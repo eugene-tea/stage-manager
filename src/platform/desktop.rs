@@ -139,7 +139,7 @@ pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
             && w.alpha > 0.0
             && w.bounds.contains(p)
             && !dock.seen_through(w.pid, w.layer, w.bounds, p)
-            && !seen_through(w)
+            && !seen_through(w, list)
     })
 }
 
@@ -190,8 +190,13 @@ pub struct Owner<'a> {
 ///   0,0 2560x1440 over the main screen for the suite's whole run while the owner used his
 ///   Mac as always, no banner shown; every card click of the suite was refused under it. A
 ///   window of Notification Center's smaller than a screen (a banner at the top right, its
-///   panel) still covers what is below: a click there is the banner's.
-pub fn click_through_overlay(layer: i64, bounds: Rect, owner: &Owner<'_>, screens: &[Rect]) -> bool {
+///   panel) still covers what is below: a click there is the banner's. And the full-screen
+///   one is looked through only while Notification Center has no other window on that
+///   screen (`siblings`: the frames of the owner's other drawn windows above layer 0): with
+///   its panel, a banner or the widgets' editing sheet up, it is presumably the catcher whose
+///   click closes them, so it blocks, as an unknown window does (a click there must never be
+///   a wallpaper click, nor a test's click close the owner's panel).
+pub fn click_through_overlay(layer: i64, bounds: Rect, owner: &Owner<'_>, screens: &[Rect], siblings: &[Rect]) -> bool {
     if layer <= 0 {
         return false;
     }
@@ -203,7 +208,9 @@ pub fn click_through_overlay(layer: i64, bounds: Rect, owner: &Owner<'_>, screen
         Some(b) => b == NOTIFICATION_CENTER_UI,
         None => owner.exe.is_some_and(|e| e.starts_with(NOTIFICATION_CENTER_APP)),
     };
-    screenshot || (notification_center && screens.iter().any(|s| covers_screen(bounds, *s)))
+    screenshot
+        || (notification_center
+            && screens.iter().any(|s| covers_screen(bounds, *s) && !siblings.iter().any(|o| o.intersect(s).is_some())))
 }
 
 /// True when `bounds` holds the whole of `screen`, within a point.
@@ -215,17 +222,23 @@ fn covers_screen(bounds: Rect, screen: Rect) -> bool {
         && bounds.max_y() >= screen.max_y() - 1.0
 }
 
-/// [`click_through_overlay`] for a listed window: its owner read now (bundle id, else its
-/// executable), against every active display. A window at layer 0 or below, or one not
-/// drawn, is answered at once with no read (false).
-pub fn seen_through(w: &CgWindow) -> bool {
+/// [`click_through_overlay`] for window `w` of `list` (the window list it was read from):
+/// its owner read now (bundle id, else its executable), against every active display, its
+/// owner's other drawn windows above layer 0 in `list` as its siblings. A window at layer 0
+/// or below, or one not drawn, is answered at once with no read (false).
+pub fn seen_through(w: &CgWindow, list: &[CgWindow]) -> bool {
     if w.layer <= 0 || !w.onscreen || w.alpha <= 0.0 {
         return false;
     }
     let bundle = super::apps::bundle_of(w.pid);
     let exe = if bundle.is_none() { super::apps::exe_path(w.pid) } else { None };
     let owner = Owner { name: &w.owner, bundle: bundle.as_deref(), exe: exe.as_deref() };
-    click_through_overlay(w.layer, w.bounds, &owner, &cg_display_bounds())
+    let siblings: Vec<Rect> = list
+        .iter()
+        .filter(|o| o.pid == w.pid && o.id != w.id && o.onscreen && o.alpha > 0.0 && o.layer > 0)
+        .map(|o| o.bounds)
+        .collect();
+    click_through_overlay(w.layer, w.bounds, &owner, &cg_display_bounds(), &siblings)
 }
 
 #[cfg(test)]
@@ -286,15 +299,15 @@ mod tests {
         let screens = [full];
         let named = |name| Owner { name, ..Owner::default() };
         let of = |name, bundle| Owner { name, bundle: Some(bundle), exe: None };
-        let shot = |layer| click_through_overlay(layer, full, &of("Screenshot", SCREENSHOT_UI), &screens);
+        let shot = |layer| click_through_overlay(layer, full, &of("Screenshot", SCREENSHOT_UI), &screens, &[]);
         assert!(shot(24));
-        assert!(click_through_overlay(24, full, &named("Screenshot"), &screens), "its app name, no bundle read");
-        assert!(click_through_overlay(24, full, &named("screencaptureui"), &screens));
+        assert!(click_through_overlay(24, full, &named("Screenshot"), &screens, &[]), "its app name, no bundle read");
+        assert!(click_through_overlay(24, full, &named("screencaptureui"), &screens, &[]));
         assert!(!shot(0), "never a layer-0 window");
-        assert!(!click_through_overlay(24, full, &of("Screenshot", "com.example.screenshot"), &screens), "another app named so");
-        assert!(!click_through_overlay(24, full, &named("Window Server"), &screens), "the menu bar");
-        assert!(!click_through_overlay(25, full, &of("Control Center", "com.apple.controlcenter"), &screens));
-        assert!(!click_through_overlay(3, full, &of("Some App", "com.example.app"), &screens), "a floating panel");
+        assert!(!click_through_overlay(24, full, &of("Screenshot", "com.example.screenshot"), &screens, &[]), "another app named so");
+        assert!(!click_through_overlay(24, full, &named("Window Server"), &screens, &[]), "the menu bar");
+        assert!(!click_through_overlay(25, full, &of("Control Center", "com.apple.controlcenter"), &screens, &[]));
+        assert!(!click_through_overlay(3, full, &of("Some App", "com.example.app"), &screens, &[]), "a floating panel");
         // In the hit test: the overlay alone is the wallpaper; an app window under it is not.
         let shot = CgWindow { owner: "Screenshot".into(), pid: -1, ..w(24, full, true) };
         assert!(is_wallpaper_click(std::slice::from_ref(&shot), Point::new(900.0, 600.0), &DockBar::default()));
@@ -317,24 +330,31 @@ mod tests {
             bundle: None,
             exe: Some("/System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter"),
         };
-        assert!(click_through_overlay(23, main, &nc, &screens), "its full-screen layer");
-        assert!(click_through_overlay(23, main, &by_exe, &screens), "by its executable, no bundle read");
-        assert!(click_through_overlay(23, laptop, &nc, &screens), "over the other screen");
-        assert!(click_through_overlay(23, Rect::new(-0.5, 0.0, 2560.5, 1440.0), &nc, &screens), "within a point");
+        assert!(click_through_overlay(23, main, &nc, &screens, &[]), "its full-screen layer");
+        assert!(click_through_overlay(23, main, &by_exe, &screens, &[]), "by its executable, no bundle read");
+        assert!(click_through_overlay(23, laptop, &nc, &screens, &[]), "over the other screen");
+        assert!(click_through_overlay(23, Rect::new(-0.5, 0.0, 2560.5, 1440.0), &nc, &screens, &[]), "within a point");
         // A banner at the top right (about 350 x 70 under the menu bar), and its panel.
         let banner = Rect::new(2190.0, 38.0, 360.0, 76.0);
-        assert!(!click_through_overlay(23, banner, &nc, &screens), "a banner blocks");
-        assert!(!click_through_overlay(23, Rect::new(2160.0, 30.0, 400.0, 1410.0), &nc, &screens), "its panel blocks");
-        assert!(!click_through_overlay(23, Rect::new(0.0, 30.0, 2560.0, 1410.0), &nc, &screens), "short of the whole screen");
-        assert!(!click_through_overlay(0, main, &nc, &screens), "never at layer 0");
+        assert!(!click_through_overlay(23, banner, &nc, &screens, &[]), "a banner blocks");
+        assert!(!click_through_overlay(23, Rect::new(2160.0, 30.0, 400.0, 1410.0), &nc, &screens, &[]), "its panel blocks");
+        assert!(!click_through_overlay(23, Rect::new(0.0, 30.0, 2560.0, 1410.0), &nc, &screens, &[]), "short of the whole screen");
+        assert!(!click_through_overlay(0, main, &nc, &screens, &[]), "never at layer 0");
         // Anyone else's full-screen window blocks, whatever its name.
         let named = |name| Owner { name, ..Owner::default() };
-        assert!(!click_through_overlay(23, main, &named("Notification Center"), &screens), "the name alone");
+        assert!(!click_through_overlay(23, main, &named("Notification Center"), &screens, &[]), "the name alone");
         let other = Owner { name: "Notification Center", bundle: Some("com.example.notes"), exe: None };
-        assert!(!click_through_overlay(23, main, &other, &screens), "another app named so");
+        assert!(!click_through_overlay(23, main, &other, &screens, &[]), "another app named so");
         let stranger = Owner { name: "Overlay", bundle: None, exe: Some("/Applications/Overlay.app/Contents/MacOS/Overlay") };
-        assert!(!click_through_overlay(23, main, &stranger, &screens), "an unknown app's full-screen window");
-        assert!(!click_through_overlay(23, main, &nc, &[]), "no screen known");
+        assert!(!click_through_overlay(23, main, &stranger, &screens, &[]), "an unknown app's full-screen window");
+        assert!(!click_through_overlay(23, main, &nc, &[], &[]), "no screen known");
+        // Alone on its screen it is looked through; with its panel, a banner or the widgets'
+        // editing sheet on that screen it is the catcher that closes them, and blocks.
+        let panel = Rect::new(2160.0, 30.0, 400.0, 1410.0);
+        assert!(!click_through_overlay(23, main, &nc, &screens, &[panel]), "beside its panel");
+        assert!(!click_through_overlay(23, main, &nc, &screens, &[banner]), "beside a banner");
+        assert!(!click_through_overlay(23, main, &by_exe, &screens, &[panel]), "beside its panel, by its executable");
+        assert!(click_through_overlay(23, main, &nc, &screens, &[Rect::new(-1500.0, 300.0, 360.0, 76.0)]), "a banner on the other screen");
     }
 
     #[test]

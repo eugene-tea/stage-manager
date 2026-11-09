@@ -161,7 +161,7 @@ fn listed(list: &[CgWindow]) -> Vec<Listed> {
 /// near the zones, above layer 0.
 fn without_overlays(near: Vec<Listed>, list: &[CgWindow]) -> Vec<Listed> {
     near.into_iter()
-        .filter(|n| n.layer <= 0 || !list.iter().find(|w| w.id == n.id).is_some_and(super::desktop::seen_through))
+        .filter(|n| n.layer <= 0 || !list.iter().find(|w| w.id == n.id).is_some_and(|w| super::desktop::seen_through(w, list)))
         .collect()
 }
 

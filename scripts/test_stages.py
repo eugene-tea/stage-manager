@@ -196,9 +196,10 @@ def ctl_once(*words):
 # A synthetic click or hover refused under a Notification Center banner is tried again for
 # this long (a banner stays about 5 s; drags already wait, `drag_sampled`). Notification
 # Center's full-screen click-through window (11-09: layer 23 over the whole main screen for a
-# whole run, no banner) refuses nothing: the app looks through it (desktop::seen_through), so
-# a refusal naming Notification Center is one of its windows smaller than a screen, a banner
-# or its panel (the reply gives its layer and frame).
+# whole run, no banner) refuses nothing while it is alone on its screen: the app looks through
+# it (desktop::seen_through). A refusal naming Notification Center is a banner, its panel, or
+# the full-screen window beside one of them (the catcher that closes them; the reply gives
+# the window's layer and frame): waited out here, never clicked.
 BANNER_WAIT = 8.0
 
 
