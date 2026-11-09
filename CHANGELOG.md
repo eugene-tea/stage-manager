@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A window kept on top of all others (a music player in a corner) now stays on top through
+  a switch also while the strip shows over your windows; the moving pictures went over it.
 - With "Click wallpaper to reveal desktop: Only in Stage Manager", grabbing a window's edge
   to resize it no longer sends your stage to the strip when the press lands a hair outside the
   window. The window used to hide mid-drag and shrink to its smallest size out of sight, so an

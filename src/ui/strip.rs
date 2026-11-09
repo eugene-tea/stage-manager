@@ -3728,7 +3728,6 @@ impl Strip {
         if lift && self.pane.placed && !self.snapshot.fullscreen {
             self.pane.panel.orderFrontRegardless();
         }
-        self.reorder_overlay();
         tracing::debug!(lift, "strip level");
         self.publish_panel();
     }
