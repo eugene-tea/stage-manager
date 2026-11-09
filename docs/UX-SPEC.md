@@ -264,7 +264,13 @@ through: a click under it is on whatever is below. A press on a file or folder o
 desktop, or its name, is Finder's, as on Apple's: it selects it or starts dragging it, and
 nothing is revealed. The icons are the ones read for the corner patch (every 5 s); when none
 are that fresh the press waits up to 60 ms for a read, and where they cannot be read at all
-the press counts as on the wallpaper.
+the press counts as on the wallpaper. A press just outside a window is its edge, as on Apple's: macOS
+gives every resizable window a band a few points wide outside its frame where a press takes
+the edge to resize it, so a press within 6 pt of any window's edge (10 pt near a corner), any
+stage's, reveals nothing. Within 16 pt of a window the reveal waits for the release and runs
+only when the pointer is still where it pressed (within 4 pt): a press there that turns into a
+drag (a resize, a rubber-band selection) reveals nothing, so no window is ever parked while a
+press may still hold its edge. Further out the reveal runs on the press, at once.
 
 **Drag and drop.** A card dragged into the main area grows to window size within about
 100 pt past the strip (`[drag] grow_distance`) and joins the current stage where you drop it.
