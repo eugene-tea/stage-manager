@@ -12,8 +12,10 @@
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
 //!   snapshots appear exactly over them and shrink into their card's slot on the spring;
 //!   incoming windows' snapshots grow from their card to their frames, both along Apple's
-//!   path (`motion_math::Path`: turned about their middle, sideways and flat ahead of the
-//!   spring at the window's end; a dropped window's card goes straight). Both start on one
+//!   path (`motion_math::Path`: the window's picture, never stretched, turned about its
+//!   middle and seen from Apple's flight eye in front of the display's middle, its size, turn
+//!   and height on the spring and its sideways place ahead toward the window's end; a
+//!   dropped window's card goes straight). Both start on one
 //!   frame, as Apple's do, once the outgoing windows have parked behind their snapshots (the
 //!   controller's note, [`PARK_WAIT_MAX`] at most): until then every snapshot holds still, the
 //!   incoming ones on their cards, so no outgoing window shows at full size beside a moving
@@ -494,8 +496,9 @@ impl Strip {
         (GhostShadow { window: if key { active } else { inactive }, corner, window_size: (frame.w, frame.h), card, amount }, note)
     }
 
-    /// Lays the overlay over the main display with the strip's eye, and has the snapshots'
-    /// shadows drawn for its scale ahead of the first switch.
+    /// Lays the overlay over the main display with the strip's eye (the snapshots' planes are
+    /// given through it; they fly through Apple's flight eye, which the overlay sets over the
+    /// display), and has the snapshots' shadows drawn for its scale ahead of the first switch.
     fn place_overlay(&mut self) {
         let g = &self.geometry;
         let eye = Point::new(g.global.x + g.m.eye.x, g.global.y + g.m.eye.y);

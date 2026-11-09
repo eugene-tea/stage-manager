@@ -368,31 +368,44 @@ read back within 1 % the same way). Apple's hover is a spring too: an ease-out o
 misses its gentle first frames and its long tail. The slide (Apple's read ω 16.3, ours 16.8)
 and the press are unchanged.
 
-**The switch's path** (measured 11-09, the same recordings: the fixture's blue window growing
-out of its hovered card, slot 5, to 1100 × 748 pt; the green one shrinking from 1000 × 692
-into its place in a combined card; each frame's window traced as drawn, a trapezoid with the
-turn, its six numbers: the left edge's x, top and bottom, the right edge's). Growing, Apple's
-left edge is 17 % of its way across while the top edge is 11 % up, 56 % against 42 % five
-frames in, 86 % against 79 % at ten; the bottom-left corner stays within 3 pt of the card's
-bottom for the first 100 ms (the left side coming toward the eye as the window turns about
-its middle). Shrinking, the other way: the top and height lead and the sideways motion trails
-(the left edge 30 % of its way at 85 ms, the top 41 %). Neither way is one spring on a
-straight line: none came within 9 pt rms growing or 7 shrinking, whatever the spring, the
-pivot or the eye, and the last round's springs on our left-edge path missed by 20.3 pt rms (54
-at worst) growing and 16.7 (83) shrinking.
-Fitted: one critically damped spring both ways, stiffness 289 (ω 17.0), from the same moment;
-the window turned about its vertical middle, seen from the strip's eye; its height, vertical
-place and corner on the spring; its middle's sideways place and its width 0.33 · p (1 − p)
-ahead toward the window's end (p the spring's progress), its turn 0.19 · p (1 − p). That
-draws Apple's corners within 3.4 pt rms (10 at worst) growing and 3.5 (10) shrinking, both
-directions from the same numbers. Ours (1.6.0), read through the same pipeline, came back as
-what it is: ω 16.6 (its 272/33 is 16.5), a lean of 0.02 and the left-edge pivot (1.5 pt rms;
-turned about the middle, 4.1). The faster growing spring of the last
-round (353/37.6) was this lean read through the left edge and width. Not settled: his real
-windows (Notes, VS Code) take long, dropped-frame recordings whose cards sit among others;
-VS Code's late frames fit the path within 6.6 pt rms with its card placed by the fit, the
-straight path not within 14. A recording of one fixture window growing from and shrinking
-into the same slot, in both apps, would pin the lean on a large window.
+**The switch's path** (measured 11-09 on two sets of recordings: first the fixture's blue
+window growing out of its hovered card, slot 5, to 1100 × 748 pt and the green one shrinking
+from 1000 × 692 into a combined card; then, recorded for this, one 1800 × 1100 pt window
+growing from and shrinking into the same slot, three runs each way, its four corners tracked
+frame by frame to a tenth of a point). Apple's three runs each way were identical to a tenth
+of a point.
+
+*What flies.* The window's picture, never stretched, turned about its vertical middle and
+seen in perspective from an eye in front of the display's middle, 3000 pt away on the 5K
+display (1.17 display widths): that rigid plane draws every frame of the 1800 pt window
+within 0.16 pt rms growing and 0.43 shrinking. The strip's own eye (15, 720 at 2260 pt) does
+not fit it (6.1 and 4.1 pt rms), and read through that eye the same frames are up to 14 %
+wider than the window. Seen from the flight's eye, the card is the window far behind the
+screen (0.12 of its size: 21,700 pt back, if the eye is 3000 pt in front) turned 76°.
+
+*How it flies.* Its size, which is its depth, its turn and its height run on one critically
+damped spring (ω 16.8 growing, 17.3 shrinking; 289/34 both ways), from the same moment. Its
+sideways place runs ahead toward the window's end: 44 % across at 67 ms while its size is
+29 % of the way, 66 % against 48 % at 100 ms. Growing, it is out over the desktop while still
+small and far back, then comes forward to the viewer; shrinking, it shrinks back in place
+first, then slides into the card. The lead depends on the geometry (0.75 · p (1 − p) for the
+1800 pt window, 0.3 for the 1100 pt one, p the spring's progress); one rule gives both:
+Apple scales the sideways place about a point 205 pt left of the screen (0.08 display widths)
+while the place it scales from moves on the spring (each set alone puts that point between
+200 and 228 pt left). Our model draws Apple's corners within 5.3 pt rms (22 at worst) growing
+and 6.0 (17) shrinking on the 1800 pt window, 6.1 (24) and 5.3 (17) on the 1100 pt one. The
+model of the round before (seen from the strip's eye; the middle's sideways place and the
+width 0.33 · p (1 − p) ahead, the turn 0.19 ahead; the window stretched up to 16 % wide in
+flight, so it widened with its sideways motion and seemed to fill toward the viewer rather
+than come from behind) missed the 1800 pt window by 26.5 pt rms (118 at worst) and 27.2
+(135), though it fitted the 1100 pt one it was made from (3.4 and 3.5). Ours keeps the lead
+between none and 1 · p (1 − p), so a window close to the strip never passes its place; what
+Apple's does there is not measured, nor the flight's eye and origin on other displays (ours
+scale them with the display's width).
+
+Not matched: Apple's window leaves its card at the card's hovered size and lands on it at
+that size; ours drops the hover for a frame at the click and lands on the card at rest, which
+grows again a few frames after.
 
 ## Deliberate differences
 

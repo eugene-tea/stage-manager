@@ -8,17 +8,18 @@
 //! over such a window for the length of every switch (the owner's report, 10-22).
 //!
 //! The overlay shows only while something moves; it stays on the active Space (it moves
-//! there when shown, it never joins every Space). Its layers repeat the strip's perspective:
-//! each ghost has a container of its own whose eye is the strip's eye, so a ghost turned like
-//! a card and placed on a card's thumbnail looks exactly like that thumbnail, and a flat ghost
-//! at a window's frame looks exactly like the window. Each ghost's plane turns about its
-//! middle (its anchor), as Apple's snapshots do in flight; it is given as a plane turned about
-//! its left edge and placed at the pose that looks the same ([`Pose`]). A flight goes through
-//! poses along Apple's path ([`Path`], [`flight_samples`]) as keyframes, the picture, its glass
-//! and the window's shadow through the same sizes. The ghosts stack in the order they were
-//! added, the last on top: in one shared container Core Animation would sort turned ghosts by
-//! depth, as it did the card's planes (owner, 10-27), and a second app's ghost would start
-//! over the front window's and flip under it as they flatten.
+//! there when shown, it never joins every Space). Each ghost has a perspective container of
+//! its own whose eye is Apple's flight eye, in front of the display's middle ([`Flight`]).
+//! Callers give a ghost as a plane turned about its left edge seen through the strip's eye;
+//! it is placed at the pose the flight's eye draws exactly the same ([`Pose`]), so a ghost
+//! on a card's thumbnail looks exactly like that thumbnail, and a flat ghost at a window's
+//! frame looks exactly like the window. Each ghost's plane turns about its middle (its
+//! anchor), as Apple's snapshots do in flight. A flight goes through poses along Apple's path
+//! ([`Path`], [`flight_samples`]) as keyframes, the picture, its glass and the window's
+//! shadow through the same sizes. The ghosts stack in the order they were added, the last on
+//! top: in one shared container Core Animation would sort turned ghosts by depth, as it did
+//! the card's planes (owner, 10-27), and a second app's ghost would start over the front
+//! window's and flip under it as they flatten.
 //!
 //! **Groups.** A switch's incoming snapshots go into one [`GhostGroup`], a flat layer holding
 //! their containers in the same order, so the landing fades them as one picture: at fade `a`
@@ -61,7 +62,7 @@ use objc2_quartz_core::{
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::Picture;
 use crate::platform::capture_frame::Extent;
-use crate::ui::motion_math::{Eye, Path, Plane, Pose, Spring, Toward, flight_samples, path_duration, travel};
+use crate::ui::motion_math::{Eye, Flight, Path, Plane, Pose, Spring, Toward, flight_samples, path_duration, travel};
 use crate::ui::panels;
 use crate::ui::window_shadow::{ShadowLayers, WindowShadow};
 
@@ -224,6 +225,11 @@ pub struct Ghost {
     pending: Option<Picture>,
     /// Where it is headed (or sits).
     pub target: Plane,
+    /// The strip's eye its planes are given through ([`Plane::pose`]); its container's is the
+    /// flight's ([`Self::eye`]).
+    strip: Eye,
+    /// The flight's sideways origin ([`Flight::origin_x`]).
+    origin_x: f64,
     /// How long its current flight runs (seconds; [`path_duration`] of its travel):
     /// its shadow's springs run as long.
     flight: f64,
@@ -366,8 +372,8 @@ impl Ghost {
         }
     }
 
-    /// The perspective the ghost is seen through: its container's eye and distance
-    /// ([`Overlay::fit`]), so it is the one in use even after the overlay moved.
+    /// The perspective the ghost is seen through, the flight's: its container's eye and
+    /// distance ([`Overlay::fit`]), so it is the one in use even after the overlay moved.
     fn eye(&self) -> Eye {
         let at = self.depth.position();
         let m34 = self.depth.sublayerTransform().m34;
@@ -385,7 +391,7 @@ impl Ghost {
             }
         }
         self.take_pending();
-        let look = Look::of(&p.pose(self.eye()));
+        let look = Look::of(&p.pose(self.strip, self.eye()));
         self.plane.setPosition(look.position);
         self.plane.setBounds(look.bounds);
         self.plane.setTransform(look.transform);
@@ -450,7 +456,7 @@ impl Ghost {
     /// Where the ghost is drawn now (Core Animation's presentation of it; its target when
     /// nothing is drawn yet), as a plane turned about its left edge.
     pub fn drawn(&self) -> Plane {
-        let mut plane = self.drawn_pose().plane(self.eye());
+        let mut plane = self.drawn_pose().plane(self.eye(), self.strip);
         plane.corner = self.target.corner;
         plane
     }
@@ -458,7 +464,7 @@ impl Ghost {
     /// Where the ghost is drawn now, as its pose (turned about its middle).
     fn drawn_pose(&self) -> Pose {
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
-        let Some(shown) = (unsafe { self.plane.presentationLayer() }) else { return self.target.pose(self.eye()) };
+        let Some(shown) = (unsafe { self.plane.presentationLayer() }) else { return self.target.pose(self.strip, self.eye()) };
         let (position, bounds, t) = (shown.position(), shown.bounds(), shown.transform());
         // SAFETY: as above.
         let corner = unsafe { self.image.presentationLayer() }.map_or(self.image.cornerRadius(), |l| l.cornerRadius());
@@ -472,17 +478,18 @@ impl Ghost {
     }
 
     /// Moves the ghost to `p` on the spring, from wherever it is drawn now, along Apple's path
-    /// toward `toward` ([`Path`]: sideways and flat ahead of the spring at a window's end, up
-    /// and down on it), turned about its middle. Every layer that follows the plane's size
-    /// (the picture, its glass, the window's shadow) goes through the same poses.
+    /// toward `toward` ([`Path`]: the size, the turn and the height on the spring, the sideways
+    /// place ahead of it toward a window's end), turned about its middle. Every layer that
+    /// follows the plane's size (the picture, its glass, the window's shadow) goes through the
+    /// same poses.
     pub fn spring_to(&mut self, p: Plane, spring: Spring, toward: Toward) {
         let eye = self.eye();
         let from = self.drawn_pose();
-        let to = p.pose(eye);
+        let to = p.pose(self.strip, eye);
         // Every part runs as long as the farthest edge needs to come to rest on the path.
-        let duration = path_duration(spring, travel(unturned(&from.plane(eye)), unturned(&p)), toward);
+        let duration = path_duration(spring, travel(unturned(&from.plane(eye, self.strip)), unturned(&p)), toward);
         self.flight = duration;
-        let samples = flight_samples(&Path { from, to, toward }, spring, duration);
+        let samples = flight_samples(&Path { from, to, toward, origin_x: self.origin_x }, spring, duration);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.take_pending();
@@ -665,8 +672,12 @@ pub struct Overlay {
     root: Retained<CALayer>,
     /// The ghosts' perspective containers, flat, bottom to top.
     space: Retained<CALayer>,
-    /// The eye in the overlay's coordinates, and its distance.
+    /// The strip's eye in the overlay's coordinates, and its distance: planes are given
+    /// through it.
     eye: (Point, f64),
+    /// What the ghosts are seen through in flight (overlay coordinates): their containers'
+    /// perspective.
+    flight: Flight,
     /// The overlay's top-left corner, global coordinates.
     origin: Point,
     shown: bool,
@@ -693,11 +704,13 @@ impl Overlay {
         root.addSublayer(&space);
         panel.setContentView(Some(&view));
         let eye = (Point::new(0.0, 0.0), 1.0);
-        Self { panel, view, root, space, eye, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false }
+        let flight = Flight::over(0.0, Size::new(100.0, 100.0), 0.0);
+        Self { panel, view, root, space, eye, flight, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false }
     }
 
-    /// Covers the display `frame` (Cocoa coordinates; `primary_height` flips them) and sets
-    /// the perspective: the eye at `eye` (global), `distance` points away.
+    /// Covers the display `frame` (Cocoa coordinates; `primary_height` flips them), with the
+    /// strip's eye at `eye` (global), `distance` points away, and the flight's over the
+    /// display ([`Flight::over`]).
     pub fn place(&mut self, frame: NSRect, primary_height: f64, eye: Point, distance: f64) {
         if self.panel.frame() != frame {
             self.panel.setFrame_display(frame, false);
@@ -713,6 +726,7 @@ impl Overlay {
         self.root.setFrame(all);
         self.space.setFrame(all);
         self.eye = (local_eye, distance);
+        self.flight = Flight::over(0.0, Size::new(size.width, size.height), local_eye.y);
         // SAFETY: reading the sublayers array; every one is a ghost's container or a group of them.
         if let Some(depths) = unsafe { self.space.sublayers() } {
             for depth in depths.iter() {
@@ -730,12 +744,12 @@ impl Overlay {
         CATransaction::commit();
     }
 
-    /// Makes `depth` a ghost's perspective container: the whole overlay, the eye where
-    /// [`Self::place`] put it (a group covers the whole overlay too, so it is the same inside
-    /// one).
+    /// Makes `depth` a ghost's perspective container: the whole overlay, the flight's eye
+    /// where [`Self::place`] put it (a group covers the whole overlay too, so it is the same
+    /// inside one).
     fn fit(&self, depth: &CALayer) {
         let all = self.space.bounds();
-        let (eye, distance) = self.eye;
+        let (eye, distance) = (self.flight.eye.at, self.flight.eye.distance);
         depth.setBounds(all);
         depth.setAnchorPoint(CGPoint::new(eye.x / all.size.width.max(1.0), eye.y / all.size.height.max(1.0)));
         depth.setPosition(CGPoint::new(eye.x, eye.y));
@@ -744,8 +758,13 @@ impl Overlay {
         depth.setSublayerTransform(p);
     }
 
-    /// The perspective of the ghosts' containers ([`Self::fit`]).
+    /// The perspective of the ghosts' containers ([`Self::fit`]): the flight's.
     fn perspective(&self) -> Eye {
+        self.flight.eye
+    }
+
+    /// The strip's eye, which ghosts' planes are given through.
+    fn strip_eye(&self) -> Eye {
         Eye { at: self.eye.0, distance: self.eye.1.max(1.0) }
     }
 
@@ -884,7 +903,7 @@ impl Overlay {
         plane.setOpacity(opacity);
         let mut layers = ShadowLayers::new(&plane);
         let window_size = CGSize::new(shadow.window_size.0, shadow.window_size.1);
-        layers.set_shadow(&shadow.window, shadow.corner, self.scale(), bounds(&at.pose(self.perspective())).size, window_size);
+        layers.set_shadow(&shadow.window, shadow.corner, self.scale(), bounds(&at.pose(self.strip_eye(), self.perspective())).size, window_size);
         let body = CALayer::new();
         body.setAnchorPoint(CGPoint::new(0.0, 0.0));
         let (r, g, b, a) = shadow.card.color;
@@ -925,6 +944,8 @@ impl Overlay {
             extent,
             pending: None,
             target: at,
+            strip: self.strip_eye(),
+            origin_x: self.flight.origin_x,
             flight: 0.0,
             grouped: group.is_some(),
         };
@@ -971,7 +992,7 @@ impl Overlay {
         plane.addSublayer(&body);
         let depth = self.stack(&plane, true, None);
         let glass = glass_layer();
-        let mut g = Ghost { window: 0, depth, plane, body, image: img, glass, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, flight: 0.0, grouped: false };
+        let mut g = Ghost { window: 0, depth, plane, body, image: img, glass, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, strip: self.strip_eye(), origin_x: self.flight.origin_x, flight: 0.0, grouped: false };
         g.set(at);
         g
     }
