@@ -63,7 +63,8 @@
 //!   stage without Shift, and Shift gives it a stage of its own (`Decision::for_new_window`).
 //! - **Transitions** (`[animation]`): a batch that parks shown windows or brings parked ones
 //!   back is announced to the strip first ([`strip_model::Transition`]); once the strip has
-//!   drawn snapshots over them, outgoing windows park behind theirs, and incoming windows wait
+//!   drawn snapshots over them, outgoing windows park behind theirs (the whole motion starts
+//!   then, both ways on one frame: [`Controller::note_parked`]), and incoming windows wait
 //!   (in the safety registry at their arrival frames) until the strip's growing snapshots
 //!   are within a point of their frames as shown ([`StripEvent::Unveil`],
 //!   `motion_math::unveil_time`), or a click or another event arrives, or their backstop
@@ -485,6 +486,18 @@ fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>) -> (Vec<Action>,
     });
     now.extend(focus);
     (now, later)
+}
+
+/// The windows of `waiting` (an app's windows waiting in `unplaced`) that a notice of that app
+/// (its activation, a focus) offers to [`Controller::on_found`]: the ones the window server
+/// lists on a managed screen now (`listed`, [`Controller::shown_managed`]), in order. One still
+/// away (minimized, another Desktop's, a dialog its app keeps off screen) waits on untouched:
+/// offered, it went back to wait only after landing a switch's held windows (11-09: our own
+/// switch's activation of Messages and of Safari, each with such a window, brought the
+/// incoming windows in 135 and 230 ms into the motion, before the echo check ran; the
+/// snapshots unveiled at about 670 ms). The once-a-second check offers it once it shows.
+fn offered_at_notice(waiting: impl IntoIterator<Item = u32>, listed: &HashSet<u32>) -> Vec<u32> {
+    waiting.into_iter().filter(|id| listed.contains(id)).collect()
 }
 
 /// Switch cover `c` as it can be drawn now (round 8L3), or why not: where nothing lies on the
@@ -3098,7 +3111,8 @@ impl Controller {
         failed
     }
 
-    /// Tells the strip a transition's outgoing windows have parked, if no snapshot did yet.
+    /// Tells the strip a transition's outgoing windows have parked, if no snapshot did yet: its
+    /// motion starts then, the outgoing and the incoming snapshots on one frame.
     fn note_parked(&mut self) {
         if self.parked_note.is_some() {
             self.present();
@@ -3573,7 +3587,7 @@ impl Controller {
             }
             WinEvent::Focused(id) => {
                 if self.unplaced.contains(&id) {
-                    self.on_found(ob, id);
+                    self.offer_waiting(ob, vec![id]);
                 }
                 // A late key window drawn key: its snapshot's shadow hands over (an echo too).
                 self.key_focus_heard(ob, id);
@@ -3719,11 +3733,11 @@ impl Controller {
                 // An app we unhid and focused again took it (or another app did: no retry).
                 self.activation_noticed(pid);
                 self.key_activation_heard(pid);
+                // Before the echo check: a window of the app that shows now is placed whoever
+                // activated it. One still away is left alone ([`offered_at_notice`]).
                 let waiting: Vec<u32> =
                     self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
-                for id in waiting {
-                    self.on_found(ob, id);
-                }
+                self.offer_waiting(ob, waiting);
                 // The active app changed: an app whose every window is parked may be hidden
                 // now (`hide_parked_apps`: the app a switch left stayed active until then).
                 self.hide_pass(ob);
@@ -5448,9 +5462,23 @@ impl Controller {
         }
     }
 
+    /// Offers windows waiting in `unplaced` (`ids`, an app's at its activation or a focus) to
+    /// [`Self::on_found`]: those the window server lists on a managed screen now
+    /// ([`offered_at_notice`]), one list read for them all, none when there are none.
+    fn offer_waiting(&mut self, ob: &mut Observer, ids: Vec<u32>) {
+        if ids.is_empty() {
+            return;
+        }
+        let listed = self.shown_managed(&windows::list_windows());
+        for id in offered_at_notice(ids, &listed) {
+            self.on_found(ob, id);
+        }
+    }
+
     /// A window appeared after launch: the rules decide where it goes. One that is not on
     /// screen (another Space, minimized, app hidden; or any window while a full-screen app's
-    /// Space shows) waits in `unplaced` until it shows.
+    /// Space shows) waits in `unplaced` until it shows, and a switch's windows held behind
+    /// their snapshots stay held: only a window placed now brings them in first.
     fn on_found(&mut self, ob: &mut Observer, id: u32) {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
             return;
@@ -5471,7 +5499,6 @@ impl Controller {
             // A new window: its app is not done reopening windows yet.
             self.quiet.window(&bundle, Instant::now());
         }
-        self.flush_pending(ob);
         let list = windows::list_windows();
         let shown = self.shown_managed(&list);
         // The screen the window shows on: its own overview and full-screen checks gate it
@@ -5492,6 +5519,14 @@ impl Controller {
             }
             return;
         }
+        // It shows: a switch's windows still held behind their snapshots come to their frames
+        // first, and the window server is read again after them.
+        let list = if self.pending.is_some() {
+            self.flush_pending(ob);
+            windows::list_windows()
+        } else {
+            list
+        };
         let now = Instant::now();
         if is_main {
             if self.look_for_overview(&list, screen.frame, now) {
@@ -7803,6 +7838,35 @@ mod tests {
         // Slack, busy, reports its activation 800 ms after our focus: past the echo window.
         assert!(e.is_app_echo(slack, t0 + Duration::from_millis(800)), "late, but the one we asked for");
         assert!(!e.is_app_echo(slack, t0 + Duration::from_millis(900)), "a second one is not");
+    }
+
+    #[test]
+    fn our_own_activation_never_lands_a_held_switch_through_a_window_still_away() {
+        // 11-09 10:06:42.737: a card click; the keyboard goes to Messages (pid 740) while its
+        // and Telegram's windows wait behind their growing snapshots. Messages also has window
+        // 176 waiting off screen since 09:56, Safari (738) its dialog 314.
+        let (messages, safari) = (740, 738);
+        let pid_of = |id: u32| match id {
+            176 => Some(messages),
+            314 => Some(safari),
+            _ => None,
+        };
+        let unplaced = [176u32, 314];
+        let listed: HashSet<u32> = [134, 166, 299].into();
+        let mut e = Echoes::default();
+        let t0 = Instant::now();
+        e.touch_app(messages, t0);
+        // 24 ms later macOS says Messages activated: its waiting windows are offered first,
+        // and only those that show reach `on_found`, whose placing lands the switch.
+        let waiting = unplaced.iter().copied().filter(|id| pid_of(*id) == Some(messages));
+        assert!(offered_at_notice(waiting, &listed).is_empty(), "176 is still away: nothing is placed, the switch stays held");
+        assert!(e.is_app_echo(messages, t0 + Duration::from_millis(24)), "and the activation is our echo: nothing below runs for it");
+        // Safari's the same at 10:06:46.411 (its dialog 314 away).
+        let waiting = unplaced.iter().copied().filter(|id| pid_of(*id) == Some(safari));
+        assert!(offered_at_notice(waiting, &listed).is_empty());
+        // A window of the app that does show now (un-minimized, say) is a new window: placed.
+        let shows: HashSet<u32> = [134, 166, 176].into();
+        assert_eq!(offered_at_notice(unplaced, &shows), vec![176]);
     }
 
     #[test]

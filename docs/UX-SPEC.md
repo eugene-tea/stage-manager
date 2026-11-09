@@ -112,7 +112,7 @@ of the least recently used card. (Keep stages in place, an extra below, orders i
 **Switching.** The pressed card eases back on mouse-down. On release, the windows you leave
 shrink into their card's slot and the new stage grows from its card, each on Apple's spring for
 its way: a window growing out of its card moves faster than one shrinking into its card
-(measured, below).
+(measured, below). Both start on the same frame, as Apple's do.
 Shift-click a card to bring its windows into the current stage; Option-click is a plain click.
 Clicking a card's app icon brings every window of that app, from all stages.
 
@@ -739,10 +739,10 @@ in front, and the windows on screen all along bring no stage forward even after 
 - Since macOS 15, macOS asks about once a month whether the app may capture windows
   directly. Apple's content picker avoids that alert but cannot serve a strip of every
   window.
-- In a switch the windows you leave start shrinking about 50 ms (three frames) after the new
-  stage starts growing: their snapshots wait until the windows behind them have moved to the
-  hiding corner, or the windows would show around them. Apple's start together. Measured 11-09;
-  the springs themselves match.
+- A switch's motion starts once the windows you leave have moved to the hiding corner behind
+  their pictures, or they would show around them: about 50 to 90 ms after the click (11-09's
+  log; the `transition: the motion starts` line has it as `motion_ms`). How soon Apple's starts
+  after the click is not measured.
 - Apple's card dragged out appears turned like a card, a moment after the pointer leaves the
   strip, and flattens to its window as it grows, in about 120 ms whatever the pointer does;
   ours stays flat and grows with the distance. A card dragged from the main screen's strip

@@ -635,6 +635,13 @@ pub struct TransitionReport {
     pub travel: f64,
     /// When the strip unveils the incoming windows, after the motion starts (ms), if any.
     pub unveil_ms: Option<u64>,
+    /// When the motion started, after the snapshots were drawn (ms): the outgoing and the
+    /// incoming snapshots start on one frame, once the outgoing windows have parked behind
+    /// theirs (at once when nothing leaves).
+    pub motion_ms: Option<u64>,
+    /// The motion started because the wait for the outgoing windows to park ran out (200 ms),
+    /// not at their note.
+    pub motion_waited_out: Option<bool>,
 }
 
 fn transition_report_slot() -> &'static Mutex<Option<TransitionReport>> {

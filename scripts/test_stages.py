@@ -2645,6 +2645,33 @@ def phase_motion():
         check(overlay_shown(our_windows(), state()["display"]["frame"]) is None, "the overlay is gone once the motion ends")
         consistent("animated switch")
 
+    say("-- a card click to an app with a window waiting off screen: the switch's own activation never brings its windows early (11-09)")
+    # Alpha 2 opens minimized: it waits in `unplaced`. The card click's activation of Alpha
+    # (our echo) offered it to the window placement, which brought the held windows in at once.
+    start_extra_args("a", 2, "--minimized", "Alpha 2")
+    s = wait_state(lambda x: "Alpha 1" in by_title(x) and len(x.get("unplaced", [])) >= 1, "Alpha 1 managed, Alpha 2 waiting minimized", timeout=10)
+    if check(s is not None, "Alpha 1 has a stage, Alpha 2 waits off screen (minimized)"):
+        alpha = by_title(s)["Alpha 1"]["home"]
+        if s["active"] == alpha:
+            other = next((c for c in s.get("strip_cards", []) if c["number"] != alpha), None)
+            if other and reveal_strip("away from Alpha") is not None:
+                ctl("debug-click", *center(other["frame"]))
+                wait_state(lambda x: x["active"] != alpha, "another stage")
+                time.sleep(1.0)  # landed, past the echo window
+        revealed = reveal_strip("Alpha's card")
+        s = state()
+        card = next((c for c in s.get("strip_cards", []) if c["number"] == alpha), None)
+        if revealed is not None and check(card is not None, "Alpha's card is drawn"):
+            before_log = len(log_text())
+            r = ctl("debug-click", *center(card["frame"]))
+            if not blocked(r, "the card click to Alpha (its held windows, the motion's start)"):
+                check(wait_state(lambda x: x["active"] == alpha, "Alpha's stage to come") is not None, "the click switched to Alpha")
+                time.sleep(1.2)
+                switch_timing_check(log_text()[before_log:], "a card click to Alpha with Alpha 2 minimized")
+                consistent("held switch with a window waiting off screen")
+    stop_extra("a")
+    time.sleep(1.0)
+
     say("-- an activation of the fixture from another app's stage grows from its card (8L)")
     time.sleep(1.0)
     start_extra("a", 1)
@@ -2728,6 +2755,41 @@ def swap_holds(before, after, slot, leaving):
     """Apple's swap: the stage left took the clicked card's slot; every other card kept its."""
     return (len(before) == len(after) and after[slot] == leaving
             and all(a == b for i, (a, b) in enumerate(zip(before, after)) if i != slot))
+
+
+def _log_secs(line):
+    """Seconds of the day of a log line's timestamp (None without one)."""
+    m = re.search(r" (\d\d):(\d\d):(\d\d\.\d+) ", line)
+    return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3)) if m else None
+
+
+def switch_timing_check(log, what):
+    """11-09 (switch-timing), from the app's log of one animated switch (`log`, the part after
+    it began): its incoming windows wait behind their snapshots until the unveil (the phase is
+    `switching` from the send for most of `unveil_ms`), never brought in early by the switch's
+    own activation or focus; and the motion starts both ways on one frame once the outgoing
+    windows have parked (`transition: the motion starts`, at their note, not the 200 ms
+    fallback). Returns the transition's id, or None."""
+    lines = log.splitlines()
+    sent = [ln for ln in lines if "phase from=steady to=switching #" in ln]
+    if not check(bool(sent), f"{what}: the switch held its incoming windows behind their snapshots"):
+        return None
+    tid = re.search(r"to=switching #(\d+)", sent[-1]).group(1)
+    done = next((ln for ln in lines if f"phase from=switching #{tid} to=" in ln), None)
+    drawn = next((ln for ln in lines if f"transition id={tid} " in ln and "unveil_ms=" in ln), "")
+    unveil = int(m.group(1)) if (m := re.search(r"unveil_ms=(\d+)", drawn)) else None
+    held = (_log_secs(done) - _log_secs(sent[-1])) * 1000 if done and _log_secs(done) is not None and _log_secs(sent[-1]) is not None else None
+    say(f"    switch #{tid}: held {held and round(held)} ms, unveil at {unveil} ms of the motion")
+    check(held is not None and unveil is not None and held >= 0.8 * unveil,
+          f"{what}: its windows waited for the unveil, not brought in early ({held and round(held)} ms held, unveil {unveil} ms)")
+    start = next((ln for ln in lines if "transition: the motion starts" in ln and f"id={tid} " in ln), None)
+    motion = int(m.group(1)) if start and (m := re.search(r"motion_ms=(\d+)", start)) else None
+    if check(start is not None, f"{what}: the motion's start is logged"):
+        say(f"    the motion started {motion} ms after the snapshots were drawn "
+            f"({'the 200 ms wait ran out' if 'waited_out=true' in start else 'at the parked note'})")
+        check("waited_out=false" in start, f"{what}: the motion started at the outgoing windows' parked note, not the 200 ms fallback")
+        check(motion is not None and motion <= 150, f"{what}: the motion started within 150 ms of the snapshots ({motion} ms)")
+    return tid
 
 
 def click_slot(slot, what, settle=1.0):
