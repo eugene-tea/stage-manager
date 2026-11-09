@@ -379,6 +379,141 @@ def do(*words):
 # ----- phases ----------------------------------------------------------------------------
 
 
+def fixture_windows(bundles=None):
+    """Fixture windows on layer 0 as the window server sees them, with the display."""
+    out, display = [], None
+    for b in bundles or ALL_IDS:
+        p = probe(b)
+        display = p["display"]
+        out += [w for w in p["windows"] if w["layer"] == 0]
+    return out, display
+
+def start_fixture(n, *extra):
+    stop_fixture()
+    subprocess.run(["open", "-n", "-g", FIX_APP, "--args", "--windows", str(n), "--background", *extra], check=True)
+    want = n + (1 if "--panel" in extra else 0)
+    return wait_until(lambda: len(fixture_windows([FIX_ID])[0]) >= want, 15, f"{want} fixture windows")
+
+def stop_fixture():
+    for pid in pids_of(FIX_EXE):
+        os.kill(pid, signal.SIGTERM)
+    wait_until(lambda: not pids_of(FIX_EXE), 10, "the fixture to quit")
+
+def app_pid():
+    r = ctl("ping")
+    return r.get("pid") if r.get("ok") else None
+
+def guardian_pids(app):
+    """The guardian of our own app (pid `app`) only: never another Stage Manager's."""
+    return pids_of(f"stage-manager --guardian {app}$") if app else []
+
+def owner_app_running():
+    """Any Stage Manager that is not this run's own app (the owner's, from ~/Applications,
+    a repo's target/ or anywhere else), or another Stage Manager's guardian still waiting for a
+    window it left parked: no live phase runs while it is up. Such a guardian brings back any
+    window it finds in the park zone, the fixtures' too (10-16: every Dock arrival failed)."""
+    ours = app_pid()
+    apps = pids_of("Stage Manager.app/Contents/MacOS/stage-manager$")
+    guardians = set(pids_of("Stage Manager.app/Contents/MacOS/stage-manager --guardian ")) - set(guardian_pids(ours))
+    return any(p != ours for p in apps) or bool(guardians)
+
+def archive_log():
+    """Keeps the last app run's log as stage-manager.run-NN.log (renamed, not removed: its
+    guardian keeps writing into the same file), so a run leaves the whole story."""
+    log = log_path()
+    if not os.path.exists(log):
+        return None
+    n = 1 + max([int(f[len("stage-manager.run-"):-4]) for f in os.listdir(HOME)
+                 if f.startswith("stage-manager.run-") and f.endswith(".log") and f[18:-4].isdigit()] or [0])
+    path = os.path.join(HOME, f"stage-manager.run-{n:02d}.log")
+    os.rename(log, path)
+    return path
+
+def start_app(expect_windows, extra_env=None, fresh_log=True, capture=False):
+    """Launches the app (window captures off unless `capture`) and waits for its windows."""
+    if app_pid():
+        stop_app()
+    if fresh_log:
+        archive_log()
+    args = ["open", "-n", APP]
+    env = {
+        "STAGE_MANAGER_HOME": HOME,
+        "STAGE_MANAGER_ONLY": ONLY,
+        "STAGE_MANAGER_NO_PROMPT": "1",
+        "RUST_LOG": "info,stage_manager=debug",
+    }
+    if not capture:
+        env["STAGE_MANAGER_NO_CAPTURE"] = "1"
+    env.update(extra_env or {})
+    for k, v in env.items():
+        args += ["--env", f"{k}={v}"]
+    subprocess.run(args, check=True)
+    ok = wait_until(app_pid, 15, "the app")
+    if not ok:
+        return None
+    return wait_until(
+        lambda: (lambda s: s if s.get("ok") and len(s["windows"]) >= expect_windows else None)(ctl("state")),
+        20,
+        f"{expect_windows} managed windows",
+    )
+
+def wait_gone(pid, timeout=10):
+    def gone():
+        try:
+            os.kill(pid, 0)
+            return False
+        except ProcessLookupError:
+            return True
+
+    return wait_until(gone, timeout, f"process {pid} to exit")
+
+def stop_app():
+    pid = app_pid()
+    if pid:
+        ctl("quit")
+        wait_gone(pid)
+
+def log_text():
+    try:
+        with open(log_path(), encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+def state(landed=True):
+    """The engine's state (`ctl state`). A question never lands a running switch (8L3: the
+    incoming windows wait behind their snapshots until the motion unveils them), so by default
+    this waits (up to 2 s) until no switch holds windows, as before, when asking landed it;
+    `landed=False` reads it at once (a check that samples a switch while it runs)."""
+    end = time.time() + 2.0
+    while True:
+        s = ctl("state")
+        if not s.get("ok"):
+            raise RuntimeError(f"ctl state: {s}")
+        if not landed or s.get("switching") is None or time.time() >= end:
+            return s
+        time.sleep(0.05)
+
+def by_title(s):
+    return {w["title"]: w for w in s["windows"]}
+
+def stage_titles(s):
+    """Stage number -> titles of its standard windows, front to back."""
+    titles = {w["id"]: w["title"] for w in s["windows"]}
+    return {st["number"]: [titles[i] for i in st["windows"]] for st in s["stages"]}
+
+def all_onscreen(what, never_ours=()):
+    """Every fixture window out of the park zone, but `never_ours`: windows we never parked
+    and must leave where they are (the stray of the 8M drills: never shown, off screen)."""
+    wins, d = fixture_windows()
+    wins = [w for w in wins if w["id"] not in set(never_ours)]
+    if not wins:
+        # A fixture that crashed, or a probe that failed, must not pass as "nothing parked".
+        return check(False, f"{what}: every fixture window onscreen (the window server lists no fixture window)")
+    stuck = [fmt(w["bounds"]) for w in wins if is_parked(w["bounds"], d)]
+    return check(not stuck, f"{what}: every fixture window onscreen" + (f" (parked: {stuck})" if stuck else ""))
+
+
 def phase_m3():
     say("\n== milestone 3: stages, switching, frames, z-order, merge, pin, reveal, children ==")
     # A fresh start, as m4's: the safety drills before it (8M, 8N) leave a state.json whose
