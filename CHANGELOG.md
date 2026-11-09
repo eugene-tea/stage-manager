@@ -58,6 +58,8 @@
 - Clicking the wallpaper works again after you take a screenshot: macOS's screenshot tool
   leaves an invisible screen-sized window behind for minutes, and clicks under it were taken
   for clicks on a window.
+- Settings' panes are plain, as in Safari's, Finder's or Mail's settings: the rows sit on the
+  window itself, without the rounded box around them.
 - Settings says what "Click wallpaper to reveal desktop" does: with Always, macOS moves every
   window aside itself; Only in Stage Manager puts your stage into the strip, as Apple's does.
 - A downloaded update also installs when you quit Stage Manager (Quit in the menu, or ⌘Q

@@ -1,7 +1,8 @@
 //! The Settings window, in the shape of a Mac app's Settings (Safari, Mail, Xcode): a toolbar
 //! of panes (`NSWindowToolbarStyle::Preference`, an SF Symbol and a label each), one pane
-//! shown at a time, the window titled after it. Each pane is a grouped form in the look of
-//! System Settings ([`form`]).
+//! shown at a time, the window titled after it. Each pane is a plain form
+//! ([`form::Style::Plain`]): rows straight on the window background, as in those apps, since
+//! the toolbar already groups them.
 //!
 //! - **General:** launch at login, the menu bar icon, automatic update checks, installing
 //!   updates automatically, the version with Check for Updates….
@@ -40,7 +41,7 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
-use super::form::{self, ActionTarget, FlippedView, Form, Row};
+use super::form::{self, ActionTarget, FlippedView, Form, Row, Style};
 use crate::config::{AppConfig, Config, FitMode};
 use crate::engine::model::StripOrder;
 use crate::platform::login_item::LoginStatus;
@@ -671,7 +672,7 @@ fn windows(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSPopUpButt
     let fit = m.popup(&FIT_TITLES, fit_index, tag::FIT);
     let hotkeys = m.switch(v.hotkeys, tag::HOTKEYS);
     m.ours(tag::SPEED);
-    let (speed_below, speed, speed_h) = speed_view(m.mtm, f.inner() - 24.0, speed_stop(v.speed), v.animations_on, m.target);
+    let (speed_below, speed, speed_h) = speed_view(m.mtm, f.row_inner(), speed_stop(v.speed), v.animations_on, m.target);
     let mut speed_row = Row::new("Animation speed", None);
     if !v.animations_on {
         speed_row = speed_row.detail("Animations are off in the config file ([animation] enabled = false or speed = 0).");
@@ -735,19 +736,19 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (V
     };
     let maker = |pane: Pane| Maker { mtm, target, pane };
 
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let (login, icon, updates, install) = general(&mut f, &maker(Pane::General), v);
     add(Pane::General, f);
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let (recent, grouping) = stage_manager(&mut f, &maker(Pane::StageManager), v);
     add(Pane::StageManager, f);
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let ([restore, new_apps, shift, merge], order) = stages(&mut f, &maker(Pane::Stages), v);
     add(Pane::Stages, f);
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let (fit, speed, hotkeys) = windows(&mut f, &maker(Pane::Windows), v);
     add(Pane::Windows, f);
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let copy = advanced(&mut f, &maker(Pane::Advanced), v);
     add(Pane::Advanced, f);
 
