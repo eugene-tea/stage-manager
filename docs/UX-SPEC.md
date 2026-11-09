@@ -136,7 +136,11 @@ extra, off by default, puts it in the current stage instead: see Extras).
 An app that opens several windows at once comes forward with the one it opened last in
 front, as macOS shows them, and that one is in front on every switch back to its stage
 (Apple's, 11-09; the window used last comes in front, and the keyboard goes to it).
-Sheets and dialogs follow their window. An app that quits takes its windows out of their
+Sheets and dialogs follow their window. Short-lived windows (Safari's small dialogs, Chrome's
+address-bar suggestions) join the stage shown and leave it a second later, as any window
+does: nothing changes on screen, and holding every new window back to see whether it stays
+would slow them all, so they stay managed (decided 11-09). One that shows on a card or
+switches a stage is a bug. An app that quits takes its windows out of their
 stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
 An app that saved a hidden window's corner place when it quit, and reopens the window there
 within a day, has the window put back where it was before the quit (else centered).
