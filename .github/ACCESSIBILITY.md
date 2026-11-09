@@ -1,7 +1,7 @@
 # Accessibility
 
 Stage Manager should work for everyone who can use Apple's Stage Manager. This page says
-where it stands, honestly, and how to tell us about a barrier.
+where it stands and how to tell us about a barrier.
 
 ## What works
 

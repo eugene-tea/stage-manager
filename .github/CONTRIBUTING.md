@@ -17,5 +17,7 @@ out and the rules it keeps. Before a pull request:
 - A line in [CHANGELOG.md](../CHANGELOG.md) under Unreleased, in plain words a user would
   understand.
 - A new option goes in [CONFIG.md](../docs/CONFIG.md) with its default.
+- Anything new on screen works with VoiceOver and follows Reduce Motion
+  ([ACCESSIBILITY.md](ACCESSIBILITY.md)).
 
 For anything big, open an issue first so we can agree on the shape before you build it.

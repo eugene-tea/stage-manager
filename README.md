@@ -52,6 +52,7 @@ check on GitHub, which you can turn off.
 - [Info page](https://eugene-tea.github.io/stage-manager/)
 - [User guide](docs/GUIDE.md): install, use, settings, troubleshooting
 - [Configuration reference](docs/CONFIG.md): every option
+- [Accessibility](.github/ACCESSIBILITY.md): VoiceOver, the keyboard, Reduce Motion, and what's missing
 - [Development](docs/DEVELOPMENT.md): build, test, release
 - [Notes for AI agents](docs/AGENTS.md): for an assistant changing your settings
 - [Changelog](CHANGELOG.md)
