@@ -438,7 +438,7 @@ pub const RETIRED: &[(&str, &str, &str)] = &[
     (
         "windows",
         "hide_parked_apps",
-        "no longer used; apps are no longer hidden (the corner patch covers parked windows' slivers)",
+        "no longer used; it is ignored",
     ),
 ];
 
