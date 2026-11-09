@@ -1064,6 +1064,34 @@ fn spring(s: motion_math::Spring, key: &str, from: &AnyObject, to: &AnyObject) -
     anim
 }
 
+/// How a card's size and glass move to their new values: eased out over a time (a press, a
+/// merge, a repaint), or on the hover's spring, 99 % there by that time (Apple's hover,
+/// measured 11-09: a spring, not an ease-out).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Ease {
+    Out(f64),
+    Spring(f64),
+}
+
+impl Ease {
+    fn seconds(self) -> f64 {
+        match self {
+            Ease::Out(s) | Ease::Spring(s) => s,
+        }
+    }
+}
+
+/// An animation of `key` from `from` to `to` on the curve `e`.
+fn eased(key: &str, from: &AnyObject, to: &AnyObject, e: Ease) -> Retained<CABasicAnimation> {
+    match e {
+        Ease::Spring(seconds) => match motion_math::hover_spring(seconds) {
+            Some(s) => Retained::into_super(spring(s, key, from, to)),
+            None => ease(key, from, to, seconds),
+        },
+        Ease::Out(seconds) => ease(key, from, to, seconds),
+    }
+}
+
 fn ease(key: &str, from: &AnyObject, to: &AnyObject, seconds: f64) -> Retained<CABasicAnimation> {
     let anim = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str(key)));
     anim.setDuration(seconds);
@@ -1113,15 +1141,15 @@ fn spring_sublayer_transform(s: motion_math::Spring, layer: &CALayer, to: CATran
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("sublayerTransform")));
 }
 
-/// Eases `layer`'s transform to `to` from what is drawn now.
-fn ease_transform(layer: &CALayer, to: CATransform3D, seconds: f64) {
+/// Eases `layer`'s transform to `to` from what is drawn now, on the curve `e`.
+fn ease_transform(layer: &CALayer, to: CATransform3D, e: Ease) {
     // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
     let from = unsafe { layer.presentationLayer() }.map(|p| p.transform()).unwrap_or_else(|| layer.transform());
     layer.setTransform(to);
-    if seconds <= 0.0 {
+    if e.seconds() <= 0.0 {
         return;
     }
-    let anim = ease("transform", &transform_value(from), &transform_value(to), seconds);
+    let anim = eased("transform", &transform_value(from), &transform_value(to), e);
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("transform")));
 }
 
@@ -1134,23 +1162,23 @@ fn fade_in(layer: &CALayer, seconds: f64) {
 }
 
 /// Paints `plane`'s glass: its background the under and `image` at the card's opacity, or
-/// (none) the plain plate under an opaque picture; over `fade` seconds when above zero.
-fn paint_plane_glass(plane: &CALayer, image: &CALayer, look: Option<&GlassLook>, fade: f64) {
+/// (none) the plain plate under an opaque picture; on the curve `fade` when it takes time.
+fn paint_plane_glass(plane: &CALayer, image: &CALayer, look: Option<&GlassLook>, fade: Ease) {
     let plate = color(0.22, 0.22, 0.24, 1.0);
     let (to_color, to_opacity) = match look {
         Some(l) => (l.color.clone(), l.opacity),
         None => (plate, 1.0),
     };
-    if fade > 0.0 {
+    if fade.seconds() > 0.0 {
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
         let from_color = unsafe { plane.presentationLayer() }.and_then(|l| l.backgroundColor()).or_else(|| plane.backgroundColor());
         // SAFETY: as above.
         let from_opacity = unsafe { image.presentationLayer() }.map_or(image.opacity(), |l| l.opacity());
         if let Some(from) = from_color {
-            plane.addAnimation_forKey(&ease("backgroundColor", as_object(&*from), as_object(&*to_color), fade), Some(&NSString::from_str("glass")));
+            plane.addAnimation_forKey(&eased("backgroundColor", as_object(&*from), as_object(&*to_color), fade), Some(&NSString::from_str("glass")));
         }
         image.addAnimation_forKey(
-            &ease("opacity", &NSNumber::new_f32(from_opacity), &NSNumber::new_f32(to_opacity), fade),
+            &eased("opacity", &NSNumber::new_f32(from_opacity), &NSNumber::new_f32(to_opacity), fade),
             Some(&NSString::from_str("glass")),
         );
     }
@@ -2295,7 +2323,7 @@ impl Strip {
             layers.layout = layout.clone();
         }
         let fade = if immediate || self.instant { 0.0 } else { self.style.animation.seconds(GLASS_FADE_MS) };
-        self.paint_glass(card.stage, fade);
+        self.paint_glass(card.stage, Ease::Out(fade));
     }
 
     /// The cards' glass as the style sets it.
@@ -2350,9 +2378,9 @@ impl Strip {
     }
 
     /// Paints the glass of `stage`'s card for where it is laid out: each plane's background
-    /// the under, each picture at the card's opacity; a change fades over `fade` seconds
+    /// the under, each picture at the card's opacity; a change fades on the curve `fade`
     /// (from a look to another; to or from opaque at once).
-    fn paint_glass(&mut self, stage: u64, fade: f64) {
+    fn paint_glass(&mut self, stage: u64, fade: Ease) {
         if self.away {
             return;
         }
@@ -2371,7 +2399,7 @@ impl Strip {
             if (painted.is_none() && look.is_none()) || (painted.is_some() && GlassLook::same(old, look.as_ref())) {
                 continue;
             }
-            let fade = if old.is_some() && look.is_some() { fade } else { 0.0 };
+            let fade = if old.is_some() && look.is_some() { fade } else { Ease::Out(0.0) };
             paint_plane_glass(plane, image, look.as_ref(), fade);
         }
         CATransaction::commit();
@@ -2385,7 +2413,7 @@ impl Strip {
         let fade = self.style.animation.seconds(GLASS_FADE_MS);
         let stages: Vec<u64> = self.pane.cards.keys().copied().collect();
         for stage in stages {
-            self.paint_glass(stage, fade);
+            self.paint_glass(stage, Ease::Out(fade));
         }
     }
 
@@ -2808,7 +2836,8 @@ impl Strip {
             if mode == DragMode::Reorder {
                 drag.ghost = None;
             } else {
-                let frame = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, strip_right, style.grow_distance, p);
+                let hold = strip_layout::window_grab(drag.full, (style.window_grab_x, style.window_grab_y));
+                let frame = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, strip_right, style.grow_distance, hold, p);
                 let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_ref(), style.ghost_opacity as f32));
                 ghost.set_frame(frame, primary_height);
             }
@@ -2911,7 +2940,9 @@ impl Strip {
             let out = !self.geometry.global.contains(at);
             if out {
                 let right = self.geometry.global.max_x();
-                let rect = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, right, self.style.drag.grow_distance, at);
+                let d = &self.style.drag;
+                let hold = strip_layout::window_grab(drag.full, (d.window_grab_x, d.window_grab_y));
+                let rect = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, right, d.grow_distance, hold, at);
                 self.motion.keep_landing(drag.ghost, drag.window, rect);
                 if drag.alone {
                     // The card shows its other windows at once; the controller's snapshot agrees.
@@ -2926,7 +2957,8 @@ impl Strip {
                 tracing::debug!(stage = drag.stage, "card drag cancelled over the strip");
                 return None;
             }
-            let origin = strip_layout::drop_origin(drag.full, drag.grab.0, at);
+            let d = &self.style.drag;
+            let origin = strip_layout::drop_origin(strip_layout::window_grab(drag.full, (d.window_grab_x, d.window_grab_y)), at);
             let window = drag.alone.then_some(drag.window);
             tracing::debug!(stage = drag.stage, ?window, "card dragged out: dropped in the main area");
             return Some(StripEvent::CardDropped { stage: drag.stage, window, x: origin.x, y: origin.y });
@@ -2970,8 +3002,9 @@ impl Strip {
             return;
         }
         let was = std::mem::replace(&mut self.squeezed, stage);
-        let seconds = self.style.animation.seconds(if stage.is_some() { self.style.cards.press_ms } else { self.style.cards.hover_ms });
-        self.ease_cards([was, stage], seconds);
+        // A press eases out; letting go goes back to the hover's size on its spring.
+        let e = if stage.is_some() { Ease::Out(self.style.animation.seconds(self.style.cards.press_ms)) } else { self.hover_ease() };
+        self.ease_cards([was, stage], e);
     }
 
     /// A click on `stage`'s card at `p`: on an app icon (without shift) or the card.
@@ -3050,7 +3083,7 @@ impl Strip {
             layers.card.addAnimation_forKey(&fade, Some(&NSString::from_str("vanish")));
         }
         if let Some(c) = toward {
-            ease_transform(&layers.card, scale_about(MERGE_SHRINK, c, m.eye), seconds);
+            ease_transform(&layers.card, scale_about(MERGE_SHRINK, c, m.eye), Ease::Out(seconds));
         }
         CATransaction::commit();
         let card = layers.card.clone();
@@ -3123,27 +3156,33 @@ impl Strip {
         self.ease_growth([previous, card]);
     }
 
-    /// Eases each of `stages`' cards to its size now ([`Strip::card_scale`]) and its glass
-    /// ([`Glass::picture`]) over `[cards] hover_ms`.
+    /// Moves each of `stages`' cards to its size now ([`Strip::card_scale`]) and its glass
+    /// ([`Glass::picture`]) on the hover's spring ([`Strip::hover_ease`]).
     fn ease_growth(&mut self, stages: [Option<u64>; 2]) {
-        self.ease_cards(stages, self.style.animation.seconds(self.style.cards.hover_ms));
+        self.ease_cards(stages, self.hover_ease());
     }
 
-    /// Eases each of `stages`' cards to its size now and its glass to its hover's (a hovered
-    /// card turns solid as it grows) over `seconds` (0: at once), on the one curve, so the
-    /// two move as one. A press changes the size alone: the pressed card is still hovered.
-    fn ease_cards(&mut self, stages: [Option<u64>; 2], seconds: f64) {
+    /// The hover's curve: a spring 99 % there after `[cards] hover_ms`, as Apple's.
+    fn hover_ease(&self) -> Ease {
+        Ease::Spring(self.style.animation.seconds(self.style.cards.hover_ms))
+    }
+
+    /// Moves each of `stages`' cards to its size now and its glass to its hover's (a hovered
+    /// card turns solid as it grows) on the curve `e` (no time: at once), the one curve for
+    /// both, so the two move as one. A press changes the size alone: the pressed card is
+    /// still hovered.
+    fn ease_cards(&mut self, stages: [Option<u64>; 2], e: Ease) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for stage in stages.into_iter().flatten() {
             let Some(layout) = self.layouts.iter().find(|l| l.stage == stage).cloned() else { continue };
             let t = self.card_transform(&layout);
             if let Some(layers) = self.pane.cards.get(&stage) {
-                ease_transform(&layers.card, t, seconds);
+                ease_transform(&layers.card, t, e);
             }
         }
         for stage in stages.into_iter().flatten() {
-            self.paint_glass(stage, seconds);
+            self.paint_glass(stage, e);
         }
         CATransaction::commit();
     }

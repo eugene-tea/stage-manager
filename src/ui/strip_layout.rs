@@ -499,28 +499,33 @@ pub fn layout_column(cards: &[CardSnapshot], height: f64, m: &Metrics) -> Vec<Ca
     out
 }
 
-/// The pointer's depth into a dropped window's title bar, from its top edge.
-pub const TITLE_GRAB: f64 = 14.0;
+/// Where a card dragged out holds its window of `full` size: the pointer `grab` (`[drag]
+/// window_grab_x`, `window_grab_y`) right of its left edge and below its top, at most half its
+/// width and height. Apple's holds the window there wherever the card was pressed (measured
+/// 11-09: 96 and 100 pt, pressed at 47 % and at 71 % of a card's width).
+pub fn window_grab(full: Size, grab: (f64, f64)) -> (f64, f64) {
+    (grab.0.clamp(0.0, full.w.max(0.0) / 2.0), grab.1.clamp(0.0, full.h.max(0.0) / 2.0))
+}
 
 /// The ghost of a card dragged out of the strip, in global coordinates: inside the strip it
 /// is the front thumbnail `thumb` (where it was pressed, grabbed at fractions `grab` of its
 /// size); past `strip_right` it grows toward the window's `full` size, reached `grow` further
-/// (`[drag] grow_distance`), the grab point sliding up into the title bar. The pointer `p`
-/// stays at the grab point throughout.
-pub fn ghost_frame(thumb: Rect, grab: (f64, f64), full: Size, strip_right: f64, grow: f64, p: Point) -> Rect {
+/// (`[drag] grow_distance`), the grab point sliding to where the window is held (`hold`,
+/// [`window_grab`]). The pointer `p` stays at the grab point throughout.
+pub fn ghost_frame(thumb: Rect, grab: (f64, f64), full: Size, strip_right: f64, grow: f64, hold: (f64, f64), p: Point) -> Rect {
     let t = ((p.x - strip_right) / grow.max(1.0)).clamp(0.0, 1.0);
     let lerp = |a: f64, b: f64| a + (b - a) * t;
     let w = lerp(thumb.w, full.w.max(thumb.w));
     let h = lerp(thumb.h, full.h.max(thumb.h));
-    let ox = grab.0 * w;
-    let oy = lerp(grab.1 * thumb.h, TITLE_GRAB.min(h));
+    let ox = lerp(grab.0 * thumb.w, hold.0);
+    let oy = lerp(grab.1 * thumb.h, hold.1);
     Rect::new(p.x - ox, p.y - oy, w, h)
 }
 
-/// Where a dropped card's front window goes (its top-left corner, global): the same
-/// horizontal grab point as the ghost, with its title bar under the pointer.
-pub fn drop_origin(full: Size, grab_x: f64, p: Point) -> Point {
-    Point::new(p.x - grab_x * full.w, p.y - TITLE_GRAB)
+/// Where a dropped card's window goes (its top-left corner, global): held at `hold`
+/// ([`window_grab`]) under the pointer `p`, as the grown ghost was.
+pub fn drop_origin(hold: (f64, f64), p: Point) -> Point {
+    Point::new(p.x - hold.0, p.y - hold.1)
 }
 
 #[cfg(test)]
@@ -959,16 +964,23 @@ mod tests {
         let thumb = Rect::new(20.0, 500.0, 150.0, 100.0);
         let full = Size::new(900.0, 600.0);
         let grab = (0.5, 0.5);
-        const GHOST_GROW_DISTANCE: f64 = 260.0;
-        let inside = ghost_frame(thumb, grab, full, 200.0, GHOST_GROW_DISTANCE, Point::new(95.0, 550.0));
+        let style = StripStyle::default();
+        let (grow, d) = (style.drag.grow_distance, &style.drag);
+        let hold = window_grab(full, (d.window_grab_x, d.window_grab_y));
+        assert_eq!(hold, (96.0, 100.0), "Apple's, measured 11-09");
+        let inside = ghost_frame(thumb, grab, full, 200.0, grow, hold, Point::new(95.0, 550.0));
         assert_eq!(inside, thumb, "unchanged inside the strip");
-        let far = ghost_frame(thumb, grab, full, 200.0, GHOST_GROW_DISTANCE, Point::new(200.0 + GHOST_GROW_DISTANCE + 50.0, 550.0));
+        let far = ghost_frame(thumb, grab, full, 200.0, grow, hold, Point::new(200.0 + grow + 50.0, 550.0));
         assert_eq!((far.w, far.h), (900.0, 600.0));
-        assert_eq!(far.y, 550.0 - TITLE_GRAB, "the title bar under the pointer");
-        assert_eq!(far.x + 0.5 * far.w, 510.0);
-        let mid = ghost_frame(thumb, grab, full, 200.0, GHOST_GROW_DISTANCE, Point::new(200.0 + GHOST_GROW_DISTANCE / 2.0, 550.0));
+        assert_eq!((far.x, far.y), (200.0 + grow + 50.0 - 96.0, 450.0), "the pointer 96 pt in from the left edge, 100 below the top");
+        let mid = ghost_frame(thumb, grab, full, 200.0, grow, hold, Point::new(200.0 + grow / 2.0, 550.0));
         assert!(mid.w > thumb.w && mid.w < full.w);
-        let at = drop_origin(full, 0.5, Point::new(510.0, 550.0));
+        let at = drop_origin(hold, Point::new(200.0 + grow + 50.0, 550.0));
         assert_eq!((at.x, at.y), (far.x, far.y), "the drop lands where the grown ghost was");
+        // Wherever the card was pressed (Apple's 03 at 47 % of the card, 06 at 71 %), the same.
+        let other = ghost_frame(thumb, (0.71, 0.67), full, 200.0, grow, hold, Point::new(200.0 + grow + 50.0, 550.0));
+        assert_eq!((other.x, other.y), (far.x, far.y));
+        // A small window is held at most at its middle.
+        assert_eq!(window_grab(Size::new(150.0, 120.0), (96.0, 100.0)), (75.0, 60.0));
     }
 }
