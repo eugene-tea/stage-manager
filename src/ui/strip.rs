@@ -53,13 +53,13 @@
 //!   card's size in the column and the window itself past it, its plane on the card faded. Released
 //!   in the main area it goes out as [`StripEvent::CardDropped`] naming it (Apple's); in the
 //!   column, in a gap that opens under the pointer, as [`StripEvent::WindowToNewCard`]; on
-//!   another card's middle, which shows it behind its own windows, as
+//!   another card's middle, which shows it in front of its own windows, as
 //!   [`StripEvent::WindowToCard`]; over its own card, nothing. Apple's leaves it on the card
 //!   until the pointer leaves the strip (UX-SPEC, Drag and drop).
 //! - **Drop a card on a card** (`[strip] merge_on_drop`, an extension): over the middle part
 //!   of another card (`[drag] merge_zone` of its height, measured on the cards at rest) the
 //!   reorder gap closes and that card grows and shows the dragged card's windows stacked
-//!   behind its own, as the merged card will look; leaving the zone undoes it on the spring.
+//!   in front of its own, as the merged card will look; leaving the zone undoes it on the spring.
 //!   Released there, the dragged card shrinks into it and fades, and the drop goes out as
 //!   [`StripEvent::CardMerged`].
 //! - **Drop target**: while the controller reports a window drag
@@ -1602,8 +1602,8 @@ enum WindowSpot {
     /// Into the gap right above this stage's card (`None`: below the last card), which opens:
     /// a stage of its own there.
     Gap(Option<u64>),
-    /// Onto this stage's card (`[strip] merge_on_drop`), which grows and shows it behind its
-    /// own windows: it joins that stage.
+    /// Onto this stage's card (`[strip] merge_on_drop`), which grows and shows it in front of
+    /// its own windows: it joins that stage, its front window.
     Onto(u64),
 }
 
@@ -2240,7 +2240,7 @@ impl Strip {
             }
             cards.insert(to, card);
         }
-        // A window lifted off its card: the card it is held over shows it behind its own
+        // A window lifted off its card: the card it is held over shows it in front of its own
         // windows, or the gap under the pointer opens, a card of it in size.
         if let Some(d) = self.card_drag.as_ref().filter(|d| d.mode == DragMode::Lifted)
             && let Some(lifted) = cards.iter().find(|c| c.stage == d.stage).map(|c| c.only_window(d.window))
@@ -3305,10 +3305,10 @@ impl Strip {
         match mode {
             DragMode::Reorder => {
                 // Held over a card it would merge into, the dragged card fades as when it is
-                // dragged out: it lies right over the target, whose preview shows its own
-                // front window with the dragged card's windows behind; at full opacity the
-                // dragged card hid that front window, so the target seemed to show the
-                // dragged card's picture twice (owner 10-22, round 9C).
+                // dragged out: it lies right over the target, whose preview shows the dragged
+                // card's windows in front of its own; at full opacity the dragged card hid
+                // the preview, so the target seemed to show the dragged card's picture twice
+                // (owner 10-22, round 9C).
                 let held = if onto.is_some() { style.lifted_opacity as f32 } else { 1.0 };
                 let seconds = if was == DragMode::Reorder { self.style.animation.seconds(self.style.cards.hover_ms) } else { 0.0 };
                 self.fade_card(stage, held, seconds);

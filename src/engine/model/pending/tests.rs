@@ -1429,8 +1429,9 @@ fn merging_a_partly_restored_stage_into_the_active_one_takes_its_pending_windows
     assert_eq!(m.pending_count(), 0);
 }
 
-/// R5, into an inactive stage (a card dropped on a card): the pending windows go behind the
-/// destination's, in saved order; saved and launched again, it is one stage.
+/// R5, into an inactive stage (a card dropped on a card): the dropped card's windows go in
+/// front of the destination's, its pending ones with them in saved order; saved and launched
+/// again, it is one stage.
 #[test]
 fn merging_a_partly_restored_stage_into_an_inactive_one_takes_its_pending_windows() {
     let (mut m, editor, mail, browser) = partly_restored();
@@ -1438,22 +1439,23 @@ fn merging_a_partly_restored_stage_into_an_inactive_one_takes_its_pending_window
     assert_eq!(m.stage_of(w(3)), Some(mail));
     assert!(m.stage(browser).is_none());
     assert_eq!(m.pending_of(mail).len(), 2);
-    assert!(m.pending_of(mail).iter().all(|x| !x.key), "the merge keeps Mail's key");
+    assert!(m.pending_of(mail).iter().all(|x| !x.key), "the dropped card's restored window is the key");
+    assert_eq!(m.stage(mail).and_then(|s| s.key), Some(w(3)));
 
     // Saved now: one stage holds Mail, Recipes and the two awaited windows, no duplicates.
     let file = m.to_state();
     let saved = file.spaces.iter().find(|s| s.id == 7).expect("Desktop 7");
     assert_eq!(saved.stages.len(), 2);
     let titles = |s: &SavedStage| s.windows.iter().map(|x| x.title.clone()).collect::<Vec<_>>();
-    assert_eq!(titles(&saved.stages[1]), ["Mail", "Recipes", "Travel", "Maps"]);
+    assert_eq!(titles(&saved.stages[1]), ["Recipes", "Mail", "Travel", "Maps"], "the awaited ones after the live ones, as every save writes them");
 
-    // The late windows land in Mail's stage, behind its windows, in saved order; after the
+    // The late windows land in Mail's stage, in front of Mail, in saved order; after the
     // restore window that stage comes forward, as any stage a late window joins.
     add(&mut m, maps());
     assert_eq!(m.main_active_stage(), Some(mail));
     assert_ne!(m.main_active_stage(), Some(editor));
     add(&mut m, travel());
-    assert_eq!(m.stage(mail).map(|s| s.windows.clone()), Some(vec![w(2), w(3), w(4), w(5)]));
+    assert_eq!(m.stage(mail).map(|s| s.windows.clone()), Some(vec![w(3), w(4), w(5), w(2)]));
     assert_eq!(m.stages_in(m.current_space(MAIN)).count(), 2, "the old stage is not made again");
 
     // Launched again after another restart from the file saved mid-way: one combined stage.
@@ -1466,7 +1468,8 @@ fn merging_a_partly_restored_stage_into_an_inactive_one_takes_its_pending_window
     for id in [13, 4, 5] {
         assert_eq!(again.stage_of(w(id)), Some(combined), "window {id}");
     }
-    assert_eq!(again.stage(combined).map(|s| s.windows.clone()), Some(vec![w(12), w(13), w(4), w(5)]));
+    // In the file's order: the live windows first, the dropped card's Recipes in front.
+    assert_eq!(again.stage(combined).map(|s| s.windows.clone()), Some(vec![w(13), w(12), w(4), w(5)]));
 }
 
 /// R5 and the pool: a stray's part merged into a stage here keeps the merge; the next stray

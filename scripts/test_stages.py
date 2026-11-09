@@ -2599,8 +2599,8 @@ def merge_sub_test(vis):
     s = state()
     after = {st["id"]: list(st["windows"]) for st in s["stages"]}
     check(src not in after, f"the dropped card's stage is gone ({sorted(after)})")
-    check(after.get(dst) == staying + moving,
-          f"the target's stage holds both, its own in front ({after.get(dst)}, wanted {staying + moving})")
+    check(after.get(dst) == moving + staying,
+          f"the target's stage holds both, the dropped card's in front (11-09) ({after.get(dst)}, wanted {moving + staying})")
     parked = {w["id"]: w["parked"] for w in s["windows"]}
     check(all(parked.get(i) for i in staying + moving), "every window of both stays parked (nothing moved on screen)")
     num = numbers_by_id(s)
@@ -3677,12 +3677,12 @@ def drop_settle_checks():
 def merge_hold_check():
     """A card held over another card's middle (`[strip] merge_on_drop`; owner 10-22, round 9C:
     "both windows render with the same content until I release"): the target previews the
-    merge, its own windows in front and the dragged card's behind, and each of its planes
-    shows its own window's picture (`shows` in `ctl debug-strip`: none while captures are
-    off), never another's; the dragged card, lying right over the target, fades to
-    `[drag] lifted_opacity` so the target's front window shows. Released there, the stages
-    merge."""
-    say("-- a card held over another card: the preview shows the target's own front window")
+    merge, the dragged card's windows in front and its own behind (11-09: what is moved is
+    what is cared about), and each of its planes shows its own window's picture (`shows` in
+    `ctl debug-strip`: none while captures are off), never another's; the dragged card, lying
+    right over the target, fades to `[drag] lifted_opacity` so the target's preview shows.
+    Released there, the stages merge."""
+    say("-- a card held over another card: the preview shows the dragged card's windows in front")
     with open(os.path.join(HOME, "config.toml"), "w") as fh:
         fh.write(CONFIG_DROP)
     ctl("reload")
@@ -3723,8 +3723,8 @@ def merge_hold_check():
         return
     planes = t["planes"]
     front = planes[-1]["window"] if planes else None
-    check(front in mine and any(p["window"] in theirs for p in planes),
-          f"the target previews the merge: its own window in front ({front}), the dragged card's behind "
+    check(front in theirs and any(p["window"] in mine for p in planes),
+          f"the target previews the merge: the dragged card's window in front ({front}), its own behind "
           f"({[p['window'] for p in planes]})")
     wrong = [(p["window"], p["shows"]) for h in held for c in h["cards"] for p in c["planes"]
              if p.get("shows") is not None and p["shows"] != p["window"]]

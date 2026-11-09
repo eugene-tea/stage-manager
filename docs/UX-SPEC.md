@@ -326,8 +326,9 @@ into its window as above. Inside the column it can go where Apple's has nothing 
 offer (extensions, always on, as a window dropped on the strip): into a gap between cards,
 which opens under the pointer, as a stage of its own there (`Model::move_window_to_new_stage`;
 the stage it left keeps its number and slot); onto another card's middle (`[strip]
-merge_on_drop`, `[drag] merge_zone`), which grows and shows it behind its own windows, into
-that card's stage alone (`Model::move_window_to_stage`); back over its own card, nothing
+merge_on_drop`, `[drag] merge_zone`), which grows and shows it in front of its own windows,
+into that card's stage alone, as its front window (`Model::move_window_to_stage`: first in
+its order, raised last and focused when that stage shows); back over its own card, nothing
 changes (released there after a wobble that went nowhere, it is a click). The press decides
 what moves: on one window of a card of several, that window; on the card's app icons (they
 are drawn over the windows), or anywhere on a card of one window, the whole card, which

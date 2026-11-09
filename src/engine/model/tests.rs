@@ -1727,21 +1727,23 @@ fn a_card_dropped_on_a_card_keeps_every_window_parked_and_moves_nothing() {
     assert_eq!(a, [Action::StateChanged], "nothing moves on screen");
     assert_eq!(e.d.frames, desk);
     assert!(e.m.stage(s1).is_none(), "the emptied stage is gone");
-    assert_eq!(e.m.stage(s3).expect("kept").windows, [w(3), w(1)], "behind the target's own windows");
-    assert_eq!(e.m.stage(s3).expect("kept").key, Some(w(3)), "the target keeps its key window");
+    assert_eq!(e.m.stage(s3).expect("kept").windows, [w(1), w(3)], "the dropped card's first, in front of the target's own");
+    assert_eq!(e.m.stage(s3).expect("kept").key, Some(w(1)), "the dropped card's key window is the target's now");
     assert!(e.m.window(w(1)).is_some_and(|x| x.parked) && e.m.window(w(3)).is_some_and(|x| x.parked));
     let now: Vec<Rect> = [1, 3].iter().map(|&id| e.m.window(w(id)).expect("known").restore).collect();
     assert_eq!(now, saved, "saved frames kept");
     assert_eq!(e.m.windows().count(), 4, "every window kept");
     assert_eq!(e.m.strip_slots(MAIN), [s2, s3], "the dropped card's slot closes; the target keeps its place");
     let card = e.m.strip().into_iter().find(|c| c.stage == s3).expect("a card");
-    assert_eq!(card.windows, [w(3), w(1)], "the target's card shows both, its own in front");
+    assert_eq!(card.windows, [w(1), w(3)], "the target's card shows both, the dropped one in front");
     assert_eq!(card.apps.len(), 2);
-    // Switching to it brings both back.
+    // Switching to it brings both back, the dropped one in front and focused.
     let obs = e.d.obs();
     let a = e.m.switch_to(s3, &obs);
     e.run(a);
     assert!(!e.d.parked(w(1)) && !e.d.parked(w(3)));
+    assert_eq!(e.d.focused, Some(w(1)));
+    assert!(e.d.z.iter().position(|&x| x == w(1)) < e.d.z.iter().position(|&x| x == w(3)), "in front ({:?})", e.d.z);
     assert_eq!(e.d.frames[&w(1)], saved[0]);
 }
 
@@ -1789,7 +1791,7 @@ fn merging_cards_carries_children_and_keeps_a_declared_stage() {
     let a = e.m.merge_stages(chat, s3, &obs);
     e.run(a);
     assert!(e.m.stage(chat).is_some_and(|s| s.windows.is_empty()), "a declared stage survives empty");
-    assert_eq!(e.m.stage(s3).expect("kept").windows, [w(3), w(2)]);
+    assert_eq!(e.m.stage(s3).expect("kept").windows, [w(2), w(3)]);
     assert_eq!(e.m.stage_of(w(5)), Some(s3), "the child follows its parent");
     assert!(e.d.parked(w(5)) && e.m.window(w(5)).is_some_and(|x| x.parked), "and stays parked");
 }
@@ -2542,6 +2544,10 @@ fn combined_card() -> (Env, StageId) {
     let obs = e.d.obs();
     let a = e.m.merge_stages(third, card, &obs);
     e.run(a);
+    assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![3, 5, 2]), "the dropped card in front");
+    // The order the tests below were written for: app 11's windows in front, 5 the key.
+    e.m.make_key(card, w(2));
+    e.m.make_key(card, w(5));
     e.switch(1);
     assert_eq!(e.number_of(1), 1);
     assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![5, 2, 3]));
@@ -2679,12 +2685,61 @@ fn one_window_dropped_on_another_card_joins_that_stage_alone() {
     let a = e.m.move_window_to_stage(card, w(2), four, &obs);
     assert_eq!(a, [Action::StateChanged], "nothing moves on screen: {a:?}");
     e.run(a);
-    assert_eq!(e.m.stage(four).map(|s| (s.windows.iter().map(|x| x.0).collect::<Vec<_>>(), s.key)), Some((vec![4, 2], Some(w(4)))), "behind its windows, its key kept");
+    assert_eq!(e.m.stage(four).map(|s| (s.windows.iter().map(|x| x.0).collect::<Vec<_>>(), s.key)), Some((vec![2, 4], Some(w(2)))), "in front of its windows, its key window");
     assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![5, 3]));
     assert_eq!(e.m.window(w(2)).map(|x| x.restore), restore);
     assert!(e.d.parked(w(2)));
     assert_eq!((e.m.stage_number(card), e.m.stage_number(four), e.slot_numbers()), (number, four_number, slots));
     assert_eq!(e.m.stage_of(w(1)), e.m.main_active_stage(), "the current stage untouched");
+}
+
+/// Eugene, 11-09: a window moved into a stage is the one cared about. Whichever path moves
+/// it (onto another card, out into the current stage, into a gap, a desktop window onto the
+/// strip), it is first in its new stage's order, the card's front window and its key; that
+/// stage shown, it is in front and focused.
+#[test]
+fn a_moved_window_is_first_in_its_new_stage() {
+    let order = |e: &Env, s: StageId| e.m.stage(s).map(|s| (s.windows.iter().map(|x| x.0).collect::<Vec<_>>(), s.key.map(|k| k.0)));
+    // Onto another card: in front of its window, and in front and focused when shown.
+    let (mut e, card) = combined_card();
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let obs = e.d.obs();
+    let a = e.m.move_window_to_stage(card, w(2), four, &obs);
+    e.run(a);
+    assert_eq!(order(&e, four), Some((vec![2, 4], Some(2))));
+    let shown = e.m.strip().into_iter().find(|c| c.stage == four).expect("a card");
+    assert_eq!(shown.windows.first(), Some(&w(2)), "the card's front window");
+    let n = e.m.stage_number(four).expect("numbered");
+    e.switch(n);
+    assert_eq!(e.d.focused, Some(w(2)));
+    assert_eq!(e.d.z.iter().position(|&x| x == w(2)), Some(0), "in front ({:?})", e.d.z);
+    // Out into the current stage (the drop in the middle): first, as before.
+    let (mut e, card) = combined_card();
+    let active = e.m.main_active_stage().expect("active");
+    let obs = e.d.obs();
+    let a = e.m.move_window_into_active_at(card, w(2), Point::new(500.0, 300.0), &obs);
+    e.run(a);
+    assert_eq!(order(&e, active).map(|o| o.0[0]), Some(2));
+    assert_eq!(e.d.focused, Some(w(2)));
+    // A whole card onto a card: its windows in front, in their own order.
+    let (mut e, card) = combined_card();
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(card, four, &obs);
+    e.run(a);
+    assert_eq!(order(&e, four), Some((vec![5, 2, 3, 4], Some(5))));
+    // Into a gap, and a desktop window onto the strip: alone, so first.
+    let (mut e, card) = combined_card();
+    let a = e.m.move_window_to_new_stage(card, w(2), None);
+    e.run(a);
+    let gap = e.m.stage_of(w(2)).expect("staged");
+    assert_eq!(order(&e, gap), Some((vec![2], Some(2))));
+    let pre = e.d.frames[&w(1)];
+    let obs = e.d.obs();
+    let a = e.m.drop_window_on_strip(w(1), pre, None, &obs);
+    e.run(a);
+    let own = e.m.stage_of(w(1)).expect("staged");
+    assert_eq!(order(&e, own), Some((vec![1], Some(1))));
 }
 
 #[test]
@@ -2695,7 +2750,8 @@ fn a_stages_only_window_dropped_on_a_card_merges_its_stage() {
     let a = e.m.move_window_to_stage(four, w(4), card, &obs);
     e.run(a);
     assert_eq!(e.m.stage(four), None, "its emptied stage goes");
-    assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![5, 2, 3, 4]));
+    assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![4, 5, 2, 3]), "in front");
+    assert_eq!(e.m.stage(card).and_then(|s| s.key), Some(w(4)));
 }
 
 #[test]
