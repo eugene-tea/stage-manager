@@ -4107,7 +4107,9 @@ def landing_blend_check():
         for m in reads:
             if m[3] >= 250:
                 ref = m
-            elif ref and 25 <= m[3] <= 230:
+            # Below a quarter opaque, the 8-bit rounding of a premultiplied read is blown up by
+            # 255/alpha (11-09: one read at alpha 32 was off 12 levels, green falling, no bleed).
+            elif ref and 64 <= m[3] <= 230:
                 rgb = [m[i] * 255.0 / m[3] for i in range(3)]
                 fading.append((round(m[3]), [round(v) for v in rgb], [round(v) for v in ref[:3]],
                                max(abs(rgb[i] - ref[i]) for i in range(3))))
