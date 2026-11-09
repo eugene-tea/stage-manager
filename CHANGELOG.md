@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A closed window about the size of another screen is no longer mistaken for a full-screen
+  one: its card used to stay, and the app's window was tried again at every switch.
 - A window kept on top of all others (a music player in a corner) now stays on top through
   a switch also while the strip shows over your windows; the moving pictures went over it.
 - With "Click wallpaper to reveal desktop: Only in Stage Manager", grabbing a window's edge
