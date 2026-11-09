@@ -904,18 +904,108 @@ impl Model {
     /// [`Model::merge_into_active_at`] of that stage. A no-op for an unknown window or stage,
     /// a window not in an inactive stage of the card's Space, or a Space not shown now.
     pub fn move_window_into_active_at(&mut self, stage: StageId, id: WindowId, top_left: Point, obs: &Observation) -> Vec<Action> {
-        let Some(space) = self.stage(stage).map(|s| s.space) else { return Vec::new() };
-        let Some(id) = self.resolve_standard(id) else { return Vec::new() };
-        let Some(Home::Stage(home)) = self.windows.get(&id).map(|w| w.home) else { return Vec::new() };
-        let Some(src) = self.stage(home) else { return Vec::new() };
-        if src.space != space || !self.is_shown_space(space) || self.is_active(home) || !src.windows.contains(&id) {
-            return Vec::new();
-        }
-        if src.windows.iter().all(|&w| w == id) {
+        let Some((id, home, space)) = self.card_window(stage, id) else { return Vec::new() };
+        if self.alone_in(home, id) {
             return self.merge_into_active_at(home, top_left, obs);
         }
         self.place_dropped(id, top_left);
         self.bring_into_active(space, &[id], &[home], obs)
+    }
+
+    /// One window dragged off a card of several and dropped into a gap between the strip's
+    /// cards (an extension, as a window dragged by its title bar onto the strip,
+    /// [`Model::drop_window_on_strip`]): `id` (with its children) goes into a new stage of its
+    /// own, parked with its saved frame, whose card takes the slot right above `before`'s card
+    /// (the bottom for `None`) by [`Model::move_card`]'s rule (following the Dock, its Dock
+    /// place). Nothing moves on screen and the view does not switch. The stage it left keeps
+    /// its other windows in their order, its slot and its number (its key moves to its next
+    /// window when it was this one). The window alone in its stage is that card moved
+    /// ([`Model::move_card`]). A no-op as [`Model::move_window_into_active_at`].
+    pub fn move_window_to_new_stage(&mut self, stage: StageId, id: WindowId, before: Option<StageId>) -> Vec<Action> {
+        let Some((id, home, space)) = self.card_window(stage, id) else { return Vec::new() };
+        if self.alone_in(home, id) {
+            return self.move_card(home, before);
+        }
+        let Some((display, recency)) = self.stage(home).map(|s| (s.display, s.last_active)) else { return Vec::new() };
+        let new = self.create_stage(space, None);
+        self.take_off(home, id);
+        self.set_home(id, Home::Stage(new), display);
+        // As recent as the stage it came from: a full strip never drops its card first.
+        if let Some(s) = self.stage_mut(new) {
+            s.windows = vec![id];
+            s.key = Some(id);
+            s.last_active = recency;
+        }
+        self.strip_enter(space, new);
+        if before != Some(new) {
+            self.place_card(new, before, false);
+        }
+        self.normalize_slots();
+        vec![Action::StateChanged]
+    }
+
+    /// One window dragged off a card of several and dropped onto another card (`[strip]
+    /// merge_on_drop`, an extension): `id` alone (with its children) joins `into`'s stage,
+    /// behind its windows, as a card dropped there would ([`Model::merge_stages`]). Both
+    /// stages are inactive, so nothing moves on screen: the window stays parked with its
+    /// saved frame. `into` keeps its slot, number, name and key window; the stage it left keeps
+    /// its other windows in their order, its slot and its number (its key moves on when it was
+    /// this one). Into the active stage (a card of it shows only with `[strip] active =
+    /// "card"`) the window comes forward, as when dragged out ([`Model::move_window_into_active_at`]
+    /// without the drop point). The window alone in its stage merges that stage. With "One at
+    /// a Time", a grouped card's window goes into the stage whose slot that card sits in. A
+    /// no-op as [`Model::move_window_into_active_at`], and onto its own stage or a stage of
+    /// another Space.
+    pub fn move_window_to_stage(&mut self, stage: StageId, id: WindowId, into: StageId, obs: &Observation) -> Vec<Action> {
+        let Some((id, home, space)) = self.card_window(stage, id) else { return Vec::new() };
+        let into = if self.options.settings.app_windows == AppWindows::OneAtATime { self.slot_showing(space, into).unwrap_or(into) } else { into };
+        let Some(display) = self.stage(into).filter(|d| d.space == space).map(|d| d.display) else { return Vec::new() };
+        if into == home {
+            return Vec::new();
+        }
+        if self.alone_in(home, id) {
+            return self.merge_one(home, into, obs);
+        }
+        if self.is_active(into) {
+            return self.bring_into_active(space, &[id], &[home], obs);
+        }
+        self.take_off(home, id);
+        self.set_home(id, Home::Stage(into), display);
+        if let Some(d) = self.stage_mut(into) {
+            d.windows.push(id);
+            if d.key.is_none_or(|k| !d.windows.contains(&k)) {
+                d.key = Some(id);
+            }
+        }
+        self.normalize_slots();
+        vec![Action::StateChanged]
+    }
+
+    /// The window `id` of `stage`'s card, the inactive stage it lives in (another of the
+    /// card's with "One at a Time") and their Space, when that Space shows now: what the ops
+    /// that take one window off a card of several act on.
+    fn card_window(&self, stage: StageId, id: WindowId) -> Option<(WindowId, StageId, SpaceId)> {
+        let space = self.stage(stage)?.space;
+        let id = self.resolve_standard(id)?;
+        let Home::Stage(home) = self.windows.get(&id)?.home else { return None };
+        let src = self.stage(home)?;
+        (src.space == space && self.is_shown_space(space) && !self.is_active(home) && src.windows.contains(&id)).then_some((id, home, space))
+    }
+
+    /// `id` is the only window of `stage`.
+    fn alone_in(&self, stage: StageId, id: WindowId) -> bool {
+        self.stage(stage).is_some_and(|s| s.windows.iter().all(|&w| w == id))
+    }
+
+    /// Takes `id` off `stage`'s windows; the stage's key moves to its next window when it was
+    /// this one.
+    fn take_off(&mut self, stage: StageId, id: WindowId) {
+        if let Some(s) = self.stage_mut(stage) {
+            s.windows.retain(|&w| w != id);
+            if s.key == Some(id) {
+                s.key = s.windows.first().copied();
+            }
+        }
     }
 
     /// A card dragged out of one screen's strip and dropped on screen `to`: what a drop in its

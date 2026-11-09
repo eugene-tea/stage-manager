@@ -200,18 +200,21 @@ with Apple's.
 
 ### Drag and drop
 
-- **Drag a card into the middle** to bring its windows into the stage you are in. On a card
-  of several windows, the window you drag it by comes alone, as with Apple's; the others
-  stay on the card. As with Apple's, you hold the window near its top-left corner, about 100
-  points in and 100 down, wherever you picked up the card (`[drag] window_grab_x`,
-  `window_grab_y`).
+- **Drag a card into the middle** to bring its windows into the stage you are in. As with
+  Apple's, you hold the window near its top-left corner, about 100 points in and 100 down,
+  wherever you picked up the card (`[drag] window_grab_x`, `window_grab_y`).
+- **Drag one window off a card of several** by its picture: it comes off alone as soon as you
+  move, and the others stay on the card. Let it go in the middle and it joins the stage you
+  are in, as with Apple's; between two cards, it gets a stage of its own there; on another
+  card, it joins that card's stage; back on its own card, nothing changes.
 - **Drag a window onto the strip** by its title bar to give it a stage of its own. The cards
   stay under the window as you drag; once the pointer is over the strip, a small picture of
   the window shows where it will go.
 - **Drag a card up or down** to move it to another place in the strip.
 - **Drop a card onto another card** to merge the two stages. To split them again, drag a
-  window of the merged card into the middle, or open the merged stage and drag a window onto
-  the strip. Up and down the strip and onto another card, a card always moves whole.
+  window off the merged card into the middle or between two cards.
+- To move a whole card of several windows (up or down, onto another card, or into the
+  middle), drag it by its app icons. A card of one window moves whole wherever you hold it.
 
 Shift-click a card to bring its windows into the current stage without leaving it, as with
 Apple's. Hold Shift while you open an app, or Shift-click it in the Dock, to bring it here too

@@ -2607,6 +2607,123 @@ fn a_window_drag_out_of_the_current_stage_or_of_no_window_does_nothing() {
     assert!(e.m.move_window_into_active_at(card, w(99), Point::new(500.0, 300.0), &obs).is_empty());
 }
 
+/// Each stage's windows by stage id, for "the others stay in their stage".
+fn stage_windows(e: &Env) -> Vec<(StageId, Vec<u32>)> {
+    e.m.stages().iter().map(|s| (s.id, s.windows.iter().map(|x| x.0).collect())).collect()
+}
+
+#[test]
+fn one_window_dropped_in_a_gap_of_the_strip_gets_a_stage_of_its_own_there() {
+    let (mut e, card) = combined_card();
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let (number, four_number, slots) = (e.m.stage_number(card), e.m.stage_number(four), e.slot_numbers());
+    let before = stage_windows(&e);
+    let restore = e.m.window(w(2)).map(|x| x.restore);
+    let a = e.m.move_window_to_new_stage(card, w(2), Some(four));
+    assert_eq!(a, [Action::StateChanged], "nothing moves on screen, nothing switches: {a:?}");
+    e.run(a);
+    let new = e.m.stage_of(w(2)).expect("staged");
+    assert!(new != card && new != four && Some(new) != e.m.main_active_stage(), "a stage of its own");
+    assert_eq!(e.m.stage(new).map(|s| (s.windows.iter().map(|x| x.0).collect::<Vec<_>>(), s.key)), Some((vec![2], Some(w(2)))));
+    assert!(e.d.parked(w(2)) && e.d.parked(w(5)) && e.d.parked(w(3)));
+    assert_eq!(e.m.window(w(2)).map(|x| x.restore), restore, "its saved frame kept");
+    // The others stay in their stages, which keep their numbers; the stage it left keeps the rest in order.
+    let after: Vec<(StageId, Vec<u32>)> = stage_windows(&e).into_iter().filter(|s| s.0 != new).collect();
+    let expected: Vec<(StageId, Vec<u32>)> = before.into_iter().map(|(id, ws)| (id, ws.into_iter().filter(|&x| x != 2).collect())).collect();
+    assert_eq!(after, expected);
+    assert_eq!((e.m.stage_number(card), e.m.stage_number(four)), (number, four_number));
+    // Its card sits right above the card it was dropped above; the order is saved.
+    let new_number = e.m.stage_number(new).expect("numbered");
+    let mut expected_slots = slots;
+    let at = expected_slots.iter().position(|&n| Some(n) == four_number).expect("four's card shown");
+    expected_slots.insert(at, new_number);
+    assert_eq!(e.slot_numbers(), expected_slots);
+    let state = e.m.to_state();
+    let ids: Vec<StageId> = state.spaces[0].strip_slots.iter().filter_map(|i| e.m.stages().get(*i).map(|s| s.id)).collect();
+    assert_eq!(ids, e.m.strip_slots(MAIN));
+    // Shown, it comes alone.
+    e.switch(new_number);
+    assert!(!e.d.parked(w(2)) && e.d.parked(w(5)) && e.d.parked(w(3)));
+}
+
+#[test]
+fn the_front_window_dropped_in_a_gap_hands_its_stages_key_to_the_next_and_goes_to_the_bottom() {
+    let (mut e, card) = combined_card();
+    let a = e.m.move_window_to_new_stage(card, w(5), None);
+    e.run(a);
+    assert_eq!(e.m.stage(card).map(|s| (s.windows.iter().map(|x| x.0).collect::<Vec<_>>(), s.key)), Some((vec![2, 3], Some(w(2)))));
+    assert_eq!(e.slot_numbers().last(), Some(&e.number_of(5)), "below the last card");
+}
+
+#[test]
+fn a_stages_only_window_dropped_in_a_gap_moves_its_card() {
+    let (mut e, card) = combined_card();
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let count = e.m.stages().len();
+    assert_eq!(e.m.strip_slots(MAIN), [four, card]);
+    assert!(e.m.move_window_to_new_stage(four, w(4), Some(card)).is_empty(), "already there");
+    let a = e.m.move_window_to_new_stage(four, w(4), None);
+    assert_eq!(a, [Action::StateChanged]);
+    assert_eq!(e.m.stages().len(), count, "no new stage");
+    assert_eq!(e.m.stage_of(w(4)), Some(four));
+    assert_eq!(e.m.strip_slots(MAIN), [card, four], "the card moved, as dragged whole");
+}
+
+#[test]
+fn one_window_dropped_on_another_card_joins_that_stage_alone() {
+    let (mut e, card) = combined_card();
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let (number, four_number, slots) = (e.m.stage_number(card), e.m.stage_number(four), e.slot_numbers());
+    let restore = e.m.window(w(2)).map(|x| x.restore);
+    let obs = e.d.obs();
+    let a = e.m.move_window_to_stage(card, w(2), four, &obs);
+    assert_eq!(a, [Action::StateChanged], "nothing moves on screen: {a:?}");
+    e.run(a);
+    assert_eq!(e.m.stage(four).map(|s| (s.windows.iter().map(|x| x.0).collect::<Vec<_>>(), s.key)), Some((vec![4, 2], Some(w(4)))), "behind its windows, its key kept");
+    assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![5, 3]));
+    assert_eq!(e.m.window(w(2)).map(|x| x.restore), restore);
+    assert!(e.d.parked(w(2)));
+    assert_eq!((e.m.stage_number(card), e.m.stage_number(four), e.slot_numbers()), (number, four_number, slots));
+    assert_eq!(e.m.stage_of(w(1)), e.m.main_active_stage(), "the current stage untouched");
+}
+
+#[test]
+fn a_stages_only_window_dropped_on_a_card_merges_its_stage() {
+    let (mut e, card) = combined_card();
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let obs = e.d.obs();
+    let a = e.m.move_window_to_stage(four, w(4), card, &obs);
+    e.run(a);
+    assert_eq!(e.m.stage(four), None, "its emptied stage goes");
+    assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![5, 2, 3, 4]));
+}
+
+#[test]
+fn a_window_dropped_on_its_own_card_or_from_the_current_stage_does_nothing() {
+    let (mut e, card) = combined_card();
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let active = e.m.main_active_stage().expect("active");
+    let obs = e.d.obs();
+    assert!(e.m.move_window_to_stage(card, w(2), card, &obs).is_empty(), "onto its own card");
+    assert!(e.m.move_window_to_stage(active, w(1), four, &obs).is_empty(), "the current stage's window");
+    assert!(e.m.move_window_to_stage(card, w(99), four, &obs).is_empty(), "a window that is gone");
+    assert!(e.m.move_window_to_new_stage(active, w(1), None).is_empty());
+    assert!(e.m.move_window_to_new_stage(card, w(99), None).is_empty());
+}
+
+#[test]
+fn a_window_dropped_on_the_current_stages_card_comes_forward() {
+    let (mut e, card) = combined_card();
+    let active = e.m.main_active_stage().expect("active");
+    let obs = e.d.obs();
+    let a = e.m.move_window_to_stage(card, w(2), active, &obs);
+    assert!(a.contains(&Action::Focus { id: w(2) }), "{a:?}");
+    e.run(a);
+    assert_eq!(e.m.stage_of(w(2)), Some(active));
+    assert!(!e.d.parked(w(2)));
+    assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![5, 3]));
+}
+
 #[test]
 fn a_window_dropped_on_the_strip_gets_its_own_stage_and_keeps_its_pre_drag_frame() {
     let mut e = Env::new();

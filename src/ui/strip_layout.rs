@@ -560,6 +560,24 @@ pub fn window_grab(full: Size, grab: (f64, f64)) -> (f64, f64) {
     (grab.0.clamp(0.0, full.w.max(0.0) / 2.0), grab.1.clamp(0.0, full.h.max(0.0) / 2.0))
 }
 
+/// What a press on a card drags once it moves past the threshold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Grip {
+    /// The whole card (reorder, merge, out into the stage): any press on a card of one window,
+    /// or a press on a combined card's app icons (or off every window).
+    Card,
+    /// The window pressed alone, from the first move, as on Apple's: a press on one window of
+    /// a card of several.
+    Window,
+}
+
+/// The grip of a press on a card of `windows` windows, `on_window` when a window's turned
+/// plane holds it ([`CardLayout::thumb_at`]), `on_icon` when an app icon does (icons are
+/// drawn over the windows, so an icon wins).
+pub fn grip(windows: usize, on_window: bool, on_icon: bool) -> Grip {
+    if windows > 1 && on_window && !on_icon { Grip::Window } else { Grip::Card }
+}
+
 /// The ghost of a card dragged out of the strip, before its turn, in global coordinates:
 /// inside the strip it is the pressed window's plane `start` (its thumbnail before the turn,
 /// as drawn when pressed, the pointer `grab` right of its left edge and below its top); past
@@ -588,6 +606,17 @@ mod tests {
     use super::*;
     use crate::config::{Auto, StripStyle};
     use crate::ui::strip_model::CardWindow;
+
+    #[test]
+    fn a_press_on_one_window_of_several_grips_that_window_and_icons_or_a_single_card_grip_the_card() {
+        assert_eq!(grip(2, true, false), Grip::Window, "a window of a combined card");
+        assert_eq!(grip(3, true, false), Grip::Window);
+        assert_eq!(grip(2, true, true), Grip::Card, "an app icon over a window");
+        assert_eq!(grip(2, false, true), Grip::Card, "an app icon");
+        assert_eq!(grip(2, false, false), Grip::Card, "off every window (the name, the padding)");
+        assert_eq!(grip(1, true, false), Grip::Card, "a card of one window moves whole, as today");
+        assert_eq!(grip(1, false, true), Grip::Card);
+    }
 
     fn card(stage: u64, windows: &[(u32, i32, f64, f64)]) -> CardSnapshot {
         let mut apps = Vec::new();
