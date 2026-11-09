@@ -195,11 +195,14 @@ with Apple's.
 
 ### Drag and drop
 
-- **Drag a card into the middle** to bring its windows into the stage you are in.
+- **Drag a card into the middle** to bring its windows into the stage you are in. On a card
+  of several windows, the window you drag it by comes alone, as with Apple's; the others
+  stay on the card.
 - **Drag a window onto the strip** by its title bar to give it a stage of its own.
 - **Drag a card up or down** to move it to another place in the strip.
-- **Drop a card onto another card** to merge the two stages. To split them again, open the
-  merged stage and drag a window onto the strip.
+- **Drop a card onto another card** to merge the two stages. To split them again, drag a
+  window of the merged card into the middle, or open the merged stage and drag a window onto
+  the strip. Up and down the strip and onto another card, a card always moves whole.
 
 Shift-click a card to bring its windows into the current stage without leaving it, as with
 Apple's. Hold Shift while you open an app, or Shift-click it in the Dock, to bring it here too

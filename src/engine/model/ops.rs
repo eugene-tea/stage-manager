@@ -766,8 +766,6 @@ impl Model {
     /// Moves app `pid`'s windows from `space`'s inactive stages into its active one (only the
     /// most recent one when `one`); see [`Model::bring_app_here`].
     fn gather_app(&mut self, pid: Pid, space: SpaceId, obs: &Observation, one: bool) -> Vec<Action> {
-        let mut actions = Vec::new();
-        let display = self.space_display(space);
         let active = self.ensure_active(space);
         let mut sources: Vec<(u64, StageId, Vec<WindowId>)> = self
             .stages
@@ -789,12 +787,25 @@ impl Model {
         if one {
             moving.truncate(1);
         }
+        let sources: Vec<StageId> = sources.into_iter().map(|s| s.1).collect();
+        self.bring_into_active(space, &moving, &sources, obs)
+    }
+
+    /// Moves `moving` (standard windows of inactive stages of `space`, front first) into
+    /// `space`'s active stage, in front and in their order, each with its children: their old
+    /// stages keep their other windows (an old key moves to the next window), the moved ones
+    /// are restored and raised, and the first is focused. `sources` are the stages they came
+    /// from: an emptied one goes away. No actions when `moving` is empty.
+    fn bring_into_active(&mut self, space: SpaceId, moving: &[WindowId], sources: &[StageId], obs: &Observation) -> Vec<Action> {
+        let mut actions = Vec::new();
         if moving.is_empty() {
             return actions;
         }
+        let display = self.space_display(space);
+        let active = self.ensure_active(space);
         self.revealed.remove(&space);
         self.capture(active, obs);
-        for &id in &moving {
+        for &id in moving {
             if let Some(Home::Stage(s)) = self.windows.get(&id).map(|w| w.home)
                 && let Some(stage) = self.stage_mut(s)
             {
@@ -807,7 +818,7 @@ impl Model {
         }
         let t = self.tick();
         if let Some(a) = self.stage_mut(active) {
-            let mut windows = moving.clone();
+            let mut windows = moving.to_vec();
             windows.append(&mut a.windows);
             a.windows = windows;
             a.key = moving.first().copied();
@@ -829,7 +840,7 @@ impl Model {
         if let Some(&first) = moving.first() {
             actions.push(Action::Focus { id: first });
         }
-        for (_, s, _) in sources {
+        for &s in sources {
             self.drop_if_dead(s, &mut actions);
         }
         self.normalize_slots();
@@ -856,25 +867,55 @@ impl Model {
         if self.is_active(stage) {
             return Vec::new();
         }
-        if let Some(front) = s.windows.first().copied()
-            && let Some(w) = self.windows.get(&front)
-        {
-            let d = *self.display(w.meta.display);
-            let old = w.restore;
-            let v = d.visible;
-            // A fresh placement, not a frame the user left: the whole width on screen when
-            // it fits, as before.
-            let x = if old.w <= v.w { top_left.x.min(v.max_x() - old.w).max(v.x) } else { top_left.x };
-            let placed = d.reach(Rect::new(x, top_left.y, old.w, old.h));
-            let (dx, dy) = (placed.x - old.x, placed.y - old.y);
-            self.move_restore(front, placed);
-            for c in self.children_of(front) {
-                let Some(cw) = self.windows.get(&c) else { continue };
-                let moved = self.display(cw.meta.display).reach(cw.restore.translate(dx, dy));
-                self.move_restore(c, moved);
-            }
+        if let Some(front) = s.windows.first().copied() {
+            self.place_dropped(front, top_left);
         }
         self.merge_into_active(stage, obs)
+    }
+
+    /// Puts `id`'s saved frame where a drop at `top_left` lands it ([`Model::merge_into_active_at`]):
+    /// its size kept, moved left onto the visible frame when it fits, within reach
+    /// ([`Display::reach`]), its children moved by the same offset, each as the user's move.
+    fn place_dropped(&mut self, id: WindowId, top_left: Point) {
+        let Some(w) = self.windows.get(&id) else { return };
+        let d = *self.display(w.meta.display);
+        let old = w.restore;
+        let v = d.visible;
+        // A fresh placement, not a frame the user left: the whole width on screen when it
+        // fits, as before.
+        let x = if old.w <= v.w { top_left.x.min(v.max_x() - old.w).max(v.x) } else { top_left.x };
+        let placed = d.reach(Rect::new(x, top_left.y, old.w, old.h));
+        let (dx, dy) = (placed.x - old.x, placed.y - old.y);
+        self.move_restore(id, placed);
+        for c in self.children_of(id) {
+            let Some(cw) = self.windows.get(&c) else { continue };
+            let moved = self.display(cw.meta.display).reach(cw.restore.translate(dx, dy));
+            self.move_restore(c, moved);
+        }
+    }
+
+    /// One window dragged out of a card of several and dropped in the main area, as Apple's
+    /// does with each window of a combined card: `id` alone (with its children) joins the
+    /// active stage of the card's Space in front, focused, with its top-left corner at
+    /// `top_left` as [`Model::merge_into_active_at`] places it. The stage it came from keeps
+    /// its other windows in their order, its slot and its number (its key moves to its next
+    /// window when it was this one). `stage` is the card's: the window's own stage may be
+    /// another of the card's (a "One at a Time" group). The window alone in its stage is
+    /// [`Model::merge_into_active_at`] of that stage. A no-op for an unknown window or stage,
+    /// a window not in an inactive stage of the card's Space, or a Space not shown now.
+    pub fn move_window_into_active_at(&mut self, stage: StageId, id: WindowId, top_left: Point, obs: &Observation) -> Vec<Action> {
+        let Some(space) = self.stage(stage).map(|s| s.space) else { return Vec::new() };
+        let Some(id) = self.resolve_standard(id) else { return Vec::new() };
+        let Some(Home::Stage(home)) = self.windows.get(&id).map(|w| w.home) else { return Vec::new() };
+        let Some(src) = self.stage(home) else { return Vec::new() };
+        if src.space != space || !self.is_shown_space(space) || self.is_active(home) || !src.windows.contains(&id) {
+            return Vec::new();
+        }
+        if src.windows.iter().all(|&w| w == id) {
+            return self.merge_into_active_at(home, top_left, obs);
+        }
+        self.place_dropped(id, top_left);
+        self.bring_into_active(space, &[id], &[home], obs)
     }
 
     /// A card dropped onto another card (`[strip] merge_on_drop`, an extension: Apple's strip

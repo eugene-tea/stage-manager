@@ -223,6 +223,16 @@ impl CardSnapshot {
         }
         card
     }
+
+    /// This card after its window `id` was dragged out alone (Apple's: each window of a
+    /// combined card drags out on its own): its other windows in their order, and the apps
+    /// they belong to. The strip draws it from the drop until the controller's next snapshot.
+    pub fn without_window(&self, id: u32) -> CardSnapshot {
+        let mut card = self.clone();
+        card.windows.retain(|w| w.id != id);
+        card.apps.retain(|pid| card.windows.iter().any(|w| w.pid == *pid));
+        card
+    }
 }
 
 /// Moves the item `id` says is `stage` right above `before`'s (the bottom for `None`): the
@@ -288,8 +298,10 @@ pub enum StripEvent {
     CardPressed { stage: u64 },
     /// A card was dragged out of the strip and released in the main area: its windows join
     /// the active stage, and the stage's front window goes with its top-left corner at
-    /// (`x`, `y`) (global, top-left origin), so its title bar lands under the pointer.
-    CardDropped { stage: u64, x: f64, y: f64 },
+    /// (`x`, `y`) (global, top-left origin), so its title bar lands under the pointer. With
+    /// `window` (a card of several windows, pressed on that one; Apple's), that window alone
+    /// joins and goes there; its stage keeps the others.
+    CardDropped { stage: u64, window: Option<u32>, x: f64, y: f64 },
     /// A card's app icon was clicked: switch to the card's stage and bring every window of
     /// that app there (Apple: clicking the icon shows all of the app's windows).
     IconClicked { stage: u64, pid: i32 },
@@ -758,6 +770,17 @@ mod tests {
         assert_eq!((m.stage, m.number, m.name.as_deref()), (2, 2, Some("Work")), "the target's identity");
         assert_eq!(m.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [5, 6, 9, 8]);
         assert_eq!(m.apps, [50, 60, 80]);
+    }
+
+    #[test]
+    fn a_window_dragged_out_alone_leaves_the_others_and_their_apps() {
+        let win = |id: u32, pid: i32| CardWindow { id, pid, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
+        let card = CardSnapshot { stage: 2, number: 2, windows: vec![win(5, 50), win(6, 60), win(7, 50)], apps: vec![50, 60], ..Default::default() };
+        let left = card.without_window(6);
+        assert_eq!((left.stage, left.number), (2, 2));
+        assert_eq!(left.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [5, 7]);
+        assert_eq!(left.apps, [50], "the app with no window left loses its icon");
+        assert_eq!(card.without_window(5).apps, [50, 60], "an app with a window left keeps it");
     }
 
     #[test]

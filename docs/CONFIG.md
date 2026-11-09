@@ -56,7 +56,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
 | `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
-| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area windows keep clear of with fit. |
+| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column, the area windows keep clear of with fit (cards draw past it where they reach). |
 | `strip.capacity` | `0` | whole number, 0 to 30 | Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt). |
 | `strip.capacity_pitch` | `190.0` | number, 20 to 2000 | With capacity = 0: room per card, in points of visible height. |
 | `strip.capacity_margin` | `60.0` | number, 0 to 2000 | With capacity = 0: visible height kept free above and below the cards. |
@@ -112,7 +112,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `motion.slide_stiffness` | `282.0` | number, 1 to 10000 | Spring stiffness of the strip sliding out and back in (auto-hide, a window over it). Apple's, measured: 282 (99 % by about 400 ms). |
 | `motion.slide_damping` | `33.6` | number, 0 to 1000 | Spring damping of the slide (33.6 with stiffness 282 and mass 1: critically damped). |
 | `motion.slide_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the slide. |
-| `motion.slide_distance` | `286.0` | number, 0 to 3000 | How far left the cards slide when the strip hides. |
+| `motion.slide_distance` | `286.0` | number, 0 to 3000 | How far left the cards slide when the strip hides; further when the widest card needs it to leave the screen. |
 | `reveal.edge_width` | `2.0` | number, 0 to 100 | The pointer within this many points of the left edge counts as at the edge. |
 | `reveal.delay_ms` | `250` | whole number, 0 to 10000 | Resting at the left edge this long brings a hidden strip back. |
 | `reveal.hide_delay_ms` | `500` | whole number, 0 to 10000 | A strip brought back hides again this long after the pointer leaves it. |

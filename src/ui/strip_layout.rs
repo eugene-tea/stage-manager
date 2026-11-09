@@ -74,6 +74,8 @@ pub struct Metrics {
     pub icon_step: f64,
     pub icon_max: usize,
     pub hover_scale: f64,
+    /// How far a thumbnail's or icon's shadow reaches past it, sideways.
+    pub shadow: f64,
 }
 
 impl Metrics {
@@ -109,6 +111,7 @@ impl Metrics {
             icon_step: i.step * k,
             icon_max: i.max,
             hover_scale: c.hover_scale,
+            shadow: (c.shadow_radius + c.shadow_offset_x.abs()).max(i.shadow_radius) * k,
         }
     }
 
@@ -174,6 +177,83 @@ impl Metrics {
     }
 }
 
+impl Metrics {
+    /// Every place a window's left edge can take on a card, before the turn, right of the
+    /// card's left edge ([`arrange_card`]): the front app's windows step `stack_dx` (the
+    /// deepest at 0), a second app's start `second_app_dx` right (at most `max_windows - 1`
+    /// of them). A column too full shrinks them toward 0.
+    fn plane_offsets(&self) -> Vec<f64> {
+        let n = self.max_windows;
+        let front = (0..n).map(|j| j as f64 * self.stack_dx);
+        let second = (0..n.saturating_sub(1)).map(|j| self.second_app_dx + j as f64 * self.stack_dx);
+        front.chain(second).chain(std::iter::once(0.0)).collect()
+    }
+
+    /// The far edge of a window's plane whose left edge is at `x`, `u` wide before the turn
+    /// (the right side of [`Metrics::project`]).
+    fn far_x(&self, x: f64, u: f64) -> f64 {
+        self.eye.x + (x + u * self.tilt.cos() - self.eye.x) * self.far_ratio(u)
+    }
+
+    /// The rightmost point any card can draw at rest in its slot (panel coordinates): the far
+    /// edge of the widest window (`max_width`; the far edge only moves right as a plane
+    /// widens, or never past its left edge) at the rightmost left edge, or an app icon's edge.
+    fn card_right(&self) -> f64 {
+        let x = self.card_x + self.plane_offsets().into_iter().fold(f64::NEG_INFINITY, f64::max);
+        let plane = x.max(self.far_x(x, self.max_width));
+        plane.max(self.icons_right())
+    }
+
+    /// The right edge of a card's last app icon at most (the icons start at the leftmost
+    /// window's corner, never right of the card's left edge: the front app's deepest window
+    /// sits there).
+    fn icons_right(&self) -> f64 {
+        if self.icon_size <= 0.0 || self.icon_max == 0 {
+            return f64::NEG_INFINITY;
+        }
+        // A column too full scales the icons' offsets and size toward the corner.
+        let last = self.icon_dx + (self.icon_max - 1) as f64 * self.icon_step;
+        self.card_x + (last + self.icon_size / 2.0).max(0.0)
+    }
+
+    /// The leftmost point any card can draw at rest (panel coordinates): its leftmost
+    /// window's left edge, or the icon on its corner.
+    fn card_left(&self) -> f64 {
+        let x = self.card_x + self.plane_offsets().into_iter().fold(f64::INFINITY, f64::min);
+        if self.icon_size <= 0.0 || self.icon_max == 0 {
+            return x;
+        }
+        x + (self.icon_dx - self.icon_size / 2.0).min(0.0)
+    }
+
+    /// The strip panel's width: the column, and room right of it for the widest thing a card
+    /// can draw, so nothing is cut off at the column's edge (owner 11-09: a second app's
+    /// window was). A card grown under the pointer (`hover_scale`, about its middle) spans
+    /// `hover_scale` times the widest card; dragged within the column it follows the pointer,
+    /// pressed at its left edge at the most, up to the column's right edge, so its right part
+    /// reaches that span past the column. Shadows add theirs. Never wider than the screen.
+    pub fn panel_width(&self) -> f64 {
+        let (left, right) = (self.card_left(), self.card_right());
+        let grow = self.hover_scale.max(1.0);
+        let span = (right - left).max(0.0) * grow;
+        // A card grown in its slot: its middle lies within it, so it reaches no further right
+        // than its right edge plus its growth.
+        let grown = right + (right - left).max(0.0) * (grow - 1.0);
+        let reach = (self.width + span).max(grown) + self.shadow;
+        reach.ceil().max(self.width).min(self.visible.w.max(self.width))
+    }
+
+    /// How far left the cards slide to leave the screen whole when the strip hides: the far
+    /// edge of the widest card moves `dx` times its far-edge ratio (the slide is in 3D, before
+    /// the perspective), its left edge and icons by `dx`.
+    pub fn hide_distance(&self) -> f64 {
+        let x = self.card_x + self.plane_offsets().into_iter().fold(f64::NEG_INFINITY, f64::max);
+        // Every point of a plane moves at least as far as its far edge does.
+        let far = x.max(self.far_x(x, self.max_width)) / self.far_ratio(self.max_width);
+        far.max(self.icons_right()).max(0.0)
+    }
+}
+
 /// One window's thumbnail on a card.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThumbSlot {
@@ -223,6 +303,13 @@ impl CardLayout {
         r.unwrap_or(self.frame)
     }
 
+    /// The thumbnail under `p` (panel coordinates, the card as laid out, unscaled), as its
+    /// index in [`CardLayout::thumbs`]: the frontmost drawn whose turned plane holds `p`
+    /// (the card draws the list back to front, so the first that holds it is on top).
+    pub fn thumb_at(&self, m: &Metrics, p: Point) -> Option<usize> {
+        self.thumbs.iter().position(|t| in_quad(&m.project(self.frame.x + t.rect.x, self.frame.y + t.rect.y, t.rect.w, t.rect.h), p))
+    }
+
     /// The center hover grows the card about: the middle of its turned thumbnails.
     pub fn hover_center(&self, m: &Metrics) -> Point {
         let mut r: Option<Rect> = None;
@@ -233,6 +320,18 @@ impl CardLayout {
         let r = r.unwrap_or(self.frame);
         Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0)
     }
+}
+
+/// True when `p` lies in the convex quadrilateral `q` (its corners in order, either way
+/// round), its edges included.
+fn in_quad(q: &[Point; 4], p: Point) -> bool {
+    let sides: Vec<f64> = (0..4)
+        .map(|i| {
+            let (a, b) = (q[i], q[(i + 1) % 4]);
+            (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
+        })
+        .collect();
+    sides.iter().all(|&c| c >= 0.0) || sides.iter().all(|&c| c <= 0.0)
 }
 
 /// Arranges a card's thumbnails; `scale` shrinks everything further (a column too full).
@@ -399,6 +498,81 @@ mod tests {
         let top = if y < eye { y } else { eye + (y - eye) / f } - panel_top;
         let b = m.projected_bounds(m.card_x, top, s.w, s.h);
         (b.w, b.h)
+    }
+
+    /// The widest card: a screen-sized window of one app, two of a second app.
+    fn widest(m: &Metrics) -> CardLayout {
+        let (w, h) = (m.visible.w, m.visible.h);
+        let c = card(1, &[(1, 10, w, h), (2, 20, w, h), (3, 20, w, h)]);
+        layout_column(&[c], m.visible.h, m).remove(0)
+    }
+
+    /// `l`'s box grown by `s` about its hover center (as the strip draws a hovered card).
+    fn grown(l: &CardLayout, m: &Metrics, s: f64) -> Rect {
+        let (b, c) = (l.bounds(m), l.hover_center(m));
+        Rect::new(c.x + (b.x - c.x) * s, c.y + (b.y - c.y) * s, b.w * s, b.h * s)
+    }
+
+    #[test]
+    fn the_panel_has_room_for_the_widest_card_grown_and_dragged_to_the_columns_edge() {
+        for m in [laptop(), five_k()] {
+            let l = widest(&m);
+            let rest = l.bounds(&m);
+            assert!(rest.max_x() > m.width + 40.0, "the second app's window reaches past the column ({} > {})", rest.max_x(), m.width);
+            let panel = m.panel_width();
+            let hovered = grown(&l, &m, m.hover_scale);
+            assert!(hovered.max_x() + m.shadow <= panel, "grown under the pointer: {} in {panel}", hovered.max_x());
+            // Dragged in the column: pressed at its left edge, the pointer at the column's edge.
+            let dragged = hovered.max_x() + (m.width - hovered.x);
+            assert!(dragged + m.shadow <= panel, "following the pointer: {dragged} in {panel}");
+            assert!(panel < m.width + 2.0 * rest.w, "and no more than that: {panel}");
+        }
+        // A config's wider second app gets more room; a screen narrower than it caps the panel.
+        let mut style = StripStyle::default();
+        style.cards.second_app_dx = 200.0;
+        let wide = Metrics::new(&style, Size::new(1800.0, 1130.0), 1.0, 545.5);
+        assert!(wide.panel_width() > laptop().panel_width() + 100.0);
+        let tiny = Metrics::new(&StripStyle::default(), Size::new(400.0, 300.0), 1.0, 150.0);
+        assert!(tiny.panel_width() <= 400.0);
+    }
+
+    #[test]
+    fn the_hidden_slide_takes_the_widest_card_off_the_screen() {
+        for (m, apple) in [(laptop(), true), (five_k(), false)] {
+            let l = widest(&m);
+            let d = m.hide_distance();
+            for t in &l.thumbs {
+                let x = l.frame.x + t.rect.x;
+                // Slid in 3D before the perspective: the far edge moves `d` times its ratio.
+                let far = m.eye.x + (x - d + t.rect.w * m.tilt.cos() - m.eye.x) * m.far_ratio(t.rect.w);
+                assert!(far <= 1e-6, "far edge at {far} after a slide of {d}");
+            }
+            if apple {
+                // Apple's measured 286 pt is just what the widest card needs on the laptop.
+                assert!((d - 286.0).abs() < 1.0, "{d}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_press_finds_the_frontmost_window_whose_turned_plane_holds_it() {
+        let m = laptop();
+        let l = widest(&m);
+        let (front, second) = (l.thumbs[0], l.thumbs[1]);
+        let mid = |t: &ThumbSlot, fx: f64| {
+            let q = m.project(l.frame.x + t.rect.x, l.frame.y + t.rect.y, t.rect.w, t.rect.h);
+            Point::new(q[0].x + (q[1].x - q[0].x) * fx, (q[0].y + q[3].y) / 2.0)
+        };
+        assert_eq!(l.thumb_at(&m, mid(&front, 0.5)), Some(0), "the front window over the others");
+        // Past the front window's far edge only the second app's window is drawn.
+        let past = mid(&second, 0.97);
+        assert!(past.x > m.project(l.frame.x + front.rect.x, l.frame.y + front.rect.y, front.rect.w, front.rect.h)[1].x);
+        assert_eq!(l.thumb_at(&m, past), Some(1));
+        assert_eq!(l.thumb_at(&m, Point::new(l.bounds(&m).max_x() + 5.0, past.y)), None);
+        // Above the front window's top, where the raised second app's window peeks out.
+        let top = m.project(l.frame.x + second.rect.x, l.frame.y + second.rect.y, second.rect.w, second.rect.h);
+        let peek = Point::new(top[0].x + 30.0, l.frame.y + second.rect.y + 2.0);
+        assert_eq!(l.thumb_at(&m, peek), Some(1), "{peek:?}");
     }
 
     #[test]

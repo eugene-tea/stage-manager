@@ -73,7 +73,8 @@ scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore
                                           # offscreen enhanced stale handles displays
 scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh hide               # [windows] hide_parked_apps; by name only, as still,
-                                          # away and glass
+                                          # away, glass and crop (a combined card drawn whole,
+                                          # one of its windows dragged out alone)
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh

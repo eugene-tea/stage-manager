@@ -213,8 +213,27 @@ there is on the wallpaper (or the window) below it, and only one on or near the 
 magnified icons included) is the Dock's.
 
 **Drag and drop.** A card dragged into the main area grows to window size and joins the
-current stage where you drop it. A window dragged onto the strip becomes a stage of its own
-in the slot under the pointer.
+current stage where you drop it. On a card of several windows each window drags out on its
+own, as on Apple's: the press picks the frontmost window drawn under the pointer (its turned
+plane, as drawn), the stand-in is that window's picture and grows to its size, and the drop
+brings that window alone into the current stage, in front with the keyboard, its title bar
+under the pointer. The stage it left keeps its other windows in their order, its slot and its
+number, and its card shows them at once (a stage's only window is the whole card's drop).
+Within the column a card still moves whole: reordering and dropping onto another card are
+extensions (below), and there the card is what is arranged. A window dragged onto the strip
+becomes a stage of its own in the slot under the pointer.
+
+**Nothing on a card is cut off.** The strip's panel reaches past its column on the right,
+as far as the widest card can draw: a combined card's second app's window (`[cards]
+second_app_dx` right of the first), grown under the pointer, or dragged to the column's
+edge with its right part past the pointer, shadows included (the widest card's span at
+`hover_scale`, past the column; about 465 pt in all on the laptop, 485 on a 5K screen). The
+column alone is the strip for everything that measures it (hit tests of drops, window drags
+over the strip, auto-hide, `[windows] fit`); the room right of it lets every click and
+scroll through, except over a card drawn there, which hovers and clicks as the rest of it. A
+hidden strip slides `[motion] slide_distance` (Apple's 286 pt), or as far as takes the
+widest card off the screen whole where that is further (the slide is in 3D, so a card's far
+edge moves less than its left: 286 pt is just enough on the laptop, 297 on a 5K screen).
 
 **Timing.** Every animation uses Apple's measured timing by default:
 
@@ -398,7 +417,7 @@ first visit still shows its edges for a moment, until its patch is drawn.
 
 **Dragging uses stand-ins.** A window dragged over the strip keeps its size under a
 card-sized picture of it, where Apple shrinks the window itself. A card dragged out is shown
-by a growing picture of its front window.
+by a growing picture of the window it was pressed on (its front window on a card of one).
 
 **⌘M** parks the window and then un-minimizes it there, so macOS may show its restore
 animation toward the corner. Apple's window shrinks straight into the strip. macOS's
