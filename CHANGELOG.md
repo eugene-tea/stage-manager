@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `[windows] hide_parked_apps` is gone: Stage Manager no longer hides apps whose windows all
+  wait in the strip. It was off by default and never in Settings; the corner patch already
+  covers the edges of those windows. A config file that sets it to `true` gets a note that it
+  is no longer used; one that sets it to `false` loads without a word.
 - In a switch, a see-through Dock that reaches the bottom corner no longer shows the edge of
   a window waiting there: the desktop picture painted over the corner for the switch now goes
   under the Dock too.

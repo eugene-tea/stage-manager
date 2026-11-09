@@ -357,9 +357,6 @@ pub struct WindowsConfig {
     pub park_inside: f64,
     /// How far below the display's bottom a parked window's top is asked.
     pub park_drop: f64,
-    /// Apps whose every window sits in inactive stages are hidden instead of parked in view
-    /// (a prototype).
-    pub hide_parked_apps: bool,
     /// The desktop picture, drawn from its file, over the parked windows' slivers (a
     /// prototype).
     pub corner_patch: bool,
@@ -800,7 +797,12 @@ impl Config {
                     continue;
                 }
                 if let Some((_, _, why)) = RETIRED.iter().find(|(s, k, _)| s == section && k == key) {
-                    warnings.push(format!("[{section}] {key}: {why}"));
+                    // A retired switch left off asks nothing of the user: noted at debug only.
+                    if v.as_bool() == Some(false) {
+                        tracing::debug!("config: [{section}] {key} = false is no longer used; ignored");
+                    } else {
+                        warnings.push(format!("[{section}] {key}: {why}"));
+                    }
                     continue;
                 }
                 let Some(d) = KEYS.iter().find(|d| d.section == section && d.key == key) else {
@@ -1030,7 +1032,6 @@ impl Config {
                 inert_slivers: v.flag("windows.inert_slivers"),
                 park_inside: v.num("windows.park_inside"),
                 park_drop: v.num("windows.park_drop"),
-                hide_parked_apps: v.flag("windows.hide_parked_apps"),
                 corner_patch: v.flag("windows.corner_patch"),
                 corner_patch_reach: v.auto("windows.corner_patch_reach"),
             },
@@ -1602,6 +1603,18 @@ swipe = true
         assert!(p.warnings.iter().any(|w| w.contains("position")));
         assert!(p.warnings.iter().any(|w| w.contains("[gestures]")));
         assert!(p.warnings.iter().any(|w| w.contains("fit_windows") && w.contains("[windows] fit")));
+    }
+
+    /// `[windows] hide_parked_apps`, retired 11-09: set, a gentle notice; left off (the
+    /// owner's file), not a word.
+    #[test]
+    fn a_retired_switch_left_off_loads_without_a_word() {
+        let on = parse("[windows]\nhide_parked_apps = true\n");
+        assert_eq!(on.warnings.len(), 1, "{:?}", on.warnings);
+        assert!(on.warnings[0].starts_with("[windows] hide_parked_apps: no longer used"), "{:?}", on.warnings);
+        let off = parse("[windows]\nhide_parked_apps = false\nfit = \"move\"\n");
+        assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+        assert_eq!(off.config.windows.fit, FitMode::Move, "the rest still read");
     }
 
     #[test]

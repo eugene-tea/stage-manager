@@ -153,7 +153,7 @@ impl Controller {
                     server: server_of(list, id),
                     other_space,
                     full_screen,
-                    app_hidden: self.counts_hidden(pid) || apps::is_hidden(pid) != Some(false),
+                    app_hidden: apps::is_hidden(pid) != Some(false),
                     maybe_tab: maybe_tab(list, id),
                 }
             }
@@ -209,7 +209,7 @@ impl Controller {
         self.stale.kept.retain(|id, _| m.window(WindowId(*id)).is_some());
         self.stale.looks.prune(now);
         for (id, pid) in candidates {
-            let hidden = self.counts_hidden(pid) || apps::is_hidden(pid) == Some(true);
+            let hidden = apps::is_hidden(pid) == Some(true);
             if hidden || self.busy_apps.borrow().busy(pid, now) || ob.noted_closed(id) {
                 continue;
             }

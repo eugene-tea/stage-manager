@@ -33,7 +33,6 @@
 
 mod ahead;
 mod away;
-mod hide;
 mod ops;
 mod pending;
 mod pool;

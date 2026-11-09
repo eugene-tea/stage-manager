@@ -18,7 +18,6 @@ pub mod gone;
 pub mod guard_watch;
 pub mod handoff;
 pub mod hidden_tab;
-pub mod hide;
 pub mod leftovers;
 pub mod logout_watch;
 pub mod model;

@@ -83,22 +83,3 @@ fn a_stage_hotkey_counts_the_strip_of_the_screen_with_the_keyboard() {
     assert_eq!(e.m.keyboard_display(None, None), STUDIO);
     assert_eq!(e.m.keyboard_display(None, Some(DisplayId(77))), STUDIO, "a screen the model does not know: the main one");
 }
-
-#[test]
-fn hiding_an_app_judges_the_screen_its_windows_are_on() {
-    // Switching 6: Chrome is wholly on the laptop, a card there.
-    let mut e = Env::both();
-    let [_, _, _, chrome, _] = measured_desk(&mut e);
-    let p = e.m.app_park(20);
-    assert_eq!((p.windows, p.shown), (1, 0));
-    assert_eq!(p.keep.iter().map(|k| k.0).collect::<Vec<_>>(), vec![5], "the laptop's card waits in place while hidden: {chrome:?}");
-    assert!(p.stage_here);
-    // The laptop's desktop revealed: its front is empty, its Desktop then known by the
-    // slivers alone, so its apps stay parked; the Studio's apps are not concerned.
-    let obs = e.d.obs();
-    let a = e.m.reveal_desktop_on(Some(LAPTOP), &obs);
-    e.run(a);
-    assert!(e.m.active_stage(LAPTOP).and_then(|s| e.m.stage(s)).is_some_and(|s| s.windows.is_empty()), "revealed");
-    assert!(!e.m.app_park(20).stage_here, "the laptop's front has no window");
-    assert!(e.m.app_park(12).stage_here, "Music, on the Studio: its screen's front shows Code");
-}

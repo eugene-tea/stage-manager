@@ -496,23 +496,10 @@ has ended). The picture goes only after that, 300 ms past
 the unveil at the most; an outgoing picture's shadow comes in over twice
 `[animation] cover_ms` as its window leaves. The cards' thumbnails are not captured while a
 switch's pictures move (a round of captures is the window server's work, and drops a frame).
-With `[windows] hide_parked_apps`, a window of an app hidden in place shows only once our
-unhide after the unveil has taken (about 100 ms later), when the window server lists it on
-screen: its picture's shadow hands over then, except the key window's: it shows inactive
-first, so its picture keeps the key shadow until the app is active and has focused it again
-(drawn key then: a frame of the inactive shadow alone reads 4 levels lighter, and the key
-shadow over the inactive one is the smaller error, as the inactive one lies mostly within
-it). The picture stays until the
-app has taken the activation of its key window focused again, so the window is never seen in
-its inactive look (Messages turns to its key look up to 180 ms after it shows); 400 ms past
-the unveil at the most. An app that has not taken that activation 60 ms after its key window
-was focused again is focused once more, twice at most (a window can take the focus while its
-app never becomes active, the keyboard staying with the app before).
 
 **Deviation (superseded switches):** a switch overtaken before it lands (another card
 click, a click of yours anywhere, an activation, a focus) still brings its windows, but
-never focuses one or activates its app afterwards: its held focus, the focus again after its
-app's unhide and the retries above are dropped, so the keyboard is the newer switch's or
+never focuses one or activates its app afterwards: its held focus is dropped, so the keyboard is the newer switch's or
 where you clicked (else two card clicks half a second apart hand the activation back and
 forth between the two apps). A window's focus brings its stage only in the active app (or with the button down
 on a sliver), never in a hidden app or an app behind: those are the app's own or a late echo
