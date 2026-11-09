@@ -918,6 +918,70 @@ impl Model {
         self.bring_into_active(space, &[id], &[home], obs)
     }
 
+    /// A card dragged out of one screen's strip and dropped on screen `to`: what a drop in its
+    /// own screen's main area does ([`Model::merge_into_active_at`], or with `window`, one
+    /// window of a card of several, [`Model::move_window_into_active_at`]), on that screen. The
+    /// windows join the active stage of the Desktop `to` shows, in front, the first focused,
+    /// the front one with its top-left corner at `top_left`; the others keep their places
+    /// relative to the visible frame ([`Display::adopt`]). They are that screen's from now on;
+    /// the stage they leave goes when emptied, its card with it, and nothing else changes on
+    /// the screen they left (Apple's, 11-09: a card dragged from the 5K's strip onto the
+    /// laptop opened its window there). Windows of the card still awaited after a restart stay
+    /// with its stage. `to` the card's own screen (or unknown) is the drop on its own screen.
+    /// A no-op for an unknown stage or window, the active stage, or a card on
+    /// a Desktop not shown.
+    pub fn drop_card_on_display(
+        &mut self,
+        stage: StageId,
+        window: Option<WindowId>,
+        top_left: Point,
+        to: DisplayId,
+        obs: &Observation,
+    ) -> Vec<Action> {
+        let Some(src) = self.stage(stage) else { return Vec::new() };
+        let (from, space) = (src.display, src.space);
+        if to == from || !self.displays.iter().any(|d| d.id == to) {
+            return match window {
+                Some(w) => self.move_window_into_active_at(stage, w, top_left, obs),
+                None => self.merge_into_active_at(stage, top_left, obs),
+            };
+        }
+        if !self.is_shown_space(space) {
+            return Vec::new();
+        }
+        // The windows that go and the stages they leave: one window of a card of several (its
+        // own stage may be another of the card's, a "One at a Time" group), else the card's.
+        let alone = window.and_then(|w| self.resolve_standard(w)).and_then(|id| match self.windows.get(&id).map(|w| w.home) {
+            Some(Home::Stage(home)) => Some((id, home)),
+            _ => None,
+        });
+        let (moving, home) = match alone {
+            Some((id, home)) if self.stage(home).is_some_and(|h| h.windows.len() > 1 && h.windows.contains(&id)) => (vec![id], home),
+            Some((_, home)) => (self.stage(home).map(|h| h.windows.clone()).unwrap_or_default(), home),
+            None => (self.stage(stage).map(|s| s.windows.clone()).unwrap_or_default(), stage),
+        };
+        let Some(h) = self.stage(home) else { return Vec::new() };
+        if moving.is_empty() || h.space != space || self.is_active(home) {
+            return Vec::new();
+        }
+        let target = self.current_space(to);
+        let (there, here) = (*self.display(to), *self.display(from));
+        for &id in &moving {
+            let mut group = vec![id];
+            group.extend(self.children_of(id));
+            for g in &group {
+                if let Some(w) = self.windows.get_mut(g) {
+                    w.restore = there.adopt(w.restore, &here);
+                    w.original = w.original.map(|o| there.adopt(o, &here));
+                    w.meta.display = to;
+                }
+            }
+            self.set_space(&group, target);
+        }
+        self.place_dropped(moving[0], top_left);
+        self.bring_into_active(target, &moving, &[home], obs)
+    }
+
     /// A card dropped onto another card (`[strip] merge_on_drop`, an extension: Apple's strip
     /// does not merge): every window of `stage` joins `into`, behind `into`'s own windows and
     /// in its own order, each child with its parent. Both stages are inactive, so nothing

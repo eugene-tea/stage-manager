@@ -33,7 +33,7 @@ first start, switch and creation, a too-wide one narrowed and given back its exa
 quit; with `fit = "move"` plus the launch reveal and the edge tab turned on, those; a
 menu-path quit right after a first start with many windows), parity (the generated config has
 no live values and registers no hotkey; Cmd-M sends a window to the strip; a click on a
-card's app icon brings every window of that app), motion (the strip below windows and lifted
+card's app icon brings every window of that app), motion (the strip below windows, also
 while a window is dragged over it, with the dragged window's card in the motion overlay; a
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
 across a relaunch; a card dropped in a gap reorders and one dropped on another card's middle
@@ -49,7 +49,9 @@ relaunch, and is never saved), enhanced (round enhanced-ui: the fixture's
 AXEnhancedUserInterface on, as an assistive client left Chrome's on 11-03, its windows slide to
 every frame Accessibility writes; switches away and back never list a fixture window between
 the park corner and its frame, its flag goes off and on once per switch, and is on at the end),
-handles (round stale-handles: our handle on a fixture window taken for dead, `ctl
+behave (round parity-behave: an app's two windows opened at once
+come in front with the one opened last in front, also after a switch away and back; a card
+dragged onto the other screen opens its window there), handles (round stale-handles: our handle on a fixture window taken for dead, `ctl
 debug-stale-handle`: a switch away still parks it, found again in its app's list, and back
 brings it; then, its handle dead again and the window ordered out unlisted, as Music kept its
 closed window on 11-04, it leaves the model with its stage and card),
@@ -148,9 +150,9 @@ EXTRA = {
 ALL_IDS = [FIX_ID] + [e[0] for e in EXTRA.values()]
 PARK_MARGIN = 64.0
 # A shown window of the front stage hides the strip only when its left edge is within this of
-# the screen's left edge (strip_visibility::COVER_EDGE, Apple's as measured 11-05); one over
+# the screen's left edge (strip_visibility::COVER_EDGE, Apple's as recorded 11-09); one over
 # the cards further right leaves the strip shown, under the window.
-STRIP_COVER_EDGE = 50.0
+STRIP_COVER_EDGE = 20.0
 
 HOME = os.environ.get("TEST_HOME") or tempfile.mkdtemp(prefix="sm-test.", dir="/tmp")
 os.makedirs(HOME, exist_ok=True)
@@ -1146,9 +1148,10 @@ def phase_strip():
 
 def strip_cover_checks(s, wid):
     """Apple's strip stays up under a window over its cards and slides away only once the
-    window's left edge is about 50 pt from the screen's left edge (11-05, his Studio Display).
-    Window `wid` (the front stage's only one, clear of the strip) goes 100 pt in, over the
-    cards: the strip stays shown, below windows; then flush left: it slides away; then back."""
+    window covers the cards' left edge (recorded 11-09 on his Studio Display: shown at 52 pt,
+    gone at 15 pt; ours at 20 pt). Window `wid` (the front stage's only one, clear of the
+    strip) goes 100 pt in, then 30 pt in, over the cards: the strip stays shown, below
+    windows; then flush left: it slides away; then back."""
     say("-- the strip stays up under a window over its cards; it slides away once the window reaches the left edge")
     vis = s["display"]["visible"]
     r = next(w for w in s["windows"] if w["id"] == wid)["restore"]
@@ -1158,6 +1161,11 @@ def strip_cover_checks(s, wid):
     p = strip_panel()
     check(panel_shown() is True and p is not None and p["layer"] == -1,
           f"a window 100 pt in, over the cards: the strip stays shown, below it (shown {panel_shown()}, layer {p and p['layer']})")
+    ctl("debug-frame", wid, vis["x"] + 30, r["y"], r["w"], r["h"])
+    time.sleep(0.9)
+    p = strip_panel()
+    check(panel_shown() is True and p is not None and p["layer"] == -1,
+          f"30 pt in (Apple's stayed up at 52 pt, went at 15): still shown, below it (shown {panel_shown()}, layer {p and p['layer']})")
     ctl("debug-frame", wid, vis["x"], r["y"], r["w"], r["h"])
     gone = wait_until(lambda: panel_shown() is False, 3, "the strip to slide away")
     check(gone is not None, "the window flush with the left edge: the strip slides away")
@@ -2158,8 +2166,8 @@ def blocked(reply, what):
 
 def sample_during(proc):
     """Our onscreen windows, sampled back to back for as long as the drag `proc` runs (the
-    strip is lifted only while the pointer is over it, under a second; a single timed sample
-    missed it). Every sample is a list as `our_windows` gives."""
+    dragged window's card shows only while the pointer is over the strip, under a second; a
+    single timed sample missed it). Every sample is a list as `our_windows` gives."""
     seen, pid = [], app_pid()
     while proc.poll() is None:
         seen.append(our_windows(pid))
@@ -2414,6 +2422,93 @@ def phase_crop():
     consistent("one window out of a combined card")
 
 
+def phase_behave():
+    """Round parity-behave (11-09: Apple's Stage Manager recorded beside ours). Fixture
+    windows only.
+
+    - Two windows an app opens at once (Fixture 1, then Fixture 2, in front) while another
+      stage is in front: the app's stage comes in front with Fixture 2 in front, and it stays
+      in front after a switch away and back (Apple's showed Red 2, opened last; ours raised
+      the older one, found first, over it and kept it so).
+    - A card dragged from the main screen's strip onto the other screen (skipped with one
+      screen): its window opens there, in that screen's current stage, its title bar under
+      the drop point; the main screen's front stays and the card leaves its strip (Apple's:
+      the window opened on the laptop; ours: the windows came to the main screen)."""
+    say("\n== behave: an app's front window on arrival; a card dropped on the other screen ==")
+    stop_app()
+    stop_all_fixtures()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_extra_frames("a", 1, "700,120,640,420")
+    s = start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with Alpha 1 in front"):
+        return
+    alpha = by_title(s)["Alpha 1"]
+
+    say("-- an app opens two windows at once: its stage comes in front, the one opened last in front")
+    # Not --background: the fixture activates and orders each window front as it opens it, so
+    # Fixture 2 (opened last) is in front and key, as Red 2 was in the recordings.
+    subprocess.run(["open", "-n", "-g", FIX_APP, "--args", "--windows", "2",
+                    "--frames", "760,160,700,480;900,260,640,420"], check=True)
+    both = ("Fixture 1", "Fixture 2")
+    s = wait_state(lambda x: all(by_title(x).get(t, {}).get("home") == x["active"] for t in both)
+                   and x["active"] != alpha["home"], "both fixture windows in front, in a stage of their own", timeout=10)
+    if not check(s is not None, f"the fixture's two windows get a stage of their own, in front ({stage_titles(state())})"):
+        return
+    time.sleep(1.5)  # the second window may be placed a moment after the first's switch
+    fixture = by_title(state())["Fixture 1"]["home"]
+    check(z_titles(list(both)) == ["Fixture 2", "Fixture 1"], f"Fixture 2, opened last, is in front ({z_titles(list(both))})")
+    do("switch", by_title(state())["Alpha 1"]["home"])
+    time.sleep(1.5)
+    do("switch", fixture)
+    time.sleep(1.5)
+    check(z_titles(list(both)) == ["Fixture 2", "Fixture 1"], f"after a switch away and back, Fixture 2 is still in front ({z_titles(list(both))})")
+    s = state()
+    st = next((x for x in s["stages"] if x["number"] == fixture), None)
+    check(st is not None and st["key"] == by_title(s)["Fixture 2"]["id"], f"and its key window ({st and st['key']})")
+
+    say("-- a card dragged onto the other screen opens its window there")
+    screens = s.get("displays", [])
+    if len(screens) < 2:
+        skip("behave: a card to the other screen", f"one screen ({len(screens)} reported); two are needed")
+        stop_app()
+        all_onscreen("behave quit")
+        return
+    main, other = screens[0], screens[1]
+    alpha = by_title(s)["Alpha 1"]
+    card = next((c for c in s.get("strip_cards", []) if c["number"] == alpha["home"]), None)
+    if not check(alpha["parked"] and card is not None, f"Alpha 1 is a card on the main screen ({alpha['home']}, cards {[c['number'] for c in s.get('strip_cards', [])]})"):
+        return
+    ov = other["visible"]
+    drop = (ov["x"] + ov["w"] / 2, ov["y"] + ov["h"] / 3)
+    other_front = next(k for k in s["displays"] if k["id"] == other["id"])["active_stage"]
+    main_front = next(k for k in s["displays"] if k["id"] == main["id"])["active_stage"]
+    before_log = len(log_text())
+    out, _ = card_drag(center(card["frame"]), drop, "Alpha's card onto the other screen")
+    if blocked(out, "the card dragged onto the other screen (where its window opens)"):
+        return
+    s = wait_state(lambda x: by_title(x)["Alpha 1"]["display"] == other["id"] and not by_title(x)["Alpha 1"]["parked"],
+                   "Alpha 1 on the other screen")
+    if not check(s is not None, f"Alpha 1 opens on the other screen ({by_title(state())['Alpha 1']})"):
+        return
+    a = by_title(s)["Alpha 1"]
+    there = next(k for k in s["displays"] if k["id"] == other["id"])
+    check(other_front is None or a["stage"] == there["active_stage"],
+          f"in that screen's current stage ({a['stage']}, its front {there['active_stage']}, before {other_front})")
+    f = a["restore"]
+    check(f["x"] <= drop[0] <= f["x"] + f["w"] and f["y"] <= drop[1] <= f["y"] + 30,
+          f"its title bar under the drop point ({fmt(f)}, drop {drop[0]:.0f},{drop[1]:.0f})")
+    check(next(k for k in s["displays"] if k["id"] == main["id"])["active_stage"] == main_front, "the main screen's front is unchanged")
+    check(all(c["number"] != alpha["home"] for c in s.get("strip_cards", [])) or a["home"] != alpha["home"],
+          f"its card left the main screen's strip ({[c['number'] for c in s.get('strip_cards', [])]})")
+    check("card dropped on another screen" in log_text()[before_log:], "logged as a card dropped on another screen")
+    consistent("a card dropped on the other screen")
+    stop_app()
+    all_onscreen("behave quit")
+
+
 def phase_motion():
     say("\n== motion: strip level, a window dropped into a slot, card reorder, switch animation ==")
     stop_app()
@@ -2440,7 +2535,7 @@ def phase_motion():
     panel = strip_panel()
     check(panel is not None and panel["layer"] == -1, f"the strip sits below windows (layer {panel and panel['layer']})")
 
-    say("-- a window dragged over the strip lifts it and shows its card; dropped above the first card it takes that slot")
+    say("-- a window dragged over the strip stays above it (Apple's) and shows its card; dropped above the first card it takes that slot")
     s = state()
     first = s["strip_cards"][0]["frame"] if s.get("strip_cards") else None
     pre = by_title(s)["Fixture 5"]["restore"]
@@ -2456,9 +2551,10 @@ def phase_motion():
     else:
         layers = sorted({p["layer"] for p in (strip_panel(m) for m in seen) if p})
         lifted = [m for m in seen if (lambda p: p is not None and p["layer"] == 3)(strip_panel(m))]
-        check(bool(lifted), f"the strip is above windows while a window is over it (layers seen {layers} in {len(seen)} samples)")
-        check(any(w["layer"] == OVERLAY_LAYER for m in lifted for w in m),
-              "the dragged window's card shows in the motion overlay (while the strip is lifted)")
+        check(bool(seen) and not lifted,
+              f"the strip stays below windows while a window is dragged over it, as Apple's cards stay under it (layers seen {layers} in {len(seen)} samples)")
+        check(any(w["layer"] == OVERLAY_LAYER for m in seen for w in m),
+              "the dragged window's card shows in the motion overlay, above the window")
         check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]}{whose(out)})")
         s = wait_state(lambda x: by_title(x)["Fixture 5"]["parked"], "Fixture 5 to become its own stage")
         if check(s is not None, "a window dropped on the strip gets a stage of its own"):
@@ -7043,7 +7139,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "hide": phase_hide, "away": phase_away,
-             "glass": phase_glass, "displays": phase_displays, "crop": phase_crop}[p]()
+             "glass": phase_glass, "displays": phase_displays, "crop": phase_crop, "behave": phase_behave}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

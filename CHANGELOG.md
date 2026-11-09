@@ -25,6 +25,23 @@
     sliding in about 180 ms after the pointer gets there; ours took about 320 ms).
   - A card dragged into the middle grows to its window's size sooner, and you hold the window
     near its top-left corner, as with Apple's, instead of by the middle of its title bar.
+- The strip slides away later, as Apple's does: only once a window covers the cards' left
+  edge (about 20 points from the screen's edge), not already at about 50.
+- A window you drag over the strip stays above the cards, as with Apple's; a small picture of
+  it still shows where it goes once the pointer is over the strip.
+- A card dragged onto your other screen opens its windows there, in the stage in front on
+  that screen. Before, they came to the screen the card was on.
+- An app that opens two windows at once now comes forward with the one it opened last in
+  front, as with Apple's, and keeps it in front when you come back to its stage.
+- A window no longer ends up off the edge of the screen after macOS's Show Desktop (a
+  wallpaper click with "Always"): the place macOS pushes it to while the desktop shows, or
+  as it slides back, is no longer taken as its own, so its stage brings it back where you
+  left it.
+- Clicking the wallpaper works again after you take a screenshot: macOS's screenshot tool
+  leaves an invisible screen-sized window behind for minutes, and clicks under it were taken
+  for clicks on a window.
+- Settings says what "Click wallpaper to reveal desktop" does: with Always, macOS moves every
+  window aside itself; Only in Stage Manager puts your stage into the strip, as Apple's does.
 
 ## 1.7.0 — 2026-11-06
 

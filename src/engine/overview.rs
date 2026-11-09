@@ -167,6 +167,8 @@ pub struct OverviewWatch {
     stuck: bool,
     /// When Show Desktop was last expected from a wallpaper click ([`Self::expect_show_desktop`]).
     expected: Option<Instant>,
+    /// When Show Desktop was last seen gone ([`Self::moves_windows`]).
+    desktop_ended: Option<Instant>,
 }
 
 impl OverviewWatch {
@@ -206,6 +208,9 @@ impl OverviewWatch {
                 self.showing = None;
                 self.stuck = false;
                 self.ended = Some(now);
+                if was == Overview::ShowDesktop {
+                    self.desktop_ended = Some(now);
+                }
                 Change::Ended(was)
             }
             (None, None) => Change::None,
@@ -255,6 +260,17 @@ impl OverviewWatch {
             Some(Overview::MissionControl) => false,
             None => self.expected.is_some_and(|t| now.duration_since(t) < REVEAL_EXPECTED),
         }
+    }
+
+    /// True while macOS's Show Desktop may have the windows pushed aside: it is listed (also
+    /// one listed too long to be trusted: the windows may still be aside), expected from a
+    /// wallpaper click, or closed less than [`OVERVIEW_SETTLE`] ago (the windows slide back).
+    /// A frame read then is Show Desktop's, never the window's own (11-09: a window pushed off
+    /// the right edge was read at the close and kept there as its frame).
+    pub fn moves_windows(&self, now: Instant) -> bool {
+        self.showing.is_some_and(|(k, _)| k == Overview::ShowDesktop)
+            || self.expected.is_some_and(|t| now.duration_since(t) < REVEAL_EXPECTED)
+            || self.desktop_ended.is_some_and(|t| now.duration_since(t) < OVERVIEW_SETTLE)
     }
 
     /// True once, when an expectation's time is up at `now` with no Show Desktop listed since

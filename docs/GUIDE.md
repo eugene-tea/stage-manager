@@ -84,7 +84,7 @@ Apple's strip, the wallpaper shows faintly through them (`[cards] window_opacity
 them opaque); the card under the pointer turns solid as it grows (`[cards]
 hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through).
 The strip sits below your windows: a window over the cards covers them, and when a window
-comes within about 50 points of the screen's left edge, the strip slides away. Rest the
+covers their left edge too (about 20 points from the screen's edge), the strip slides away. Rest the
 pointer at the left edge of the screen to bring it back.
 
 ### Switching
@@ -150,7 +150,8 @@ its own stage; the front one is shown and the rest wait in the strip.
 Every screen has its own strip and stages, as with Apple's. A window you drag to another
 screen starts a stage of its own there, in front; the stage that was in front there goes to
 a card, and the screen you took it from brings its most recent card forward. Clicking a card
-changes only that screen. A new app opens on the screen you are typing on. Close the lid and
+changes only that screen. Drag a card onto the other screen and its windows open there, in
+the stage in front on that screen. A new app opens on the screen you are typing on. Close the lid and
 that screen's stages come to the remaining screen: the one in front stays in front, the
 others become cards; open it and the stages macOS moves back are its own again. Each screen
 hides its stages in a corner of its own, one with no screen beyond it. After a restart each
@@ -202,7 +203,9 @@ with Apple's.
   stay on the card. As with Apple's, you hold the window near its top-left corner, about 100
   points in and 100 down, wherever you picked up the card (`[drag] window_grab_x`,
   `window_grab_y`).
-- **Drag a window onto the strip** by its title bar to give it a stage of its own.
+- **Drag a window onto the strip** by its title bar to give it a stage of its own. The cards
+  stay under the window as you drag; once the pointer is over the strip, a small picture of
+  the window shows where it will go.
 - **Drag a card up or down** to move it to another place in the strip.
 - **Drop a card onto another card** to merge the two stages. To split them again, drag a
   window of the merged card into the middle, or open the merged stage and drag a window onto
@@ -228,7 +231,9 @@ the Dock.
 
 Clicking the wallpaper shows the desktop and clicking it again brings your stage back. This
 follows macOS's own setting in System Settings → Desktop & Dock → "Click wallpaper to reveal
-desktop".
+desktop": with **Only in Stage Manager**, your stage goes into the strip, as with Apple's.
+With **Always** (macOS's default), macOS itself moves every window aside, as it does without
+Stage Manager, and Stage Manager can't change that for you.
 
 ### The clean corner
 

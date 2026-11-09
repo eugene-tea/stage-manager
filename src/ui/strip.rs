@@ -30,9 +30,9 @@
 //!   opaque cards. The card under the pointer (or a dragged card's target) eases to
 //!   `[cards] hover_window_opacity` (solid) with its growth, and back on leave.
 //! - **Level** (`[strip] level`): Apple's strip sits below windows, so a window moved over
-//!   it covers it (and auto-hide slides it away). It is lifted above windows only while a
-//!   window is dragged over it, while a card is dragged, and while the edge reveals it over
-//!   a covering window; a click on a card never lifts it.
+//!   it covers it (and auto-hide slides it away), also while the window is dragged over it.
+//!   It is lifted above windows only while a card is dragged and while the edge reveals it
+//!   over a covering window; a click on a card never lifts it.
 //! - **The panel** is wider than the column ([`Metrics::panel_width`]): a card draws past the
 //!   column's right edge (a second app's window, the hover's growth, a card following the
 //!   pointer to the column's edge) and nothing there is cut off (owner 11-09). The column
@@ -54,10 +54,11 @@
 //!   Released there, the dragged card shrinks into it and fades, and the drop goes out as
 //!   [`StripEvent::CardMerged`].
 //! - **Drop target**: while the controller reports a window drag
-//!   ([`StripSnapshot::window_drag`]) and the pointer is over the strip column, the strip is
-//!   lifted above windows, a card-sized snapshot of the window, turned like a card, follows
-//!   the pointer, and the cards open a gap at the slot under the pointer
-//!   ([`drop_slot`] tells the controller which). Auto-hide never fights either drag.
+//!   ([`StripSnapshot::window_drag`]) and the pointer is over the strip column, a card-sized
+//!   snapshot of the window, turned like a card, follows the pointer above everything (Apple's
+//!   window turns into its card there), the cards stay below the dragged window, and they
+//!   open a gap at the slot under the pointer ([`drop_slot`] tells the controller which).
+//!   Auto-hide never fights either drag.
 //! - **Transitions** (`[animation]`, see `strip_motion`): snapshots of the windows that
 //!   leave and arrive move in the motion overlay above everything while the real windows
 //!   jump behind them.
@@ -3284,7 +3285,8 @@ impl Strip {
             self.visibility.forget_shown();
         }
         let decision = self.visibility.step(mode, edge_pointer, &self.geometry.global, Instant::now());
-        // A window dragged over the strip column reveals it and opens the gap under the pointer.
+        // A window dragged over the strip column shows it (under the window) and opens the gap
+        // under the pointer.
         let over = pointer.filter(|p| window_drag && self.snapshot.user_visible && self.geometry.global.contains(*p));
         let drop_over = over.is_some();
         let before = over.and_then(|p| self.drop_slot_at(p).before);
@@ -3305,19 +3307,21 @@ impl Strip {
             self.slide(shown, true);
             self.update_targets();
         }
-        // Below windows (Apple's) unless something needs it on top: a window or a card being
-        // dragged, or the edge revealing it over a window that covers it.
+        // Below windows (Apple's) unless something needs it on top (`strip_visibility::lifted`):
+        // a card being dragged, or the edge revealing it over a window that covers it; a window
+        // dragged over it stays above it, as on Apple's (11-09), its card in the overlay.
         // A raised strip stays raised while a transition runs (or starts): the leaving windows
         // still cover it until their snapshots land; it goes back below once the transition
         // has landed (10-13, a laptop: a card click to a stage clear of the strip dropped it
         // at once, under the window leaving).
         let held_up = self.pane.lifted == Some(true) && (self.transition_starting || self.motion_running());
-        let lift = self.style.level == StripLevel::AboveWindows
-            || drop_over
-            || card_dragging
-            || held_up
-            || (self.pane.shown && mode == Mode::EdgeOnly);
-        self.set_lifted(lift);
+        self.set_lifted(strip_visibility::lifted(strip_visibility::Lift {
+            always: self.style.level == StripLevel::AboveWindows,
+            card_drag: card_dragging,
+            transition: held_up,
+            edge_reveal: self.pane.shown && mode == Mode::EdgeOnly,
+            window_drag_over: drop_over,
+        }));
         self.window_drag_card(over);
         // Hidden at the edge with no clock running, mouse moves wake it (U6); without the
         // global monitor's moves the pointer is polled as before.

@@ -615,16 +615,28 @@ fn stage_manager(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwi
     }
     let recent = m.switch(v.show_recent_apps, tag::RECENT);
     let grouping = m.popup(&["All at Once", "One at a Time"], if v.all_at_once { 0 } else { 1 }, tag::GROUPING);
-    let wallpaper = if v.wallpaper_only_in_stage_manager { "Only in Stage Manager" } else { "Always" };
     f.group(vec![
         apple,
         Row::new("Show recent apps in Stage Manager", Some(view(&recent))),
         Row::new("Show windows from an application", Some(view(&grouping))),
         Row::new("Click wallpaper to reveal desktop", Some(view(&m.button("Desktop & Dock Settings…", tag::DESKTOP_DOCK))))
-            .detail(format!("{wallpaper}. Set in System Settings → Desktop & Dock.")),
+            .detail(wallpaper_detail(v.wallpaper_only_in_stage_manager)),
     ]);
     f.footnote("These are macOS's own Stage Manager settings, shared with System Settings → Desktop & Dock.");
     (recent, grouping)
+}
+
+/// What "Click wallpaper to reveal desktop" does here, under the macOS setting. With Always
+/// macOS itself moves every window aside on a wallpaper click (Apple's Stage Manager is off
+/// while this app runs), and this app cannot stop it without writing that setting, which it
+/// never does: only "Only in Stage Manager" leaves the click to it, and then the stage goes
+/// into the strip as on Apple's (UX-SPEC, "macOS settings come first").
+fn wallpaper_detail(only_in_stage_manager: bool) -> &'static str {
+    if only_in_stage_manager {
+        "Only in Stage Manager. The stage goes into the strip, as in Apple's."
+    } else {
+        "Always. macOS moves every window aside; with Only in Stage Manager, the stage goes into the strip, as in Apple's."
+    }
 }
 
 /// The Stages pane: where windows and apps go.
@@ -940,6 +952,15 @@ mod tests {
         for (i, s) in SPEEDS.iter().enumerate() {
             assert_eq!(speed_stop(*s), i, "every stop maps to itself");
         }
+    }
+
+    /// 11-09: with Always, macOS moves the windows aside and Apple's stage-to-strip needs Only
+    /// in Stage Manager; the row says so, and what each value does.
+    #[test]
+    fn the_wallpaper_row_says_what_each_value_does() {
+        assert!(wallpaper_detail(false).starts_with("Always. macOS moves every window aside"));
+        assert!(wallpaper_detail(false).contains("with Only in Stage Manager, the stage goes into the strip"));
+        assert!(wallpaper_detail(true).starts_with("Only in Stage Manager. The stage goes into the strip"));
     }
 
     #[test]
