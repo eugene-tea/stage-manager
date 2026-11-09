@@ -1371,8 +1371,8 @@ mod tests {
         assert!(c.stages.restore_after_restart, "stages come back after a restart (the owner's word, 10-13)");
         let a = &c.style.animation;
         assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
-        assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (353.0, 37.6, 1.0), "Apple's windows growing out of a card, measured 11-09");
-        assert_eq!((a.shrink_stiffness, a.shrink_damping, a.shrink_mass), (272.0, 33.0, 1.0), "Apple's windows shrinking into a card, measured 11-09");
+        assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (289.0, 34.0, 1.0), "Apple's windows growing out of a card, measured 11-09 with the path");
+        assert_eq!((a.shrink_stiffness, a.shrink_damping, a.shrink_mass), (289.0, 34.0, 1.0), "Apple's windows shrinking into a card: the same spring");
         let m = &c.style.motion;
         assert_eq!((m.spring_stiffness, m.spring_damping, m.spring_mass), (289.0, 34.0, 1.0), "Apple's card glide");
         assert_eq!((m.slide_stiffness, m.slide_damping, m.slide_mass), (282.0, 33.6, 1.0), "Apple's slide");
