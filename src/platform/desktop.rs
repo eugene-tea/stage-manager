@@ -6,7 +6,9 @@
 //! point: the desktop picture and Finder's desktop icons are desktop elements, which the
 //! window list leaves out. A click on the Dock, the menu bar, our strip or any app window
 //! hits a window and is ignored. macOS's own click-through overlays do not count
-//! ([`click_through_overlay`]).
+//! ([`click_through_overlay`], [`seen_through`]): every test of what lies under a point
+//! looks through them (the wallpaper click here, the Dock press, the inert slivers' tap, the
+//! test input's path checks).
 
 use objc2::runtime::AnyObject;
 use objc2_app_kit::NSScreen;
@@ -137,7 +139,7 @@ pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
             && w.alpha > 0.0
             && w.bounds.contains(p)
             && !dock.seen_through(w.pid, w.layer, w.bounds, p)
-            && !(w.layer > 0 && click_through_overlay(w.layer, &w.owner, super::apps::bundle_of(w.pid).as_deref()))
+            && !seen_through(w)
     })
 }
 
@@ -155,22 +157,75 @@ pub fn resizable_frames(list: &[CgWindow]) -> Vec<Rect> {
 /// The screenshot tool's process (⇧⌘3/4/5, the Screenshot app).
 pub const SCREENSHOT_UI: &str = "com.apple.screencaptureui";
 
+/// Notification Center's process (its banners, its panel and the widgets' editing).
+pub const NOTIFICATION_CENTER_UI: &str = "com.apple.notificationcenterui";
+
+/// Notification Center's app bundle: its executable lies inside it.
+pub const NOTIFICATION_CENTER_APP: &str = "/System/Library/CoreServices/NotificationCenter.app/";
+
+/// Who owns a listed window, as far as it could be read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Owner<'a> {
+    /// The window list's owner name (the process's or app's name).
+    pub name: &'a str,
+    /// The owner's bundle id, when the process has one and it was read.
+    pub bundle: Option<&'a str>,
+    /// The owner's executable (`proc_pidpath`), read when no bundle id was.
+    pub exe: Option<&'a str>,
+}
+
 /// True for a window of macOS's own that lets every click through to what is below it, so
-/// a click under it can still be on the wallpaper: the screenshot tool's (owner
-/// "Screenshot", process `screencaptureui`), which after a screenshot leaves an opaque,
-/// screen-sized window at layer 24 listed on screen for minutes (owner 11-09 10:02: every
-/// wallpaper click after it was taken for a click on a window). Only above layer 0, where
-/// no app's document window lives, and only by the owner's identity: its bundle id
-/// (`bundle`, when the process has one) or, with none read, its process or app name.
-/// Everything else, an unknown overlay included, still covers the wallpaper.
-pub fn click_through_overlay(layer: i64, owner: &str, bundle: Option<&str>) -> bool {
+/// a press under it reaches what lies there (the wallpaper, a card, the Dock, a parked
+/// window's edge). Only above layer 0, where no app's document window lives, and only by the
+/// owner's identity (`owner`): its bundle id when read, else its executable or name.
+/// Everything else, an unknown overlay included, still covers what is below.
+///
+/// - **The screenshot tool's** (bundle [`SCREENSHOT_UI`]; with none read, process
+///   `screencaptureui` or app "Screenshot"), which after a screenshot leaves an opaque,
+///   screen-sized window at layer 24 listed on screen for minutes (owner 11-09 10:02: every
+///   wallpaper click after it was taken for a click on a window). Any size.
+/// - **Notification Center's full-screen window** (bundle [`NOTIFICATION_CENTER_UI`]; with
+///   none read, an executable inside [`NOTIFICATION_CENTER_APP`]) whose `bounds` cover a
+///   whole screen of `screens` (within a point): 11-09 14:45, layer 23, alpha 1,
+///   0,0 2560x1440 over the main screen for the suite's whole run while the owner used his
+///   Mac as always, no banner shown; every card click of the suite was refused under it. A
+///   window of Notification Center's smaller than a screen (a banner at the top right, its
+///   panel) still covers what is below: a click there is the banner's.
+pub fn click_through_overlay(layer: i64, bounds: Rect, owner: &Owner<'_>, screens: &[Rect]) -> bool {
     if layer <= 0 {
         return false;
     }
-    match bundle {
+    let screenshot = match owner.bundle {
         Some(b) => b == SCREENSHOT_UI,
-        None => matches!(owner, "screencaptureui" | "Screenshot"),
+        None => matches!(owner.name, "screencaptureui" | "Screenshot"),
+    };
+    let notification_center = match owner.bundle {
+        Some(b) => b == NOTIFICATION_CENTER_UI,
+        None => owner.exe.is_some_and(|e| e.starts_with(NOTIFICATION_CENTER_APP)),
+    };
+    screenshot || (notification_center && screens.iter().any(|s| covers_screen(bounds, *s)))
+}
+
+/// True when `bounds` holds the whole of `screen`, within a point.
+fn covers_screen(bounds: Rect, screen: Rect) -> bool {
+    !screen.is_degenerate()
+        && bounds.x <= screen.x + 1.0
+        && bounds.y <= screen.y + 1.0
+        && bounds.max_x() >= screen.max_x() - 1.0
+        && bounds.max_y() >= screen.max_y() - 1.0
+}
+
+/// [`click_through_overlay`] for a listed window: its owner read now (bundle id, else its
+/// executable), against every active display. A window at layer 0 or below, or one not
+/// drawn, is answered at once with no read (false).
+pub fn seen_through(w: &CgWindow) -> bool {
+    if w.layer <= 0 || !w.onscreen || w.alpha <= 0.0 {
+        return false;
     }
+    let bundle = super::apps::bundle_of(w.pid);
+    let exe = if bundle.is_none() { super::apps::exe_path(w.pid) } else { None };
+    let owner = Owner { name: &w.owner, bundle: bundle.as_deref(), exe: exe.as_deref() };
+    click_through_overlay(w.layer, w.bounds, &owner, &cg_display_bounds())
 }
 
 #[cfg(test)]
@@ -227,20 +282,59 @@ mod tests {
     /// the desktop; real windows, and any other overlay, still cover it.
     #[test]
     fn only_macos_click_through_overlays_are_seen_through() {
-        assert!(click_through_overlay(24, "Screenshot", Some(SCREENSHOT_UI)));
-        assert!(click_through_overlay(24, "Screenshot", None), "its app name, no bundle read");
-        assert!(click_through_overlay(24, "screencaptureui", None));
-        assert!(!click_through_overlay(0, "Screenshot", Some(SCREENSHOT_UI)), "never a layer-0 window");
-        assert!(!click_through_overlay(24, "Screenshot", Some("com.example.screenshot")), "another app named so");
-        assert!(!click_through_overlay(24, "Window Server", None), "the menu bar");
-        assert!(!click_through_overlay(25, "Control Center", Some("com.apple.controlcenter")));
-        assert!(!click_through_overlay(3, "Some App", Some("com.example.app")), "a floating panel");
-        // In the hit test: the overlay alone is the wallpaper; an app window under it is not.
         let full = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let screens = [full];
+        let named = |name| Owner { name, ..Owner::default() };
+        let of = |name, bundle| Owner { name, bundle: Some(bundle), exe: None };
+        let shot = |layer| click_through_overlay(layer, full, &of("Screenshot", SCREENSHOT_UI), &screens);
+        assert!(shot(24));
+        assert!(click_through_overlay(24, full, &named("Screenshot"), &screens), "its app name, no bundle read");
+        assert!(click_through_overlay(24, full, &named("screencaptureui"), &screens));
+        assert!(!shot(0), "never a layer-0 window");
+        assert!(!click_through_overlay(24, full, &of("Screenshot", "com.example.screenshot"), &screens), "another app named so");
+        assert!(!click_through_overlay(24, full, &named("Window Server"), &screens), "the menu bar");
+        assert!(!click_through_overlay(25, full, &of("Control Center", "com.apple.controlcenter"), &screens));
+        assert!(!click_through_overlay(3, full, &of("Some App", "com.example.app"), &screens), "a floating panel");
+        // In the hit test: the overlay alone is the wallpaper; an app window under it is not.
         let shot = CgWindow { owner: "Screenshot".into(), pid: -1, ..w(24, full, true) };
         assert!(is_wallpaper_click(std::slice::from_ref(&shot), Point::new(900.0, 600.0), &DockBar::default()));
         let app = w(0, Rect::new(800.0, 500.0, 400.0, 300.0), true);
         assert!(!is_wallpaper_click(&[shot, app], Point::new(900.0, 600.0), &DockBar::default()));
+    }
+
+    /// 11-09 14:45: Notification Center kept a window at layer 23 over the whole main screen
+    /// for the suite's whole run, click-through, no banner shown. Seen through by its bundle
+    /// id or its executable; a banner-sized window of its own, and an unknown app's
+    /// full-screen window, still cover what is below.
+    #[test]
+    fn notification_centers_full_screen_layer_is_seen_through_its_banners_are_not() {
+        let main = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let laptop = Rect::new(-1800.0, 271.0, 1800.0, 1169.0);
+        let screens = [main, laptop];
+        let nc = Owner { name: "Notification Center", bundle: Some(NOTIFICATION_CENTER_UI), exe: None };
+        let by_exe = Owner {
+            name: "Notification Center",
+            bundle: None,
+            exe: Some("/System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter"),
+        };
+        assert!(click_through_overlay(23, main, &nc, &screens), "its full-screen layer");
+        assert!(click_through_overlay(23, main, &by_exe, &screens), "by its executable, no bundle read");
+        assert!(click_through_overlay(23, laptop, &nc, &screens), "over the other screen");
+        assert!(click_through_overlay(23, Rect::new(-0.5, 0.0, 2560.5, 1440.0), &nc, &screens), "within a point");
+        // A banner at the top right (about 350 x 70 under the menu bar), and its panel.
+        let banner = Rect::new(2190.0, 38.0, 360.0, 76.0);
+        assert!(!click_through_overlay(23, banner, &nc, &screens), "a banner blocks");
+        assert!(!click_through_overlay(23, Rect::new(2160.0, 30.0, 400.0, 1410.0), &nc, &screens), "its panel blocks");
+        assert!(!click_through_overlay(23, Rect::new(0.0, 30.0, 2560.0, 1410.0), &nc, &screens), "short of the whole screen");
+        assert!(!click_through_overlay(0, main, &nc, &screens), "never at layer 0");
+        // Anyone else's full-screen window blocks, whatever its name.
+        let named = |name| Owner { name, ..Owner::default() };
+        assert!(!click_through_overlay(23, main, &named("Notification Center"), &screens), "the name alone");
+        let other = Owner { name: "Notification Center", bundle: Some("com.example.notes"), exe: None };
+        assert!(!click_through_overlay(23, main, &other, &screens), "another app named so");
+        let stranger = Owner { name: "Overlay", bundle: None, exe: Some("/Applications/Overlay.app/Contents/MacOS/Overlay") };
+        assert!(!click_through_overlay(23, main, &stranger, &screens), "an unknown app's full-screen window");
+        assert!(!click_through_overlay(23, main, &nc, &[]), "no screen known");
     }
 
     #[test]

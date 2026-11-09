@@ -1342,7 +1342,7 @@ impl Controller {
             return;
         }
         let Some(dock) = self.dock_pid(list) else { return };
-        if !dock::dock_under(list, p, dock, &self.dock_bar_now()) {
+        if !dock::dock_under(list, p, dock, &self.dock_bar_now(), &crate::platform::desktop::seen_through) {
             return;
         }
         match dock::item_at(dock, p) {

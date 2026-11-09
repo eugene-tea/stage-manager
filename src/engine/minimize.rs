@@ -24,7 +24,10 @@
 //!   the controller parks it again at once ([`crate::platform::observe::WinEvent::Deminiaturized`]).
 //!
 //! So the window is put beyond the screen edge the Dock is on, in line with its park frame
-//! ([`dive_frame`]): its un-minimize sinks into that edge and comes up in the corner.
+//! ([`dive_frame`]): its un-minimize sinks into that edge and comes up in the corner. The
+//! Dock's edge is told by the tile, also when the Dock has hidden itself and lists its tiles
+//! just beyond that edge ([`dock_edge`]; the 11-09 suite's ⌘M: no dive for a hidden Dock's
+//! tile, and the window rose to its full height and slid into the corner, 336 ms in view).
 
 use crate::engine::geometry::Rect;
 
@@ -41,13 +44,24 @@ pub enum DockEdge {
     Right,
 }
 
+/// How far past its screen's edge an auto-hidden Dock's tile may lie and still tell that edge
+/// (points): a hidden Dock lists its tiles just beyond the edge it hides into (11-09 suite:
+/// a tile at 1790,1445 68x84 under the 5K's bottom edge at 1440), at most a magnified tile's
+/// size (128 pt) away.
+pub const HIDDEN_REACH: f64 = 128.0;
+
 /// The edge of `screen` nearest the middle of `tile` (the window's Dock tile, or the Dock's
-/// bar): the Dock's edge. `None` when the tile is not on `screen` or is nearest its top,
-/// where the Dock never is.
+/// bar): the Dock's edge. A tile just beyond the bottom, left or right edge, along that
+/// edge (its near side within [`HIDDEN_REACH`]), is an auto-hidden Dock's at that edge.
+/// `None` when the tile is elsewhere off `screen` or is nearest its top, where the Dock
+/// never is.
 pub fn dock_edge(tile: Rect, screen: Rect) -> Option<DockEdge> {
     let c = tile.center();
-    if tile.is_degenerate() || screen.is_degenerate() || !screen.contains(c) {
+    if tile.is_degenerate() || screen.is_degenerate() {
         return None;
+    }
+    if !screen.contains(c) {
+        return hidden_edge(tile, screen);
     }
     let to_bottom = screen.max_y() - c.y;
     let to_left = c.x - screen.x;
@@ -62,6 +76,21 @@ pub fn dock_edge(tile: Rect, screen: Rect) -> Option<DockEdge> {
         Some(DockEdge::Left)
     } else {
         Some(DockEdge::Right)
+    }
+}
+
+/// The edge an auto-hidden Dock's `tile` lies just beyond ([`dock_edge`]).
+fn hidden_edge(tile: Rect, screen: Rect) -> Option<DockEdge> {
+    let c = tile.center();
+    let across = |lo: f64, hi: f64, at: f64| at >= lo && at <= hi;
+    if across(screen.x, screen.max_x(), c.x) && across(screen.max_y() - 1.0, screen.max_y() + HIDDEN_REACH, tile.y) {
+        Some(DockEdge::Bottom)
+    } else if across(screen.y, screen.max_y(), c.y) && across(screen.x - HIDDEN_REACH, screen.x + 1.0, tile.max_x()) {
+        Some(DockEdge::Left)
+    } else if across(screen.y, screen.max_y(), c.y) && across(screen.max_x() - 1.0, screen.max_x() + HIDDEN_REACH, tile.x) {
+        Some(DockEdge::Right)
+    } else {
+        None
     }
 }
 
@@ -113,6 +142,27 @@ mod tests {
         assert_eq!(dock_edge(Rect::new(1200.0, 2.0, 68.0, 68.0), MAIN), None, "no Dock at the top");
         assert_eq!(dock_edge(TILE.translate(-3000.0, 0.0), MAIN), None, "a tile on another screen");
         assert_eq!(dock_edge(Rect::default(), MAIN), None, "no tile read");
+    }
+
+    /// 11-09 suite (parity, Cmd-M): the Dock auto-hidden at the minimize, its tile listed at
+    /// 1790,1445 68x84, under the 5K's bottom edge. The dive was left out (`dive=None`): the
+    /// window was un-minimized toward its park frame, rose out of the tile to its full height
+    /// and slid into the corner, 336 ms outside it.
+    #[test]
+    fn an_auto_hidden_docks_tile_beyond_the_edge_tells_that_edge() {
+        let hidden = Rect::new(1790.0, 1445.0, 68.0, 84.0);
+        assert_eq!(dock_edge(hidden, MAIN), Some(DockEdge::Bottom));
+        assert_eq!(dock_edge(Rect::new(-70.0, 600.0, 68.0, 68.0), MAIN), Some(DockEdge::Left));
+        assert_eq!(dock_edge(Rect::new(2563.0, 600.0, 68.0, 68.0), MAIN), Some(DockEdge::Right));
+        // Far beyond the edge, beside the screen, or above it: not this screen's Dock.
+        assert_eq!(dock_edge(Rect::new(1790.0, 1700.0, 68.0, 84.0), MAIN), None, "far below");
+        assert_eq!(dock_edge(Rect::new(2600.0, 1445.0, 68.0, 84.0), MAIN), None, "below and past the right edge");
+        assert_eq!(dock_edge(Rect::new(1200.0, -80.0, 68.0, 68.0), MAIN), None, "above");
+        assert_eq!(dock_edge(Rect::new(-300.0, 600.0, 68.0, 68.0), MAIN), None, "on the laptop to the left");
+        // The run's window: its dive below the 5K, the laptop to its left out of the way.
+        let run_laptop = Rect::new(-1800.0, 271.0, 1800.0, 1169.0);
+        let park = Rect::new(2559.0, 1439.0, 600.0, 432.0);
+        assert_eq!(dive_frame(park, hidden, MAIN, &[MAIN, run_laptop]), Some(Rect::new(2559.0, 1440.0 + DIVE_DEPTH, 600.0, 432.0)));
     }
 
     #[test]
