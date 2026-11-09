@@ -368,7 +368,7 @@ pub const KEYS: &[KeyDef] = &[
     k("windows", "hide_parked_apps", Kind::Bool, "false",
         "An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default."),
     k("windows", "corner_patch", Kind::Bool, "true",
-        "Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it."),
+        "Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour) or a desktop icon lies under it."),
     k("windows", "corner_patch_reach", Kind::FloatOrAuto { min: 0.0, max: 400.0 }, "\"auto\"",
         "How far past a sliver the corner patch reaches, in points, to cover its shadow: \"auto\" is a parked (inactive) window's shadow, side by side; a number is used on every side."),
     k("windows", "inert_slivers", Kind::Bool, "true",
@@ -582,6 +582,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-36.toml"),
     include_str!("legacy/default-37.toml"),
     include_str!("legacy/default-38.toml"),
+    include_str!("legacy/default-39.toml"),
 ];
 
 #[cfg(test)]
