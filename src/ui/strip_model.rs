@@ -41,9 +41,9 @@ pub struct StripSnapshot {
     /// screen's left edge over the strip ([`crate::ui::strip_visibility::hides_strip`]; a
     /// window being dragged is left out).
     pub active_frames: Vec<Rect>,
-    /// A managed window is being dragged by its title bar: the strip reveals itself while the
-    /// pointer is over the strip area and shows a drop target (a placeholder card sized
-    /// like the window's pre-drag frame). Releasing there sends the window to a stage of its
+    /// A managed window is being dragged by its title bar: while the pointer is over the strip
+    /// area the strip shows (below the window, as Apple's) with a drop target (a placeholder
+    /// card sized like the window's pre-drag frame) and the window's card follows the pointer. Releasing there sends the window to a stage of its
     /// own; the controller decides that from the mouse-up.
     pub window_drag: Option<CardWindow>,
     /// Where the button went down for that drag (global, top-left): the point of the window

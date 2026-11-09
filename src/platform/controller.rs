@@ -723,6 +723,33 @@ fn note_fallback(said: &mut HashSet<&'static str>, why: &'static str) {
     }
 }
 
+/// The order a run of windows found together is placed in: creation (window id) order, but
+/// each app's windows front to back in the slots its windows take in that order (`z`: the
+/// window server's front-to-back place; unlisted windows after, oldest first). The first
+/// window of a new app placed brings its stage in front and is raised and focused: taken
+/// oldest first, an app that opened two windows at once had its older one raised over the
+/// one it opened last, and kept it in front on every switch to the stage (11-09: Red 1 over
+/// Red 2; Apple's shows Red 2, the window used last, in front).
+fn found_order(mut run: Vec<u32>, pid: impl Fn(u32) -> Option<i32>, z: impl Fn(u32) -> Option<usize>) -> Vec<u32> {
+    run.sort_unstable();
+    run.dedup();
+    let mut slots: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (i, &id) in run.iter().enumerate() {
+        if let Some(p) = pid(id) {
+            slots.entry(p).or_default().push(i);
+        }
+    }
+    let mut out = run.clone();
+    for at in slots.values().filter(|a| a.len() > 1) {
+        let mut ids: Vec<u32> = at.iter().map(|&i| run[i]).collect();
+        ids.sort_by_key(|&id| (z(id).unwrap_or(usize::MAX), id));
+        for (&i, id) in at.iter().zip(ids) {
+            out[i] = id;
+        }
+    }
+    out
+}
+
 /// True when a move of a shown window while the left button is down is the user dragging
 /// it: the press was on the window (`frame`, its frame at the press, with a margin for the
 /// resize edge) and the pointer has moved since. An app moving its own window while the
@@ -3425,7 +3452,7 @@ impl Controller {
     // ----- events ------------------------------------------------------------------------
 
     /// Handles a batch of observer events. Runs of `Found` are taken in window-id order
-    /// (creation order), so rules see windows in the order the app opened them.
+    /// (creation order), each app's windows front to back ([`found_order`]).
     pub fn on_events(&mut self, ob: &mut Observer, events: Vec<WinEvent>) {
         let mut i = 0;
         while i < events.len() {
@@ -3435,8 +3462,8 @@ impl Controller {
                     run.push(*id);
                     i += 1;
                 }
-                run.sort_unstable();
-                run.dedup();
+                let z = if run.len() > 1 { windows::z_order(&windows::list_windows()) } else { HashMap::new() };
+                let run = found_order(run, |id| ob.window(id).map(|w| w.pid), |id| z.get(&id).copied());
                 for id in run {
                     self.on_found(ob, id);
                 }
@@ -5902,6 +5929,14 @@ impl Controller {
             }
             return;
         }
+        // A card dropped on another screen opens there (Apple's, 11-09): that screen must take
+        // input too.
+        let drop_to = self.card_drop_display(&event);
+        if drop_to.is_some_and(|d| d != self.strip_event_display(&event) && self.frozen_on(d)) {
+            tracing::debug!("a card dropped on a screen showing a full-screen app's Space or settling: nothing happens");
+            self.present();
+            return;
+        }
         let pressed = self.pressed_obs.take().filter(|(at, _)| at.elapsed() < PRESSED_OBS_MAX).map(|(_, obs)| obs);
         let obs = match pressed {
             Some(obs) if matches!(event, StripEvent::CardClicked { .. } | StripEvent::IconClicked { .. }) => obs,
@@ -5918,6 +5953,12 @@ impl Controller {
                 tracing::info!(stage, number = m.stage_number(StageId(stage)), shift, "card clicked");
                 refused = m.switch_refused(StageId(stage)).filter(|r| *r != SwitchRefused::InFront).map(|r| (stage, r));
                 if shift { m.merge_into_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
+            }
+            StripEvent::CardDropped { stage, window, x, y } if drop_to.is_some_and(|d| m.stage(StageId(stage)).is_some_and(|s| s.display != d)) => {
+                counters::bump(Count::Drop);
+                let to = drop_to.unwrap_or_else(|| m.main_display().id);
+                tracing::info!(stage, ?window, x, y, screen = to.0, "card dropped on another screen: it opens there, in that screen's current stage");
+                m.drop_card_on_display(StageId(stage), window.map(WindowId), Point::new(x, y), to, &obs)
             }
             StripEvent::CardDropped { stage, window: Some(window), x, y } => {
                 counters::bump(Count::Drop);
@@ -5956,6 +5997,17 @@ impl Controller {
             tracing::debug!("the engine did not take the strip's edit; the strip shows the engine's cards again");
             self.present();
         }
+    }
+
+    /// The screen a card drop lands on: the managed screen showing most of the dropped window
+    /// (its front window's size at the drop's top-left corner, or the window dragged out
+    /// alone; [`Self::display_at`]). `None` for any other event or an unknown stage.
+    fn card_drop_display(&self, event: &StripEvent) -> Option<DisplayId> {
+        let StripEvent::CardDropped { stage, window, x, y } = *event else { return None };
+        let m = self.model.as_ref()?;
+        let front = window.map(WindowId).or_else(|| m.stage(StageId(stage))?.windows.first().copied())?;
+        let size = m.window(front)?.restore;
+        Some(self.display_at(Rect::new(x, y, size.w, size.h)))
     }
 
     /// The screen whose stages a strip event addresses: its stage's (the main one when the
@@ -7089,6 +7141,27 @@ fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 11-09: an app's windows found together go front to back, so the one it opened last (in
+    /// front) is placed first and its stage's arrival raises and focuses it; other apps keep
+    /// their places in creation order.
+    #[test]
+    fn windows_found_together_go_front_to_back_within_their_app() {
+        // App 7 opened 11 (Red 1) then 12 (Red 2, in front); app 8's 10 and 13 in between.
+        let pid = |id: u32| Some(if id == 11 || id == 12 { 7 } else { 8 });
+        let z = |id: u32| match id {
+            12 => Some(0),
+            11 => Some(1),
+            13 => Some(2),
+            10 => Some(3),
+            _ => None,
+        };
+        assert_eq!(found_order(vec![12, 11, 10, 13, 11], pid, z), vec![13, 12, 11, 10]);
+        // Unlisted windows go after the listed ones of their app, oldest first.
+        assert_eq!(found_order(vec![5, 4, 12], |_| Some(1), |id| (id == 12).then_some(0)), vec![12, 4, 5]);
+        // One window per app: creation order, as before.
+        assert_eq!(found_order(vec![3, 1, 2], |id| Some(id as i32), |_| None), vec![1, 2, 3]);
+    }
 
     /// The review's S1: a full-screen app on the main screen froze every strip's
     /// input; each screen now answers for itself.

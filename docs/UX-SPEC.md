@@ -22,7 +22,7 @@ file never repeats one.
 | Stage Manager on or off | The two cannot run together. While Apple's is on, Stage Manager steps aside: every window comes back, the strip hides and nothing is arranged. It offers to turn Apple's off, and changes the setting only when you click. |
 | Show recent apps | Off hides the strip until the pointer reaches the left edge. |
 | Show windows from an application | All at Once or One at a Time, as below. |
-| Click wallpaper to reveal desktop | With "Only in Stage Manager", a wallpaper click reveals the desktop. With "Always", macOS moves the windows aside itself and Stage Manager stays out of the way. |
+| Click wallpaper to reveal desktop | With "Only in Stage Manager", a wallpaper click puts the stage into the strip, as Apple's does. With "Always", macOS itself moves every window aside (Apple's Stage Manager is off while ours runs) and Stage Manager stays out of the way: macOS answers that click before any other app can, and only that setting stops it, which Stage Manager never writes. Settings says so beside its button to System Settings. |
 | Show items on desktop | Read, but not acted on (see the differences). |
 
 Settings changes "Show recent apps" and "Show windows from an application" the same way
@@ -37,10 +37,11 @@ title bar comes below the menu bar and above the Dock with at least 80 points of
 screen, and one left in the hiding corner comes back just out of it.
 
 **The strip.** It sits below windows: a window moved over the cards covers them and the strip
-stays up under it. It slides away only once a window of the front stage comes within 50 pt of
-the screen's left edge, as Apple's does (measured on a Studio Display: Apple's stayed up under
-a window dragged left over the cards and went at about 50 pt; a laptop's windows nearly fill
-the screen, so there it goes more often). Each screen's strip follows its
+stays up under it. It slides away only once a window of the front stage covers the cards'
+left edge, its own left edge within 20 pt of the screen's, as Apple's does (recorded on a
+Studio Display: Apple's stayed up under a window dragged left over the cards to 52 pt, and
+slid away when it was dragged on to 15 pt, its cards starting at 16 pt; the point between
+was not measured; a laptop's windows nearly fill the screen, so there it goes more often). Each screen's strip follows its
 own front stage. Resting the pointer at the left edge brings it back. Each card draws the stage's
 windows at one scale, turned in perspective toward the middle of the screen, with the app
 icon on its bottom-left corner. The number of cards depends on the screen height: 5 on a
@@ -92,6 +93,9 @@ does the same for that window.
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an
 extra, off by default, puts it in the current stage instead: see Extras).
+An app that opens several windows at once comes forward with the one it opened last in
+front, as macOS shows them, and that one is in front on every switch back to its stage
+(Apple's, 11-09; the window used last comes in front, and the keyboard goes to it).
 Sheets and dialogs follow their window. An app that quits takes its windows out of their
 stages and an emptied stage leaves the strip, also when the app quits without macOS's notice.
 An app that saved a hidden window's corner place when it quit, and reopens the window there
@@ -145,7 +149,12 @@ showing most of it (macOS's rule).
   once it is let go (nothing changes under the hand, however slow the drag across the
   seam). The stage in front there goes to a card; the screen it left, its front now empty,
   brings its most recent card forward. A window dragged onto either screen's strip becomes a
-  stage of its own there. Decided, not measured: a window dragged out of a stage of several
+  stage of its own there. A card dragged from one screen's strip onto the other screen opens
+  there, as a drop in a screen's own main area does: its windows (or the one window dragged
+  out of a card of several) join that screen's current stage, in front with the keyboard, the
+  front one's title bar under the pointer, and the card leaves its strip; the screen it came
+  from keeps its front (Apple's, 11-09: a card dragged from the 5K's strip onto the laptop
+  opened its window there). Decided, not measured: a window dragged out of a stage of several
   leaves the rest in their stage.
 - **Clicks and activations.** A card click changes only its own screen, and so does a click
   on a card's app icon: the app's windows come from that screen's stages. Decided, not
@@ -207,7 +216,8 @@ is back on the same Desktop when they end. The strip never appears in ⌘-Tab or
 window cycle.
 
 **Wallpaper click.** The active stage goes into the strip, and a second click brings it
-back. A double click counts as one click, and Finder becoming active after the click never
+back (with "Click wallpaper to reveal desktop: Only in Stage Manager"; with "Always" macOS
+moves the windows aside itself, see the settings above). A double click counts as one click, and Finder becoming active after the click never
 switches stages. The Dock's window spans its whole screen, clear away from its bar: a click
 there is on the wallpaper (or the window) below it, and only one on or near the bar (its
 magnified icons included) is the Dock's.
@@ -221,7 +231,13 @@ under the pointer. The stage it left keeps its other windows in their order, its
 number, and its card shows them at once (a stage's only window is the whole card's drop).
 Within the column a card still moves whole: reordering and dropping onto another card are
 extensions (below), and there the card is what is arranged. A window dragged onto the strip
-becomes a stage of its own in the slot under the pointer.
+becomes a stage of its own in the slot under the pointer. While it is dragged over the cards
+they stay under it, as Apple's do; once the pointer is over the strip, a card-sized picture of
+it follows the pointer above everything (Apple's window itself turns into a card there,
+recorded with the pointer about 280 pt from the edge on a 5K screen). Apple's took the drop
+of a window of another app than the stage's (11-09: Green out of Red's stage made a card) and
+sent one of the stage's only app back where it was (Red 2 out of Red's stage); ours makes a
+card of either, an extension that keeps Apple's own case as it is.
 
 **Nothing on a card is cut off.** The strip's panel reaches past its column on the right,
 as far as the widest card can draw: a combined card's second app's window (`[cards]
@@ -416,7 +432,8 @@ frame, unless the frames look alike there) or a desktop icon came under it. A De
 first visit still shows its edges for a moment, until its patch is drawn.
 
 **Dragging uses stand-ins.** A window dragged over the strip keeps its size under a
-card-sized picture of it, where Apple shrinks the window itself. A card dragged out is shown
+card-sized picture of it, where Apple shrinks the window itself: Stage Manager cannot resize
+another app's window while you hold it without fighting the drag. A card dragged out is shown
 by a growing picture of the window it was pressed on (its front window on a card of one).
 
 **⌘M** parks the window and then un-minimizes it there, so macOS may show its restore
@@ -650,6 +667,13 @@ in front, and the windows on screen all along bring no stage forward even after 
   app with the same title and no telling frame stay in view rather than guess.
 - With "Click wallpaper: Only in Stage Manager", a click on a desktop icon also counts as a
   wallpaper click.
+- With "Click wallpaper: Always" (macOS's default), a wallpaper click moves every window
+  aside as macOS does outside Stage Manager, where Apple's puts the stage into the strip and
+  the strip stays (recorded 11-09). Only "Only in Stage Manager" gives the click to Stage
+  Manager.
+- A card dragged onto a screen left of its own keeps its card size until the drop (its
+  stand-in grows toward the window's size only right of the strip); Apple's arrives at the
+  window's size.
 - Since macOS 15, macOS asks about once a month whether the app may capture windows
   directly. Apple's content picker avoids that alert but cannot serve a strip of every
   window.

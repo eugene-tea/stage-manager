@@ -9,6 +9,16 @@
   its windows into the middle and that window alone joins the stage you are in, where you let
   it go; the others stay on the card. Dragged up or down the strip, or onto another card, the
   card still moves whole.
+- The strip slides away later, as Apple's does: only once a window covers the cards' left
+  edge (about 20 points from the screen's edge), not already at about 50.
+- A window you drag over the strip stays above the cards, as with Apple's; a small picture of
+  it still shows where it goes once the pointer is over the strip.
+- A card dragged onto your other screen opens its windows there, in the stage in front on
+  that screen. Before, they came to the screen the card was on.
+- An app that opens two windows at once now comes forward with the one it opened last in
+  front, as with Apple's, and keeps it in front when you come back to its stage.
+- Settings says what "Click wallpaper to reveal desktop" does: with Always, macOS moves every
+  window aside itself; Only in Stage Manager puts your stage into the strip, as Apple's does.
 
 ## 1.7.0 — 2026-11-06
 
