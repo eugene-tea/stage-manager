@@ -2529,6 +2529,84 @@ fn a_dropped_card_lands_its_front_window_at_the_drop_point() {
     assert!(VISIBLE.contains_rect(&f), "{f:?} on screen");
 }
 
+/// A card of three windows (5 and 2 of app 11, 3 of app 12) beside the active stage (1) and a
+/// fourth stage (4): the stage numbers are 1, 2 (the combined card) and 3 (window 4's).
+fn combined_card() -> (Env, StageId) {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Native);
+    e.add(meta(5, 11, "com.example.b"), RuleAction::Native);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::Native);
+    e.add(meta(4, 13, "com.example.d"), RuleAction::Native);
+    let (card, third) = (e.m.stage_of(w(2)).expect("staged"), e.m.stage_of(w(3)).expect("staged"));
+    let obs = e.d.obs();
+    let a = e.m.merge_stages(third, card, &obs);
+    e.run(a);
+    e.switch(1);
+    assert_eq!(e.number_of(1), 1);
+    assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![5, 2, 3]));
+    (e, card)
+}
+
+#[test]
+fn one_window_dragged_out_of_a_combined_card_joins_the_current_stage_alone() {
+    let (mut e, card) = combined_card();
+    let (number, slots) = (e.m.stage_number(card), e.slot_numbers());
+    let (four, four_number) = (e.m.stage_of(w(4)), e.number_of(4));
+    let obs = e.d.obs();
+    let a = e.m.move_window_into_active_at(card, w(2), Point::new(500.0, 300.0), &obs);
+    assert!(a.contains(&Action::Focus { id: w(2) }), "the dropped window has the keyboard: {a:?}");
+    e.run(a);
+    let active = e.m.main_active_stage().expect("active");
+    assert_eq!(e.m.stage_of(w(2)), Some(active), "the window joins the current stage");
+    assert_eq!(e.m.stage(active).map(|s| (s.windows.iter().map(|x| x.0).collect::<Vec<_>>(), s.key)), Some((vec![2, 1], Some(w(2)))));
+    let f = e.d.frames[&w(2)];
+    assert_eq!((f.x, f.y), (500.0, 300.0), "at the drop point");
+    assert!(!e.d.parked(w(2)));
+    // The stage it left keeps its other windows, in their order, parked, with its number and slot.
+    assert_eq!(e.m.stage(card).map(|s| s.windows.iter().map(|x| x.0).collect::<Vec<_>>()), Some(vec![5, 3]));
+    assert!(e.d.parked(w(5)) && e.d.parked(w(3)));
+    assert_eq!(e.m.stage_number(card), number);
+    assert_eq!((e.m.stage_of(w(4)), e.number_of(4)), (four, four_number));
+    assert_eq!(e.slot_numbers(), slots, "the strip keeps its order");
+}
+
+#[test]
+fn the_front_window_dragged_out_hands_its_stages_key_to_the_next() {
+    let (mut e, card) = combined_card();
+    let obs = e.d.obs();
+    let a = e.m.move_window_into_active_at(card, w(5), Point::new(400.0, 200.0), &obs);
+    e.run(a);
+    assert_eq!(e.m.stage(card).map(|s| (s.windows.iter().map(|x| x.0).collect::<Vec<_>>(), s.key)), Some((vec![2, 3], Some(w(2)))));
+    // Shown again, the stage comes back with its two windows.
+    let n = e.m.stage_number(card).expect("numbered");
+    e.switch(n);
+    assert!(!e.d.parked(w(2)) && !e.d.parked(w(3)));
+    assert!(e.d.parked(w(5)) && e.d.parked(w(1)), "the dropped window stays with the stage it joined");
+}
+
+#[test]
+fn a_stages_only_window_dragged_out_is_the_whole_cards_drop() {
+    let (mut e, _) = combined_card();
+    let four = e.m.stage_of(w(4)).expect("staged");
+    let obs = e.d.obs();
+    let a = e.m.move_window_into_active_at(four, w(4), Point::new(500.0, 300.0), &obs);
+    e.run(a);
+    assert_eq!(e.m.stage(four), None, "its emptied stage goes, as a card dropped whole");
+    assert_eq!(e.m.stage_of(w(4)), e.m.main_active_stage());
+    let f = e.d.frames[&w(4)];
+    assert_eq!((f.x, f.y), (500.0, 300.0));
+}
+
+#[test]
+fn a_window_drag_out_of_the_current_stage_or_of_no_window_does_nothing() {
+    let (mut e, card) = combined_card();
+    let obs = e.d.obs();
+    // The current stage's own window, and a window that is gone.
+    assert!(e.m.move_window_into_active_at(card, w(1), Point::new(500.0, 300.0), &obs).is_empty());
+    assert!(e.m.move_window_into_active_at(card, w(99), Point::new(500.0, 300.0), &obs).is_empty());
+}
+
 #[test]
 fn a_window_dropped_on_the_strip_gets_its_own_stage_and_keeps_its_pre_drag_frame() {
     let mut e = Env::new();

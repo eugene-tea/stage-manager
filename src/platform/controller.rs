@@ -31,7 +31,8 @@
 //!   down (AX move events between a global mouse-down and mouse-up) is announced to the strip,
 //!   which shows a drop target; released over the strip, it gets a stage of its own and keeps
 //!   its pre-drag frame. A card dragged out of the strip arrives as
-//!   [`StripEvent::CardDropped`], one dropped onto another card as
+//!   [`StripEvent::CardDropped`] (with a window id: that window of a combined card alone,
+//!   [`Model::move_window_into_active_at`]), one dropped onto another card as
 //!   [`StripEvent::CardMerged`] (`[strip] merge_on_drop`).
 //! - **Spaces**: every Space (Desktop) has its own stages and strip, as Apple's does. A
 //!   window is given to the engine only once the window server lists it on screen (so its
@@ -5835,7 +5836,7 @@ impl Controller {
         match event {
             StripEvent::CardClicked { stage, shift } => StripEvent::CardClicked { stage: f(stage), shift },
             StripEvent::CardPressed { stage } => StripEvent::CardPressed { stage: f(stage) },
-            StripEvent::CardDropped { stage, x, y } => StripEvent::CardDropped { stage: f(stage), x, y },
+            StripEvent::CardDropped { stage, window, x, y } => StripEvent::CardDropped { stage: f(stage), window, x, y },
             StripEvent::IconClicked { stage, pid } => StripEvent::IconClicked { stage: f(stage), pid },
             StripEvent::CardMoved { stage, before } => StripEvent::CardMoved { stage: f(stage), before: before.map(f) },
             StripEvent::CardMerged { stage, into } => StripEvent::CardMerged { stage: f(stage), into: f(into) },
@@ -5878,7 +5879,8 @@ impl Controller {
         self.flush_superseded(ob, "a strip click");
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
-        let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. });
+        // A window dragged out of a combined card leaves the card drawn without it, the same.
+        let local_edit = matches!(event, StripEvent::CardMoved { .. } | StripEvent::CardMerged { .. } | StripEvent::CardDropped { window: Some(_), .. });
         if self.frozen_on(self.strip_event_display(&event)) {
             // Refused: nothing acted, so a focus held (and a Desktop arranged for it) stays.
             tracing::debug!(settling = self.phase.changing(), "a full-screen app's Space shows or a Space change is settling; the strip's input does nothing");
@@ -5917,7 +5919,12 @@ impl Controller {
                 refused = m.switch_refused(StageId(stage)).filter(|r| *r != SwitchRefused::InFront).map(|r| (stage, r));
                 if shift { m.merge_into_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
             }
-            StripEvent::CardDropped { stage, x, y } => {
+            StripEvent::CardDropped { stage, window: Some(window), x, y } => {
+                counters::bump(Count::Drop);
+                tracing::info!(stage, window, x, y, "a window dragged out of a combined card: it alone joins the current stage");
+                m.move_window_into_active_at(StageId(stage), WindowId(window), Point::new(x, y), &obs)
+            }
+            StripEvent::CardDropped { stage, window: None, x, y } => {
                 counters::bump(Count::Drop);
                 tracing::info!(stage, x, y, "card dropped in the main area: its windows join the current stage");
                 m.merge_into_active_at(StageId(stage), Point::new(x, y), &obs)

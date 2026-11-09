@@ -2311,6 +2311,109 @@ def merge_sub_test(vis):
     consistent("card merge")
 
 
+def rect_right(r):
+    return r["x"] + r["w"]
+
+
+def phase_crop():
+    """Round strip-crop-window-drag (owner 11-09). A combined card (Alpha 1 in front, Fixture 1
+    behind it: a second app's window, `[cards] second_app_dx` to the right) is drawn whole,
+    at rest and grown under the pointer: its back window reaches past the strip column and
+    stays inside the strip's panel (the panel was the column's width, and cut it off with a
+    straight edge). Then the back window is dragged out by its own part (Apple's: each window
+    of a combined card drags out on its own): it alone joins the current stage at the drop
+    point, and the card keeps Alpha 1, its number and its slot. Fixture windows only."""
+    say("\n== crop: a combined card drawn whole past the column; one of its windows dragged out alone ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config(CONFIG_BACKDROP)
+    # Wide windows make a wide card; Fixture 2 (the current stage) sits clear of the strip.
+    start_extra_frames("a", 1, "40,40,-80,700")
+    start_fixture(2, "--frames", "40,40,-80,700;560,80,640,420")
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with two fixture windows and Alpha's"):
+        return
+    start_backdrop(s)
+    t = by_title(s)
+    f1, f2, a1 = t["Fixture 1"]["id"], t["Fixture 2"]["id"], t["Alpha 1"]["id"]
+    do("new", f1)
+    do("send", by_title(state())["Fixture 1"]["home"], a1)
+    do("switch", by_title(state())["Fixture 2"]["home"])
+    time.sleep(1.0)
+    s = state()
+    t = by_title(s)
+    card = t["Fixture 1"]["home"]
+    members = {st["number"]: list(st["windows"]) for st in s["stages"]}
+    if not check(members.get(card) == [a1, f1] and s["active"] == t["Fixture 2"]["home"] and card in s["strip"],
+                 f"one combined card, Alpha 1 in front of Fixture 1, Fixture 2 current ({stage_titles(s)}, strip {s['strip']})"):
+        return
+    stage = ids_by_number(s)[card]
+    vis = s["display"]["visible"]
+    column = vis["x"] + s["strip_width"]
+
+    def planes():
+        """The combined card's planes as drawn (global), by window id, and the strip panel."""
+        p = strip_probe() or {}
+        c = next((c for c in p.get("cards", []) if c.get("stage") == stage), None)
+        return ({q["window"]: q["plane"] for q in c["planes"]} if c else {}), strip_panel()
+
+    say("-- the combined card is drawn whole past the strip column, at rest and grown under the pointer")
+    if reveal_strip("crop: the combined card") is not None:
+        drawn, panel = planes()
+        back = drawn.get(f1)
+        if check(back is not None and panel is not None and a1 in drawn, f"the card's two planes and the strip panel ({sorted(drawn)}, {panel and panel['bounds']})"):
+            right = rect_right(panel["bounds"])
+            check(rect_right(back) > column + 10, f"Fixture 1's window reaches past the column ({rect_right(back):.0f} > {column:.0f})")
+            check(all(rect_right(r) <= right + 0.5 for r in drawn.values()),
+                  f"and the panel holds it: nothing cut off at a straight edge (planes to {max(rect_right(r) for r in drawn.values()):.0f}, panel to {right:.0f})")
+            front = drawn[a1]
+            at = ((rect_right(front) + rect_right(back)) / 2, back["y"] + back["h"] / 2)
+            r = strip_hover(at)
+            if not blocked(r, "the hovered combined card (its growth past the column)"):
+                time.sleep(0.5)
+                grown, panel = planes()
+                g = grown.get(f1)
+                check(g is not None and g["w"] > back["w"] * 1.03, f"hovered on its back window's part, the card grows ({back['w']:.0f} -> {g and round(g['w'])})")
+                check(g is not None and panel is not None and all(rect_right(x) <= rect_right(panel["bounds"]) + 0.5 for x in grown.values()),
+                      f"grown, it still fits the panel (to {g and round(rect_right(g))}, panel to {panel and round(rect_right(panel['bounds']))})")
+                strip_hover(None)
+
+    say("-- the back window dragged out by its own part joins the current stage alone; the card keeps the other")
+    time.sleep(1.0)
+    if reveal_strip("crop: one window out") is None:
+        return
+    drawn, _ = planes()
+    if not check(f1 in drawn and a1 in drawn, f"the combined card drawn ({sorted(drawn)})"):
+        return
+    front, back = drawn[a1], drawn[f1]
+    # Right of the front window's far edge: only Fixture 1's plane is drawn there.
+    press = ((rect_right(front) + rect_right(back)) / 2, back["y"] + back["h"] / 2)
+    drop = (vis["x"] + 700, vis["y"] + vis["h"] / 2)
+    before_log = len(log_text())
+    out, seen = card_drag(press, drop, "Fixture 1 by its own part into the main area")
+    if blocked(out, "the window dragged out of the combined card (the drag, where it lands, the card it leaves)"):
+        return
+    check('"ok": true' in out or '"ok":true' in out, f"the drag ran ({out.strip()[:120]}{whose(out)})")
+    picked = [p for p in seen if p.get("drag_window") == f1 and p.get("drag_alone")]
+    check(bool(picked), f"the press picked Fixture 1, to go alone ({len(picked)} of {len(seen)} samples)")
+    check(any(p.get("dragging") == "Out" for p in picked), "it was dragged out of the column")
+    s = wait_state(lambda x: by_title(x)["Fixture 1"]["home"] == x["active"], "Fixture 1 to join the current stage")
+    if not check(s is not None, f"Fixture 1 joins the current stage ({stage_titles(state())})"):
+        return
+    t = by_title(s)
+    check(t["Fixture 2"]["home"] == s["active"] and not t["Fixture 1"]["parked"], "beside Fixture 2, on screen")
+    check(t["Alpha 1"]["home"] == card and t["Alpha 1"]["parked"], f"Alpha 1 stays in its stage, number {card}, hidden ({t['Alpha 1']['home']})")
+    check(card in s["strip"], f"its card stays in the strip ({s['strip']})")
+    f = t["Fixture 1"]["restore"]
+    check(f["x"] <= drop[0] <= f["x"] + f["w"] and f["y"] <= drop[1] <= f["y"] + 30,
+          f"Fixture 1 lands with its title bar under the drop point ({fmt(f)})")
+    time.sleep(0.5)
+    drawn, _ = planes()
+    check(sorted(drawn) == [a1], f"the card shows Alpha 1 alone ({sorted(drawn)})")
+    check("a window dragged out of a combined card" in log_text()[before_log:], "logged as one window out of a combined card")
+    consistent("one window out of a combined card")
+
+
 def phase_motion():
     say("\n== motion: strip level, a window dropped into a slot, card reorder, switch animation ==")
     stop_app()
@@ -6940,7 +7043,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "hide": phase_hide, "away": phase_away,
-             "glass": phase_glass, "displays": phase_displays}[p]()
+             "glass": phase_glass, "displays": phase_displays, "crop": phase_crop}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

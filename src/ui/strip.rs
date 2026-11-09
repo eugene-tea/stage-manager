@@ -33,12 +33,20 @@
 //!   it covers it (and auto-hide slides it away). It is lifted above windows only while a
 //!   window is dragged over it, while a card is dragged, and while the edge reveals it over
 //!   a covering window; a click on a card never lifts it.
+//! - **The panel** is wider than the column ([`Metrics::panel_width`]): a card draws past the
+//!   column's right edge (a second app's window, the hover's growth, a card following the
+//!   pointer to the column's edge) and nothing there is cut off (owner 11-09). The column
+//!   (`Geometry::global`) is still what drops, window drags, auto-hide and `[windows] fit`
+//!   measure; the room right of it lets clicks through except over a card drawn there.
 //! - **Drag a card** (press, move more than `[drag] threshold`): within the strip column the
 //!   card itself follows the pointer and the others make room on the spring
 //!   (`[strip] reorder`; released there it goes out as [`StripEvent::CardMoved`]); past the
-//!   column a ghost of its front thumbnail follows the pointer in its own click-through
-//!   panel and grows toward the window's size; released outside the strip it goes out as
-//!   [`StripEvent::CardDropped`].
+//!   column a ghost of the window pressed (the frontmost turned plane under the press)
+//!   follows the pointer in its own click-through panel and grows toward that window's size;
+//!   released outside the strip it goes out as [`StripEvent::CardDropped`]. On a card of
+//!   several windows that window goes alone, as on Apple's (the event names it; its plane
+//!   fades while it is out, and the card drops it at the release); in the column the card
+//!   moves whole.
 //! - **Drop a card on a card** (`[strip] merge_on_drop`, an extension): over the middle part
 //!   of another card (`[drag] merge_zone` of its height, measured on the cards at rest) the
 //!   reorder gap closes and that card grows and shows the dragged card's windows stacked
@@ -819,9 +827,11 @@ impl EdgeTab {
 struct Geometry {
     /// The main display's frame, Cocoa coordinates.
     screen: NSRect,
-    /// Panel frame, Cocoa coordinates (bottom-left origin).
+    /// Panel frame, Cocoa coordinates (bottom-left origin): the column and room right of it
+    /// for what cards draw past the column ([`Metrics::panel_width`]).
     panel: NSRect,
-    /// The strip area in global top-left coordinates.
+    /// The strip column in global top-left coordinates: what hit tests, drops, window drags,
+    /// auto-hide and `[windows] fit` measure. The panel is wider ([`Geometry::area`]).
     global: Rect,
     /// Height of the primary display (for flipping Cocoa y).
     primary_height: f64,
@@ -857,9 +867,16 @@ impl Geometry {
         let top = primary_height - (visible.origin.y + visible.size.height);
         let display_middle = primary_height - (frame.origin.y + frame.size.height / 2.0);
         let m = Metrics::new(style, size, k, display_middle - top);
-        let panel = NSRect::new(visible.origin, NSSize::new(m.width, visible.size.height));
+        let panel = NSRect::new(visible.origin, NSSize::new(m.panel_width(), visible.size.height));
         let global = Rect::new(visible.origin.x, top, m.width, visible.size.height);
         Self { screen: frame, panel, global, primary_height, m }
+    }
+
+    /// The whole panel in global top-left coordinates: the column and the room right of it
+    /// where a card may draw (a second app's window, a hovered or dragged card). A point in it
+    /// is the strip's only over a card ([`Strip::update_pass_through`]).
+    fn area(&self) -> Rect {
+        Rect::new(self.global.x, self.global.y, self.panel.size.width, self.global.h)
     }
 
     /// The edge tab's frame, global (top-left origin): flush left, vertically centered on
@@ -1318,14 +1335,18 @@ struct CardDrag {
     onto: Option<u64>,
     /// Where the press was (global).
     press: Point,
-    /// The front thumbnail where it was pressed (global).
+    /// The pressed window's thumbnail where it was pressed (global, its turned plane's box).
     thumb: Rect,
     /// The press point as fractions of the thumbnail's size.
     grab: (f64, f64),
-    /// The front window's size.
+    /// The pressed window's size.
     full: Size,
-    /// The front window's id (its thumbnail is the ghost's image).
-    front: u32,
+    /// The window pressed: the frontmost under the press (the front one off every window: on
+    /// an icon). Its thumbnail is the ghost's image, and it is the window that lands.
+    window: u32,
+    /// The card has other windows: dragged out, `window` goes alone, as Apple's does
+    /// ([`StripEvent::CardDropped`] with its id). Within the column the card moves whole.
+    alone: bool,
     /// The ghost, once the press moved past the threshold.
     ghost: Option<Ghost>,
     /// The drag went somewhere: over another card, or half a card away from the press. Then a
@@ -1589,9 +1610,11 @@ impl Strip {
         self.style.animation.animates().then(|| motion_math::slide_spring(&self.style))
     }
 
-    /// How far left the cards sit when hidden.
+    /// How far left the cards sit when hidden: `[motion] slide_distance`, or further when
+    /// the widest card needs it to leave the screen whole ([`Metrics::hide_distance`]).
     fn hidden_dx(&self) -> f64 {
-        -(self.style.motion.slide_distance * self.m().k).max(self.geometry.panel.size.width + 30.0)
+        let m = self.m();
+        -(self.style.motion.slide_distance * m.k).max(self.geometry.global.w + 30.0).max(m.hide_distance())
     }
 
     fn current_dx(&self) -> f64 {
@@ -2132,6 +2155,9 @@ impl Strip {
             "pictures": pictures,
             "lifted": self.lifted_card.as_ref().map(|l| l.0),
             "dragging": self.card_drag.as_ref().map(|d| format!("{:?}", d.mode)),
+            // The window pressed, and whether it goes alone out of the column.
+            "drag_window": self.card_drag.as_ref().map(|d| d.window),
+            "drag_alone": self.card_drag.as_ref().map(|d| d.alone),
             "merge_onto": self.merge_onto(),
             "shown": self.pane.shown,
             "overlay_top_down": self.motion_top_down(),
@@ -2482,7 +2508,7 @@ impl Strip {
             let x = icons_right + 4.0;
             let base = layout.thumbs.first().map_or(layout.frame.h, |t| t.rect.max_y());
             let label = text_layer(name, 11.0, self.scale, false);
-            let width = (self.geometry.panel.size.width - 8.0 - x).max(30.0);
+            let width = (self.geometry.global.w - 8.0 - x).max(30.0);
             label.setFrame(CGRect::new(CGPoint::new(x, origin.y + base - 2.0), CGSize::new(width, 15.0)));
             label.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
             label.setShadowOpacity(0.6);
@@ -2521,7 +2547,7 @@ impl Strip {
             }
         }
         CATransaction::commit();
-        if let Some(ghost) = self.card_drag.as_mut().filter(|d| d.front == id).and_then(|d| d.ghost.as_mut()) {
+        if let Some(ghost) = self.card_drag.as_mut().filter(|d| d.window == id).and_then(|d| d.ghost.as_mut()) {
             ghost.set_image(&picture);
         }
         self.thumbs.insert(id, picture);
@@ -2657,7 +2683,7 @@ impl Strip {
         // A card a transition is still landing in is not drawn yet: a press there is nothing
         // (it would switch straight back; review R1-ui 3).
         self.pressed = if self.pane.shown { self.card_at(p).filter(|s| !self.motion.holds(*s)) } else { None };
-        self.card_drag = self.pressed.and_then(|stage| self.drag_for(stage));
+        self.card_drag = self.pressed.and_then(|stage| self.drag_for(stage, p));
         if let Some(stage) = self.pressed {
             // A click is likely: fresh snapshots of what leaves and what arrives, and the
             // engine's look at the windows taken now rather than at the release.
@@ -2670,12 +2696,13 @@ impl Strip {
         self.pressed.map(|stage| StripEvent::CardPressed { stage })
     }
 
-    /// A possible drag of `stage`'s card from the current pointer.
-    fn drag_for(&self, stage: u64) -> Option<CardDrag> {
+    /// A possible drag of `stage`'s card pressed at `p` (panel coordinates), from the
+    /// current pointer: of the window pressed ([`Strip::window_at`]).
+    fn drag_for(&self, stage: u64, p: Point) -> Option<CardDrag> {
         let layout = self.layouts.iter().find(|l| l.stage == stage)?;
         let card = self.snapshot.cards.iter().find(|c| c.stage == stage)?;
-        let slot = layout.thumbs.first()?;
-        let front = card.windows.first()?;
+        let slot = layout.thumbs.get(self.window_at(layout, p).unwrap_or(0))?;
+        let pressed = card.windows.iter().find(|w| w.id == slot.id)?;
         let g = self.geometry.global;
         let b = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let thumb = Rect::new(g.x + b.x, g.y + b.y, b.w.max(1.0), b.h.max(1.0));
@@ -2690,11 +2717,37 @@ impl Strip {
             press,
             thumb,
             grab,
-            full: front.frame.size(),
-            front: front.id,
+            full: pressed.frame.size(),
+            window: pressed.id,
+            alone: card.windows.len() > 1,
             ghost: None,
             strayed: false,
         })
+    }
+
+    /// The window of `layout`'s card under `p` (panel coordinates) where the card is drawn
+    /// now (on its way to its slot, grown or pressed), as its index in the layout's
+    /// thumbnails: the frontmost whose turned plane holds it ([`CardLayout::thumb_at`]).
+    fn window_at(&self, layout: &CardLayout, p: Point) -> Option<usize> {
+        let m = self.m();
+        let d = self.drawn_offset(layout.stage);
+        let s = self.card_scale(layout.stage);
+        // Undo the growth about the drawn middle, then the offset: the card as laid out.
+        let c = layout.hover_center(m);
+        let at = Point::new(c.x + (p.x - d.x - c.x) / s, c.y + (p.y - d.y - c.y) / s);
+        layout.thumb_at(m, at)
+    }
+
+    /// Fades the plane of `window` on `stage`'s card to `opacity` (a window dragged out
+    /// alone: the card shows the others as they are).
+    fn set_plane_opacity(&self, stage: u64, window: u32, opacity: f32) {
+        let Some(layers) = self.pane.cards.get(&stage) else { return };
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for (_, plane) in layers.planes.iter().filter(|(id, _)| *id == window) {
+            plane.setOpacity(opacity);
+        }
+        CATransaction::commit();
     }
 
     /// Sets a dragged card's opacity in the strip (lifted out, or back).
@@ -2738,7 +2791,8 @@ impl Strip {
         let in_column = self.geometry.global.contains(p);
         let mode = if follow && in_column { DragMode::Reorder } else { DragMode::Out };
         let (before, onto) = if mode == DragMode::Reorder { self.card_spot(p, stage) } else { (None, None) };
-        let image = self.thumbs.get(&drag.front).cloned();
+        let image = self.thumbs.get(&drag.window).cloned();
+        let (window, alone) = (drag.window, drag.alone);
         let was = drag.mode;
         let was_onto = self.merge_onto();
         if was == DragMode::Pressed {
@@ -2768,6 +2822,10 @@ impl Strip {
                 // dragged card's picture twice (owner 10-22, round 9C).
                 let held = if onto.is_some() { style.lifted_opacity as f32 } else { 1.0 };
                 let seconds = if was == DragMode::Reorder { self.style.animation.seconds(self.style.cards.hover_ms) } else { 0.0 };
+                if was == DragMode::Out && alone {
+                    // Back in the column the card moves whole again.
+                    self.set_plane_opacity(stage, window, 1.0);
+                }
                 self.fade_card(stage, held, seconds);
                 if was != DragMode::Reorder {
                     self.lift_card(stage);
@@ -2780,7 +2838,14 @@ impl Strip {
                     self.settle_lifted();
                 }
                 if was != DragMode::Out {
-                    self.set_card_opacity(stage, style.lifted_opacity as f32);
+                    // Out of the column a window of several goes alone: its plane fades, the
+                    // card keeps the others; a card of one window fades whole.
+                    if alone {
+                        self.set_card_opacity(stage, 1.0);
+                        self.set_plane_opacity(stage, window, style.lifted_opacity as f32);
+                    } else {
+                        self.set_card_opacity(stage, style.lifted_opacity as f32);
+                    }
                     // The card goes back to its slot while its ghost is out.
                     self.layout_cards(false);
                 }
@@ -2821,6 +2886,7 @@ impl Strip {
                 return Some(StripEvent::CardMerged { stage: drag.stage, into });
             }
             self.set_card_opacity(drag.stage, 1.0);
+            self.set_plane_opacity(drag.stage, drag.window, 1.0);
             if drag.mode == DragMode::Reorder {
                 // Put the card in its new slot now; the controller's snapshot agrees. It stays
                 // above the others until it has glided in.
@@ -2846,7 +2912,11 @@ impl Strip {
             if out {
                 let right = self.geometry.global.max_x();
                 let rect = strip_layout::ghost_frame(drag.thumb, drag.grab, drag.full, right, self.style.drag.grow_distance, at);
-                self.motion.keep_landing(drag.ghost, drag.front, rect);
+                self.motion.keep_landing(drag.ghost, drag.window, rect);
+                if drag.alone {
+                    // The card shows its other windows at once; the controller's snapshot agrees.
+                    self.leave_locally(drag.stage, drag.window);
+                }
             } else {
                 drop(drag.ghost);
             }
@@ -2857,7 +2927,9 @@ impl Strip {
                 return None;
             }
             let origin = strip_layout::drop_origin(drag.full, drag.grab.0, at);
-            return Some(StripEvent::CardDropped { stage: drag.stage, x: origin.x, y: origin.y });
+            let window = drag.alone.then_some(drag.window);
+            tracing::debug!(stage = drag.stage, ?window, "card dragged out: dropped in the main area");
+            return Some(StripEvent::CardDropped { stage: drag.stage, window, x: origin.x, y: origin.y });
         }
         let Some(pressed) = self.pressed.take() else {
             self.squeeze(None);
@@ -2927,6 +2999,13 @@ impl Strip {
         strip_model::move_before(&mut self.snapshot.cards, |c| c.stage, stage, before)
     }
 
+    /// Takes `window` off `stage`'s card in the snapshot (see [`CardSnapshot::without_window`]).
+    fn leave_locally(&mut self, stage: u64, window: u32) {
+        if let Some(card) = self.snapshot.cards.iter_mut().find(|c| c.stage == stage) {
+            *card = card.without_window(window);
+        }
+    }
+
     /// Merges `stage`'s card into `into`'s in the snapshot (see
     /// [`CardSnapshot::merged_with`]); false when either card is not there.
     fn merge_locally(&mut self, stage: u64, into: u64) -> bool {
@@ -2994,7 +3073,8 @@ impl Strip {
         if self.edge_waits && self.poll_timer.is_none() && self.visibility.wakes(p, &g) {
             self.update_visibility();
         }
-        if g.contains(p) {
+        // The whole panel: a card's part drawn right of the column hovers and clicks too.
+        if self.geometry.area().contains(p) {
             self.hover_at(Some(Point::new(p.x - g.x, p.y - g.y)));
         } else if self.hovered.is_some() || self.pane.catches == Some(true) {
             self.hover_at(None);
@@ -3004,13 +3084,15 @@ impl Strip {
     /// Lets clicks through the pane except where they are its own (R1-ui 8): the strip's
     /// empty column is the desktop's (a wallpaper click, Finder's icons) or the window's
     /// under it; the pane takes the mouse only on a card (where it is drawn now) or while a
-    /// card is pressed or dragged. `local` is the pointer in panel coordinates (`None`: read
-    /// it now). AppKit decides per window, so the flag follows the pointer.
+    /// card is pressed or dragged. The room right of the column holds no card of its own:
+    /// there too only a card drawn into it catches. `local` is the pointer in panel
+    /// coordinates (`None`: read it now). AppKit decides per window, so the flag follows the
+    /// pointer.
     fn update_pass_through(&mut self, local: Option<Point>) {
         let local = local.or_else(|| {
             let g = self.geometry.global;
             let p = self.pointer();
-            g.contains(p).then(|| Point::new(p.x - g.x, p.y - g.y))
+            self.geometry.area().contains(p).then(|| Point::new(p.x - g.x, p.y - g.y))
         });
         let busy = self.pressed.is_some() || self.card_drag.is_some();
         let catch = self.pane.shown && (busy || local.and_then(|p| self.card_at(p)).is_some());

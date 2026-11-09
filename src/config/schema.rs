@@ -222,7 +222,7 @@ pub const KEYS: &[KeyDef] = &[
     k("strip", "show_numbers", Kind::Bool, "false", "Draw each card's stage number (for the hotkeys). Apple shows none."),
     k("strip", "show_names", Kind::Bool, "false", "Draw stage names under cards. Apple shows none."),
     k("strip", "width", f(60.0, 800.0), "200.0",
-        "Width of the strip column: the panel, and the area windows keep clear of with fit."),
+        "Width of the strip column, the area windows keep clear of with fit (cards draw past it where they reach)."),
     k("strip", "capacity", i(0, 30), "0",
         "Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt)."),
     k("strip", "capacity_pitch", f(20.0, 2000.0), "190.0", "With capacity = 0: room per card, in points of visible height."),
@@ -294,7 +294,7 @@ pub const KEYS: &[KeyDef] = &[
         "Spring stiffness of the strip sliding out and back in (auto-hide, a window over it). Apple's, measured: 282 (99 % by about 400 ms)."),
     k("motion", "slide_damping", f(0.0, 1000.0), "33.6", "Spring damping of the slide (33.6 with stiffness 282 and mass 1: critically damped)."),
     k("motion", "slide_mass", f(0.01, 100.0), "1.0", "Spring mass of the slide."),
-    k("motion", "slide_distance", f(0.0, 3000.0), "286.0", "How far left the cards slide when the strip hides."),
+    k("motion", "slide_distance", f(0.0, 3000.0), "286.0", "How far left the cards slide when the strip hides; further when the widest card needs it to leave the screen."),
     // [reveal]
     k("reveal", "edge_width", f(0.0, 100.0), "2.0", "The pointer within this many points of the left edge counts as at the edge."),
     k("reveal", "delay_ms", i(0, 10_000), "250", "Resting at the left edge this long brings a hidden strip back."),
@@ -555,6 +555,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-30.toml"),
     include_str!("legacy/default-31.toml"),
     include_str!("legacy/default-32.toml"),
+    include_str!("legacy/default-33.toml"),
 ];
 
 #[cfg(test)]

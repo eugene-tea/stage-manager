@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- A card is no longer cut off at the strip's right edge: a second app's window on a combined
+  card (Mail beside Telegram, say), a card growing under the pointer, and a card you drag
+  toward the edge show whole.
+- Each window of a combined card drags out on its own, as with Apple's: drag a card by one of
+  its windows into the middle and that window alone joins the stage you are in, where you let
+  it go; the others stay on the card. Dragged up or down the strip, or onto another card, the
+  card still moves whole.
+
 ## 1.7.0 — 2026-11-06
 
 - After a restart, a window its app reopens at a fraction of the size it had (VS Code, say)
