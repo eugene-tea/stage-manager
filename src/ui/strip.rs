@@ -42,14 +42,15 @@
 //! - **Drag a card** (press, move more than `[drag] threshold`): within the strip column the
 //!   card itself follows the pointer and the others make room on the spring
 //!   (`[strip] reorder`; released there it goes out as [`StripEvent::CardMoved`]); past the
-//!   column a ghost of the window pressed (the frontmost turned plane under the press)
-//!   follows the pointer in its own click-through panel, turned as the card at first and flat
-//!   on the growing spring, and grows toward that window's size;
-//!   released outside the strip it goes out as [`StripEvent::CardDropped`].
+//!   column the window pressed (the frontmost turned plane under the press) appears as
+//!   Apple's does, a ghost at its own size in its own click-through panel, turned as the card
+//!   at first and flat on the growing spring, sliding in from right of the pointer
+//!   (`[drag] appear_ms`) and then held under it; back over the column the card follows
+//!   again; released outside the strip it goes out as [`StripEvent::CardDropped`].
 //! - **Drag one window off a combined card** ([`strip_layout::grip`]: a press on one window of
 //!   a card of several; on the app icons, or on a card of one window, the card moves whole):
 //!   that window alone comes off from the first move (`DragMode::Lifted`), its ghost at the
-//!   card's size in the column and growing past it, its plane on the card faded. Released
+//!   card's size in the column and the window itself past it, its plane on the card faded. Released
 //!   in the main area it goes out as [`StripEvent::CardDropped`] naming it (Apple's); in the
 //!   column, in a gap that opens under the pointer, as [`StripEvent::WindowToNewCard`]; on
 //!   another card's middle, which shows it behind its own windows, as
@@ -1282,6 +1283,10 @@ fn app_icon(pid: i32, points: f64) -> Option<CFRetained<CGImage>> {
 /// dragged card appears turned like a card and is flat about 300 ms later (measured 11-09 on
 /// two drags at different distances: the turn halved after about 90 ms and was under a tenth
 /// after about 230 ms both times, while the pointer had moved 114 and 150 pt).
+///
+/// Past the column it is the window at its own size ([`strip_layout::ghost_frame`]), the
+/// turn drawing it about half as wide at first, and it slides in from right of the pointer
+/// ([`Slide`]): Apple's window appears there when the drag leaves the strip.
 struct Ghost {
     panel: Retained<NSPanel>,
     /// Covers the panel, anchored at the strip's eye: its `sublayerTransform` is the strip's
@@ -1303,10 +1308,29 @@ struct Ghost {
     pictured: bool,
     /// How long an arriving picture takes to fade in (seconds; 0: at once).
     fade: f64,
+    /// Where it slides in from, right and down from its frame (points; zero: no slide): the
+    /// panel also holds that spot until it is dropped.
+    slide: (f64, f64),
 }
 
+/// How a window appearing past the column slides under the pointer: from `from` (right and
+/// down from where it is held, [`strip_layout::appear_offset`]), sideways over `seconds` on
+/// [`strip_layout::appear_progress`]'s curve, and up on the spring it flattens on (Apple's
+/// corner comes up with its turn).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Slide {
+    from: (f64, f64),
+    seconds: f64,
+}
+
+/// The sideways slide's key on the ghost's plane.
+const SLIDE_X: &str = "slideX";
+/// The slide up's key on the ghost's plane.
+const SLIDE_Y: &str = "slideY";
+
 /// How a card's ghost starts: the card's turn and the strip's eye, the spring it flattens on
-/// (`None`: flat at once), its plate's colour and an arriving picture's fade.
+/// (`None`: flat at once), its plate's colour, an arriving picture's fade and, for the window
+/// appearing past the column, its slide (`None`: where it is held at once).
 struct GhostLook {
     tilt: f64,
     eye: Point,
@@ -1314,6 +1338,7 @@ struct GhostLook {
     flatten: Option<motion_math::Spring>,
     plate: CFRetained<CGColor>,
     fade: f64,
+    slide: Option<Slide>,
 }
 
 impl Ghost {
@@ -1375,6 +1400,31 @@ impl Ghost {
             turn.setTransform(identity());
             turn.addAnimation_forKey(&spring(s, "transform", &transform_value(from), &transform_value(identity())), Some(&NSString::from_str("flatten")));
         }
+        // Slid in from right of the pointer: sideways on the appear curve, up as it flattens.
+        // Both ride on the plane's position (additive), which follows the pointer meanwhile.
+        let mut slide = (0.0, 0.0);
+        if let Some(sl) = look.slide.filter(|sl| sl.seconds > 0.0) {
+            slide = sl.from;
+            let x = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("position.x")));
+            x.setDuration(sl.seconds);
+            // The smoothstep, 3t² − 2t³ (strip_layout::appear_progress).
+            x.setTimingFunction(Some(&CAMediaTimingFunction::functionWithControlPoints(1.0 / 3.0, 0.0, 2.0 / 3.0, 1.0)));
+            // SAFETY: NSNumbers are valid values of a position's component.
+            unsafe {
+                x.setFromValue(Some(&NSNumber::new_f64(sl.from.0)));
+                x.setToValue(Some(&NSNumber::new_f64(0.0)));
+            }
+            x.setAdditive(true);
+            turn.addAnimation_forKey(&x, Some(&NSString::from_str(SLIDE_X)));
+            // The view is not flipped: lower on the screen is a smaller y.
+            let (from, to) = (NSNumber::new_f64(-sl.from.1), NSNumber::new_f64(0.0));
+            let y = match look.flatten {
+                Some(s) => Retained::into_super(spring(s, "position.y", &from, &to)),
+                None => ease("position.y", &from, &to, sl.seconds),
+            };
+            y.setAdditive(true);
+            turn.addAnimation_forKey(&y, Some(&NSString::from_str(SLIDE_Y)));
+        }
         panel.setContentView(Some(&view));
         Self {
             panel,
@@ -1387,6 +1437,7 @@ impl Ghost {
             eye: look.eye,
             pictured: picture.is_some(),
             fade: look.fade,
+            slide,
         }
     }
 
@@ -1394,7 +1445,10 @@ impl Ghost {
     /// holds the whole picture around it (the turned plane lies within it: the turn only draws
     /// a plane right of the eye narrower and nearer the eye's height).
     fn set_frame(&self, r: Rect, primary_height: f64) {
-        let whole = self.extent.around(r);
+        let mut whole = self.extent.around(r);
+        if self.slide != (0.0, 0.0) {
+            whole = whole.union(&self.extent.around(Rect::new(r.x + self.slide.0, r.y + self.slide.1, r.w, r.h)));
+        }
         let cocoa = NSRect::new(NSPoint::new(whole.x, primary_height - (whole.y + whole.h)), NSSize::new(whole.w, whole.h));
         self.panel.setFrame_display(cocoa, true);
         CATransaction::begin();
@@ -1413,9 +1467,12 @@ impl Ghost {
         self.panel.orderFrontRegardless();
     }
 
-    /// Flat at once (released: the drop's motion starts from the flat window).
+    /// Flat and in place at once (released: the drop's motion starts from the flat window
+    /// where it is held).
     fn flatten(&self) {
-        self.turn.removeAnimationForKey(&NSString::from_str("flatten"));
+        for key in ["flatten", SLIDE_X, SLIDE_Y] {
+            self.turn.removeAnimationForKey(&NSString::from_str(key));
+        }
     }
 
     /// A newer picture: the panel keeps the window where it is and grows or shrinks around it
@@ -1458,7 +1515,7 @@ enum DragMode {
     /// ghost follows the pointer at the card's size, its plane on the card faded, and the column
     /// shows where it goes ([`WindowSpot`]).
     Lifted,
-    /// Dragged out: the ghost follows the pointer and grows.
+    /// Dragged out: the ghost follows the pointer, the window itself past the column.
     Out,
 }
 
@@ -1507,6 +1564,9 @@ struct CardDrag {
     spot: WindowSpot,
     /// The ghost, once the press moved past the threshold.
     ghost: Option<Ghost>,
+    /// The ghost is the window past the column (else the card's plane in it): crossing the
+    /// column's edge either way makes a new one.
+    ghost_out: bool,
     /// The drag went somewhere: over another card, or half a card away from the press. Then a
     /// release back in its own slot puts the card back and is no click (no switch).
     strayed: bool,
@@ -2958,6 +3018,7 @@ impl Strip {
             grip,
             spot: WindowSpot::Home,
             ghost: None,
+            ghost_out: false,
             strayed: false,
         })
     }
@@ -3011,7 +3072,6 @@ impl Strip {
 
     fn mouse_dragged(&mut self) {
         let p = self.pointer();
-        let strip_right = self.geometry.global.max_x();
         let primary_height = self.geometry.primary_height;
         let mtm = self.mtm;
         let style = self.style.drag.clone();
@@ -3040,7 +3100,16 @@ impl Strip {
             let flatten = full.animation.animates().then(|| motion_math::switch_spring(full));
             let plate = empty_plate(None, &full.cards);
             let fade = full.animation.seconds(full.cards.fade_ms);
-            move || GhostLook { tilt, eye, perspective, flatten, plate: plate.clone(), fade }
+            let appear = full.animation.seconds(style.appear_ms);
+            move |slide: Option<(f64, f64)>| GhostLook {
+                tilt,
+                eye,
+                perspective,
+                flatten,
+                plate: plate.clone(),
+                fade,
+                slide: slide.map(|from| Slide { from, seconds: appear }),
+            }
         };
         let (was, was_spot) = (drag.mode, drag.spot);
         let was_onto = self.merge_onto();
@@ -3058,11 +3127,19 @@ impl Strip {
             if mode == DragMode::Reorder {
                 drag.ghost = None;
             } else {
-                // The ghost: the pressed window, at its plane's size in the column, growing
-                // toward its own past the column's edge.
+                // The ghost: the pressed window, at its plane's size in the column; past the
+                // column's edge the window itself, as Apple's appears there: turned as the card,
+                // right of the pointer, sliding under it. Back over the column it is the card's
+                // plane again (or the card itself follows, reordering).
+                let out = !in_column;
+                if drag.ghost_out != out {
+                    drag.ghost = None;
+                    drag.ghost_out = out;
+                }
                 let hold = strip_layout::window_grab(drag.full, (style.window_grab_x, style.window_grab_y));
-                let frame = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, strip_right, style.grow_distance, hold, p);
-                let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_ref(), style.ghost_opacity as f32, look()));
+                let frame = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, out, hold, p);
+                let slide = out.then(|| strip_layout::appear_offset(hold));
+                let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_ref(), style.ghost_opacity as f32, look(slide)));
                 ghost.set_frame(frame, primary_height);
             }
         }
@@ -3189,10 +3266,9 @@ impl Strip {
             }
             let out = !self.geometry.global.contains(at);
             if out {
-                let right = self.geometry.global.max_x();
                 let d = &self.style.drag;
                 let hold = strip_layout::window_grab(drag.full, (d.window_grab_x, d.window_grab_y));
-                let rect = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, right, d.grow_distance, hold, at);
+                let rect = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, true, hold, at);
                 if let Some(g) = drag.ghost.as_ref() {
                     g.flatten();
                 }

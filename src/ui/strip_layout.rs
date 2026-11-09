@@ -578,25 +578,52 @@ pub fn grip(windows: usize, on_window: bool, on_icon: bool) -> Grip {
     if windows > 1 && on_window && !on_icon { Grip::Window } else { Grip::Card }
 }
 
-/// The ghost of a card dragged out of the strip, before its turn, in global coordinates:
-/// inside the strip it is the pressed window's plane `start` (its thumbnail before the turn,
-/// as drawn when pressed, the pointer `grab` right of its left edge and below its top); past
-/// `strip_right` it grows toward the window's `full` size, reached `grow` further (`[drag]
-/// grow_distance`), the grab point sliding to where the window is held (`hold`,
-/// [`window_grab`]). The pointer `p` stays at the grab point throughout. The ghost starts
-/// turned as the card is and flattens on its own time (the strip's `Ghost`).
-pub fn ghost_frame(start: Rect, grab: (f64, f64), full: Size, strip_right: f64, grow: f64, hold: (f64, f64), p: Point) -> Rect {
-    let t = ((p.x - strip_right) / grow.max(1.0)).clamp(0.0, 1.0);
-    let lerp = |a: f64, b: f64| a + (b - a) * t;
-    let w = lerp(start.w, full.w.max(start.w));
-    let h = lerp(start.h, full.h.max(start.h));
-    let ox = lerp(grab.0, hold.0);
-    let oy = lerp(grab.1, hold.1);
-    Rect::new(p.x - ox, p.y - oy, w, h)
+/// The ghost of a card or window dragged from the strip, before its turn, in global
+/// coordinates, for the pointer at `p`. In the column (`out` false) it is the pressed window's
+/// plane `start` (its thumbnail before the turn, as drawn when pressed), the pointer `grab`
+/// right of its left edge and below its top. Out of the column it is the window itself at its
+/// `full` size, held at `hold` ([`window_grab`]) as Apple's is: Apple's turns into its window
+/// the moment it leaves the strip (measured 11-09), no growing card in between. It appears
+/// turned as the card is, which is what draws it about half as wide at first, and slides from
+/// [`appear_offset`] into this frame (the strip's `Ghost`).
+pub fn ghost_frame(start: Rect, grab: (f64, f64), full: Size, out: bool, hold: (f64, f64), p: Point) -> Rect {
+    if out {
+        let o = drop_origin(hold, p);
+        Rect::new(o.x, o.y, full.w.max(start.w), full.h.max(start.h))
+    } else {
+        Rect::new(p.x - grab.0, p.y - grab.1, start.w, start.h)
+    }
+}
+
+/// How far right of the pointer the window's left edge is when Apple's dragged window
+/// appears past the strip (points; measured 11-09 at 60 fps: 34 and 118 in the two drags, 03
+/// and 06).
+pub const APPEAR_DX: f64 = 76.0;
+
+/// How much lower than where it is held the window's top is when it appears (points;
+/// measured 11-09: 42 and 34). It comes up as it flattens, on the same spring: the turn on
+/// Apple's carries the corner down with it.
+pub const APPEAR_DROP: f64 = 38.0;
+
+/// Where a window that has just appeared past the strip starts, as an offset from where it is
+/// held (`hold`, [`window_grab`]): its left edge [`APPEAR_DX`] right of the pointer and
+/// [`APPEAR_DROP`] lower (points, right and down).
+pub fn appear_offset(hold: (f64, f64)) -> (f64, f64) {
+    (hold.0 + APPEAR_DX, APPEAR_DROP)
+}
+
+/// How far the appearing window has slid sideways from [`appear_offset`] to under the pointer,
+/// at `t` (0 to 1) of `[drag] appear_ms`: a smoothstep, `3t² − 2t³` (the Bézier curve
+/// (⅓, 0), (⅔, 1) the strip animates with). Apple's measured 11-09 (60 fps, its window's left
+/// edge against the pointer): starts from rest, half way after about 50 ms, under the pointer
+/// after about 100 ms.
+pub fn appear_progress(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Where a dropped card's window goes (its top-left corner, global): held at `hold`
-/// ([`window_grab`]) under the pointer `p`, as the grown ghost was.
+/// ([`window_grab`]) under the pointer `p`, as the ghost was.
 pub fn drop_origin(hold: (f64, f64), p: Point) -> Point {
     Point::new(p.x - hold.0, p.y - hold.1)
 }
@@ -1125,27 +1152,69 @@ mod tests {
     }
 
     #[test]
-    fn the_ghost_grows_from_the_thumbnail_to_the_window_past_the_strip() {
+    fn the_ghost_is_the_card_in_the_column_and_the_window_past_it() {
         let thumb = Rect::new(20.0, 500.0, 150.0, 100.0);
         let full = Size::new(900.0, 600.0);
         let grab = (75.0, 50.0);
-        let style = StripStyle::default();
-        let (grow, d) = (style.drag.grow_distance, &style.drag);
+        let d = &StripStyle::default().drag;
         let hold = window_grab(full, (d.window_grab_x, d.window_grab_y));
         assert_eq!(hold, (96.0, 100.0), "Apple's, measured 11-09");
-        let inside = ghost_frame(thumb, grab, full, 200.0, grow, hold, Point::new(95.0, 550.0));
-        assert_eq!(inside, thumb, "unchanged inside the strip");
-        let far = ghost_frame(thumb, grab, full, 200.0, grow, hold, Point::new(200.0 + grow + 50.0, 550.0));
+        let inside = ghost_frame(thumb, grab, full, false, hold, Point::new(95.0, 550.0));
+        assert_eq!(inside, thumb, "the card's plane under the pointer in the column");
+        let moved = ghost_frame(thumb, grab, full, false, hold, Point::new(105.0, 560.0));
+        assert_eq!(moved, Rect::new(30.0, 510.0, 150.0, 100.0), "it follows the pointer");
+        // Just past the column: the whole window at once, no growing with the distance.
+        let out = ghost_frame(thumb, grab, full, true, hold, Point::new(201.0, 550.0));
+        assert_eq!(out, Rect::new(201.0 - 96.0, 450.0, 900.0, 600.0), "the pointer 96 pt in from the left edge, 100 below the top");
+        let far = ghost_frame(thumb, grab, full, true, hold, Point::new(900.0, 550.0));
         assert_eq!((far.w, far.h), (900.0, 600.0));
-        assert_eq!((far.x, far.y), (200.0 + grow + 50.0 - 96.0, 450.0), "the pointer 96 pt in from the left edge, 100 below the top");
-        let mid = ghost_frame(thumb, grab, full, 200.0, grow, hold, Point::new(200.0 + grow / 2.0, 550.0));
-        assert!(mid.w > thumb.w && mid.w < full.w);
-        let at = drop_origin(hold, Point::new(200.0 + grow + 50.0, 550.0));
-        assert_eq!((at.x, at.y), (far.x, far.y), "the drop lands where the grown ghost was");
+        let at = drop_origin(hold, Point::new(900.0, 550.0));
+        assert_eq!((at.x, at.y), (far.x, far.y), "the drop lands where the ghost was");
         // Wherever the card was pressed (Apple's 03 at 47 % of the card, 06 at 71 %), the same.
-        let other = ghost_frame(thumb, (106.5, 67.0), full, 200.0, grow, hold, Point::new(200.0 + grow + 50.0, 550.0));
+        let other = ghost_frame(thumb, (106.5, 67.0), full, true, hold, Point::new(900.0, 550.0));
         assert_eq!((other.x, other.y), (far.x, far.y));
+        // Left of the column (a screen on that side) it is the window too.
+        let left = ghost_frame(thumb, grab, full, true, hold, Point::new(-300.0, 550.0));
+        assert_eq!((left.x, left.w), (-396.0, 900.0));
         // A small window is held at most at its middle.
         assert_eq!(window_grab(Size::new(150.0, 120.0), (96.0, 100.0)), (75.0, 60.0));
+    }
+
+    #[test]
+    fn the_window_appears_right_of_the_pointer_and_lower() {
+        let hold = (96.0, 100.0);
+        let (dx, dy) = appear_offset(hold);
+        let p = Point::new(250.0, 960.0);
+        let held = drop_origin(hold, p);
+        // Apple's, measured 11-09: the left edge 34 and 118 pt right of the pointer, the top
+        // 42 and 34 pt below where it ends up.
+        let left = held.x + dx - p.x;
+        assert!((34.0..=118.0).contains(&left), "{left}");
+        assert!((34.0..=42.0).contains(&dy), "{dy}");
+        // A window held nearer its left edge (a small one) starts as far right of the pointer.
+        let (small, _) = appear_offset((40.0, 60.0));
+        assert_eq!(drop_origin((40.0, 60.0), p).x + small - p.x, left);
+    }
+
+    #[test]
+    fn the_appearing_window_slides_under_the_pointer_on_apples_curve() {
+        // Apple's, 11-09, 60 fps: how far its window's left edge had come from where it
+        // appeared to under the pointer, frame by frame from the first frame it showed (03: a
+        // card of one window; 06: one window of a combined card), against `[drag] appear_ms`.
+        let apple: [&[f64]; 2] = [&[0.0, -0.05, 0.27, 0.56, 0.72, 0.94, 1.0], &[0.0, 0.08, 0.26, 0.46, 0.66, 0.81, 0.90, 0.97, 1.0]];
+        let ms = StripStyle::default().drag.appear_ms as f64;
+        assert_eq!(ms, 100.0);
+        let (mut sum, mut n, mut worst) = (0.0, 0.0, 0.0_f64);
+        for drag in apple {
+            for (frame, &seen) in drag.iter().enumerate() {
+                let ours = appear_progress(frame as f64 * 1000.0 / 60.0 / ms);
+                sum += (ours - seen).powi(2);
+                n += 1.0;
+                worst = worst.max((ours - seen).abs());
+            }
+        }
+        let rms = (sum / n).sqrt();
+        assert!(rms < 0.07 && worst < 0.13, "rms {rms:.3}, worst {worst:.3}");
+        assert_eq!((appear_progress(0.0), appear_progress(0.5), appear_progress(1.0), appear_progress(2.0)), (0.0, 0.5, 1.0, 1.0));
     }
 }

@@ -201,8 +201,9 @@ with Apple's.
 ### Drag and drop
 
 - **Drag a card into the middle** to bring its windows into the stage you are in. As with
-  Apple's, you hold the window near its top-left corner, about 100 points in and 100 down,
-  wherever you picked up the card (`[drag] window_grab_x`, `window_grab_y`).
+  Apple's, it turns into its window as it leaves the strip, and you hold the window near its
+  top-left corner, about 100 points in and 100 down, wherever you picked up the card
+  (`[drag] window_grab_x`, `window_grab_y`).
 - **Drag one window off a card of several** by its picture: it comes off alone as soon as you
   move, and the others stay on the card. Let it go in the middle and it joins the stage you
   are in, as with Apple's; between two cards, it gets a stage of its own there; on another

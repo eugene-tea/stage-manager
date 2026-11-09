@@ -9,8 +9,12 @@
 - Hovering a card of two apps grows each window a little on its own, as Apple's does, so
   the card keeps its shape instead of swelling as a whole; the app icons stay where they
   are, at their size, on every card.
-- A card you drag into the middle starts tilted, as it sits in the strip, and straightens as
-  it grows toward its window, as with Apple's, instead of going flat at once.
+- A card or window you drag out of the strip turns into its window the moment it leaves the
+  strip, as with Apple's: the window shows at its own size, tilted as the card sits in the
+  strip, just right of the pointer, then slides under the pointer in about a tenth of a
+  second and straightens. Before, a card-sized picture followed the pointer and grew over
+  the first 100 points. Back over the strip, the card follows the pointer again.
+  `[drag] grow_distance` is gone; `[drag] appear_ms` sets how long the slide takes.
 - At launch, a card still waiting for its window's picture is faint glass instead of a dark
   grey block, and the picture fades in when it arrives, so the strip no longer flicks from
   dark blocks to pictures one card at a time.
@@ -44,8 +48,8 @@
     to start and settling softly, instead of jumping most of the way at once.
   - The strip comes back sooner when you rest the pointer at the left edge (Apple's starts
     sliding in about 180 ms after the pointer gets there; ours took about 320 ms).
-  - A card dragged into the middle grows to its window's size sooner, and you hold the window
-    near its top-left corner, as with Apple's, instead of by the middle of its title bar.
+  - A card dragged into the middle holds its window near its top-left corner, as with
+    Apple's, instead of by the middle of its title bar.
 - The strip slides away later, as Apple's does: only once a window covers the cards' left
   edge (about 20 points from the screen's edge), not already at about 50.
 - A window you drag over the strip stays above the cards, as with Apple's; a small picture of

@@ -209,7 +209,8 @@ pub struct DragStyle {
     pub threshold: f64,
     /// The middle fraction of a card's height that takes a dropped card (a merge).
     pub merge_zone: f64,
-    pub grow_distance: f64,
+    /// Past the strip, the window appearing under the pointer slides there this long.
+    pub appear_ms: u64,
     /// Where a card dragged out holds its window: the pointer this far right of the window's
     /// left edge and this far below its top (points), whatever the press.
     pub window_grab_x: f64,
@@ -986,7 +987,7 @@ impl Config {
                 drag: DragStyle {
                     threshold: v.num("drag.threshold"),
                     merge_zone: v.num("drag.merge_zone"),
-                    grow_distance: v.num("drag.grow_distance"),
+                    appear_ms: v.uint("drag.appear_ms"),
                     window_grab_x: v.num("drag.window_grab_x"),
                     window_grab_y: v.num("drag.window_grab_y"),
                     lifted_opacity: v.num("drag.lifted_opacity"),
@@ -1379,7 +1380,7 @@ mod tests {
         let k = &c.style.cards;
         assert_eq!((k.hover_scale, k.hover_ms, k.press_scale, k.press_ms), (1.11, 400, 0.987, 100), "Apple's hover (measured 11-09) and press");
         let d = &c.style.drag;
-        assert_eq!((d.grow_distance, d.window_grab_x, d.window_grab_y), (100.0, 96.0, 100.0), "Apple's card dragged out, measured 11-09");
+        assert_eq!((d.appear_ms, d.window_grab_x, d.window_grab_y), (100, 96.0, 100.0), "Apple's card dragged out, measured 11-09");
         let r = &c.style.reveal;
         assert_eq!((r.delay_ms, r.poll_ms), (130, 30), "Apple's edge reveal, measured 11-09");
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
@@ -1444,6 +1445,7 @@ mod tests {
         "cards.press_scale",
         "cards.fade_ms",
         "drag.merge_ms",
+        "drag.appear_ms",
     ];
 
     #[test]

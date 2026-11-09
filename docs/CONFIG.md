@@ -123,7 +123,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `reveal.launch_reveal_ms` | `3000` | whole number, 0 to 60000 | How long that launch showing lasts. |
 | `drag.threshold` | `5.0` | number, 0 to 100 | A press that moves farther than this (points, at least 5) drags the card; less is a click. |
 | `drag.merge_zone` | `0.5` | number, 0 to 1 | With merge_on_drop: the middle part of a card's height (0.5 = the middle half) where a dragged card drops onto it; above and below, it goes between cards. |
-| `drag.grow_distance` | `100.0` | number, 1 to 3000 | Past the strip, the dragged card grows to its window's size over this distance (Apple's is there about 100 pt out). |
+| `drag.appear_ms` | `100` | whole number, 0 to 2000 | Past the strip a dragged card shows its window, turned as the card; the window slides under the pointer in this many milliseconds (Apple's, measured: about 100). |
 | `drag.window_grab_x` | `96.0` | number, 0 to 1000 | A card dragged out holds its window with the pointer this far right of the window's left edge, wherever the card was pressed (Apple's, measured: 96; at most half the window's width). |
 | `drag.window_grab_y` | `100.0` | number, 0 to 1000 | ...and this far below the window's top edge (Apple's, measured: 100; at most half its height). |
 | `drag.lifted_opacity` | `0.3` | number, 0 to 1 | Opacity of a card in the strip while it is dragged out. |
