@@ -144,6 +144,9 @@
   footer { padding: 48px 0; color: var(--secondary); font-size: 13px; text-align: center; }
   footer nav { margin-bottom: 12px; font-size: 15px; }
   footer nav a { margin: 0 12px; }
+  /* Catalogs the app is listed on: their badges, kept here so the page loads nothing from elsewhere. */
+  footer .listed { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin: 0 0 16px; }
+  footer .listed img { display: block; width: auto; height: 40px; }
   /* Centred lines (and the card titles) wrap into even lines, never a lone word. */
   h1, h2, h3, .lede, .meta, .privacy, footer p { text-wrap: balance; }
 
@@ -266,6 +269,14 @@
       <a href="https://github.com/eugene-tea/stage-manager">Source</a>
       <a href="https://github.com/eugene-tea/stage-manager/releases">Releases</a>
     </nav>
+    <div class="listed">
+      <a href="https://alternativeto.net/software/stage-manager/about/?utm_source=badge&amp;utm_medium=referral" rel="noopener">
+        <picture>
+          <source srcset="assets/badges/alternativeto-dark.svg" media="(prefers-color-scheme: dark)">
+          <img src="assets/badges/alternativeto-light.svg" alt="Stage Manager on AlternativeTo" width="118" height="40">
+        </picture>
+      </a>
+    </div>
     <p>By <a href="https://github.com/eugene-tea">Eugene T</a>. Stage Manager is an independent project and is not affiliated with, endorsed by or sponsored by Apple Inc. Apple, Mac and macOS are trademarks of Apple&nbsp;Inc.</p>
   </div>
 </footer>
