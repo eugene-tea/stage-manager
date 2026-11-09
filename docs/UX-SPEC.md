@@ -115,7 +115,7 @@ of the least recently used card. (Keep stages in place, an extra below, orders i
 **Switching.** The pressed card eases back on mouse-down. On release, the windows you leave
 shrink into their card's slot and the new stage grows from its card, each on Apple's spring for
 its way: a window growing out of its card moves faster than one shrinking into its card
-(measured, below).
+(measured, below). Both start on the same frame, as Apple's do.
 Shift-click a card to bring its windows into the current stage; Option-click is a plain click.
 Clicking a card's app icon brings every window of that app, from all stages.
 
@@ -260,7 +260,11 @@ switches stages. The Dock's window spans its whole screen, clear away from its b
 there is on the wallpaper (or the window) below it, and only one on or near the bar (its
 magnified icons included) is the Dock's. So with the screenshot tool's window, which macOS
 leaves over the whole screen for minutes after a screenshot and which lets every click
-through: a click under it is on whatever is below.
+through: a click under it is on whatever is below. A press on a file or folder on the
+desktop, or its name, is Finder's, as on Apple's: it selects it or starts dragging it, and
+nothing is revealed. The icons are the ones read for the corner patch (every 5 s); when none
+are that fresh the press waits up to 60 ms for a read, and where they cannot be read at all
+the press counts as on the wallpaper.
 
 **Drag and drop.** A card dragged into the main area grows to window size within about
 100 pt past the strip (`[drag] grow_distance`) and joins the current stage where you drop it.
@@ -741,8 +745,6 @@ in front, and the windows on screen all along bring no stage forward even after 
 - New windows are matched to rules by the title they have when they appear.
 - Windows of a relaunched app are matched to their stages by title and frame; two of one
   app with the same title and no telling frame stay in view rather than guess.
-- With "Click wallpaper: Only in Stage Manager", a click on a desktop icon also counts as a
-  wallpaper click.
 - With "Click wallpaper: Always" (macOS's default), a wallpaper click moves every window
   aside as macOS does outside Stage Manager, where Apple's puts the stage into the strip and
   the strip stays (recorded 11-09). Only "Only in Stage Manager" gives the click to Stage
@@ -753,10 +755,10 @@ in front, and the windows on screen all along bring no stage forward even after 
 - Since macOS 15, macOS asks about once a month whether the app may capture windows
   directly. Apple's content picker avoids that alert but cannot serve a strip of every
   window.
-- In a switch the windows you leave start shrinking about 50 ms (three frames) after the new
-  stage starts growing: their snapshots wait until the windows behind them have moved to the
-  hiding corner, or the windows would show around them. Apple's start together. Measured 11-09;
-  the springs themselves match.
+- A switch's motion starts once the windows you leave have moved to the hiding corner behind
+  their pictures, or they would show around them: about 50 to 90 ms after the click (11-09's
+  log; the `transition: the motion starts` line has it as `motion_ms`). How soon Apple's starts
+  after the click is not measured.
 - Apple's card dragged out appears a moment after the pointer leaves the strip, already
   close to the window's size and right of the pointer, and slides under it as it flattens;
   ours leaves the card where the pointer is, at the card's size, and grows with the

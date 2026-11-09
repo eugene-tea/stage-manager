@@ -11,7 +11,11 @@
 //!   macOS, plain ghosts (a light card) move instead.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
 //!   snapshots appear exactly over them and shrink into their card's slot on the spring;
-//!   incoming windows' snapshots grow from their card to their frames. The slot is the
+//!   incoming windows' snapshots grow from their card to their frames. Both start on one
+//!   frame, as Apple's do, once the outgoing windows have parked behind their snapshots (the
+//!   controller's note, [`PARK_WAIT_MAX`] at most): until then every snapshot holds still, the
+//!   incoming ones on their cards, so no outgoing window shows at full size beside a moving
+//!   snapshot ([`Rise`]); with nothing leaving the motion starts at once. The slot is the
 //!   engine's ([`MovingWindow::slot`], `ui::transition_plan`), never one the strip works out
 //!   on its own; once the incoming windows are in place their frames are read back and their
 //!   snapshots finish exactly there. Each snapshot's start, end and slot are logged and kept
@@ -87,7 +91,8 @@ const SETTLED: f64 = 0.002;
 /// A card dragged out keeps its ghost on screen at most this long while its windows'
 /// transition is on its way.
 const LANDING_MAX: f64 = 1.0;
-/// Outgoing snapshots start shrinking after this at the latest, parked or not (seconds).
+/// A switch's motion starts after this at the latest, its outgoing windows parked or not
+/// (seconds; [`Strip::outgoing_parked`]).
 const PARK_WAIT_MAX: f64 = 0.2;
 /// How often a landed switch's held cover looks whether the patch shows (seconds: a frame).
 const HOLD_POLL: f64 = 1.0 / 60.0;
@@ -130,6 +135,12 @@ struct Running {
     /// Outgoing snapshots waiting for their windows to park: (index in `ghosts`, card plane,
     /// the card's glass there).
     waiting: Vec<(usize, Plane, Option<GlassLook>)>,
+    /// The incoming snapshots' motion, waiting with the outgoing ones until their windows
+    /// have parked ([`Rise`]); taken when it starts.
+    rise: Option<Rise>,
+    /// When the snapshots were drawn (the motion starts then, or once the outgoing windows
+    /// have parked).
+    drawn_at: Instant,
     /// Cards hidden until their snapshots land.
     held: Vec<u64>,
     timers: Vec<Retained<NSTimer>>,
@@ -168,6 +179,23 @@ struct Running {
     /// The landing was due once already (its outgoing snapshots settled): a landing moved
     /// earlier needs a timer of its own.
     settled: bool,
+}
+
+/// A switch's incoming motion before it starts: everything starts on one frame, as Apple's
+/// does, once the outgoing windows have parked behind their snapshots (they never show at full
+/// size beside a moving snapshot), or at once when nothing leaves.
+struct Rise {
+    /// The incoming snapshots: (index in `ghosts`, the window's plane, the card's glass at
+    /// the start).
+    ghosts: Vec<(usize, Plane, Option<GlassLook>)>,
+    /// When the strip unveils the incoming windows, from the motion's start (seconds;
+    /// [`unveil_time`]), if any come.
+    unveil: Option<f64>,
+    /// How long past the unveil the landing may wait for them to show ([`SHOWN_MAX`], or
+    /// [`LATE_MAX`] with late windows).
+    wait: f64,
+    /// Late windows are among them ([`Transition::late`]).
+    late: bool,
 }
 
 /// A landed switch's incoming snapshots fading out over their windows as one picture
@@ -678,7 +706,9 @@ impl Strip {
             }
         }
         // The incoming snapshots go into one group, above the outgoing ones (made with the first).
+        // They start growing with the outgoing ones ([`Rise`]).
         let mut incoming: Option<GhostGroup> = None;
+        let mut rising = Vec::new();
         for w in &t.incoming {
             let id = w.window.id;
             let image = self.motion.cache.get(id).cloned().or_else(|| self.thumbs.get(&id).cloned());
@@ -688,13 +718,11 @@ impl Strip {
             };
             let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), 0.0);
             let group = incoming.get_or_insert_with(|| self.motion.overlay.group());
-            let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0, Some(group));
+            let ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0, Some(group));
             // From its card's look.
             ghost.set_glass(glass.as_ref(), 1.0);
             let end = Plane::window(w.window.frame, o, style.corner_radius);
-            ghost.spring_to(end, spring);
-            ghost.spring_shadow(1.0, spring);
-            ghost.spring_glass(glass.as_ref(), 0.0, spring);
+            rising.push((ghosts.len(), end, glass));
             report.push(GhostReport {
                 window: id,
                 outgoing: false,
@@ -745,8 +773,7 @@ impl Strip {
         // point of them: the farthest edge's travel decides when.
         let travel = report.iter().filter(|g| !g.outgoing).fold(0.0, |m: f64, g| m.max(travel(g.start, g.end)));
         let unveil = cover.incoming.then(|| unveil_time(&self.style, travel));
-        let started = Instant::now();
-        let unveil_at = unveil.map(|u| started + Duration::from_secs_f64(u));
+        let drawn_at = Instant::now();
         // Late windows (an app we hid, unhidden after the unveil) show when their app says so,
         // bounded: their snapshots wait for that ([`Self::late_shown`]).
         let late: Vec<u32> = t.late.iter().copied().filter(|w| ghosts.iter().any(|g| g.window == *w)).collect();
@@ -756,33 +783,23 @@ impl Strip {
         let unshown: Vec<u32> =
             if unveil.is_some() { ghosts.iter().filter(|g| t.incoming.iter().any(|w| w.window.id == g.window)).map(|g| g.window).collect() } else { Vec::new() };
         let wait = if late.is_empty() { SHOWN_MAX } else { LATE_MAX.max(SHOWN_MAX) };
-        let lands_after = unveil.map(|u| started + Duration::from_secs_f64(u + wait + SHOWN_FADE + AFTER_UNVEIL));
-        if let Some(u) = unveil.filter(|_| !late.is_empty()) {
-            timers.push(after(u + LATE_MAX, move || {
-                with_strip_of(display, |s| s.late_shown(id, None, None));
-            }));
-        }
+        let rise = Rise { ghosts: rising, unveil, wait, late: !late.is_empty() };
         // The key window's snapshot, taken parked and inactive, again once it is key.
         if let Some(key) = t.key_in.filter(|k| !late.contains(k) && ghosts.iter().any(|g| g.window == *k) && !plain) {
             timers.push(after(RECAPTURE_AFTER, move || {
                 with_strip_of(display, |s| s.recapture_key(id, key));
             }));
         }
-        if let Some(unveil) = unveil {
-            timers.push(after(unveil, move || {
-                // The strip busy (never expected from a timer): the unveil still goes.
-                if with_strip_of(display, |s| s.unveil(id)).is_none() {
-                    strip_model::emit(StripEvent::Unveil { id });
-                }
-            }));
-        }
-        if waiting.is_empty() {
+        let rises_now = waiting.is_empty();
+        if rises_now {
             timers.push(after(settle_time(spring, SETTLED), move || {
                 with_strip_of(display, |s| s.end_transition(id));
             }));
         } else {
+            // The whole motion waits for the outgoing windows to park behind their snapshots
+            // (the controller's note, [`Self::outgoing_parked`]), this long at most.
             timers.push(after(PARK_WAIT_MAX, move || {
-                with_strip_of(display, |s| s.outgoing_parked(id));
+                with_strip_of(display, |s| s.outgoing_parked_as(id, true));
             }));
         }
         let unveil_ms = unveil.map(|u| (u * 1000.0).round() as u64);
@@ -816,6 +833,8 @@ impl Strip {
             corner_picture,
             travel,
             unveil_ms,
+            motion_ms: None,
+            motion_waited_out: None,
         });
         self.motion.running =
             Some(Running {
@@ -823,14 +842,16 @@ impl Strip {
                 ghosts,
                 incoming,
                 waiting,
+                rise: Some(rise),
+                drawn_at,
                 held,
                 timers,
                 under,
                 corner,
                 corner_at,
                 arrived,
-                lands_after,
-                unveil_at,
+                lands_after: None,
+                unveil_at: None,
                 unshown,
                 late_key: t.key_in.filter(|k| late.contains(k)),
                 late: late.clone(),
@@ -840,6 +861,9 @@ impl Strip {
                 final_land: None,
                 settled: false,
             });
+        if rises_now {
+            self.start_motion(id, false);
+        }
     }
 
     /// The park corner's cover for transition `id` (global): the corner patch's picture of it,
@@ -884,6 +908,14 @@ impl Strip {
                     a.1 = *real;
                 }
                 let to = Plane::window(*real, o, corner);
+                // Not moving yet (the outgoing windows still parking): it starts toward there.
+                if let Some(rise) = r.rise.as_mut() {
+                    for (i, end, _) in rise.ghosts.iter_mut() {
+                        if r.ghosts.get(*i).is_some_and(|g| g.window == *window) {
+                            *end = to;
+                        }
+                    }
+                }
                 for g in r.ghosts.iter_mut().filter(|g| g.window == *window && g.target.tilt == 0.0) {
                     let t = g.target;
                     let off = (t.left_mid.x - to.left_mid.x).abs().max((t.left_mid.y - to.left_mid.y).abs()).max((t.size.w - to.size.w).abs()).max((t.size.h - to.size.h).abs());
@@ -905,23 +937,83 @@ impl Strip {
         });
     }
 
-    /// The outgoing windows of transition `id` have parked: their snapshots shrink into their
-    /// cards now, and the transition ends when they land.
+    /// The outgoing windows of transition `id` have parked (the controller's note): the motion
+    /// starts.
     pub(super) fn outgoing_parked(&mut self, id: u64) {
+        self.outgoing_parked_as(id, false);
+    }
+
+    /// The outgoing windows of transition `id` have parked, or the wait for them ran out
+    /// (`waited_out`, [`PARK_WAIT_MAX`]): the whole motion starts on this frame, the outgoing
+    /// snapshots shrinking into their cards as the incoming ones grow ([`Rise`]), and the
+    /// transition ends when the outgoing ones land.
+    fn outgoing_parked_as(&mut self, id: u64, waited_out: bool) {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
         let spring = self.shrink();
-        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id && !r.waiting.is_empty()) else { return };
-        for (i, end, glass) in std::mem::take(&mut r.waiting) {
-            if let Some(g) = r.ghosts.get_mut(i) {
-                g.spring_to(end, spring);
-                g.spring_shadow(0.0, spring);
-                g.spring_glass(glass.as_ref(), 1.0, spring);
+        if self.motion.running.as_ref().is_none_or(|r| r.id != id || r.waiting.is_empty()) {
+            return;
+        }
+        // One commit for both ways: every spring begins on the same frame.
+        objc2_quartz_core::CATransaction::begin();
+        self.start_motion(id, waited_out);
+        if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+            for (i, end, glass) in std::mem::take(&mut r.waiting) {
+                if let Some(g) = r.ghosts.get_mut(i) {
+                    g.spring_to(end, spring);
+                    g.spring_shadow(0.0, spring);
+                    g.spring_glass(glass.as_ref(), 1.0, spring);
+                }
             }
         }
+        objc2_quartz_core::CATransaction::commit();
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
         r.timers.push(after(settle_time(spring, SETTLED), move || {
             with_strip_of(display, |s| s.end_transition(id));
         }));
+    }
+
+    /// Starts transition `id`'s incoming motion ([`Rise`]): the snapshots grow from their cards
+    /// on the switch spring, and the unveil, the late windows' wait and the earliest landing
+    /// count from now. `waited_out`: the outgoing windows' note never came within
+    /// [`PARK_WAIT_MAX`]. Logged with how long after the snapshots were drawn (kept for `ctl
+    /// state`, [`TransitionReport::motion_ms`]).
+    fn start_motion(&mut self, id: u64, waited_out: bool) {
+        // Its timers come back to this strip (round displays-live-1).
+        let display = self.display;
+        let spring = self.spring();
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        let Some(rise) = r.rise.take() else { return };
+        for (i, end, glass) in &rise.ghosts {
+            if let Some(g) = r.ghosts.get_mut(*i) {
+                g.spring_to(*end, spring);
+                g.spring_shadow(1.0, spring);
+                g.spring_glass(glass.as_ref(), 0.0, spring);
+            }
+        }
+        let started = Instant::now();
+        r.unveil_at = rise.unveil.map(|u| started + Duration::from_secs_f64(u));
+        r.lands_after = rise.unveil.map(|u| started + Duration::from_secs_f64(u + rise.wait + SHOWN_FADE + AFTER_UNVEIL));
+        if let Some(u) = rise.unveil.filter(|_| rise.late) {
+            r.timers.push(after(u + LATE_MAX, move || {
+                with_strip_of(display, |s| s.late_shown(id, None, None));
+            }));
+        }
+        if let Some(unveil) = rise.unveil {
+            r.timers.push(after(unveil, move || {
+                // The strip busy (never expected from a timer): the unveil still goes.
+                if with_strip_of(display, |s| s.unveil(id)).is_none() {
+                    strip_model::emit(StripEvent::Unveil { id });
+                }
+            }));
+        }
+        let outgoing = r.waiting.len();
+        let motion_ms = started.saturating_duration_since(r.drawn_at).as_millis() as u64;
+        tracing::debug!(id, motion_ms, waited_out, outgoing, incoming = rise.ghosts.len(), "transition: the motion starts, the outgoing and the incoming snapshots on one frame");
+        strip_model::update_transition(id, |t| {
+            t.motion_ms = Some(motion_ms);
+            t.motion_waited_out = Some(waited_out);
+        });
     }
 
     /// Transition `id`'s incoming snapshots are within a point of their windows as shown:

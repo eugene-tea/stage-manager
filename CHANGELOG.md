@@ -10,6 +10,16 @@
 - At launch, a card still waiting for its window's picture is faint glass instead of a dark
   grey block, and the picture fades in when it arrives, so the strip no longer flicks from
   dark blocks to pictures one card at a time.
+- With "Click wallpaper to reveal desktop: Only in Stage Manager", pressing a file or folder
+  on the desktop no longer sends your stage to the strip: you can select it, or drag it onto
+  a window, as with Apple's. Only a click on bare wallpaper reveals the desktop.
+- In a switch, the new stage's windows no longer jump in early, full size, with their pictures
+  still flying toward them. Switching to an app with another window waiting out of sight (a
+  minimized one, one on another Desktop, a dialog kept off screen) brought them in a moment
+  into the motion.
+- In a switch, the windows you leave start shrinking on the same frame as the new stage starts
+  growing, as with Apple's, instead of about 50 ms later, and never show at full size beside a
+  moving picture. The motion as a whole starts that much later after the click.
 - A card is no longer cut off at the strip's right edge: a second app's window on a combined
   card (Mail beside Telegram, say), a card growing under the pointer, and a card you drag
   toward the edge show whole.
