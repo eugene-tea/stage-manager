@@ -809,6 +809,59 @@ again (its clocks from then), every saved window still waiting, of the Desktops 
 goes back to its stage by app, title and frame as it is found, parked when its stage is not
 in front, and the windows on screen all along bring no stage forward even after it.
 
+## Accessibility
+
+### Reduce Motion
+
+Decided from what the setting is for, not from Apple's Stage Manager (whose behaviour under
+it is not measured). Reduce Motion is for people whom large or depth motion makes dizzy or
+sick: the vestibular triggers are large surfaces moving across the screen, zooming toward the
+viewer, and turns in 3D. Apple's Human Interface Guidelines
+([Motion](https://developer.apple.com/design/human-interface-guidelines/motion),
+[Accessibility](https://developer.apple.com/design/human-interface-guidelines/accessibility))
+ask apps, with it on, to replace large movement, zooming, scaling, depth changes, spinning and
+parallax with dissolves and fades, to tighten springs so nothing bounces, and allow motion
+that tracks a person's own gesture directly. WCAG 2.3.3
+([Animation from Interactions](https://www.w3.org/WAI/WCAG21/Understanding/animation-from-interactions.html))
+asks that motion set off by an interaction can be turned off unless it is essential. What
+carries meaning stays: where a window went must still be clear.
+
+`[animation] reduce_motion`: "system" (default) follows macOS's setting, read at launch and
+whenever macOS says it changed; "on" and "off" ignore it. With it, every motion below is
+replaced by one fade of 200 ms (`display_options::FADE_MS`, scaled by `[animation] speed`),
+one way, never repeated, so nothing flashes. `[animation] enabled = false` or `speed = 0`
+still turns everything off, fades included.
+
+| Case | Full motion | Under Reduce Motion | Why |
+|---|---|---|---|
+| The switch (also the desktop reveal, ⌘M, an activation, a drop) | windows fly between card and frame at full-screen scale, turned and scaled in depth | a cross-fade where the windows are: the outgoing pictures fade out at their frames while their stage's card fades in at its slot; the incoming pictures fade in at their frames while their card fades out | the largest trigger of all: depth, scale and a 3D turn over most of the screen. The card fading in at its slot as the windows fade out says where they went; the same unveil, handover and landing rules hold, with no spring travel |
+| The strip sliding out and in | 286 pt sideways, in 3D | fades in at its place; fades out where it is, then leaves the screen unseen | a large surface moving across the screen |
+| Hover | the card's windows grow 11 % on a spring | no growth; the glass still turns solid | scaling by itself; the colour change alone still shows which card is under the pointer |
+| Press | the card eases to 0.987 | none | scaling |
+| A card moving to another slot | glides on a spring | at its new slot at once, fading in there | movement the user did not make; the fade still marks the card that moved |
+| A card or window dragged out | appears turned beside the pointer, slides under it and straightens (the 3D settle) | appears flat under the pointer; then follows it | following the pointer is the user's own movement and stays; the slide and the turn settle by themselves |
+| A card dropped on a card | shrinks into it and fades | fades where it is | scaling |
+| A card dragged in the column, a window's card over the strip | follows the pointer | the same | the user's own movement |
+| The park corner's cover and the corner patch | still pictures over the corner while windows wait there | the same | nothing moves; without them a window jumping to the corner would show |
+| The landing (pictures fading over the windows), a new card fading in | fades | the same | already fades |
+
+### Reduce Transparency
+
+macOS's own materials turn opaque with Reduce Transparency (and with Increase Contrast, which
+turns it on). The cards' glass does too: each window's picture is drawn solid on the cards
+(as `[cards] window_opacity = 1`), and the edge tab is solid with a firm edge. Read at launch
+and followed live; the strip repaints at once.
+
+### VoiceOver
+
+The strip's view is a group, "Stages", holding one button per card, framed where the card
+rests: "Stage 3: Safari, Notes" (the ⌃⌥N number), or the stage's name with its apps; the
+current stage's card (`[strip] active = "card"`) adds "current stage". Its help says
+"Switches to this stage."; pressing it (VoiceOver's press) switches as a click does, and each
+app has a custom action, "Show all Safari windows", as a click on its icon. The list follows
+the cards as they change, keeping each card's element; it is empty while the strip is out of
+sight. The edge tab is a button, "Stages", that reveals the strip.
+
 ## Known gaps
 
 - Not yet seen live with ours, built from the one-screen code and checked by the suite's

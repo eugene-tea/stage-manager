@@ -98,7 +98,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel,
+    NSAccessibilityButton, NSAccessibilityElementProtocol, NSApplication, NSBackingStoreType, NSColor, NSEvent, NSEventModifierFlags, NSEventType, NSFloatingWindowLevel,
     NSNormalWindowLevel, NSPanel, NSRunningApplication, NSScreen, NSTrackingArea, NSTrackingAreaOptions, NSView,
     NSWindowStyleMask,
 };
@@ -121,6 +121,8 @@ use crate::ui::glass_math::Glass;
 use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::overlay::GlassLook;
 use crate::ui::card_glass;
+use crate::ui::display_options;
+use crate::ui::strip_access;
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Grip, Metrics};
 use crate::ui::strip_model::{self, CardChange, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
@@ -388,6 +390,8 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     THUMB_INTERVAL.with(|i| i.set(thumbnail_interval_ms));
     let strip = Strip::new(mtm, Duration::from_millis(thumbnail_interval_ms.max(1)), strip_model::MAIN_STRIP);
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
+    // Reduce Motion and Reduce Transparency: read now, followed live; the glass repaints.
+    display_options::install(|| with_strips(Strip::display_options_changed));
     strip_model::set_presenter(|snapshot| {
         DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
@@ -592,6 +596,14 @@ fn snapshot_arrived(id: u32, picture: Picture) {
     with_strips(|s| s.set_snapshot(id, picture.clone()));
 }
 
+/// A card's accessibility element was pressed (VoiceOver): the strip keyed `strip` sends what
+/// a click would, outside its borrow ([`strip_access::PressSink`]).
+fn access_pressed(strip: u32, stage: u64, pid: Option<i32>) {
+    if let Some(Some(e)) = with_strip_of(strip, |s| s.access_press(stage, pid)) {
+        strip_model::emit(e);
+    }
+}
+
 /// Shows `picture` in `layer`, which draws a window at `window` (its superlayer's
 /// coordinates): the window keeps that rectangle, child windows sticking out of it are drawn
 /// past it (as Apple's thumbnails show a popup), never squeezed into it.
@@ -668,6 +680,17 @@ define_class!(
         fn mouse_exited(&self, _event: &NSEvent) {
             with_strip_of(self.strip(), |s| s.hover_at(None));
         }
+
+        // VoiceOver's pointer and the Accessibility Inspector: the card's element under the
+        // point (screen coordinates), else the strip itself.
+        #[unsafe(method(accessibilityHitTest:))]
+        fn accessibility_hit_test(&self, point: NSPoint) -> *mut AnyObject {
+            match strip_access::hit(self, point) {
+                Some(element) => Retained::autorelease_return(element),
+                // SAFETY: NSView's own hit test, same signature; an autoreleased object or nil.
+                None => unsafe { msg_send![super(self), accessibilityHitTest: point] },
+            }
+        }
     }
 );
 
@@ -703,6 +726,23 @@ define_class!(
 
     // SAFETY: NSObjectProtocol has no safety requirements.
     unsafe impl NSObjectProtocol for EdgeTabView {}
+
+    // SAFETY: NSView implements the element protocol.
+    unsafe impl NSAccessibilityElementProtocol for EdgeTabView {}
+
+    // SAFETY: the signature matches NSAccessibilityButton; the label is NSView's storage
+    // (`strip_access::describe_edge_tab`).
+    unsafe impl NSAccessibilityButton for EdgeTabView {
+        // VoiceOver's press reveals the strip, as a click on the tab does.
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_perform_press(&self) -> bool {
+            let strip = self.ivars().get();
+            DispatchQueue::main().exec_async(move || {
+                with_strip_of(strip, Strip::tab_clicked);
+            });
+            true
+        }
+    }
 
     impl EdgeTabView {
         // SAFETY (all methods): signatures match NSView / NSResponder.
@@ -774,6 +814,7 @@ impl EdgeTab {
         unsafe { panel.setReleasedWhenClosed(false) };
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), frame.size);
         let view = EdgeTabView::new(mtm, bounds, strip);
+        strip_access::describe_edge_tab(&view);
         let options =
             NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
         // SAFETY: the view owns the tracking area and outlives it; no user info.
@@ -807,7 +848,14 @@ impl EdgeTab {
     fn paint(&self, mtm: MainThreadMarker) {
         let name = NSApplication::sharedApplication(mtm).effectiveAppearance().name().to_string();
         let dark = name.contains("Dark");
-        let (fill, edge) = if dark { (color(1.0, 1.0, 1.0, 0.42), color(0.0, 0.0, 0.0, 0.25)) } else { (color(0.0, 0.0, 0.0, 0.28), color(1.0, 1.0, 1.0, 0.45)) };
+        // Reduce Transparency (and Increase Contrast, which turns it on): solid, with a firm edge.
+        let solid = display_options::reduce_transparency();
+        let (fill, edge) = match (dark, solid) {
+            (true, false) => (color(1.0, 1.0, 1.0, 0.42), color(0.0, 0.0, 0.0, 0.25)),
+            (false, false) => (color(0.0, 0.0, 0.0, 0.28), color(1.0, 1.0, 1.0, 0.45)),
+            (true, true) => (color(0.78, 0.78, 0.8, 1.0), color(0.0, 0.0, 0.0, 1.0)),
+            (false, true) => (color(0.35, 0.35, 0.37, 1.0), color(1.0, 1.0, 1.0, 1.0)),
+        };
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.pill.setBackgroundColor(Some(&fill));
@@ -1001,6 +1049,22 @@ impl CardLayers {
         }
     }
 
+    /// Puts every depth at slide `dx` without moving: after `hold` seconds where it is drawn
+    /// now (a strip fading out under Reduce Motion goes off the screen once faded), or at once.
+    fn jump_to(&self, m: &Metrics, dx: f64, hold: f64) {
+        let key = NSString::from_str("sublayerTransform");
+        for d in self.all_depths() {
+            // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
+            let now = unsafe { d.space.presentationLayer() }.map_or_else(|| d.space.sublayerTransform(), |p| p.sublayerTransform());
+            d.space.removeAnimationForKey(&key);
+            d.space.setSublayerTransform(perspective(m, dx));
+            if hold > 0.0 {
+                let v = transform_value(now);
+                d.space.addAnimation_forKey(&ease("sublayerTransform", &v, &v, hold), Some(&key));
+            }
+        }
+    }
+
     /// Slides every depth to `dx`: on the spring `s`, or at once.
     fn slide_to(&self, s: Option<motion_math::Spring>, m: &Metrics, dx: f64) {
         for d in self.all_depths() {
@@ -1171,6 +1235,17 @@ fn fade_in(layer: &CALayer, seconds: f64) {
     }
     let anim = ease("opacity", &NSNumber::new_f32(0.0), &NSNumber::new_f32(1.0), seconds);
     layer.addAnimation_forKey(&anim, Some(&NSString::from_str("fade")));
+}
+
+/// Fades `layer` out from what is drawn over `seconds`, then takes it off its superlayer.
+fn fade_away(layer: &Retained<CALayer>, seconds: f64) {
+    // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+    let from = unsafe { layer.presentationLayer() }.map_or_else(|| layer.opacity(), |p| p.opacity());
+    layer.setOpacity(0.0);
+    let anim = ease("opacity", &NSNumber::new_f32(from), &NSNumber::new_f32(0.0), seconds);
+    layer.addAnimation_forKey(&anim, Some(&NSString::from_str("fade")));
+    let layer = layer.clone();
+    let _once = motion::after(seconds + 0.05, move || layer.removeFromSuperlayer());
 }
 
 /// The plate under an opaque picture (the glass off, or no picture of the wallpaper).
@@ -1616,6 +1691,8 @@ struct Pane {
     geometry: Option<Geometry>,
     /// The style and backing scale its cards were built with.
     built: Option<(Arc<StripStyle>, f64)>,
+    /// Its cards for VoiceOver: one element each, children of its view.
+    access: strip_access::Access,
 }
 
 impl Pane {
@@ -1645,6 +1722,7 @@ impl Pane {
 
         let bounds = NSRect::new(NSPoint::new(0.0, 0.0), geometry.panel.size);
         let view = StripView::new(mtm, bounds, strip);
+        strip_access::describe_strip_view(&view);
         let root = CALayer::new();
         root.setGeometryFlipped(true);
         // Layer-hosting: set the layer before turning layers on.
@@ -1678,6 +1756,7 @@ impl Pane {
             placed: false,
             geometry: None,
             built: None,
+            access: strip_access::Access::default(),
         }
     }
 
@@ -1744,6 +1823,8 @@ struct Strip {
     squeezed: Option<u64>,
     thumbs: HashMap<u32, Picture>,
     icons: HashMap<i32, Option<CFRetained<CGImage>>>,
+    /// Apps' names by pid, for the cards' VoiceOver labels.
+    app_names: HashMap<i32, Option<String>>,
     visibility: Visibility,
     poll_timer: Option<Retained<NSTimer>>,
     /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
@@ -1795,6 +1876,7 @@ impl Strip {
             squeezed: None,
             thumbs: HashMap::new(),
             icons: HashMap::new(),
+            app_names: HashMap::new(),
             visibility: Visibility::default(),
             poll_timer: None,
             edge_waits: false,
@@ -1826,6 +1908,25 @@ impl Strip {
     /// The strip's slide (`[motion] slide_*` at `[animation] speed`); `None`: no animation.
     fn slide_spring(&self) -> Option<motion_math::Spring> {
         self.style.animation.animates().then(|| motion_math::slide_spring(&self.style))
+    }
+
+    /// Reduce Motion applies now ([`display_options::reduced`]): what animates only fades.
+    fn reduced(&self) -> bool {
+        display_options::reduced(&self.style.animation)
+    }
+
+    /// The fade standing in for motion under Reduce Motion (seconds; 0: no animation).
+    fn reduced_fade(&self) -> f64 {
+        display_options::fade_seconds(&self.style.animation)
+    }
+
+    /// macOS's Reduce Motion or Reduce Transparency changed: the glass follows at once (the
+    /// motion from the next one).
+    fn display_options_changed(&mut self) {
+        self.repaint_glass();
+        if self.pane.tab.shown {
+            self.pane.tab.paint(self.mtm);
+        }
     }
 
     /// How far left the cards sit when hidden: `[motion] slide_distance`, or further when
@@ -2064,6 +2165,10 @@ impl Strip {
         self.others.push(old);
         self.layouts.clear();
         self.hovered = None;
+        // A pane faded out under Reduce Motion when left shows its cards again with the strip.
+        if self.pane.shown {
+            self.pane.cards_root.setOpacity(1.0);
+        }
     }
 
     /// Brings the active pane up to date with the current geometry and `style`; true when its
@@ -2239,7 +2344,10 @@ impl Strip {
     /// The size a card is drawn at, of its resting size: pressed (`[cards] press_scale`),
     /// grown (`hover_scale`) or at rest.
     fn card_scale(&self, stage: u64) -> f64 {
-        if self.squeezed == Some(stage) {
+        // Reduce Motion: a card never grows or shrinks by itself (its glass still turns solid).
+        if self.reduced() {
+            1.0
+        } else if self.squeezed == Some(stage) {
             self.style.cards.press_scale
         } else if self.grown(stage) {
             self.m().hover_scale
@@ -2265,10 +2373,16 @@ impl Strip {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         let keep: Vec<u64> = layouts.iter().map(|l| l.stage).collect();
+        // Reduce Motion: a card leaving the strip fades out where it is (no snapshot flies
+        // out of it: its windows fade in at their frames meanwhile).
+        let fade_out = (self.has_snapshot && !self.instant && self.reduced()).then(|| self.reduced_fade()).filter(|s| *s > 0.0);
         self.pane.cards.retain(|stage, layers| {
             let kept = keep.contains(stage);
             if !kept {
-                layers.card.removeFromSuperlayer();
+                match fade_out {
+                    Some(seconds) => fade_away(&layers.card, seconds),
+                    None => layers.card.removeFromSuperlayer(),
+                }
             }
             kept
         });
@@ -2408,7 +2522,8 @@ impl Strip {
     }
 
     /// Publishes where the cards are (global), for `ctl state`.
-    fn publish_cards(&self) {
+    fn publish_cards(&mut self) {
+        self.update_access();
         let g = self.geometry.global;
         let frames = if self.pane.shown {
             self.layouts
@@ -2420,6 +2535,39 @@ impl Strip {
             Vec::new()
         };
         strip_model::publish_cards(self.display, frames);
+    }
+
+    /// Lists the cards for VoiceOver where they rest ([`strip_access`]); none while the strip
+    /// is out of sight.
+    fn update_access(&mut self) {
+        let items = if self.pane.shown {
+            let cards = self.shown_cards();
+            for pid in cards.iter().flat_map(|c| c.apps.iter().copied()) {
+                self.app_names.entry(pid).or_insert_with(|| {
+                    NSRunningApplication::runningApplicationWithProcessIdentifier(pid).and_then(|a| a.localizedName()).map(|n| n.to_string())
+                });
+            }
+            let m = self.m();
+            let frames: Vec<(u64, Rect)> = self.layouts.iter().filter(|l| !placeholder(l.stage)).map(|l| (l.stage, l.bounds(m))).collect();
+            strip_access::items(&cards, &frames, |pid| self.app_names.get(&pid).cloned().flatten())
+        } else {
+            Vec::new()
+        };
+        self.pane.access.update(&self.pane.view, self.display, items, access_pressed);
+    }
+
+    /// VoiceOver pressed `stage`'s card (`pid`: its action for that app): the event a click
+    /// on it (or on that app's icon) sends, when the card can be pressed now.
+    fn access_press(&mut self, stage: u64, pid: Option<i32>) -> Option<StripEvent> {
+        if !self.pane.shown || placeholder(stage) || self.motion.holds(stage) || !self.layouts.iter().any(|l| l.stage == stage) {
+            return None;
+        }
+        self.prefetch(Some(stage));
+        tracing::debug!(stage, ?pid, "strip card pressed through accessibility");
+        Some(match pid {
+            Some(pid) => StripEvent::IconClicked { stage, pid },
+            None => StripEvent::CardClicked { stage, shift: false },
+        })
     }
 
     /// The transform of the depth of window `id` on the card at `layout` (its container is
@@ -2531,6 +2679,10 @@ impl Strip {
             }
         }
         let glide = self.glide().filter(|_| !(immediate || self.instant));
+        // Reduce Motion: a card never glides; it is at its new slot at once and fades in there.
+        let swap = glide.is_some() && self.reduced() && !self.motion.holds(card.stage);
+        let glide = glide.filter(|_| !swap);
+        let swap_fade = self.reduced_fade();
         let grown = self.depth_transforms(card.stage, layout);
         let scale = self.card_scale(card.stage);
         if let Some(layers) = self.pane.cards.get_mut(&card.stage) {
@@ -2541,6 +2693,9 @@ impl Strip {
             let now = Point::new(drawn.x - layers.built.x, drawn.y - layers.built.y);
             let from = motion_math::rescaled_start(now, scale, old_center, layout.hover_center(&m));
             layers.move_units(glide, CGPoint::new(from.x, from.y), to);
+            if swap && ((from.x - to.x).abs() >= 0.25 || (from.y - to.y).abs() >= 0.25) {
+                fade_in(&layers.card, swap_fade);
+            }
             for (d, t) in layers.depths.iter().zip(grown) {
                 d.space.setTransform(t);
             }
@@ -2554,7 +2709,9 @@ impl Strip {
     /// The cards' glass as the style sets it.
     fn glass(&self) -> Glass {
         let c = &self.style.cards;
-        Glass { opacity: c.window_opacity, hover_opacity: c.hover_window_opacity, saturation: c.backdrop_saturation, brightness: c.backdrop_brightness }
+        // Reduce Transparency: solid cards, as macOS's own materials turn opaque.
+        let opacity = if display_options::reduce_transparency() { 1.0 } else { c.window_opacity };
+        Glass { opacity, hover_opacity: c.hover_window_opacity, saturation: c.backdrop_saturation, brightness: c.backdrop_brightness }
     }
 
     /// The glass behind `slot`'s picture on `layout`, from the wallpaper behind the thumbnail
@@ -3097,7 +3254,9 @@ impl Strip {
         let look = {
             let (m, g, full) = (self.m(), self.geometry.global, &self.style);
             let (tilt, eye, perspective) = (m.tilt, Point::new(g.x + m.eye.x, g.y + m.eye.y), m.perspective);
-            let flatten = full.animation.animates().then(|| motion_math::switch_spring(full));
+            // Reduce Motion: the ghost is flat at once and appears under the pointer, no slide.
+            let still = display_options::reduced(&full.animation);
+            let flatten = (full.animation.animates() && !still).then(|| motion_math::switch_spring(full));
             let plate = empty_plate(None, &full.cards);
             let fade = full.animation.seconds(full.cards.fade_ms);
             let appear = full.animation.seconds(style.appear_ms);
@@ -3108,7 +3267,7 @@ impl Strip {
                 flatten,
                 plate: plate.clone(),
                 fade,
-                slide: slide.map(|from| Slide { from, seconds: appear }),
+                slide: slide.filter(|_| !still).map(|from| Slide { from, seconds: appear }),
             }
         };
         let (was, was_spot) = (drag.mode, drag.spot);
@@ -3457,7 +3616,8 @@ impl Strip {
             let fade = ease("opacity", &NSNumber::new_f32(shown), &NSNumber::new_f32(0.0), seconds);
             layers.card.addAnimation_forKey(&fade, Some(&NSString::from_str("vanish")));
         }
-        if let Some(c) = toward {
+        // Reduce Motion: it fades into its target where it is, without shrinking.
+        if let Some(c) = toward.filter(|_| !self.reduced()) {
             ease_transform(&layers.card, scale_about(MERGE_SHRINK, c, m.eye), Ease::Out(seconds));
         }
         CATransaction::commit();
@@ -3736,7 +3896,7 @@ impl Strip {
     /// Slides the strip in or out (each card whole, in 3D) and lets clicks through while it
     /// is out.
     fn slide(&mut self, shown: bool, animated: bool) {
-        self.pane.shown = shown;
+        let was_shown = std::mem::replace(&mut self.pane.shown, shown);
         self.publish_cards();
         self.publish_panel();
         self.update_pass_through(None);
@@ -3749,10 +3909,31 @@ impl Strip {
         let dx = self.current_dx();
         let slide = self.slide_spring().filter(|_| animated);
         let m = self.m().clone();
+        // Reduce Motion: the strip fades in at its place, and fades out where it is before it
+        // goes off the screen; it never slides.
+        let fade = if slide.is_some() && self.reduced() { self.reduced_fade() } else { 0.0 };
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        for layers in self.pane.cards.values() {
-            layers.slide_to(slide, &m, dx);
+        let root = &self.pane.cards_root;
+        let fading = NSString::from_str("slideFade");
+        if fade > 0.0 {
+            // Shown from off the screen it starts transparent (also when it went off with the
+            // full slide); hidden, from what is drawn.
+            // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+            let drawn = unsafe { root.presentationLayer() }.map_or_else(|| root.opacity(), |p| p.opacity());
+            let from = if shown && !was_shown { 0.0 } else { drawn };
+            let to = if shown { 1.0 } else { 0.0 };
+            root.setOpacity(to);
+            root.addAnimation_forKey(&ease("opacity", &NSNumber::new_f32(from), &NSNumber::new_f32(to), fade), Some(&fading));
+            for layers in self.pane.cards.values() {
+                layers.jump_to(&m, dx, if shown { 0.0 } else { fade });
+            }
+        } else {
+            root.removeAnimationForKey(&fading);
+            root.setOpacity(1.0);
+            for layers in self.pane.cards.values() {
+                layers.slide_to(slide, &m, dx);
+            }
         }
         CATransaction::commit();
     }

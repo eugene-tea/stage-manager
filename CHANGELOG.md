@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- VoiceOver reads the strip: each card is a button that says its stage and apps ("Stage 3:
+  Safari, Notes", or the stage's name), and pressing it switches to that stage. Its actions
+  show all of one app's windows, as a click on the app's icon. The edge tab is a button too.
+- Stage Manager follows Reduce Motion (System Settings → Accessibility → Display). Windows
+  fade in and out where they are instead of flying to and from the strip, the strip fades
+  in and out instead of sliding, and cards no longer grow under the pointer, glide to a new
+  place or slide in beside the pointer when dragged out. `[animation] reduce_motion`
+  ("system", "on" or "off") decides it for Stage Manager alone.
+- With Reduce Transparency or Increase Contrast on, the cards are solid instead of letting
+  the wallpaper through, as macOS's own glass turns solid; the edge tab too.
+- In Settings, VoiceOver reads each switch and pop-up menu by its row's name and the grey
+  explanation under it as help, the animation speed slider says the speed ("Native", "2×")
+  instead of a number, and Tab reaches every control of the pane shown with Full Keyboard
+  Access. In the welcome window, each Allow button says what it allows.
+
 - With "Click wallpaper to reveal desktop: Only in Stage Manager", grabbing a window's edge
   to resize it no longer sends your stage to the strip when the press lands a hair outside the
   window. The window used to hide mid-drag and shrink to its smallest size out of sight, so an

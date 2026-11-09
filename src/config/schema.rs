@@ -351,6 +351,8 @@ pub const KEYS: &[KeyDef] = &[
     k("animation", "snapshot_interval_ms", i(0, 60_000), "2000",
         "How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip."),
     k("animation", "snapshot_cache_mb", i(16, 8192), "512", "Most memory kept for full-size window snapshots; the oldest go first."),
+    k("animation", "reduce_motion", Kind::Choice(&["system", "on", "off"]), "\"system\"",
+        "Reduce Motion: \"system\" follows macOS (System Settings > Accessibility > Display > Reduce motion); \"on\" always, \"off\" never. With it, nothing flies, slides, grows or turns: a switch is a short cross-fade, the strip fades in and out, cards change place with a fade and do not grow under the pointer."),
     k("animation", "activation_grows", Kind::Bool, "true",
         "Cmd-Tab, a Dock click or a click on a parked sliver to an app in another stage: true grows its windows from their card like a card click, as Apple does (the corner where they wait is covered meanwhile); false brings them to their frames at once, with no motion."),
     // [windows]
@@ -582,6 +584,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-36.toml"),
     include_str!("legacy/default-37.toml"),
     include_str!("legacy/default-38.toml"),
+    include_str!("legacy/default-39.toml"),
 ];
 
 #[cfg(test)]

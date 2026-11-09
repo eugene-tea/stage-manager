@@ -11,7 +11,7 @@ use std::rc::Rc;
 use objc2::rc::Retained;
 use objc2::{MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSColor, NSImageView, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
+    NSAccessibility, NSApplication, NSBackingStoreType, NSColor, NSImageView, NSView, NSWindow, NSWindowStyleMask, NSWindowTitleVisibility,
 };
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize, NSString};
 
@@ -136,6 +136,8 @@ fn build(mtm: MainThreadMarker, rows: &[WelcomeRow], target: &ActionTarget) -> (
     if let Some(icon) = app.applicationIconImage() {
         let iv = NSImageView::imageViewWithImage(&icon, mtm);
         iv.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(72.0, 72.0)));
+        // The title under it names the app: VoiceOver skips the picture.
+        iv.setAccessibilityElement(false);
         f.place(&iv, (WIDTH - 72.0) / 2.0, 72.0);
         f.space(10.0);
     }
@@ -175,7 +177,11 @@ fn build(mtm: MainThreadMarker, rows: &[WelcomeRow], target: &ActionTarget) -> (
         let trailing = if r.done() {
             done_mark(mtm, if matches!(r, WelcomeRow::AppleOff(_)) { "Off" } else { "Allowed" })
         } else {
-            view(&form::button(mtm, button, target, t))
+            let b = form::button(mtm, button, target, t);
+            // "Allow…" alone does not say what for: VoiceOver reads the row it allows.
+            let spoken = if t == tag::APPLE { format!("Turn Off {title}") } else { format!("Allow {title}") };
+            b.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
+            view(&b)
         };
         row.trailing.push(trailing);
         group.push(row);
@@ -220,6 +226,8 @@ fn make_window(mtm: MainThreadMarker, size: NSSize) -> Retained<NSWindow> {
     window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
     window.setTitlebarAppearsTransparent(true);
     window.setMovableByWindowBackground(true);
+    // Full Keyboard Access: Tab reaches every button, also after the rows are rebuilt.
+    window.setAutorecalculatesKeyViewLoop(true);
     // Titled windows are restorable by default: never brought back by macOS's reopen at
     // login (round reopen-list).
     window.setRestorable(false);

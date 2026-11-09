@@ -35,7 +35,7 @@ use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSImage, NSPopUpButton, NSScreen, NSScrollView,
+    NSAccessibility, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSImage, NSPopUpButton, NSScreen, NSScrollView,
     NSSlider, NSSwitch, NSTextAlignment, NSTickMarkPosition, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
     NSToolbarItem, NSView, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
 };
@@ -471,7 +471,10 @@ fn change_for(c: &Controls, t: isize) -> Option<Change> {
         tag::ORDER => order_change(c.order.indexOfSelectedItem()),
         tag::FIT => Change::Fit(FIT_MODES[(c.fit.indexOfSelectedItem().max(0) as usize).min(2)]),
         tag::HOTKEYS => Change::Hotkeys(on(&c.hotkeys)),
-        tag::SPEED => Change::Speed(SPEEDS[(c.speed.doubleValue().round().max(0.0) as usize).min(SPEEDS.len() - 1)]),
+        tag::SPEED => {
+            describe_speed(&c.speed);
+            Change::Speed(SPEEDS[(c.speed.doubleValue().round().max(0.0) as usize).min(SPEEDS.len() - 1)])
+        }
         tag::OPEN => Change::OpenConfig,
         tag::REVEAL => Change::RevealConfig,
         tag::COPY => Change::CopyAgentInstructions,
@@ -509,6 +512,17 @@ fn view<T: AsRef<NSView>>(v: &T) -> Retained<NSView> {
     v.as_ref().retain()
 }
 
+/// What VoiceOver reads as the speed slider's value: the speed, not the stop's number.
+pub fn speed_words(speed: f64) -> String {
+    if (speed - 1.0).abs() < 1e-9 { "Native".to_string() } else { format!("{}×", (speed * 100.0).round() / 100.0) }
+}
+
+/// Gives the speed slider its value in words ([`speed_words`]) for where it stands.
+fn describe_speed(slider: &NSSlider) {
+    let stop = (slider.doubleValue().round().max(0.0) as usize).min(SPEEDS.len() - 1);
+    slider.setAccessibilityValueDescription(Some(&NSString::from_str(&speed_words(SPEEDS[stop]))));
+}
+
 /// The speed slider with Slower · Native · Faster under it.
 fn speed_view(mtm: MainThreadMarker, width: f64, stop: usize, enabled: bool, target: &ActionTarget) -> (Retained<NSView>, Retained<NSSlider>, f64) {
     let view = FlippedView::new(mtm, NSSize::new(width, 40.0));
@@ -521,6 +535,8 @@ fn speed_view(mtm: MainThreadMarker, width: f64, stop: usize, enabled: bool, tar
     slider.setContinuous(false);
     slider.setDoubleValue(stop as f64);
     slider.setEnabled(enabled);
+    slider.setAccessibilityLabel(Some(&NSString::from_str("Animation speed")));
+    describe_speed(&slider);
     form::wire(&slider, target, tag::SPEED);
     slider.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, 24.0)));
     view.addSubview(&slider);
@@ -610,7 +626,9 @@ fn stage_manager(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwi
     let mut apple = Row::new("Apple's Stage Manager", None);
     if v.apple_on {
         apple = apple.detail("On. This app stands down until Apple's is off: it arranges nothing and shows no strip.");
-        apple.trailing.push(view(&m.button("Turn Off", tag::TURN_OFF)));
+        let off = m.button("Turn Off", tag::TURN_OFF);
+        off.setAccessibilityLabel(Some(&NSString::from_str("Turn Off Apple's Stage Manager")));
+        apple.trailing.push(view(&off));
     } else {
         apple = apple.detail("Off. This app takes its place.");
     }
@@ -806,6 +824,8 @@ pub fn create(mtm: MainThreadMarker, values: SettingsValues, pane: Pane) -> Reta
     toolbar.setAutosavesConfiguration(false);
     window.setToolbar(Some(&toolbar));
     window.setToolbarStyle(NSWindowToolbarStyle::Preference);
+    // Full Keyboard Access: Tab reaches every control of the pane shown, as panes swap.
+    window.setAutorecalculatesKeyViewLoop(true);
     OPEN.with(|o| {
         *o.borrow_mut() = Some(Open {
             window: window.clone(),
@@ -890,6 +910,7 @@ pub fn apply(values: SettingsValues) {
         c.fit.selectItemAtIndex(FIT_MODES.iter().position(|m| *m == values.fit).unwrap_or(0) as isize);
         set_switch(&c.hotkeys, values.hotkeys);
         c.speed.setDoubleValue(speed_stop(values.speed) as f64);
+        describe_speed(&c.speed);
         let wallpaper_changed = open.shown.wallpaper_only_in_stage_manager != values.wallpaper_only_in_stage_manager
             || open.shown.config_error != values.config_error;
         open.shown = values;
@@ -939,6 +960,14 @@ pub fn confirm_copied() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_speed_slider_reads_its_speed() {
+        assert_eq!(speed_words(1.0), "Native");
+        assert_eq!(speed_words(0.33), "0.33×");
+        assert_eq!(speed_words(2.0), "2×");
+        assert_eq!(speed_words(SPEEDS[0]), "0.25×");
+    }
 
     #[test]
     fn the_slider_stops_at_apples_speed_in_the_middle() {

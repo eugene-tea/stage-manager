@@ -253,20 +253,21 @@ impl GhostGroup {
     /// whatever differs from the windows under it melts, and no snapshot shows through
     /// another). The caller removes it after.
     pub fn fade_out(&self, duration: f64) {
+        fade_layer(&self.layer, 0.0, duration);
+    }
+
+    /// Fades the group to `opacity` over `duration` seconds from what is drawn now, as one
+    /// picture (Reduce Motion's cross-fade: a switch's snapshots fade where they are).
+    pub fn fade_to(&self, opacity: f32, duration: f64) {
+        fade_layer(&self.layer, opacity, duration);
+    }
+
+    /// Sets the group's opacity at once.
+    pub fn set_opacity(&self, opacity: f32) {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
-        let key = NSString::from_str("opacity");
-        // SAFETY: presentationLayer returns a copy of the drawn state or nil.
-        let from = unsafe { self.layer.presentationLayer() }.map_or(self.layer.opacity(), |l| l.opacity());
-        self.layer.setOpacity(0.0);
-        let anim = CABasicAnimation::animationWithKeyPath(Some(&key));
-        // SAFETY: from/to are numbers, the property's type.
-        unsafe {
-            anim.setFromValue(Some(&NSNumber::new_f32(from)));
-            anim.setToValue(Some(&NSNumber::new_f32(0.0)));
-        }
-        anim.setDuration(duration.max(1e-3));
-        self.layer.addAnimation_forKey(&anim, Some(&key));
+        self.layer.removeAnimationForKey(&NSString::from_str("opacity"));
+        self.layer.setOpacity(opacity);
         CATransaction::commit();
     }
 
@@ -277,6 +278,25 @@ impl GhostGroup {
         self.layer.removeFromSuperlayer();
         CATransaction::commit();
     }
+}
+
+/// Fades `layer`'s opacity to `to` over `duration` seconds from what is drawn now, linear.
+fn fade_layer(layer: &CALayer, to: f32, duration: f64) {
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    let key = NSString::from_str("opacity");
+    // SAFETY: presentationLayer returns a copy of the drawn state or nil.
+    let from = unsafe { layer.presentationLayer() }.map_or(layer.opacity(), |l| l.opacity());
+    layer.setOpacity(to);
+    let anim = CABasicAnimation::animationWithKeyPath(Some(&key));
+    // SAFETY: from/to are numbers, the property's type.
+    unsafe {
+        anim.setFromValue(Some(&NSNumber::new_f32(from)));
+        anim.setToValue(Some(&NSNumber::new_f32(to)));
+    }
+    anim.setDuration(duration.max(1e-3));
+    layer.addAnimation_forKey(&anim, Some(&key));
+    CATransaction::commit();
 }
 
 /// How long a newer picture of the window takes to replace the one a flying snapshot shows
@@ -573,6 +593,12 @@ impl Ghost {
             }
         }
         CATransaction::commit();
+    }
+
+    /// Fades the whole ghost (picture, glass and shadows) to `opacity` over `duration` seconds
+    /// where it is (Reduce Motion's cross-fade, for a snapshot outside a group).
+    pub fn fade_to(&self, opacity: f32, duration: f64) {
+        fade_layer(&self.depth, opacity, duration);
     }
 
     /// True when it stacks in a [`GhostGroup`].

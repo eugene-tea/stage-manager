@@ -146,6 +146,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `animation.shadow_offset_y` | `10.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
 | `animation.snapshot_interval_ms` | `2000` | whole number, 0 to 60000 | How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip. |
 | `animation.snapshot_cache_mb` | `512` | whole number, 16 to 8192 | Most memory kept for full-size window snapshots; the oldest go first. |
+| `animation.reduce_motion` | `"system"` | "system", "on", "off" | Reduce Motion: "system" follows macOS (System Settings > Accessibility > Display > Reduce motion); "on" always, "off" never. With it, nothing flies, slides, grows or turns: a switch is a short cross-fade, the strip fades in and out, cards change place with a fade and do not grow under the pointer. |
 | `animation.activation_grows` | `true` | true or false | Cmd-Tab, a Dock click or a click on a parked sliver to an app in another stage: true grows its windows from their card like a card click, as Apple does (the corner where they wait is covered meanwhile); false brings them to their frames at once, with no motion. |
 | `windows.fit` | `"off"` | "off", "move", "narrow" | Keep placed windows clear of the strip: "move" right just enough, "narrow" also too-wide ones. Apple: "off". |
 | `windows.fit_margin` | `16.0` | number, 0 to 500 | With fit: room kept between the strip column and the windows. |

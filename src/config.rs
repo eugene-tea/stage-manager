@@ -246,11 +246,38 @@ pub struct AnimationStyle {
     pub shadow_offset_y: f64,
     pub snapshot_interval_ms: u64,
     pub snapshot_cache_mb: u64,
+    /// When Reduce Motion applies: macOS's setting, always or never
+    /// ([`ReduceMotion::applies`]).
+    pub reduce_motion: ReduceMotion,
     /// An activation of an app in another stage (Cmd-Tab, Dock, a click on its sliver) grows
     /// its windows from their card like a card click, as Apple's does (the default; the park
     /// corner, where macOS has raised them, is covered meanwhile); off, they come to their
     /// frames at once.
     pub activation_grows: bool,
+}
+
+/// `[animation] reduce_motion`: when the app follows Reduce Motion (nothing flies, slides,
+/// grows or turns; see `ui::display_options`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReduceMotion {
+    /// As macOS says (System Settings > Accessibility > Display > Reduce motion).
+    #[default]
+    System,
+    /// Always, whatever macOS says.
+    On,
+    /// Never: the full motion, whatever macOS says.
+    Off,
+}
+
+impl ReduceMotion {
+    /// True when motion is reduced, given macOS's Reduce Motion setting (`system`).
+    pub fn applies(self, system: bool) -> bool {
+        match self {
+            Self::System => system,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
 }
 
 /// `[animation] shadow`: a moving snapshot's shadow.
@@ -322,6 +349,12 @@ impl AnimationStyle {
     /// True when anything animates.
     pub fn animates(&self) -> bool {
         self.speed() > 0.0
+    }
+
+    /// True when motion is reduced (`[animation] reduce_motion`, given macOS's Reduce Motion
+    /// setting `system`): what animates then only fades, nothing moves, grows or turns.
+    pub fn reduces_motion(&self, system: bool) -> bool {
+        self.reduce_motion.applies(system)
     }
 
     /// A duration of `ms` milliseconds at this speed, in seconds (0 when nothing animates).
@@ -1015,6 +1048,11 @@ impl Config {
                     shadow_offset_y: v.num("animation.shadow_offset_y"),
                     snapshot_interval_ms: v.uint("animation.snapshot_interval_ms"),
                     snapshot_cache_mb: v.uint("animation.snapshot_cache_mb"),
+                    reduce_motion: match v.text("animation.reduce_motion") {
+                        "on" => ReduceMotion::On,
+                        "off" => ReduceMotion::Off,
+                        _ => ReduceMotion::System,
+                    },
                     activation_grows: v.flag("animation.activation_grows"),
                 },
             },
@@ -1261,6 +1299,15 @@ pub fn command(args: &[String]) -> (i32, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduce_motion_follows_macos_unless_set() {
+        assert!(ReduceMotion::System.applies(true) && !ReduceMotion::System.applies(false));
+        assert!(ReduceMotion::On.applies(false) && ReduceMotion::On.applies(true));
+        assert!(!ReduceMotion::Off.applies(true) && !ReduceMotion::Off.applies(false));
+        let a = AnimationStyle { reduce_motion: ReduceMotion::Off, ..Config::default().style.animation };
+        assert!(!a.reduces_motion(true), "off keeps the full motion whatever macOS says");
+    }
     use crate::engine::rules::AppMatch;
 
     fn parse(text: &str) -> Parsed {
@@ -1544,6 +1591,7 @@ shift_brings_here = false
 enabled = false
 unpark_at = 0.9
 activation_grows = false
+reduce_motion = "on"
 "##,
         );
         let c = p.config;
@@ -1552,6 +1600,8 @@ activation_grows = false
         assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
         assert!(!c.style.animation.activation_grows, "kept: false brings an activation's windows at once");
         assert!(Config::default().style.animation.activation_grows, "an activation grows from its card by default, as Apple's (8L)");
+        assert_eq!(c.style.animation.reduce_motion, ReduceMotion::On);
+        assert_eq!(Config::default().style.animation.reduce_motion, ReduceMotion::System, "macOS's Reduce Motion decides by default");
         assert_eq!(c.strip.order, StripOrder::InPlace, "\"fixed\" is the older name of \"in_place\"");
         assert_eq!(c.strip.active, ActiveCard::Card, "show_active = true is the older active = \"card\"");
         assert!(!p.warnings.iter().any(|w| w.contains("show_active") || w.contains("order")), "the older spellings read without a warning: {:?}", p.warnings);

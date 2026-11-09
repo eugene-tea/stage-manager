@@ -17,12 +17,12 @@ use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
-use objc2::{DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{ClassType, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBitmapImageFileType,
     NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSFont,
     NSFontWeightRegular, NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSImageView, NSLineBreakMode,
-    NSPopUpButton, NSSwitch, NSTextAlignment, NSTextField, NSTitlePosition, NSView, NSWindow,
+    NSAccessibility, NSPopUpButton, NSSwitch, NSTextAlignment, NSTextField, NSTitlePosition, NSView, NSWindow,
 };
 use objc2_foundation::{MainThreadMarker, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
@@ -178,6 +178,8 @@ pub fn symbol(mtm: MainThreadMarker, name: &str, points: f64, color: Option<&NSC
         view.setContentTintColor(Some(c));
     }
     view.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(points + 8.0, points + 8.0)));
+    // Decoration beside words that say the same: VoiceOver skips it.
+    view.setAccessibilityElement(false);
     view
 }
 
@@ -491,6 +493,7 @@ impl Form {
         for (control, frame) in row.trailing.iter().zip(&at.trailing) {
             control.setFrame(frame.rect());
             content.addSubview(control);
+            describe_control(control, &row.title, row.detail.as_deref());
         }
         if let (Some((below, _)), Some(frame)) = (row.below, at.below) {
             below.setFrame(frame.rect());
@@ -504,6 +507,18 @@ impl Form {
         let h = finished_height(self.y, self.trailing_gap, &self.metrics);
         self.view.setFrameSize(NSSize::new(self.width, h));
         (self.view, h)
+    }
+}
+
+/// What VoiceOver reads for a row's control: a switch or a pop-up has no words of its own,
+/// so it takes the row's title (System Settings' rows read so); the row's grey explanation is
+/// every control's help. A button keeps its own title.
+pub fn describe_control(control: &NSView, title: &str, detail: Option<&str>) {
+    if control.isKindOfClass(NSSwitch::class()) || control.isKindOfClass(NSPopUpButton::class()) {
+        control.setAccessibilityLabel(Some(&NSString::from_str(title)));
+    }
+    if let Some(d) = detail {
+        control.setAccessibilityHelp(Some(&NSString::from_str(d)));
     }
 }
 
