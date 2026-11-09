@@ -26,7 +26,7 @@
 //! [`safety::guarded`]: a panic is caught, logged and followed by a registry resync, instead
 //! of killing the thread that owns the windows.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -54,6 +54,7 @@ use super::{enhanced_ui, safety};
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
+use crate::engine::slow_task::{self, SlowTasks};
 use crate::engine::stand_down::{Heard, Logout, Quit, Signal, StandDown, Step, Task, Work, logout_plan, release_plan, resume_plan};
 use crate::ui::strip_model::{StripDrop, StripEvent};
 
@@ -139,6 +140,30 @@ pub enum WmCommand {
     Probe(observe_probe::Note),
     /// The launch's recovery scan read an app after observation's start ([`launch_scan`]).
     LaunchScan(launch_scan::Done<launch_scan::Read>),
+}
+
+impl WmCommand {
+    /// The command's name, for the slow-task line ([`slow_task`]).
+    fn name(&self) -> &'static str {
+        match self {
+            WmCommand::Apps(_) => "command Apps",
+            WmCommand::App(_) => "command App",
+            WmCommand::Accessibility(_) => "command Accessibility",
+            WmCommand::NativeSettings(_) => "command NativeSettings",
+            WmCommand::Displays(..) => "command Displays",
+            WmCommand::Input(..) => "command Input",
+            WmCommand::Hotkey(_) => "command Hotkey",
+            WmCommand::Strip(_) => "command Strip",
+            WmCommand::SpaceChanged => "command SpaceChanged",
+            WmCommand::ToggleStrip => "command ToggleStrip",
+            WmCommand::ReloadConfig => "command ReloadConfig",
+            WmCommand::Ctl(..) => "command Ctl",
+            WmCommand::Shutdown(_) => "command Shutdown",
+            WmCommand::LogoutSignal(..) => "command LogoutSignal",
+            WmCommand::Probe(_) => "command Probe",
+            WmCommand::LaunchScan(_) => "command LaunchScan",
+        }
+    }
 }
 
 /// A `CFRunLoop` reference that may be used from other threads.
@@ -279,6 +304,24 @@ struct WmState {
 thread_local! {
     static STATE: RefCell<Option<WmState>> = const { RefCell::new(None) };
     static INBOX: RefCell<Option<Receiver<WmCommand>>> = const { RefCell::new(None) };
+    /// Slow tasks' log lines, rate-limited ([`slow_task`]).
+    static SLOW: RefCell<SlowTasks> = RefCell::new(SlowTasks::default());
+    /// The slowest step ([`step`]) of the task running, for its slow-task line.
+    static SLOWEST_STEP: Cell<Option<(&'static str, Duration)>> = const { Cell::new(None) };
+}
+
+/// Runs one named step of a task (the tick's parts), keeping the slowest for the task's
+/// slow-task line ([`guarded_state`]).
+fn step<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
+    let start = Instant::now();
+    let out = f();
+    let took = start.elapsed();
+    SLOWEST_STEP.with(|s| {
+        if s.get().is_none_or(|(_, t)| took > t) {
+            s.set(Some((name, took)));
+        }
+    });
+    out
 }
 
 fn with_state(f: impl FnOnce(&mut WmState)) {
@@ -293,11 +336,22 @@ fn with_state(f: impl FnOnce(&mut WmState)) {
 }
 
 /// Runs `f` on the state inside a guarded section; after a caught panic the registry is
-/// resynced from the model.
-fn guarded_state(what: &str, f: impl FnOnce(&mut WmState)) {
+/// resynced from the model. A run that held the thread [`slow_task::SLOW`] or longer is
+/// logged as task `task` (`detail`: what it handled, or empty), rate-limited.
+fn guarded_state(what: &str, task: &'static str, detail: &str, f: impl FnOnce(&mut WmState)) {
+    let start = Instant::now();
+    SLOWEST_STEP.with(|s| s.set(None));
     if safety::guarded(what, || with_state(f)).is_none() {
         let _ = safety::guarded("panic recovery", || with_state(WmState::after_panic));
     }
+    let took = start.elapsed();
+    if took < slow_task::SLOW {
+        return;
+    }
+    let Some(held) = SLOW.with(|s| s.borrow_mut().note(task, took, Instant::now())) else { return };
+    let ms = took.as_millis() as u64;
+    let (slowest, slowest_ms) = SLOWEST_STEP.with(|s| s.take()).map_or(("", 0), |(n, t)| (n, t.as_millis() as u64));
+    tracing::debug!(task, detail, ms, slowest, slowest_ms, held, "slow WM task");
 }
 
 /// The fast tick (none once Quit is requested).
@@ -305,7 +359,7 @@ fn fast_tick() {
     if safety::quit_requested() {
         return;
     }
-    guarded_state("the WM fast tick", |s| s.controller.fast_tick(&mut s.observer));
+    guarded_state("the WM fast tick", "fast tick", "", |s| s.controller.fast_tick(&mut s.observer));
     arm_fast_tick();
 }
 
@@ -320,7 +374,7 @@ fn drain() {
             tracing::debug!("quitting: a queued WM command is dropped");
             continue;
         }
-        guarded_state("a WM command", |s| s.handle(cmd));
+        guarded_state("a WM command", cmd.name(), "", |s| s.handle(cmd));
     }
     arm_fast_tick();
 }
@@ -330,7 +384,7 @@ fn tick() {
     if safety::quit_requested() {
         return;
     }
-    guarded_state("the WM tick", WmState::tick);
+    guarded_state("the WM tick", "tick", "", WmState::tick);
     arm_fast_tick();
 }
 
@@ -346,7 +400,7 @@ unsafe extern "C-unwind" fn ax_callback(
     let element = unsafe { AxElement::from_borrowed(element) };
     // SAFETY: as above.
     let name = unsafe { notification.as_ref() }.to_string();
-    guarded_state("an AX callback", |s| {
+    guarded_state("an AX callback", "AX callback", &name, |s| {
         s.observer.on_notification(pid, element, &name);
         if !safety::quit_requested() {
             s.pump();
@@ -791,23 +845,23 @@ impl WmState {
         let full = self.ticks.is_multiple_of(RETRY_EVERY);
         // Apps gone without a termination notice (round missed-quit): the pids whose calls
         // failed each tick, the apps with tracked windows about once a second.
-        self.observer.reap_gone(full);
+        step("reap gone apps", || self.observer.reap_gone(full));
         if full {
-            self.release_overdue_scans();
-            self.observer.retry_pending(ax_callback);
+            step("release overdue scans", || self.release_overdue_scans());
+            step("retry pending apps", || self.observer.retry_pending(ax_callback));
             // Windows closed while their app did not answer (8M): no destroyed notice came.
-            self.observer.sweep_closed();
+            step("sweep closed windows", || self.observer.sweep_closed());
             // Windows taken from an old guardian (round 8N): its rules, about once a second.
             if self.trusted {
-                self.taken.pass(&self.controller.model_window_ids());
+                step("taken windows", || self.taken.pass(&self.controller.model_window_ids()));
             }
         }
-        self.sweep_after_display_change();
-        self.rescan_pass();
-        self.pump();
-        self.controller.tick(&mut self.observer);
+        step("display change sweep", || self.sweep_after_display_change());
+        step("rescan", || self.rescan_pass());
+        step("events", || self.pump());
+        step("controller tick", || self.controller.tick(&mut self.observer));
         // An app's enhanced UI a restore could not put back, or held off too long: on again.
-        enhanced_ui::sweep();
+        step("enhanced UI sweep", enhanced_ui::sweep);
     }
 
     /// One slice of the scans waiting ([`Rescan`]): apps a scan could not read, tried again

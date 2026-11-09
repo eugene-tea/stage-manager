@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- With `[log] level = "debug"`, the log names any task that holds the app's window thread
+  for 100 ms or more, and how long each save of your stages takes.
 - A closed window about the size of another screen is no longer mistaken for a full-screen
   one: its card used to stay, and the app's window was tried again at every switch.
 - A window kept on top of all others (a music player in a corner) now stays on top through

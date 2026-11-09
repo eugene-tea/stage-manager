@@ -3442,6 +3442,7 @@ impl Controller {
     /// frame that is not finite) is not written: the file on disk stays. The state is clean
     /// only once the file is replaced; a failure is tried again later ([`SaveClock::failed`]).
     pub fn save_now(&mut self) {
+        let start = Instant::now();
         let Some(m) = self.model.as_mut() else {
             self.save.saved();
             return;
@@ -3466,6 +3467,7 @@ impl Controller {
                 return;
             }
         };
+        let encoded = start.elapsed();
         let result = crate::private_files::ensure_dir(&paths::config_dir())
             .and_then(|_| super::durable::replace(&path, text.as_bytes(), super::durable::Flush::Full));
         match result {
@@ -3474,7 +3476,10 @@ impl Controller {
                     tracing::info!(failures = self.save.failures(), "state saved to {} again", path.display());
                 }
                 self.save.saved();
-                tracing::debug!("state saved to {}", path.display());
+                // How long the save held the window thread (1.9: off the thread if over ~10 ms).
+                let ms = |d: Duration| (d.as_secs_f64() * 10_000.0).round() / 10.0;
+                let took = start.elapsed();
+                tracing::debug!(ms = ms(took), encode_ms = ms(encoded), write_ms = ms(took - encoded), bytes = text.len(), "state saved to {}", path.display());
             }
             Err(e) => {
                 let wait = self.save.failed(Instant::now());

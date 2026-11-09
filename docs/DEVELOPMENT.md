@@ -211,6 +211,10 @@ menu. Day files are capped in size and kept 14 days.
   warning and error, deduplicated: short enough to paste.
 - `stage-manager mark ["note"]` (or **Mark a Problem** in the menu) writes a marked block
   with the app's state and the last 30 seconds of detailed lines.
+- At `debug`, a task that held the window thread 100 ms or more (a command, a tick, an
+  Accessibility callback) logs one `slow WM task` line: its name, how long, the tick's slowest
+  part, and how many such lines were held back (one a second per task at most). Each
+  `state saved` line says how long the save took (`ms`, `encode_ms`, `write_ms`).
 
 Window titles go into the log, and into a mark's state dumps, as a short hash
 (`#1a2b3c4d`, the same for the same title in every process on this Mac: it is keyed with a

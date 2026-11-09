@@ -40,6 +40,7 @@ pub mod rules;
 pub mod save_clock;
 pub mod settings;
 pub mod show_desktop;
+pub mod slow_task;
 pub mod slide_hold;
 pub mod solar_settle;
 pub mod stale_activation;
