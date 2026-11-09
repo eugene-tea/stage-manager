@@ -17,10 +17,13 @@
 //! - **Column.** Cards' left edges at `x`; `gap` between one card's left edge bottom and the
 //!   next one's top; the column centered on the visible frame.
 //! - **Stack.** Windows of one app step `stack_dx` to the right toward the front one (the
-//!   window behind peeks out on the left, as on Apple's strip); a second app's windows sit
-//!   `second_app_dx` right and `second_app_dy` up.
-//! - **Icon.** Centered `center_dx` right and `center_dy` down from the bottom-left corner of
-//!   the card's leftmost window.
+//!   window behind peeks out on the left, as on Apple's strip), each at its own card size.
+//! - **Several apps** (measured 11-09 on a 5K display): every window at the plain scale, no
+//!   window held at `min_height` (the card as a whole is), the front window (the stage's
+//!   last used) in front, a second app's windows `second_app_dx` toward the side they sit on
+//!   on the screen and `second_app_dy` up, so the card stays about a single card's size.
+//! - **Icon.** Centered `center_dx` right of the card's leftmost window's left edge and
+//!   `center_dy` down from the card's bottom.
 //!
 //! Every length is multiplied by the strip's length scale `k` (1 unless `[strip] scale` or
 //! `scale_to_display` say otherwise).
@@ -118,9 +121,22 @@ impl Metrics {
     /// A window's thumbnail before the turn: the window scaled by `full_height / visible
     /// height`, at least `min_height` tall, at most `max_width` wide (aspect kept).
     pub fn thumb_size(&self, frame: &Rect) -> Size {
+        self.sized(frame, self.min_height)
+    }
+
+    /// A window's thumbnail on a card of several apps: [`Metrics::thumb_size`] without the
+    /// floor (Apple draws each at the plain scale and holds the card as a whole at
+    /// `min_height`, [`arrange_card`]).
+    pub fn plain_size(&self, frame: &Rect) -> Size {
+        self.sized(frame, 0.0)
+    }
+
+    /// The window scaled by `full_height / visible height`, at least `floor` tall, at most
+    /// `max_width` wide (aspect kept).
+    fn sized(&self, frame: &Rect, floor: f64) -> Size {
         let (w, h) = if frame.w > 1.0 && frame.h > 1.0 { (frame.w, frame.h) } else { (800.0, 600.0) };
         let aspect = w / h;
-        let mut v = (self.full_height * h / self.visible.h.max(1.0)).max(self.min_height);
+        let mut v = (self.full_height * h / self.visible.h.max(1.0)).max(floor);
         let mut u = v * aspect;
         if u > self.max_width {
             u = self.max_width;
@@ -180,13 +196,16 @@ impl Metrics {
 impl Metrics {
     /// Every place a window's left edge can take on a card, before the turn, right of the
     /// card's left edge ([`arrange_card`]): the front app's windows step `stack_dx` (the
-    /// deepest at 0), a second app's start `second_app_dx` right (at most `max_windows - 1`
-    /// of them). A column too full shrinks them toward 0.
+    /// deepest at 0); a second app's start `second_app_dx` to either side of the front
+    /// window (at most `max_windows - 1` of them), so whichever group is leftmost starts at 0
+    /// and the other `second_app_dx` right of it. A column too full shrinks them toward 0.
     fn plane_offsets(&self) -> Vec<f64> {
         let n = self.max_windows;
+        let side = self.second_app_dx.abs();
         let front = (0..n).map(|j| j as f64 * self.stack_dx);
-        let second = (0..n.saturating_sub(1)).map(|j| self.second_app_dx + j as f64 * self.stack_dx);
-        front.chain(second).chain(std::iter::once(0.0)).collect()
+        let second = (0..n.saturating_sub(1)).map(|j| j as f64 * self.stack_dx);
+        let shifted: Vec<f64> = front.clone().chain(second.clone()).map(|x| x + side).collect();
+        front.chain(second).chain(shifted).chain(std::iter::once(0.0)).collect()
     }
 
     /// The far edge of a window's plane whose left edge is at `x`, `u` wide before the turn
@@ -285,7 +304,7 @@ impl CardLayout {
     /// the front window is on top, then the others in their order, within an app's group and
     /// across apps. The turn alone would stack them by depth instead: wherever two overlap,
     /// the one whose left edge is further right is nearer the eye
-    /// ([`Metrics::depth_at`]), and a second app's windows sit `second_app_dx` right.
+    /// ([`Metrics::depth_at`]), and a second app's windows can sit `second_app_dx` right.
     pub fn draw_order(&self) -> Vec<ThumbSlot> {
         self.thumbs.iter().rev().copied().collect()
     }
@@ -334,9 +353,36 @@ fn in_quad(q: &[Point; 4], p: Point) -> bool {
     sides.iter().all(|&c| c >= 0.0) || sides.iter().all(|&c| c <= 0.0)
 }
 
+/// The side a card of several apps puts a second app's windows on: -1 left of the front
+/// window, +1 right, as the second app's most recent window sits on the screen beside the
+/// front one (its middle left of the front window's middle, or level with it: left, where
+/// the windows of one app peek out too). Apple's card keeps that side (measured 11-09: a
+/// window left of the front one peeked out on the left, two of the owner's cards with the
+/// other window right of the front one on the right).
+pub fn second_app_side(front: &Rect, other: &Rect) -> f64 {
+    if other.x + other.w / 2.0 > front.x + front.w / 2.0 { 1.0 } else { -1.0 }
+}
+
+/// The height of thumbnails `sizes` (multiplied by `grow`) centered on one line, each raised
+/// by its `up`.
+fn stacked_height(sizes: &[Size], up: &[f64], grow: f64) -> f64 {
+    let above = sizes.iter().zip(up).map(|(s, u)| s.h * grow / 2.0 + u).fold(f64::NEG_INFINITY, f64::max);
+    let below = sizes.iter().zip(up).map(|(s, u)| s.h * grow / 2.0 - u).fold(f64::NEG_INFINITY, f64::max);
+    above + below
+}
+
 /// Arranges a card's thumbnails; `scale` shrinks everything further (a column too full).
 /// Returns the card's size (widest reach before the turn, span of the left edges) and its
-/// thumbnails relative to its top-left corner.
+/// thumbnails relative to its top-left corner, front window first.
+///
+/// One app: each window at its own card size ([`Metrics::thumb_size`]), stepping `stack_dx`
+/// toward the front one. Several apps (Apple's, measured 11-09 on a 5K display, Blue behind
+/// and Green in front): every window at the plain scale ([`Metrics::plain_size`]: Blue 85,
+/// Green 79 pt tall, not 97), a second app's windows `second_app_dx` toward their side on
+/// the screen ([`second_app_side`]) and `second_app_dy` up, every window centered on one line
+/// (so the window behind peeks out above and to its side), and the whole card grown, sizes
+/// only, until it is `min_height` tall (Apple's pair measured 96 pt). A third app's windows
+/// join the second's group (not measured on Apple's).
 pub fn arrange_card(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<ThumbSlot>) {
     let windows = &card.windows[..card.windows.len().min(m.max_windows)];
     if windows.is_empty() {
@@ -347,24 +393,46 @@ pub fn arrange_card(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<
     // among earlier windows of the same group.
     let groups: Vec<usize> = windows.iter().map(|w| usize::from(w.pid != windows[0].pid)).collect();
     let depth: Vec<usize> = (0..windows.len()).map(|i| (0..i).filter(|&j| groups[j] == groups[i]).count()).collect();
+    let second = groups.iter().position(|&g| g == 1);
     let sizes: Vec<Size> = windows
         .iter()
         .zip(&depth)
         .map(|(w, &d)| {
-            let s = m.thumb_size(&w.frame);
+            let s = if second.is_some() { m.plain_size(&w.frame) } else { m.thumb_size(&w.frame) };
             let b = m.behind_scale.powi(d as i32);
             Size::new(s.w * b, s.h * b)
         })
         .collect();
+    let side = second.map_or(1.0, |i| second_app_side(&windows[0].frame, &windows[i].frame));
     // Apple steps toward the front: the deepest window of a group sits leftmost.
     let in_group = |g: usize| groups.iter().filter(|&&x| x == g).count();
     let dx: Vec<f64> = (0..windows.len())
-        .map(|i| groups[i] as f64 * m.second_app_dx + (in_group(groups[i]) - 1 - depth[i]) as f64 * m.stack_dx)
+        .map(|i| groups[i] as f64 * side * m.second_app_dx + (in_group(groups[i]) - 1 - depth[i]) as f64 * m.stack_dx)
         .collect();
     let up: Vec<f64> = groups.iter().map(|&g| g as f64 * m.second_app_dy).collect();
+    // Several apps: the card as a whole at least `min_height` tall, its windows grown (their
+    // offsets kept), never wider than `max_width`.
+    let grow = if second.is_some() && stacked_height(&sizes, &up, 1.0) < m.min_height {
+        let widest = sizes.iter().map(|s| s.w).fold(0.0, f64::max);
+        let cap = if widest > 0.0 { (m.max_width / widest).max(1.0) } else { 1.0 };
+        let (mut lo, mut hi) = (1.0, cap);
+        if stacked_height(&sizes, &up, hi) <= m.min_height {
+            lo = hi;
+        }
+        for _ in 0..40 {
+            let mid = (lo + hi) / 2.0;
+            if stacked_height(&sizes, &up, mid) < m.min_height { lo = mid } else { hi = mid }
+        }
+        lo
+    } else {
+        1.0
+    };
+    let sizes: Vec<Size> = sizes.iter().map(|s| Size::new(s.w * grow, s.h * grow)).collect();
     // Every window centered on one line, the second app's raised by `up`.
-    let line = sizes.iter().map(|s| s.h).fold(0.0, f64::max) / 2.0 + up.iter().cloned().fold(0.0, f64::max);
+    let line = sizes.iter().zip(&up).map(|(s, u)| s.h / 2.0 + u).fold(0.0, f64::max);
     let rects: Vec<Rect> = (0..windows.len()).map(|i| Rect::new(dx[i], line - up[i] - sizes[i].h / 2.0, sizes[i].w, sizes[i].h)).collect();
+    let min_x = rects.iter().map(|r| r.x).fold(f64::INFINITY, f64::min);
+    let rects: Vec<Rect> = rects.iter().map(|r| r.translate(-min_x, 0.0)).collect();
     let min_y = rects.iter().map(|r| r.y).fold(f64::INFINITY, f64::min);
     let max_x = rects.iter().map(|r| r.max_x()).fold(0.0, f64::max);
     let max_y = rects.iter().map(|r| r.max_y()).fold(0.0, f64::max);
@@ -380,9 +448,10 @@ pub fn arrange_card(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<
     (Size::new(max_x * scale, (max_y - min_y) * scale), thumbs)
 }
 
-/// The app icons of a card, relative to its top-left corner: centered `icon_dx` right and
-/// `icon_dy` down from the bottom-left corner of the card's leftmost window (the front-most
-/// of those at the left edge), the next app `icon_step` right.
+/// The app icons of a card, relative to its top-left corner: centered `icon_dx` right of the
+/// card's leftmost window's left edge and `icon_dy` down from the card's bottom (its lowest
+/// window's; Apple's icons on a card of two apps sat 10 pt above the front window's bottom,
+/// the window behind ending 10 pt higher), the next app `icon_step` right.
 fn icons_for(card: &CardSnapshot, thumbs: &[ThumbSlot], size: Size, m: &Metrics, scale: f64) -> Vec<(i32, Rect)> {
     if m.icon_size <= 0.0 {
         return Vec::new();
@@ -394,10 +463,7 @@ fn icons_for(card: &CardSnapshot, thumbs: &[ThumbSlot], size: Size, m: &Metrics,
         }
     }
     let left = thumbs.iter().map(|t| t.rect.x).fold(f64::INFINITY, f64::min);
-    let corner = thumbs
-        .iter()
-        .find(|t| t.rect.x <= left + 1e-9)
-        .map_or(Point::new(0.0, size.h), |t| Point::new(t.rect.x, t.rect.max_y()));
+    let corner = Point::new(if left.is_finite() { left } else { 0.0 }, size.h);
     let s = m.icon_size * scale;
     pids.iter()
         .take(m.icon_max)
@@ -477,6 +543,15 @@ mod tests {
         CardSnapshot { stage, number: stage as usize, name: None, windows, apps, ..Default::default() }
     }
 
+    /// A card of windows at their screen frames: (id, pid, frame), front window first.
+    fn card_at(stage: u64, windows: &[(u32, i32, Rect)]) -> CardSnapshot {
+        let mut c = card(stage, &windows.iter().map(|&(id, pid, f)| (id, pid, f.w, f.h)).collect::<Vec<_>>());
+        for (w, &(_, _, f)) in c.windows.iter_mut().zip(windows) {
+            w.frame = f;
+        }
+        c
+    }
+
     /// His laptop: visible 0,39 1800 × 1130 in a 1800 × 1169 display; the panel starts at
     /// y = 39, so the display's middle (584.5) is 545.5 in panel coordinates.
     fn laptop() -> Metrics {
@@ -500,10 +575,12 @@ mod tests {
         (b.w, b.h)
     }
 
-    /// The widest card: a screen-sized window of one app, two of a second app.
+    /// The widest card: a screen-sized window of one app, two of a second app right of it on
+    /// the screen (so they sit right of it on the card too).
     fn widest(m: &Metrics) -> CardLayout {
         let (w, h) = (m.visible.w, m.visible.h);
-        let c = card(1, &[(1, 10, w, h), (2, 20, w, h), (3, 20, w, h)]);
+        let at = |x: f64| Rect::new(x, 0.0, w, h);
+        let c = card_at(1, &[(1, 10, at(0.0)), (2, 20, at(300.0)), (3, 20, at(300.0))]);
         layout_column(&[c], m.visible.h, m).remove(0)
     }
 
@@ -518,7 +595,7 @@ mod tests {
         for m in [laptop(), five_k()] {
             let l = widest(&m);
             let rest = l.bounds(&m);
-            assert!(rest.max_x() > m.width + 40.0, "the second app's window reaches past the column ({} > {})", rest.max_x(), m.width);
+            assert!(rest.max_x() > m.width, "the second app's window reaches past the column ({} > {})", rest.max_x(), m.width);
             let panel = m.panel_width();
             let hovered = grown(&l, &m, m.hover_scale);
             assert!(hovered.max_x() + m.shadow <= panel, "grown under the pointer: {} in {panel}", hovered.max_x());
@@ -538,7 +615,7 @@ mod tests {
 
     #[test]
     fn the_hidden_slide_takes_the_widest_card_off_the_screen() {
-        for (m, apple) in [(laptop(), true), (five_k(), false)] {
+        for m in [laptop(), five_k()] {
             let l = widest(&m);
             let d = m.hide_distance();
             for t in &l.thumbs {
@@ -547,10 +624,9 @@ mod tests {
                 let far = m.eye.x + (x - d + t.rect.w * m.tilt.cos() - m.eye.x) * m.far_ratio(t.rect.w);
                 assert!(far <= 1e-6, "far edge at {far} after a slide of {d}");
             }
-            if apple {
-                // Apple's measured 286 pt is just what the widest card needs on the laptop.
-                assert!((d - 286.0).abs() < 1.0, "{d}");
-            }
+            // Cards of several apps as compact as Apple's: its measured 286 pt slide is about
+            // what the widest needs (275 on the laptop, 286.4 at 5K; the slide is the larger).
+            assert!((270.0..290.0).contains(&d), "{d}");
         }
     }
 
@@ -577,9 +653,13 @@ mod tests {
 
     #[test]
     fn a_card_draws_its_front_window_on_top_then_the_others_in_order() {
-        // The front window (app 10), a second app's window (20), then another of app 10's.
+        // The front window (app 10), a second app's window (20, right of it on the screen),
+        // then another of app 10's.
         let m = laptop();
-        let c = card(1, &[(1, 10, 1200.0, 900.0), (2, 20, 1200.0, 900.0), (3, 10, 1000.0, 800.0)]);
+        let c = card_at(
+            1,
+            &[(1, 10, Rect::new(0.0, 0.0, 1200.0, 900.0)), (2, 20, Rect::new(500.0, 0.0, 1200.0, 900.0)), (3, 10, Rect::new(0.0, 0.0, 1000.0, 800.0))],
+        );
         let l = &layout_column(&[c], 1130.0, &m)[0];
         let drawn: Vec<u32> = l.draw_order().iter().map(|t| t.id).collect();
         assert_eq!(drawn, [3, 2, 1], "back to front: the list reversed, the front window last");
@@ -740,32 +820,108 @@ mod tests {
     }
 
     #[test]
-    fn same_app_windows_step_right_toward_the_front_and_a_second_app_sits_right_and_up() {
-        let m = laptop();
+    fn same_app_windows_step_right_toward_the_front_at_their_own_card_size() {
+        let m = five_k();
+        // Apple's Red 1 (1000 × 706) and Red 2 (900 × 628), measured 11-09 on the 5K display
+        // both ways round: the window behind peeks out 16 pt on the left, both 97 pt tall
+        // (each held at `min_height`), their tops level.
+        let (red1, red2) = (Rect::new(700.0, 242.0, 1000.0, 706.0), Rect::new(880.0, 342.0, 900.0, 628.0));
+        for (front, behind) in [(red2, red1), (red1, red2)] {
+            let (_, t) = arrange_card(&card_at(1, &[(1, 10, front), (2, 10, behind)]), &m, 1.0);
+            assert_eq!(t[0].rect.x - t[1].rect.x, 16.0, "the window behind peeks out on the left");
+            assert_eq!(t[1].rect.x, 0.0);
+            assert!((t[0].rect.h - 97.0).abs() < 1e-9 && (t[1].rect.h - 97.0).abs() < 1e-9);
+            assert!((t[0].rect.y - t[1].rect.y).abs() < 1e-9, "tops level");
+        }
         let (_, t) = arrange_card(&card(1, &[(1, 10, 900.0, 700.0), (2, 10, 900.0, 700.0), (3, 10, 900.0, 700.0)]), &m, 1.0);
         // Front first in `t`: the front window is rightmost, the deepest at the card's left.
-        assert_eq!(t[0].rect.x - t[1].rect.x, 17.0);
-        assert_eq!(t[1].rect.x - t[2].rect.x, 17.0);
-        assert_eq!(t[2].rect.x, 0.0);
-        let mid = |r: &Rect| r.y + r.h / 2.0;
-        assert!((mid(&t[0].rect) - mid(&t[2].rect)).abs() < 1e-9);
-        let c = card(1, &[(1, 10, 900.0, 700.0), (2, 20, 900.0, 700.0)]);
-        let (_, t) = arrange_card(&c, &m, 1.0);
-        assert_eq!(t[1].rect.x - t[0].rect.x, 68.0);
-        assert!((mid(&t[0].rect) - mid(&t[1].rect) - 14.0).abs() < 1e-9);
+        assert_eq!((t[0].rect.x, t[1].rect.x, t[2].rect.x), (32.0, 16.0, 0.0));
+    }
+
+    /// Apple's card of Blue (1100 × 748 at 760, 262) behind and Green (1000 × 688 at 1300,
+    /// 604) in front, the 5K display, measured from the 11-09 stills (2 px a point, its left
+    /// edges 1 pt right of ours, the anti-aliased edge): Blue's left edge at 16, Green's at
+    /// 58; Blue 85 pt tall, Green 78, both at the plain scale; Green's top 18.3 pt below
+    /// Blue's; Green's bottom 96.3 below Blue's top; Green's far edge at 128.5, Blue's at 95;
+    /// the icons centered 10 pt above Green's bottom.
+    #[test]
+    fn a_card_of_two_apps_matches_apples_blue_and_green() {
+        let m = five_k();
+        let (blue, green) = (Rect::new(760.0, 262.0, 1100.0, 748.0), Rect::new(1300.0, 604.0, 1000.0, 688.0));
+        let c = card_at(1, &[(1, 20, green), (2, 10, blue)]);
+        let l = layout_column(&[c], 1410.0, &m).remove(0);
+        let (g, b) = (l.thumbs[0].rect, l.thumbs[1].rect);
+        let near = |ours: f64, apple: f64, tol: f64, what: &str| assert!((ours - apple).abs() <= tol, "{what}: ours {ours:.2}, Apple's {apple}");
+        near(l.frame.x + b.x, 15.0, 1e-9, "Blue's left edge, the card's");
+        near(g.x - b.x, 42.0, 1e-9, "Green right of Blue");
+        near(b.h, 85.0, 1.0, "Blue's height");
+        near(g.h, 78.0, 1.0, "Green's height");
+        near(g.y - b.y, 18.3, 0.5, "Green's top below Blue's");
+        near(g.max_y() - b.y, 96.3, 1.0, "the card's height");
+        let far = |r: &Rect| m.project(l.frame.x + r.x, l.frame.y + r.y, r.w, r.h)[1].x;
+        near(far(&g), 128.5 - 1.0, 2.0, "Green's far edge");
+        near(far(&b), 95.0 - 1.0, 2.0, "Blue's far edge");
+        // As compact as a single card and a little: Blue alone is 97 tall, 143 wide.
+        let single = m.thumb_size(&blue);
+        assert!(far(&g) - l.frame.x < single.w, "{} < {}", far(&g) - l.frame.x, single.w);
+        // The icons: 10.5 right of the card's left edge, 10.5 above its bottom (Green's).
+        let (_, icon) = l.icons[0];
+        near(icon.x + icon.w / 2.0, b.x + 10.5, 1e-9, "icon x");
+        near(icon.y + icon.h / 2.0, g.max_y() - 10.5, 1e-9, "icon y");
+        // Green, the stage's last used, is drawn on top.
+        assert_eq!(l.draw_order().last().map(|t| t.id), Some(1));
     }
 
     #[test]
-    fn the_icon_sits_on_the_front_windows_bottom_left_corner() {
+    fn a_second_app_peeks_out_on_its_side_of_the_screen() {
+        let m = five_k();
+        let front = Rect::new(800.0, 300.0, 1000.0, 700.0);
+        let left = Rect::new(400.0, 200.0, 1000.0, 700.0);
+        let right = Rect::new(1200.0, 200.0, 1000.0, 700.0);
+        let (_, t) = arrange_card(&card_at(1, &[(1, 10, front), (2, 20, left)]), &m, 1.0);
+        assert_eq!((t[0].rect.x, t[1].rect.x), (42.0, 0.0), "left of it: peeks out on the left");
+        let (_, t) = arrange_card(&card_at(1, &[(1, 10, front), (2, 20, right)]), &m, 1.0);
+        assert_eq!((t[0].rect.x, t[1].rect.x), (0.0, 42.0), "right of it: on the right");
+        assert!(t[1].rect.y < t[0].rect.y, "raised either way");
+        assert_eq!(second_app_side(&front, &front), -1.0, "level: on the left, as one app's");
+        // A third app's window joins the second's group, one step on (not measured on Apple's).
+        let c = card_at(1, &[(1, 10, front), (2, 20, right), (3, 30, right)]);
+        let (_, t) = arrange_card(&c, &m, 1.0);
+        assert_eq!((t[0].rect.x, t[1].rect.x, t[2].rect.x), (0.0, 58.0, 42.0));
+    }
+
+    #[test]
+    fn a_card_of_small_windows_of_two_apps_is_held_at_min_height_as_a_whole() {
+        let m = five_k();
+        let small = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let (size, t) = arrange_card(&card_at(1, &[(1, 10, small), (2, 20, small)]), &m, 1.0);
+        assert!((size.h - 97.0).abs() < 1e-6, "{size:?}");
+        assert!(t.iter().all(|s| s.rect.h < 97.0), "neither window at the floor itself");
+        assert_eq!(t[0].rect.x - t[1].rect.x, 42.0, "offsets kept");
+        assert!((t[0].rect.y - t[1].rect.y - 15.0).abs() < 1e-9);
+        // Banners grow no wider than the widest card.
+        let banner = Rect::new(0.0, 0.0, 3000.0, 150.0);
+        let (_, t) = arrange_card(&card_at(1, &[(1, 10, banner), (2, 20, banner)]), &m, 1.0);
+        assert!(t.iter().all(|s| s.rect.w <= m.max_width + 1e-9));
+        // Big windows are not grown: two full-screen windows stay at the plain scale.
+        let full = Rect::new(0.0, 0.0, 2560.0, 1410.0);
+        let (_, t) = arrange_card(&card_at(1, &[(1, 10, full), (2, 20, full)]), &m, 1.0);
+        assert!((t[0].rect.h - 161.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_icon_sits_on_the_cards_bottom_left_corner() {
         let m = laptop();
         let c = card(1, &[(1, 10, 1280.0, 940.0), (2, 20, 900.0, 700.0)]);
         let l = layout_column(&[c], 1130.0, &m);
-        let front = l[0].thumbs[0].rect;
         let icons = &l[0].icons;
         assert_eq!(icons.len(), 2);
+        let left = l[0].thumbs.iter().map(|t| t.rect.x).fold(f64::INFINITY, f64::min);
+        let bottom = l[0].thumbs.iter().map(|t| t.rect.max_y()).fold(0.0, f64::max);
         let center = |r: &Rect| Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0);
-        assert!((center(&icons[0].1).x - (front.x + 10.5)).abs() < 1e-9);
-        assert!((center(&icons[0].1).y - (front.max_y() - 10.5)).abs() < 1e-9);
+        assert!((center(&icons[0].1).x - (left + 10.5)).abs() < 1e-9);
+        assert!((center(&icons[0].1).y - (bottom - 10.5)).abs() < 1e-9);
+        assert!((bottom - l[0].frame.h).abs() < 1e-9, "the card's bottom");
         assert_eq!(icons[1].1.x - icons[0].1.x, 36.0);
         assert_eq!(icons[0].1.w, 38.0);
     }
