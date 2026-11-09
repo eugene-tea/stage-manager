@@ -194,7 +194,12 @@ def ctl_once(*words):
 
 
 # A synthetic click or hover refused under a Notification Center banner is tried again for
-# this long (a banner stays about 5 s; drags already wait, `drag_sampled`).
+# this long (a banner stays about 5 s; drags already wait, `drag_sampled`). Notification
+# Center's full-screen click-through window (11-09: layer 23 over the whole main screen for a
+# whole run, no banner) refuses nothing while it is alone on its screen: the app looks through
+# it (desktop::seen_through). A refusal naming Notification Center is a banner, its panel, or
+# the full-screen window beside one of them (the catcher that closes them; the reply gives
+# the window's layer and frame): waited out here, never clicked.
 BANNER_WAIT = 8.0
 
 
@@ -5199,6 +5204,11 @@ def minimize_path_check(p, wid, log):
             check(w <= 200 and h <= 200, f"Cmd-M: no full-size picture at the old frame ({w:.0f}x{h:.0f} at the start)")
     dived = [ln for ln in log.splitlines() if "window minimized: it goes to the strip" in ln]
     say(f"    {dived[-1][dived[-1].find('window minimized'):] if dived else 'no minimize line'}")
+    # 11-09 14:49: an auto-hidden Dock listed the tile under the screen's edge, the dive was
+    # left out (dive=None) and the window rose to its full height on the way to the corner.
+    # With the tile read and no screen below the Dock's edge, the dive is taken.
+    if dived and "tile=Some(" in dived[-1]:
+        check("dive=Some(" in dived[-1], "Cmd-M: the window was put beyond the Dock's edge while minimized (the dive)")
 
 
 def start_extra_frames(k, n, frames):

@@ -72,10 +72,12 @@ pub struct DockPress<T> {
 /// layer [`DOCK_LAYER`]): not its wallpaper, nor Mission Control, Launchpad or a folder's
 /// popup, which the Dock draws at other layers. The Dock's window spans its display, clear
 /// away from the bar: there it is seen through (`bar`, [`DockBar::seen_through`]), so a press
-/// in the middle of the screen asks the Dock nothing (the review's switching 3).
-pub fn dock_under(list: &[CgWindow], p: Point, dock: i32, bar: &DockBar) -> bool {
+/// in the middle of the screen asks the Dock nothing (the review's switching 3). macOS's
+/// click-through overlays above the Dock (`through`: [`super::desktop::seen_through`]; 11-09,
+/// Notification Center's full-screen layer 23) are seen through too.
+pub fn dock_under(list: &[CgWindow], p: Point, dock: i32, bar: &DockBar, through: &dyn Fn(&CgWindow) -> bool) -> bool {
     list.iter()
-        .find(|w| w.onscreen && w.alpha > 0.0 && w.bounds.contains(p) && !bar.seen_through(w.pid, w.layer, w.bounds, p))
+        .find(|w| w.onscreen && w.alpha > 0.0 && w.bounds.contains(p) && !bar.seen_through(w.pid, w.layer, w.bounds, p) && !through(w))
         .is_some_and(|w| w.pid == dock && w.layer == DOCK_LAYER)
 }
 
@@ -315,13 +317,14 @@ mod tests {
         let app = win(9, 0, Rect::new(0.0, 0.0, 1800.0, 1169.0));
         let p = Point::new(500.0, 1130.0);
         let none = DockBar::default();
-        assert!(dock_under(&[bar.clone(), app.clone()], p, 7, &none));
-        assert!(!dock_under(&[app.clone(), bar.clone()], p, 7, &none), "a window above it");
-        assert!(!dock_under(std::slice::from_ref(&bar), Point::new(100.0, 1130.0), 7, &none), "off the bar");
-        assert!(!dock_under(&[win(7, -2147483624, Rect::new(0.0, 0.0, 1800.0, 1169.0))], p, 7, &none), "the Dock's wallpaper");
-        assert!(!dock_under(&[win(7, 27, Rect::new(0.0, 0.0, 1800.0, 1169.0))], p, 7, &none), "Mission Control, Launchpad, a popup");
+        let no_overlay = |_: &CgWindow| false;
+        assert!(dock_under(&[bar.clone(), app.clone()], p, 7, &none, &no_overlay));
+        assert!(!dock_under(&[app.clone(), bar.clone()], p, 7, &none, &no_overlay), "a window above it");
+        assert!(!dock_under(std::slice::from_ref(&bar), Point::new(100.0, 1130.0), 7, &none, &no_overlay), "off the bar");
+        assert!(!dock_under(&[win(7, -2147483624, Rect::new(0.0, 0.0, 1800.0, 1169.0))], p, 7, &none, &no_overlay), "the Dock's wallpaper");
+        assert!(!dock_under(&[win(7, 27, Rect::new(0.0, 0.0, 1800.0, 1169.0))], p, 7, &none, &no_overlay), "Mission Control, Launchpad, a popup");
         let hidden = CgWindow { alpha: 0.0, ..bar };
-        assert!(!dock_under(&[hidden, app], p, 7, &none), "an auto-hidden bar's transparent window is not it");
+        assert!(!dock_under(&[hidden, app], p, 7, &none, &no_overlay), "an auto-hidden bar's transparent window is not it");
     }
 
     #[test]
@@ -331,10 +334,18 @@ mod tests {
         let app = win(9, 0, Rect::new(200.0, 200.0, 1200.0, 800.0));
         let known = DockBar { pid: Some(7), bars: vec![Rect::new(700.0, 1370.0, 1100.0, 66.0)] };
         let list = [whole, app];
-        assert!(dock_under(&list, Point::new(1000.0, 1400.0), 7, &known), "on the bar");
-        assert!(!dock_under(&list, Point::new(1180.0, 600.0), 7, &known), "mid-screen: the app's window below, no Dock ask");
-        assert!(!dock_under(&list, Point::new(2000.0, 100.0), 7, &known), "the wallpaper below");
-        assert!(dock_under(&list, Point::new(1180.0, 600.0), 7, &DockBar::default()), "the bar unknown: asked, as before");
+        let no_overlay = |_: &CgWindow| false;
+        assert!(dock_under(&list, Point::new(1000.0, 1400.0), 7, &known, &no_overlay), "on the bar");
+        assert!(!dock_under(&list, Point::new(1180.0, 600.0), 7, &known, &no_overlay), "mid-screen: the app's window below, no Dock ask");
+        assert!(!dock_under(&list, Point::new(2000.0, 100.0), 7, &known, &no_overlay), "the wallpaper below");
+        assert!(dock_under(&list, Point::new(1180.0, 600.0), 7, &DockBar::default(), &no_overlay), "the bar unknown: asked, as before");
+        // Notification Center's full-screen layer above it (11-09): the bar under it is the
+        // Dock's; another app's window over the bar is not.
+        let nc = win(894, 23, Rect::new(0.0, 0.0, 2560.0, 1440.0));
+        let overlay = |w: &CgWindow| w.pid == 894;
+        let covered = [nc.clone(), list[0].clone(), list[1].clone()];
+        assert!(dock_under(&covered, Point::new(1000.0, 1400.0), 7, &known, &overlay), "seen through");
+        assert!(!dock_under(&covered, Point::new(1000.0, 1400.0), 7, &known, &no_overlay), "not seen through: it covers the bar");
     }
 
     #[test]

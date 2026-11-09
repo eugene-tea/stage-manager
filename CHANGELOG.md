@@ -14,8 +14,13 @@
   into its new card. A full-size picture used to appear where the window had been and fly to
   the strip, and the window itself came back out of the Dock and crossed the screen to the
   corner at odd sizes. Now it sinks out of its Dock tile below the screen and waits in the
-  corner unseen. Without a Dock tile to start from, and under Reduce Motion, the card fades
-  in instead.
+  corner unseen, also when the Dock hides itself. Without a Dock tile to start from, and
+  under Reduce Motion, the card fades in instead.
+- Clicks on the wallpaper, the Dock and the edges of windows in the corner work while
+  Notification Center keeps an invisible window over the whole screen, as it sometimes does
+  for a long time with no notification showing: clicks under it were taken for clicks on a
+  window. A notification itself still takes its own clicks, and while a notification or
+  Notification Center's panel shows, a click beside it is still not a wallpaper click.
 - VoiceOver reads the strip: each card is a button that says its stage and apps ("Stage 3:
   Safari, Notes", or the stage's name), and pressing it switches to that stage. Its actions
   show all of one app's windows, as a click on the app's icon. The edge tab is a button too.

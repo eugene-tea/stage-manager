@@ -295,15 +295,22 @@ pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), Str
     // The Dock draws its bar in one window as large as its display, clear and click-through
     // away from the bar (engine::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
     // it counts only on the bar's own frame, read through Accessibility, and wherever that
-    // frame is unknown.
+    // frame is unknown. macOS's click-through overlays (the screenshot tool's, Notification
+    // Center's full-screen layer: desktop::seen_through) never count.
     let dock = std::cell::OnceCell::new();
     let dock_bar = || *dock.get_or_init(|| super::dock::dock_pid().map(|pid| (pid, super::dock::bar_frame(pid))));
-    path_refusal(&list, path, pids, press, own, &cards, &dock_bar).map_or(Ok(()), Err)
+    let through = |w: &windows::CgWindow, p: Point| {
+        let clear_dock = w.layer == super::dock::DOCK_LAYER
+            && dock_bar().is_some_and(|(pid, bar)| pid == w.pid && bar.is_some_and(|b| !b.contains(p)));
+        clear_dock || super::desktop::seen_through(w, &list)
+    };
+    path_refusal(&list, path, pids, press, own, &cards, &through).map_or(Ok(()), Err)
 }
 
 /// Why a synthetic input along `path` is refused over `list` (front to back), or `None`
 /// when every point is safe ([`path_is_safe`]): `own` our pid, `cards` every screen's cards,
-/// `dock_bar` the Dock's pid and bar frame (read only when the Dock's window is met).
+/// `through` true for another process's window seen through at a point (the Dock's away
+/// from its bar, macOS's click-through overlays; asked only of a window under the point).
 ///
 /// After a drag's press the bare desktop (no window above the desktop level) is safe: the
 /// moves and the release go to the window pressed, and nothing of anyone's lies there. A
@@ -316,7 +323,7 @@ fn path_refusal(
     press: bool,
     own: i32,
     cards: &[Rect],
-    dock_bar: &dyn Fn() -> Option<(i32, Option<Rect>)>,
+    through: &dyn Fn(&windows::CgWindow, Point) -> bool,
 ) -> Option<String> {
     for (i, p) in path.iter().enumerate() {
         // Our own strip sits below normal windows (layer -1): it counts where nothing covers
@@ -327,13 +334,21 @@ fn path_refusal(
         let on_card = !press || i > 0 || cards.iter().any(|r| r.contains(*p));
         let top = list.iter().find(|w| {
             let click_through = w.pid == own && (w.layer > CLICKABLE_LEVEL || (w.bounds.w > TAB_MAX_WIDTH && !on_card));
-            let clear_dock = w.layer == super::dock::DOCK_LAYER
-                && dock_bar().is_some_and(|(pid, bar)| pid == w.pid && bar.is_some_and(|b| !b.contains(*p)));
-            w.onscreen && !click_through && !clear_dock && (w.layer >= 0 || pids.contains(&w.pid)) && w.alpha > 0.0 && w.bounds.contains(*p)
+            w.onscreen
+                && !click_through
+                && (w.layer >= 0 || pids.contains(&w.pid))
+                && w.alpha > 0.0
+                && w.bounds.contains(*p)
+                && (w.pid == own || pids.contains(&w.pid) || !through(w, *p))
         });
         match top {
             Some(w) if pids.contains(&w.pid) => {}
-            Some(w) => return Some(format!("the topmost window at {:.0},{:.0} is not ours or a fixture's (pid {})", p.x, p.y, w.pid)),
+            Some(w) => {
+                return Some(format!(
+                    "the topmost window at {:.0},{:.0} is not ours or a fixture's (pid {}) at layer {}, {}",
+                    p.x, p.y, w.pid, w.layer, w.bounds
+                ));
+            }
             None if press && i > 0 => {}
             None => {
                 // Say where our own windows are: the strip panel missing from the screen there
@@ -547,12 +562,13 @@ fn drag_interrupted(ups_at_press: u64, ups_now: u64, button_down: bool) -> Optio
 /// transparent ones seen through, is a desktop-level window of another process (Finder's
 /// icons, the wallpaper), or the window macOS's Show Desktop puts over the revealed desktop
 /// (WindowManager's, [`crate::engine::overview::SHOW_DESKTOP_LAYER`]: a click there brings
-/// the windows back). The test's desktop clicks ([`desktop_click`], [`desktop_drag`]) go only
-/// there.
-fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32) -> Result<(), String> {
+/// the windows back). macOS's click-through overlays (`through`: [`super::desktop::seen_through`])
+/// are seen through as well. The test's desktop clicks ([`desktop_click`], [`desktop_drag`])
+/// go only there.
+fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32, through: &dyn Fn(&windows::CgWindow) -> bool) -> Result<(), String> {
     let top = list.iter().find(|w| {
         let click_through = w.pid == own && (w.layer > CLICKABLE_LEVEL || w.bounds.w > TAB_MAX_WIDTH);
-        w.onscreen && !click_through && w.alpha > 0.0 && w.bounds.contains(p)
+        w.onscreen && !click_through && w.alpha > 0.0 && w.bounds.contains(p) && (w.pid == own || !through(w))
     });
     match top {
         Some(w) if w.layer < 0 && w.pid != own => Ok(()),
@@ -567,7 +583,8 @@ fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32) -> Result<(), Stri
 /// ([`desktop_at`]). The pointer goes back where it was.
 pub fn desktop_click(p: Point, double: bool) -> Result<(), String> {
     let own = std::process::id() as i32;
-    desktop_at(&windows::list_windows(), p, own)?;
+    let list = windows::list_windows();
+    desktop_at(&list, p, own, &|w| super::desktop::seen_through(w, &list))?;
     let back = pointer_home();
     move_first(p, false)?;
     for clicks in 1..=if double { 2 } else { 1 } {
@@ -590,7 +607,7 @@ pub fn desktop_drag(from: Point, to: Point) -> Result<(), String> {
     let list = windows::list_windows();
     let path = segment(from, to, 4.0);
     for p in &path {
-        desktop_at(&list, *p, own)?;
+        desktop_at(&list, *p, own, &|w| super::desktop::seen_through(w, &list))?;
     }
     let back = pointer_home();
     move_first(from, false)?;
@@ -624,18 +641,19 @@ mod tests {
         let app = w(55, 0, Rect::new(100.0, 100.0, 800.0, 600.0));
         let tab = w(own, 0, Rect::new(0.0, 600.0, 8.0, 80.0));
         let list = [app.clone(), tab, patch, icons.clone()];
-        assert_eq!(desktop_at(&list, Point::new(2490.0, 1380.0), own), Ok(()), "under the patch: the icon");
-        assert!(desktop_at(&list, Point::new(200.0, 200.0), own).is_err(), "an app's window");
-        assert!(desktop_at(&list, Point::new(4.0, 620.0), own).is_err(), "our edge tab takes clicks");
-        assert!(desktop_at(std::slice::from_ref(&app), Point::new(2490.0, 1380.0), own).is_err(), "nothing listed there");
+        let no_overlay = |_: &windows::CgWindow| false;
+        assert_eq!(desktop_at(&list, Point::new(2490.0, 1380.0), own, &no_overlay), Ok(()), "under the patch: the icon");
+        assert!(desktop_at(&list, Point::new(200.0, 200.0), own, &no_overlay).is_err(), "an app's window");
+        assert!(desktop_at(&list, Point::new(4.0, 620.0), own, &no_overlay).is_err(), "our edge tab takes clicks");
+        assert!(desktop_at(std::slice::from_ref(&app), Point::new(2490.0, 1380.0), own, &no_overlay).is_err(), "nothing listed there");
         // Show Desktop's own window over the revealed desktop: a click there brings the
         // windows back.
         let mut reveal = w(400, crate::engine::overview::SHOW_DESKTOP_LAYER, screen);
         reveal.owner = "WindowManager".into();
-        assert_eq!(desktop_at(&[reveal.clone(), icons.clone()], Point::new(1200.0, 700.0), own), Ok(()));
+        assert_eq!(desktop_at(&[reveal.clone(), icons.clone()], Point::new(1200.0, 700.0), own, &no_overlay), Ok(()));
         let mut other = reveal;
         other.owner = "Dock".into();
-        assert!(desktop_at(&[other, icons], Point::new(1200.0, 700.0), own).is_err(), "only WindowManager's");
+        assert!(desktop_at(&[other, icons], Point::new(1200.0, 700.0), own, &no_overlay).is_err(), "only WindowManager's");
     }
 
     #[test]
@@ -649,7 +667,7 @@ mod tests {
         let mail = w(owner, 0, Rect::new(-1700.0, 1000.0, 800.0, 400.0));
         let list = [mail, strip, wallpaper];
         let card = [Rect::new(15.0, 686.0, 88.0, 97.0)];
-        let no_dock = || None;
+        let no_dock = |_: &windows::CgWindow, _: Point| false;
         let pids = [own, fixture];
         let path = |to: Point| {
             let mut p = vec![Point::new(55.0, 739.0), Point::new(55.0, 751.0)];
@@ -663,6 +681,58 @@ mod tests {
         let off_card = [Point::new(-900.0, 687.0), Point::new(-880.0, 687.0)];
         assert!(path_refusal(&list, &off_card, &pids, true, own, &card, &no_dock).is_some(), "the press itself is never on the bare desktop");
         assert!(path_refusal(&list, &across[1..], &pids, false, own, &card, &no_dock).is_some(), "a hover never is either");
+    }
+
+    /// 11-09 14:45: Notification Center's click-through window over the whole main screen
+    /// (layer 23) refused every card click of the suite. Looked through while it is alone on
+    /// its screen; beside its panel or a banner it blocks (a test's click never closes the
+    /// owner's panel), and so does an unknown app's full-screen window.
+    #[test]
+    fn notification_centers_full_screen_layer_is_looked_through_a_banner_is_not() {
+        use crate::platform::desktop::{NOTIFICATION_CENTER_UI, Owner, click_through_overlay};
+        let (own, fixture, nc_pid) = (7, 70, 894);
+        let main = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let w = |id: u32, pid: i32, layer: i64, bounds: Rect| windows::CgWindow { id, pid, owner: String::new(), name: None, layer, bounds, onscreen: true, alpha: 1.0 };
+        // Notification Center's windows, its identity and siblings as `desktop::seen_through`
+        // reads them.
+        let nc = |id: u32, bounds: Rect| windows::CgWindow { owner: "Notification Center".into(), ..w(id, nc_pid, 23, bounds) };
+        let through = |c: &windows::CgWindow, list: &[windows::CgWindow]| {
+            let bundle = (c.pid == nc_pid).then_some(NOTIFICATION_CENTER_UI);
+            let siblings: Vec<Rect> = list.iter().filter(|o| o.pid == c.pid && o.id != c.id && o.layer > 0).map(|o| o.bounds).collect();
+            click_through_overlay(c.layer, c.bounds, &Owner { name: &c.owner, bundle, exe: None }, &[main], &siblings)
+        };
+        let strip = w(2, own, -1, Rect::new(0.0, 30.0, 220.0, 1410.0));
+        let fix = w(3, fixture, 0, Rect::new(400.0, 78.0, 600.0, 432.0));
+        let card = [Rect::new(15.0, 686.0, 88.0, 97.0)];
+        let pids = [own, fixture];
+        let click = [Point::new(66.0, 739.0)];
+        let refusal = |list: &[windows::CgWindow], path: &[Point]| {
+            path_refusal(list, path, &pids, true, own, &card, &|c: &windows::CgWindow, _: Point| through(c, list))
+        };
+        let alone = [nc(10, main), strip.clone(), fix.clone()];
+        assert_eq!(refusal(&alone, &click), None, "a card click under the full-screen layer alone");
+        assert_eq!(refusal(&alone, &[Point::new(700.0, 300.0)]), None, "a fixture's window under it");
+        // Beside a banner at the top right: the banner refuses its own click, and the
+        // full-screen layer, the catcher now, refuses everywhere else on that screen.
+        let banner = Rect::new(2190.0, 38.0, 360.0, 76.0);
+        let with_banner = [nc(11, banner), nc(10, main), strip.clone(), fix.clone()];
+        let on_banner = refusal(&with_banner, &[Point::new(2300.0, 70.0)]);
+        assert!(on_banner.is_some_and(|e| e.contains("not ours or a fixture's (pid 894)") && e.contains("2190,38")), "the banner's click");
+        assert!(refusal(&with_banner, &click).is_some_and(|e| e.contains("layer 23, 0,0 2560x1440")), "the catcher beside a banner");
+        // Beside its panel: blocked, so a test's click never closes the owner's panel.
+        let with_panel = [nc(12, Rect::new(2160.0, 30.0, 400.0, 1410.0)), nc(10, main), strip.clone(), fix];
+        assert!(refusal(&with_panel, &click).is_some(), "the catcher beside the panel");
+        // An unknown app's full-screen window refuses.
+        let stranger = windows::CgWindow { owner: "Overlay".into(), ..w(20, 55, 23, main) };
+        assert!(refusal(&[stranger.clone(), strip], &click).is_some(), "an unknown overlay");
+        // The test's desktop clicks look through it alone to the desktop, never beside its
+        // panel, nor through a stranger's.
+        let icons = w(30, 300, -2_147_483_603, main);
+        let at = Point::new(1200.0, 700.0);
+        let desktop = |list: &[windows::CgWindow]| desktop_at(list, at, own, &|c: &windows::CgWindow| through(c, list));
+        assert_eq!(desktop(&[nc(10, main), icons.clone()]), Ok(()));
+        assert!(desktop(&[nc(12, Rect::new(2160.0, 30.0, 400.0, 1410.0)), nc(10, main), icons.clone()]).is_err(), "beside its panel");
+        assert!(desktop(&[stranger, icons]).is_err());
     }
 
     const NONE: Modifiers = Modifiers { shift: false, cmd: false };

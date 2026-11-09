@@ -431,6 +431,15 @@ pub fn bundle_of(pid: i32) -> Option<String> {
     running(pid).and_then(|a| a.bundleIdentifier()).map(|s| s.to_string())
 }
 
+/// Process `pid`'s executable (`proc_pidpath`), as the kernel reports it; `None` when it
+/// cannot be read (the process is gone).
+pub fn exe_path(pid: i32) -> Option<String> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` is writable for the length passed.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
+}
+
 /// When this login session began: the start of this user's `loginwindow` (it is relaunched
 /// at each login), as an instant on our clock. `None` when it cannot be read. The restore's
 /// settling waits at least a minute after it ([`crate::engine::restore::SETTLE_AFTER_LOGIN`]).
