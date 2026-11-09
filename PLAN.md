@@ -10,6 +10,9 @@ and what users asked for is in [docs/FEATURE-REQUESTS.md](docs/FEATURE-REQUESTS.
   cards (which stage, which apps), Reduce Motion worked out from first principles, and a review
   of the whole app.
 - **The edge tab across Desktops** goes in `test_spaces.py`.
+- **After the release:** read the repository's front files as GitHub shows them (README,
+  Accessibility, Security, Contributing, Code of Conduct tabs), the description and the topics, and bring
+  them in line with 1.8.0.
 
 ## 1.9
 
