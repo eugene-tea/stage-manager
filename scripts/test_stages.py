@@ -1738,6 +1738,107 @@ def phase_native():
     all_onscreen("native quit")
     stop_all_fixtures()
     native_wallpaper()
+    wallpaper_edge()
+
+
+def wallpaper_edge():
+    """A press just outside a window is its edge, never a wallpaper click (11-09: VS Code's
+    right edge pressed 0.3 pt outside its frame sent the stage to the strip; the window parked
+    while he kept dragging and shrank to its minimum in the park corner). macOS gives a
+    resizable window a band a few points wide outside its frame where a press takes its edge.
+
+    1. A press 2 pt right of a fixture's right edge, dragged 60 pt right: the stage stays, the
+       window is never parked, macOS resizes it (its band took the press).
+    2. A sweep: a press k pt right of the edge (mid edge, then out past the top-right corner),
+       dragged 40 pt: whether macOS took the edge (the window grew) is printed, the band's real
+       reach for the main thread. Every press here is within 16 pt, so none reveals.
+    3. A still click 10 pt out (past our band, near it): the desktop is revealed on the
+       release; a click again brings the stage back.
+    Same gate as `native_wallpaper`: Apple's Stage Manager off, "Click wallpaper to reveal
+    desktop" Only in Stage Manager (with Always, macOS itself would act on the presses)."""
+    say("-- a press just outside a window's edge: the edge, no wallpaper click")
+    if wm_default("GloballyEnabled") == "1":
+        skip("wallpaper edge", "Apple's Stage Manager is on; a real wallpaper click would act on every window")
+        return
+    if wm_default("EnableStandardClickToShowDesktop") != "0":
+        skip("wallpaper edge", "\"Click wallpaper to reveal desktop\" is Always: macOS would move every window aside")
+        return
+    try:
+        write_config(None)
+        start_extra("a", 1)
+        activate("a")
+        time.sleep(1.0)
+        if not check(start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"}) is not None, "app up with one fixture window"):
+            return
+        s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage")
+        if not check(s is not None, "Alpha 1 is shown"):
+            return
+        wid = by_title(s)["Alpha 1"]["id"]
+        vis = s["display"]["visible"]
+        # Its right edge 200 pt in from the screen's, clear of the strip on the left.
+        frame = {"x": vis["x"] + vis["w"] - 1000, "y": vis["y"] + 200, "w": 800, "h": 500}
+
+        def put_back():
+            ctl("debug-frame", wid, frame["x"], frame["y"], frame["w"], frame["h"])
+            time.sleep(0.6)
+
+        def press_drag(at, to):
+            r = ctl("debug-desktop", f"{at[0]:.1f}", f"{at[1]:.1f}", "drag", f"{to[0]:.1f}", f"{to[1]:.1f}")
+            time.sleep(0.8)
+            return r
+
+        put_back()
+        right, mid, top = frame["x"] + frame["w"], frame["y"] + frame["h"] / 2, frame["y"]
+
+        say("-- 1. pressed 2 pt outside the right edge and dragged")
+        r = press_drag((right + 2, mid), (right + 62, mid))
+        if not r.get("ok"):
+            skip("wallpaper edge", f"the press's path is not all desktop ({r.get('error')})")
+            return
+        s = state()
+        a1 = by_title(s)["Alpha 1"]
+        check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"the stage stays ({stage_titles(s)})")
+        check(not a1["parked"], "the window is never parked")
+        check("resize band" in log_text(), "the press is logged as the window's edge")
+        grown = live_frame("Alpha 1")
+        say(f"    the window after the drag: {fmt(grown)} (macOS resized it: {grown['w'] > frame['w'] + 20})")
+
+        say("-- 2. how far out macOS's band reaches (a drag from each press)")
+        for where, points in (("mid edge", [(right + k, mid) for k in (1, 3, 4, 5, 6, 7, 8, 10, 12)]),
+                              ("past the corner", [(right + k, top - k) for k in (2, 4, 6, 8, 10, 12)])):
+            took = []
+            for at in points:
+                put_back()
+                before = live_frame("Alpha 1")
+                r = press_drag(at, (at[0] + 40, at[1]))
+                if not r.get("ok"):
+                    took.append(f"{at[0] - right:.0f}: refused")
+                    continue
+                after = live_frame("Alpha 1")
+                took.append(f"{at[0] - right:.0f}: {'edge' if after['w'] > before['w'] + 20 else 'no'}")
+                s = state()
+                check(not s["desktop_revealed"] and shown(s, "Alpha 1"),
+                      f"{where}, {at[0] - right:.0f} pt out: a drag reveals nothing ({stage_titles(s)})")
+            say(f"    {where}, pt out -> macOS took the edge: {', '.join(took)}")
+
+        say("-- 3. a still click 10 pt out: the desktop, on the release")
+        put_back()
+        r = ctl("debug-desktop", f"{right + 10:.1f}", f"{mid:.1f}")
+        if check(r.get("ok"), f"clicked 10 pt out ({r.get('error', 'ok')})"):
+            time.sleep(1.5)
+            s = state()
+            check(s["desktop_revealed"] and by_title(s)["Alpha 1"]["parked"], "the desktop is revealed")
+            check('on="release"' in log_text() or "on=release" in log_text(), "the reveal ran on the release")
+            ctl("debug-desktop", f"{right + 10:.1f}", f"{mid:.1f}")
+            s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage back")
+            check(s is not None, "a click again brings the stage back")
+            check(s is not None and close(live_frame("Alpha 1"), frame), "at its frame")
+        consistent("wallpaper edge")
+    finally:
+        stop_app()
+        all_onscreen("wallpaper edge quit")
+        stop_all_fixtures()
+        write_config(None)
 
 
 def set_config_live(text):

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- With "Click wallpaper to reveal desktop: Only in Stage Manager", grabbing a window's edge
+  to resize it no longer sends your stage to the strip when the press lands a hair outside the
+  window. The window used to hide mid-drag and shrink to its smallest size out of sight, so an
+  app like VS Code came back with its side panels folded. A press just outside any window is
+  now its edge, and a click a little further out reveals the desktop only when you let go
+  without dragging.
 - A window of a combined card now comes off the card alone as soon as you drag it, also
   inside the strip, where the whole card used to follow the pointer. Let it go between two
   cards for a stage of its own there, on another card to join that stage, or back on its own

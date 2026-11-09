@@ -141,6 +141,17 @@ pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
     })
 }
 
+/// The frames of the real windows in `list` whose resize band a press may be in
+/// ([`crate::engine::desktop_click::edge_zone`]): every app's window on screen at a normal or
+/// floating level, below the Dock's, any stage's; not the Dock, the menu bar, macOS's
+/// overlays or a transparent window. The caller leaves our own out.
+pub fn resizable_frames(list: &[CgWindow]) -> Vec<Rect> {
+    list.iter()
+        .filter(|w| w.onscreen && w.alpha > 0.0 && (0..super::dock::DOCK_LAYER).contains(&w.layer))
+        .map(|w| w.bounds)
+        .collect()
+}
+
 /// The screenshot tool's process (⇧⌘3/4/5, the Screenshot app).
 pub const SCREENSHOT_UI: &str = "com.apple.screencaptureui";
 
@@ -168,6 +179,24 @@ mod tests {
 
     fn w(layer: i64, bounds: Rect, onscreen: bool) -> CgWindow {
         CgWindow { id: 1, pid: 2, owner: String::new(), name: None, layer, bounds, onscreen, alpha: 1.0 }
+    }
+
+    #[test]
+    fn resize_bands_are_read_of_app_windows_only() {
+        let app = Rect::new(100.0, 100.0, 500.0, 400.0);
+        let panel = Rect::new(700.0, 100.0, 200.0, 200.0);
+        let mut clear = w(0, Rect::new(0.0, 0.0, 50.0, 50.0), true);
+        clear.alpha = 0.0;
+        let list = [
+            w(0, app, true),
+            w(3, panel, true),
+            w(0, Rect::new(900.0, 900.0, 100.0, 100.0), false),
+            w(crate::platform::dock::DOCK_LAYER, Rect::new(0.0, 0.0, 1440.0, 900.0), true),
+            w(25, Rect::new(0.0, 0.0, 1440.0, 25.0), true),
+            w(-2_147_483_603, Rect::new(0.0, 0.0, 1440.0, 900.0), true),
+            clear,
+        ];
+        assert_eq!(resizable_frames(&list), vec![app, panel]);
     }
 
     #[test]
