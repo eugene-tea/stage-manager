@@ -21,6 +21,9 @@
   wallpaper click with "Always"): the place macOS pushes it to while the desktop shows, or
   as it slides back, is no longer taken as its own, so its stage brings it back where you
   left it.
+- Clicking the wallpaper works again after you take a screenshot: macOS's screenshot tool
+  leaves an invisible screen-sized window behind for minutes, and clicks under it were taken
+  for clicks on a window.
 - Settings says what "Click wallpaper to reveal desktop" does: with Always, macOS moves every
   window aside itself; Only in Stage Manager puts your stage into the strip, as Apple's does.
 

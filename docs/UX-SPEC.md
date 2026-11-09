@@ -222,7 +222,9 @@ back (with "Click wallpaper to reveal desktop: Only in Stage Manager"; with "Alw
 moves the windows aside itself, see the settings above). A double click counts as one click, and Finder becoming active after the click never
 switches stages. The Dock's window spans its whole screen, clear away from its bar: a click
 there is on the wallpaper (or the window) below it, and only one on or near the bar (its
-magnified icons included) is the Dock's.
+magnified icons included) is the Dock's. So with the screenshot tool's window, which macOS
+leaves over the whole screen for minutes after a screenshot and which lets every click
+through: a click under it is on whatever is below.
 
 **Drag and drop.** A card dragged into the main area grows to window size and joins the
 current stage where you drop it. On a card of several windows each window drags out on its

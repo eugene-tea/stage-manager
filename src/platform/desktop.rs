@@ -5,7 +5,8 @@
 //! A click counts as a wallpaper click when no window of layer 0 or above contains the
 //! point: the desktop picture and Finder's desktop icons are desktop elements, which the
 //! window list leaves out. A click on the Dock, the menu bar, our strip or any app window
-//! hits a window and is ignored.
+//! hits a window and is ignored. macOS's own click-through overlays do not count
+//! ([`click_through_overlay`]).
 
 use objc2::runtime::AnyObject;
 use objc2_app_kit::NSScreen;
@@ -130,7 +131,35 @@ fn bounds_of(id: u32) -> Rect {
 /// spans its whole display, clear and click-through there ([`DockBar`]; the review's
 /// switching 3: no click on the Dock's screen was a wallpaper click).
 pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
-    !list.iter().any(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !dock.seen_through(w.pid, w.layer, w.bounds, p))
+    !list.iter().any(|w| {
+        w.onscreen
+            && w.layer >= 0
+            && w.alpha > 0.0
+            && w.bounds.contains(p)
+            && !dock.seen_through(w.pid, w.layer, w.bounds, p)
+            && !(w.layer > 0 && click_through_overlay(w.layer, &w.owner, super::apps::bundle_of(w.pid).as_deref()))
+    })
+}
+
+/// The screenshot tool's process (⇧⌘3/4/5, the Screenshot app).
+pub const SCREENSHOT_UI: &str = "com.apple.screencaptureui";
+
+/// True for a window of macOS's own that lets every click through to what is below it, so
+/// a click under it can still be on the wallpaper: the screenshot tool's (owner
+/// "Screenshot", process `screencaptureui`), which after a screenshot leaves an opaque,
+/// screen-sized window at layer 24 listed on screen for minutes (owner 11-09 10:02: every
+/// wallpaper click after it was taken for a click on a window). Only above layer 0, where
+/// no app's document window lives, and only by the owner's identity: its bundle id
+/// (`bundle`, when the process has one) or, with none read, its process or app name.
+/// Everything else, an unknown overlay included, still covers the wallpaper.
+pub fn click_through_overlay(layer: i64, owner: &str, bundle: Option<&str>) -> bool {
+    if layer <= 0 {
+        return false;
+    }
+    match bundle {
+        Some(b) => b == SCREENSHOT_UI,
+        None => matches!(owner, "screencaptureui" | "Screenshot"),
+    }
 }
 
 #[cfg(test)]
@@ -163,6 +192,26 @@ mod tests {
         let mut clear = w(30, Rect::new(0.0, 0.0, 1440.0, 900.0), true);
         clear.alpha = 0.0;
         assert!(is_wallpaper_click(&[clear], Point::new(900.0, 600.0), &DockBar::default()), "transparent overlay");
+    }
+
+    /// 11-09: the screenshot tool's screen-sized window at layer 24 lets clicks through to
+    /// the desktop; real windows, and any other overlay, still cover it.
+    #[test]
+    fn only_macos_click_through_overlays_are_seen_through() {
+        assert!(click_through_overlay(24, "Screenshot", Some(SCREENSHOT_UI)));
+        assert!(click_through_overlay(24, "Screenshot", None), "its app name, no bundle read");
+        assert!(click_through_overlay(24, "screencaptureui", None));
+        assert!(!click_through_overlay(0, "Screenshot", Some(SCREENSHOT_UI)), "never a layer-0 window");
+        assert!(!click_through_overlay(24, "Screenshot", Some("com.example.screenshot")), "another app named so");
+        assert!(!click_through_overlay(24, "Window Server", None), "the menu bar");
+        assert!(!click_through_overlay(25, "Control Center", Some("com.apple.controlcenter")));
+        assert!(!click_through_overlay(3, "Some App", Some("com.example.app")), "a floating panel");
+        // In the hit test: the overlay alone is the wallpaper; an app window under it is not.
+        let full = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let shot = CgWindow { owner: "Screenshot".into(), pid: -1, ..w(24, full, true) };
+        assert!(is_wallpaper_click(std::slice::from_ref(&shot), Point::new(900.0, 600.0), &DockBar::default()));
+        let app = w(0, Rect::new(800.0, 500.0, 400.0, 300.0), true);
+        assert!(!is_wallpaper_click(&[shot, app], Point::new(900.0, 600.0), &DockBar::default()));
     }
 
     #[test]
