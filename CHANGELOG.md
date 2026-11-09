@@ -9,6 +9,12 @@
   its windows into the middle and that window alone joins the stage you are in, where you let
   it go; the others stay on the card. Dragged up or down the strip, or onto another card, the
   card still moves whole.
+- A card holding windows of two apps looks like Apple's: about the size of a single card,
+  the window you used last in front, the other peeking out above it on the side where it
+  sits on your screen, instead of the two side by side. A second window of the same app
+  peeks out a point less, and the app icons sit at the card's bottom edge.
+- Cards look closer to Apple's: rounder corners, and a shadow you barely see instead of a
+  soft dark one; the app icons' shadow is a little darker.
 
 ## 1.7.0 — 2026-11-06
 

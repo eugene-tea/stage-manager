@@ -44,7 +44,36 @@ the screen, so there it goes more often). Each screen's strip follows its
 own front stage. Resting the pointer at the left edge brings it back. Each card draws the stage's
 windows at one scale, turned in perspective toward the middle of the screen, with the app
 icon on its bottom-left corner. The number of cards depends on the screen height: 5 on a
-laptop, 6 on a 5K screen. A popup open on a window (a popover, a child window sticking out
+laptop, 6 on a 5K screen.
+
+**A card's look** (measured on the 11-09 stills of a 5K display, 2 px a point). The front
+window is the stage's last used, drawn on top. Windows of one app: the one behind peeks out
+16 pt on the left (`[cards] stack_dx`; 17 read on the laptop's window list), each at its own
+card size (Red 1 and Red 2, 1000 × 706 and 900 × 628, both 97 pt tall, tops level, either
+one in front). Several apps: the card stays about a single card's size. Blue (1100 × 748)
+behind and Green (1000 × 688, right of it and lower on the screen) in front: every window at
+the plain scale, none held at 97 pt (Blue 85 pt tall, Green 78), Green's left edge 42 pt
+right of Blue's (`second_app_dx`), Green's top 18.3 pt below Blue's (the two centered on one
+line, the window behind 15 pt up: `second_app_dy`), Green's bottom 96 pt below Blue's top
+(the whole card is held at `min_height`, its windows grown, their offsets kept), Green's far
+edge at 128.5 pt where Blue alone reaches 105. The window behind peeks out on the side it
+sits on the screen: two of the owner's cards with the other app's window right of the front
+one showed it peeking out on the right (23 and 47 pt; up 34 and 13 pt, so Apple's offsets
+vary with the windows; ours are the fixture's). A third app's windows join the second's
+(not measured). The icons sit 10.5 pt right of the card's left edge and 10.5 pt above its
+bottom (the lowest window's: 10 pt above Green's bottom, at Blue's), and stay put while the
+card grows. Corners 8 pt (`corner_radius`; fitted to the rounding of three cards' top-left
+corners, ours read 4 at 4). The card's shadow is barely there: 5 to 8 levels darker in the
+first two pixels below a card, gone by 4 (2 pt), 3 to 6 levels for a pixel beside its far
+edge, none above it; a Core Animation render of a card fitted to the bottom, top and far
+edges of two cards gives `shadow_radius` 1, `shadow_opacity` 0.3, `shadow_offset_y` 1 (the
+same render read our old 4 / 0.4 / 2 within a level). The icon's shadow is darker than the
+card's and soft, above the icon as well as below (on the card it covers: 17 levels at a
+pixel, gone by 12): `[icons] shadow_radius` 3, `shadow_opacity` 0.6, `shadow_offset_y` 1.5
+(fitted the same way, looser: a range of 3 to 4, 0.5 to 0.7, 1 to 1.5 fits). Hovered, each
+window of a card grows by about 11 % about its own middle and the offsets between them stay
+(a single card 178 → 199 pt wide; the pair's offsets 42 and 18 pt both ways, the pair's
+bounds 7 % wider, 9 % taller). A popup open on a window (a popover, a child window sticking out
 of it) shows on its card beside the window, at its true size and place, as on Apple's; the
 window keeps its own size on the card, and nothing outside a window is drawn. A palette
 far from its window (more than the window's own width or height past it, or on another
@@ -224,16 +253,17 @@ extensions (below), and there the card is what is arranged. A window dragged ont
 becomes a stage of its own in the slot under the pointer.
 
 **Nothing on a card is cut off.** The strip's panel reaches past its column on the right,
-as far as the widest card can draw: a combined card's second app's window (`[cards]
-second_app_dx` right of the first), grown under the pointer, or dragged to the column's
+as far as the widest card can draw: a combined card's other window (`[cards]
+second_app_dx` beside the front one), grown under the pointer, or dragged to the column's
 edge with its right part past the pointer, shadows included (the widest card's span at
-`hover_scale`, past the column; about 465 pt in all on the laptop, 485 on a 5K screen). The
+`hover_scale`, past the column; about 454 pt in all on the laptop, 474 on a 5K screen). The
 column alone is the strip for everything that measures it (hit tests of drops, window drags
 over the strip, auto-hide, `[windows] fit`); the room right of it lets every click and
 scroll through, except over a card drawn there, which hovers and clicks as the rest of it. A
 hidden strip slides `[motion] slide_distance` (Apple's 286 pt), or as far as takes the
 widest card off the screen whole where that is further (the slide is in 3D, so a card's far
-edge moves less than its left: 286 pt is just enough on the laptop, 297 on a 5K screen).
+edge moves less than its left: the widest card needs 275 pt on the laptop, 286.4 on a 5K
+screen).
 
 **Timing.** Every animation uses Apple's measured timing by default:
 
@@ -655,7 +685,8 @@ in front, and the windows on screen all along bring no stage forward even after 
   window.
 - Not measured yet on Apple's: the edge-reveal and auto-hide delays (ours: 250 ms and
   500 ms), the hover's exact easing, a new card's fade, a Shift-click on a card holding
-  several apps, and the cards' shadow and corner radius.
+  several apps, a card of three or more apps, and what decides how far the other app's
+  window peeks out (ours: always the fixture's 42 and 15 pt, on its side of the screen).
 - Where Apple places a window moved to another Desktop is unverified. Ours places it as a
   window of its app opening there: in that app's most recent stage on that Desktop, else a
   stage of its own, shown in front. Several apps moved at once get a stage each; the front

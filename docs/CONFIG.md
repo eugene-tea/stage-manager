@@ -76,19 +76,19 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `cards.perspective` | `"auto"` | "auto" or a number, 50 to 50000 | Eye distance in points; "auto" is Apple's for the screen (1346 at 1800 pt wide, 2260 at 2560). |
 | `cards.perspective_x` | `15.0` | number, -3000 to 3000 | The eye's horizontal position, from the screen's left edge. |
 | `cards.perspective_y` | `0.0` | number, -3000 to 3000 | The eye's height, from the screen's vertical middle (down is positive). |
-| `cards.corner_radius` | `4.0` | number, 0 to 60 | Corner radius of each window's thumbnail. |
+| `cards.corner_radius` | `8.0` | number, 0 to 60 | Corner radius of each window's thumbnail (Apple's, measured on a 5K display: 8). |
 | `cards.border_width` | `0.5` | number, 0 to 10 | Width of the thin edge around each thumbnail. |
 | `cards.border_color` | `"#ffffff2e"` | color "#rrggbb" or "#rrggbbaa" | Color of that edge. |
-| `cards.shadow_radius` | `4.0` | number, 0 to 100 | Blur radius of each thumbnail's shadow. |
-| `cards.shadow_opacity` | `0.4` | number, 0 to 1 | Opacity of that shadow. |
+| `cards.shadow_radius` | `1.0` | number, 0 to 100 | Blur radius of each thumbnail's shadow (Apple's is barely there: about 2 pt below a card, 1 pt beside it). |
+| `cards.shadow_opacity` | `0.3` | number, 0 to 1 | Opacity of that shadow. |
 | `cards.shadow_offset_x` | `0.0` | number, -100 to 100 | Horizontal offset of that shadow. |
-| `cards.shadow_offset_y` | `2.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
+| `cards.shadow_offset_y` | `1.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
 | `cards.shadow_color` | `"#000000"` | color "#rrggbb" or "#rrggbbaa" | Color of that shadow. |
 | `cards.max_windows` | `3` | whole number, 1 to 8 | Most windows drawn on one card. |
-| `cards.stack_dx` | `17.0` | number, -200 to 200 | Windows of one app step this far right toward the front one (the one behind peeks out on the left). |
+| `cards.stack_dx` | `16.0` | number, -200 to 200 | Windows of one app step this far right toward the front one (the one behind peeks out on the left). |
 | `cards.behind_scale` | `1.0` | number, 0.3 to 1 | Each window behind another of the same app is drawn this much smaller. |
-| `cards.second_app_dx` | `68.0` | number, -300 to 300 | A second app's window sits this far right of the first. |
-| `cards.second_app_dy` | `14.0` | number, -300 to 300 | ...and this far up. |
+| `cards.second_app_dx` | `42.0` | number, -300 to 300 | On a card of several apps, a second app's window sits this far from the front window, toward its side on the screen (it peeks out on that side). |
+| `cards.second_app_dy` | `15.0` | number, -300 to 300 | ...and this far up (the windows centered on one line otherwise). |
 | `cards.hover_scale` | `1.06` | number, 1 to 2 | The card under the pointer grows by this factor, about its center. |
 | `cards.hover_ms` | `210` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, eased out, in milliseconds (Apple's, measured: 208 growing, 220 shrinking). |
 | `cards.press_scale` | `0.987` | number, 0.5 to 1 | A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more). |
@@ -99,13 +99,13 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `cards.backdrop_saturation` | `0.95` | number, 0 to 2 | Behind each window's picture on a card, the wallpaper's colour there (its average behind the thumbnail), at this saturation of the wallpaper's own: 0 grey, 1 as it is. |
 | `cards.backdrop_brightness` | `0.78` | number, 0 to 2 | ...and at this brightness of the wallpaper's own (Apple's darkens it a little). |
 | `icons.size` | `38.0` | number, 0 to 300 | Size of the app icon image (macOS icons carry a margin; about 31 pt shows). 0 hides icons. |
-| `icons.center_dx` | `10.5` | number, -300 to 300 | The icon's center, right of the card's bottom-left corner (its leftmost window's). |
-| `icons.center_dy` | `-10.5` | number, -300 to 300 | The icon's center, below the card's bottom-left corner (up is negative). |
+| `icons.center_dx` | `10.5` | number, -300 to 300 | The icon's center, right of the card's leftmost window's left edge. |
+| `icons.center_dy` | `-10.5` | number, -300 to 300 | The icon's center, below the card's bottom (its lowest window's; up is negative). |
 | `icons.step` | `36.0` | number, 0 to 300 | A second app's icon sits this far right of the first. |
 | `icons.max` | `3` | whole number, 0 to 10 | Most icons on one card. |
-| `icons.shadow_radius` | `4.0` | number, 0 to 100 | Blur radius of the icon's shadow. |
-| `icons.shadow_opacity` | `0.3` | number, 0 to 1 | Opacity of the icon's shadow. |
-| `icons.shadow_offset_y` | `2.0` | number, -100 to 100 | Vertical offset of the icon's shadow (down is positive). |
+| `icons.shadow_radius` | `3.0` | number, 0 to 100 | Blur radius of the icon's shadow. |
+| `icons.shadow_opacity` | `0.6` | number, 0 to 1 | Opacity of the icon's shadow. |
+| `icons.shadow_offset_y` | `1.5` | number, -100 to 100 | Vertical offset of the icon's shadow (down is positive). |
 | `motion.spring_stiffness` | `289.0` | number, 1 to 10000 | Spring stiffness of cards gliding to new slots (a switch's swap, a reorder, a drop making room). Apple's, measured: 289 (99 % by about 375 ms). |
 | `motion.spring_damping` | `34.0` | number, 0 to 1000 | Spring damping of the cards' glide (34 with stiffness 289 and mass 1: critically damped, no overshoot). |
 | `motion.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the cards' glide. |
