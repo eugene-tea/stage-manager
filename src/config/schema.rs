@@ -312,8 +312,8 @@ pub const KEYS: &[KeyDef] = &[
     k("drag", "threshold", f(0.0, 100.0), "5.0", "A press that moves farther than this (points, at least 5) drags the card; less is a click."),
     k("drag", "merge_zone", f(0.0, 1.0), "0.5",
         "With merge_on_drop: the middle part of a card's height (0.5 = the middle half) where a dragged card drops onto it; above and below, it goes between cards."),
-    k("drag", "grow_distance", f(1.0, 3000.0), "100.0",
-        "Past the strip, the dragged card grows to its window's size over this distance (Apple's is there about 100 pt out)."),
+    k("drag", "appear_ms", i(0, 2000), "100",
+        "Past the strip a dragged card shows its window, turned as the card; the window slides under the pointer in this many milliseconds (Apple's, measured: about 100)."),
     k("drag", "window_grab_x", f(0.0, 1000.0), "96.0",
         "A card dragged out holds its window with the pointer this far right of the window's left edge, wherever the card was pressed (Apple's, measured: 96; at most half the window's width)."),
     k("drag", "window_grab_y", f(0.0, 1000.0), "100.0",
@@ -427,6 +427,11 @@ pub const RETIRED: &[(&str, &str, &str)] = &[
         "windows",
         "corner_patch_fps",
         "it is ignored; the corner patch draws the wallpaper from its file, with no live capture",
+    ),
+    (
+        "drag",
+        "grow_distance",
+        "it is ignored; a card dragged out of the strip shows its window as soon as it leaves the strip, as Apple's does ([drag] appear_ms)",
     ),
 ];
 
@@ -576,6 +581,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-35.toml"),
     include_str!("legacy/default-36.toml"),
     include_str!("legacy/default-37.toml"),
+    include_str!("legacy/default-38.toml"),
 ];
 
 #[cfg(test)]

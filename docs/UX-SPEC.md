@@ -272,13 +272,26 @@ only when the pointer is still where it pressed (within 4 pt): a press there tha
 drag (a resize, a rubber-band selection) reveals nothing, so no window is ever parked while a
 press may still hold its edge. Further out the reveal runs on the press, at once.
 
-**Drag and drop.** A card dragged into the main area grows to window size within about
-100 pt past the strip (`[drag] grow_distance`) and joins the current stage where you drop it.
-It leaves the strip turned as the card is and flattens on the spring of windows growing out
-of the strip (99 % at about 355 ms), whatever the pointer does, as Apple's does: measured on
-Apple's two drags (11-09, a 5K screen), the turn went from the card's (about 45°) to half in
-about 90 ms and under a tenth in about 230 ms both times, while the pointer had moved 114 pt
-in one and 150 pt in the other, so it follows the time, not the distance.
+**Drag and drop.** A card dragged into the main area turns into its window the moment the
+pointer leaves the strip's column, and joins the current stage where you drop it. As
+Apple's, the window appears at its own size, turned as the card is in the strip's
+perspective (which draws it about half as wide at first), its left edge about 76 pt right of
+the pointer and its top about 38 pt lower than where it is held; it slides under the pointer
+in `[drag] appear_ms` (100 ms, a smoothstep: half way at 50 ms) and comes up as it flattens,
+on the spring of windows growing out of the strip (99 % at about 355 ms), whatever the
+pointer does. Measured on Apple's two drags (11-09, 60 fps, a 5K screen, 03 a card of one
+window and 06 one window of a combined card): its first frame showed the window 424 and
+472 pt wide of 990, its top edge sloping as the card's turn draws it, its left edge 34 and
+118 pt right of the pointer and its top 42 and 34 pt low; its left edge was under the pointer
+after 5 and 7 frames (about half way after 3), its turn halved after about 7 frames and was
+gone after 18 to 20 (about 300 ms), so the turn follows the time, not the distance. Apple's
+window appeared with the pointer 155 pt and 245 pt from the screen's edge (between the frames
+at 148 and 160 pt, and at 240 and 248 pt): no fixed distance from the edge, from the press or
+from the card explains both, so ours uses its column's edge (200 pt at the default width),
+which lies between them. Apple's window is drawn at its full width after about 140 ms, while
+its turn still shows; ours widens with its turn alone, up to about a fifth of the width
+narrower on the way, its slope matching Apple's (one spring fits both measures best). Back over the column, the card follows the pointer
+again (or a window lifted off a combined card is its card-sized picture again), at once.
 The window is held with the pointer 96 pt in from its left edge and 100 pt below its top
 (`[drag] window_grab_x`, `window_grab_y`; at most half the window's width and height),
 wherever the card was pressed: Apple's put two drags pressed at 47 % and at 71 % of a card's
@@ -300,8 +313,8 @@ Ours lifts the window off from the first move instead (past `[drag] threshold`, 
 with the whole card following the pointer inside the column, "both windows move together"):
 its picture leaves the card at the card's size, turned as the card and flattening on the same
 spring as a card dragged out, held where it was pressed; its plane on the card fades to
-`[drag] lifted_opacity`, the card keeping the others where they are; past the column it grows
-toward the window's size as above. Inside the column it can go where Apple's has nothing to
+`[drag] lifted_opacity`, the card keeping the others where they are; past the column it turns
+into its window as above. Inside the column it can go where Apple's has nothing to
 offer (extensions, always on, as a window dropped on the strip): into a gap between cards,
 which opens under the pointer, as a stage of its own there (`Model::move_window_to_new_stage`;
 the stage it left keeps its number and slot); onto another card's middle (`[strip]
@@ -343,7 +356,7 @@ screen).
 | The edge reveal | starts about 180 ms after the pointer reaches the left edge |
 | Hover | grows 11 % on a spring, half way at about 100 ms, 99 % at about 400 ms, its windows turning solid on the same curve |
 | Press | eases to 0.987 of its size in about 100 ms |
-| A card dragged out | window size within about 100 pt past the strip; turned as the card at first, flat on the growing spring |
+| A card dragged out | its window as it leaves the strip: turned as the card at first, flat on the growing spring; slides under the pointer in about 100 ms (smoothstep) |
 
 Measured 11-09 on a 5K screen at 60 frames a second, Apple's and ours running the same
 scripted clicks and drags, each edge of a window tracked frame by frame (our own known springs
@@ -541,7 +554,8 @@ first visit still shows its edges for a moment, until its patch is drawn.
 **Dragging uses stand-ins.** A window dragged over the strip keeps its size under a
 card-sized picture of it, where Apple shrinks the window itself: Stage Manager cannot resize
 another app's window while you hold it without fighting the drag. A card dragged out is shown
-by a growing picture of the window it was pressed on (its front window on a card of one).
+by a picture of the window it was pressed on (its front window on a card of one), at the
+window's size past the strip.
 A window of a combined card lifts off as that picture from the first move, inside the strip
 too, where Apple's leaves it on the card until the pointer is about 245 pt from the edge
 (Drag and drop, above).
@@ -779,9 +793,6 @@ in front, and the windows on screen all along bring no stage forward even after 
   aside as macOS does outside Stage Manager, where Apple's puts the stage into the strip and
   the strip stays (recorded 11-09). Only "Only in Stage Manager" gives the click to Stage
   Manager.
-- A card dragged onto a screen left of its own keeps its card size until the drop (its
-  stand-in grows toward the window's size only right of the strip); Apple's arrives at the
-  window's size.
 - Since macOS 15, macOS asks about once a month whether the app may capture windows
   directly. Apple's content picker avoids that alert but cannot serve a strip of every
   window.
@@ -789,12 +800,9 @@ in front, and the windows on screen all along bring no stage forward even after 
   their pictures, or they would show around them: about 50 to 90 ms after the click (11-09's
   log; the `transition: the motion starts` line has it as `motion_ms`). How soon Apple's starts
   after the click is not measured.
-- Apple's card dragged out appears a moment after the pointer leaves the strip, already
-  close to the window's size and right of the pointer, and slides under it as it flattens;
-  ours leaves the card where the pointer is, at the card's size, and grows with the
-  distance. Both start turned and flatten in the same time. A card dragged from the main
-  screen's strip onto the laptop's screen landed with the pointer 39 pt in and 353 pt down
-  (once, measured 11-09): Apple's rule across screens is not known.
+- A card dragged from the main screen's strip onto the laptop's screen landed with the
+  pointer 39 pt in and 353 pt down on Apple's (once, measured 11-09): its rule across screens
+  is not known; ours holds it as on its own screen.
 - Not measured yet on Apple's: the auto-hide delay (ours: 500 ms), a new card's fade, a
   Shift-click on a card holding several apps, a card of three or more apps, and what decides
   how far the other app's window peeks out (ours: always the fixture's 42 and 15 pt, on its
