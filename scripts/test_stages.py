@@ -182,12 +182,73 @@ def run(args, **kw):
     return subprocess.run(args, env=ENV, capture_output=True, text=True, **kw)
 
 
-def ctl(*words):
+def ctl_once(*words):
     r = run([BIN, "ctl", *map(str, words)], timeout=15)
     try:
         return json.loads(r.stdout.strip() or "{}")
     except json.JSONDecodeError:
         return {"ok": False, "error": r.stdout + r.stderr}
+
+
+# A synthetic click or hover refused under a Notification Center banner is tried again for
+# this long (a banner stays about 5 s; drags already wait, `drag_sampled`).
+BANNER_WAIT = 8.0
+
+
+def ctl(*words):
+    """One ctl command, its JSON reply. A synthetic click or hover the app refused because a
+    Notification Center banner was topmost there (`banner_pid`) is tried again every half
+    second for up to `BANNER_WAIT` seconds; a banner still there then is named in the reply's
+    error (the app it belongs to, `banner_app`), and the caller's own handling of a refused
+    click goes on as before."""
+    r = ctl_once(*words)
+    if not words or words[0] not in ("debug-click", "debug-hover") or banner_pid(r) is None:
+        return r
+    end = time.time() + BANNER_WAIT
+    say(f"  a Notification Center banner covers the {words[0][6:]} point; waiting up to {BANNER_WAIT:.0f} s")
+    while time.time() < end:
+        time.sleep(0.5)
+        r = ctl_once(*words)
+        if banner_pid(r) is None:
+            return r
+    app = banner_app()
+    note = f" (a Notification Center banner of {app or 'an app not named'} stayed {BANNER_WAIT:.0f} s)"
+    say(f"  the banner stayed{note}")
+    if isinstance(r, dict):
+        r = {**r, "error": str(r.get("error", "")) + note}
+    return r
+
+
+def banner_pid(reply):
+    """The pid of Notification Center when `reply` (a ctl reply) refused a synthetic input
+    because Notification Center's window (a banner) was topmost on its path; else None."""
+    err = str(reply.get("error") or "") if isinstance(reply, dict) else str(reply or "")
+    m = re.search(r"not ours or a fixture's \(pid (\d+)\)", err)
+    if not m:
+        return None
+    r = subprocess.run(["ps", "-o", "comm=", "-p", m.group(1)], capture_output=True, text=True)
+    return int(m.group(1)) if "NotificationCenter" in r.stdout else None
+
+
+def banner_app():
+    """The app a Notification Center banner on screen belongs to: the first part of the
+    banner's accessibility description ("App, title, body"; only the app's name is kept, never
+    the banner's text), read through System Events; None when it cannot be told."""
+    js = (
+        'const p = Application("System Events").processes.byName("NotificationCenter");'
+        'let out = null;'
+        'for (const w of p.windows()) { for (const e of w.entireContents()) {'
+        '  try { const s = e.subrole(), d = e.description();'
+        '    if (s && String(s).includes("Notification") && d && String(d).includes(", ")) { out = String(d).split(", ")[0]; break; }'
+        '  } catch (_) {} } if (out) break; }'
+        'out || "";'
+    )
+    try:
+        r = subprocess.run(["osascript", "-l", "JavaScript", "-e", js], capture_output=True, text=True, timeout=5)
+    except subprocess.TimeoutExpired:
+        return None
+    name = r.stdout.strip()
+    return name[:40] if r.returncode == 0 and name else None
 
 
 def probe(bundle=FIX_ID):
