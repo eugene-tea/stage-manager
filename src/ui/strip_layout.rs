@@ -595,6 +595,16 @@ pub fn ghost_frame(start: Rect, grab: (f64, f64), full: Size, out: bool, hold: (
     }
 }
 
+/// Whether a dragged card's ghost is drawn as its window, at the window's size: past the
+/// column (`out`) once a full-size snapshot of the window is at hand (`sharp`; the press asks
+/// for one). The card's thumbnail is never stretched to the window's size (11-09: Mail's
+/// 1651 x 1196 window drawn from its thumbnail covered his screen, blurred; Apple's is sharp):
+/// until the snapshot comes the ghost stays the card's plane under the pointer, and it turns
+/// into the window when the snapshot arrives.
+pub fn ghost_as_window(out: bool, sharp: bool) -> bool {
+    out && sharp
+}
+
 /// How far right of the pointer the window's left edge is when Apple's dragged window
 /// appears past the strip (points; measured 11-09 at 60 fps: 34 and 118 in the two drags, 03
 /// and 06).
@@ -1178,6 +1188,21 @@ mod tests {
         assert_eq!((left.x, left.w), (-396.0, 900.0));
         // A small window is held at most at its middle.
         assert_eq!(window_grab(Size::new(150.0, 120.0), (96.0, 100.0)), (75.0, 60.0));
+    }
+
+    #[test]
+    fn past_the_column_the_thumbnail_stays_card_sized_until_the_sharp_picture_comes() {
+        let thumb = Rect::new(20.0, 500.0, 150.0, 100.0);
+        let full = Size::new(1651.0, 1196.0);
+        let (grab, hold) = ((75.0, 50.0), window_grab(full, (96.0, 100.0)));
+        let p = Point::new(900.0, 550.0);
+        assert!(!ghost_as_window(false, true), "in the column it is the card's plane");
+        assert!(!ghost_as_window(true, false), "past it, no snapshot yet: not stretched");
+        assert!(ghost_as_window(true, true));
+        let waiting = ghost_frame(thumb, grab, full, ghost_as_window(true, false), hold, p);
+        assert_eq!(waiting, Rect::new(825.0, 500.0, 150.0, 100.0), "the card's size, under the pointer");
+        let sharp = ghost_frame(thumb, grab, full, ghost_as_window(true, true), hold, p);
+        assert_eq!((sharp.w, sharp.h), (1651.0, 1196.0), "the window's size, with its own picture");
     }
 
     #[test]

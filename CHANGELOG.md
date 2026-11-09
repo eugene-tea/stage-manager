@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A card dragged out of the strip shows its window sharp, at its size, as Apple's does. It
+  was the card's small picture stretched to the window's size, so a large window covered the
+  screen with a blurred picture while you dragged. Until the sharp picture is ready, the
+  card's picture follows the pointer at its card size.
 - A window dragged off a card onto another card, or a card dropped onto another card, now goes
   in front of that stage's windows: it is the card's front picture and the window in front,
   with the keyboard, when you switch there. It went behind them all.

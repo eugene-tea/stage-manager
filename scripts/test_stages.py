@@ -4407,6 +4407,7 @@ def phase_capture():
     cap = state().get("capture", {})
     check(cap.get("images", 0) > (s or {}).get("capture", {}).get("images", 0),
           f"pictures keep coming ({cap.get('images')} so far)")
+    sharp_ghost_check()
     if not os.environ.get("SM_SKIP_LANDING"):
         landing_blend_check()
     captures_stop_with_strip_hidden()
@@ -4431,6 +4432,67 @@ def phase_capture():
     all_onscreen("capture quit")
     for over in (0, 230):
         popup_over_check(over)
+
+
+GHOST_LAYER = 4  # NSFloatingWindowLevel + 1: a dragged card's ghost panel
+
+
+def sharp_ghost_check():
+    """11-09 (Eugene, Mail's card dragged out): past the column a dragged card's ghost is its
+    window at full size drawn from the window's full-size snapshot, never the card's thumbnail
+    stretched (it covered his screen, blurred); until the snapshot comes it stays at the card's
+    size. Fixture 1 and 2's combined card, by its app icons (the whole card) and by Fixture 1's
+    own part (the window lifted off), each dragged past the column, held there about a second
+    and brought back over the card: nothing changes, and no ghost panel is left on screen."""
+    say("-- a card dragged past the column: its ghost is the window, sharp, never the thumbnail stretched")
+    s = state()
+    vis = s["display"]["visible"]
+    t = by_title(s)
+    number = t["Fixture 1"]["home"]
+    stage = ids_by_number(s).get(number)
+    p = strip_probe() or {}
+    c = next((c for c in p.get("cards", []) if c.get("stage") == stage), None)
+    if not check(c is not None and c.get("icons") and len(c.get("planes", [])) >= 2,
+                 f"Fixture 1 and 2's card drawn with its icons ({c and len(c.get('planes', []))} planes)"):
+        return
+    planes = {q["window"]: q["plane"] for q in c["planes"]}
+    f1 = t["Fixture 1"]["id"]
+    others = [r for w, r in planes.items() if w != f1]
+    back = planes.get(f1)
+    # Fixture 1's own part: right of the other window's far edge, if it shows there.
+    own = None
+    if back and others and rect_right(back) > max(rect_right(r) for r in others) + 4:
+        own = ((max(rect_right(r) for r in others) + rect_right(back)) / 2, back["y"] + back["h"] / 2)
+    for how, press in (("by its icons", center(c["icons"][0])), ("by Fixture 1's own part", own)):
+        if press is None:
+            skip(f"sharp ghost {how}", "Fixture 1 shows no part of its own on the card")
+            continue
+        out_at = (vis["x"] + s["strip_width"] + 600, press[1])
+        wiggle = [out_at, (out_at[0], out_at[1] + 30)] * 6 + [out_at]
+        path = [press, (press[0], press[1] + 12), *wiggle, press]
+        words = [str(round(v, 1)) for q in path for v in q] + ["hold=300"]
+        say(f"  dragging the card {how} past the column and back")
+        proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
+        seen = sample_strip_during(proc, after=0.0)
+        out, _ = proc.communicate(timeout=20)
+        if blocked(out, f"the sharp ghost {how}"):
+            continue
+        if not check('"ok": true' in out or '"ok":true' in out, f"{how}: the drag ran ({out.strip()[:120]}{whose(out)})"):
+            continue
+        ghosts = [q["drag_ghost"] for q in seen if q.get("drag_ghost") and q["drag_ghost"].get("out")]
+        if not check(bool(ghosts), f"{how}: its ghost was seen past the column ({len(seen)} samples)"):
+            continue
+        stretched = [g["frame"] for g in ghosts if not g["window"] and g["frame"]["w"] > g["full"]["w"] * 0.6]
+        check(not stretched, f"{how}: never the thumbnail at the window's size ({stretched[:2]})")
+        sharp = [g for g in ghosts if g["window"] and abs(g["frame"]["w"] - g["full"]["w"]) <= 1]
+        check(bool(sharp), f"{how}: the window at its size with its own snapshot ({len(sharp)} of {len(ghosts)} past the column; "
+              f"the first {ghosts[0]})")
+        time.sleep(1.3)  # a dropped ghost lingers at most a second for its landing
+        left = [w for w in our_windows() if w["layer"] == GHOST_LAYER]
+        check(not left, f"{how}: no ghost left on screen after the release ({left})")
+        x = state()
+        check(by_title(x)["Fixture 1"]["home"] == number and by_title(x)["Fixture 2"]["home"] == number,
+              f"{how}: back over its card, nothing changed ({stage_titles(x)})")
 
 
 def captures_stop_with_strip_hidden():

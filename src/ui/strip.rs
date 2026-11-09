@@ -50,7 +50,8 @@
 //! - **Drag one window off a combined card** ([`strip_layout::grip`]: a press on one window of
 //!   a card of several; on the app icons, or on a card of one window, the card moves whole):
 //!   that window alone comes off from the first move (`DragMode::Lifted`), its ghost at the
-//!   card's size in the column and the window itself past it, its plane on the card faded. Released
+//!   card's size in the column and the window itself past it (from its full-size snapshot;
+//!   at the card's size until that comes), its plane on the card faded. Released
 //!   in the main area it goes out as [`StripEvent::CardDropped`] naming it (Apple's); in the
 //!   column, in a gap that opens under the pointer, as [`StripEvent::WindowToNewCard`]; on
 //!   another card's middle, which shows it in front of its own windows, as
@@ -667,7 +668,10 @@ define_class!(
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            with_strip_of(self.strip(), |s| s.hover_at(Some(p)));
+            with_strip_of(self.strip(), |s| {
+                s.end_lost_drag();
+                s.hover_at(Some(p));
+            });
         }
 
         #[unsafe(method(mouseEntered:))]
@@ -1639,9 +1643,13 @@ struct CardDrag {
     spot: WindowSpot,
     /// The ghost, once the press moved past the threshold.
     ghost: Option<Ghost>,
-    /// The ghost is the window past the column (else the card's plane in it): crossing the
-    /// column's edge either way makes a new one.
+    /// The ghost is past the column (else the card's plane in it): crossing the column's edge
+    /// either way makes a new one.
     ghost_out: bool,
+    /// The ghost is the window at its size with its full-size snapshot
+    /// ([`strip_layout::ghost_as_window`]); past the column without one it is the card's plane
+    /// with the thumbnail, until the snapshot arrives ([`Strip::set_snapshot`]).
+    ghost_window: bool,
     /// The drag went somewhere: over another card, or half a card away from the press. Then a
     /// release back in its own slot puts the card back and is no click (no switch).
     strayed: bool,
@@ -2515,6 +2523,12 @@ impl Strip {
             "drag_window": self.card_drag.as_ref().map(|d| d.window),
             "drag_alone": self.card_drag.as_ref().map(|d| d.grip == Grip::Window),
             "drag_spot": self.card_drag.as_ref().filter(|d| d.mode == DragMode::Lifted).map(|d| format!("{:?}", d.spot)),
+            // The drag's ghost: where its window is drawn (global, before the turn), whether
+            // as the window with its full-size snapshot, and the pressed window's size.
+            "drag_ghost": self.card_drag.as_ref().and_then(|d| {
+                let placed = d.ghost.as_ref()?.placed.get()?.0;
+                Some(serde_json::json!({ "frame": placed, "window": d.ghost_window, "out": d.ghost_out, "full": d.full }))
+            }),
             "merge_onto": self.merge_onto(),
             "shown": self.pane.shown,
             "overlay_top_down": self.motion_top_down(),
@@ -3000,7 +3014,8 @@ impl Strip {
             }
         }
         CATransaction::commit();
-        if let Some(ghost) = self.card_drag.as_mut().filter(|d| d.window == id).and_then(|d| d.ghost.as_mut()) {
+        // A thumbnail never goes into a ghost drawn as the window (its snapshot is sharper).
+        if let Some(ghost) = self.card_drag.as_mut().filter(|d| d.window == id && !d.ghost_window).and_then(|d| d.ghost.as_mut()) {
             ghost.set_image(&picture);
         }
         self.thumbs.insert(id, picture);
@@ -3176,6 +3191,7 @@ impl Strip {
             spot: WindowSpot::Home,
             ghost: None,
             ghost_out: false,
+            ghost_window: false,
             strayed: false,
         })
     }
@@ -3249,7 +3265,8 @@ impl Strip {
         };
         let (before, onto) = if mode == DragMode::Reorder { self.card_spot(p, stage) } else { (None, None) };
         let spot = if mode == DragMode::Lifted { self.window_spot(p, stage) } else { WindowSpot::Home };
-        let image = self.thumbs.get(&drag.window).cloned();
+        let thumb = self.thumbs.get(&drag.window).cloned();
+        let sharp = self.motion.snapshot(drag.window).cloned();
         let window = drag.window;
         let look = {
             let (m, g, full) = (self.m(), self.geometry.global, &self.style);
@@ -3288,16 +3305,21 @@ impl Strip {
             } else {
                 // The ghost: the pressed window, at its plane's size in the column; past the
                 // column's edge the window itself, as Apple's appears there: turned as the card,
-                // right of the pointer, sliding under it. Back over the column it is the card's
-                // plane again (or the card itself follows, reordering).
+                // right of the pointer, sliding under it, drawn from its full-size snapshot,
+                // never the thumbnail stretched (11-09); none yet, the card's plane follows
+                // until it comes. Back over the column it is the card's plane again (or the
+                // card itself follows, reordering).
                 let out = !in_column;
-                if drag.ghost_out != out {
+                let as_window = strip_layout::ghost_as_window(out, sharp.is_some());
+                if drag.ghost_out != out || drag.ghost_window != as_window {
                     drag.ghost = None;
                     drag.ghost_out = out;
+                    drag.ghost_window = as_window;
                 }
                 let hold = strip_layout::window_grab(drag.full, (style.window_grab_x, style.window_grab_y));
-                let frame = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, out, hold, p);
-                let slide = out.then(|| strip_layout::appear_offset(hold));
+                let frame = strip_layout::ghost_frame(drag.plane, drag.grab, drag.full, as_window, hold, p);
+                let slide = as_window.then(|| strip_layout::appear_offset(hold));
+                let image = if as_window { sharp } else { thumb };
                 let ghost = drag.ghost.get_or_insert_with(|| Ghost::new(mtm, image.as_ref(), style.ghost_opacity as f32, look(slide)));
                 ghost.set_frame(frame, primary_height);
             }
@@ -3346,6 +3368,31 @@ impl Strip {
         if now_onto != was_onto {
             tracing::debug!(stage, onto = ?now_onto, "card held over a card");
             self.ease_growth([was_onto, now_onto]);
+        }
+        self.update_visibility();
+    }
+
+    /// A card drag whose release never reached the strip (the pointer moves with no button
+    /// held: the mouse-up went elsewhere): it ends as a drag let go over the strip does, the
+    /// card back in its slot, nothing dropped, and its ghost's panel gone. A ghost left on the
+    /// screen would follow nothing and cover what is under it.
+    fn end_lost_drag(&mut self) {
+        if self.card_drag.as_ref().is_none_or(|d| d.mode == DragMode::Pressed) || NSEvent::pressedMouseButtons() & 1 != 0 {
+            return;
+        }
+        let Some(drag) = self.card_drag.take() else { return };
+        tracing::info!(stage = drag.stage, mode = ?drag.mode, "card drag: no release came (the button is up); cancelled, its ghost gone");
+        self.pressed = None;
+        let onto = drag.onto;
+        self.set_card_opacity(drag.stage, 1.0);
+        self.set_plane_opacity(drag.stage, drag.window, 1.0);
+        drop(drag.ghost);
+        self.layout_cards(false);
+        if drag.mode == DragMode::Reorder {
+            self.settle_lifted();
+        }
+        if onto.is_some() {
+            self.ease_growth([onto, None]);
         }
         self.update_visibility();
     }
@@ -3635,6 +3682,7 @@ impl Strip {
     /// strip column the pane lets clicks through, so its own tracking sees nothing there;
     /// the cards hover from here and the pane catches clicks again once it is on one.
     fn pointer_moved(&mut self, p: Point) {
+        self.end_lost_drag();
         let g = self.geometry.global;
         self.visibility.set_screen_left(self.geometry.screen.origin.x);
         // Hidden at the edge, nothing polled: a move to the edge or the tab starts the rest.

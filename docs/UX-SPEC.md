@@ -287,7 +287,10 @@ perspective (which draws it about half as wide at first), its left edge about 76
 the pointer and its top about 38 pt lower than where it is held; it slides under the pointer
 in `[drag] appear_ms` (100 ms, a smoothstep: half way at 50 ms) and comes up as it flattens,
 on the spring of windows growing out of the strip (99 % at about 355 ms), whatever the
-pointer does. Measured on Apple's two drags (11-09, 60 fps, a 5K screen, 03 a card of one
+pointer does. The window is drawn from its own full-size snapshot (asked for at the press),
+sharp as Apple's; until that snapshot is at hand the card's thumbnail is never stretched to
+the window's size: the card's picture follows the pointer at its card size, and turns into
+the window when the snapshot comes. Measured on Apple's two drags (11-09, 60 fps, a 5K screen, 03 a card of one
 window and 06 one window of a combined card): its first frame showed the window 424 and
 472 pt wide of 990, its top edge sloping as the card's turn draws it, its left edge 34 and
 118 pt right of the pointer and its top 42 and 34 pt low; its left edge was under the pointer
