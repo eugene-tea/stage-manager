@@ -2381,6 +2381,15 @@ def phase_crop():
         c = next((c for c in p.get("cards", []) if c.get("stage") == stage), None)
         return ({q["window"]: q["plane"] for q in c["planes"]} if c else {}), strip_panel()
 
+    def icons():
+        """The combined card's app icons as drawn (global)."""
+        p = strip_probe() or {}
+        c = next((c for c in p.get("cards", []) if c.get("stage") == stage), None)
+        return c.get("icons", []) if c else []
+
+    def middle(r):
+        return (r["x"] + r["w"] / 2, r["y"] + r["h"] / 2)
+
     say("-- the combined card is drawn whole past the strip column, at rest and grown under the pointer")
     if reveal_strip("crop: the combined card") is not None:
         drawn, panel = planes()
@@ -2391,6 +2400,7 @@ def phase_crop():
             check(all(rect_right(r) <= right + 0.5 for r in drawn.values()),
                   f"and the panel holds it: nothing cut off at a straight edge (planes to {max(rect_right(r) for r in drawn.values()):.0f}, panel to {right:.0f})")
             front = drawn[a1]
+            rest_icons = icons()
             at = ((rect_right(front) + rect_right(back)) / 2, back["y"] + back["h"] / 2)
             r = strip_hover(at)
             if not blocked(r, "the hovered combined card (its growth past the column)"):
@@ -2398,6 +2408,16 @@ def phase_crop():
                 grown, panel = planes()
                 g = grown.get(f1)
                 check(g is not None and g["w"] > back["w"] * 1.03, f"hovered on its back window's part, the card grows ({back['w']:.0f} -> {g and round(g['w'])})")
+                # Apple's (strip-polish, 11-09): each window grows about its own middle, the
+                # offsets between them kept, and the app icons stay where they are, at their size.
+                for wid, name in ((a1, "Alpha 1"), (f1, "Fixture 1")):
+                    if wid in grown:
+                        (x0, y0), (x1, y1) = middle(drawn[wid]), middle(grown[wid])
+                        check(abs(x1 - x0) <= 1.0 and abs(y1 - y0) <= 1.0,
+                              f"grown, {name}'s window keeps its middle ({x0:.1f},{y0:.1f} -> {x1:.1f},{y1:.1f})")
+                now_icons = icons()
+                check(len(now_icons) == len(rest_icons) and all(abs(a[k] - b[k]) <= 0.5 for a, b in zip(rest_icons, now_icons) for k in ("x", "y", "w", "h")),
+                      f"grown, the card's icons stay where they are, at their size ({rest_icons} -> {now_icons})")
                 check(g is not None and panel is not None and all(rect_right(x) <= rect_right(panel["bounds"]) + 0.5 for x in grown.values()),
                       f"grown, it still fits the panel (to {g and round(rect_right(g))}, panel to {panel and round(rect_right(panel['bounds']))})")
                 strip_hover(None)

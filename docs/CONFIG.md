@@ -93,7 +93,8 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `cards.hover_ms` | `400` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, in milliseconds: a spring, 99 % there by then, half way at a quarter of it (Apple's, measured: about 400). |
 | `cards.press_scale` | `0.987` | number, 0.5 to 1 | A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more). |
 | `cards.press_ms` | `100` | whole number, 0 to 3000 | How long the press takes, eased out, in milliseconds (Apple's, measured: 90 % at 72 ms, done by 100). |
-| `cards.fade_ms` | `200` | whole number, 0 to 3000 | How long a new card takes to fade in, in milliseconds (not measured on Apple's). |
+| `cards.fade_ms` | `200` | whole number, 0 to 3000 | How long a new card takes to fade in, and a window's picture arriving on a card drawn without one, in milliseconds (not measured on Apple's). |
+| `cards.empty_opacity` | `0.35` | number, 0 to 1 | A window on a card before its picture arrives (at launch): its glass at this opacity, nearly see-through, with the card's edge; its picture fades in over fade_ms. |
 | `cards.window_opacity` | `0.78` | number, 0 to 1 | How opaque each window's picture is on its card: Apple's cards let the wallpaper through (0.78, measured on a card read white, black and grey); 1 draws them opaque. |
 | `cards.hover_window_opacity` | `1.0` | number, 0 to 1 | The same on the card under the pointer (or a dragged card's target), eased with its growth: Apple's hovered card turns solid. The value of window_opacity turns the fade off. |
 | `cards.backdrop_saturation` | `0.95` | number, 0 to 2 | Behind each window's picture on a card, the wallpaper's colour there (its average behind the thumbnail), at this saturation of the wallpaper's own: 0 grey, 1 as it is. |

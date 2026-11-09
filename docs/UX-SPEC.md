@@ -76,7 +76,10 @@ pixel, gone by 12): `[icons] shadow_radius` 3, `shadow_opacity` 0.6, `shadow_off
 (fitted the same way, looser: a range of 3 to 4, 0.5 to 0.7, 1 to 1.5 fits). Hovered, each
 window of a card grows by about 11 % about its own middle and the offsets between them stay
 (a single card 178 → 199 pt wide; the pair's offsets 42 and 18 pt both ways, the pair's
-bounds 7 % wider, 9 % taller). A popup open on a window (a popover, a child window sticking out
+bounds 7 % wider, 9 % taller; Blue's and Green's middles moved under half a point), and the
+app icons neither move nor grow (their boxes the same to the pixel on the 2x stills of a
+single card and of the pair). Ours does the same, and grows a card a dragged card would
+merge into and shrinks a pressed one the same way (Apple's press not measured). A popup open on a window (a popover, a child window sticking out
 of it) shows on its card beside the window, at its true size and place, as on Apple's; the
 window keeps its own size on the card, and nothing outside a window is drawn. A palette
 far from its window (more than the window's own width or height past it, or on another
@@ -261,6 +264,11 @@ through: a click under it is on whatever is below.
 
 **Drag and drop.** A card dragged into the main area grows to window size within about
 100 pt past the strip (`[drag] grow_distance`) and joins the current stage where you drop it.
+It leaves the strip turned as the card is and flattens on the spring of windows growing out
+of the strip (99 % at about 355 ms), whatever the pointer does, as Apple's does: measured on
+Apple's two drags (11-09, a 5K screen), the turn went from the card's (about 45°) to half in
+about 90 ms and under a tenth in about 230 ms both times, while the pointer had moved 114 pt
+in one and 150 pt in the other, so it follows the time, not the distance.
 The window is held with the pointer 96 pt in from its left edge and 100 pt below its top
 (`[drag] window_grab_x`, `window_grab_y`; at most half the window's width and height),
 wherever the card was pressed: Apple's put two drags pressed at 47 % and at 71 % of a card's
@@ -304,7 +312,7 @@ screen).
 | The edge reveal | starts about 180 ms after the pointer reaches the left edge |
 | Hover | grows 11 % on a spring, half way at about 100 ms, 99 % at about 400 ms, its windows turning solid on the same curve |
 | Press | eases to 0.987 of its size in about 100 ms |
-| A card dragged out | window size within about 100 pt past the strip |
+| A card dragged out | window size within about 100 pt past the strip; turned as the card at first, flat on the growing spring |
 
 Measured 11-09 on a 5K screen at 60 frames a second, Apple's and ours running the same
 scripted clicks and drags, each edge of a window tracked frame by frame (our own known springs
@@ -450,7 +458,13 @@ no picture ready yet, a staying window with no picture of it, such as another ap
 app does not manage, an activated window macOS put outside that square), an activated app's
 windows come to their places at once instead of growing.
 
-**Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces.
+**Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces. Until a
+window's first picture arrives (at launch, a window first seen), its place on the card is
+faint glass: the card's wallpaper-toned under at `[cards] empty_opacity` (0.35), with the
+card's edge, or with no picture of the wallpaper a black as faint (the wallpaper darkened as
+much as that glass would); the picture then fades in over `[cards] fade_ms` (200 ms). A
+dragged card's stand-in without a picture is as faint. Apple's cards show live surfaces and
+are never drawn without one.
 
 **Hidden stages wait in a corner.** Without private APIs, the only way to hide a window but
 keep it ready is to move it almost off screen. macOS keeps a thin edge of each such window
@@ -743,15 +757,12 @@ in front, and the windows on screen all along bring no stage forward even after 
   stage starts growing: their snapshots wait until the windows behind them have moved to the
   hiding corner, or the windows would show around them. Apple's start together. Measured 11-09;
   the springs themselves match.
-- Apple's card dragged out appears turned like a card, a moment after the pointer leaves the
-  strip, and flattens to its window as it grows, in about 120 ms whatever the pointer does;
-  ours stays flat and grows with the distance. A card dragged from the main screen's strip
-  onto the laptop's screen landed with the pointer 39 pt in and 353 pt down (once, measured
-  11-09): Apple's rule across screens is not known.
-- Apple's hovered card keeps its app icon where it was, at its size; ours grows and moves it
-  with the card. On a card of two apps Apple's grows each window by about 11 % about its own
-  middle, the gaps between them unchanged (the card as a whole about 7 %); ours grows the
-  whole card 11 %, the same on a card of one window.
+- Apple's card dragged out appears a moment after the pointer leaves the strip, already
+  close to the window's size and right of the pointer, and slides under it as it flattens;
+  ours leaves the card where the pointer is, at the card's size, and grows with the
+  distance. Both start turned and flatten in the same time. A card dragged from the main
+  screen's strip onto the laptop's screen landed with the pointer 39 pt in and 353 pt down
+  (once, measured 11-09): Apple's rule across screens is not known.
 - Not measured yet on Apple's: the auto-hide delay (ours: 500 ms), a new card's fade, a
   Shift-click on a card holding several apps, a card of three or more apps, and what decides
   how far the other app's window peeks out (ours: always the fixture's 42 and 15 pt, on its

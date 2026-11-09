@@ -269,7 +269,10 @@ pub const KEYS: &[KeyDef] = &[
     k("cards", "press_scale", f(0.5, 1.0), "0.987",
         "A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more)."),
     k("cards", "press_ms", i(0, 3000), "100", "How long the press takes, eased out, in milliseconds (Apple's, measured: 90 % at 72 ms, done by 100)."),
-    k("cards", "fade_ms", i(0, 3000), "200", "How long a new card takes to fade in, in milliseconds (not measured on Apple's)."),
+    k("cards", "fade_ms", i(0, 3000), "200",
+        "How long a new card takes to fade in, and a window's picture arriving on a card drawn without one, in milliseconds (not measured on Apple's)."),
+    k("cards", "empty_opacity", f(0.0, 1.0), "0.35",
+        "A window on a card before its picture arrives (at launch): its glass at this opacity, nearly see-through, with the card's edge; its picture fades in over fade_ms."),
     k("cards", "window_opacity", f(0.0, 1.0), "0.78",
         "How opaque each window's picture is on its card: Apple's cards let the wallpaper through (0.78, measured on a card read white, black and grey); 1 draws them opaque."),
     k("cards", "hover_window_opacity", f(0.0, 1.0), "1.0",
@@ -572,6 +575,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-34.toml"),
     include_str!("legacy/default-35.toml"),
     include_str!("legacy/default-36.toml"),
+    include_str!("legacy/default-37.toml"),
 ];
 
 #[cfg(test)]
