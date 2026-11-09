@@ -443,15 +443,13 @@ mod app {
     }
 
     fn finish_exit(ok: bool, code: i32) -> ! {
+        let reason = stage_manager::ui::app_menu::system_quit_reason();
+        let (head_start, logout_reason) = (wm_thread::quit_after_head_start(), reason.is_some_and(logout_watch::logout_reason));
+        let user_quit = stage_manager::ui::app_menu::user_quit();
         if ok {
             // A quit at a logout: the guardian waits for its cancel, which opens the app again
             // (round logout-cancel-relaunch); never after the user's own Quit.
-            let reason = stage_manager::ui::app_menu::system_quit_reason();
-            let marker = logout_watch::quit_marker(
-                wm_thread::quit_after_head_start(),
-                reason.is_some_and(logout_watch::logout_reason),
-                stage_manager::ui::app_menu::user_quit(),
-            );
+            let marker = logout_watch::quit_marker(head_start, logout_reason, user_quit);
             if marker == logout_watch::LOGOUT_MARK {
                 tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
             }
@@ -465,6 +463,9 @@ mod app {
         ctl::remove_socket();
         // No app is left with its enhanced UI off by us (round enhanced-ui).
         stage_manager::platform::enhanced_ui::restore_all("quit");
+        // A ready update installs at the user's own Quit, not reopened (his go 11-09); main
+        // thread only (the signal watcher's exit installs nothing).
+        stage_manager::ui::shell::install_on_quit(user_quit, ok, head_start || logout_reason);
         // An update ready to install: its helper waits for this process to exit (8C).
         stage_manager::platform::updater::launch_pending_helper();
         // A capture still in flight at exit makes macOS alert about screen access. Before the
@@ -537,8 +538,11 @@ mod app {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-menu-quit needs STAGE_MANAGER_TEST=1");
                 }
-                // The menu's path: the action runs while the app state is borrowed.
-                DispatchQueue::main().exec_async(|| with_app(|app| app.on_menu(MenuAction::Quit)));
+                // The menu's path: the user's Quit, run while the app state is borrowed.
+                DispatchQueue::main().exec_async(|| {
+                    stage_manager::ui::app_menu::note_user_quit();
+                    with_app(|app| app.on_menu(MenuAction::Quit))
+                });
                 json!({ "ok": true, "quitting": true })
             }
             Command::DebugUpdate => {

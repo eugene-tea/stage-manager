@@ -322,6 +322,14 @@ gives a place for Settings, About, updates and Quit. It can be hidden, and openi
 again then shows Settings. Its glyph is original art, as tall as the SF Symbols beside it at
 the menu bar's default size (12 pt of ink, their median).
 
+**Updates.** Apple's Stage Manager updates with macOS; ours updates itself (GUIDE, Updates).
+A downloaded update also installs when you quit Stage Manager: the menu's Quit, or ⌘Q in
+Settings and About. It then stays closed (no relaunch: the user asked it to stop). Never at a
+logout, restart or shutdown, while Apple's Stage Manager is on, or when a window could not
+be brought back. A launch that finds a downloaded update an earlier run left (it quit while
+the update waited) checks again within its first minute, from scratch, instead of a day
+later. An automatic install still waits, after an unlock, for 120 s with no input.
+
 **Launch at login.** Apple's is part of macOS. Ours registers at its first launch from
 Applications, and Settings can turn that off. It registers as a login item
 (`SMAppService.mainApp`). At login `loginwindow` first relaunches the apps of its reopen

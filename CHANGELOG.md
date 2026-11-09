@@ -42,6 +42,13 @@
   for clicks on a window.
 - Settings says what "Click wallpaper to reveal desktop" does: with Always, macOS moves every
   window aside itself; Only in Stage Manager puts your stage into the strip, as Apple's does.
+- A downloaded update also installs when you quit Stage Manager (Quit in the menu, or ⌘Q
+  in Settings and About). Stage Manager doesn't open again afterwards; the new version
+  starts the next time you open it. Logging out, restarting or shutting down never
+  installs it. Before, an update that waited for you to step away (say the screen stayed
+  locked for a weekend) was thrown away when you quit, and the next check came a day later.
+- When Stage Manager finds an update it downloaded earlier but never installed, it checks
+  again within a minute of opening instead of a day later, and downloads it afresh.
 
 ## 1.7.0 — 2026-11-06
 

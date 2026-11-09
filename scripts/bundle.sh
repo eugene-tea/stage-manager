@@ -2,6 +2,8 @@
 # Assembles an app bundle under target/.
 #   scripts/bundle.sh app      -> target/Stage Manager.app (from target/release/stage-manager)
 #   scripts/bundle.sh fixture  -> target/SM Fixture.app    (compiles scripts/fixture/*.swift)
+# SM_APP and SM_BIN bundle another binary elsewhere (scripts/test-update-quit.sh bundles a
+# test build in a scratch folder); SM_APP must end in "/Stage Manager.app".
 # FIXTURE_ID and FIXTURE_APP give the fixture another bundle ID and path, so test runs can use
 # a fixture no other run manages (scripts/test-stages.sh does).
 set -euo pipefail
@@ -49,8 +51,13 @@ PLIST
 
 case "${1:-}" in
   app)
-    APP="target/Stage Manager.app"
-    BIN="target/release/stage-manager"
+    APP="${SM_APP:-target/Stage Manager.app}"
+    BIN="${SM_BIN:-target/release/stage-manager}"
+    # It is replaced whole (rm -rf): only ever a Stage Manager bundle.
+    case "$APP" in
+      "Stage Manager.app" | */"Stage Manager.app") ;;
+      *) echo "error: SM_APP must end in /Stage Manager.app, got: $APP" >&2; exit 1 ;;
+    esac
     [ -x "$BIN" ] || { echo "error: $BIN missing; run make build" >&2; exit 1; }
     rm -rf "$APP"
     mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
