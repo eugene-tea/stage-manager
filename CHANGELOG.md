@@ -17,6 +17,10 @@
   that screen. Before, they came to the screen the card was on.
 - An app that opens two windows at once now comes forward with the one it opened last in
   front, as with Apple's, and keeps it in front when you come back to its stage.
+- A window no longer ends up off the edge of the screen after macOS's Show Desktop (a
+  wallpaper click with "Always"): the place macOS pushes it to while the desktop shows, or
+  as it slides back, is no longer taken as its own, so its stage brings it back where you
+  left it.
 - Settings says what "Click wallpaper to reveal desktop" does: with Always, macOS moves every
   window aside itself; Only in Stage Manager puts your stage into the strip, as Apple's does.
 

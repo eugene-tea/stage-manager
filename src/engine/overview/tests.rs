@@ -480,3 +480,24 @@ fn show_desktop_is_up_while_listed_or_expected_never_for_mission_control() {
     m.see(seen(&[WM19]), t0);
     assert!(m.showing().is_some() && !m.show_desktop_up(t0));
 }
+
+/// 11-09: a frame read while Show Desktop has the windows aside, or as they slide back, is
+/// macOS's: expected from the click, listed, and a settle after it closed. Mission Control
+/// moves no window's frame.
+#[test]
+fn show_desktop_moves_windows_while_expected_listed_and_a_settle_after_it_closed() {
+    let t0 = Instant::now();
+    let mut w = OverviewWatch::default();
+    assert!(!w.moves_windows(t0));
+    assert!(w.expect_show_desktop(t0));
+    assert!(w.moves_windows(ms(t0, 100)), "expected from the wallpaper click");
+    w.see(Some(Overview::ShowDesktop), ms(t0, 700));
+    assert!(w.moves_windows(ms(t0, 5000)), "listed, however long");
+    assert_eq!(w.see(None, ms(t0, 6000)), Change::Ended(Overview::ShowDesktop));
+    assert!(w.moves_windows(ms(t0, 6000)) && w.moves_windows(ms(t0, 6999)), "the windows slide back");
+    assert!(!w.moves_windows(ms(t0, 7000)), "back in place a settle after");
+    let mut m = OverviewWatch::default();
+    m.see(Some(Overview::MissionControl), t0);
+    m.see(None, ms(t0, 500));
+    assert!(!m.moves_windows(t0) && !m.moves_windows(ms(t0, 600)));
+}

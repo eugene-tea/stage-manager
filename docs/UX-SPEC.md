@@ -212,7 +212,9 @@ showing most of it (macOS's rule).
   window of the other screens, on Desktops not shown too, which a quit does safely.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
-is back on the same Desktop when they end. The strip never appears in ⌘-Tab or the ⌘\`
+is back on the same Desktop when they end. Where Show Desktop pushes a window (while it
+shows, expected from a wallpaper click, and for a second after it closes, as the windows
+slide back) is never taken as the window's frame: a switch then keeps each window's own. The strip never appears in ⌘-Tab or the ⌘\`
 window cycle.
 
 **Wallpaper click.** The active stage goes into the strip, and a second click brings it

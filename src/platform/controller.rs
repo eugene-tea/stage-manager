@@ -1489,7 +1489,7 @@ impl Controller {
         let listed: HashMap<u32, Rect> =
             list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect();
         let settling = self.phase.space_settling(Instant::now());
-        let frames = observed_frames(&reads, &listed, settling);
+        let frames = frames_unless_aside(observed_frames(&reads, &listed, settling), self.overview.moves_windows(Instant::now()));
         ob.note_frames(frames.iter().map(|(id, f)| (id.0, *f)));
         Observation { frames, z_order, focused: focused_window().map(WindowId) }
     }
@@ -1544,6 +1544,7 @@ impl Controller {
                 (w.meta.id, frame)
             })
             .collect();
+        let frames = frames_unless_aside(frames, self.overview.moves_windows(Instant::now()));
         Observation { frames, z_order, focused }
     }
 
@@ -3538,7 +3539,13 @@ impl Controller {
                     // again under them ([`Self::reconcile_parked`]).
                     self.strays.entry(id).or_default().user_moved = true;
                 }
-                if let (Some(m), Some(frame)) = (self.model.as_mut(), frame)
+                // Show Desktop pushing the windows aside (or sliding them back) is macOS's move,
+                // never the window's own frame (11-09).
+                let aside = !ours && !input::left_button_down() && self.overview.moves_windows(now);
+                if aside {
+                    tracing::trace!(id, "a move while Show Desktop has the windows aside: not the window's frame");
+                }
+                if let (Some(m), Some(frame)) = (self.model.as_mut(), frame.filter(|_| !aside))
                     && m.window(WindowId(id)).is_some()
                 {
                     if ours {
@@ -7116,6 +7123,21 @@ fn observed_frames(reads: &[FrameRead], listed: &HashMap<u32, Rect>, settling: b
         .collect()
 }
 
+/// The frames an observation takes (`frames`, read now): none while macOS's Show Desktop may
+/// have the windows pushed aside (`aside`, [`OverviewWatch::moves_windows`]: listed, expected
+/// from a wallpaper click, or sliding back after its close), so the model keeps each window's
+/// own frame. 11-09: an activation right at Show Desktop's close took a window's listed frame,
+/// pushed off the right edge (2408,42 for 452,55), as its own, and every switch to its stage
+/// brought it back there. A parked window macOS pushes out of the park zone then is left to
+/// [`Controller::reconcile_parked`], which waits for the overview's settle.
+fn frames_unless_aside(frames: HashMap<WindowId, Rect>, aside: bool) -> HashMap<WindowId, Rect> {
+    if aside && !frames.is_empty() {
+        tracing::debug!(windows = frames.len(), "Show Desktop has the windows aside: their frames are not taken; each keeps its own");
+        return HashMap::new();
+    }
+    frames
+}
+
 /// A shown window's frame for an activation's switch: the window server's bounds
 /// (`listed`) when they disagree with the tracked frame by more than a point (an app may
 /// have moved the window without a notice), else the tracked one. The tracked one stays too
@@ -7141,6 +7163,28 @@ fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 11-09 10:00:03: an activation as Show Desktop closed read a window at its pushed-aside
+    /// frame and kept it; while Show Desktop may have the windows aside no frame is taken,
+    /// and the switch keeps the window's own (the model's tracked frame).
+    #[test]
+    fn a_frame_show_desktop_set_is_never_taken() {
+        use crate::engine::overview::{Overview, OverviewWatch};
+        let tracked = Rect::new(452.0, 55.0, 1786.0, 1285.0);
+        let pushed = Rect::new(2408.0, 42.0, 1786.0, 1285.0);
+        let studio = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let read: HashMap<WindowId, Rect> =
+            [(WindowId(299), activation_frame(tracked, Some(pushed), studio, false, true))].into();
+        assert_eq!(read[&WindowId(299)], pushed, "the window server's bounds win an activation");
+        let t0 = Instant::now();
+        let mut watch = OverviewWatch::default();
+        watch.see(Some(Overview::ShowDesktop), t0);
+        let kept = frames_unless_aside(read.clone(), watch.moves_windows(t0));
+        assert!(kept.is_empty(), "Show Desktop listed: nothing taken");
+        watch.see(None, t0 + Duration::from_millis(300));
+        assert!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_millis(400))).is_empty(), "sliding back");
+        assert_eq!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_secs(2))), read, "settled: read again");
+    }
 
     /// 11-09: an app's windows found together go front to back, so the one it opened last (in
     /// front) is placed first and its stage's arrival raises and focuses it; other apps keep

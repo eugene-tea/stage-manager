@@ -3046,3 +3046,33 @@ fn a_pinned_window_keeps_its_app_shown_and_an_empty_stage_says_so() {
     e.reveal();
     assert!(!e.m.app_park(11).stage_here);
 }
+
+/// 11-09: a switch while Show Desktop has the windows pushed aside gets no frames from the
+/// platform (`frames_unless_aside`): the window comes back at its own frame, never where
+/// Show Desktop had pushed it (with the pushed frame read, it came back off the right edge).
+#[test]
+fn a_switch_with_no_frame_read_keeps_the_windows_own_frame() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.switch(1);
+    let own = e.d.frames[&w(1)];
+    let pushed = own.translate(1956.0, -13.0);
+    e.d.frames.insert(w(1), pushed);
+    let mut obs = e.d.obs();
+    obs.frames.clear();
+    let keyboard = e.m.keyboard_display(obs.focused, None);
+    let a = e.m.switch_to_number(2, keyboard, &obs);
+    e.run(a);
+    assert_eq!(e.m.window(w(1)).map(|x| x.restore), Some(own), "its own frame kept");
+    e.switch(1);
+    assert_eq!(e.d.frames[&w(1)], own, "back at its own frame");
+    // What the read took before: the pushed frame became the window's.
+    let mut b = Env::new();
+    b.add(meta(1, 10, "com.example.a"), RuleAction::Current);
+    b.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    b.switch(1);
+    b.d.frames.insert(w(1), pushed);
+    b.switch(2);
+    assert_eq!(b.m.window(w(1)).map(|x| x.restore), Some(pushed));
+}
