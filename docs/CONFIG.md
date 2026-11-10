@@ -104,9 +104,9 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `icons.center_dy` | `-10.5` | number, -300 to 300 | The icon's center, below the card's bottom (its lowest window's; up is negative). |
 | `icons.step` | `36.0` | number, 0 to 300 | A second app's icon sits this far right of the first. |
 | `icons.max` | `3` | whole number, 0 to 10 | Most icons on one card. |
-| `icons.shadow_radius` | `3.0` | number, 0 to 100 | Blur radius of the icon's shadow. |
-| `icons.shadow_opacity` | `0.6` | number, 0 to 1 | Opacity of the icon's shadow. |
-| `icons.shadow_offset_y` | `1.5` | number, -100 to 100 | Vertical offset of the icon's shadow (down is positive). |
+| `icons.shadow_radius` | `2.0` | number, 0 to 100 | Blur radius of the icon's shadow. |
+| `icons.shadow_opacity` | `0.3` | number, 0 to 1 | Opacity of the icon's shadow. |
+| `icons.shadow_offset_y` | `1.0` | number, -100 to 100 | Vertical offset of the icon's shadow (down is positive). |
 | `motion.spring_stiffness` | `289.0` | number, 1 to 10000 | Spring stiffness of cards gliding to new slots (a switch's swap, a reorder, a drop making room). Apple's, measured: 289 (99 % by about 375 ms). |
 | `motion.spring_damping` | `34.0` | number, 0 to 1000 | Spring damping of the cards' glide (34 with stiffness 289 and mass 1: critically damped, no overshoot). |
 | `motion.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the cards' glide. |

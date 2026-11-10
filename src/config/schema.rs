@@ -286,9 +286,9 @@ pub const KEYS: &[KeyDef] = &[
     k("icons", "center_dy", f(-300.0, 300.0), "-10.5", "The icon's center, below the card's bottom (its lowest window's; up is negative)."),
     k("icons", "step", f(0.0, 300.0), "36.0", "A second app's icon sits this far right of the first."),
     k("icons", "max", i(0, 10), "3", "Most icons on one card."),
-    k("icons", "shadow_radius", f(0.0, 100.0), "3.0", "Blur radius of the icon's shadow."),
-    k("icons", "shadow_opacity", f(0.0, 1.0), "0.6", "Opacity of the icon's shadow."),
-    k("icons", "shadow_offset_y", f(-100.0, 100.0), "1.5", "Vertical offset of the icon's shadow (down is positive)."),
+    k("icons", "shadow_radius", f(0.0, 100.0), "2.0", "Blur radius of the icon's shadow."),
+    k("icons", "shadow_opacity", f(0.0, 1.0), "0.3", "Opacity of the icon's shadow."),
+    k("icons", "shadow_offset_y", f(-100.0, 100.0), "1.0", "Vertical offset of the icon's shadow (down is positive)."),
     // [motion]
     k("motion", "spring_stiffness", f(1.0, 10_000.0), "289.0",
         "Spring stiffness of cards gliding to new slots (a switch's swap, a reorder, a drop making room). Apple's, measured: 289 (99 % by about 375 ms)."),
@@ -591,6 +591,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-38.toml"),
     include_str!("legacy/default-39.toml"),
     include_str!("legacy/default-40.toml"),
+    include_str!("legacy/default-41.toml"),
 ];
 
 #[cfg(test)]

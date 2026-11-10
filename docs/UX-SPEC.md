@@ -73,10 +73,12 @@ corners, ours read 4 at 4). The card's shadow is barely there: 5 to 8 levels dar
 first two pixels below a card, gone by 4 (2 pt), 3 to 6 levels for a pixel beside its far
 edge, none above it; a Core Animation render of a card fitted to the bottom, top and far
 edges of two cards gives `shadow_radius` 1, `shadow_opacity` 0.3, `shadow_offset_y` 1 (the
-same render read our old 4 / 0.4 / 2 within a level). The icon's shadow is darker than the
-card's and soft, above the icon as well as below (on the card it covers: 17 levels at a
-pixel, gone by 12): `[icons] shadow_radius` 3, `shadow_opacity` 0.6, `shadow_offset_y` 1.5
-(fitted the same way, looser: a range of 3 to 4, 0.5 to 0.7, 1 to 1.5 fits). Hovered, each
+same render read our old 4 / 0.4 / 2 within a level). The icon's shadow is faint and tight:
+measured 11-09 evening against Apple's in Dark Mode on the same wallpaper (the owner's two
+screenshots), below the icon over the wallpaper it darkens by about 30 % at the edge, 16 %
+three pixels down, and is gone by 8 (4 pt): `[icons] shadow_radius` 2, `shadow_opacity` 0.3,
+`shadow_offset_y` 1, within 2 to 3 % of Apple's from three pixels down. The morning's fit on
+the card under the icon (3, 0.6, 1.5) read twice as dark and twice as wide on the wallpaper. Hovered, each
 window of a card grows by about 11 % about its own middle and the offsets between them stay
 (a single card 178 → 199 pt wide; the pair's offsets 42 and 18 pt both ways, the pair's
 bounds 7 % wider, 9 % taller; Blue's and Green's middles moved under half a point), and the

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- The shadow under the app icons on cards is lighter and tighter, as Apple's is.
+
 ## 1.8.2 — 2026-11-09
 
 - Closing a notification no longer hides your windows.
