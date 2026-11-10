@@ -9,21 +9,30 @@
 //! the echo made every reveal bring Finder's stage forward ("Finder comes back and leaves,
 //! back and leaves, on each desktop click").
 //!
-//! [`DesktopEcho`] tells the echo from a deliberate act. After a wallpaper click, an
-//! activation of the desktop's owner ([`DESKTOP_OWNER`]) or a focus of one of its windows
-//! is the click's echo until the user does something else (a mouse-down anywhere but the
-//! wallpaper, a key press) or [`WALLPAPER_ECHO`] has passed. A click on one of our strip's
-//! cards is not "something else": the global input monitor never sees clicks on our own
-//! panel, and a card picked right after a reveal must not be fought by Finder's late echo.
+//! [`DesktopEcho`] tells the echo from a deliberate act. From a press on the desktop (the
+//! wallpaper or a desktop icon), an activation of the desktop's owner ([`DESKTOP_OWNER`]) or
+//! a focus of one of its windows is the press's echo while the button is down and until
+//! [`WALLPAPER_ECHO`] after its release, however the press ends (a click, a long press, a
+//! drag, a rubber band), unless the user does something else first (a mouse-down anywhere
+//! but the desktop, a key press). Since the reveal waits for the release, macOS's Finder
+//! activation can come while the press is still down, about a second after it (11-09
+//! 16:33:26.9 press, 16:33:27.92 Finder activated, right at the release of a 1 s press).
+//! A click on one of our strip's cards is not "something else": the global input monitor
+//! never sees clicks on our own panel, and a card picked right after a reveal must not be
+//! fought by Finder's late echo.
 
 use std::time::{Duration, Instant};
 
 /// The app that owns the desktop (its window is the wallpaper's click target).
 pub const DESKTOP_OWNER: &str = "com.apple.finder";
 
-/// How long after a wallpaper click the desktop owner's activation and focus count as its
-/// echo (unless the user did something else first).
+/// How long after a desktop press (and again after its release) the desktop owner's
+/// activation and focus count as its echo (unless the user did something else first).
 pub const WALLPAPER_ECHO: Duration = Duration::from_millis(1000);
+
+/// How long a desktop press may stay down and still count as down: a release the input
+/// monitor missed never leaves Finder's activations echoes for good.
+pub const PRESS_HELD_MAX: Duration = Duration::from_secs(60);
 
 /// What a desktop owner's activation or window focus is, after [`DesktopEcho::classify`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,28 +43,45 @@ pub enum Cause {
     WallpaperEcho,
 }
 
-/// The pending echo of the last wallpaper click.
+/// The pending echo of the last desktop press.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DesktopEcho {
-    clicked: Option<Instant>,
+    /// The press, or its release once it came.
+    since: Option<Instant>,
+    /// The press is still down (its release not seen yet).
+    down: bool,
 }
 
 impl DesktopEcho {
-    /// The user clicked the wallpaper (whether or not anything was revealed: Finder becomes
-    /// frontmost either way).
-    pub fn wallpaper_clicked(&mut self, now: Instant) {
-        self.clicked = Some(now);
+    /// The user pressed the desktop: the wallpaper or a desktop icon (whether or not anything
+    /// will be revealed: Finder becomes frontmost either way).
+    pub fn desktop_pressed(&mut self, now: Instant) {
+        self.since = Some(now);
+        self.down = true;
     }
 
-    /// The user did something else (a mouse-down off the wallpaper, a key press): what the
+    /// A left mouse-up: a desktop press still pending is released now, and its echo runs
+    /// [`WALLPAPER_ECHO`] from here. Nothing for any other release.
+    pub fn released(&mut self, now: Instant) {
+        if std::mem::take(&mut self.down) && self.since.is_some() {
+            self.since = Some(now);
+        }
+    }
+
+    /// The user did something else (a mouse-down off the desktop, a key press): what the
     /// desktop owner does next is no echo. True when an echo was pending.
     pub fn user_acted(&mut self) -> bool {
-        self.clicked.take().is_some()
+        self.down = false;
+        self.since.take().is_some()
     }
 
-    /// True while a wallpaper click's echo is expected.
+    /// True while a desktop press's echo is expected: the press is down, or it was pressed or
+    /// released less than [`WALLPAPER_ECHO`] ago.
     pub fn pending(&self, now: Instant) -> bool {
-        self.clicked.is_some_and(|t| now.saturating_duration_since(t) < WALLPAPER_ECHO)
+        self.since.is_some_and(|t| {
+            let age = now.saturating_duration_since(t);
+            age < WALLPAPER_ECHO || (self.down && age < PRESS_HELD_MAX)
+        })
     }
 
     /// Classifies an activation of the app `bundle_id`, or a focus of one of its windows.
@@ -87,23 +113,25 @@ mod tests {
         let t0 = Instant::now();
         let mut e = DesktopEcho::default();
         assert_eq!(e.classify(Some(DESKTOP_OWNER), t0), Cause::Other, "no click yet");
-        e.wallpaper_clicked(t0);
+        e.desktop_pressed(t0);
+        e.released(t0 + MS(100));
         assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(150)), Cause::WallpaperEcho);
         assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(450)), Cause::WallpaperEcho);
         assert_eq!(e.classify(Some("com.example.a"), t0 + MS(150)), Cause::Other);
         assert_eq!(e.classify(None, t0 + MS(150)), Cause::Other);
-        assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + WALLPAPER_ECHO), Cause::Other, "expired");
+        assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(100) + WALLPAPER_ECHO), Cause::Other, "expired");
     }
 
     #[test]
     fn any_other_input_ends_the_echo() {
         let t0 = Instant::now();
         let mut e = DesktopEcho::default();
-        e.wallpaper_clicked(t0);
+        e.desktop_pressed(t0);
         assert!(e.user_acted());
         assert!(!e.user_acted(), "nothing pending any more");
         assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(100)), Cause::Other);
-        e.wallpaper_clicked(t0 + MS(200));
+        e.desktop_pressed(t0 + MS(200));
+        e.released(t0 + MS(250));
         assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(300)), Cause::WallpaperEcho, "a new click arms it again");
     }
 
@@ -154,9 +182,24 @@ mod tests {
             a
         }
 
-        /// A wallpaper click at `ms`.
+        /// A wallpaper click at `ms` (pressed and released at once).
         fn wallpaper_click(&mut self, ms: u64) -> Vec<Action> {
-            self.echo.wallpaper_clicked(self.at(ms));
+            self.press(ms);
+            self.release(ms, true)
+        }
+
+        /// A press on the desktop at `ms`: nothing reveals before its release.
+        fn press(&mut self, ms: u64) {
+            self.echo.desktop_pressed(self.at(ms));
+        }
+
+        /// Its release at `ms`: a still short click reveals (`click`); a long press or a
+        /// drag reveals nothing.
+        fn release(&mut self, ms: u64, click: bool) -> Vec<Action> {
+            self.echo.released(self.at(ms));
+            if !click {
+                return Vec::new();
+            }
             let obs = self.d.obs();
             let a = self.m.reveal_desktop(&obs);
             self.d.apply(&a);
@@ -330,5 +373,88 @@ mod tests {
         let after = s.slots();
         assert_eq!(after[lru_slot], a, "the revealed stage takes the least recently used card's slot");
         assert!(!after.contains(&lru));
+    }
+
+    // ----- presses whose reveal waits for the release (round finder-press) --------------
+
+    /// Finder's stage never came: nothing switched, A's stage in front, Finder's window parked.
+    fn finder_stayed_away(s: &Desktop, a: StageId) {
+        assert_eq!(s.m.main_active_stage(), Some(a), "A's stage stays in front");
+        assert!(s.d.parked(w(1)) && !s.d.parked(w(2)), "Finder's window stays in the strip");
+    }
+
+    #[test]
+    fn a_long_press_on_the_wallpaper_brings_no_finder_stage() {
+        // 11-09 16:33:26.899 press, Finder activated 1025 ms later while still down (handled
+        // before the release reached us), released after 1024 ms: no click, nothing revealed.
+        let mut s = Desktop::new(false, 6);
+        let a = s.stage(2);
+        s.press(0);
+        let (cause, actions) = s.finder_activated(1025);
+        assert_eq!(cause, Cause::WallpaperEcho, "the press is down: the desktop's");
+        assert!(actions.is_empty());
+        assert!(s.release(1116, false).is_empty(), "a long press reveals nothing");
+        let (cause, _) = s.finder_focused(1500);
+        assert_eq!(cause, Cause::WallpaperEcho, "just after the release: still the desktop's");
+        finder_stayed_away(&s, a);
+        assert!(!s.m.desktop_revealed());
+    }
+
+    #[test]
+    fn a_rubber_band_or_a_file_drag_from_the_desktop_brings_no_finder_stage() {
+        let mut s = Desktop::new(false, 6);
+        let a = s.stage(2);
+        s.press(0);
+        assert_eq!(s.finder_activated(200).0, Cause::WallpaperEcho);
+        assert_eq!(s.finder_focused(2500).0, Cause::WallpaperEcho, "still dragging");
+        s.release(4000, false);
+        let (cause, actions) = s.finder_activated(4600);
+        assert_eq!(cause, Cause::WallpaperEcho, "Finder's late activation at the drop");
+        assert!(actions.is_empty());
+        finder_stayed_away(&s, a);
+        assert_eq!(s.finder_focused(4000 + WALLPAPER_ECHO.as_millis() as u64 + 50).0, Cause::Other, "the echo ends");
+    }
+
+    #[test]
+    fn a_quick_click_reveals_and_finders_late_echo_switches_nothing() {
+        let mut s = Desktop::new(false, 6);
+        s.press(0);
+        assert!(!s.m.desktop_revealed(), "nothing reveals on the press");
+        assert!(!s.release(150, true).is_empty());
+        assert!(s.m.desktop_revealed());
+        let (cause, actions) = s.finder_activated(1100);
+        assert_eq!(cause, Cause::WallpaperEcho, "within the echo of the release");
+        assert!(actions.is_empty());
+        assert!(s.m.desktop_revealed(), "the reveal holds");
+        assert!(s.d.parked(w(1)) && s.d.parked(w(2)));
+    }
+
+    #[test]
+    fn a_dock_click_on_finder_after_a_desktop_press_brings_its_stage() {
+        // Later than the echo window: the Dock's press ends nothing pending, Finder comes.
+        let mut s = Desktop::new(false, 6);
+        let finder = s.stage(1);
+        s.press(0);
+        s.release(1100, false);
+        let dock = 1100 + WALLPAPER_ECHO.as_millis() as u64 + 200;
+        assert!(!s.echo.pending(s.at(dock)), "the echo is over");
+        s.echo.user_acted(); // the Dock's mouse-down
+        let (cause, actions) = s.finder_activated(dock + 50);
+        assert_eq!(cause, Cause::Other);
+        assert!(!actions.is_empty());
+        assert_eq!(s.m.main_active_stage(), Some(finder));
+        assert!(!s.d.parked(w(1)));
+
+        // Within the window: the Dock's mouse-down (off the desktop) makes it deliberate.
+        let mut s = Desktop::new(false, 6);
+        let finder = s.stage(1);
+        s.press(0);
+        s.release(1100, false);
+        assert!(s.echo.user_acted(), "the Dock click ends the echo");
+        s.release(1300, false);
+        let (cause, actions) = s.finder_activated(1350);
+        assert_eq!(cause, Cause::Other, "the Dock's release arms nothing");
+        assert!(!actions.is_empty());
+        assert_eq!(s.m.main_active_stage(), Some(finder));
     }
 }

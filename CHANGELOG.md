@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.8.1 — 2026-11-09
+
+- Holding the mouse down on the desktop, or dragging from it (selecting icons, moving a
+  file), no longer brings back a stage with a Finder window.
+
 ## 1.8.0 — 2026-11-09
 
 - A switch moves as Apple's does, matched frame by frame to recordings of both. A window
