@@ -7712,7 +7712,17 @@ def phase_screens():
     b_id = ids["Bravo 1"]
     check(all(w["display"] == main_id for w in s["windows"]), "every fixture window is the main screen's at launch")
     ov = other["visible"]
-    for n, at in (("Bravo 1", (120.0, 100.0)), ("Charlie 1", (420.0, 220.0))):
+    for k, n, at in (("b", "Bravo 1", (120.0, 100.0)), ("c", "Charlie 1", (420.0, 220.0))):
+        # One stage per app at the first start, one in front: `debug-frame` moves a shown
+        # window only (live 11-09: Bravo 1 was a card, "not a shown managed window"), so its
+        # stage is brought in first, by activating its app.
+        activate(k)
+        x = wait_state(lambda y: not by_title(y)[n]["parked"] and screen(y, main_id)["active_stage"] == by_title(y)[n]["stage"],
+                       f"{n}'s stage in front on the main screen", timeout=6)
+        if not check(x is not None, f"{n}'s stage brought in on the main screen first"):
+            stop_app()
+            return
+        time.sleep(0.8)  # past the activation echo window and its switch
         r = ctl("debug-frame", ids[n], ov["x"] + at[0], ov["y"] + at[1], 640, 420)
         if not check(r.get("ok"), f"{n} moved to the other screen ({r.get('error', 'ok')})"):
             stop_app()
