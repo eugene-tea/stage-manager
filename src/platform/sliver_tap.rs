@@ -154,14 +154,24 @@ fn listed(list: &[CgWindow]) -> Vec<Listed> {
     list.iter().map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer }).collect()
 }
 
-/// `near` without macOS's click-through overlays ([`super::desktop::seen_through`], their
-/// owners read from `list`): a press under one reaches the sliver below, so the tap judges it
-/// as if the overlay were not there (11-09: Notification Center's full-screen layer 23 over
-/// the main screen would otherwise own every corner press). Asked only of the few windows
-/// near the zones, above layer 0.
+/// `near` without the screenshot tool's window ([`super::desktop::overlay_of`]: seen through
+/// everywhere, its owner read from the window): a press under it reaches the sliver below,
+/// so the tap judges it as if the window were not there. Asked only of the few windows near
+/// the zones, above layer 0. Notification Center's full-screen window
+/// ([`super::desktop::Through::OffItsElements`]) is kept: whether a point is its own (a
+/// banner drawn inside it) takes an Accessibility hit test at the press, and this list is
+/// read before any press, the callback never asking anything. So a press under it passes,
+/// as one under any window not parked: a parked window's edge pressable while it is up,
+/// never a press on a banner swallowed.
 fn without_overlays(near: Vec<Listed>, list: &[CgWindow]) -> Vec<Listed> {
     near.into_iter()
-        .filter(|n| n.layer <= 0 || !list.iter().find(|w| w.id == n.id).is_some_and(|w| super::desktop::seen_through(w, list)))
+        .filter(|n| {
+            n.layer <= 0
+                || !list
+                    .iter()
+                    .find(|w| w.id == n.id)
+                    .is_some_and(|w| super::desktop::overlay_of(w) == super::desktop::Through::Everywhere)
+        })
         .collect()
 }
 

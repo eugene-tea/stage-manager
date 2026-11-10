@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.8.2 — 2026-11-09
+
+- Closing a notification no longer hides your windows.
+
 ## 1.8.1 — 2026-11-09
 
 - Holding the mouse down on the desktop, or dragging from it (selecting icons, moving a
