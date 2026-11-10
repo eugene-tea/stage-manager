@@ -7,8 +7,10 @@
 //! window list leaves out. A click on the Dock, the menu bar, our strip or any app window
 //! hits a window and is ignored. macOS's own click-through overlays do not count
 //! ([`click_through_overlay`], [`seen_through`]): every test of what lies under a point
-//! looks through them (the wallpaper click here, the Dock press, the inert slivers' tap, the
-//! test input's path checks).
+//! looks through them (the wallpaper click here, the Dock press, the test input's path
+//! checks), Notification Center's full-screen window only where the Accessibility element at
+//! the point is not its own (a banner drawn inside it is). The inert slivers' tap, judging
+//! presses from a list read before them, looks through the screenshot tool's alone.
 
 use objc2::runtime::AnyObject;
 use objc2_app_kit::NSScreen;
@@ -139,7 +141,7 @@ pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
             && w.alpha > 0.0
             && w.bounds.contains(p)
             && !dock.seen_through(w.pid, w.layer, w.bounds, p)
-            && !seen_through(w, list)
+            && !seen_through(w, p)
     })
 }
 
@@ -174,31 +176,48 @@ pub struct Owner<'a> {
     pub exe: Option<&'a str>,
 }
 
-/// True for a window of macOS's own that lets every click through to what is below it, so
-/// a press under it reaches what lies there (the wallpaper, a card, the Dock, a parked
-/// window's edge). Only above layer 0, where no app's document window lives, and only by the
-/// owner's identity (`owner`): its bundle id when read, else its executable or name.
-/// Everything else, an unknown overlay included, still covers what is below.
+/// How a listed window takes the clicks at its points ([`click_through_overlay`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Through {
+    /// It covers what is below: every app's window, and any overlay not known here.
+    Covers,
+    /// Every click goes through it to what is below (the screenshot tool's window).
+    Everywhere,
+    /// A click goes through it only where the Accessibility element at the point is not its
+    /// owner's ([`looked_through`]): Notification Center's full-screen window, which draws
+    /// its banners, panel and alerts inside itself.
+    OffItsElements,
+}
+
+/// How a window of macOS's own lets clicks through to what is below it, so a press under it
+/// reaches what lies there (the wallpaper, a card, the Dock, a parked window's edge). Only
+/// above layer 0, where no app's document window lives, and only by the owner's identity
+/// (`owner`): its bundle id when read, else its executable or name. Everything else, an
+/// unknown overlay included, covers what is below ([`Through::Covers`]).
 ///
 /// - **The screenshot tool's** (bundle [`SCREENSHOT_UI`]; with none read, process
 ///   `screencaptureui` or app "Screenshot"), which after a screenshot leaves an opaque,
 ///   screen-sized window at layer 24 listed on screen for minutes (owner 11-09 10:02: every
-///   wallpaper click after it was taken for a click on a window). Any size.
+///   wallpaper click after it was taken for a click on a window). Any size, every point
+///   ([`Through::Everywhere`]).
 /// - **Notification Center's full-screen window** (bundle [`NOTIFICATION_CENTER_UI`]; with
 ///   none read, an executable inside [`NOTIFICATION_CENTER_APP`]) whose `bounds` cover a
-///   whole screen of `screens` (within a point): 11-09 14:45, layer 23, alpha 1,
-///   0,0 2560x1440 over the main screen for the suite's whole run while the owner used his
-///   Mac as always, no banner shown; every card click of the suite was refused under it. A
-///   window of Notification Center's smaller than a screen (a banner at the top right, its
-///   panel) still covers what is below: a click there is the banner's. And the full-screen
-///   one is looked through only while Notification Center has no other window on that
-///   screen (`siblings`: the frames of the owner's other drawn windows above layer 0): with
-///   its panel, a banner or the widgets' editing sheet up, it is presumably the catcher whose
-///   click closes them, so it blocks, as an unknown window does (a click there must never be
-///   a wallpaper click, nor a test's click close the owner's panel).
-pub fn click_through_overlay(layer: i64, bounds: Rect, owner: &Owner<'_>, screens: &[Rect], siblings: &[Rect]) -> bool {
+///   whole screen of `screens` (within a point): layer 23, alpha 1, 0,0 2560x1440 over the
+///   main screen (11-09 14:45, for the suite's whole run, no banner shown: every card click
+///   of the suite was refused under it). Measured 11-09 18:0x on macOS 26: Notification
+///   Center has no window on screen before a banner; with one up its only window is this
+///   full-screen one, the banner drawn inside it (no banner-sized window of its own), and
+///   `AXUIElementCopyElementAtPosition` on the system-wide element answers Notification
+///   Center's `AXGroup` (subrole `AXNotificationCenterBanner`) on the banner, and whatever
+///   lies below (Finder's desktop, an app's window) off it. So it is looked through only
+///   where that element is not Notification Center's ([`Through::OffItsElements`]): a
+///   point on a banner, its close button, its panel, an alert's buttons or the widgets'
+///   editing is its own, as an unknown window's would be (17:59, 1.8.1: closing banners at
+///   the top right was taken for wallpaper clicks and revealed the desktop). A window of
+///   Notification Center's smaller than a screen covers what is below.
+pub fn click_through_overlay(layer: i64, bounds: Rect, owner: &Owner<'_>, screens: &[Rect]) -> Through {
     if layer <= 0 {
-        return false;
+        return Through::Covers;
     }
     let screenshot = match owner.bundle {
         Some(b) => b == SCREENSHOT_UI,
@@ -208,9 +227,25 @@ pub fn click_through_overlay(layer: i64, bounds: Rect, owner: &Owner<'_>, screen
         Some(b) => b == NOTIFICATION_CENTER_UI,
         None => owner.exe.is_some_and(|e| e.starts_with(NOTIFICATION_CENTER_APP)),
     };
-    screenshot
-        || (notification_center
-            && screens.iter().any(|s| covers_screen(bounds, *s) && !siblings.iter().any(|o| o.intersect(s).is_some())))
+    if screenshot {
+        Through::Everywhere
+    } else if notification_center && screens.iter().any(|s| covers_screen(bounds, *s)) {
+        Through::OffItsElements
+    } else {
+        Through::Covers
+    }
+}
+
+/// Whether a click at a point goes through a window that lets clicks through as `through`
+/// and is owned by `pid`. `element_pid`: the owner of the Accessibility element at that
+/// point ([`element_pid_at`]), asked only for [`Through::OffItsElements`]; no answer
+/// (`None`) and the window's own element both cover what is below.
+pub fn looked_through(through: Through, pid: i32, element_pid: impl FnOnce() -> Option<i32>) -> bool {
+    match through {
+        Through::Covers => false,
+        Through::Everywhere => true,
+        Through::OffItsElements => element_pid().is_some_and(|e| e != pid),
+    }
 }
 
 /// True when `bounds` holds the whole of `screen`, within a point.
@@ -222,23 +257,48 @@ fn covers_screen(bounds: Rect, screen: Rect) -> bool {
         && bounds.max_y() >= screen.max_y() - 1.0
 }
 
-/// [`click_through_overlay`] for window `w` of `list` (the window list it was read from):
-/// its owner read now (bundle id, else its executable), against every active display, its
-/// owner's other drawn windows above layer 0 in `list` as its siblings. A window at layer 0
-/// or below, or one not drawn, is answered at once with no read (false).
-pub fn seen_through(w: &CgWindow, list: &[CgWindow]) -> bool {
+/// [`click_through_overlay`] for window `w`: its owner read now (bundle id, else its
+/// executable), against every active display. A window at layer 0 or below, or one not
+/// drawn, is answered at once with no read ([`Through::Covers`]).
+pub fn overlay_of(w: &CgWindow) -> Through {
     if w.layer <= 0 || !w.onscreen || w.alpha <= 0.0 {
-        return false;
+        return Through::Covers;
     }
     let bundle = super::apps::bundle_of(w.pid);
     let exe = if bundle.is_none() { super::apps::exe_path(w.pid) } else { None };
     let owner = Owner { name: &w.owner, bundle: bundle.as_deref(), exe: exe.as_deref() };
-    let siblings: Vec<Rect> = list
-        .iter()
-        .filter(|o| o.pid == w.pid && o.id != w.id && o.onscreen && o.alpha > 0.0 && o.layer > 0)
-        .map(|o| o.bounds)
-        .collect();
-    click_through_overlay(w.layer, w.bounds, &owner, &cg_display_bounds(), &siblings)
+    click_through_overlay(w.layer, w.bounds, &owner, &cg_display_bounds())
+}
+
+/// True when a click at `p` (top-left coordinates, within `w`'s bounds) goes through window
+/// `w` to what is below ([`overlay_of`], [`looked_through`]). Accessibility is asked
+/// ([`element_pid_at`]) only when `w` is Notification Center's full-screen window.
+pub fn seen_through(w: &CgWindow, p: Point) -> bool {
+    looked_through(overlay_of(w), w.pid, || element_pid_at(p))
+}
+
+/// The messaging timeout of [`element_pid_at`]: a hung Notification Center holds the caller
+/// up this long at most, and the point then counts as its own.
+pub const ELEMENT_AT_TIMEOUT_SECONDS: f32 = 0.1;
+
+/// The pid owning the Accessibility element at `p` (top-left coordinates), from
+/// `AXUIElementCopyElementAtPosition` on the system-wide element; `None` without an answer
+/// within [`ELEMENT_AT_TIMEOUT_SECONDS`]. The system-wide element's timeout is the
+/// process's global one, so it is set for the call and put back to
+/// [`super::wm_thread::AX_TIMEOUT_SECONDS`] after: another thread's Accessibility call made
+/// meanwhile only gets the shorter budget.
+pub fn element_pid_at(p: Point) -> Option<i32> {
+    let system = super::ax::AxElement::system_wide();
+    let _ = system.set_messaging_timeout(ELEMENT_AT_TIMEOUT_SECONDS);
+    let pid = system.element_at(p).and_then(|e| e.pid());
+    let _ = system.set_messaging_timeout(super::wm_thread::AX_TIMEOUT_SECONDS);
+    match pid {
+        Ok(pid) => Some(pid),
+        Err(e) => {
+            tracing::debug!(x = p.x, y = p.y, "no Accessibility element at the point ({e}): Notification Center's window covers it");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -299,15 +359,19 @@ mod tests {
         let screens = [full];
         let named = |name| Owner { name, ..Owner::default() };
         let of = |name, bundle| Owner { name, bundle: Some(bundle), exe: None };
-        let shot = |layer| click_through_overlay(layer, full, &of("Screenshot", SCREENSHOT_UI), &screens, &[]);
-        assert!(shot(24));
-        assert!(click_through_overlay(24, full, &named("Screenshot"), &screens, &[]), "its app name, no bundle read");
-        assert!(click_through_overlay(24, full, &named("screencaptureui"), &screens, &[]));
-        assert!(!shot(0), "never a layer-0 window");
-        assert!(!click_through_overlay(24, full, &of("Screenshot", "com.example.screenshot"), &screens, &[]), "another app named so");
-        assert!(!click_through_overlay(24, full, &named("Window Server"), &screens, &[]), "the menu bar");
-        assert!(!click_through_overlay(25, full, &of("Control Center", "com.apple.controlcenter"), &screens, &[]));
-        assert!(!click_through_overlay(3, full, &of("Some App", "com.example.app"), &screens, &[]), "a floating panel");
+        let shot = |layer| click_through_overlay(layer, full, &of("Screenshot", SCREENSHOT_UI), &screens);
+        assert_eq!(shot(24), Through::Everywhere);
+        assert_eq!(click_through_overlay(24, full, &named("Screenshot"), &screens), Through::Everywhere, "its app name, no bundle read");
+        assert_eq!(click_through_overlay(24, full, &named("screencaptureui"), &screens), Through::Everywhere);
+        assert_eq!(click_through_overlay(24, Rect::new(100.0, 100.0, 300.0, 200.0), &named("Screenshot"), &screens), Through::Everywhere, "any size");
+        assert_eq!(shot(0), Through::Covers, "never a layer-0 window");
+        assert_eq!(click_through_overlay(24, full, &of("Screenshot", "com.example.screenshot"), &screens), Through::Covers, "another app named so");
+        assert_eq!(click_through_overlay(24, full, &named("Window Server"), &screens), Through::Covers, "the menu bar");
+        assert_eq!(click_through_overlay(25, full, &of("Control Center", "com.apple.controlcenter"), &screens), Through::Covers);
+        assert_eq!(click_through_overlay(3, full, &of("Some App", "com.example.app"), &screens), Through::Covers, "a floating panel");
+        // Everywhere, whatever element lies at the point: Accessibility is never asked.
+        assert!(looked_through(Through::Everywhere, 5, || panic!("asked")));
+        assert!(!looked_through(Through::Covers, 5, || panic!("asked")));
         // In the hit test: the overlay alone is the wallpaper; an app window under it is not.
         let shot = CgWindow { owner: "Screenshot".into(), pid: -1, ..w(24, full, true) };
         assert!(is_wallpaper_click(std::slice::from_ref(&shot), Point::new(900.0, 600.0), &DockBar::default()));
@@ -315,12 +379,13 @@ mod tests {
         assert!(!is_wallpaper_click(&[shot, app], Point::new(900.0, 600.0), &DockBar::default()));
     }
 
-    /// 11-09 14:45: Notification Center kept a window at layer 23 over the whole main screen
-    /// for the suite's whole run, click-through, no banner shown. Seen through by its bundle
-    /// id or its executable; a banner-sized window of its own, and an unknown app's
-    /// full-screen window, still cover what is below.
+    /// Notification Center's full-screen window at layer 23 (11-09 14:45: over the whole main
+    /// screen for the suite's whole run; 18:0x: its only window with a banner up, the banner
+    /// drawn inside it) is told by its bundle id or its executable, and only over a whole
+    /// screen; a smaller window of its own, and an unknown app's full-screen window, cover
+    /// what is below.
     #[test]
-    fn notification_centers_full_screen_layer_is_seen_through_its_banners_are_not() {
+    fn notification_centers_full_screen_window_is_known_by_its_owner_and_size() {
         let main = Rect::new(0.0, 0.0, 2560.0, 1440.0);
         let laptop = Rect::new(-1800.0, 271.0, 1800.0, 1169.0);
         let screens = [main, laptop];
@@ -330,31 +395,38 @@ mod tests {
             bundle: None,
             exe: Some("/System/Library/CoreServices/NotificationCenter.app/Contents/MacOS/NotificationCenter"),
         };
-        assert!(click_through_overlay(23, main, &nc, &screens, &[]), "its full-screen layer");
-        assert!(click_through_overlay(23, main, &by_exe, &screens, &[]), "by its executable, no bundle read");
-        assert!(click_through_overlay(23, laptop, &nc, &screens, &[]), "over the other screen");
-        assert!(click_through_overlay(23, Rect::new(-0.5, 0.0, 2560.5, 1440.0), &nc, &screens, &[]), "within a point");
-        // A banner at the top right (about 350 x 70 under the menu bar), and its panel.
-        let banner = Rect::new(2190.0, 38.0, 360.0, 76.0);
-        assert!(!click_through_overlay(23, banner, &nc, &screens, &[]), "a banner blocks");
-        assert!(!click_through_overlay(23, Rect::new(2160.0, 30.0, 400.0, 1410.0), &nc, &screens, &[]), "its panel blocks");
-        assert!(!click_through_overlay(23, Rect::new(0.0, 30.0, 2560.0, 1410.0), &nc, &screens, &[]), "short of the whole screen");
-        assert!(!click_through_overlay(0, main, &nc, &screens, &[]), "never at layer 0");
-        // Anyone else's full-screen window blocks, whatever its name.
+        let off = Through::OffItsElements;
+        assert_eq!(click_through_overlay(23, main, &nc, &screens), off, "its full-screen window");
+        assert_eq!(click_through_overlay(23, main, &by_exe, &screens), off, "by its executable, no bundle read");
+        assert_eq!(click_through_overlay(23, laptop, &nc, &screens), off, "over the other screen");
+        assert_eq!(click_through_overlay(23, Rect::new(-0.5, 0.0, 2560.5, 1440.0), &nc, &screens), off, "within a point");
+        // A window of its own smaller than a screen covers what is below.
+        assert_eq!(click_through_overlay(23, Rect::new(2190.0, 38.0, 360.0, 76.0), &nc, &screens), Through::Covers, "banner-sized");
+        assert_eq!(click_through_overlay(23, Rect::new(2160.0, 30.0, 400.0, 1410.0), &nc, &screens), Through::Covers, "panel-sized");
+        assert_eq!(click_through_overlay(23, Rect::new(0.0, 30.0, 2560.0, 1410.0), &nc, &screens), Through::Covers, "short of the whole screen");
+        assert_eq!(click_through_overlay(0, main, &nc, &screens), Through::Covers, "never at layer 0");
+        // Anyone else's full-screen window covers, whatever its name.
         let named = |name| Owner { name, ..Owner::default() };
-        assert!(!click_through_overlay(23, main, &named("Notification Center"), &screens, &[]), "the name alone");
+        assert_eq!(click_through_overlay(23, main, &named("Notification Center"), &screens), Through::Covers, "the name alone");
         let other = Owner { name: "Notification Center", bundle: Some("com.example.notes"), exe: None };
-        assert!(!click_through_overlay(23, main, &other, &screens, &[]), "another app named so");
+        assert_eq!(click_through_overlay(23, main, &other, &screens), Through::Covers, "another app named so");
         let stranger = Owner { name: "Overlay", bundle: None, exe: Some("/Applications/Overlay.app/Contents/MacOS/Overlay") };
-        assert!(!click_through_overlay(23, main, &stranger, &screens, &[]), "an unknown app's full-screen window");
-        assert!(!click_through_overlay(23, main, &nc, &[], &[]), "no screen known");
-        // Alone on its screen it is looked through; with its panel, a banner or the widgets'
-        // editing sheet on that screen it is the catcher that closes them, and blocks.
-        let panel = Rect::new(2160.0, 30.0, 400.0, 1410.0);
-        assert!(!click_through_overlay(23, main, &nc, &screens, &[panel]), "beside its panel");
-        assert!(!click_through_overlay(23, main, &nc, &screens, &[banner]), "beside a banner");
-        assert!(!click_through_overlay(23, main, &by_exe, &screens, &[panel]), "beside its panel, by its executable");
-        assert!(click_through_overlay(23, main, &nc, &screens, &[Rect::new(-1500.0, 300.0, 360.0, 76.0)]), "a banner on the other screen");
+        assert_eq!(click_through_overlay(23, main, &stranger, &screens), Through::Covers, "an unknown app's full-screen window");
+        assert_eq!(click_through_overlay(23, main, &nc, &[]), Through::Covers, "no screen known");
+    }
+
+    /// 11-09 17:59 (1.8.1): closing banners at the top right was taken for wallpaper clicks.
+    /// Measured 18:0x: on a banner the Accessibility element at the point is Notification
+    /// Center's (`AXNotificationCenterBanner`), off it Finder's desktop or the app window
+    /// below. Its full-screen window is looked through only where the element is not its own.
+    #[test]
+    fn notification_centers_window_is_looked_through_only_off_its_own_elements() {
+        let (nc, finder, app) = (894, 520, 77);
+        let off = Through::OffItsElements;
+        assert!(!looked_through(off, nc, || Some(nc)), "a banner, its close button, its panel: its own element");
+        assert!(looked_through(off, nc, || Some(finder)), "Finder's desktop below");
+        assert!(looked_through(off, nc, || Some(app)), "another app's window below");
+        assert!(!looked_through(off, nc, || None), "no answer: it covers");
     }
 
     #[test]

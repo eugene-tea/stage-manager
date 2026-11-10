@@ -81,7 +81,7 @@ use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
 use crate::platform::windows;
 use crate::ui::motion_math::{
-    Plane, SHOWN_FADE, SnapshotCache, Spring, Toward, path_settle_time, settle_time, shown_handover, shown_lands, shows_at, shrink_spring,
+    Plane, SnapshotCache, Spring, Toward, path_settle_time, settle_time, shows_at, shrink_spring,
     switch_spring, travel, unveil_time,
 };
 use crate::ui::minimize_motion;
@@ -183,7 +183,7 @@ struct Running {
     /// shadow ([`Strip::poll_shown`]).
     unkeyed: Vec<u32>,
     /// The landing is not before this once every incoming window shows (its shadow handed
-    /// over: [`shown_lands`]).
+    /// over).
     shown_land: Option<Instant>,
     /// Nor before this once every late window is in its final look.
     final_land: Option<Instant>,
@@ -1141,7 +1141,7 @@ impl Strip {
         }
         let started = Instant::now();
         r.unveil_at = rise.unveil.map(|u| started + Duration::from_secs_f64(u));
-        r.lands_after = rise.unveil.map(|u| started + Duration::from_secs_f64(u + rise.wait + SHOWN_FADE + AFTER_UNVEIL));
+        r.lands_after = rise.unveil.map(|u| started + Duration::from_secs_f64(u + rise.wait + AFTER_UNVEIL));
         if let Some(u) = rise.unveil.filter(|_| rise.late) {
             r.timers.push(after(u + LATE_MAX, move || {
                 with_strip_of(display, |s| s.late_shown(id, None, None));
@@ -1242,8 +1242,8 @@ impl Strip {
     }
 
     /// Transition `id`'s incoming windows `windows` show at their frames now (`seen`: the
-    /// window server said so; else the wait ran out): each snapshot's shadow fades from
-    /// [`shown_handover`] on, and once every incoming window shows the landing is planned
+    /// window server said so; else the wait ran out): each snapshot's shadow goes at once,
+    /// and once every incoming window shows the landing is planned
     /// ([`Self::replan_landing`]). Kept for `ctl state` ([`GhostReport::shown_ms`]).
     fn windows_shown(&mut self, id: u64, windows: &[u32], seen: bool) {
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
@@ -1255,13 +1255,13 @@ impl Strip {
         r.unkeyed.retain(|w| !windows.contains(w));
         let now = Instant::now();
         let since = r.unveil_at.map_or(0.0, |u| now.saturating_duration_since(u).as_secs_f64());
-        let begin = shown_handover(since);
+        // In one step: the window and the change reach the display on about the same frame
+        // (motion_math's Handover: measured 11-09, a fade overlapped both shadows).
         for g in r.ghosts.iter().filter(|g| windows.contains(&g.window)) {
-            g.fade_shadow(1.0, 0.0, begin, SHOWN_FADE);
+            g.fade_shadow(1.0, 0.0, 0.0, 0.0);
         }
-        let land = now + Duration::from_secs_f64(shown_lands(since));
-        r.shown_land = Some(r.shown_land.map_or(land, |l| l.max(land)));
-        let (shown_ms, handover_ms) = ((since * 1000.0).round() as u64, ((since + begin) * 1000.0).round() as u64);
+        r.shown_land = Some(r.shown_land.map_or(now, |l| l.max(now)));
+        let (shown_ms, handover_ms) = ((since * 1000.0).round() as u64, (since * 1000.0).round() as u64);
         tracing::debug!(id, ?windows, seen, shown_ms, handover_ms, "transition: the incoming windows show at their frames; their snapshots hand the shadow over");
         strip_model::update_transition(id, |t| {
             for g in t.ghosts.iter_mut().filter(|g| !g.outgoing && windows.contains(&g.window)) {

@@ -73,8 +73,8 @@ pub struct DockPress<T> {
 /// popup, which the Dock draws at other layers. The Dock's window spans its display, clear
 /// away from the bar: there it is seen through (`bar`, [`DockBar::seen_through`]), so a press
 /// in the middle of the screen asks the Dock nothing (the review's switching 3). macOS's
-/// click-through overlays above the Dock (`through`: [`super::desktop::seen_through`]; 11-09,
-/// Notification Center's full-screen layer 23) are seen through too.
+/// click-through overlays above the Dock (`through`: [`super::desktop::seen_through`] at `p`;
+/// 11-09, Notification Center's full-screen layer 23 off its own elements) are seen through too.
 pub fn dock_under(list: &[CgWindow], p: Point, dock: i32, bar: &DockBar, through: &dyn Fn(&CgWindow) -> bool) -> bool {
     list.iter()
         .find(|w| w.onscreen && w.alpha > 0.0 && w.bounds.contains(p) && !bar.seen_through(w.pid, w.layer, w.bounds, p) && !through(w))

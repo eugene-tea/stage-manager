@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.8.2 — 2026-11-09
+
+- Closing a notification no longer hides your windows.
+- Alerts from Settings, such as Check for Updates…, now open attached to the Settings window.
+- A window coming in from the strip no longer shows a darker shadow for a moment as it lands.
+
 ## 1.8.1 — 2026-11-09
 
 - Holding the mouse down on the desktop, or dragging from it (selecting icons, moving a

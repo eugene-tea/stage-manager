@@ -271,7 +271,13 @@ switches stages. The Dock's window spans its whole screen, clear away from its b
 there is on the wallpaper (or the window) below it, and only one on or near the bar (its
 magnified icons included) is the Dock's. So with the screenshot tool's window, which macOS
 leaves over the whole screen for minutes after a screenshot and which lets every click
-through: a click under it is on whatever is below. A press on a file or folder on the
+through: a click under it is on whatever is below. Notification Center draws its banners
+inside one window over the whole main screen (measured 11-09 on macOS 26: no window of its own
+before a banner; with one up, that window at layer 23 is its only one, with no banner-sized
+window), so a click under it is on whatever is below only where the Accessibility element at
+the point is not Notification Center's: a click on a banner, its close button, its panel, an
+alert or the widgets' editing is Notification Center's and reveals nothing (1.8.1 took closing
+a banner for a wallpaper click). A press on a file or folder on the
 desktop, or its name, is Finder's, as on Apple's: it selects it or starts dragging it, and
 nothing is revealed. The icons are the ones read for the corner patch (every 5 s); when none
 are that fresh the press waits up to 60 ms for a read, and where they cannot be read at all
@@ -437,6 +443,10 @@ logout, restart or shutdown, while Apple's Stage Manager is on, or when a window
 be brought back. A launch that finds a downloaded update an earlier run left (it quit while
 the update waited) checks again within its first minute, from scratch, instead of a day
 later. An automatic install still waits, after an unlock, for 120 s with no input.
+An alert that comes from a Settings control (Check for Updates… and the install it leads
+to, a setting that can't be saved, Turn Off) is a sheet on the Settings window while it is
+up, as Apple's HIG asks; the menu bar's counts as one from Settings while Settings is
+frontmost. The automatic check's notices and the others stand free, as before.
 
 **Launch at login.** Apple's is part of macOS. Ours registers at its first launch from
 Applications, and Settings can turn that off. It registers as a login item

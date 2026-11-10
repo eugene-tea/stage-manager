@@ -9,7 +9,9 @@
 //! then quits through the app's quit path, which starts the installer helper last. A ready
 //! update also installs at the user's own Quit, without reopening the app
 //! ([`install_on_quit`]); a launch that finds an update an earlier run left behind checks
-//! again within its first minute instead of waiting a day.
+//! again within its first minute instead of waiting a day. Who asked ([`Asker`]) decides
+//! whether an alert takes the focus and where it shows: a click in Settings gets sheets on
+//! the Settings window ([`alert::place`]).
 //!
 //! The main thread's poll ([`poll`], every second) and config reloads ([`config_changed`])
 //! keep it current; menu clicks arrive through [`menu`]. Apple's settings have one source:
@@ -30,7 +32,7 @@ use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEvent, NSPas
 use objc2_core_graphics::{CGDisplayIsAsleep, CGEventSource, CGEventSourceStateID, CGEventType, CGMainDisplayID};
 use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSString, NSTimer, NSURL};
 
-use super::alert::{self, AlertSpec};
+use super::alert::{self, AlertSpec, Place};
 use super::app_menu::{self, AppEvent};
 use super::settings_window::{self, Change, Pane, SettingsValues};
 use super::status_menu::MenuAction;
@@ -78,15 +80,41 @@ pub struct Hooks {
     pub quit: fn(),
 }
 
+/// Who asked for an update check, an install or Apple's turn-off: whether its alerts take
+/// the focus, and where they show (round settings-sheet). Ordered: a click joining a run
+/// raises it to the later asker, a click in Settings the highest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Asker {
+    /// Nobody: an automatic check or install; its alerts never take the focus.
+    Nobody,
+    /// A click outside the Settings window (the menu bar, the welcome): free-standing alerts.
+    User,
+    /// A click in the Settings window: its alerts are sheets on it while it is up.
+    Settings,
+}
+
+impl Asker {
+    /// A user asked (the result shows, the alert takes the focus).
+    pub fn asked(self) -> bool {
+        self != Asker::Nobody
+    }
+
+    /// A menu bar click: one in Settings when Settings is what the user is looking at
+    /// (frontmost and key), else one outside it.
+    pub fn from_menu(settings_front: bool) -> Asker {
+        if settings_front { Asker::Settings } else { Asker::User }
+    }
+}
+
 /// Where an update install stands.
 enum Install {
     /// Nothing under way.
     Idle,
-    /// Downloading and verifying `version`; `asked`: a click started it (or joined it).
-    Preparing { version: updates::Version, asked: bool },
+    /// Downloading and verifying `version`; `by`: who started it (or joined it).
+    Preparing { version: updates::Version, by: Asker },
     /// Verified and staged; waiting for a quiet moment. `told`: the wait for an unlock (or
     /// the display's wake) was logged, once per ready update.
-    Ready { prepared: Prepared, asked: bool, timer: Retained<NSTimer>, told: bool },
+    Ready { prepared: Prepared, by: Asker, timer: Retained<NSTimer>, told: bool },
 }
 
 struct Shell {
@@ -99,9 +127,9 @@ struct Shell {
     permissions: PermissionState,
     raw: RawSettings,
     capture_refused: bool,
-    /// The update check in flight: its number, and whether a user asked for it (its result
-    /// shows then).
-    update: Option<(u64, bool)>,
+    /// The update check in flight: its number, and who asked for it (a user's: its result
+    /// shows).
+    update: Option<(u64, Asker)>,
     update_serial: u64,
     install: Install,
     /// An earlier run left a downloaded update behind: an automatic check is owed now, not in
@@ -478,7 +506,7 @@ impl Shell {
         welcome::show(self.mtm, rows, |action| {
             later(move || match action {
                 WelcomeAction::Allow(a) => allow(a),
-                WelcomeAction::TurnOffApple => turn_off_apple(),
+                WelcomeAction::TurnOffApple => turn_off_apple(Asker::User),
                 WelcomeAction::OpenSettings => show_settings(),
                 WelcomeAction::Done => {}
             })
@@ -519,8 +547,10 @@ impl Shell {
             }
             Err(e) => {
                 tracing::warn!(key = path, "settings: cannot write the config: {e}");
-                alert::show(
+                // Only Settings writes here: its sheet.
+                present(
                     self.mtm,
+                    Asker::Settings,
                     AlertSpec {
                         key: "config-write",
                         title: "Stage Manager couldn't save this setting".into(),
@@ -562,8 +592,8 @@ impl Shell {
             }
             Change::AutoUpdates(on) => self.write_config("app.check_for_updates", if on { "true" } else { "false" }),
             Change::InstallUpdates(on) => self.write_config("app.install_updates", if on { "true" } else { "false" }),
-            Change::CheckNow => later(|| check(true)),
-            Change::TurnOffApple => later(turn_off_apple),
+            Change::CheckNow => later(|| check(Asker::Settings)),
+            Change::TurnOffApple => later(|| turn_off_apple(Asker::Settings)),
             Change::ShowRecentApps(on) => self.write_apple("AutoHide", i64::from(!on)),
             Change::AllAtOnce(all) => self.write_apple("AppWindowGroupingBehavior", i64::from(all)),
             Change::OpenDesktopAndDock => open_url(DESKTOP_DOCK_URL),
@@ -655,11 +685,29 @@ pub fn menu(action: MenuAction) {
                 about::show(mtm);
             }
         }
-        MenuAction::CheckForUpdates => check(true),
+        MenuAction::CheckForUpdates => check(menu_asker()),
         MenuAction::Settings => show_settings(),
         MenuAction::Allow(a) => allow(a),
-        MenuAction::TurnOffAppleStageManager => turn_off_apple(),
+        MenuAction::TurnOffAppleStageManager => turn_off_apple(menu_asker()),
         MenuAction::MarkProblem | MenuAction::Quit => {}
+    }
+}
+
+/// Who a menu bar click is: one in Settings while Settings is frontmost and key.
+fn menu_asker() -> Asker {
+    Asker::from_menu(MainThreadMarker::new().is_some_and(settings_window::is_front))
+}
+
+/// Shows `spec` where `by` puts it: a sheet on the Settings window when the click came from
+/// there and it is up with no other sheet of ours; free-standing otherwise ([`alert::place`]).
+fn present(mtm: MainThreadMarker, by: Asker, spec: AlertSpec, on_button: impl Fn(usize) + 'static) {
+    // The alert it replaces goes first: a sheet replaced under its key leaves room for this one.
+    alert::close(spec.key);
+    let window = settings_window::shown_window();
+    let sheet_up = window.as_deref().is_some_and(alert::has_sheet);
+    match (alert::place(by == Asker::Settings, window.is_some(), sheet_up), window) {
+        (Place::Sheet, Some(w)) => alert::show_sheet(mtm, spec, &w, on_button),
+        _ => alert::show(mtm, spec, on_button),
     }
 }
 
@@ -746,7 +794,7 @@ fn auto_check() {
     })
     .unwrap_or(false);
     if due && unattended_allowed() {
-        check(false);
+        check(Asker::Nobody);
     }
 }
 
@@ -780,17 +828,18 @@ fn stale_work_found(found: StaleWork) {
 /// timeout is 20 s; a completion that never comes must not wedge every later check).
 const CHECK_WATCHDOG: Duration = Duration::from_secs(25);
 
-/// Checks GitHub for a newer release; `manual` checks always answer. A manual check while
-/// one runs makes that one's result show.
-pub fn check(manual: bool) {
+/// Checks GitHub for a newer release; a user's check always answers (`by`). A user's check
+/// while one runs makes that one's result show, where this one's would.
+pub fn check(by: Asker) {
+    let manual = by.asked();
     let started = with(|s| match s.update.as_mut() {
-        Some((_, asked)) => {
-            *asked |= manual;
+        Some((_, asker)) => {
+            *asker = (*asker).max(by);
             None
         }
         None => {
             s.update_serial += 1;
-            s.update = Some((s.update_serial, manual));
+            s.update = Some((s.update_serial, by));
             Some(s.update_serial)
         }
     })
@@ -807,8 +856,8 @@ pub fn check(manual: bool) {
 
 /// The check numbered `serial` ended (its answer, or the watchdog: whichever comes first).
 fn on_checked(serial: u64, outcome: Outcome) {
-    let Some(Some((mtm, skipped, manual, auto_install))) = with(|s| {
-        let (running, manual) = s.update?;
+    let Some(Some((mtm, skipped, by, auto_install))) = with(|s| {
+        let (running, by) = s.update?;
         if running != serial {
             return None;
         }
@@ -818,10 +867,11 @@ fn on_checked(serial: u64, outcome: Outcome) {
             s.left_behind = false;
             s.save_state();
         }
-        Some((s.mtm, s.state.skipped_version.clone(), manual, s.config.app.install_updates))
+        Some((s.mtm, s.state.skipped_version.clone(), by, s.config.app.install_updates))
     }) else {
         return;
     };
+    let manual = by.asked();
     let current = updates::current();
     match outcome {
         Outcome::Available(release) => {
@@ -829,23 +879,24 @@ fn on_checked(serial: u64, outcome: Outcome) {
             let worth = updates::worth_telling(&release, skipped.as_deref());
             if !manual && worth && auto_install && updater::can_install().is_ok() {
                 // "Install updates automatically": no prompt; installed once the user is away.
-                begin_install(release, false);
+                begin_install(release, Asker::Nobody);
             } else if manual || worth {
-                offer(mtm, release, &current, manual);
+                offer(mtm, release, &current, by);
             }
         }
         Outcome::UpToDate => {
             tracing::info!(manual, "up to date");
             if manual {
                 let (title, text) = updates::up_to_date_text(&current);
-                alert::show(mtm, AlertSpec { key: "update", title, text, buttons: vec!["OK".into()], cancel: Some(0), warning: false, activate: true }, |_| {});
+                present(mtm, by, AlertSpec { key: "update", title, text, buttons: vec!["OK".into()], cancel: Some(0), warning: false, activate: true }, |_| {});
             }
         }
         Outcome::Failed(e) => {
             if manual {
                 tracing::warn!("update check failed: {e}");
-                alert::show(
+                present(
                     mtm,
+                    by,
                     AlertSpec {
                         key: "update",
                         title: "Stage Manager can't check for updates right now".into(),
@@ -884,18 +935,21 @@ pub fn offer_spec(release: &Release, current: &updates::Version, install: &Resul
 /// Offers `release`. A user's check brings the alert to the front; an automatic one never
 /// takes the focus from what the user is doing (R8 V2): the alert comes up above other
 /// windows without activating the app, and keyboard focus stays where it was.
-fn offer(mtm: MainThreadMarker, release: Release, current: &updates::Version, manual: bool) {
+fn offer(mtm: MainThreadMarker, release: Release, current: &updates::Version, by: Asker) {
     let install = updater::can_install();
     let mut spec = offer_spec(&release, current, &install);
-    spec.activate = manual;
+    spec.activate = by.asked();
     let verifiable = match &install {
         Ok(_) => true,
         Err(r) => r.opens_disk_image(),
     };
-    alert::show(mtm, spec, move |button| match button {
+    // The click answers for whoever asked; an automatic offer's Install is a user's (outside
+    // Settings: the alert stood free).
+    let clicked = by.max(Asker::User);
+    present(mtm, by, spec, move |button| match button {
         0 if verifiable => {
             let r = release.clone();
-            later(move || begin_install(r, true));
+            later(move || begin_install(r, clicked));
         }
         0 => open_url(release.download_url()),
         2 => skip_version(&release.version),
@@ -930,29 +984,30 @@ pub fn debug_install() {
         later(move || match outcome {
             Outcome::Available(release) => {
                 tracing::warn!(version = %release.version, auto, "debug-update: installing as Install and Relaunch (or, auto, an automatic install) does");
-                begin_install(release, !auto);
+                begin_install(release, if auto { Asker::Nobody } else { Asker::User });
             }
             other => tracing::warn!(?other, "debug-update: nothing to install"),
         })
     });
 }
 
-/// Downloads and verifies `release`, then installs it at a quiet moment. `asked`: the user
-/// clicked Install (it goes as soon as nothing is mid-drag or mid-transition); otherwise an
-/// automatic install, which also waits for the user to be away. A click joins an install
-/// already under way.
-fn begin_install(release: Release, asked: bool) {
+/// Downloads and verifies `release`, then installs it at a quiet moment. Asked by a user
+/// (`by`), it goes as soon as nothing is mid-drag or mid-transition and its alerts show where
+/// the click was; otherwise an automatic install, which also waits for the user to be away.
+/// A click joins an install already under way.
+fn begin_install(release: Release, by: Asker) {
+    let asked = by.asked();
     let under_way = with(|s| match &mut s.install {
         Install::Idle => {
-            s.install = Install::Preparing { version: release.version.clone(), asked };
+            s.install = Install::Preparing { version: release.version.clone(), by };
             None
         }
-        Install::Preparing { version, asked: a } => {
-            *a |= asked;
+        Install::Preparing { version, by: b } => {
+            *b = (*b).max(by);
             Some(version.to_string())
         }
-        Install::Ready { prepared, asked: a, .. } => {
-            *a |= asked;
+        Install::Ready { prepared, by: b, .. } => {
+            *b = (*b).max(by);
             Some(prepared.version.to_string())
         }
     });
@@ -972,16 +1027,17 @@ fn begin_install(release: Release, asked: bool) {
 
 /// The download and verification of `release` ended.
 fn prepared(release: Release, result: Result<Prepared, PrepareError>) {
-    let Some(Some((mtm, asked))) = with(|s| {
-        let asked = match &s.install {
-            Install::Preparing { asked, .. } => *asked,
+    let Some(Some((mtm, by))) = with(|s| {
+        let by = match &s.install {
+            Install::Preparing { by, .. } => *by,
             _ => return None,
         };
         s.install = Install::Idle;
-        Some((s.mtm, asked))
+        Some((s.mtm, by))
     }) else {
         return;
     };
+    let asked = by.asked();
     let current = updates::current();
     match result {
         Ok(prepared) => {
@@ -989,14 +1045,15 @@ fn prepared(release: Release, result: Result<Prepared, PrepareError>) {
             // SAFETY: the block runs on the main run loop, which keeps the timer; the install
             // state keeps it too and invalidates it.
             let timer = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(QUIET_TICK, true, &tick) };
-            with(|s| s.install = Install::Ready { prepared, asked, timer, told: false });
+            with(|s| s.install = Install::Ready { prepared, by, timer, told: false });
             install_if_quiet();
         }
         Err(PrepareError::Manual(refusal, dmg)) => {
             tracing::info!(?refusal, "update: verified, but this copy cannot replace itself; opening the disk image");
             updater::open_disk_image(&dmg);
-            alert::show(
+            present(
                 mtm,
+                by,
                 AlertSpec {
                     key: "update",
                     title: format!("Install Stage Manager {} from the disk image", release.version),
@@ -1013,7 +1070,7 @@ fn prepared(release: Release, result: Result<Prepared, PrepareError>) {
             tracing::warn!(version = %release.version, "update: not installed: {why}");
             // No Skip This Version here (review 8C #1): a failure may be a network blip, and
             // it must not silence the release; the next daily check offers it again.
-            alert::show(mtm, install_failed_spec(&release, &why, &current, asked), move |b| {
+            present(mtm, by, install_failed_spec(&release, &why, &current, asked), move |b| {
                 if b == 0 {
                     open_url(release.download_url());
                 }
@@ -1054,8 +1111,9 @@ fn idle_secs() -> f64 {
 /// helper is armed and the app quits through its quit path (every window back first).
 fn install_if_quiet() {
     let Some(Some((asked, hooks))) = with(|s| match &s.install {
-        Install::Ready { asked, .. } => {
-            if !*asked && !(s.config.app.install_updates && s.config.app.check_for_updates) {
+        Install::Ready { by, .. } => {
+            let asked = by.asked();
+            if !asked && !(s.config.app.install_updates && s.config.app.check_for_updates) {
                 // Automatic installs were turned off while it waited.
                 if let Install::Ready { timer, prepared, .. } = std::mem::replace(&mut s.install, Install::Idle) {
                     timer.invalidate();
@@ -1065,7 +1123,7 @@ fn install_if_quiet() {
                 tracing::info!("update: automatic install turned off; not installing");
                 return None;
             }
-            Some((*asked, s.hooks))
+            Some((asked, s.hooks))
         }
         _ => None,
     }) else {
@@ -1162,8 +1220,9 @@ fn show_update_note() {
 
 /// Turns Apple's Stage Manager off (the user's click), then checks within about 2 s that it
 /// stopped: `GloballyEnabled` reads back 0 and `WindowManager` shows no more windows than
-/// before. Otherwise System Settings → Desktop & Dock opens with a one-line hint.
-pub fn turn_off_apple() {
+/// before. Otherwise System Settings → Desktop & Dock opens with a one-line hint (a sheet on
+/// Settings when `by` clicked there).
+pub fn turn_off_apple(by: Asker) {
     let before = native_settings::window_manager_windows();
     let written = native_settings::turn_off_apple_stage_manager();
     if let Err(e) = &written {
@@ -1182,8 +1241,9 @@ pub fn turn_off_apple() {
         if !stopped {
             open_url(DESKTOP_DOCK_URL);
             if let Some(mtm) = MainThreadMarker::new() {
-                alert::show(
+                present(
                     mtm,
+                    by,
                     AlertSpec {
                         key: "apple",
                         title: "Turn off Stage Manager in Desktop & Dock".into(),
@@ -1211,6 +1271,25 @@ pub fn turn_off_wait() -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Round settings-sheet: a click in Settings outranks a menu click, which outranks an
+    /// automatic run, when one joins another; only a user's alerts take the focus.
+    #[test]
+    fn the_asker_who_clicked_last_or_in_settings_decides() {
+        assert!(Asker::Nobody < Asker::User && Asker::User < Asker::Settings);
+        assert_eq!(Asker::Nobody.max(Asker::Settings), Asker::Settings, "Settings joins an automatic check: its sheet");
+        assert_eq!(Asker::Settings.max(Asker::User), Asker::Settings, "a menu click joins a Settings check: still its sheet");
+        assert!(!Asker::Nobody.asked() && Asker::User.asked() && Asker::Settings.asked());
+    }
+
+    /// The menu bar's Check for Updates… and Turn Off: a sheet on Settings only while
+    /// Settings is frontmost and key, else free-standing.
+    #[test]
+    fn a_menu_click_counts_as_settings_only_while_settings_is_in_front() {
+        assert_eq!(Asker::from_menu(true), Asker::Settings);
+        assert_eq!(Asker::from_menu(false), Asker::User);
+        assert_eq!(alert::place(Asker::from_menu(false) == Asker::Settings, true, false), Place::Free);
+    }
 
     /// The 1.7 review: a failed first registration is not marked done, so the next launch
     /// tries it again; launch at login off is done without asking macOS.
