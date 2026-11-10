@@ -9,92 +9,50 @@ and what users asked for is in [docs/FEATURE-REQUESTS.md](docs/FEATURE-REQUESTS.
 Version 1 is Apple's Stage Manager, copied with nothing left: these are fixes and checks only. New
 features wait for 2.0.
 
-**Fixes**
+**Still open**
 
-- **Two suite checks that fail since 1.8.0** (`visible`, `slots`; the same on 1.8.1 and 1.8.2):
-  "the edge tab appears at layer 3" times out after the launch announce, and "its icon keeps its place on
-  the thumbnail" sees the icon drift about 28 pt during a card drag. Check each against the app's behaviour
-  (1.8.0 changed the card drag and the icons) and fix the app or the check.
-- **The suite's `wallpaper_edge` setup** skips with "no desktop window at 2362,480"; the behaviour was
-  checked by hand (11-09). Make the check find the desktop and run.
-- **The edge tab across Desktops** goes in `test_spaces.py`.
-- **Reopen after a cancelled logout even when some windows didn't come back.** Today only a clean quit at
-  a logout reopens the app on a cancel. The parked file says "logout", and the guardian waits for the
-  cancel once its recovery watch is done.
-- **The last frame of the shadow handover.** Since 1.8.2 an incoming window's snapshot drops its
-  shadow in one step once the window server lists the window in place: about half the landings show
-  no darker frame, the rest one (up to 15 levels on Finder's heavier shadow), more under load. The
-  window server shows the window a frame before our layer change reaches the screen. Find a way to
-  take that frame back without guessing early (a lighter edge, 11-01).
-- **Minimize as Apple's does: done** (round minimize-direct; live check 1 below). The yellow button and
-  ⌘M are caught before macOS's genie and the window flies from its frame into a new card at the top of
-  the strip. Window ▸ Minimize, a title-bar double-click and an app's own minimize still play the genie
-  first, then come back to the strip (UX-SPEC, "Minimize").
-- **Whatever the Apple session below finds different.**
+- **VoiceOver read aloud on the strip (E), 5 min.** Each card reads its stage and apps, and VO-Space
+  switches stages. The labels are in the Accessibility tree (checked 11-09); hearing them needs Eugene.
+- **The auto-hide delay on Apple's** (ours: `[reveal] hide_delay_ms` 500): a strip brought back by the
+  pointer, then the pointer away from it; how long until Apple's slides out. One recording.
+- **How soon Apple's switch starts after the click** (ours: 50 to 90 ms, `motion_ms`). One recording with
+  the click on the log's clock.
+- **The last frame of the shadow handover: proposed to close.** Since 1.8.2 a landing shows no darker
+  frame about half the time, otherwise one (up to 15 levels on Finder's heavier shadow), more under load.
+  Two shadows overlapping always read darker unless one goes on the very frame the other comes; macOS
+  gives no way to drop another app's window shadow, and every signal we have (the window list, even a
+  capture without our windows) comes after the window is already on screen. Eugene's call.
+
+**Done on 11-09 evening** (live on the 5K and the laptop screen; dev, unreleased)
+
+- The two suite checks failing since 1.8.0: the edge tab check left the pointer on the strip (check
+  fixed); the icon drift was real, a card's hover growth followed its old slot during a fast drag (app
+  fixed). `visible` and `slots`: 288 passed.
+- `wallpaper_edge` runs (the desktop lookup missed the desktop's own windows); the edge tab across
+  Desktops is in `test_spaces.py` (223 passed).
+- A cancelled logout reopens the app after an unclean quit too (`restore`, the frozen-Bravo case).
+- Minimize as Apple's: the yellow button and ⌘M fly the window straight into a new card at the top, no
+  genie (measured on Apple's 11-09, `parity` 49 passed). Window ▸ Minimize, a title-bar double-click and
+  an app's own minimize still play the genie first, then come to the strip.
+- From the Apple session: Shift-click takes only the card's front window; a card of three apps (icons
+  18 pt apart, the third window behind at the top); a hidden app's card leaves the strip and comes back to
+  its slot unhidden, the most recent stage coming in front if the hidden one was.
+- Live checks done: the never-run suite checks (`safety park capture parity displays`, 228 passed); ⌘-Tab
+  to the other screen, full screen on one screen and Mission Control with two screens (new `screens`
+  phase); a window moved to another Desktop in Mission Control (it leaves its stage and carries a stage of
+  its own there; the Desktop left keeps its stages).
+- Apple's measured, nothing to change: the card glass in Dark Mode (0.78 / 0.93 / 0.82, ours 0.78 / 0.95 /
+  0.78, within the fit); Option-click is a plain click; ⌘\` raises the app's other window in its stage;
+  no spring loading (a window brought to the strip hides it near the edge, or makes a new card dropped
+  low, as ours); the card count by height (4 at a 13-inch Air's, 6 at the Studio Display's); Reduce
+  Motion: Apple's switch is a cross-fade of about 80 ms, its minimize a fade out in place of about
+  130 ms (ours fades 200 ms, worked out from the accessibility guidance, kept).
 
 **Settled, nothing to do**
 
 - Saving `state.json` off the window thread: 1422 saves on 11-08 and 11-09 took 4.9 ms typically, 9 ms
   at the 99th percentile, 29 ms at most.
-- Accessibility (1.8.0) and the GitHub tabs (checked after 1.8.0): done; VoiceOver read aloud is a live
-  check below.
-
-## Live checks
-
-**One session, about 52 minutes.** Use the dev app and fixture windows only, with the 5K and the laptop
-screen both attached. The main thread runs it, with Eugene at the Mac for the steps marked (E).
-
-1. **The suite's new checks, 13 min.** `scripts/test-stages.sh safety park capture parity` on today's
-   build: `kill -9` with a dialog open, an app answering late at the quit, a fit move then a
-   crash, a dialog opened in a hidden stage, a window showing only a piece at the corner, no
-   captures while the strip is hidden, and a minimized window's way to the strip sampled every
-   8 ms (its places are printed): ⌘M and the yellow button never put it in the Dock (at its frame,
-   then parked, its picture flying from its frame into the top card); an app's own minimize after the
-   genie only sinks out of the Dock tile, then the corner. Hands off the Mac; they have never run.
-2. **Both screens, 5 min.** `scripts/test-stages.sh displays` on today's build. All checks pass, including
-   each screen's own card glass and corner patch (`displays[i].pictures`, `displays[i].corner_patch.shown`).
-3. **⌘-Tab to the other screen, 3 min.** Put fixture B on the laptop screen (`ctl debug-frame`) as a stage of
-   its own, then send it to a card there. Bring fixture A's stage to the front on the 5K. Activate B the way
-   ⌘-Tab does (`osascript … to activate`). In the log: one `transition` on the laptop screen only. The 5K's
-   `displays[0].active_stage` doesn't change.
-4. **Full screen on one screen, 4 min.** `ctl debug-fullscreen <B> on` on the laptop screen, then open a new
-   fixture window on the 5K. It joins the 5K's stage, the 5K's strip stays, and "a full-screen Space shows"
-   is logged for the laptop screen only. Then `debug-fullscreen <B> off`: B comes back to its stage.
-5. **Mission Control, 3 min.** `ctl debug-expose mission-control`. A fixture window opened while it's up is
-   placed once it ends, and both strips come back on the same Desktop.
-6. **A window moved to another Desktop of the laptop screen (E), 4 min.** Eugene drags fixture B in Mission
-   Control to the laptop screen's second Desktop. In the log: B leaves its stage, and on that Desktop it
-   starts a stage of its own. Back on the first Desktop, its stages are as they were.
-7. **Apple's Stage Manager, measured (E), 16 min.** Eugene turns on Apple's Stage Manager and Dark Mode.
-   - `scripts/measure-apple-card-glass.py`, in Dark Mode.
-   - Then, in Light Mode, on fixture cards:
-     - Shift-click on a card of two apps: whole card, or the app under the pointer?
-     - Option-click on a card.
-     - ⌘H, then ⌘\`.
-     - The auto-hide delay and a new card's fade (recordings).
-     - A card of three apps.
-     - Spring loading: a window dragged over a card and held there; does that stage come forward, and
-       does the drop add the window to it?
-     - The strip's card count on the laptop screen (4?).
-   - **Minimize, one 30 s recording** (screen recording at 60 fps, the 5K only; round minimize-flow).
-     Fixture `--windows 2` as one stage, two cards of other fixtures in the strip. At 0 s the yellow
-     button on Fixture 1; at 10 s ⌘M on Fixture 2; at 20 s Reduce Motion on, ⌘M on the window
-     brought back from Fixture 1's card. Read frame by frame: does a genie into the Dock play at all;
-     where the window shrinks to (the new card's slot: top or bottom of the strip) and in how many
-     frames; does it turn and take on the card's glass on the way, or fly flat; does its card appear
-     at once, fade or slide; does the Dock show anything (a tile, a bounce); and what Reduce Motion
-     makes of it. Constants that may change after it: the flight's spring (today `[animation]
-     shrink_*`, a pair of its own if Apple's is faster), where the picture starts and its size
-     (`ui::minimize_motion::start`: the Dock tile, at the size the genie left the window), the
-     card's fade without a tile and under Reduce Motion (`display_options::FADE_MS`), and the new
-     card's slot (the engine's `Target::New`). Read 11-09 for the yellow button (no genie, the top
-     slot, ~450 ms): the yellow button and ⌘M are now caught before the genie; still to read from
-     this recording: ⌘M's and Reduce Motion's frames against ours, and whether `[animation] shrink_*`
-     wants a pair of its own.
-   - With Reduce Motion on: one switch recorded (for the accessibility round).
-   - Eugene turns Apple's Stage Manager and Dark Mode back off.
-8. **VoiceOver on the strip (E), 5 min.** The accessibility round's checklist: each card reads its stage and
-   apps, and VO-Space switches stages.
+- Accessibility (1.8.0) and the GitHub tabs (checked after 1.8.0).
 
 **When it happens, no session needed:**
 
