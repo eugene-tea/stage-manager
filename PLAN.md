@@ -4,47 +4,38 @@ What's still to do. What shipped is in [CHANGELOG.md](CHANGELOG.md), how the app
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), how it should behave is in [docs/UX-SPEC.md](docs/UX-SPEC.md),
 and what users asked for is in [docs/FEATURE-REQUESTS.md](docs/FEATURE-REQUESTS.md).
 
-## 1.8.0
+## 1.8.x: everything known broken or unchecked
 
-- **Accessibility** (`.github/ACCESSIBILITY.md`), in progress: VoiceOver labels on the strip's
-  cards (which stage, which apps), Reduce Motion worked out from first principles, and a review
-  of the whole app.
-- **The edge tab across Desktops** goes in `test_spaces.py`.
-- **After the release:** look at the repository's tabs on GitHub (README, Accessibility, Security,
-  Contributing) once 1.8.0 is live; the files themselves were reviewed before it.
+Version 1 is Apple's Stage Manager, copied with nothing left: these are fixes and checks only. New
+features wait for 2.0.
 
-## 1.9
-
-- **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
-  Window, Quit App. A named stage shows its name on hover (R7).
-- **Stages in the menu bar menu**, click one to switch (R2).
-- **Drop a window on a card** to add it to that stage (R3b).
-- **"Only the main screen" in Settings** (`[displays] main_only`, off; R8). The setting is read at launch, so
-  turning it on or off quits the app (every window comes back) and opens it again, as an update does. Its
-  line in Settings says so.
-- **Scroll the strip past its capacity**, with a "+N" mark (R5).
-- **No stage switches the user didn't ask for** (R6): an activation with no click or key press just before
-  it doesn't switch stages, and that app's card glows.
-- **One stage across all screens** (R8, second half), an option, off. One strip, on the main screen. A
-  switch brings a stage's windows back on every screen. Still open: what it means when "Displays have
-  separate Spaces" is on, and the lid and restart rules once a window moved to another screen keeps its
-  stage.
-- **Save `state.json` off the window thread** if 1.8's timing shows saves over about 10 ms: a writer thread
-  that keeps only the newest state, finished before the quit's save.
-- **Reopen after a cancelled logout even when some windows didn't come back.** Today only a clean quit at
-  a logout reopens the app on a cancel. The parked file says "logout", and the guardian waits for the
-  cancel once its recovery watch is done.
+**Fixes**
 
 - **Two suite checks that fail since 1.8.0** (`visible`, `slots`; the same on 1.8.1 and 1.8.2):
   "the edge tab appears at layer 3" times out after the launch announce, and "its icon keeps its place on
   the thumbnail" sees the icon drift about 28 pt during a card drag. Check each against the app's behaviour
   (1.8.0 changed the card drag and the icons) and fix the app or the check.
-
+- **The suite's `wallpaper_edge` setup** skips with "no desktop window at 2362,480"; the behaviour was
+  checked by hand (11-09). Make the check find the desktop and run.
+- **The edge tab across Desktops** goes in `test_spaces.py`.
+- **Reopen after a cancelled logout even when some windows didn't come back.** Today only a clean quit at
+  a logout reopens the app on a cancel. The parked file says "logout", and the guardian waits for the
+  cancel once its recovery watch is done.
 - **The last frame of the shadow handover.** Since 1.8.2 an incoming window's snapshot drops its
   shadow in one step once the window server lists the window in place: about half the landings show
   no darker frame, the rest one (up to 15 levels on Finder's heavier shadow), more under load. The
   window server shows the window a frame before our layer change reaches the screen. Find a way to
   take that frame back without guessing early (a lighter edge, 11-01).
+- **Minimize as Apple's does**, once the minimize recording below is read: Apple's shows no genie into
+  the Dock (11-09); ours lets macOS's genie play, then brings the window back to the strip.
+- **Whatever the Apple session below finds different.**
+
+**Settled, nothing to do**
+
+- Saving `state.json` off the window thread: 1422 saves on 11-08 and 11-09 took 4.9 ms typically, 9 ms
+  at the 99th percentile, 29 ms at most.
+- Accessibility (1.8.0) and the GitHub tabs (checked after 1.8.0): done; VoiceOver read aloud is a live
+  check below.
 
 ## Live checks
 
@@ -79,6 +70,9 @@ screen both attached. The main thread runs it, with Eugene at the Mac for the st
      - ⌘H, then ⌘\`.
      - The auto-hide delay and a new card's fade (recordings).
      - A card of three apps.
+     - Spring loading: a window dragged over a card and held there; does that stage come forward, and
+       does the drop add the window to it?
+     - The strip's card count on the laptop screen (4?).
    - **Minimize, one 30 s recording** (screen recording at 60 fps, the 5K only; round minimize-flow).
      Fixture `--windows 2` as one stage, two cards of other fixtures in the strip. At 0 s the yellow
      button on Fixture 1; at 10 s ⌘M on Fixture 2; at 20 s Reduce Motion on, ⌘M on the window
@@ -108,3 +102,21 @@ screen both attached. The main thread runs it, with Eugene at the Mac for the st
   System Events (`osascript -e 'tell application "System Events" to count windows of every process'`). If
   any are listed, our quit fixed it: the menu line then says "Quit and reopen Stage Manager", and the bug
   is ours. If none are listed, lock and unlock the screen and count again.
+
+## 2.0: new features
+
+- **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
+  Window, Quit App. A named stage shows its name on hover (R7).
+- **Stages in the menu bar menu**, click one to switch (R2).
+- **Drop a window on a card** to add it to that stage (R3b). Apple's strip hides instead (11-09); spring
+  loading, if Apple's has it, is a 1.8.x check.
+- **"Only the main screen" in Settings** (`[displays] main_only`, off; R8). The setting is read at launch, so
+  turning it on or off quits the app (every window comes back) and opens it again, as an update does. Its
+  line in Settings says so.
+- **Scroll the strip past its capacity**, with a "+N" mark (R5).
+- **No stage switches the user didn't ask for** (R6): an activation with no click or key press just before
+  it doesn't switch stages, and that app's card glows.
+- **One stage across all screens** (R8, second half), an option, off. One strip, on the main screen. A
+  switch brings a stage's windows back on every screen. Still open: what it means when "Displays have
+  separate Spaces" is on, and the lid and restart rules once a window moved to another screen keeps its
+  stage.
