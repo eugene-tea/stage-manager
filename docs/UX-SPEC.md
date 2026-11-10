@@ -62,10 +62,15 @@ line, the window behind 15 pt up: `second_app_dy`), Green's bottom 96 pt below B
 edge at 128.5 pt where Blue alone reaches 105. The window behind peeks out on the side it
 sits on the screen: two of the owner's cards with the other app's window right of the front
 one showed it peeking out on the right (23 and 47 pt; up 34 and 13 pt, so Apple's offsets
-vary with the windows; ours are the fixture's). A third app's windows join the second's
-(not measured). The icons sit 10.5 pt right of the card's left edge and 10.5 pt above its
+vary with the windows; ours are the fixture's). A card of three apps (measured 11-09, Red 1
+in front, Green, Blue): the second app's window where a card of two puts it (Green on the
+left, its left edge 42 pt out and 15 pt up), the third's behind both at the top, its left
+edge 12 pt toward the second's side and 24 pt up (`third_app_dx`, `third_app_dy`: 0.29 and
+1.6 times the second's, read on the hovered card against a card of two hovered the same
+way); a fourth app's windows join the third's (not measured). The icons sit 10.5 pt right of the card's left edge and 10.5 pt above its
 bottom (the lowest window's: 10 pt above Green's bottom, at Blue's), and stay put while the
-card grows. They are the variants the Dock shows (macOS 26's icon and widget style: Default,
+card grows. On a card of two apps the second icon sits 36 pt right of the first (`[icons]
+step`); on a card of three they overlap, 18 pt apart (`step_three`, measured 11-09). They are the variants the Dock shows (macOS 26's icon and widget style: Default,
 Dark, Clear or Tinted, light, dark or following the appearance): in Dark Mode Apple's cards
 showed Mail's, Finder's, Messages' and Safari's dark icons (11-09). Ours fetches each icon per
 look (`ui::app_icons`) and again at an appearance change. Corners 8 pt (`corner_radius`; fitted to the rounding of three cards' top-left
@@ -129,7 +134,12 @@ ahead of the spring while it rises and gains height on it, so it seems to come u
 card's bottom; one shrinking into its card drops and loses height first, staying wide and
 flat, then slides into the card and turns. In flight a window turns about its vertical
 middle, so its left side comes toward you as it turns.
-Shift-click a card to bring its windows into the current stage; Option-click is a plain click.
+Shift-click a card to add its front window (its stage's last used, drawn in front) to the
+current stage, in front with the keyboard, whatever part of the card the pointer is on; the
+rest of the card stays in the strip in its slot (Apple's, measured 11-09 on a card of two
+apps, whichever app's part was clicked, and on a card of one app's two windows). A card of
+one window brings its stage in whole. Option-click is a plain click, as on Apple's (checked
+11-09: no app is hidden).
 Clicking a card's app icon brings every window of that app, from all stages.
 
 **Activation.** ⌘-Tab, ⌘⇧-Tab or a Dock click to an app in another stage switches to that
@@ -181,6 +191,17 @@ With One at a Time, only the app's most recent window shows, and clicking its ca
 opens its next window.
 
 **⌘M** sends the window to the strip as a card of its own, not to the Dock.
+
+**⌘H** (and Hide Others, or an app hiding itself) takes the app's windows off its cards. A
+stage of that app alone leaves the strip entirely: the most recent stage out of view takes
+its slot. When it was the stage in front, the most recent stage comes in front, as on a
+click. Unhidden without an activation, the stage comes back as a card in the slot it left,
+not in front, and the stage in front stays (the card that took the slot goes out of view
+when the strip is full). Unhidden by an activation (⌘-Tab, a Dock click), it comes in front
+as any activation does. A stage shared with other apps stays, showing theirs (Apple's,
+measured 11-09 with an app of two windows alone in front; a shared stage not measured).
+**⌘\`** brings the app's other window in front in its stage, and nothing else (checked
+11-09).
 
 **Desktops.** Each Desktop has its own stages, active stage and strip, listing only its
 windows. The same app can have stages on several Desktops. A card click never changes the
@@ -938,8 +959,9 @@ sight. The edge tab is a button, "Stages", that reveals the strip.
   pointer 39 pt in and 353 pt down on Apple's (once, measured 11-09): its rule across screens
   is not known; ours holds it as on its own screen.
 - Not measured yet on Apple's: the auto-hide delay (ours: 500 ms), a new card's fade, a
-  Shift-click on a card holding several apps, a card of three or more apps, and what decides
-  how far the other app's window peeks out (ours: always the fixture's 42 and 15 pt, on its
+  card of four or more apps, which side a third app's window takes when it sits on the
+  other side of the front window from the second app's (ours: the second's side), and what
+  decides how far the other app's window peeks out (ours: always the fixture's 42 and 15 pt, on its
   side of the screen).
 - Where Apple places a window moved to another Desktop is unverified. Ours places it as a
   window of its app opening there: in that app's most recent stage on that Desktop, else a

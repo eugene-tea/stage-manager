@@ -33,6 +33,7 @@
 
 mod ahead;
 mod away;
+mod hidden;
 mod ops;
 mod pending;
 mod pool;
@@ -478,6 +479,12 @@ pub struct Model {
     /// The Dock's application items in order, as the platform last read them ("Follow the
     /// Dock", [`StripOrder::Dock`]).
     pub(crate) dock: Vec<DockApp>,
+    /// Apps hidden now (⌘H, Hide Others, an app hiding itself; `hidden.rs`): their windows
+    /// show on no card, and a stage of theirs alone leaves the strip until they are unhidden.
+    pub(crate) hidden_apps: HashSet<Pid>,
+    /// Stages that left their strip slot because their apps were hidden, with that slot's
+    /// index: unhidden, they come back there (`hidden.rs`).
+    pub(crate) hidden_slots: HashMap<StageId, usize>,
     /// Logical clock for stage recency.
     pub(crate) clock: u64,
     /// Next stage ID.
@@ -542,6 +549,8 @@ impl Model {
             owed: HashMap::new(),
             last_pending: None,
             dock: Vec::new(),
+            hidden_apps: HashSet::new(),
+            hidden_slots: HashMap::new(),
             clock: 0,
             next_stage: 1,
             options,

@@ -597,6 +597,29 @@ impl Model {
         actions
     }
 
+    /// A Shift-click on `stage`'s card, as Apple's does (measured 11-09): the card's front
+    /// window alone (its stage's last used, drawn in front, with its children) joins the
+    /// active stage of its Space, in front and focused, whatever part of the card the pointer
+    /// was on; the rest of the card stays in the strip, in its slot, with its number (its key
+    /// moves to its next window). A stage of one window is [`Model::merge_into_active`] of it.
+    /// A no-op as [`Model::merge_into_active`].
+    pub fn add_card_front_to_active(&mut self, stage: StageId, obs: &Observation) -> Vec<Action> {
+        let front = self.stage(stage).and_then(|s| {
+            s.windows
+                .iter()
+                .copied()
+                .find(|w| self.windows.get(w).is_some_and(|w| w.meta.role == WindowRole::Standard && !self.hidden_apps.contains(&w.meta.pid)))
+        });
+        let Some(front) = front else {
+            return self.merge_into_active(stage, obs);
+        };
+        let Some((id, home, space)) = self.card_window(stage, front) else { return Vec::new() };
+        if self.alone_in(home, id) {
+            return self.merge_into_active(home, obs);
+        }
+        self.bring_into_active(space, &[id], &[home], obs)
+    }
+
     /// Pins a window (a child stands for its parent) so it shows on every stage of its Space
     /// and is never parked, or unpins it into the active stage of its Space. A window seen on
     /// every Space (sticky) stays pinned.

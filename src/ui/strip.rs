@@ -658,7 +658,7 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
+            let shift = click_adds(event.modifierFlags());
             // Emit outside the borrow: the sink may call back into the strip.
             if let Some(Some(e)) = with_strip_of(self.strip(), |s| s.mouse_up(p, shift)) {
                 tracing::debug!(?e, "strip click");
@@ -4075,9 +4075,26 @@ fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
     starts
 }
 
+/// True when a click on a card with `flags` held is a Shift-click (the card's front window
+/// joins the current stage, [`StripEvent::CardClicked`]'s `shift`). Option is no modifier
+/// here: an Option-click is a plain click, as on Apple's (checked 11-09: no app hidden).
+fn click_adds(flags: NSEventModifierFlags) -> bool {
+    flags.contains(NSEventModifierFlags::Shift)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Apple's, checked 11-09: an Option-click on a card is a plain click (no app hidden, no
+    /// window added); only Shift makes a click add the card's front window.
+    #[test]
+    fn an_option_click_on_a_card_is_a_plain_click() {
+        assert!(!click_adds(NSEventModifierFlags::Option));
+        assert!(!click_adds(NSEventModifierFlags::empty()));
+        assert!(click_adds(NSEventModifierFlags::Shift));
+        assert!(click_adds(NSEventModifierFlags::Shift | NSEventModifierFlags::Option));
+    }
 
     /// Owner 11-09: a card drawn before its picture arrives is faint, never the dark plate: the
     /// glass's under at `empty_opacity`, or with no under black darkening the wallpaper as

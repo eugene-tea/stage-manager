@@ -1303,7 +1303,7 @@ def phase_m6():
 
 
 def phase_strip():
-    say("\n== the strip end to end: a card click switches, a shift-click merges ==")
+    say("\n== the strip end to end: a card click switches, a shift-click adds the card's front window ==")
     stop_app()
     stop_fixture()
     p = os.path.join(HOME, "state.json")
@@ -1331,10 +1331,18 @@ def phase_strip():
     consistent("after the card click")
     do("switch", 1)
     time.sleep(1.5)
+    # Apple's (measured 11-09): a Shift-click adds the card's front window alone (its stage's
+    # last used), whatever part of the card is under the pointer; the rest stays a card.
+    card = stage_titles(state()).get(2, [])
+    front = card[0] if card else None
     r = ctl("debug-click", x, y, "shift")
     check(r.get("ok"), f"shift-clicked the card ({r.get('error', 'ok')})")
-    s = wait_until(lambda: (lambda x: x if len(x["stages"]) == 1 else None)(state()), 3, "the shift-click to merge")
-    check(s is not None and len(stage_titles(s)[1]) == 4, "a shift-click brings the card's windows into the active stage")
+    s = wait_until(lambda: (lambda x: x if len(stage_titles(x).get(1, [])) == 2 else None)(state()), 3, "the shift-click to add a window")
+    got = stage_titles(s) if s else {}
+    check(s is not None and front is not None and got.get(1, [None])[0] == front and sorted(got[1]) == sorted([front, "Fixture 3"]),
+          f"a shift-click brings the card's front window ({front}) alone into the active stage, in front ({got})")
+    check(s is not None and s["strip"] == [2] and sorted(got.get(2, [])) == sorted(t for t in card if t != front),
+          f"the card's other windows stay a card in its slot ({got}, strip {s and s['strip']})")
     consistent("after the shift-click")
     stop_app()
     all_onscreen("strip quit")
