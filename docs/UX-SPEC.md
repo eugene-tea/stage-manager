@@ -979,10 +979,14 @@ set to move its cursor with the mouse pointer.
 
 ## Known gaps
 
-- Not yet seen live with ours, built from the one-screen code and checked by the suite's
-  `displays` phase: a second screen's own card glass and corner patch, a full-screen app or
-  Mission Control on one screen while windows arrive on the other, ⌘-Tab to the other
-  screen's stage, and a window moved to another Desktop of the second screen.
+- A window coming in from the strip can show one frame of a darker shadow as it lands
+  (about half the landings, up to 15 levels within 45 pt of its edge on Finder's heavier
+  shadow; more often when the Mac is busy). Two shadows overlap for that frame: the
+  window's own, which macOS shows the moment the window is in place, and its picture's,
+  which ours drops as soon as macOS reports the window there but which reaches the screen
+  about a frame later. macOS gives no way to drop another app's window shadow, and no
+  signal comes before the window is on screen; dropping it earlier by a guess shows a
+  lighter edge instead (11-01). Measured 11-09 at 60 fps on VS Code, Safari and Finder.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.
@@ -1006,13 +1010,14 @@ set to move its cursor with the mouse pointer.
   window.
 - A switch's motion starts once the windows you leave have moved to the hiding corner behind
   their pictures, or they would show around them: about 50 to 90 ms after the click (11-09's
-  log; the `transition: the motion starts` line has it as `motion_ms`). How soon Apple's starts
-  after the click is not measured.
+  log; the `transition: the motion starts` line has it as `motion_ms`). Apple's first frame
+  comes about 65 to 85 ms after the click (11-09, four clicks of six).
 - A card dragged from the main screen's strip onto the laptop's screen landed with the
   pointer 39 pt in and 353 pt down on Apple's (once, measured 11-09): its rule across screens
   is not known; ours holds it as on its own screen.
-- Not measured yet on Apple's: the auto-hide delay (ours: 500 ms), a new card's fade, a
-  card of four or more apps, which side a third app's window takes when it sits on the
+- Apple's auto-hide comes either about 0.1 s or about 1.1 s after the pointer leaves the
+  strip (six runs, 11-09, no difference found between them); ours waits 500 ms.
+- Not measured yet on Apple's: a card of four or more apps, which side a third app's window takes when it sits on the
   other side of the front window from the second app's (ours: the second's side), and what
   decides how far the other app's window peeks out (ours: always the fixture's 42 and 15 pt, on its
   side of the screen).

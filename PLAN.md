@@ -11,11 +11,7 @@ features wait for 2.0.
 
 **Still open**
 
-- **The last frame of the shadow handover: proposed to close.** Since 1.8.2 a landing shows no darker
-  frame about half the time, otherwise one (up to 15 levels on Finder's heavier shadow), more under load.
-  Two shadows overlapping always read darker unless one goes on the very frame the other comes; macOS
-  gives no way to drop another app's window shadow, and every signal we have (the window list, even a
-  capture without our windows) comes after the window is already on screen. Eugene's call.
+Nothing.
 
 **Done on 11-09 evening** (live on the 5K and the laptop screen; dev, unreleased)
 
@@ -48,6 +44,8 @@ features wait for 2.0.
   130 ms (ours fades 200 ms, worked out from the accessibility guidance, kept).
 
 **Settled, nothing to do**
+
+- The last frame of the shadow handover: a known gap (UX-SPEC, Known gaps), Eugene's call 11-09.
 - Apple's auto-hide, measured (six runs, 11-09 20:2x): a strip brought back by the pointer at the edge
   starts sliding out either about 0.1 s or about 1.1 s after the pointer leaves it, three runs each, with
   no difference found between them (the same card, size and path). Ours: 500 ms, kept between them.

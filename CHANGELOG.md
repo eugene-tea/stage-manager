@@ -1,22 +1,22 @@
 # Changelog
 
-## Unreleased
+## 1.8.3 — 2026-11-09
 
-- VoiceOver can now reach the cards in the strip. Each card reads its front window's title
-  and offers Add to Stage, as Apple's does.
+- Minimizing a window with the yellow button or ⌘M sends it straight into a new card at the
+  top of the strip, as Apple's does, with no genie into the Dock first.
 - Shift-clicking a card adds only its front window to the current stage, as Apple's does; the
   rest of the card stays in the strip.
 - Hiding an app (⌘H) takes its card out of the strip, and when it was the stage in front, the
   stage you used before it comes in front. Unhiding it puts its card back where it was.
 - A card of three apps looks like Apple's: the third app's window behind the others at the
   top, and the app icons closer together, overlapping.
-- Minimizing a window with the yellow button or ⌘M sends it straight into a new card at the
-  top of the strip, as Apple's does, with no genie into the Dock first.
 - The shadow under the app icons on cards is lighter and tighter, as Apple's is.
-- When you cancel a logout, restart or shutdown after Stage Manager quit for it, Stage Manager
-  now opens again even if some windows didn't come back at the quit.
+- VoiceOver can now reach the cards in the strip. Each card reads its front window's title
+  and offers Add to Stage, as Apple's does.
 - A card dragged quickly up or down the strip stays in one piece: its picture no longer runs
   ahead of its app icons and jumps back onto them.
+- When you cancel a logout, restart or shutdown after Stage Manager quit for it, Stage Manager
+  now opens again even if some windows didn't come back at the quit.
 
 ## 1.8.2 — 2026-11-09
 
