@@ -11,8 +11,10 @@ features wait for 2.0.
 
 **Still open**
 
-- **VoiceOver read aloud on the strip (E), 5 min.** Each card reads its stage and apps, and VO-Space
-  switches stages. The labels are in the Accessibility tree (checked 11-09); hearing them needs Eugene.
+- **VoiceOver read aloud on the strip (E), 5 min.** Each card reads its front window's title as Apple's,
+  VO-Space switches stages, Add to Stage adds the front window. With VoiceOver on, a hit test at a card
+  answers its button wherever the pointer is (catching windows under the cards, unchecked live); hearing
+  them needs Eugene.
 - **The last frame of the shadow handover: proposed to close.** Since 1.8.2 a landing shows no darker
   frame about half the time, otherwise one (up to 15 levels on Finder's heavier shadow), more under load.
   Two shadows overlapping always read darker unless one goes on the very frame the other comes; macOS

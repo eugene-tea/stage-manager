@@ -222,6 +222,9 @@ pub struct CardSnapshot {
     /// The active stage's empty slot (`[strip] active = "gap"`): laid out at its card's size so
     /// no other card moves, never drawn, never hit.
     pub gap: bool,
+    /// The front window's title (empty when it has none or it is not known): what VoiceOver
+    /// reads for the card, as Apple's. Never drawn, never logged.
+    pub title: String,
 }
 
 impl CardSnapshot {
@@ -232,6 +235,7 @@ impl CardSnapshot {
     /// over this one, and until the controller's next snapshot after the drop.
     pub fn merged_with(&self, dropped: &CardSnapshot) -> CardSnapshot {
         let mut card = self.clone();
+        card.title = dropped.title.clone();
         card.windows = dropped.windows.iter().copied().chain(self.windows.iter().copied().filter(|w| !dropped.windows.iter().any(|d| d.id == w.id))).collect();
         card.apps = Vec::new();
         for pid in dropped.apps.iter().chain(self.apps.iter()) {
@@ -247,6 +251,11 @@ impl CardSnapshot {
     /// they belong to. The strip draws it from the drop until the controller's next snapshot.
     pub fn without_window(&self, id: u32) -> CardSnapshot {
         let mut card = self.clone();
+        // The next window's title is not known here: the app's name stands in until the
+        // controller's snapshot.
+        if card.windows.first().is_some_and(|w| w.id == id) {
+            card.title.clear();
+        }
         card.windows.retain(|w| w.id != id);
         card.apps.retain(|pid| card.windows.iter().any(|w| w.pid == *pid));
         card
@@ -256,6 +265,9 @@ impl CardSnapshot {
     /// card it is held over shows in front of its own windows).
     pub fn only_window(&self, id: u32) -> CardSnapshot {
         let mut card = self.clone();
+        if card.windows.first().is_none_or(|w| w.id != id) {
+            card.title.clear();
+        }
         card.windows.retain(|w| w.id == id);
         card.apps.retain(|pid| card.windows.iter().any(|w| w.pid == *pid));
         card
@@ -292,7 +304,8 @@ impl CardSnapshot {
     /// place renumbers the stages between its old and new place (numbers follow creation
     /// order), so a number alone never rebuilds a card, nor moves one (round 9C).
     pub fn change_to(&self, new: &CardSnapshot, numbers_drawn: bool) -> CardChange {
-        let same = CardSnapshot { number: new.number, ..self.clone() };
+        // The title is read by VoiceOver only: a retitled window never rebuilds its card.
+        let same = CardSnapshot { number: new.number, title: new.title.clone(), ..self.clone() };
         if same != *new {
             CardChange::Rebuild
         } else if self.number != new.number && numbers_drawn {
@@ -790,6 +803,8 @@ mod tests {
         assert_eq!(card.change_to(&other, false), CardChange::Rebuild, "a window more is a change");
         let named = CardSnapshot { name: Some("Work".into()), ..card.clone() };
         assert_eq!(card.change_to(&named, false), CardChange::Rebuild);
+        let retitled = CardSnapshot { title: "Notes \u{2014} draft".into(), ..card.clone() };
+        assert_eq!(card.change_to(&retitled, false), CardChange::None, "a title is only read, never drawn");
     }
 
     #[test]
@@ -812,6 +827,8 @@ mod tests {
         assert_eq!((m.stage, m.number, m.name.as_deref()), (2, 2, Some("Work")), "the target's identity");
         assert_eq!(m.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [9, 8, 5, 6]);
         assert_eq!(m.apps, [60, 80, 50]);
+        let titled = |c: &CardSnapshot, t: &str| CardSnapshot { title: t.into(), ..c.clone() };
+        assert_eq!(titled(&target, "Inbox").merged_with(&titled(&dropped, "Draft")).title, "Draft", "the dropped front window is in front");
     }
 
     #[test]
@@ -825,6 +842,10 @@ mod tests {
         assert_eq!(card.without_window(5).apps, [50, 60], "an app with a window left keeps it");
         let lifted = card.only_window(6);
         assert_eq!((lifted.windows.iter().map(|w| w.id).collect::<Vec<_>>(), lifted.apps), (vec![6], vec![60]), "the window lifted off, with its app");
+        let card = CardSnapshot { title: "Front".into(), ..card };
+        assert_eq!(card.without_window(6).title, "Front", "the front window stays");
+        assert_eq!(card.without_window(5).title, "", "the next window's title is not known here");
+        assert_eq!((card.only_window(5).title.as_str(), card.only_window(6).title.as_str()), ("Front", ""));
     }
 
     #[test]

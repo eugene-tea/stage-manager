@@ -944,13 +944,38 @@ and followed live; the strip repaints at once.
 
 ### VoiceOver
 
-The strip's view is a group, "Stages", holding one button per card, framed where the card
-rests: "Stage 3: Safari, Notes" (the ⌃⌥N number), or the stage's name with its apps; the
-current stage's card (`[strip] active = "card"`) adds "current stage". Its help says
-"Switches to this stage."; pressing it (VoiceOver's press) switches as a click does, and each
-app has a custom action, "Show all Safari windows", as a click on its icon. The list follows
-the cards as they change, keeping each card's element; it is empty while the strip is out of
-sight. The edge tab is a button, "Stages", that reveals the strip.
+**Apple's** (observed 11-09 with the Accessibility API, Apple's Stage Manager on): each card
+is an `AXButton` of WindowManager, framed where the card is, labelled with its front
+window's title alone ("Activity Monitor"; no stage number, no other app's name), with the
+actions `AXPress` (a click: the stage comes in front) and `AXAddToStage` (Shift-click's
+add). A system-wide hit test at a card's middle (`AXUIElementCopyElementAtPosition`, how
+VoiceOver finds what is under the pointer) answers that button wherever the pointer is.
+
+**Ours.** The strip's view is a group, "Stages", holding one button per card, framed where
+the card rests, labelled as Apple's: the front window's title; a card of several apps reads
+its front window's alone, as Apple's. Where we add to it: an untitled front window reads its
+app's name; a stage with a name (`[stages] names`, a `stage:` rule) says it first ("Mail:
+Inbox"); with nothing known the card says its ⌃⌥N number ("Stage 3"); the current stage's
+card (`[strip] active = "card"`) adds "current stage". A window retitled while it fronts a
+card renews the label. Its help says "Switches to this stage."; `AXPress` switches as a
+click does, `AXAddToStage` adds the front window to the stage in front as a Shift-click
+does (not offered on the current stage's card), and each app has a custom action, "Show all
+Safari windows", as a click on its icon. The list follows the cards as they change, keeping
+each card's element; it is empty while the strip is out of sight. The edge tab is a button,
+"Stages", that reveals the strip.
+
+**Reaching the cards.** The window server passes a hit test over a window that ignores the
+mouse, as it does a click, and the strip's pane lets the mouse through except while the
+pointer is on a card (one flag per window, set by where the pointer is). So a hit test at a
+card with the pointer elsewhere answered Finder's desktop beneath (found 11-09).
+While VoiceOver or Switch Control is on (read from macOS and followed live), each card gets
+a transparent catching window of its own exactly where it rests, just under the pane:
+hit tests there answer the card's button, the pointer's events there go to the strip as
+the pane's own would, and the empty column and the gaps between cards still let clicks
+through. With neither on, nothing changes. The strip never takes keyboard focus (a
+non-activating panel, as Apple's strip never takes it from the window in front), so
+VoiceOver reaches the cards through the pointer: the pointer over the strip, or VoiceOver
+set to move its cursor with the mouse pointer.
 
 ## Known gaps
 

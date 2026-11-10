@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- VoiceOver can now reach the cards in the strip. Each card reads its front window's title
+  and offers Add to Stage, as Apple's does.
 - Shift-clicking a card adds only its front window to the current stage, as Apple's does; the
   rest of the card stays in the strip.
 - Hiding an app (⌘H) takes its card out of the strip, and when it was the stage in front, the

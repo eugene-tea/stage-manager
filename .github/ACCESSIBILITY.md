@@ -5,11 +5,15 @@ where it stands and how to tell us about a barrier.
 
 ## What works
 
-- **VoiceOver.** Each card in the strip is a button that says which stage it is and which
-  apps it holds, for example "Stage 3: Safari, Notes", or the stage's name. Pressing it
-  switches to that stage. Its actions show all of one app's windows, as a click on the app's
-  icon does. The menu bar icon, its menu, Settings and the welcome window are standard macOS
-  controls; switches and pop-up menus in Settings read the name of their row.
+- **VoiceOver.** Each card in the strip is a button that reads the title of its front
+  window, as Apple's does, or the app's name when the window has none; a stage you named
+  says its name first. Pressing it switches to that stage. Its Add to Stage action adds the
+  card's front window to the stage you are in, as Shift-click does, and its other actions
+  show all of one app's windows, as a click on the app's icon does. VoiceOver finds the
+  cards under the pointer: move the pointer over the strip, or set VoiceOver to move its
+  cursor with the mouse pointer (VoiceOver Utility, Navigation, Mouse pointer). The menu
+  bar icon, its menu, Settings and the welcome window are standard macOS controls; switches
+  and pop-up menus in Settings read the name of their row.
 - **Keyboard.** Settings, the welcome window and the menu work with Full Keyboard Access.
   With keyboard shortcuts turned on in Settings → Windows, ⌃⌥1–9 switches stages and
   ⌃⌥⇧1–9 sends the front window to one. ⌘-Tab and the Dock also bring an app's stage
@@ -28,6 +32,8 @@ where it stands and how to tell us about a barrier.
 
 - None of this has been tested by people who rely on VoiceOver, Switch Control or Voice
   Control. Your report is especially welcome.
+- The strip never takes the keyboard, as Apple's doesn't (it would take it from the window
+  you are typing in), so VoiceOver's keys alone don't move into it; the pointer does.
 - VoiceOver doesn't reach the strip while it is hidden (a window covering it, or "Show recent
   apps" off); use the keyboard shortcuts, ⌘-Tab or the Dock then.
 - Dragging cards and windows to and from the strip has no keyboard or VoiceOver way yet,

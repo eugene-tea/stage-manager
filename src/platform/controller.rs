@@ -139,7 +139,7 @@ use crate::engine::save_clock::SaveClock;
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, Minimized, StripDrop, StripEvent, StripSnapshot, Transition};
-use crate::ui::{motion_math, transition_plan};
+use crate::ui::{assistive, motion_math, transition_plan};
 
 mod arrival;
 mod ax_blind;
@@ -3641,9 +3641,14 @@ impl Controller {
                 {
                     // A window titled late (an Electron app's) may be a saved one after all.
                     let actions = m.window_retitled(WindowId(id));
+                    // VoiceOver reads a card by its front window's title (as Apple's): a card's
+                    // front window retitled is presented again while an assistive app listens.
+                    let fronts_card = assistive::on() && fronts_a_card(m, WindowId(id));
                     self.mark_dirty();
                     if !actions.is_empty() {
                         self.execute(ob, actions);
+                        self.present();
+                    } else if fronts_card {
                         self.present();
                     }
                 }
@@ -7206,6 +7211,15 @@ fn listed_bounds(list: &[windows::CgWindow]) -> Vec<(u32, Rect)> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect()
 }
 
+/// True when `id` is the front window of a stage in the strip (a parked one's): the window a
+/// card's accessibility label reads.
+fn fronts_a_card(m: &Model, id: WindowId) -> bool {
+    m.window(id).is_some_and(|w| match w.home {
+        Home::Stage(s) => w.parked && m.stage(s).is_some_and(|s| s.windows.first() == Some(&id)),
+        _ => false,
+    })
+}
+
 /// The strip's cards of `space`, in slot order.
 fn cards_in(m: &Model, space: SpaceId) -> Vec<CardSnapshot> {
     m.strip_in(space)
@@ -7213,6 +7227,7 @@ fn cards_in(m: &Model, space: SpaceId) -> Vec<CardSnapshot> {
         .map(|c| CardSnapshot {
             stage: c.stage.0,
             number: c.number,
+            title: c.windows.first().and_then(|id| m.window(*id)).map(|w| w.meta.title.clone()).unwrap_or_default(),
             name: c.name,
             windows: c
                 .windows

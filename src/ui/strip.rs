@@ -124,7 +124,9 @@ use crate::ui::overlay::GlassLook;
 use crate::ui::app_icons;
 use crate::ui::card_glass;
 use crate::ui::display_options;
+use crate::ui::assistive;
 use crate::ui::strip_access;
+use crate::ui::strip_reach;
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Grip, Metrics};
 use crate::ui::strip_model::{self, CardChange, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
@@ -394,6 +396,8 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
     // Reduce Motion and Reduce Transparency: read now, followed live; the glass repaints.
     display_options::install(|| with_strips(Strip::display_options_changed));
+    // VoiceOver or Switch Control: the cards hit-testable where they rest while one is on.
+    assistive::install(|| with_strips(Strip::update_access));
     strip_model::set_presenter(|snapshot| {
         DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
@@ -600,8 +604,37 @@ fn snapshot_arrived(id: u32, picture: Picture) {
 
 /// A card's accessibility element was pressed (VoiceOver): the strip keyed `strip` sends what
 /// a click would, outside its borrow ([`strip_access::PressSink`]).
-fn access_pressed(strip: u32, stage: u64, pid: Option<i32>) {
-    if let Some(Some(e)) = with_strip_of(strip, |s| s.access_press(stage, pid)) {
+fn access_pressed(strip: u32, stage: u64, press: strip_access::Press) {
+    if let Some(Some(e)) = with_strip_of(strip, |s| s.access_press(stage, press)) {
+        strip_model::emit(e);
+    }
+}
+
+/// The pointer on a card's catching window ([`strip_reach`]): the strip keyed `strip` takes
+/// it as its own view would, emitting outside its borrow.
+fn reach_mouse(strip: u32, mouse: strip_reach::Mouse) {
+    use strip_reach::Mouse;
+    let event = with_strip_of(strip, |s| {
+        let local = |s: &Strip, p: NSPoint| {
+            let (g, at) = (s.geometry.global, s.geometry.global_point(p));
+            Point::new(at.x - g.x, at.y - g.y)
+        };
+        match mouse {
+            Mouse::Moved(p) => {
+                let at = local(s, p);
+                s.end_lost_drag();
+                s.hover_at(Some(at));
+                None
+            }
+            Mouse::Down(p) => s.mouse_down(local(s, p)),
+            Mouse::Dragged => {
+                s.mouse_dragged();
+                None
+            }
+            Mouse::Up(p, flags) => s.mouse_up(local(s, p), click_adds(flags)),
+        }
+    });
+    if let Some(Some(e)) = event {
         strip_model::emit(e);
     }
 }
@@ -1733,6 +1766,8 @@ struct Pane {
     built: Option<(Arc<StripStyle>, f64)>,
     /// Its cards for VoiceOver: one element each, children of its view.
     access: strip_access::Access,
+    /// A catching window under each card while an assistive app is on.
+    reach: strip_reach::Reach,
 }
 
 impl Pane {
@@ -1797,7 +1832,14 @@ impl Pane {
             geometry: None,
             built: None,
             access: strip_access::Access::default(),
+            reach: strip_reach::Reach::default(),
         }
+    }
+
+    /// Puts the panel at `level`, its cards' catching windows with it.
+    fn set_level(&self, level: isize) {
+        self.panel.setLevel(level);
+        self.reach.set_level(level);
     }
 
     /// Ordered in and on the Space shown now.
@@ -2174,9 +2216,10 @@ impl Strip {
         let resting = self.style.level == StripLevel::AboveWindows;
         if self.pane.lifted.is_some_and(|l| l != resting) {
             // Only the level: ordering it in now could take it to another Space.
-            self.pane.panel.setLevel(if resting { NSFloatingWindowLevel } else { BELOW_WINDOWS });
+            self.pane.set_level(if resting { NSFloatingWindowLevel } else { BELOW_WINDOWS });
             self.pane.lifted = Some(resting);
         }
+        self.pane.reach.clear(&self.pane.panel);
     }
 
     /// Makes the pane of the Desktop shown the active one: the pane on it already, else one
@@ -2613,21 +2656,34 @@ impl Strip {
         } else {
             Vec::new()
         };
+        let frames: Vec<(u64, Rect)> = items.iter().map(|i| (i.stage, i.frame)).collect();
         self.pane.access.update(&self.pane.view, self.display, items, access_pressed);
+        self.update_reach(&frames);
     }
 
-    /// VoiceOver pressed `stage`'s card (`pid`: its action for that app): the event a click
-    /// on it (or on that app's icon) sends, when the card can be pressed now.
-    fn access_press(&mut self, stage: u64, pid: Option<i32>) -> Option<StripEvent> {
+    /// Puts a catching window under each listed card (`frames`: view coordinates) while an
+    /// assistive app is on and the strip shows, so a hit test there finds the card whatever
+    /// the pointer does ([`strip_reach`]); none otherwise.
+    fn update_reach(&mut self, frames: &[(u64, Rect)]) {
+        let on = assistive::on() && self.pane.shown && self.pane.panel.isVisible();
+        let p = self.pane.panel.frame();
+        let panel = Rect::new(p.origin.x, p.origin.y, p.size.width, p.size.height);
+        let wanted = strip_reach::targets(on, panel, frames)
+            .into_iter()
+            .filter_map(|(stage, frame)| Some((stage, frame, self.pane.access.element(stage)?.clone())))
+            .collect();
+        self.pane.reach.update(self.mtm, &self.pane.panel, self.display, wanted, reach_mouse);
+    }
+
+    /// VoiceOver pressed `stage`'s card, or asked one of its actions: the event the click it
+    /// stands for sends ([`strip_access::event_for`]), when the card can be pressed now.
+    fn access_press(&mut self, stage: u64, press: strip_access::Press) -> Option<StripEvent> {
         if !self.pane.shown || placeholder(stage) || self.motion.holds(stage) || !self.layouts.iter().any(|l| l.stage == stage) {
             return None;
         }
         self.prefetch(Some(stage));
-        tracing::debug!(stage, ?pid, "strip card pressed through accessibility");
-        Some(match pid {
-            Some(pid) => StripEvent::IconClicked { stage, pid },
-            None => StripEvent::CardClicked { stage, shift: false },
-        })
+        tracing::debug!(stage, ?press, "strip card pressed through accessibility");
+        Some(strip_access::event_for(stage, press))
     }
 
     /// Each thumbnail depth's unit transform on `stage`'s card, back to front as its depths:
@@ -3983,7 +4039,7 @@ impl Strip {
             return;
         }
         self.pane.lifted = Some(lift);
-        self.pane.panel.setLevel(if lift { NSFloatingWindowLevel } else { BELOW_WINDOWS });
+        self.pane.set_level(if lift { NSFloatingWindowLevel } else { BELOW_WINDOWS });
         // Only a pane already on its Desktop: a first order-in decides the Desktop it lives on.
         if lift && self.pane.placed && !self.snapshot.fullscreen {
             self.pane.panel.orderFrontRegardless();
