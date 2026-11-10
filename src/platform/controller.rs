@@ -4102,7 +4102,8 @@ impl Controller {
         } else {
             HashMap::new()
         };
-        super::minimize_tap::publish(Minimizable { on, windows });
+        let dock = self.dock_bar.as_ref().map(|(_, b)| b.clone()).unwrap_or_default();
+        super::minimize_tap::publish(Minimizable { on, windows, dock });
     }
 
     /// A window un-minimized on its way to the strip ([`Self::on_minimized`]) is down: AppKit
