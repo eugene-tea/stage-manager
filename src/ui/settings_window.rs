@@ -947,6 +947,20 @@ pub fn is_open() -> bool {
     OPEN.with(|o| o.borrow().as_ref().is_some_and(|o| o.window.isVisible()))
 }
 
+/// The window while it is on screen (shown, not minimized): alerts from its controls attach
+/// to it as sheets (round settings-sheet).
+pub fn shown_window() -> Option<Retained<NSWindow>> {
+    OPEN.with(|o| o.borrow().as_ref().map(|o| o.window.clone())).filter(|w| w.isVisible() && !w.isMiniaturized())
+}
+
+/// Whether the window is what the user is looking at: the app active and the window (or a
+/// sheet on it) key. A menu bar click then counts as one in the window.
+pub fn is_front(mtm: MainThreadMarker) -> bool {
+    let Some(window) = shown_window() else { return false };
+    objc2_app_kit::NSApplication::sharedApplication(mtm).isActive()
+        && (window.isKeyWindow() || window.attachedSheet().is_some_and(|s| s.isKeyWindow()))
+}
+
 /// "Copied" on the copy button for a moment.
 pub fn confirm_copied() {
     let Some(button) = OPEN.with(|o| o.borrow().as_ref().map(|o| o.controls.copy.clone())) else { return };

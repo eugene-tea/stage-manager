@@ -3,6 +3,7 @@
 ## 1.8.2 — 2026-11-09
 
 - Closing a notification no longer hides your windows.
+- Alerts from Settings, such as Check for Updates…, now open attached to the Settings window.
 
 ## 1.8.1 — 2026-11-09
 

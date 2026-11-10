@@ -443,6 +443,10 @@ logout, restart or shutdown, while Apple's Stage Manager is on, or when a window
 be brought back. A launch that finds a downloaded update an earlier run left (it quit while
 the update waited) checks again within its first minute, from scratch, instead of a day
 later. An automatic install still waits, after an unlock, for 120 s with no input.
+An alert that comes from a Settings control (Check for Updates… and the install it leads
+to, a setting that can't be saved, Turn Off) is a sheet on the Settings window while it is
+up, as Apple's HIG asks; the menu bar's counts as one from Settings while Settings is
+frontmost. The automatic check's notices and the others stand free, as before.
 
 **Launch at login.** Apple's is part of macOS. Ours registers at its first launch from
 Applications, and Settings can turn that off. It registers as a login item
