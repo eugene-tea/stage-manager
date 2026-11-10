@@ -47,10 +47,14 @@
 //!   A snapshot's spring runs until it rests within [`END_TOLERANCE`] ([`spring_duration`]),
 //!   not Core Animation's settling time, which stopped it a point short and jumped.
 //! - **Handover.** An incoming snapshot keeps its shadow until the window server shows its
-//!   window at its frame ([`shows_at`]), then fades it from a frame on ([`shown_handover`]),
-//!   never before a presentation lag past the unveil, and lands once it has handed over
-//!   ([`shown_lands`]). Both shadows for a few frames read about 2 levels darker; a shadow
-//!   faded before its window showed read 16 lighter for 80 ms (11-01).
+//!   window at its frame ([`shows_at`]), then drops it at once, in one step: the window and
+//!   the change reach the display on about the same compositor frame. A shadow dropped before
+//!   its window showed read 16 levels lighter for 80 ms (11-01); one faded over three frames
+//!   from a presentation lag past the unveil overlapped the window's own for four frames, up
+//!   to 12 levels darker within 45 pt of the edge (11-09, the owner's "shadow wobble" as the
+//!   window lands). Measured 11-09 at 60 fps (VS Code, Safari, Finder, frames on the log's
+//!   clock): dropped in a step when the window is listed, no frame lighter and at most one
+//!   frame of both, in three landings of five none.
 //! - **Planes.** Callers give a snapshot as a plane turned about its left edge, like a strip
 //!   card, seen through the strip's eye: at a window's frame it is flat and full size; on a
 //!   card it is the card's thumbnail, turned by the strip's tilt. In flight it is the pose
@@ -135,31 +139,11 @@ pub const UNVEIL_TOLERANCE: f64 = 1.0;
 pub const PRESENTATION_LAG: f64 = 0.05;
 /// One display frame at 60 Hz (seconds).
 pub const FRAME: f64 = 1.0 / 60.0;
-/// How long an incoming snapshot's shadow takes to fade once its window shows (seconds):
-/// three frames, both shadows meanwhile (darker by a little, never lighter).
-pub const SHOWN_FADE: f64 = PRESENTATION_LAG;
-
 /// Whether the window server shows a window at `frame`: listed on screen (`onscreen`; a
 /// hidden app's window is not) with its `bounds` within [`UNVEIL_TOLERANCE`] of the frame on
 /// every edge (a parked one sits in the corner).
 pub fn shows_at(onscreen: bool, bounds: Rect, frame: Rect) -> bool {
     onscreen && travel(bounds, frame) <= UNVEIL_TOLERANCE
-}
-
-/// When an incoming snapshot's shadow starts to fade (seconds from now), its window seen on
-/// screen at its frame by the window server now, `since_unveil` seconds after the unveil: a
-/// frame on, as the window reaches the display at the compositor's next frame and the fade,
-/// sent now, at its next one too (the two share the compositor's lag; a frame of both shadows
-/// rather than one of neither); never before a [`PRESENTATION_LAG`] past the unveil, the
-/// least the window took to show in the owner's recordings.
-pub fn shown_handover(since_unveil: f64) -> f64 {
-    FRAME.max(PRESENTATION_LAG - since_unveil)
-}
-
-/// How long from now the snapshot of a window seen on screen now ([`shown_handover`]) may
-/// land (seconds): once its shadow has handed over.
-pub fn shown_lands(since_unveil: f64) -> f64 {
-    shown_handover(since_unveil) + SHOWN_FADE
 }
 
 /// The longest travel the unveil waits for (points): more than any display's diagonal.
@@ -727,27 +711,21 @@ pub fn rescaled_start(now: Point, s: f64, c_old: Point, c_new: Point) -> Point {
 mod tests {
     use super::*;
 
-    /// 11-01: the snapshot's shadow faded 50 ms before the unveil and its window showed a
-    /// frame after the fade ended: 16 levels lighter for ~80 ms. Now it fades once the window
-    /// server shows the window, never before: never lighter than the window's own shadow.
+    /// The shadow hands over once the window server shows the window (`shows_at`), in one
+    /// step: from then on the shadow on screen is the window's own, never darker or lighter
+    /// (11-01: dropped 50 ms early, 16 levels lighter for ~80 ms; 11-09: faded over three
+    /// frames once shown, both shadows for four frames, up to 12 levels darker).
     #[test]
     fn the_shadow_hands_over_once_the_window_shows() {
         let frame = Rect::new(813.0, 215.0, 1217.0, 790.0);
         assert!(shows_at(true, Rect::new(813.4, 215.0, 1217.0, 790.0), frame));
         assert!(!shows_at(true, Rect::new(2559.0, 1408.0, 1217.0, 790.0), frame), "parked in the corner");
         assert!(!shows_at(false, frame, frame), "a hidden app's window, in place");
-        for since in [-0.01, 0.0, 0.006, 0.03, 0.2] {
-            let begin = shown_handover(since);
-            assert!(begin >= FRAME - 1e-12, "a frame on at least: {since} {begin}");
-            assert!(since + begin >= PRESENTATION_LAG - 1e-12, "not before a lag past the unveil: {since} {begin}");
-            assert!((shown_lands(since) - begin - SHOWN_FADE).abs() < 1e-12);
-            // The window shows now (0 on the shared clock); the alpha of a point of its shadow.
-            for a in [0.1, 0.4, 0.8] {
-                for i in 0..40 {
-                    let t = i as f64 * 0.005;
-                    let e = crate::ui::shadow_math::handover_error(a, t, 0.0, begin, SHOWN_FADE);
-                    assert!(e >= -1e-12, "lighter than the window's own at {t}: {e}");
-                }
+        for a in [0.1, 0.4, 0.8] {
+            for i in 1..40 {
+                let t = i as f64 * 0.005;
+                let e = crate::ui::shadow_math::handover_error(a, t, 0.0, 0.0, 0.0);
+                assert!(e.abs() < 1e-12, "the window's own shadow alone at {t}: {e}");
             }
         }
     }

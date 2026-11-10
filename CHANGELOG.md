@@ -4,6 +4,7 @@
 
 - Closing a notification no longer hides your windows.
 - Alerts from Settings, such as Check for Updates…, now open attached to the Settings window.
+- A window coming in from the strip no longer shows a darker shadow for a moment as it lands.
 
 ## 1.8.1 — 2026-11-09
 
