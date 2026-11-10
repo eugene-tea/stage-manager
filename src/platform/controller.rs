@@ -58,8 +58,9 @@
 //!   [`desktop_click::CLICK_HOLD`] reveals, a drag or a long press reveals nothing; a press in
 //!   a window's resize band, just outside its frame, is its edge, never a wallpaper click
 //!   ([`desktop_click::reveals_on_release`], [`desktop_click::in_any_resize_band`]). macOS hands the desktop to Finder, so Finder's activation and its main
-//!   window's focus follow the click; that echo never switches stages or unparks a window
-//!   ([`DesktopEcho`]), as with Apple's. A deliberate Finder activation (Dock click, ⌘Tab,
+//!   window's focus follow the press (often while it is still down, about a second in);
+//!   that echo, during any desktop press and just after its release, never switches stages
+//!   or unparks a window ([`DesktopEcho`]), as with Apple's. A deliberate Finder activation (Dock click, ⌘Tab,
 //!   its card) still brings its stage.
 //! - **Shift sugar** (`[sugar] shift_brings_here`): Shift held at the user's triggering
 //!   action ([`Triggers`]) brings windows here: a newly opened app's first window joins the
@@ -4180,6 +4181,8 @@ impl Controller {
                 let modifiers = event.cmd || event.shift || event.other_modifiers;
                 let _ = self.dock_released(ob, event.at, modifiers, now);
                 self.press = None;
+                // A desktop press (a click, a long press, a drag): Finder's echo runs on from here.
+                self.desktop_echo.released(now);
                 if let Some(press) = self.wallpaper_press.take() {
                     self.wallpaper_released(ob, press, event.at, event.stamp);
                 }
@@ -5853,8 +5856,9 @@ impl Controller {
             tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "a press in a window's resize band: its edge, no wallpaper click");
             return false;
         }
-        // The desktop is Finder's either way: its activation and focus that follow are echoes.
-        self.desktop_echo.wallpaper_clicked(Instant::now());
+        // The desktop is Finder's either way: its activation and focus while the press is down
+        // and just after its release are echoes, whether it ends as a click or not.
+        self.desktop_echo.desktop_pressed(Instant::now());
         // A press on a desktop file or folder (to select it, drag it onto a window, open it) is
         // Finder's, as on Apple's: nothing reveals, ours or macOS's.
         let icons = self.icons_for_press(p, Instant::now());
