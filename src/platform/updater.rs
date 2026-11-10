@@ -15,11 +15,15 @@
 //!    normal quit path (every window back, the leftovers check), and right before it exits
 //!    it starts the helper: this same binary, already running and trusted, in its
 //!    `--update-helper` mode ([`run_helper`]). The new code never runs before the swap.
+//!    The user's own Quit installs a ready update too ([`hand_off`] with no relaunch; his go
+//!    11-09): the new version then replaces the old one and is not opened.
 //! 4. **Swap** ([`run_helper`]): the helper waits for the old process to exit, checks the
 //!    staged copy's signature once more, exchanges it with the installed app atomically
 //!    (`renamex_np(RENAME_SWAP)`, or three renames that undo themselves), opens it, waits
-//!    for it to answer on the ctl socket with the new version, and only then removes the old
-//!    app. Any failure puts the old app back and opens it ([`self_update::run_swap`]), and
+//!    for it to answer on the ctl socket with the new version (with no relaunch: checks the
+//!    installed copy's signature and version instead, and opens nothing), and only then
+//!    removes the old app. Any failure puts the old app back and opens it (on a relaunch;
+//!    [`self_update::run_swap`]), and
 //!    leaves a note the app shows at its next launch ([`take_note`]). When the old app cannot
 //!    be put back, the working folder is kept (marked, so a launch does not clean it) and the
 //!    log and the note say where each copy is (review R1). The old process is told by its pid
@@ -53,7 +57,7 @@ use objc2_foundation::{
 
 use super::{ctl, logging, paths};
 use crate::self_update::{
-    self, Assessment, Candidate, ExchangeError, HelperArgs, Place, Refusal, SwapOps, SwapOutcome, Trust, APP_NAME,
+    self, Assessment, Candidate, ExchangeError, HelperArgs, Place, Refusal, StaleWork, SwapOps, SwapOutcome, Trust, APP_NAME,
 };
 use crate::updates::{self, Release, Version};
 
@@ -594,7 +598,15 @@ fn prepare_in(release: &Release, trust: &Trust, target: Result<PathBuf, Refusal>
         return Err(failed(format!("the copy did not verify: {r}")));
     }
     clear_quarantine(&staged);
-    let helper = HelperArgs { pid: std::process::id(), target, staged, version: version.to_string(), requirement: trust.requirement.clone() };
+    // Reopened after the swap unless the user's Quit installs it ([`hand_off`] decides).
+    let helper = HelperArgs {
+        pid: std::process::id(),
+        target,
+        staged,
+        version: version.to_string(),
+        requirement: trust.requirement.clone(),
+        relaunch: true,
+    };
     Ok(Prepared { version, helper })
 }
 
@@ -634,31 +646,43 @@ pub fn discard(p: &Prepared) {
 /// At launch, off the main thread: removes a working folder an earlier update left beside
 /// this app (the app quit while an update waited, or a helper was killed), unless an update
 /// helper runs now (the folder is its own until it ends); and the disk images kept for
-/// manual installs more than an hour ago.
-pub fn clean_stale_work() {
+/// manual installs more than an hour ago. `found` gets what was there (off the main thread):
+/// a removed update is checked for again early ([`self_update::checks_early`]).
+pub fn clean_stale_work(found: impl FnOnce(StaleWork) + Send + 'static) {
     let _ = std::thread::Builder::new().name("update-clean".into()).spawn(|| {
         let old = clean_old_downloads(&paths::user_temp_dir(), MANUAL_KEEP);
         if old > 0 {
             tracing::info!(folders = old, "update: removed the disk images kept for earlier manual installs");
         }
-        let Ok(target) = self_update::install_target(&own_bundle(), true) else { return };
-        let Some((work, _)) = self_update::staging_paths(&target) else { return };
-        if std::fs::symlink_metadata(&work).is_err() {
-            return;
-        }
-        if processes(|_, argv| self_update::is_update_helper(argv)).next().is_some() {
-            tracing::info!("update: an installer helper runs; its working folder stays");
-            return;
-        }
-        if work.join(self_update::KEEP_MARK).exists() {
-            tracing::warn!("update: {} holds a copy an update could not put back; it stays until the next update", work.display());
-            return;
-        }
-        match remove_any(&work) {
-            Ok(()) => tracing::info!("update: removed a working folder an earlier update left behind"),
-            Err(e) => tracing::warn!("update: cannot remove {}: {e}", work.display()),
-        }
+        found(stale_work());
     });
+}
+
+/// The working folder beside this app: what is there, removing an earlier run's.
+fn stale_work() -> StaleWork {
+    let Ok(target) = self_update::install_target(&own_bundle(), true) else { return StaleWork::Nothing };
+    let Some((work, _)) = self_update::staging_paths(&target) else { return StaleWork::Nothing };
+    if std::fs::symlink_metadata(&work).is_err() {
+        return StaleWork::Nothing;
+    }
+    if processes(|_, argv| self_update::is_update_helper(argv)).next().is_some() {
+        tracing::info!("update: an installer helper runs; its working folder stays");
+        return StaleWork::HelperRuns;
+    }
+    if work.join(self_update::KEEP_MARK).exists() {
+        tracing::warn!("update: {} holds a copy an update could not put back; it stays until the next update", work.display());
+        return StaleWork::Kept;
+    }
+    match remove_any(&work) {
+        Ok(()) => {
+            tracing::info!("update: removed a working folder an earlier update left behind");
+            StaleWork::Removed
+        }
+        Err(e) => {
+            tracing::warn!("update: cannot remove {}: {e}", work.display());
+            StaleWork::NotRemoved
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -669,10 +693,27 @@ fn pending() -> &'static Mutex<Option<HelperArgs>> {
     P.get_or_init(|| Mutex::new(None))
 }
 
-/// Arms the helper: the next exit (the quit the caller starts now) launches it.
-pub fn hand_off(p: &Prepared) {
+/// Arms the helper: the next exit (the quit the caller starts now, or the user's Quit under
+/// way) launches it. `relaunch`: the new version is opened after the swap (an install at a
+/// quiet moment), or not (the user's own Quit: they asked the app to stop).
+pub fn hand_off(p: &Prepared, relaunch: bool) {
     if let Ok(mut slot) = pending().lock() {
-        *slot = Some(p.helper.clone());
+        *slot = Some(HelperArgs { relaunch, ..p.helper.clone() });
+    }
+}
+
+/// Whether a helper is armed (the quit under way was made for an install).
+pub fn armed() -> bool {
+    pending().lock().is_ok_and(|s| s.is_some())
+}
+
+/// The line when the helper cannot start: for an install at the user's Quit, one INFO line
+/// (the quit goes on; the staged copy stays, and the next launch checks again).
+fn helper_not_started(args: &HelperArgs, why: &str) {
+    if args.relaunch {
+        tracing::error!("update: cannot start the installer helper: {why}");
+    } else {
+        tracing::info!(version = %args.version, "update: the installer helper could not start ({why}); the quit goes on, and the next launch checks for the update again");
     }
 }
 
@@ -683,7 +724,7 @@ pub fn launch_pending_helper() -> bool {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
-            tracing::error!("update: cannot find our own executable: {e}");
+            helper_not_started(&args, &format!("cannot find our own executable: {e}"));
             return false;
         }
     };
@@ -698,11 +739,11 @@ pub fn launch_pending_helper() -> bool {
     }
     match cmd.spawn() {
         Ok(child) => {
-            tracing::info!(pid = child.id(), version = %args.version, "update: the installer helper started");
+            tracing::info!(pid = child.id(), version = %args.version, relaunch = args.relaunch, "update: the installer helper started");
             true
         }
         Err(e) => {
-            tracing::error!("update: cannot start the installer helper: {e}");
+            helper_not_started(&args, &e.to_string());
             false
         }
     }
@@ -857,6 +898,15 @@ impl RealSwap {
     }
 }
 
+impl RealSwap {
+    /// An app instance runs from the installed executable other than the old process (the
+    /// user opened it again after the Quit).
+    fn reopened(&self) -> bool {
+        let exe = self.exe();
+        processes(|e, argv| e == exe && self_update::is_app_instance(argv)).any(|pid| pid as u32 != self.args.pid)
+    }
+}
+
 /// Sends `sig` to each of `pids`, then waits up to `wait` for them to go. Returns whether
 /// they all went.
 fn signal_and_wait(pids: &[i32], sig: libc::c_int, wait: Duration) -> bool {
@@ -876,13 +926,27 @@ fn signal_and_wait(pids: &[i32], sig: libc::c_int, wait: Duration) -> bool {
     true
 }
 
+/// The copy at `path` satisfies `requirement` and carries `version`.
+fn verify_copy(path: &Path, requirement: &str, version: &str, which: &str) -> Result<(), String> {
+    verify_signature(path, requirement)?;
+    match plist_value(path, "CFBundleShortVersionString") {
+        Some(v) if self_update::same_version(&v, version) => Ok(()),
+        other => Err(format!("the {which} copy's version is {other:?}, not {version}")),
+    }
+}
+
 impl SwapOps for RealSwap {
     fn verify_staged(&mut self) -> Result<(), String> {
-        verify_signature(&self.args.staged, &self.args.requirement)?;
-        match plist_value(&self.args.staged, "CFBundleShortVersionString") {
-            Some(v) if self_update::same_version(&v, &self.args.version) => Ok(()),
-            other => Err(format!("the staged copy's version is {other:?}, not {}", self.args.version)),
+        // An install at the user's Quit opens nothing; if the user opened the app again
+        // before the swap, it does not go in under that copy (nothing would confirm it).
+        if !self.args.relaunch && self.reopened() {
+            return Err("Stage Manager was opened again before the update went in".into());
         }
+        verify_copy(&self.args.staged, &self.args.requirement, &self.args.version, "staged")
+    }
+
+    fn check_installed(&mut self) -> Result<(), String> {
+        verify_copy(&self.args.target, &self.args.requirement, &self.args.version, "installed")
     }
 
     fn exchange(&mut self) -> Result<(), ExchangeError> {
@@ -987,7 +1051,7 @@ pub fn run_helper(args: &[String]) -> ExitCode {
         }
     };
     let born = start_time(args.pid as i32);
-    tracing::info!(pid = args.pid, version = %args.version, target = %args.target.display(), "updater: waiting for the app to quit");
+    tracing::info!(pid = args.pid, version = %args.version, relaunch = args.relaunch, target = %args.target.display(), "updater: waiting for the app to quit");
     let start = Instant::now();
     while app_still_runs(args.pid, born) {
         if start.elapsed() > EXIT_WAIT {
@@ -1003,10 +1067,10 @@ pub fn run_helper(args: &[String]) -> ExitCode {
         std::thread::sleep(Duration::from_millis(100));
     }
     let mut ops = RealSwap { args: args.clone(), new_pid: None, launched_at: None };
-    let outcome = self_update::run_swap(&mut ops);
+    let outcome = self_update::run_swap(&mut ops, args.relaunch);
     let current = || plist_value(&args.target, "CFBundleShortVersionString").unwrap_or_default();
     match &outcome {
-        SwapOutcome::Installed => tracing::info!(version = %args.version, "updater: installed"),
+        SwapOutcome::Installed => tracing::info!(version = %args.version, relaunch = args.relaunch, "updater: installed"),
         SwapOutcome::InstalledOldLeft(e) => tracing::warn!("updater: installed; the old version stays in the working folder: {e}"),
         SwapOutcome::RolledBack { step, why, relaunched } => {
             // Only when the old app is at the installed path (`run_swap`): the folder holds
@@ -1098,6 +1162,30 @@ mod tests {
         let me = std::process::id();
         assert!(app_still_runs(me, start_time(me as i32)));
         assert!(!app_still_runs(me, Some((1, 0))));
+    }
+
+    /// His go 11-09: the user's Quit arms the helper without a relaunch; the quiet moment's
+    /// install keeps it. The armed helper marks the quit as one made for an install.
+    #[test]
+    fn a_quit_install_arms_the_helper_without_a_relaunch() {
+        let helper = HelperArgs {
+            pid: 4242,
+            target: PathBuf::from("/Applications/Stage Manager.app"),
+            staged: PathBuf::from("/Applications/.Stage Manager update/Stage Manager.app"),
+            version: "9.9.9".into(),
+            requirement: "identifier \"dev.eugene.stagemanager\"".into(),
+            relaunch: true,
+        };
+        let p = Prepared { version: Version::parse("9.9.9").expect("version"), helper };
+        for relaunch in [false, true] {
+            assert!(!armed());
+            hand_off(&p, relaunch);
+            assert!(armed(), "a quit made for an install");
+            let args = pending().lock().expect("lock").take().expect("armed");
+            assert_eq!(args.relaunch, relaunch);
+            assert_eq!(HelperArgs::parse(&args.to_args()).map(|a| a.relaunch), Ok(relaunch));
+        }
+        assert!(!armed());
     }
 
     /// Review C12: a relaunch that failed at the installed path is made up for by bundle ID.

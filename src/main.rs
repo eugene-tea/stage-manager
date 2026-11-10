@@ -32,6 +32,10 @@
 //! - `stage-manager probe-glass --rect X,Y,W,H [--rect ...]` prints the wallpaper behind each
 //!   rectangle as the cards' glass reads it (from the picture's file) and the under the
 //!   default glass makes of it, one JSON line (`ui::card_glass::probe`).
+//! - `stage-manager probe-icons [--for S]` prints, every second for S seconds (default 90),
+//!   the look the Dock shows app icons in and the mean colour of a few Apple apps' icons as
+//!   the strip fetches them, and the appearance notifications heard: the live check that the
+//!   cards' icons follow Light/Dark and the icon and widget style (`ui::app_icons::probe`).
 //! - `stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle]` opens
 //!   windows of its own, inactive, one at a time, and prints how far each one's shadow
 //!   reaches past its frame per side, one JSON object (`platform::shadow_probe`);
@@ -81,6 +85,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-shadow") => stage_manager::platform::shadow_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
+        Some("probe-icons") => stage_manager::ui::app_icons::probe(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
         Some("--version") => {
             println!("stage-manager {}", env!("CARGO_PKG_VERSION"));
@@ -90,7 +96,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>...|--all | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>...|--all | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | probe-icons [--for S] | --version]"
             );
             ExitCode::from(2)
         }
@@ -443,15 +449,13 @@ mod app {
     }
 
     fn finish_exit(ok: bool, code: i32) -> ! {
+        let reason = stage_manager::ui::app_menu::system_quit_reason();
+        let (head_start, logout_reason) = (wm_thread::quit_after_head_start(), reason.is_some_and(logout_watch::logout_reason));
+        let user_quit = stage_manager::ui::app_menu::user_quit();
         if ok {
             // A quit at a logout: the guardian waits for its cancel, which opens the app again
             // (round logout-cancel-relaunch); never after the user's own Quit.
-            let reason = stage_manager::ui::app_menu::system_quit_reason();
-            let marker = logout_watch::quit_marker(
-                wm_thread::quit_after_head_start(),
-                reason.is_some_and(logout_watch::logout_reason),
-                stage_manager::ui::app_menu::user_quit(),
-            );
+            let marker = logout_watch::quit_marker(head_start, logout_reason, user_quit);
             if marker == logout_watch::LOGOUT_MARK {
                 tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
             }
@@ -465,6 +469,9 @@ mod app {
         ctl::remove_socket();
         // No app is left with its enhanced UI off by us (round enhanced-ui).
         stage_manager::platform::enhanced_ui::restore_all("quit");
+        // A ready update installs at the user's own Quit, not reopened (his go 11-09); main
+        // thread only (the signal watcher's exit installs nothing).
+        stage_manager::ui::shell::install_on_quit(user_quit, ok, head_start || logout_reason);
         // An update ready to install: its helper waits for this process to exit (8C).
         stage_manager::platform::updater::launch_pending_helper();
         // A capture still in flight at exit makes macOS alert about screen access. Before the
@@ -537,8 +544,11 @@ mod app {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-menu-quit needs STAGE_MANAGER_TEST=1");
                 }
-                // The menu's path: the action runs while the app state is borrowed.
-                DispatchQueue::main().exec_async(|| with_app(|app| app.on_menu(MenuAction::Quit)));
+                // The menu's path: the user's Quit, run while the app state is borrowed.
+                DispatchQueue::main().exec_async(|| {
+                    stage_manager::ui::app_menu::note_user_quit();
+                    with_app(|app| app.on_menu(MenuAction::Quit))
+                });
                 json!({ "ok": true, "quitting": true })
             }
             Command::DebugUpdate => {
@@ -570,13 +580,13 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
-            Command::DebugDesktop { at, double, to } => {
+            Command::DebugDesktop { at, double, to, hold } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-desktop needs STAGE_MANAGER_TEST=1");
                 }
                 let posted = match to {
                     Some(to) => input::desktop_drag(at, to),
-                    None => input::desktop_click(at, double),
+                    None => input::desktop_click(at, double, hold.map(Duration::from_millis)),
                 };
                 match posted {
                     Ok(()) => json!({ "ok": true }),
@@ -597,6 +607,12 @@ mod app {
                     return ctl::error_reply("debug-space needs STAGE_MANAGER_TEST=1");
                 }
                 debug_space(&wm, direction, numpad)
+            }
+            Command::DebugToggleStrip => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-toggle-strip needs STAGE_MANAGER_TEST=1");
+                }
+                json!({ "ok": wm.send(WmCommand::ToggleStrip) })
             }
             Command::DebugStrip => {
                 if std::env::var_os(TEST_ENV).is_none() {
@@ -869,6 +885,8 @@ mod app {
         let appearance = apps::observe_appearance(|| {
             // Windows that follow the system's appearance change with it: read again.
             stage_manager::platform::window_look::appearance_changed();
+            // The cards' app icons follow it, as the Dock's do.
+            stage_manager::ui::strip::icons_changed();
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::appearance_changed(mtm);
             }

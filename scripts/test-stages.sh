@@ -10,7 +10,8 @@
 #   scripts/test-stages.sh restore m6      # restore after a restart (simulated new sessions), and
 #                                          # the same-session relaunch
 #   scripts/test-stages.sh m3 safety       # some phases
-#   scripts/test-stages.sh hide            # [windows] hide_parked_apps (a prototype): by name only
+#   scripts/test-stages.sh behave          # an app's front window on arrival; a card dropped
+#                                          # on the other screen (round parity-behave)
 #   scripts/test-stages.sh glass           # the cards' glass (captures on): white, grey and black
 #                                          # cards and a switch's snapshots against the model
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)

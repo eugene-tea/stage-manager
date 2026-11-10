@@ -153,6 +153,8 @@ pub struct CardStyle {
     pub press_scale: f64,
     pub press_ms: u64,
     pub fade_ms: u64,
+    /// A window on a card before its picture arrives: its glass at this opacity.
+    pub empty_opacity: f64,
     /// Each window's picture on a card (1: opaque; below, the wallpaper shows through).
     pub window_opacity: f64,
     /// The same on the card under the pointer (or a drop's target), eased with its growth.
@@ -207,7 +209,12 @@ pub struct DragStyle {
     pub threshold: f64,
     /// The middle fraction of a card's height that takes a dropped card (a merge).
     pub merge_zone: f64,
-    pub grow_distance: f64,
+    /// Past the strip, the window appearing under the pointer slides there this long.
+    pub appear_ms: u64,
+    /// Where a card dragged out holds its window: the pointer this far right of the window's
+    /// left edge and this far below its top (points), whatever the press.
+    pub window_grab_x: f64,
+    pub window_grab_y: f64,
     pub lifted_opacity: f64,
     pub ghost_opacity: f64,
     /// A card dropped onto another shrinks into it and fades this long.
@@ -220,9 +227,14 @@ pub struct AnimationStyle {
     pub enabled: bool,
     /// Multiplies the speed of every animation; 0 = none.
     pub speed: f64,
+    /// Windows growing out of the strip (a switch's incoming windows).
     pub spring_stiffness: f64,
     pub spring_damping: f64,
     pub spring_mass: f64,
+    /// Windows shrinking into the strip (a switch's outgoing windows).
+    pub shrink_stiffness: f64,
+    pub shrink_damping: f64,
+    pub shrink_mass: f64,
     pub unpark_at: f64,
     pub cover_ms: u64,
     pub corner_radius: f64,
@@ -234,11 +246,38 @@ pub struct AnimationStyle {
     pub shadow_offset_y: f64,
     pub snapshot_interval_ms: u64,
     pub snapshot_cache_mb: u64,
+    /// When Reduce Motion applies: macOS's setting, always or never
+    /// ([`ReduceMotion::applies`]).
+    pub reduce_motion: ReduceMotion,
     /// An activation of an app in another stage (Cmd-Tab, Dock, a click on its sliver) grows
     /// its windows from their card like a card click, as Apple's does (the default; the park
     /// corner, where macOS has raised them, is covered meanwhile); off, they come to their
     /// frames at once.
     pub activation_grows: bool,
+}
+
+/// `[animation] reduce_motion`: when the app follows Reduce Motion (nothing flies, slides,
+/// grows or turns; see `ui::display_options`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReduceMotion {
+    /// As macOS says (System Settings > Accessibility > Display > Reduce motion).
+    #[default]
+    System,
+    /// Always, whatever macOS says.
+    On,
+    /// Never: the full motion, whatever macOS says.
+    Off,
+}
+
+impl ReduceMotion {
+    /// True when motion is reduced, given macOS's Reduce Motion setting (`system`).
+    pub fn applies(self, system: bool) -> bool {
+        match self {
+            Self::System => system,
+            Self::On => true,
+            Self::Off => false,
+        }
+    }
 }
 
 /// `[animation] shadow`: a moving snapshot's shadow.
@@ -312,6 +351,12 @@ impl AnimationStyle {
         self.speed() > 0.0
     }
 
+    /// True when motion is reduced (`[animation] reduce_motion`, given macOS's Reduce Motion
+    /// setting `system`): what animates then only fades, nothing moves, grows or turns.
+    pub fn reduces_motion(&self, system: bool) -> bool {
+        self.reduce_motion.applies(system)
+    }
+
     /// A duration of `ms` milliseconds at this speed, in seconds (0 when nothing animates).
     pub fn seconds(&self, ms: u64) -> f64 {
         let speed = self.speed();
@@ -345,9 +390,6 @@ pub struct WindowsConfig {
     pub park_inside: f64,
     /// How far below the display's bottom a parked window's top is asked.
     pub park_drop: f64,
-    /// Apps whose every window sits in inactive stages are hidden instead of parked in view
-    /// (a prototype).
-    pub hide_parked_apps: bool,
     /// The desktop picture, drawn from its file, over the parked windows' slivers (a
     /// prototype).
     pub corner_patch: bool,
@@ -788,7 +830,12 @@ impl Config {
                     continue;
                 }
                 if let Some((_, _, why)) = RETIRED.iter().find(|(s, k, _)| s == section && k == key) {
-                    warnings.push(format!("[{section}] {key}: {why}"));
+                    // A retired switch left off asks nothing of the user: noted at debug only.
+                    if v.as_bool() == Some(false) {
+                        tracing::debug!("config: [{section}] {key} = false is no longer used; ignored");
+                    } else {
+                        warnings.push(format!("[{section}] {key}: {why}"));
+                    }
                     continue;
                 }
                 let Some(d) = KEYS.iter().find(|d| d.section == section && d.key == key) else {
@@ -938,6 +985,7 @@ impl Config {
                     press_scale: v.num("cards.press_scale"),
                     press_ms: v.uint("cards.press_ms"),
                     fade_ms: v.uint("cards.fade_ms"),
+                    empty_opacity: v.num("cards.empty_opacity"),
                     window_opacity: v.num("cards.window_opacity"),
                     hover_window_opacity: v.num("cards.hover_window_opacity"),
                     backdrop_saturation: v.num("cards.backdrop_saturation"),
@@ -974,7 +1022,9 @@ impl Config {
                 drag: DragStyle {
                     threshold: v.num("drag.threshold"),
                     merge_zone: v.num("drag.merge_zone"),
-                    grow_distance: v.num("drag.grow_distance"),
+                    appear_ms: v.uint("drag.appear_ms"),
+                    window_grab_x: v.num("drag.window_grab_x"),
+                    window_grab_y: v.num("drag.window_grab_y"),
                     lifted_opacity: v.num("drag.lifted_opacity"),
                     ghost_opacity: v.num("drag.ghost_opacity"),
                     merge_ms: v.uint("drag.merge_ms"),
@@ -985,6 +1035,9 @@ impl Config {
                     spring_stiffness: v.num("animation.spring_stiffness"),
                     spring_damping: v.num("animation.spring_damping"),
                     spring_mass: v.num("animation.spring_mass"),
+                    shrink_stiffness: v.num("animation.shrink_stiffness"),
+                    shrink_damping: v.num("animation.shrink_damping"),
+                    shrink_mass: v.num("animation.shrink_mass"),
                     unpark_at: v.num("animation.unpark_at"),
                     cover_ms: v.uint("animation.cover_ms"),
                     corner_radius: v.num("animation.corner_radius"),
@@ -997,6 +1050,11 @@ impl Config {
                     shadow_offset_y: v.num("animation.shadow_offset_y"),
                     snapshot_interval_ms: v.uint("animation.snapshot_interval_ms"),
                     snapshot_cache_mb: v.uint("animation.snapshot_cache_mb"),
+                    reduce_motion: match v.text("animation.reduce_motion") {
+                        "on" => ReduceMotion::On,
+                        "off" => ReduceMotion::Off,
+                        _ => ReduceMotion::System,
+                    },
                     activation_grows: v.flag("animation.activation_grows"),
                 },
             },
@@ -1012,7 +1070,6 @@ impl Config {
                 inert_slivers: v.flag("windows.inert_slivers"),
                 park_inside: v.num("windows.park_inside"),
                 park_drop: v.num("windows.park_drop"),
-                hide_parked_apps: v.flag("windows.hide_parked_apps"),
                 corner_patch: v.flag("windows.corner_patch"),
                 corner_patch_reach: v.auto("windows.corner_patch_reach"),
             },
@@ -1243,6 +1300,15 @@ pub fn command(args: &[String]) -> (i32, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reduce_motion_follows_macos_unless_set() {
+        assert!(ReduceMotion::System.applies(true) && !ReduceMotion::System.applies(false));
+        assert!(ReduceMotion::On.applies(false) && ReduceMotion::On.applies(true));
+        assert!(!ReduceMotion::Off.applies(true) && !ReduceMotion::Off.applies(false));
+        let a = AnimationStyle { reduce_motion: ReduceMotion::Off, ..Config::default().style.animation };
+        assert!(!a.reduces_motion(true), "off keeps the full motion whatever macOS says");
+    }
     use crate::engine::rules::AppMatch;
 
     fn parse(text: &str) -> Parsed {
@@ -1354,12 +1420,17 @@ mod tests {
         assert!(c.stages.restore_after_restart, "stages come back after a restart (the owner's word, 10-13)");
         let a = &c.style.animation;
         assert!(a.enabled && a.speed == 1.0 && a.speed() == 1.0, "every animation at Apple's speed");
-        assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (272.0, 33.0, 1.0), "Apple's switch, measured 10-12");
+        assert_eq!((a.spring_stiffness, a.spring_damping, a.spring_mass), (289.0, 34.0, 1.0), "Apple's windows growing out of a card, measured 11-09 with the path");
+        assert_eq!((a.shrink_stiffness, a.shrink_damping, a.shrink_mass), (289.0, 34.0, 1.0), "Apple's windows shrinking into a card: the same spring");
         let m = &c.style.motion;
         assert_eq!((m.spring_stiffness, m.spring_damping, m.spring_mass), (289.0, 34.0, 1.0), "Apple's card glide");
         assert_eq!((m.slide_stiffness, m.slide_damping, m.slide_mass), (282.0, 33.6, 1.0), "Apple's slide");
         let k = &c.style.cards;
-        assert_eq!((k.hover_scale, k.hover_ms, k.press_scale, k.press_ms), (1.06, 210, 0.987, 100), "Apple's hover and press");
+        assert_eq!((k.hover_scale, k.hover_ms, k.press_scale, k.press_ms), (1.11, 400, 0.987, 100), "Apple's hover (measured 11-09) and press");
+        let d = &c.style.drag;
+        assert_eq!((d.appear_ms, d.window_grab_x, d.window_grab_y), (100, 96.0, 100.0), "Apple's card dragged out, measured 11-09");
+        let r = &c.style.reveal;
+        assert_eq!((r.delay_ms, r.poll_ms), (130, 30), "Apple's edge reveal, measured 11-09");
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
     }
@@ -1405,6 +1476,9 @@ mod tests {
         "animation.spring_stiffness",
         "animation.spring_damping",
         "animation.spring_mass",
+        "animation.shrink_stiffness",
+        "animation.shrink_damping",
+        "animation.shrink_mass",
         "animation.unpark_at",
         "motion.spring_stiffness",
         "motion.spring_damping",
@@ -1419,6 +1493,7 @@ mod tests {
         "cards.press_scale",
         "cards.fade_ms",
         "drag.merge_ms",
+        "drag.appear_ms",
     ];
 
     #[test]
@@ -1517,6 +1592,7 @@ shift_brings_here = false
 enabled = false
 unpark_at = 0.9
 activation_grows = false
+reduce_motion = "on"
 "##,
         );
         let c = p.config;
@@ -1525,6 +1601,8 @@ activation_grows = false
         assert!(!c.style.animation.enabled && c.style.animation.unpark_at == 0.9);
         assert!(!c.style.animation.activation_grows, "kept: false brings an activation's windows at once");
         assert!(Config::default().style.animation.activation_grows, "an activation grows from its card by default, as Apple's (8L)");
+        assert_eq!(c.style.animation.reduce_motion, ReduceMotion::On);
+        assert_eq!(Config::default().style.animation.reduce_motion, ReduceMotion::System, "macOS's Reduce Motion decides by default");
         assert_eq!(c.strip.order, StripOrder::InPlace, "\"fixed\" is the older name of \"in_place\"");
         assert_eq!(c.strip.active, ActiveCard::Card, "show_active = true is the older active = \"card\"");
         assert!(!p.warnings.iter().any(|w| w.contains("show_active") || w.contains("order")), "the older spellings read without a warning: {:?}", p.warnings);
@@ -1575,6 +1653,18 @@ swipe = true
         assert!(p.warnings.iter().any(|w| w.contains("position")));
         assert!(p.warnings.iter().any(|w| w.contains("[gestures]")));
         assert!(p.warnings.iter().any(|w| w.contains("fit_windows") && w.contains("[windows] fit")));
+    }
+
+    /// `[windows] hide_parked_apps`, retired 11-09: set, a gentle notice; left off (the
+    /// owner's file), not a word.
+    #[test]
+    fn a_retired_switch_left_off_loads_without_a_word() {
+        let on = parse("[windows]\nhide_parked_apps = true\n");
+        assert_eq!(on.warnings.len(), 1, "{:?}", on.warnings);
+        assert!(on.warnings[0].starts_with("[windows] hide_parked_apps: no longer used"), "{:?}", on.warnings);
+        let off = parse("[windows]\nhide_parked_apps = false\nfit = \"move\"\n");
+        assert!(off.warnings.is_empty(), "{:?}", off.warnings);
+        assert_eq!(off.config.windows.fit, FitMode::Move, "the rest still read");
     }
 
     #[test]

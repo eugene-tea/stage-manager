@@ -35,5 +35,7 @@ their settings is a different job: [docs/AGENTS.md](docs/AGENTS.md).)
   apps someone is using, and never leave a window parked.
 - **Nothing private in the repo:** no logs, screenshots or window titles; the log itself
   writes titles only as short codes.
+- **Accessibility:** anything new on screen gets a VoiceOver label and follows Reduce Motion
+  ([.github/ACCESSIBILITY.md](.github/ACCESSIBILITY.md); UX-SPEC, "Accessibility").
 - **CHANGELOG** gets a line under Unreleased for every change a user would notice, in plain
   words.

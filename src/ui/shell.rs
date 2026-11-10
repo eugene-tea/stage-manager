@@ -6,7 +6,10 @@
 //! Version" (or Download where this copy cannot replace itself). Install downloads and
 //! verifies it in the background (`platform::updater`), waits for a quiet moment (never
 //! mid-drag or mid-transition; an automatic install also waits for the user to be away),
-//! then quits through the app's quit path, which starts the installer helper last.
+//! then quits through the app's quit path, which starts the installer helper last. A ready
+//! update also installs at the user's own Quit, without reopening the app
+//! ([`install_on_quit`]); a launch that finds an update an earlier run left behind checks
+//! again within its first minute instead of waiting a day.
 //!
 //! The main thread's poll ([`poll`], every second) and config reloads ([`config_changed`])
 //! keep it current; menu clicks arrive through [`menu`]. Apple's settings have one source:
@@ -44,7 +47,7 @@ use crate::platform::permissions::{self, Approval, PermissionState};
 use crate::platform::wm_thread::{WmCommand, WmHandle};
 use crate::platform::updater::{self, PrepareError, Prepared};
 use crate::platform::{capture, instance, paths, session, update_check};
-use crate::self_update::{self, Moment, Refusal};
+use crate::self_update::{self, Moment, QuitFacts, Refusal, StaleWork};
 use crate::updates::{self, Outcome, Release};
 
 /// The agent notes on GitHub (the "Copy Instructions for Agents" prompt points here).
@@ -101,6 +104,12 @@ struct Shell {
     update: Option<(u64, bool)>,
     update_serial: u64,
     install: Install,
+    /// An earlier run left a downloaded update behind: an automatic check is owed now, not in
+    /// a day (until a check gets an answer).
+    left_behind: bool,
+    /// The launch's first automatic check came (a left-behind update found later checks at
+    /// once).
+    first_check_done: bool,
     /// The activation policy through a logout (round reopen-list).
     reopen: ReopenSwitch,
     /// Counts the activation policy's switches: a pending retry of the switch back to
@@ -315,6 +324,8 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
         update: None,
         update_serial: 0,
         install: Install::Idle,
+        left_behind: false,
+        first_check_done: false,
         reopen: ReopenSwitch::default(),
         policy_serial: 0,
         _timers: Vec::new(),
@@ -374,14 +385,15 @@ impl Shell {
         } else {
             login_item::tidy(way);
         }
-        let first_check = RcBlock::new(|_t: NonNull<NSTimer>| auto_check());
+        let first_check = RcBlock::new(|_t: NonNull<NSTimer>| first_check());
         let tick = RcBlock::new(|_t: NonNull<NSTimer>| auto_check());
         if self.config.app.check_for_updates && unattended_allowed() {
             updater::warm();
         }
         // A staged copy an earlier update left beside the app (it quit while an update
-        // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6).
-        updater::clean_stale_work();
+        // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6);
+        // the update it held is checked for again within the first minute (his go 11-09).
+        updater::clean_stale_work(|found| later(move || stale_work_found(found)));
         let note = RcBlock::new(|_t: NonNull<NSTimer>| show_update_note());
         // SAFETY: the blocks run on the main run loop, which keeps the timers; we keep them too.
         unsafe {
@@ -726,11 +738,41 @@ pub fn capture_on() -> bool {
     with(|s| s.capture_on()).unwrap_or(true)
 }
 
-/// An automatic update check, when allowed, on, and a day has passed.
+/// An automatic update check, when allowed, on, and a day has passed (or an update an
+/// earlier run left behind is owed a check).
 fn auto_check() {
-    let due = with(|s| s.config.app.check_for_updates && updates::due(s.state.last_update_check, now_secs())).unwrap_or(false);
+    let due = with(|s| {
+        s.config.app.check_for_updates && self_update::check_due(s.left_behind, updates::due(s.state.last_update_check, now_secs()))
+    })
+    .unwrap_or(false);
     if due && unattended_allowed() {
         check(false);
+    }
+}
+
+/// The launch's first automatic check ([`FIRST_CHECK_DELAY`] after the launch).
+fn first_check() {
+    with(|s| s.first_check_done = true);
+    auto_check();
+}
+
+/// What the launch found beside the installed app (main thread): an update an earlier run
+/// downloaded and verified that never went in is checked for again at the first check, or at
+/// once when that came already; never trusted from the old folder (it is gone, and a new
+/// check downloads and verifies from scratch).
+fn stale_work_found(found: StaleWork) {
+    if !self_update::checks_early(found) {
+        return;
+    }
+    let Some(first_done) = with(|s| {
+        s.left_behind = true;
+        s.first_check_done
+    }) else {
+        return;
+    };
+    tracing::info!(?found, "update: an earlier run left a downloaded update behind; checking again within the first minute");
+    if first_done {
+        auto_check();
     }
 }
 
@@ -773,6 +815,7 @@ fn on_checked(serial: u64, outcome: Outcome) {
         s.update = None;
         if !matches!(outcome, Outcome::Failed(_)) {
             s.state.last_update_check = Some(now_secs());
+            s.left_behind = false;
             s.save_state();
         }
         Some((s.mtm, s.state.skipped_version.clone(), manual, s.config.app.install_updates))
@@ -872,15 +915,22 @@ fn skip_version(version: &updates::Version) {
     });
 }
 
+/// Test builds only: with this set to `1`, `debug-update` readies the update as an automatic
+/// install does (it then waits for the user to be away, or for the user's Quit).
+#[cfg(feature = "update-test")]
+pub const TEST_AUTO_ENV: &str = "STAGE_MANAGER_UPDATE_AUTO";
+
 /// Test builds only (`update-test`, the `debug-update` ctl command): checks for an update
-/// and installs it as "Install and Relaunch" does, with no alert.
+/// and installs it as "Install and Relaunch" does, with no alert (as an automatic install
+/// does with [`TEST_AUTO_ENV`]).
 #[cfg(feature = "update-test")]
 pub fn debug_install() {
-    update_check::check(|outcome| {
+    let auto = std::env::var(TEST_AUTO_ENV).is_ok_and(|v| v == "1");
+    update_check::check(move |outcome| {
         later(move || match outcome {
             Outcome::Available(release) => {
-                tracing::warn!(version = %release.version, "debug-update: installing as Install and Relaunch does");
-                begin_install(release, true);
+                tracing::warn!(version = %release.version, auto, "debug-update: installing as Install and Relaunch (or, auto, an automatic install) does");
+                begin_install(release, !auto);
             }
             other => tracing::warn!(?other, "debug-update: nothing to install"),
         })
@@ -1055,8 +1105,39 @@ fn install_if_quiet() {
         return;
     };
     tracing::info!(version = %prepared.version, asked, ?moment, "update: installing; quitting first so every window comes back");
-    updater::hand_off(&prepared);
+    updater::hand_off(&prepared, true);
     later(move || (hooks.quit)());
+}
+
+/// The app's exit path, after every window came back (main thread; elsewhere, nothing): a
+/// ready update installs at the user's own Quit, without reopening the app (his go 11-09),
+/// and never at a quit that is not theirs ([`self_update::quit_installs`]). The helper
+/// starts right after this, with the rest of the exit.
+pub fn install_on_quit(user_quit: bool, clean: bool, for_logout: bool) {
+    let Some(Some(facts)) = with(|s| {
+        matches!(s.install, Install::Ready { .. }).then(|| QuitFacts { user_quit, clean, for_logout, apple_on: s.apple_on(), helper_armed: updater::armed() })
+    }) else {
+        return;
+    };
+    if !self_update::quit_installs(facts) {
+        tracing::info!(?facts, "update: a ready update does not install at this quit; the next launch checks again");
+        return;
+    }
+    let Some(prepared) = with(|s| match std::mem::replace(&mut s.install, Install::Idle) {
+        Install::Ready { prepared, timer, .. } => {
+            timer.invalidate();
+            Some(prepared)
+        }
+        other => {
+            s.install = other;
+            None
+        }
+    })
+    .flatten() else {
+        return;
+    };
+    tracing::info!(version = %prepared.version, "update: installing at the user's Quit; the new version is not opened");
+    updater::hand_off(&prepared, false);
 }
 
 /// The note an update that did not go in left behind, shown once.

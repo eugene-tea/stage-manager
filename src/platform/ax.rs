@@ -43,6 +43,9 @@ pub mod names {
     pub const URL: &str = "AXURL";
     pub const ROLE_DOCK_ITEM: &str = "AXDockItem";
     pub const SUBROLE_APPLICATION_DOCK_ITEM: &str = "AXApplicationDockItem";
+    /// A minimized window's own tile in the Dock (`kAXMinimizedWindowDockItemSubrole`; none
+    /// with "Minimize windows into application icon", the owner's setting on 11-09).
+    pub const SUBROLE_MINIMIZED_WINDOW_DOCK_ITEM: &str = "AXMinimizedWindowDockItem";
 
     pub const ROLE_WINDOW: &str = "AXWindow";
     pub const SUBROLE_STANDARD: &str = "AXStandardWindow";
@@ -57,13 +60,16 @@ pub mod notifications {
     pub const WINDOW_MOVED: &str = "AXWindowMoved";
     pub const WINDOW_RESIZED: &str = "AXWindowResized";
     pub const WINDOW_MINIATURIZED: &str = "AXWindowMiniaturized";
+    /// Posted once a window's un-minimize animation is over and AppKit has set it down
+    /// (measured 11-09: about 0.1 s after the animation's last frame, with its move).
+    pub const WINDOW_DEMINIATURIZED: &str = "AXWindowDeminiaturized";
     pub const TITLE_CHANGED: &str = "AXTitleChanged";
 
     /// Registered on each application element.
     pub const APP_LEVEL: [&str; 3] = [WINDOW_CREATED, FOCUSED_WINDOW_CHANGED, APPLICATION_ACTIVATED];
     /// Registered on each tracked window element.
-    pub const WINDOW_LEVEL: [&str; 5] =
-        [ELEMENT_DESTROYED, WINDOW_MOVED, WINDOW_RESIZED, WINDOW_MINIATURIZED, TITLE_CHANGED];
+    pub const WINDOW_LEVEL: [&str; 6] =
+        [ELEMENT_DESTROYED, WINDOW_MOVED, WINDOW_RESIZED, WINDOW_MINIATURIZED, WINDOW_DEMINIATURIZED, TITLE_CHANGED];
 }
 
 /// An Accessibility failure.

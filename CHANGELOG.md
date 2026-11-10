@@ -1,5 +1,73 @@
 # Changelog
 
+## 1.8.0 — 2026-11-09
+
+- A switch moves as Apple's does, matched frame by frame to recordings of both. A window
+  coming out of its card moves out over the desktop while still small, as if far behind the
+  screen, then comes forward to its place; going back, it shrinks first, then slides into its
+  card. It keeps its shape (it no longer stretches wide in flight) and turns about its
+  middle. The windows you leave start shrinking on the same frame as the new ones start
+  growing, and the new stage's windows no longer jump in early at full size when their app
+  has another window out of sight.
+- Cards look like Apple's: rounder corners and a shadow you barely see. A card of two apps
+  stays about a single card's size, the window you used last in front and the other peeking
+  out above it on the side where it sits on your screen, instead of the two side by side. A
+  card under the pointer grows a little more and eases in; on a card of two apps each window
+  grows on its own and the icons stay put. At launch, a card still waiting for its picture is
+  faint glass, not a dark grey block. Nothing on a card is cut off at the strip's right edge.
+- In Dark Mode the cards show the apps' dark icons, as the Dock does, and they follow the icon
+  style chosen in System Settings → Appearance.
+- The strip comes back sooner when you rest the pointer at the left edge (after about 180 ms,
+  as Apple's, not 320), and slides away only once a window covers the cards' left edge
+  (about 20 points from the screen's edge, not 50).
+- A card or window dragged out of the strip turns into its window as it leaves the strip, as
+  with Apple's: at its own size and tilted as the card, just right of the pointer, it slides
+  under the pointer in about a tenth of a second and straightens. Before, a card-sized
+  picture grew as you went. A window you drag over the strip stays above the cards, and a
+  card dropped on your other screen opens its windows there.
+- One window of a card that holds several comes off alone as soon as you drag it, also
+  inside the strip: let it go in the middle to join your stage, between two cards for a
+  stage of its own, or on another card to join that stage. Drag a card by its app icons to
+  move the whole card. A window or card dropped onto a card now goes in front of that
+  stage's windows, not behind them.
+- VoiceOver reads the strip: each card is a button that says its stage and apps ("Stage 3:
+  Safari, Notes") and switches to it; its actions show all of one app's windows. In Settings,
+  VoiceOver reads each control by its row's name, and Tab reaches every control with Full
+  Keyboard Access; in the welcome window each Allow button says what it allows.
+- Stage Manager follows Reduce Motion: windows fade in and out where they are instead of
+  flying, the strip fades instead of sliding, and cards no longer grow, glide or slide. With
+  Reduce Transparency or Increase Contrast on, the cards are solid.
+- A downloaded update also installs when you quit Stage Manager; the new version starts the
+  next time you open it. Logging out, restarting or shutting down never installs it. Before,
+  an update that waited for you to step away was thrown away when you quit. One downloaded
+  earlier but never installed is checked again within a minute of opening, not a day later.
+- With "Click wallpaper to reveal desktop: Only in Stage Manager", a press a hair outside a
+  window is its edge: resizing no longer sends your stage to the strip mid-drag (VS Code came
+  back with its side panels folded), and a click on the wallpaper reveals the desktop when
+  you let go, as with Apple's, never for a drag or a press held about half a second. Pressing a file or folder on the desktop no longer
+  reveals it either: you can select it or drag it onto a window, as with Apple's.
+- Clicks on the wallpaper and the Dock work after a screenshot, and while Notification Center
+  keeps an invisible window over the screen: macOS leaves such windows for minutes, and
+  clicks under them were taken for clicks on a window.
+- A window no longer ends up off the edge of the screen after macOS's Show Desktop (a
+  wallpaper click with "Always"): the place macOS pushes it to is no longer taken as its own.
+- Minimizing a window ends in one motion after macOS's genie: a small picture of it flies
+  from its Dock tile into its card. A full-size picture used to fly from where the window had
+  been, and the window came back out of the Dock and crossed the screen to the corner.
+- An app's activation by macOS or ⌘Tab soon after a switch to its stage is no longer taken
+  for Stage Manager's own and ignored, which left its stage where it was.
+- Settings' panes are plain, as in Finder's settings, without the rounded box around the
+  rows, and say what each "Click wallpaper to reveal desktop" value does.
+- `[animation] reduce_motion` ("system", "on" or "off") decides Reduce Motion for Stage
+  Manager alone. `[drag] grow_distance` gives way to `[drag] appear_ms`, and
+  `[windows] hide_parked_apps` is gone (off by default and never in Settings).
+- In a switch, a see-through Dock no longer shows the edge of a window waiting in the corner,
+  and a window kept on top of all others stays on top while the strip shows over windows.
+- An app that opens two windows at once comes forward with the one it opened last in front.
+- A closed window about the size of another screen is no longer taken for a full-screen one.
+- With `[log] level = "debug"`, the log names any task that holds the app's window thread
+  for 100 ms or more, and how long each save of your stages takes.
+
 ## 1.7.0 — 2026-11-06
 
 - After a restart, a window its app reopens at a fraction of the size it had (VS Code, say)

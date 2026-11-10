@@ -2,8 +2,8 @@
 //! terminate / activate / hide / unhide notifications, observed on the main thread and handed
 //! on as plain Rust values; the active Space changing (`activeSpaceDidChangeNotification`);
 //! the screens changing (`didChangeScreenParametersNotification`);
-//! and hiding or unhiding an app by its pid (`NSRunningApplication`, public API, any thread),
-//! for `[windows] hide_parked_apps`; a logout, restart or shutdown coming or cancelled
+//! an app's state by its pid (`NSRunningApplication`, public API, any thread); a logout,
+//! restart or shutdown coming or cancelled
 //! ([`observe_logout`]: `loginwindow`'s distributed notifications and notify(3) names, and
 //! `willPowerOffNotification`); when the login session began (`loginwindow`'s start).
 
@@ -54,9 +54,9 @@ pub enum AppEvent {
     /// The app became frontmost; the instant is when the main thread got the notice (the
     /// switch it causes logs how long after it went out: `since_activation_ms`).
     Activated(AppInfo, Instant),
-    /// The app was hidden (⌘H, Hide Others, or our own hide).
+    /// The app was hidden (⌘H, Hide Others).
     Hidden(AppInfo),
-    /// The app was unhidden (an activation of a hidden app, Show All, or our own unhide).
+    /// The app was unhidden (an activation of a hidden app, Show All).
     Unhidden(AppInfo),
 }
 
@@ -359,28 +359,6 @@ fn running(pid: i32) -> Option<Retained<NSRunningApplication>> {
     NSRunningApplication::runningApplicationWithProcessIdentifier(pid).filter(|a| !a.isTerminated())
 }
 
-/// Asks app `pid` to hide (as ⌘H does: its windows on every Desktop leave the screen, no
-/// animation). False when there is no such app or macOS refused the request; the hide itself
-/// is asynchronous ([`is_hidden`] tells when it took).
-pub fn hide(pid: i32) -> bool {
-    running(pid).is_some_and(|a| a.hide())
-}
-
-/// Asks app `pid` to unhide, without activating it. False when there is no such app or macOS
-/// answered NO, which is not the outcome: on macOS 27 it answers NO for another app and
-/// unhides it a few milliseconds later (11-01: `answer=false` at every unhide, its notice
-/// 5 ms on). The unhide notice tells when it took.
-pub fn unhide(pid: i32) -> bool {
-    running(pid).is_some_and(|a| a.unhide())
-}
-
-/// Asks macOS to activate app `pid` (no options: its key window comes forward). macOS may
-/// pass over a request from an app that is not active; false when there is no such app or it
-/// answered NO.
-pub fn activate(pid: i32) -> bool {
-    running(pid).is_some_and(|a| a.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty()))
-}
-
 /// Whether app `pid` is hidden now; `None` when it is not running.
 pub fn is_hidden(pid: i32) -> Option<bool> {
     running(pid).map(|a| a.isHidden())
@@ -451,6 +429,15 @@ pub fn delayed_activations(
 /// The bundle id of running app `pid`, if any.
 pub fn bundle_of(pid: i32) -> Option<String> {
     running(pid).and_then(|a| a.bundleIdentifier()).map(|s| s.to_string())
+}
+
+/// Process `pid`'s executable (`proc_pidpath`), as the kernel reports it; `None` when it
+/// cannot be read (the process is gone).
+pub fn exe_path(pid: i32) -> Option<String> {
+    let mut buf = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    // SAFETY: `buf` is writable for the length passed.
+    let n = unsafe { libc::proc_pidpath(pid, buf.as_mut_ptr().cast(), buf.len() as u32) };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
 /// When this login session began: the start of this user's `loginwindow` (it is relaunched

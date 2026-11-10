@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::engine::displays::ScreenKey;
+use crate::engine::geometry::Point;
 use crate::engine::park::{Corner, choose_corner, park_frame_at};
 use crate::engine::persist::LaunchHints;
 use crate::engine::rules::{Decision, RuleAction};
@@ -1458,4 +1459,64 @@ fn a_provisional_desktop_on_the_second_screen_adopts_its_saved_one() {
 
 fn add_plain(m: &mut Model, meta: WindowMeta) -> Vec<Action> {
     m.add_window(meta, &Decision::default(), &Observation::default())
+}
+
+/// Apple's (11-09, recorded on the laptop): a card dragged from the Studio's strip onto the
+/// laptop opens its window there. Ours: it joins the laptop's current stage at the drop, as a
+/// drop does on its own screen; the Studio keeps its front, the card leaves its strip.
+#[test]
+fn a_card_dropped_on_another_screen_opens_there() {
+    let mut e = Env::both();
+    let [code, music, terminal, _, finder] = measured_desk(&mut e);
+    let at = Point::new(laptop().visible.x + 300.0, laptop().visible.y + 120.0);
+    let obs = e.d.obs();
+    let a = e.m.drop_card_on_display(music, None, at, LAPTOP, &obs);
+    e.run(a.clone());
+    assert_eq!(e.stage_of(3), finder, "Music joined the laptop's current stage");
+    assert_eq!(e.m.window(WindowId(3)).map(|w| (w.meta.display, w.space)), Some((LAPTOP, e.space_of(LAPTOP))));
+    let r = e.m.window(WindowId(3)).map(|w| w.restore).expect("Music");
+    assert_eq!((r.x, r.y), (at.x, at.y), "its top-left corner at the drop");
+    assert!(laptop().visible.contains(Point::new(r.x + 1.0, r.y + 1.0)), "on the laptop: {r:?}");
+    assert!(!e.parked_on(3, &studio()) && !e.parked_on(3, &laptop()), "shown");
+    assert_eq!(a.iter().rev().find_map(|x| match x { Action::Focus { id } => Some(*id), _ => None }), Some(WindowId(3)), "focused");
+    assert!(e.m.stage(music).is_none(), "the emptied stage went, its card with it");
+    assert_eq!(e.m.active_stage(STUDIO), Some(code), "the Studio keeps its front");
+    assert_eq!(e.m.strip_slots(STUDIO), vec![terminal]);
+    assert!(!e.parked_on(1, &studio()));
+}
+
+/// One window of a card of several dragged onto the other screen goes there alone; its stage
+/// keeps the other on the screen it was on.
+#[test]
+fn one_window_of_a_card_dropped_on_another_screen_goes_alone() {
+    let mut e = Env::both();
+    let [code, music, ..] = measured_desk(&mut e);
+    e.open(9, 10, &studio(), (950.0, 350.0), RuleAction::Current);
+    e.switch(music);
+    assert_eq!(e.m.stage(code).map(|s| s.windows.len()), Some(2), "Code's card holds two windows");
+    let finder = e.m.active_stage(LAPTOP).expect("the laptop's front");
+    let at = Point::new(laptop().visible.x + 200.0, laptop().visible.y + 80.0);
+    let obs = e.d.obs();
+    let a = e.m.drop_card_on_display(code, Some(WindowId(9)), at, LAPTOP, &obs);
+    e.run(a);
+    assert_eq!(e.stage_of(9), finder, "window 9 joined the laptop's current stage");
+    assert_eq!(e.m.window(WindowId(9)).map(|w| w.meta.display), Some(LAPTOP));
+    assert!(!e.parked_on(9, &laptop()) && !e.parked_on(9, &studio()));
+    assert_eq!(e.m.stage(code).map(|s| s.windows.clone()), Some(vec![WindowId(1)]), "Code keeps its other window");
+    assert_eq!(e.m.stage(code).map(|s| s.display), Some(STUDIO));
+    assert!(e.parked_on(1, &studio()), "still a card on the Studio");
+    assert_eq!(e.m.active_stage(STUDIO), Some(music));
+}
+
+/// A drop on the card's own screen is the drop in its main area, unchanged.
+#[test]
+fn a_card_dropped_on_its_own_screen_joins_its_current_stage() {
+    let mut e = Env::both();
+    let [code, music, ..] = measured_desk(&mut e);
+    let at = Point::new(500.0, 300.0);
+    let obs = e.d.obs();
+    let a = e.m.drop_card_on_display(music, None, at, STUDIO, &obs);
+    e.run(a);
+    assert_eq!(e.stage_of(3), code);
+    assert_eq!(e.m.window(WindowId(3)).map(|w| w.meta.display), Some(STUDIO));
 }

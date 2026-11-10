@@ -342,19 +342,6 @@ pub struct ParkedFile {
     /// empty in files of earlier versions.
     #[serde(default)]
     pub zones: Vec<ParkZone>,
-    /// Apps we hid (`[windows] hide_parked_apps`): the guardian unhides each one still
-    /// running under the same bundle id. Empty in files of earlier versions.
-    #[serde(default)]
-    pub hidden: Vec<HiddenApp>,
-}
-
-/// An app we hid, as the parked file records it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HiddenApp {
-    /// Its process id.
-    pub pid: i32,
-    /// Its bundle id (a pid reused by another app is not unhidden).
-    pub bundle: String,
 }
 
 impl ParkedFile {
@@ -368,7 +355,7 @@ impl ParkedFile {
         }
         Ok(match serde_json::from_slice(bytes)? {
             Any::File(f) => f,
-            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new(), hidden: Vec::new() },
+            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new() },
         })
     }
 }
@@ -691,12 +678,15 @@ mod tests {
             windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false }],
             corners: vec![Corner::BottomLeft],
             zones: vec![ParkZone { frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0), visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0), corners: vec![Corner::BottomLeft] }],
-            hidden: vec![HiddenApp { pid: 12, bundle: "com.example.a".into() }],
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
         let old = serde_json::to_vec(&f.windows).unwrap_or_default();
-        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, corners: vec![], zones: vec![], hidden: vec![], ..f.clone() }));
+        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, corners: vec![], zones: vec![], ..f.clone() }));
+        // A file of a version that hid apps (`[windows] hide_parked_apps`, before 1.8): its
+        // list of them is not read.
+        let hid = br#"{"visible":null,"windows":[],"hidden":[{"pid":12,"bundle":"com.example.a"}]}"#;
+        assert_eq!(ParkedFile::from_json(hid).ok().map(|f| f.windows.len()), Some(0));
         // A file of the version before corners: bottom-right only.
         let before = br#"{"visible":null,"windows":[]}"#;
         assert_eq!(ParkedFile::from_json(before).ok().map(|f| f.corners), Some(vec![]));

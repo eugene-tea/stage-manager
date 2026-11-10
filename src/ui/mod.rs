@@ -3,13 +3,16 @@
 
 pub mod about;
 pub mod alert;
+pub mod app_icons;
 pub mod app_menu;
 pub mod card_glass;
 pub mod corner_patch;
 pub mod corner_settle;
+pub mod display_options;
 pub mod form;
 pub mod glass_math;
 pub mod glyph;
+pub mod minimize_motion;
 pub mod motion_math;
 pub mod overlay;
 pub mod panels;
@@ -21,6 +24,7 @@ pub mod shadow_math;
 pub mod shell;
 pub mod status_menu;
 pub mod strip;
+pub mod strip_access;
 pub mod strip_demo;
 pub mod strip_layout;
 pub mod strip_model;

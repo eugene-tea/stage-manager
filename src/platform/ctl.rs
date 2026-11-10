@@ -10,8 +10,8 @@
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
-//! topmost), `debug-desktop X Y [double | drag X2 Y2]` clicks, double-clicks or drags on the
-//! desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
+//! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
+//! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
 //! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
@@ -20,7 +20,7 @@
 //! screen, `debug-close ID` closes one (its close button), `debug-stale-handle ID` takes our handle on one
 //! for dead until it is looked up afresh (round stale-handles), `debug-expose
 //! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
-//! Escape, to leave it), `debug-strip` tells what the strip draws this frame (cards in slot
+//! Escape, to leave it), `debug-toggle-strip` shows or hides the strip, `debug-strip` tells what the strip draws this frame (cards in slot
 //! order, each card's front thumbnail and icons where they are drawn, the lifted card) and
 //! `debug-overlay [X Y W H]` where the motion overlay's opaque pixels are (within a region),
 //! read back from a capture of our own overlay window, with a region's mean colour there and
@@ -169,6 +169,9 @@ pub enum Command {
     },
     /// What the strip draws this frame (needs `STAGE_MANAGER_TEST=1`).
     DebugStrip,
+    /// Shows or hides the strip, as the Show/Hide Strip hotkey does (needs
+    /// `STAGE_MANAGER_TEST=1`): the suite's check that captures stop while it is hidden.
+    DebugToggleStrip,
     /// Where the motion overlay draws, read back from its pixels, within a global region
     /// when given (needs `STAGE_MANAGER_TEST=1`).
     DebugOverlay {
@@ -228,7 +231,8 @@ pub enum Command {
         /// Hold shift.
         shift: bool,
     },
-    /// A synthetic click, double click (`double`) or drag (to `to`) on the desktop itself, posted
+    /// A synthetic click, double click (`double`), drag (to `to`) or still press held `hold` ms
+    /// on the desktop itself, posted
     /// only where nothing but the desktop lies along its path (Finder's icons, the wallpaper; our
     /// click-through corner patch seen through; needs `STAGE_MANAGER_TEST=1`): the live check
     /// that a desktop icon under the corner patch still opens and drags.
@@ -239,6 +243,8 @@ pub enum Command {
         double: bool,
         /// Dragged to here instead of clicked.
         to: Option<Point>,
+        /// Pressed still this long (ms) before the release, instead of a quick click.
+        hold: Option<u64>,
     },
 }
 
@@ -313,10 +319,14 @@ impl Command {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
                 let at = Point::new(coord(x)?, coord(y)?);
                 match rest {
-                    [] => Ok(Self::DebugDesktop { at, double: false, to: None }),
-                    ["double"] => Ok(Self::DebugDesktop { at, double: true, to: None }),
-                    ["drag", x2, y2] => Ok(Self::DebugDesktop { at, double: false, to: Some(Point::new(coord(x2)?, coord(y2)?)) }),
-                    _ => Err("debug-desktop needs X Y [double | drag X2 Y2]".into()),
+                    [] => Ok(Self::DebugDesktop { at, double: false, to: None, hold: None }),
+                    ["double"] => Ok(Self::DebugDesktop { at, double: true, to: None, hold: None }),
+                    ["drag", x2, y2] => Ok(Self::DebugDesktop { at, double: false, to: Some(Point::new(coord(x2)?, coord(y2)?)), hold: None }),
+                    ["hold", ms] => {
+                        let ms = ms.parse::<u64>().map_err(|_| format!("expected milliseconds, got {ms:?}"))?;
+                        Ok(Self::DebugDesktop { at, double: false, to: None, hold: Some(ms) })
+                    }
+                    _ => Err("debug-desktop needs X Y [double | drag X2 Y2 | hold MS]".into()),
                 }
             }
             ["debug-space", dir, rest @ ..] if rest.is_empty() || rest == ["numpad"] => {
@@ -324,6 +334,7 @@ impl Command {
                 Ok(Self::DebugSpace { direction, numpad: !rest.is_empty() })
             }
             ["debug-strip"] => Ok(Self::DebugStrip),
+            ["debug-toggle-strip"] => Ok(Self::DebugToggleStrip),
             ["debug-overlay"] => Ok(Self::DebugOverlay { region: None }),
             ["debug-overlay", x, y, w, h] => {
                 let n = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a number, got {w:?}"));
@@ -779,6 +790,7 @@ mod tests {
         assert_eq!(Command::parse("pin 12"), Ok(Command::Pin(Some(12))));
         assert_eq!(Command::parse("merge 2"), Ok(Command::Merge(2)));
         assert_eq!(Command::parse("reveal"), Ok(Command::Reveal));
+        assert_eq!(Command::parse("debug-toggle-strip"), Ok(Command::DebugToggleStrip));
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));
         assert_eq!(Command::parse("reload"), Ok(Command::Reload));
         assert_eq!(Command::parse("settings"), Ok(Command::Settings));
@@ -792,16 +804,21 @@ mod tests {
         );
         assert_eq!(
             Command::parse("debug-desktop 2490 1380 double"),
-            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: true, to: None })
+            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: true, to: None, hold: None })
         );
         assert_eq!(
             Command::parse("debug-desktop 2490 1380 drag 2200 1380"),
-            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: false, to: Some(Point::new(2200.0, 1380.0)) })
+            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: false, to: Some(Point::new(2200.0, 1380.0)), hold: None })
         );
+        assert_eq!(
+            Command::parse("debug-desktop 2490 1380 hold 600"),
+            Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: false, to: None, hold: Some(600) })
+        );
+        assert!(Command::parse("debug-desktop 2490 1380 hold long").is_err());
         assert!(Command::parse("debug-desktop 2490 1380 triple").is_err());
         assert_eq!(
             Command::parse("debug-desktop 1 2"),
-            Ok(Command::DebugDesktop { at: Point::new(1.0, 2.0), double: false, to: None })
+            Ok(Command::DebugDesktop { at: Point::new(1.0, 2.0), double: false, to: None, hold: None })
         );
         assert!(Command::parse("debug-click 60").is_err());
         assert_eq!(Command::parse("debug-glass 20 300 40 30.5"), Ok(Command::DebugGlass { region: Rect::new(20.0, 300.0, 40.0, 30.5) }));

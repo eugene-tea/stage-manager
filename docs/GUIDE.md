@@ -83,8 +83,10 @@ Each card shows the stage's windows in miniature, with the app's icon in the cor
 Apple's strip, the wallpaper shows faintly through them (`[cards] window_opacity = 1` makes
 them opaque); the card under the pointer turns solid as it grows (`[cards]
 hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through).
+A card still waiting for a window's picture (at launch) is faint glass until the picture
+fades in (`[cards] empty_opacity`, `fade_ms`).
 The strip sits below your windows: a window over the cards covers them, and when a window
-comes within about 50 points of the screen's left edge, the strip slides away. Rest the
+covers their left edge too (about 20 points from the screen's edge), the strip slides away. Rest the
 pointer at the left edge of the screen to bring it back.
 
 ### Switching
@@ -96,7 +98,9 @@ You can switch stages the same ways as with Apple's Stage Manager:
 - Click the app in the Dock.
 - Click a card's app icon to bring every window of that app, from all stages.
 
-The stage you leave takes the card's place in the strip.
+The stage you leave takes the card's place in the strip. As with Apple's, the new stage grows
+out of its card a little faster than the old one shrinks into the strip; each way has its own
+spring in the config file (`[animation] spring_*` and `shrink_*`).
 
 ### Stages in place
 
@@ -148,7 +152,8 @@ its own stage; the front one is shown and the rest wait in the strip.
 Every screen has its own strip and stages, as with Apple's. A window you drag to another
 screen starts a stage of its own there, in front; the stage that was in front there goes to
 a card, and the screen you took it from brings its most recent card forward. Clicking a card
-changes only that screen. A new app opens on the screen you are typing on. Close the lid and
+changes only that screen. Drag a card onto the other screen and its windows open there, in
+the stage in front on that screen. A new app opens on the screen you are typing on. Close the lid and
 that screen's stages come to the remaining screen: the one in front stays in front, the
 others become cards; open it and the stages macOS moves back are its own again. Each screen
 hides its stages in a corner of its own, one with no screen beyond it. After a restart each
@@ -195,11 +200,24 @@ with Apple's.
 
 ### Drag and drop
 
-- **Drag a card into the middle** to bring its windows into the stage you are in.
-- **Drag a window onto the strip** by its title bar to give it a stage of its own.
+- **Drag a card into the middle** to bring its windows into the stage you are in. As with
+  Apple's, it turns into its window as it leaves the strip, and you hold the window near its
+  top-left corner, about 100 points in and 100 down, wherever you picked up the card
+  (`[drag] window_grab_x`, `window_grab_y`).
+- **Drag one window off a card of several** by its picture: it comes off alone as soon as you
+  move, and the others stay on the card. Let it go in the middle and it joins the stage you
+  are in, as with Apple's; between two cards, it gets a stage of its own there; on another
+  card, it joins that card's stage in front of its windows, and is the one in front when you
+  switch there; back on its own card, nothing changes.
+- **Drag a window onto the strip** by its title bar to give it a stage of its own. The cards
+  stay under the window as you drag; once the pointer is over the strip, a small picture of
+  the window shows where it will go.
 - **Drag a card up or down** to move it to another place in the strip.
-- **Drop a card onto another card** to merge the two stages. To split them again, open the
-  merged stage and drag a window onto the strip.
+- **Drop a card onto another card** to merge the two stages; the dropped card's windows go in
+  front. To split them again, drag a window off the merged card into the middle or between
+  two cards.
+- To move a whole card of several windows (up or down, onto another card, or into the
+  middle), drag it by its app icons. A card of one window moves whole wherever you hold it.
 
 Shift-click a card to bring its windows into the current stage without leaving it, as with
 Apple's. Hold Shift while you open an app, or Shift-click it in the Dock, to bring it here too
@@ -221,7 +239,9 @@ the Dock.
 
 Clicking the wallpaper shows the desktop and clicking it again brings your stage back. This
 follows macOS's own setting in System Settings → Desktop & Dock → "Click wallpaper to reveal
-desktop".
+desktop": with **Only in Stage Manager**, your stage goes into the strip, as with Apple's.
+With **Always** (macOS's default), macOS itself moves every window aside, as it does without
+Stage Manager, and Stage Manager can't change that for you.
 
 ### The clean corner
 
@@ -308,6 +328,27 @@ placement = "center"    # and open centered on the screen
 Every option, with its values and default, is in the
 [configuration reference](CONFIG.md).
 
+## Accessibility
+
+- **Keyboard.** Turn on **Keyboard shortcuts** in Settings → Windows: ⌃⌥1–9 switches to a
+  stage (VoiceOver reads each card's number), ⌃⌥⇧1–9 sends the front window to one, ⌃⌥N gives it a
+  stage of its own, ⌃⌥S shows or hides the strip. ⌘-Tab and the Dock also bring an app's
+  stage forward, and holding Shift as you open an app brings it into the stage you are in.
+  Settings, the welcome window and the menu work with Full Keyboard Access.
+- **VoiceOver** reads each card as a button, "Stage 3: Safari, Notes" (or the stage's name),
+  and pressing it switches to that stage. Its actions include "Show all Safari windows", as
+  a click on the app's icon. The edge tab, when you use it, is a button too.
+- **Reduce Motion** (System Settings → Accessibility → Display) is followed: windows fade in
+  and out where they are instead of flying from the strip, the strip fades instead of
+  sliding, and cards no longer grow under the pointer or glide. To decide it in Stage
+  Manager alone, set `reduce_motion = "on"` or `"off"` under `[animation]` in the config file;
+  `speed = 0` there turns every animation off.
+- **Reduce Transparency** (and Increase Contrast) makes the cards solid, as macOS's own
+  glass turns solid.
+
+[Accessibility](../.github/ACCESSIBILITY.md) says what works and what doesn't yet, and how to
+report a problem.
+
 ## Updates and privacy
 
 Stage Manager checks GitHub for a new version once a day. When one is out, it asks:
@@ -320,8 +361,16 @@ even putting it back fails, both copies are kept and the note at the next launch
 
 Turn on **Install updates automatically** in Settings to skip the question: an update then
 installs while you are away from the Mac, never in the middle of a drag or a switch, and
-never while the screen is locked (it waits until you unlock and step away again). You
-can turn the daily check off, and **Check for Updates…** in the menu works either way. If
+never while the screen is locked (it waits until you unlock and step away again).
+
+A downloaded update also installs when you quit Stage Manager (**Quit** in the menu, or ⌘Q
+in Settings and About). It doesn't open again afterwards, since you asked it to stop; the
+new version starts the next time you open it. Logging out, restarting or shutting down
+never installs it, nor does turning on Apple's Stage Manager. If an update was downloaded
+but never installed, the next launch checks again within a minute instead of waiting a day,
+and downloads and checks the new version from scratch.
+
+You can turn the daily check off, and **Check for Updates…** in the menu works either way. If
 Stage Manager can't replace itself where it is (it runs from the disk image, or from a
 folder you can't write to), it offers the download instead.
 

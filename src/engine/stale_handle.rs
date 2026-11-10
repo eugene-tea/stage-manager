@@ -27,8 +27,8 @@
 //!   may be out of reach for a reason: on a Desktop not shown (`AXWindows` lists only the
 //!   current Space's windows for most apps), on a full-screen Space of its own (the model
 //!   keeps such a window on its Desktop, and no public API names a window's Space: the window
-//!   server listing it off screen at about a display's size is the evidence,
-//!   [`on_full_screen_space`]), its app hidden, or a hidden tab (8J: off screen
+//!   server listing it off screen at a display's top-left corner, at about its size, is the
+//!   evidence, [`on_full_screen_space`]), its app hidden, or a hidden tab (8J: off screen
 //!   beside a same-size window of its app, [`super::hidden_tab::may_be_hidden_tab`]); those
 //!   are kept ([`Keep`]).
 //!
@@ -158,12 +158,24 @@ pub fn judge(f: Facts) -> Judgement {
     }
 }
 
+/// How far (points) a full-screen window's left edge may sit from its display's, and its top
+/// above the display's top ([`on_full_screen_space`]).
+const CORNER_SLACK: f64 = 4.0;
+
 /// Whether a window the window server lists off screen at `bounds` may be on a full-screen
-/// Space of its own: about the size of one of `displays` (most of it: some displays keep a
-/// band at the top, [`fullscreen::could_be_fullscreen`]). Kept on doubt: a closed window of
-/// that size keeps its card, never a full-screen window loses it.
+/// Space of its own: at one of `displays`' top-left corner, at about its size (most of it:
+/// some displays keep a band at the top, [`fullscreen::could_be_fullscreen`], so its top may
+/// sit that band lower). Kept on doubt: a closed window of that size there keeps its card,
+/// never a full-screen window loses it. The size alone kept a closed Notes window in the
+/// middle of the 5K, sized like the laptop's screen, and 13 moves on it failed (11-09).
 pub fn on_full_screen_space(bounds: Rect, displays: &[Rect]) -> bool {
-    displays.iter().any(|&d| fullscreen::could_be_fullscreen(bounds, d))
+    displays.iter().any(|&d| {
+        let band = d.h - bounds.h;
+        fullscreen::could_be_fullscreen(bounds, d)
+            && (bounds.x - d.x).abs() <= CORNER_SLACK
+            && bounds.y >= d.y - CORNER_SLACK
+            && bounds.y <= d.y + band.max(0.0) + CORNER_SLACK
+    })
 }
 
 /// When each window's app was last asked for its windows ([`LOOK_AGAIN`]).
@@ -291,9 +303,21 @@ mod tests {
         assert!(on_full_screen_space(Rect::new(0.0, 32.0, 2560.0, 1408.0), &displays), "a display's band left at the top");
         assert!(on_full_screen_space(Rect::new(2560.0, 0.0, 1920.0, 1080.0), &displays), "on another display");
         assert!(!on_full_screen_space(Rect::new(1367.0, 313.0, 1193.0, 921.0), &displays), "Music's closed window on 11-04");
+        assert!(!on_full_screen_space(Rect::new(2560.0, 100.0, 1920.0, 1000.0), &displays), "lower than a top band would put it");
         let full = Facts { full_screen: true, ..closed() };
         assert_eq!(judge(full), Judgement::Keep(Keep::FullScreen));
         assert_eq!(judge(Facts { server: Server::Unlisted, ..full }), Judgement::Keep(Keep::FullScreen));
+    }
+
+    #[test]
+    fn a_window_sized_like_another_display_is_not_full_screen() {
+        // 11-09, 12:12: the 5K main display and the laptop's screen to its left; a closed
+        // Notes window in the middle of the 5K, sized like the laptop's screen.
+        let displays = [Rect::new(0.0, 0.0, 2560.0, 1440.0), Rect::new(-1800.0, 271.0, 1800.0, 1169.0)];
+        let notes = Rect::new(455.0, 204.0, 1668.0, 1033.0);
+        assert!(!on_full_screen_space(notes, &displays), "Notes' closed window on 11-09");
+        assert!(on_full_screen_space(Rect::new(-1800.0, 271.0, 1800.0, 1169.0), &displays), "full screen on the laptop's screen");
+        assert!(on_full_screen_space(Rect::new(-1800.0, 309.0, 1800.0, 1131.0), &displays), "below the laptop's camera band");
     }
 
     #[test]
