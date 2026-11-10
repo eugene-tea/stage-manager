@@ -977,6 +977,16 @@ non-activating panel, as Apple's strip never takes it from the window in front),
 VoiceOver reaches the cards through the pointer: the pointer over the strip, or VoiceOver
 set to move its cursor with the mouse pointer.
 
+## Measured on Apple's, nothing to change (11-09 evening)
+
+- The card glass in Dark Mode: window opacity 0.78, backdrop saturation 0.93, brightness 0.82
+  (`scripts/measure-apple-card-glass.py`); ours, fitted in Light Mode, 0.78 / 0.95 / 0.78, within the
+  fit's error.
+- The card count follows the visible height: 4 at a 13-inch MacBook Air's (about 925 pt), 6 at the
+  Studio Display's, as reviewers counted; ours gives the same.
+- Reduce Motion on Apple's: a switch is a cross-fade of about 80 ms, a minimize a fade out in place of
+  about 130 ms. Ours fades 200 ms, worked out from the accessibility guidance rather than copied.
+
 ## Known gaps
 
 - A window coming in from the strip can show one frame of a darker shadow as it lands
