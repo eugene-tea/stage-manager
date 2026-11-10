@@ -38,18 +38,14 @@ use crate::engine::geometry::Rect;
 use crate::ui::panels;
 use crate::ui::strip_access::CardElement;
 
-/// Where each card's catching window goes, Cocoa screen coordinates: `frames` (each card's
-/// rest by stage, the strip view's top-left coordinates) in the pane's panel at `panel`
-/// (Cocoa screen coordinates); none unless `on` (an assistive app on, the strip shown).
-pub fn targets(on: bool, panel: Rect, frames: &[(u64, Rect)]) -> Vec<(u64, Rect)> {
+/// Where each card's catching window goes: `frames` (each card's rest by stage, Cocoa
+/// screen coordinates, as [`crate::ui::strip_access::CardItem`] has it); none unless `on`
+/// (an assistive app on, the strip shown).
+pub fn targets(on: bool, frames: &[(u64, Rect)]) -> Vec<(u64, Rect)> {
     if !on {
         return Vec::new();
     }
-    frames
-        .iter()
-        .filter(|(_, f)| f.w > 0.0 && f.h > 0.0)
-        .map(|(stage, f)| (*stage, Rect::new(panel.x + f.x, panel.y + panel.h - (f.y + f.h), f.w, f.h)))
-        .collect()
+    frames.iter().filter(|(_, f)| f.w > 0.0 && f.h > 0.0).copied().collect()
 }
 
 /// The pointer on a card's catching window (`NSPoint`s in Cocoa screen coordinates): what
@@ -276,20 +272,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn each_card_is_covered_where_it_rests_in_screen_coordinates() {
-        // A panel at x 0, from y 25 up to 1440 (Cocoa: bottom-left origin).
-        let panel = Rect::new(0.0, 25.0, 300.0, 1415.0);
-        let frames = vec![(7, Rect::new(16.0, 100.0, 212.0, 138.0)), (8, Rect::new(16.0, 260.0, 212.0, 138.0))];
-        let t = targets(true, panel, &frames);
-        assert_eq!(t[0], (7, Rect::new(16.0, 25.0 + 1415.0 - 238.0, 212.0, 138.0)), "flipped: the top card highest on screen");
-        assert_eq!(t[1].1.y + t[1].1.h, t[0].1.y - 22.0, "the gap between them stays uncovered");
+    fn each_card_is_covered_where_it_rests() {
+        let frames = vec![(7, Rect::new(16.0, 1202.0, 212.0, 138.0)), (8, Rect::new(16.0, 1042.0, 212.0, 138.0))];
+        assert_eq!(targets(true, &frames), frames);
     }
 
     #[test]
     fn nothing_is_covered_without_an_assistive_app_or_a_card() {
-        let panel = Rect::new(0.0, 0.0, 300.0, 1000.0);
-        assert!(targets(false, panel, &[(7, Rect::new(16.0, 100.0, 212.0, 138.0))]).is_empty(), "the pane's own rules alone");
-        assert!(targets(true, panel, &[(7, Rect::new(16.0, 100.0, 0.0, 138.0))]).is_empty(), "a card with no size");
-        assert!(targets(true, panel, &[]).is_empty());
+        assert!(targets(false, &[(7, Rect::new(16.0, 100.0, 212.0, 138.0))]).is_empty(), "the pane's own rules alone");
+        assert!(targets(true, &[(7, Rect::new(16.0, 100.0, 0.0, 138.0))]).is_empty(), "a card with no size");
+        assert!(targets(true, &[]).is_empty());
     }
 }

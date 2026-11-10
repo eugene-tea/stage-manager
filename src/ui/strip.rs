@@ -2652,7 +2652,9 @@ impl Strip {
             }
             let m = self.m();
             let frames: Vec<(u64, Rect)> = self.layouts.iter().filter(|l| !placeholder(l.stage)).map(|l| (l.stage, l.bounds(m))).collect();
-            strip_access::items(&cards, &frames, |pid| self.app_names.get(&pid).cloned().flatten())
+            let p = self.pane.panel.frame();
+            let panel = Rect::new(p.origin.x, p.origin.y, p.size.width, p.size.height);
+            strip_access::items(&cards, &frames, panel, |pid| self.app_names.get(&pid).cloned().flatten())
         } else {
             Vec::new()
         };
@@ -2661,14 +2663,12 @@ impl Strip {
         self.update_reach(&frames);
     }
 
-    /// Puts a catching window under each listed card (`frames`: view coordinates) while an
-    /// assistive app is on and the strip shows, so a hit test there finds the card whatever
-    /// the pointer does ([`strip_reach`]); none otherwise.
+    /// Puts a catching window under each listed card (`frames`: Cocoa screen coordinates)
+    /// while an assistive app is on and the strip shows, so a hit test there finds the card
+    /// whatever the pointer does ([`strip_reach`]); none otherwise.
     fn update_reach(&mut self, frames: &[(u64, Rect)]) {
         let on = assistive::on() && self.pane.shown && self.pane.panel.isVisible();
-        let p = self.pane.panel.frame();
-        let panel = Rect::new(p.origin.x, p.origin.y, p.size.width, p.size.height);
-        let wanted = strip_reach::targets(on, panel, frames)
+        let wanted = strip_reach::targets(on, frames)
             .into_iter()
             .filter_map(|(stage, frame)| Some((stage, frame, self.pane.access.element(stage)?.clone())))
             .collect();

@@ -3,8 +3,10 @@
 //!
 //! - **Elements** ([`CardElement`], an `NSAccessibilityElement`): role button, labelled as
 //!   Apple's card is, with its front window's title (its app's name when untitled), help
-//!   saying what pressing does, framed where the card rests in the view (AppKit turns that
-//!   into screen coordinates as the panel moves). Its actions are Apple's: `AXPress` switches
+//!   saying what pressing does, framed where the card rests, in Cocoa screen coordinates
+//!   ([`screen_frame`]; AppKit hands clients top-left ones). Set as the frame in the flipped
+//!   view's space it came out upside down (11-09: a top card read y 1057 on a 1440 pt
+//!   screen), so the element answers `accessibilityFrame` itself. Its actions are Apple's: `AXPress` switches
 //!   as a click does, `AXAddToStage` adds the card's front window to the stage in front, as a
 //!   Shift-click does. Each app also gets a custom action that shows all its windows, as a
 //!   click on its icon does.
@@ -49,7 +51,8 @@ pub struct CardItem {
     pub help: String,
     /// It offers [`ADD_TO_STAGE`]: a card of a stage not in front.
     pub adds: bool,
-    /// Where the card rests, in the strip view's coordinates (top-left origin).
+    /// Where the card rests, in Cocoa screen coordinates (bottom-left origin, the main
+    /// screen's): [`screen_frame`].
     pub frame: Rect,
     /// Its apps, in icon order: (pid, name) for the "show all windows" actions.
     pub apps: Vec<(i32, String)>,
@@ -81,10 +84,18 @@ pub fn card_help(card: &CardSnapshot) -> String {
     if card.active { "The stage shown now.".to_string() } else { "Switches to this stage.".to_string() }
 }
 
+/// Where a card at `f` (the strip view's coordinates: top-left origin, flipped) is on screen,
+/// in Cocoa screen coordinates (bottom-left origin at the main screen's bottom left), its
+/// pane's panel being at `panel` (Cocoa screen coordinates; the view fills it).
+pub fn screen_frame(panel: Rect, f: Rect) -> Rect {
+    Rect::new(panel.x + f.x, panel.y + panel.h - (f.y + f.h), f.w, f.h)
+}
+
 /// The elements for `cards` (as the strip shows them) at `frames` (each card's resting frame
-/// by stage, view coordinates), top to bottom; `name` gives an app's name by pid. Cards with no
-/// frame (the drop gap, the active stage's empty slot, a card not laid out) are left out.
-pub fn items(cards: &[CardSnapshot], frames: &[(u64, Rect)], name: impl Fn(i32) -> Option<String>) -> Vec<CardItem> {
+/// by stage, view coordinates) in the panel at `panel` (Cocoa screen coordinates), top to
+/// bottom; `name` gives an app's name by pid. Cards with no frame (the drop gap, the active
+/// stage's empty slot, a card not laid out) are left out.
+pub fn items(cards: &[CardSnapshot], frames: &[(u64, Rect)], panel: Rect, name: impl Fn(i32) -> Option<String>) -> Vec<CardItem> {
     frames
         .iter()
         .filter_map(|(stage, frame)| {
@@ -93,7 +104,7 @@ pub fn items(cards: &[CardSnapshot], frames: &[(u64, Rect)], name: impl Fn(i32) 
             // The front window's app (the first icon), named or not.
             let front = card.apps.first().and_then(|pid| apps.iter().find(|(p, _)| p == pid)).map(|(_, n)| n.as_str());
             let label = card_label(card, front);
-            Some(CardItem { stage: card.stage, label, help: card_help(card), adds: !card.active, frame: *frame, apps })
+            Some(CardItem { stage: card.stage, label, help: card_help(card), adds: !card.active, frame: screen_frame(panel, *frame), apps })
         })
         .collect()
 }
@@ -145,6 +156,8 @@ pub struct CardTarget {
     strip: Cell<u32>,
     stage: Cell<u64>,
     adds: Cell<bool>,
+    /// Where it is, Cocoa screen coordinates.
+    frame: Cell<NSRect>,
     sink: Cell<Option<PressSink>>,
 }
 
@@ -172,6 +185,13 @@ define_class!(
     }
 
     impl CardElement {
+        // Its frame in screen coordinates, as the protocol asks (AppKit flips it for clients).
+        // SAFETY: the signature matches NSAccessibilityElement's.
+        #[unsafe(method(accessibilityFrame))]
+        fn accessibility_frame(&self) -> NSRect {
+            self.ivars().frame.get()
+        }
+
         // The actions by name, as Apple's card lists them (`AXPress`, `AXAddToStage`): the
         // protocol methods have no way to add a named action of one's own, so these three
         // (NSAccessibility's informal protocol, still what AppKit answers clients from) say
@@ -203,7 +223,7 @@ define_class!(
 
 impl CardElement {
     fn new(strip: u32, stage: u64, sink: PressSink) -> Retained<Self> {
-        let target = CardTarget { strip: Cell::new(strip), stage: Cell::new(stage), adds: Cell::new(false), sink: Cell::new(Some(sink)) };
+        let target = CardTarget { strip: Cell::new(strip), stage: Cell::new(stage), adds: Cell::new(false), frame: Cell::new(NSRect::ZERO), sink: Cell::new(Some(sink)) };
         let this = Self::alloc().set_ivars(target);
         // SAFETY: NSObject's designated initializer on a fresh instance.
         unsafe { msg_send![super(this), init] }
@@ -226,7 +246,7 @@ impl CardElement {
         self.setAccessibilityLabel(Some(&NSString::from_str(&item.label)));
         self.setAccessibilityHelp(Some(&NSString::from_str(&item.help)));
         let f = item.frame;
-        self.setAccessibilityFrameInParentSpace(NSRect::new(NSPoint::new(f.x, f.y), NSSize::new(f.w, f.h)));
+        self.ivars().frame.set(NSRect::new(NSPoint::new(f.x, f.y), NSSize::new(f.w, f.h)));
         self.ivars().adds.set(item.adds);
         let (strip, stage) = (self.ivars().strip.get(), item.stage);
         let actions: Vec<Retained<NSAccessibilityCustomAction>> = item
@@ -375,6 +395,29 @@ mod tests {
         assert_eq!(card_help(&c), "The stage shown now.");
     }
 
+    /// A Cocoa screen rect as Accessibility's clients get it: top-left origin at the main
+    /// screen's top left (`primary_h` its height), as AppKit converts `accessibilityFrame`.
+    fn top_left(primary_h: f64, r: Rect) -> Rect {
+        Rect::new(r.x, primary_h - (r.y + r.h), r.w, r.h)
+    }
+
+    #[test]
+    fn a_cards_frame_is_where_it_is_on_either_screen() {
+        // The 5K (2560x1440, main) and the laptop to its left at -1800,271 1800x1169 in
+        // top-left coordinates: Cocoa (-1800, 1440 - 271 - 1169 = 0).
+        let primary_h = 1440.0;
+        for (screen_top_left, visible_inset_top, dock) in [(Rect::new(0.0, 0.0, 2560.0, 1440.0), 25.0, 0.0), (Rect::new(-1800.0, 271.0, 1800.0, 1169.0), 33.0, 60.0)] {
+            // The panel spans the visible frame's height at the screen's left (as `Geometry`).
+            let top = screen_top_left.y + visible_inset_top;
+            let h = screen_top_left.h - visible_inset_top - dock;
+            let panel = Rect::new(screen_top_left.x, primary_h - (top + h), 300.0, h);
+            // A card 16 pt in and 300 pt down the column: globally there, top-left.
+            let local = Rect::new(16.0, 300.0, 83.0, 113.0);
+            let global = Rect::new(screen_top_left.x + 16.0, top + 300.0, 83.0, 113.0);
+            assert_eq!(top_left(primary_h, screen_frame(panel, local)), global, "{screen_top_left:?}");
+        }
+    }
+
     #[test]
     fn a_card_offers_apples_press_and_add_to_stage() {
         assert_eq!(action_names(true), ["AXPress", "AXAddToStage"]);
@@ -403,7 +446,7 @@ mod tests {
             (99, Rect::new(0.0, 0.0, 1.0, 1.0)),
             (40, Rect::new(0.0, 300.0, 100.0, 80.0)),
         ];
-        let list = items(&cards, &frames, names);
+        let list = items(&cards, &frames, Rect::new(0.0, 0.0, 300.0, 1000.0), names);
         let labels: Vec<&str> = list.iter().map(|i| i.label.as_str()).collect();
         assert_eq!(
             labels,
@@ -411,7 +454,7 @@ mod tests {
             "in the frames' order; the gap and a card not shown are left out; an untitled window of an unnamed app falls back to the number"
         );
         assert_eq!(list.iter().map(|i| i.adds).collect::<Vec<_>>(), [true, true, false], "the stage in front adds nothing");
-        assert_eq!(list[1].frame, Rect::new(0.0, 100.0, 100.0, 80.0));
+        assert_eq!(list[1].frame, Rect::new(0.0, 820.0, 100.0, 80.0), "in screen coordinates: 1000 - (100 + 80)");
         assert_eq!(list[1].apps, vec![(1, "Safari".to_string())]);
         assert_eq!(app_action_name("Safari"), "Show all Safari windows");
     }
