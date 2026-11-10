@@ -610,6 +610,13 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugPointerBack => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-pointer-back needs STAGE_MANAGER_TEST=1");
+                }
+                input::pointer_back();
+                json!({ "ok": true })
+            }
             Command::DebugSpace { direction, numpad } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-space needs STAGE_MANAGER_TEST=1");

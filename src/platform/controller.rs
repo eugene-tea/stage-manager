@@ -6789,6 +6789,7 @@ impl Controller {
             }
             Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
             | Command::DebugHover { .. }
+            | Command::DebugPointerBack
             | Command::DebugDrag { .. }
             | Command::DebugDesktop { .. }
             | Command::DebugStrip

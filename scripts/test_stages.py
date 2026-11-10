@@ -2548,6 +2548,25 @@ def skip(what, why):
     say(f"  skip {what}: {why}")
 
 
+def pointer_off_strip(s, what):
+    """Rests the pointer over the active stage's window well right of the strip's panel (a
+    synthetic hover, only over a fixture's window or ours): a revealed strip hides only once
+    the pointer is off it, and the owner's own pointer may rest on its column. The next
+    synthetic click or drag, or `ctl debug-pointer-back`, puts it back where it was."""
+    vis = s["display"]["visible"]
+    active = [w for w in s["windows"] if w["home"] == s["active"] and w["role"] == "standard" and not w["parked"]]
+    f = max((w["restore"] for w in active), key=lambda b: b["w"] * b["h"], default=None)
+    x = vis["x"] + 700
+    if f is None or not (f["x"] <= x <= f["x"] + f["w"]):
+        say(f"  pointer left where it is for {what}: no active window under {x:.0f}")
+        return False
+    r = ctl("debug-hover", x, f["y"] + f["h"] / 2, 100)
+    if blocked(r, f"{what} (the pointer moved off the strip)"):
+        return False
+    say(f"  pointer off the strip at {x:.0f},{f['y'] + f['h'] / 2:.0f} for {what} ({r.get('error', 'ok')})")
+    return bool(r.get("ok"))
+
+
 def blocked(reply, what):
     """True, with the skip noted, when `reply` (a synthetic click, hover or drag) was refused
     over another process's window ([`other_window_note`]) or a drag was cut short by the
@@ -3252,6 +3271,29 @@ def center(f):
     return (f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
 
 
+def icon_against_window(q, icon, h):
+    """The icon's top-left corner `icon` against its window drawn as the quad `q` (four
+    corners from the top left, clockwise; `ctl debug-strip`'s `thumb_corners`) whose left edge
+    is `h` long before the turn (`thumb_size`). A card grows each window about its own middle
+    and keeps its icons as they are, as Apple's (UX-SPEC, the strip's cards): the growth's
+    fixed point is where the quad's diagonals cross, its scale the left edge's length over
+    `h`; the icon is measured from the left edge's bottom end put back at rest size, so the
+    pair reads the same at any growth and anywhere the card is drawn (strip.rs's
+    `a_dragged_card_grows_about_its_own_middle_wherever_it_is_drawn`). None for a flat quad."""
+    (ax, ay), (cx, cy) = q[0], q[1]
+    rx, ry = q[2][0] - ax, q[2][1] - ay
+    tx, ty = q[3][0] - cx, q[3][1] - cy
+    den = rx * ty - ry * tx
+    if abs(den) < 1e-9 or h <= 0:
+        return None
+    u = ((cx - ax) * ty - (cy - ay) * tx) / den
+    mx, my = ax + u * rx, ay + u * ry
+    s = math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]) / h
+    if s <= 0:
+        return None
+    return (icon[0] - (mx + (q[3][0] - mx) / s), icon[1] - (my + (q[3][1] - my) / s))
+
+
 def inside(p, f, pad=0.0):
     return f["x"] - pad <= p[0] <= f["x"] + f["w"] + pad and f["y"] - pad <= p[1] <= f["y"] + f["h"] + pad
 
@@ -3941,19 +3983,24 @@ def phase_slots():
             next((c["z"] for c in p["cards"] if c["stage"] == dragged), 0) > max([c["z"] for c in p["cards"] if c["stage"] != dragged] or [0])
             for p in lifted)
         check(bool(lifted) and on_top, f"the dragged card is above every other card while dragged and gliding ({len(lifted)} of {len(seen)} samples)")
-        # The icon against the front thumbnail's left edge (its turn's axis, which the
-        # perspective leaves in place), in units of that edge's length (the hover scale
-        # grows both alike).
+        # The icon against its front window as drawn. Since 1.8.0 a card grows each window
+        # about its own middle and keeps its icons at their size, as Apple's (the press eases
+        # the card to press_scale, the drag back to hover_scale while it moves): the window's
+        # left edge alone moves against the icon as the growth runs, so the icon is read
+        # against that edge put back at rest size about the window's middle
+        # (`icon_against_window`). It keeps its place through the drag and the glide.
         rel = []
         for p in lifted:
             c = next((c for c in p["cards"] if c["stage"] == dragged), None)
-            if c and c.get("thumb_left_edge") and c.get("icons"):
-                (tx, ty), (bx, by) = [(q["x"], q["y"]) for q in c["thumb_left_edge"]]
-                ic, h = c["icons"][0], max(by - ty, 1.0)
-                rel.append(((ic["x"] - bx) / h, (ic["y"] - by) / h, h))
-        if check(len(rel) >= 3, f"the dragged card's thumbnail and icon were sampled ({len(rel)} samples)"):
-            dev = max(max(abs(r[0] - rel[0][0]), abs(r[1] - rel[0][1])) * r[2] for r in rel)
-            check(dev <= 1.0, f"its icon keeps its place on the thumbnail through the drag and the glide (largest drift {dev:.2f} pt)")
+            if c and c.get("thumb_corners") and c.get("thumb_size") and c.get("icons"):
+                q = [(v["x"], v["y"]) for v in c["thumb_corners"]]
+                r = icon_against_window(q, (c["icons"][0]["x"], c["icons"][0]["y"]), c["thumb_size"]["h"])
+                if r is not None:
+                    rel.append(r)
+        if check(len(rel) >= 3, f"the dragged card's window and icon were sampled ({len(rel)} samples)"):
+            dev = max(max(abs(r[0] - rel[0][0]), abs(r[1] - rel[0][1])) for r in rel)
+            check(dev <= 1.0, f"its icon keeps its place on its window through the drag and the glide, "
+                              f"the window grown about its own middle (largest drift {dev:.2f} pt)")
         time.sleep(0.5)
         st = state()
         n = numbers_by_id(st).get(dragged)
@@ -5078,7 +5125,13 @@ def phase_visible():
     a1 = live_frame("Alpha 1")
     check(close(a1, wide), f"nudge-only: the too-wide window stays where it is ({fmt(a1)}, was {fmt(wide)})")
     check(edge_tab() is None, "the strip is shown for a moment at launch (no tab yet)")
-    tab = wait_until(edge_tab, 8, "the edge tab")
+    # The announced strip then hides as a revealed one does: once the pointer has been off it
+    # for `hide_delay_ms`. A pointer resting on the strip's column keeps it (11-09: the
+    # owner's pointer rested there through three runs, so the strip stayed and no tab came).
+    # The pointer goes over Alpha 1, right of the strip, as a person's leaves it; it comes
+    # back with the tab's click below.
+    pointer_off_strip(s, "the launch reveal's end")
+    tab = wait_until(edge_tab, 3.0 + 4.0 + 3.0, "the edge tab (launch_reveal_ms, then hide_delay_ms off the strip)")
     check("a window covers the strip; showing it for a moment" in log_text(), "the launch announce ran")
     if check(tab is not None, f"the edge tab appears at layer 3 with our pid ({fmt(tab['bounds']) if tab else None})"):
         b = tab["bounds"]
@@ -5112,8 +5165,11 @@ def phase_visible():
             check(bool(through), f"a click on the strip's empty column goes through to the window below ({r.get('error', 'ok')})")
         else:
             check(False, f"the strip shows over Alpha 1 for the click-through check (shown {shown}, Alpha 1 {fmt(a1)})")
+        # The click put the pointer back where the owner had it: off the strip again.
+        pointer_off_strip(s, "the strip's auto-hide after the click-through")
         back = wait_until(edge_tab, 8, "the tab to come back once the pointer is away")
         check(back is not None, "the strip auto-hides again and the tab returns")
+    ctl("debug-pointer-back")
     stop_app()
     all_onscreen("nudge-only quit")
 
