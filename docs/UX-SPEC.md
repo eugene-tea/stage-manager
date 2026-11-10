@@ -653,8 +653,9 @@ Ours catches the two usual ways before macOS starts its genie, in an event tap
 (`platform::minimize_tap`, decided in `engine::minimize_press`):
 
 - **The yellow button** (a plain click; ⌥-click, ⇧-click and ⌃-click stay macOS's): a press
-  near the top-left corner of a window in a shown stage is hit-tested through Accessibility
-  at the press (0.1 s budget each call). On that window's enabled minimize button the press,
+  near the top-left corner of a window in a shown stage, with that window topmost there (not
+  under a card, the edge tab or Settings), is hit-tested through its app's Accessibility at the
+  press (0.1 s budget each call; our own windows are never asked). On that window's enabled minimize button the press,
   its drags and its release are swallowed; a release on the button minimizes, one dragged off
   does nothing, as the button's own.
 - **⌘M** (no other modifier) while the frontmost app's focused window is a managed one with

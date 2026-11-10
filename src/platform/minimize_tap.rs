@@ -7,14 +7,18 @@
 //! minimizes most are caught here first:
 //!
 //! - **The yellow button.** A left press inside the top-left corner of a window the WM thread
-//!   published ([`publish`]: managed, shown, standard) is hit-tested through Accessibility at
-//!   the press ([`probe_button`]: the system-wide element at a short timeout, then one
-//!   message for the element's subrole, enabled state, window and frame). On a managed
+//!   published ([`publish`]: managed, shown, standard) is looked up in the window server's
+//!   list ([`under`]): only when that window is topmost there (none of ours over it: a card,
+//!   the edge tab, Settings) is its app hit-tested through Accessibility ([`probe_button`]:
+//!   the app's own element at a short timeout, then one message for the element's subrole,
+//!   enabled state, window and frame). Our own process is never asked: an Accessibility call
+//!   into it waits on our main thread while every input event of the session waits on the
+//!   tap. On a managed
 //!   window's enabled minimize button the press is swallowed, with its drags and its
 //!   release; a release on the button sends the window to the strip ([`MinimizeAsk`] to the
 //!   WM thread), one elsewhere does nothing, as the button's own tracking.
-//! - **⌘M** (no other modifier): the frontmost app's focused window is asked for
-//!   ([`probe_focused`]); a managed one with an enabled minimize button and a settable
+//! - **⌘M** (no other modifier): the frontmost app (NSWorkspace's, never ours, frontmost by
+//!   its own word) is asked for its focused window ([`probe_focused`]); a managed one with an enabled minimize button and a settable
 //!   `AXMinimized` has its ⌘M swallowed and goes to the strip. Every other ⌘M is the app's.
 //!
 //! An active (filtering) `CGEventTap` at the session level, head-inserted, on a thread of its
@@ -45,9 +49,10 @@ use super::ax::{AxElement, names};
 use super::wm_thread::{WmCommand, WmHandle};
 use crate::engine::geometry::Point;
 use crate::engine::minimize_press::{
-    ButtonGate, ButtonHit, Focused, Gate, KeyGate, KeyPress, Minimizable, Pass, Pressed, is_cmd_m, judge_key, judge_press,
-    plain_click,
+    ButtonGate, ButtonHit, Focused, Gate, KeyGate, KeyPress, Minimizable, Pass, Pressed, Under, is_cmd_m, judge_key, judge_press,
+    plain_click, under_press,
 };
+use crate::engine::sliver::Listed;
 
 /// The Accessibility budget of each call the callback makes (seconds): an app this slow to
 /// answer gets its event and macOS's minimize plays.
@@ -309,9 +314,25 @@ fn set_for_key() -> Option<Minimizable> {
     s.as_ref().filter(|s| s.on).cloned()
 }
 
-/// What Accessibility says of the element at `at`, with the window element it belongs to.
-fn probe_button(at: Point) -> (ButtonHit, Option<AxElement>) {
-    let hit = super::desktop::with_system_wide(AX_SECONDS, |system| system.element_at(at));
+/// What takes a press at `at`, from the window server's on-screen list read now (no
+/// Accessibility call: a few milliseconds, only for a press in a managed window's corner),
+/// other apps' click-through overlays left out ([`super::desktop::overlay_of`]).
+fn under(at: Point, set: &Minimizable) -> Under {
+    let list: Vec<Listed> = super::windows::on_screen()
+        .iter()
+        .filter(|w| w.onscreen && w.bounds.contains(at))
+        .filter(|w| w.pid == std::process::id() as i32 || super::desktop::overlay_of(w) != super::desktop::Through::Everywhere)
+        .map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer })
+        .collect();
+    let cards: Vec<_> = crate::ui::strip_model::every_published_card().into_iter().map(|(_, r)| r).collect();
+    under_press(&list, at, std::process::id() as i32, &cards, set)
+}
+
+/// What Accessibility says of the element at `at` in app `pid` (the managed window's, topmost
+/// there: [`under`]; never our own process, never the system-wide element), with the window
+/// element it belongs to.
+fn probe_button(at: Point, pid: i32) -> (ButtonHit, Option<AxElement>) {
+    let hit = AxElement::application(pid).bounded(AX_SECONDS, |app| app.element_at(at));
     let Ok(element) = hit else { return (ButtonHit::default(), None) };
     let _ = element.set_messaging_timeout(AX_SECONDS);
     let Ok(facts) = element.button_facts() else { return (ButtonHit::default(), None) };
@@ -331,11 +352,17 @@ fn probe_button(at: Point) -> (ButtonHit, Option<AxElement>) {
 }
 
 /// What Accessibility says of the frontmost app's focused window, with its element.
+///
+/// The frontmost app is NSWorkspace's (no Accessibility call): never our own process (its
+/// windows are never managed, and an Accessibility call into it waits on our main thread),
+/// and it must say it is frontmost itself, so a notice not yet seen never sends another
+/// app's window to the strip.
 fn probe_focused() -> (Focused, Option<AxElement>) {
-    let app = super::desktop::with_system_wide(AX_SECONDS, |system| system.focused_application());
-    let Ok(app) = app else { return (Focused::default(), None) };
-    if app.pid().is_ok_and(|p| p == std::process::id() as i32) {
-        // Our own windows (Settings) are never managed.
+    let Some(pid) = super::apps::frontmost_pid().filter(|p| *p != std::process::id() as i32) else {
+        return (Focused::default(), None);
+    };
+    let app = AxElement::application(pid);
+    if !app.bounded(AX_SECONDS, |a| a.is_frontmost()).unwrap_or(false) {
         return (Focused::default(), None);
     }
     let window = app.bounded(AX_SECONDS, |a| a.focused_window());
@@ -370,8 +397,19 @@ fn on_mouse(kind: CGEventType, at: Point, flags: CGEventFlags) -> bool {
             }
             let set = set_for_press(at)?;
             let started = Instant::now();
-            let (hit, element) = probe_button(at);
-            match (judge_press(&hit, &set), element) {
+            let (id, pid) = match under(at, &set) {
+                Under::Managed { id, pid } => (id, pid),
+                Under::Ours => {
+                    note(Note::PressPassed { at, why: Pass::Ours, ms: started.elapsed().as_millis() as u64 });
+                    return None;
+                }
+                Under::Other => {
+                    note(Note::PressPassed { at, why: Pass::Covered, ms: started.elapsed().as_millis() as u64 });
+                    return None;
+                }
+            };
+            let (hit, element) = probe_button(at, pid);
+            match (judge_press(&hit, &set, id), element) {
                 (Ok((window, button)), Some(handle)) => Some(Pressed { window, button, handle }),
                 (Ok(_), None) => None,
                 (Err(why), _) => {
