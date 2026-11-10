@@ -53,6 +53,7 @@ use crate::engine::minimize_press::{
     plain_click, under_press,
 };
 use crate::engine::sliver::Listed;
+use super::desktop::Through;
 
 /// The Accessibility budget of each call the callback makes (seconds): an app this slow to
 /// answer gets its event and macOS's minimize plays.
@@ -237,10 +238,11 @@ fn run() -> bool {
 }
 
 /// What the callback decided, logged later by the WM thread.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum Note {
-    /// A press near a managed window's corner, left to the app, and why.
-    PressPassed { at: Point, why: Pass, ms: u64 },
+    /// A press near a managed window's corner, left to the app, and why (`by`: the window
+    /// that takes it, its owner, layer and bounds).
+    PressPassed { at: Point, why: Pass, ms: u64, by: Option<String> },
     /// A press on a minimize button released elsewhere: nothing happened.
     DraggedOff,
     /// ⌘M left to the app, and why.
@@ -283,8 +285,8 @@ pub fn refresh() {
     let notes = NOTES.lock().map(|mut n| std::mem::take(&mut *n)).unwrap_or_default();
     for n in notes {
         match n {
-            Note::PressPassed { at, why, ms } => {
-                tracing::debug!(x = at.x, y = at.y, ?why, ms, "minimize: a press near a window's buttons left to the app")
+            Note::PressPassed { at, why, ms, by } => {
+                tracing::debug!(x = at.x, y = at.y, ?why, ms, by = by.as_deref().unwrap_or("-"), "minimize: a press near a window's buttons left to the app")
             }
             Note::DraggedOff => tracing::debug!("minimize: the minimize button pressed and released off it: nothing, as the button's own"),
             Note::KeyPassed { why, ms } => tracing::debug!(?why, ms, "minimize: Cmd-M left to the app"),
@@ -315,17 +317,38 @@ fn set_for_key() -> Option<Minimizable> {
 }
 
 /// What takes a press at `at`, from the window server's on-screen list read now (no
-/// Accessibility call: a few milliseconds, only for a press in a managed window's corner),
-/// other apps' click-through overlays left out ([`super::desktop::overlay_of`]).
-fn under(at: Point, set: &Minimizable) -> Under {
-    let list: Vec<Listed> = super::windows::on_screen()
+/// Accessibility call into our own process: a few milliseconds, only for a press in a managed
+/// window's corner), with the covering window's owner for the log. What a click goes through
+/// is seen through as for a wallpaper click ([`super::desktop::is_wallpaper_click`]): the
+/// Dock's window away from its bar, macOS's click-through overlays
+/// ([`super::desktop::overlay_of`]). Notification Center's full-screen window is seen through
+/// only off its own elements: when the managed window lies under it, the element at the point
+/// is asked of the system-wide element (it is then Notification Center's or that app's,
+/// never ours) and must be the app's.
+fn under(at: Point, set: &Minimizable) -> (Under, Option<String>) {
+    let own = std::process::id() as i32;
+    let cg: Vec<_> = super::windows::on_screen().into_iter().filter(|w| w.onscreen && w.bounds.contains(at)).collect();
+    let through: Vec<(u32, Through)> = cg
         .iter()
-        .filter(|w| w.onscreen && w.bounds.contains(at))
-        .filter(|w| w.pid == std::process::id() as i32 || super::desktop::overlay_of(w) != super::desktop::Through::Everywhere)
-        .map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer })
+        .filter(|w| w.pid != own && w.layer > 0)
+        .map(|w| (w.id, super::desktop::overlay_of(w)))
+        .filter(|(_, t)| *t != Through::Covers)
         .collect();
+    let list: Vec<Listed> = cg.iter().map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer }).collect();
     let cards: Vec<_> = crate::ui::strip_model::every_published_card().into_iter().map(|(_, r)| r).collect();
-    under_press(&list, at, std::process::id() as i32, &cards, set)
+    let mut u = under_press(&list, at, own, &cards, set, |w| through.iter().any(|(id, _)| *id == w.id));
+    if let Under::Managed { pid, .. } = u
+        && through.iter().any(|(_, t)| *t == Through::OffItsElements)
+        && super::desktop::element_pid_at(at) != Some(pid)
+    {
+        let nc = through.iter().find(|(_, t)| *t == Through::OffItsElements).and_then(|(id, _)| list.iter().find(|w| w.id == *id)).copied();
+        u = Under::Other(nc);
+    }
+    let by = match u {
+        Under::Ours(w) | Under::Other(Some(w)) => cg.iter().find(|c| c.id == w.id).map(|c| format!("{} (pid {}) layer {} {}", c.owner, c.pid, c.layer, c.bounds)),
+        _ => None,
+    };
+    (u, by)
 }
 
 /// What Accessibility says of the element at `at` in app `pid` (the managed window's, topmost
@@ -398,13 +421,10 @@ fn on_mouse(kind: CGEventType, at: Point, flags: CGEventFlags) -> bool {
             let set = set_for_press(at)?;
             let started = Instant::now();
             let (id, pid) = match under(at, &set) {
-                Under::Managed { id, pid } => (id, pid),
-                Under::Ours => {
-                    note(Note::PressPassed { at, why: Pass::Ours, ms: started.elapsed().as_millis() as u64 });
-                    return None;
-                }
-                Under::Other => {
-                    note(Note::PressPassed { at, why: Pass::Covered, ms: started.elapsed().as_millis() as u64 });
+                (Under::Managed { id, pid }, _) => (id, pid),
+                (u, by) => {
+                    let why = if matches!(u, Under::Ours(_)) { Pass::Ours } else { Pass::Covered };
+                    note(Note::PressPassed { at, why, ms: started.elapsed().as_millis() as u64, by });
                     return None;
                 }
             };
@@ -413,7 +433,7 @@ fn on_mouse(kind: CGEventType, at: Point, flags: CGEventFlags) -> bool {
                 (Ok((window, button)), Some(handle)) => Some(Pressed { window, button, handle }),
                 (Ok(_), None) => None,
                 (Err(why), _) => {
-                    note(Note::PressPassed { at, why, ms: started.elapsed().as_millis() as u64 });
+                    note(Note::PressPassed { at, why, ms: started.elapsed().as_millis() as u64, by: None });
                     None
                 }
             }

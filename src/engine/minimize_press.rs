@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 
 use crate::engine::geometry::{Point, Rect};
+use crate::engine::sliver::{DockBar, Listed};
 
 /// The part of a window's frame, from its top-left corner, where its title-bar buttons may
 /// be (points): the standard title bar's at about 8–62 × 4–18, a unified toolbar's lower
@@ -47,6 +48,8 @@ pub struct Minimizable {
     pub on: bool,
     /// Window id → frame.
     pub windows: HashMap<u32, Rect>,
+    /// The Dock's bar: its display-sized window is clear away from it ([`under_press`]).
+    pub dock: DockBar,
 }
 
 impl Minimizable {
@@ -78,9 +81,8 @@ pub fn plain_click(shift: bool, option: bool, control: bool) -> bool {
 /// on-screen list ([`under_press`]): only a managed window there is hit-tested, and through
 /// its own app's element. Stage Manager's own windows are never asked through Accessibility
 /// (an Accessibility call into our own process from the tap answers only when our main thread
-/// gets to it, while every input event of the session waits on the tap: round minimize-direct,
-/// the capture phase's card drag stalled past the ctl client's 5 s).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// gets to it, while every input event of the session waits on the tap).
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Under {
     /// A window a minimize is caught on: hit-test its app.
     Managed {
@@ -90,9 +92,9 @@ pub enum Under {
         pid: i32,
     },
     /// One of Stage Manager's own windows takes the press (a card, the edge tab, Settings).
-    Ours,
-    /// Another window, or none.
-    Other,
+    Ours(Listed),
+    /// Another window (`None`: none at all).
+    Other(Option<Listed>),
 }
 
 /// The highest window layer of ours that takes clicks (the strip lifted, the edge tab):
@@ -104,28 +106,34 @@ pub const OWN_OVERLAY_LEVEL: i64 = 2;
 /// strip's levels are strip panes (they take clicks on a card only).
 pub const OWN_TAB_MAX_WIDTH: f64 = 12.0;
 
-/// What takes a press at `at`: the first window of `list` (front to back, on screen, other
-/// apps' click-through overlays already left out) under the point that takes clicks there.
-/// Of ours (`own`: our pid), the motion overlay and the windows above our clickable levels
-/// are click-through, and a strip pane takes a press only on one of its `cards` (global);
-/// every other window of ours takes it. Transparent and desktop-level windows are seen
-/// through.
-pub fn under_press(list: &[crate::engine::sliver::Listed], at: Point, own: i32, cards: &[Rect], set: &Minimizable) -> Under {
+/// What takes a press at `at`: the first window of `list` (front to back, on screen) under
+/// the point that a click there does not go through, as [`crate::platform::desktop::is_wallpaper_click`]
+/// decides what lies under a point: transparent and desktop-level windows are seen through,
+/// and so is every window `through` says a click passes (the Dock's display-sized window away
+/// from its bar, [`Minimizable::dock`]; macOS's click-through overlays: the screenshot tool's,
+/// Notification Center's full-screen one, whose banners the platform checks after). Of ours
+/// (`own`: our pid), the motion overlay and the windows above our clickable levels are
+/// click-through, and a strip pane takes a press only on one of its `cards` (global); every
+/// other window of ours takes it.
+pub fn under_press(list: &[Listed], at: Point, own: i32, cards: &[Rect], set: &Minimizable, through: impl Fn(&Listed) -> bool) -> Under {
     for w in list {
         if !w.bounds.contains(at) || w.alpha <= 0.0 || (w.layer < 0 && w.pid != own) {
             continue;
         }
         if w.pid == own {
-            let through = w.layer > OWN_CLICKABLE_LEVEL || w.layer == OWN_OVERLAY_LEVEL;
+            let clear = w.layer > OWN_CLICKABLE_LEVEL || w.layer == OWN_OVERLAY_LEVEL;
             let pane = w.bounds.w > OWN_TAB_MAX_WIDTH && (w.layer == OWN_CLICKABLE_LEVEL || w.layer < 0);
-            if through || (pane && !cards.iter().any(|c| c.contains(at))) {
+            if clear || (pane && !cards.iter().any(|c| c.contains(at))) {
                 continue;
             }
-            return Under::Ours;
+            return Under::Ours(*w);
         }
-        return if set.has(w.id) { Under::Managed { id: w.id, pid: w.pid } } else { Under::Other };
+        if set.dock.seen_through(w.pid, w.layer, w.bounds, at) || through(w) {
+            continue;
+        }
+        return if set.has(w.id) { Under::Managed { id: w.id, pid: w.pid } } else { Under::Other(Some(*w)) };
     }
-    Under::Other
+    Under::Other(None)
 }
 
 /// What Accessibility says of the element under a press.
@@ -323,7 +331,7 @@ mod tests {
     const BUTTON: Rect = Rect::new(667.0, 305.0, 14.0, 16.0);
 
     fn set() -> Minimizable {
-        Minimizable { on: true, windows: HashMap::from([(7, FRAME)]) }
+        Minimizable { on: true, windows: HashMap::from([(7, FRAME)]), dock: DockBar::default() }
     }
 
     fn hit(window: u32) -> ButtonHit {
@@ -345,7 +353,7 @@ mod tests {
         assert!(!Minimizable { on: false, ..set() }.may_hit(BUTTON.center()), "off: nothing asked");
         assert!(!Minimizable::default().may_hit(BUTTON.center()), "no window published");
         // A small window: the zone never reaches past it.
-        let small = Minimizable { on: true, windows: HashMap::from([(8, Rect::new(0.0, 0.0, 100.0, 50.0))]) };
+        let small = Minimizable { on: true, windows: HashMap::from([(8, Rect::new(0.0, 0.0, 100.0, 50.0))]), ..Minimizable::default() };
         assert!(!small.may_hit(Point::new(120.0, 10.0)) && small.may_hit(Point::new(30.0, 10.0)));
     }
 
@@ -416,15 +424,18 @@ mod tests {
         assert!(!g.holding());
     }
 
-    fn listed(id: u32, pid: i32, bounds: Rect, layer: i64) -> crate::engine::sliver::Listed {
-        crate::engine::sliver::Listed { id, pid, bounds, alpha: 1.0, layer }
+    fn listed(id: u32, pid: i32, bounds: Rect, layer: i64) -> Listed {
+        Listed { id, pid, bounds, alpha: 1.0, layer }
+    }
+
+    fn none(_: &Listed) -> bool {
+        false
     }
 
     const OWN: i32 = 500;
 
-    /// Round minimize-direct, the capture phase's card drag (11-09): the press on a card of
-    /// our strip, lifted to the floating level over Fixture 3's corner, was hit-tested through
-    /// the system-wide element, into our own process. Our windows are never asked.
+    /// A press on a card of our strip, lifted to the floating level over a managed window's
+    /// corner, is ours: our own process is never asked through Accessibility.
     #[test]
     fn a_press_our_own_window_takes_is_never_hit_tested() {
         let s = set();
@@ -432,17 +443,17 @@ mod tests {
         let card = Rect::new(at.x - 20.0, at.y - 20.0, 120.0, 90.0);
         let pane = listed(90, OWN, Rect::new(0.0, 0.0, 700.0, 1440.0), OWN_CLICKABLE_LEVEL);
         let window = listed(7, 42, FRAME, 0);
-        assert_eq!(under_press(&[pane, window], at, OWN, &[card], &s), Under::Ours, "a card of the lifted strip");
-        assert_eq!(under_press(&[pane, window], at, OWN, &[], &s), Under::Managed { id: 7, pid: 42 }, "the pane off its cards lets the press through");
+        assert_eq!(under_press(&[pane, window], at, OWN, &[card], &s, none), Under::Ours(pane), "a card of the lifted strip");
+        assert_eq!(under_press(&[pane, window], at, OWN, &[], &s, none), Under::Managed { id: 7, pid: 42 }, "the pane off its cards lets the press through");
         let below = listed(90, OWN, pane.bounds, -1);
-        assert_eq!(under_press(&[window, below], at, OWN, &[card], &s), Under::Managed { id: 7, pid: 42 }, "the strip below the window");
+        assert_eq!(under_press(&[window, below], at, OWN, &[card], &s, none), Under::Managed { id: 7, pid: 42 }, "the strip below the window");
         let overlay = listed(91, OWN, Rect::new(0.0, 0.0, 2560.0, 1440.0), OWN_OVERLAY_LEVEL);
         let ghost = listed(92, OWN, Rect::new(600.0, 280.0, 900.0, 640.0), 4);
-        assert_eq!(under_press(&[ghost, overlay, window], at, OWN, &[], &s), Under::Managed { id: 7, pid: 42 }, "click-through: a ghost, the overlay");
+        assert_eq!(under_press(&[ghost, overlay, window], at, OWN, &[], &s, none), Under::Managed { id: 7, pid: 42 }, "click-through: a ghost, the overlay");
         let settings = listed(93, OWN, Rect::new(600.0, 280.0, 700.0, 500.0), 0);
-        assert_eq!(under_press(&[settings, window], at, OWN, &[], &s), Under::Ours, "our Settings window over its corner");
+        assert_eq!(under_press(&[settings, window], at, OWN, &[], &s, none), Under::Ours(settings), "our Settings window over its corner");
         let tab = listed(94, OWN, Rect::new(at.x - 4.0, 0.0, 8.0, 1440.0), OWN_CLICKABLE_LEVEL);
-        assert_eq!(under_press(&[tab, window], at, OWN, &[], &s), Under::Ours, "the edge tab");
+        assert_eq!(under_press(&[tab, window], at, OWN, &[], &s, none), Under::Ours(tab), "the edge tab");
     }
 
     #[test]
@@ -451,13 +462,38 @@ mod tests {
         let at = BUTTON.center();
         let window = listed(7, 42, FRAME, 0);
         let other = listed(9, 43, Rect::new(600.0, 290.0, 300.0, 200.0), 0);
-        assert_eq!(under_press(&[other, window], at, OWN, &[], &s), Under::Other, "another app's window over its corner");
-        let clear = crate::engine::sliver::Listed { alpha: 0.0, ..other };
-        assert_eq!(under_press(&[clear, window], at, OWN, &[], &s), Under::Managed { id: 7, pid: 42 }, "a transparent one is seen through");
+        assert_eq!(under_press(&[other, window], at, OWN, &[], &s, none), Under::Other(Some(other)), "another app's window over its corner");
+        let clear = Listed { alpha: 0.0, ..other };
+        assert_eq!(under_press(&[clear, window], at, OWN, &[], &s, none), Under::Managed { id: 7, pid: 42 }, "a transparent one is seen through");
         let desktop = listed(1, 44, Rect::new(0.0, 0.0, 2560.0, 1440.0), -2_147_483_602);
-        assert_eq!(under_press(&[desktop], at, OWN, &[], &s), Under::Other, "only the desktop");
-        assert_eq!(under_press(&[listed(8, 42, FRAME, 0)], at, OWN, &[], &s), Under::Other, "a window not published");
-        assert_eq!(under_press(&[], at, OWN, &[], &s), Under::Other, "nothing listed");
+        assert_eq!(under_press(&[desktop], at, OWN, &[], &s, none), Under::Other(None), "only the desktop");
+        assert_eq!(under_press(&[listed(8, 42, FRAME, 0)], at, OWN, &[], &s, none), Under::Other(Some(listed(8, 42, FRAME, 0))), "a window not published");
+        assert_eq!(under_press(&[], at, OWN, &[], &s, none), Under::Other(None), "nothing listed");
+    }
+
+    /// Live 11-09 (parity, the yellow button on Bravo 1 at 420,98): the press was passed as
+    /// covered, the genie played. Above the window at its button lay what a click goes
+    /// through: our motion overlay, the Dock's display-sized window away from its bar, and
+    /// macOS's click-through overlays.
+    #[test]
+    fn what_a_click_goes_through_never_covers_the_button() {
+        let at = Point::new(459.0, 114.0);
+        let frame = Rect::new(420.0, 98.0, 640.0, 452.0);
+        let screen = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let mut s = Minimizable { on: true, windows: HashMap::from([(7, frame)]), dock: DockBar::default() };
+        let window = listed(7, 42, frame, 0);
+        let overlay = listed(91, OWN, screen, OWN_OVERLAY_LEVEL);
+        let dock = listed(5, 818, screen, crate::engine::overview::DOCK_LAYER);
+        let nc = listed(6, 819, screen, 23);
+        let managed = Under::Managed { id: 7, pid: 42 };
+        assert_eq!(under_press(&[overlay, window], at, OWN, &[], &s, none), managed, "our overlay above it");
+        // The Dock's window: seen through once its bar is known (away from the bar).
+        assert_eq!(under_press(&[dock, overlay, window], at, OWN, &[], &s, none), Under::Other(Some(dock)), "the bar unknown: it counts, as for a wallpaper click");
+        s.dock = DockBar { pid: Some(818), bars: vec![Rect::new(493.0, 1356.0, 1574.0, 84.0)] };
+        assert_eq!(under_press(&[dock, overlay, window], at, OWN, &[], &s, none), managed, "away from the Dock's bar");
+        // macOS's click-through overlays, as the platform tells them.
+        assert_eq!(under_press(&[nc, dock, overlay, window], at, OWN, &[], &s, |w| w.id == 6), managed, "Notification Center's full-screen window");
+        assert_eq!(under_press(&[nc, window], at, OWN, &[], &s, none), Under::Other(Some(nc)), "an overlay the platform does not see through");
     }
 
     fn key(chars: &str) -> KeyPress {
