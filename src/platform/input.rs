@@ -569,7 +569,9 @@ fn drag_interrupted(ups_at_press: u64, ups_now: u64, button_down: bool) -> Optio
 /// (WindowManager's, [`crate::engine::overview::SHOW_DESKTOP_LAYER`]: a click there brings
 /// the windows back). macOS's click-through overlays (`through`: [`super::desktop::seen_through`])
 /// are seen through as well. The test's desktop clicks ([`desktop_click`], [`desktop_drag`])
-/// go only there.
+/// go only there. `list` must hold the desktop's own windows
+/// ([`windows::on_screen_with_desktop`]): without them (11-09, the list every other reader
+/// takes) no point was ever the desktop, and every desktop click was refused unposted.
 fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32, through: &dyn Fn(&windows::CgWindow) -> bool) -> Result<(), String> {
     let top = list.iter().find(|w| {
         let click_through = w.pid == own && (w.layer > CLICKABLE_LEVEL || w.bounds.w > TAB_MAX_WIDTH);
@@ -589,7 +591,7 @@ fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32, through: &dyn Fn(&
 /// single click; a quick one without). The pointer goes back where it was.
 pub fn desktop_click(p: Point, double: bool, hold: Option<Duration>) -> Result<(), String> {
     let own = std::process::id() as i32;
-    let list = windows::list_windows();
+    let list = windows::on_screen_with_desktop();
     desktop_at(&list, p, own, &|w| super::desktop::seen_through(w, p))?;
     let back = pointer_home();
     move_first(p, false)?;
@@ -611,7 +613,7 @@ pub fn desktop_click(p: Point, double: bool, hold: Option<Duration>) -> Result<(
 /// ([`desktop_at`], checked before anything is posted). The pointer goes back where it was.
 pub fn desktop_drag(from: Point, to: Point) -> Result<(), String> {
     let own = std::process::id() as i32;
-    let list = windows::list_windows();
+    let list = windows::on_screen_with_desktop();
     let path = segment(from, to, 4.0);
     for p in &path {
         desktop_at(&list, *p, own, &|w| super::desktop::seen_through(w, *p))?;

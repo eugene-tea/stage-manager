@@ -1945,22 +1945,64 @@ def phase_native():
     wallpaper_edge()
 
 
+# The edge check's fixture frame and how far around it the check presses: the sweeps' drags
+# reach 62 pt right of its right edge and 12 pt above its top, the long press lies EDGE_FAR
+# left of its left edge.
+EDGE_FRAME = (800.0, 500.0)
+EDGE_FAR = 120.0
+
+
+def edge_zone(f):
+    """Everything the edge check presses or drags across around fixture frame `f`, with room."""
+    return {"x": f["x"] - EDGE_FAR - 40, "y": f["y"] - 40, "w": f["w"] + EDGE_FAR + 40 + 100, "h": f["h"] + 70}
+
+
+def edge_frame(s, icons):
+    """A frame on the main display for the edge check's fixture window where all the check
+    presses (`edge_zone`) is clear of every other app's window (with the owner's Stage Manager
+    quit for a run his windows stay where they are: 11-09 at 14:00 and 15:11 one of his was
+    at the old fixed spot, 2362,480), of Finder's desktop icons `icons` (grown by their
+    labels, as the app knows them), of the strip's column and of both bottom corners (the
+    park corner and its patch). Tried right to left, top to bottom; None when nowhere is."""
+    vis, display = s["display"]["visible"], s["display"]["frame"]
+    w, h = EDGE_FRAME
+    left = vis["x"] + s["strip_width"] + 20
+    corners = [{"x": vis["x"] + vis["w"] - 420, "y": vis["y"] + vis["h"] - 420, "w": 420, "h": 420},
+               {"x": vis["x"], "y": vis["y"] + vis["h"] - 420, "w": 420, "h": 420}]
+    taken = [o["bounds"] for o in others_at(vis, above=True, display=display)] + icons + corners
+    for y in range(int(vis["y"] + 200), int(vis["y"] + vis["h"] - h - 40), 60):
+        for x in range(int(vis["x"] + vis["w"] - w - 200), int(left + EDGE_FAR + 40) - 1, -60):
+            f = {"x": float(x), "y": float(y), "w": w, "h": h}
+            if not any(intersect(edge_zone(f), r) for r in taken):
+                return f
+    return None
+
+
 def wallpaper_edge():
     """A press just outside a window is its edge, never a wallpaper click (11-09: VS Code's
     right edge pressed 0.3 pt outside its frame sent the stage to the strip; the window parked
     while he kept dragging and shrank to its minimum in the park corner). macOS gives a
-    resizable window a band a few points wide outside its frame where a press takes its edge.
+    resizable window a band a few points wide outside its frame where a press takes its edge;
+    ours is 6 pt along an edge, 10 at a corner. The desktop is revealed on the release of a
+    still click shorter than 470 ms, as Apple's; a drag or a long press reveals nothing.
 
-    1. A press 2 pt right of a fixture's right edge, dragged 60 pt right: the stage stays, the
+    Alpha 1 is the fixture pressed around; Alpha 2 sits parked in a stage of its own, so the
+    corner patch reads Finder's desktop icons and the presses keep clear of them. The fixture
+    goes where nothing of anyone else's lies around it (`edge_frame`): every press is posted
+    only where the desktop itself is topmost (`ctl debug-desktop`), never on a real window.
+
+    1. A press 2 pt right of the right edge, dragged 60 pt right: the stage stays, the
        window is never parked, macOS resizes it (its band took the press).
     2. A sweep: a press k pt right of the edge (mid edge, then out past the top-right corner),
        dragged 40 pt: whether macOS took the edge (the window grew) is printed, the band's real
        reach for the main thread (macOS's own, measured 11-09: 3 pt grabs, 4 doesn't). A
        drag reveals nothing, anywhere.
-    3. A still click 10 pt out (past our band): the desktop is revealed on the release, as
-       Apple's (never on the press); a click again brings the stage back.
-    4. A still press held 700 ms, far from the window: nothing is revealed (Apple's reveals
-       only for a click shorter than about 470 ms).
+    3. A quick still click 4 pt out (past macOS's band, in ours): nothing is revealed, the
+       press is logged as the window's edge.
+    4. A quick still click 10 pt out (past our band): the desktop is revealed on the release,
+       as Apple's (never on the press); a click again brings the stage back.
+    5. A still press held 600 ms, off the window: nothing is revealed (Apple's reveals only
+       for a click shorter than about 470 ms).
     Same gate as `native_wallpaper`: Apple's Stage Manager off, "Click wallpaper to reveal
     desktop" Only in Stage Manager (with Always, macOS itself would act on the presses)."""
     say("-- a press just outside a window's edge: the edge, no wallpaper click")
@@ -1972,18 +2014,37 @@ def wallpaper_edge():
         return
     try:
         write_config(None)
-        start_extra("a", 1)
+        start_extra("a", 2)
         activate("a")
         time.sleep(1.0)
-        if not check(start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"}) is not None, "app up with one fixture window"):
+        if not check(start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"}) is not None, "app up with two fixture windows"):
             return
-        s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage")
-        if not check(s is not None, "Alpha 1 is shown"):
+        s = wait_state(lambda x: {"Alpha 1", "Alpha 2"} <= set(by_title(x)), "Alpha's windows")
+        if not check(s is not None, "Alpha 1 and Alpha 2 are managed"):
             return
-        wid = by_title(s)["Alpha 1"]["id"]
+        t = by_title(s)
+        wid = t["Alpha 1"]["id"]
+        do("new", t["Alpha 2"]["id"])
+        s = wait_state(lambda x: by_title(x)["Alpha 2"]["home"] != by_title(x)["Alpha 1"]["home"], "Alpha 2 in a stage of its own")
+        if s is not None and not shown(s, "Alpha 1"):
+            do("switch", by_title(s)["Alpha 1"]["home"])
+        s = wait_state(lambda x: shown(x, "Alpha 1") and by_title(x)["Alpha 2"]["parked"], "Alpha 1 shown, Alpha 2 parked")
+        if not check(s is not None, "Alpha 1 is shown, Alpha 2 parked in a stage of its own"):
+            return
+        # The patch at the park corner reads Finder's icons (a list once known; None unknown).
+        known = wait_until(lambda: (lambda i: (i,) if i is not None else None)((state().get("desktop_still") or {}).get("icons")),
+                           6, "Finder's desktop icons read")
+        icons = known[0] if known else []
+        if not known:
+            say("    Finder's desktop icons are not known: the presses keep clear of other apps' windows only")
+        s = state()
         vis = s["display"]["visible"]
-        # Its right edge 200 pt in from the screen's, clear of the strip on the left.
-        frame = {"x": vis["x"] + vis["w"] - 1000, "y": vis["y"] + 200, "w": 800, "h": 500}
+        frame = edge_frame(s, icons)
+        if frame is None:
+            skip("wallpaper edge", f"no spot on the main display clear of other apps' windows and {len(icons)} desktop icon(s) "
+                 f"for a {EDGE_FRAME[0]:.0f}x{EDGE_FRAME[1]:.0f} window and the presses around it")
+            return
+        say(f"    the fixture at {fmt(frame)}, the presses within {fmt(edge_zone(frame))} ({len(icons)} desktop icon(s) known)")
 
         def put_back():
             ctl("debug-frame", wid, frame["x"], frame["y"], frame["w"], frame["h"])
@@ -1995,9 +2056,12 @@ def wallpaper_edge():
             return r
 
         put_back()
+        if not check(close(live_frame("Alpha 1"), frame, 2.0), f"Alpha 1 at its frame ({fmt(live_frame('Alpha 1'))})"):
+            return
         right, mid, top = frame["x"] + frame["w"], frame["y"] + frame["h"] / 2, frame["y"]
 
         say("-- 1. pressed 2 pt outside the right edge and dragged")
+        bands = log_text().count("resize band")
         r = press_drag((right + 2, mid), (right + 62, mid))
         if not r.get("ok"):
             skip("wallpaper edge", f"the press's path is not all desktop ({r.get('error')})")
@@ -2006,7 +2070,7 @@ def wallpaper_edge():
         a1 = by_title(s)["Alpha 1"]
         check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"the stage stays ({stage_titles(s)})")
         check(not a1["parked"], "the window is never parked")
-        check("resize band" in log_text(), "the press is logged as the window's edge")
+        check(log_text().count("resize band") > bands, "the press is logged as the window's edge")
         grown = live_frame("Alpha 1")
         say(f"    the window after the drag: {fmt(grown)} (macOS resized it: {grown['w'] > frame['w'] + 20})")
 
@@ -2028,28 +2092,39 @@ def wallpaper_edge():
                       f"{where}, {at[0] - right:.0f} pt out: a drag reveals nothing ({stage_titles(s)})")
             say(f"    {where}, pt out -> macOS took the edge: {', '.join(took)}")
 
-        say("-- 3. a still click 10 pt out: the desktop, on the release")
+        say("-- 3. a quick still click 4 pt out, in our band: the window's edge, nothing revealed")
         put_back()
+        bands = log_text().count("resize band")
+        r = ctl("debug-desktop", f"{right + 4:.1f}", f"{mid:.1f}")
+        if check(r.get("ok"), f"clicked 4 pt out ({r.get('error', 'ok')})"):
+            time.sleep(1.5)
+            s = state()
+            check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"a click in the resize band reveals nothing ({stage_titles(s)})")
+            check(log_text().count("resize band") > bands, "the click is logged as the window's edge")
+
+        say("-- 4. a quick still click 10 pt out: the desktop, on the release")
+        put_back()
+        released = log_text().count('on="release"')
         r = ctl("debug-desktop", f"{right + 10:.1f}", f"{mid:.1f}")
         if check(r.get("ok"), f"clicked 10 pt out ({r.get('error', 'ok')})"):
             time.sleep(1.5)
             s = state()
             check(s["desktop_revealed"] and by_title(s)["Alpha 1"]["parked"], "the desktop is revealed")
-            check('on="release"' in log_text() or "on=release" in log_text(), "the reveal ran on the release")
+            check(log_text().count('on="release"') > released, "the reveal ran on the release")
             ctl("debug-desktop", f"{right + 10:.1f}", f"{mid:.1f}")
             s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage back")
             check(s is not None, "a click again brings the stage back")
             check(s is not None and close(live_frame("Alpha 1"), frame), "at its frame")
 
-        say("-- 4. a still press held 700 ms on the wallpaper: no click")
-        # Halfway between the strip's column and the window's left edge.
-        far = ((vis["x"] + state()["strip_width"] + frame["x"]) / 2, mid)
-        r = ctl("debug-desktop", f"{far[0]:.1f}", f"{far[1]:.1f}", "hold", "700")
+        say("-- 5. a still press held 600 ms on the wallpaper: no click")
+        far = (frame["x"] - EDGE_FAR, mid)
+        longs = log_text().count("a long press on the wallpaper")
+        r = ctl("debug-desktop", f"{far[0]:.1f}", f"{far[1]:.1f}", "hold", "600")
         if r.get("ok"):
             time.sleep(1.5)
             s = state()
-            check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"a long press reveals nothing ({stage_titles(s)})")
-            check("a long press on the wallpaper" in log_text(), "the long press is logged as no click")
+            check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"a 600 ms press reveals nothing ({stage_titles(s)})")
+            check(log_text().count("a long press on the wallpaper") > longs, "the long press is logged as no click")
         else:
             skip("wallpaper long press", f"the point is not bare desktop ({r.get('error')})")
         consistent("wallpaper edge")
@@ -2365,12 +2440,14 @@ def our_windows(pid=None):
     return [w for w in wins if w["pid"] == pid and w["onscreen"]]
 
 
-def others_at(rect):
+def others_at(rect, above=False, display=None):
     """Shown windows of another app than the fixtures' and ours that reach `rect`, as the
     window server lists them (`probe-windows --all`: ids, pids and bounds, never a title).
     With the owner's Stage Manager quit for a run his windows stay where they are, and one
     reaching a park corner keeps that corner's patch down (`a shown window reaches the
-    corner`): a check of the patch there skips, never fails."""
+    corner`): a check of the patch there skips, never fails. `above`: the windows above
+    layer 0 too (the Dock, a floating panel), but for one covering the whole of `display`
+    (Notification Center's full-screen window, which the app looks through off its banners)."""
     r = run([BIN, "probe-windows", "--all"], timeout=10)
     try:
         wins = json.loads(r.stdout)["windows"]
@@ -2382,7 +2459,11 @@ def others_at(rect):
             mine |= set(probe(b).get("pids", []))
         except (json.JSONDecodeError, AttributeError):
             pass
-    return [w for w in wins if w["layer"] == 0 and w["onscreen"] and w.get("alpha", 1) > 0
+    def counts(w):
+        if w["layer"] == 0:
+            return True
+        return above and w["layer"] > 0 and not (display and contains(w["bounds"], display, 2.0))
+    return [w for w in wins if counts(w) and w["onscreen"] and w.get("alpha", 1) > 0
             and w["pid"] not in mine and intersect(w["bounds"], rect)]
 
 
