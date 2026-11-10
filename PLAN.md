@@ -12,7 +12,7 @@ UX-SPEC, "Known gaps".
 
 **When it happens, no session needed:**
 
-- **Eugene's next real restart.** In that day's log, check:
+- **The next real restart.** In that day's log, check:
   - the launch's `recovery scan` line shows `restored=0` (no window came back hidden)
   - no `app activated … queued_ms` over 100 in the first two minutes, and if there is one, the
     `slow WM task` line names what held the thread

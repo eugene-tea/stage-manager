@@ -1352,7 +1352,7 @@ def phase_strip():
 
 def strip_cover_checks(s, wid):
     """Apple's strip stays up under a window over its cards and slides away only once the
-    window covers the cards' left edge (recorded 11-09 on his Studio Display: shown at 52 pt,
+    window covers the cards' left edge (recorded 11-09 on the owner's Studio Display: shown at 52 pt,
     gone at 15 pt; ours at 20 pt). Window `wid` (the front stage's only one, clear of the
     strip) goes 100 pt in, then 30 pt in, over the cards: the strip stays shown, below
     windows; then flush left: it slides away; then back."""
@@ -1471,14 +1471,14 @@ AT_ONCE_CAPTURES_OFF = ("window captures are off",)
 # The app's reason when a window that stays shown through the switch reaches the park corner
 # and no snapshot of it is at hand to draw on the cover (engine::corner_patch::STAYING_UNPICTURED,
 # 8L5). Skipped, never failed, only when every window it names (`at_once_windows`) is the
-# owner's own (not a fixture's, not ours): his Stage Manager quit for a run leaves his windows
+# owner's own (not a fixture's, not ours): the owner's Stage Manager quit for a run leaves the owner's windows
 # on screen, unmanaged, and the app takes no snapshot of a window it does not manage.
 STAYING_UNPICTURED = "a window that stays shown reaches the corner"
 
 
 # The most a switch's cover paints at the park corner (engine::corner_patch::COVER_CAP, 8L6): a
 # square that side at a bottom corner (a column that wide down the side at a top one). 10-16 the
-# owner's covers were up to 2087x1316 pt: his desktop painted over his windows at every switch.
+# owner's covers were up to 2087x1316 pt: the owner's desktop painted over the owner's windows at every switch.
 COVER_CAP = 320.0
 
 _RECT = r"(-?\d+),(-?\d+) (\d+)x(\d+)"
@@ -1689,7 +1689,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
           f"{what}: every arriving window grows from a card-sized start ({len(grows)} incoming snapshots, {len(arrived)} windows)")
     check("the keyboard goes to the activated window now" in log or "the keyboard goes to the new stage now" in log,
           f"{what}: the switch's focus runs before the windows arrive")
-    # 8L6: the cover never paints more than the park corner (the owner's covered most of his screen).
+    # 8L6: the cover never paints more than the park corner (the owner's covered most of the owner's screen).
     patch = re.findall(r"corner patch: shown rect=" + _RECT, log_text()[:before_log])
     for rect, cap in covers_of(log):
         ok, note = cover_in_corner(rect, cap, probe_out["display"])
@@ -1976,7 +1976,7 @@ def edge_zone(f):
 def edge_frame(s, icons):
     """A frame on the main display for the edge check's fixture window where all the check
     presses (`edge_zone`) is clear of every other app's window (with the owner's Stage Manager
-    quit for a run his windows stay where they are: 11-09 at 14:00 and 15:11 one of his was
+    quit for a run the owner's windows stay where they are: 11-09 at 14:00 and 15:11 one of the owner's was
     at the old fixed spot, 2362,480), of Finder's desktop icons `icons` (grown by their
     labels, as the app knows them), of the strip's column and of both bottom corners (the
     park corner and its patch). Tried right to left, top to bottom; None when nowhere is."""
@@ -2459,7 +2459,7 @@ def our_windows(pid=None):
 def others_at(rect, above=False, display=None):
     """Shown windows of another app than the fixtures' and ours that reach `rect`, as the
     window server lists them (`probe-windows --all`: ids, pids and bounds, never a title).
-    With the owner's Stage Manager quit for a run his windows stay where they are, and one
+    With the owner's Stage Manager quit for a run the owner's windows stay where they are, and one
     reaching a park corner keeps that corner's patch down (`a shown window reaches the
     corner`): a check of the patch there skips, never fails. `above`: the windows above
     layer 0 too (the Dock, a floating panel), but for one covering the whole of `display`
@@ -2547,7 +2547,7 @@ def whose(reply):
 def other_window_note(reply):
     """For a synthetic click, hover or drag the app refused because another process's window
     is topmost on its path (`reply`: ctl's reply, or its output text): what is there, as a
-    note; None for any other reply. With the owner's Stage Manager quit for a run his own
+    note; None for any other reply. With the owner's Stage Manager quit for a run the owner's own
     windows are on screen (10-16: Chrome over the strip at 70,735, VS Code at 580,90); the app
     posts nothing over them, and a check never moves them."""
     err = reply.get("error") if isinstance(reply, dict) else reply
@@ -2649,7 +2649,7 @@ def overlap_area(a, b):
 
 
 def reveal_strip(what):
-    """Reaches the strip the way a person does when a window covers it (his editor on the 5K
+    """Reaches the strip the way a person does when a window covers it (the owner's editor on the 5K
     display): an active window at the screen's left edge hides it (Apple's auto-hide; one
     over the cards further right leaves it shown, under the window), and the pointer resting
     at the left edge brings it back above every window. When no active window is at the edge,
@@ -4608,9 +4608,9 @@ GHOST_LAYER = 4  # NSFloatingWindowLevel + 1: a dragged card's ghost panel
 
 
 def sharp_ghost_check():
-    """11-09 (Eugene, Mail's card dragged out): past the column a dragged card's ghost is its
+    """11-09 (the owner, Mail's card dragged out): past the column a dragged card's ghost is its
     window at full size drawn from the window's full-size snapshot, never the card's thumbnail
-    stretched (it covered his screen, blurred); until the snapshot comes it stays at the card's
+    stretched (it covered the owner's screen, blurred); until the snapshot comes it stays at the card's
     size. Fixture 1 and 2's combined card, by its app icons (the whole card) and by Fixture 1's
     own part (the window lifted off), each dragged past the column, held there about a second
     and brought back over the card: nothing changes, and no ghost panel is left on screen."""
@@ -5722,7 +5722,7 @@ def expose_round(which, label, shot=None):
 
 def show_desktop_round():
     """macOS's own Show Desktop (`ctl debug-expose show-desktop`, the user's shortcut; the same
-    reveal as a wallpaper click with "Click wallpaper to reveal desktop: Always", his default)
+    reveal as a wallpaper click with "Click wallpaper to reveal desktop: Always", the owner's default)
     slides every window aside. Reports what the window server lists for the shown fixture
     windows meanwhile (`kCGWindowIsOnscreen` and frames, review R2 V8), and checks the Desktop
     is never recognized again (no Space change counted, the same Space id, no re-recognition
@@ -6529,7 +6529,7 @@ def restore_pool(run_id):
 
 def phase_away():
     """After a restart the windows macOS reopened on another Desktop than their own are named
-    in the restore's line, and nowhere else (1.6.0's menu list taken out, his word 11-06). A
+    in the restore's line, and nowhere else (1.6.0's menu list taken out, the owner's word 11-06). A
     hand-written state.json (session N1) saves Desktop 1 (id 4) with Alpha 1 and 2 in one
     stage and Alpha 3 in another, and Desktop 2 (id 8, shown when saved) with Bravo 1 and 2. In
     session N2 (STAGE_MANAGER_SESSION: the restore takes the file as from another window server
@@ -7332,7 +7332,7 @@ def ax_move_slides(title):
 
 
 def phase_enhanced():
-    """Round enhanced-ui (his 11-03: "the Chrome window is sliding in from the bottom right
+    """Round enhanced-ui (the owner's 11-03: "the Chrome window is sliding in from the bottom right
     corner, not from the strip"; an assistive client had turned Chrome's
     AXEnhancedUserInterface on, and with it on an app animates the frame changes made through
     Accessibility). The fixture starts with its flag on (`--enhanced-ui`, set by this check)
@@ -7423,15 +7423,15 @@ def sampler_out(p, what):
 # ----- stale activations: late notices never switch stages back ---------------------------
 
 def phase_stale():
-    """Round stale-activations (his 11-03 14:09:57: "my windows were flying like boomerangs";
-    the Mac's load at ~110, our activation notices 1-2.6 s late, each taken as his, each switch
+    """Round stale-activations (the owner's 11-03 14:09:57: "my windows were flying like boomerangs";
+    the Mac's load at ~110, our activation notices 1-2.6 s late, each taken as the owner's, each switch
     bringing its own late notice: ten switches back and forth in 10 s). Alpha, Bravo and
     Charlie each in a stage, the app run with every activation notice held 2 s before the WM
     thread gets it (STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS, fixtures only), as under load.
     1. Card clicks 0.4 s apart: Bravo, Charlie, Bravo, Alpha. Alpha's stage comes and stays for
        6 s (past every late notice); after the last click exactly one switch (its own), no
        activation or focus switches stages, and the late notices are dropped or echoes.
-    2. An activation of his under load (`open` of Charlie, as a ⌘Tab) still switches, late:
+    2. An activation of the owner's under load (`open` of Charlie, as a ⌘Tab) still switches, late:
        Charlie's stage comes within 5 s, and stays."""
     say("\n== stale: late activations never switch stages back ==")
     stop_app()
@@ -7489,7 +7489,7 @@ def phase_stale():
     check(frontmost_bundle() == EXTRA["a"][0], f"stale: the keyboard is Alpha's at the end (frontmost {frontmost_bundle()})")
     consistent("stale clicks")
 
-    say("-- 2. his activation under load still switches, late")
+    say("-- 2. the owner's activation under load still switches, late")
     before = len(log_text())
     activate("c")
     s = wait_state(lambda x: "Charlie 1" in active_titles(x), "Charlie's stage", timeout=5)
@@ -7504,7 +7504,7 @@ def phase_stale():
 
 
 def phase_handles():
-    """Round stale-handles (his 11-04: Music's window joined Safari's stage with a handle dead
+    """Round stale-handles (the owner's 11-04: Music's window joined Safari's stage with a handle dead
     from the first: it never parked, and once he closed it, Music keeping it ordered out, its
     card kept the old picture and flew a ghost in at every switch there). Fixture 1 and 2 at
     frames of different sizes (no hidden tab's signature), each in a stage; the app run with
@@ -7725,8 +7725,8 @@ def phase_displays():
     check(x is not None, f"the other screen's strip draws its cards' pictures (thumbnails of {sorted(screen(x or s, other).get('pictures', []))})")
     x = wait_state(lambda y: (screen(y, other).get("corner_patch") or {}).get("shown"), "the other screen's corner patch", timeout=12)
     patch = (screen(x or state(), other).get("corner_patch") or {})
-    # Another app's window at that corner (the owner's, with his Stage Manager quit) keeps
-    # the patch down by design: skipped, as the other phases do (11-06: his window there).
+    # Another app's window at that corner (the owner's, with the owner's Stage Manager quit) keeps
+    # the patch down by design: skipped, as the other phases do (11-06: the owner's window there).
     foreign = others_at(patch["rect"]) if x is None and patch.get("rect") else []
     if foreign:
         skip("the other screen's own corner patch",
@@ -7736,7 +7736,7 @@ def phase_displays():
         rect = patch.get("rect")
         check(on_screen_of(rect, other) and is_parked(rect, zone(other)), f"its rectangle is at the other screen's own corner: {fmt(rect) if rect else rect}")
         # `shown` is the plan the controller sent; the panel orders in once its picture is
-        # rendered (a screen's first, about 170 ms on his laptop), so a listing read at
+        # rendered (a screen's first, about 170 ms on the owner's laptop), so a listing read at
         # once raced it (round patch-check: listed 40 to 60 ms before it showed); waited
         # for, bounded, as the window server lists it.
         at_rect = lambda: [w for w in our_windows() if contains(w["bounds"], rect, tol=2.0) and contains(rect, w["bounds"], tol=2.0)]

@@ -178,7 +178,7 @@ class StageHolding(unittest.TestCase):
 
 class OwnersWindows(unittest.TestCase):
     """8L3: a synthetic click or drag the app refused over another process's window (the
-    owner's own, on screen while his Stage Manager is quit for a run) is a skip, not a failure."""
+    owner's own, on screen while the owner's Stage Manager is quit for a run) is a skip, not a failure."""
 
     def test_a_refusal_over_another_window_is_noted(self):
         reply = {"ok": False, "error": "the topmost window at 70,735 is not ours or a fixture's (pid 999999999)"}

@@ -1,5 +1,5 @@
 //! A window its app reopens much smaller than saved gets its saved frame back, once (round
-//! restore-saved-size, his go 11-06: after a restart VS Code reopened a 2082x1253 window at
+//! restore-saved-size, the owner's go 11-06: after a restart VS Code reopened a 2082x1253 window at
 //! 665x401, the restore matched it strongly and kept the app's frame, and he resized it back
 //! by hand).
 //!

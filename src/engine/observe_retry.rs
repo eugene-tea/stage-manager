@@ -1,6 +1,6 @@
 //! When an app that does not answer Accessibility yet is asked again (round login-observe).
 //!
-//! His restart on 11-06 09:30: a dozen apps macOS reopened did not answer Accessibility for
+//! The owner's restart on 11-06 09:30: a dozen apps macOS reopened did not answer Accessibility for
 //! several seconds after Stage Manager started. Each try to observe one cost the WM thread
 //! three registrations at the 0.25 s messaging timeout (0.75 s), one app after another, once a
 //! second: the WM thread sat 3.3 s behind its notices, and a window found (Terminal's) waited

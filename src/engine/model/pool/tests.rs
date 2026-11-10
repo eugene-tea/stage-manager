@@ -978,7 +978,7 @@ fn a_click_on_another_window_early_leaves_a_late_title_its_rematch() {
 
 #[test]
 fn a_window_the_user_touched_stays_where_it_is_when_its_title_comes() {
-    // Focused by his click (or moved, or its stage switched to): his.
+    // Focused by the owner's click (or moved, or its stage switched to): the owner's.
     let mut m = joined_by_a_late_title();
     m.touch_window(w(42));
     assert!(m.window_title_changed(w(42), "beta (Workspace)"));

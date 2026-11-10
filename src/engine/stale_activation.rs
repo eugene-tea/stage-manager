@@ -2,12 +2,12 @@
 //!
 //! macOS tells us an app became frontmost through NSWorkspace's notice, which the main thread
 //! stamps when it gets it ([`crate::platform::apps::AppEvent::Activated`]) and the WM thread
-//! decides on later. Under load that gap grows to seconds (his 11-03 14:09:57: the Mac's load
-//! at ~110, our notices 1–2.6 s late): every late activation was taken as his, each switch
+//! decides on later. Under load that gap grows to seconds (the owner's 11-03 14:09:57: the Mac's load
+//! at ~110, our notices 1–2.6 s late): every late activation was taken as the owner's, each switch
 //! superseded the one before and brought its own late activation, and windows flew back and
 //! forth between two stages for 10 s.
 //!
-//! An activation acts only if it is still true and still his when we decide ([`judge`]):
+//! An activation acts only if it is still true and still the owner's when we decide ([`judge`]):
 //!
 //! 1. **Older than our switch**: it fired (the main thread's stamp) before the latest switch we
 //!    began (a card click, a hotkey, an activation or focus decided, a drop): that switch is
@@ -17,7 +17,7 @@
 //!    main thread's view, updated before the notice is posted): something newer happened, and
 //!    its own notice is on its way.
 //!
-//! Neither drops an activation of his that is the newest thing that happened: its app stays
+//! Neither drops an activation of the owner's that is the newest thing that happened: its app stays
 //! frontmost until something newer comes, and nothing we began came after it, since every
 //! switch we begin from an activation passed rule 2 first (no newer activation had fired
 //! then). A ⌘Tab, a Dock click or a click on a window under load still switches, late.
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn a_late_activation_of_another_app_still_frontmost_acts() {
-        // Our switch at 0; his ⌘Tab to Chrome at 300 reaches us 2.5 s later: still frontmost.
+        // Our switch at 0; the owner's ⌘Tab to Chrome at 300 reaches us 2.5 s later: still frontmost.
         let t0 = Instant::now();
         assert_eq!(judge(CHROME, ms(t0, 300), Some(t0), Some(CHROME)), None);
         // Nothing known about the front (a failed read): it acts.
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn one_superseded_by_a_newer_click_is_dropped() {
-        // Chrome activated at 1000; his card click at 1500 began our switch (Slack's stage);
+        // Chrome activated at 1000; the owner's card click at 1500 began our switch (Slack's stage);
         // Chrome's notice comes at 2500.
         let t0 = Instant::now();
         let v = judge(CHROME, ms(t0, 1000), Some(ms(t0, 1500)), Some(SLACK));
@@ -175,7 +175,7 @@ mod tests {
     /// A replay's input: the notices, the card clicks (when, the stage's app), each app's stage.
     type Replay = (Vec<Notice>, Vec<(u64, i32)>, HashMap<i32, u32>);
 
-    /// His 11-03 14:09:52–14:10:09 (app[17282]): card clicks for stages 5, 4 and 1, then
+    /// The owner's 11-03 14:09:52–14:10:09 (app[17282]): card clicks for stages 5, 4 and 1, then
     /// every notice as it came (`queued_ms` gives when it fired).
     fn boomerang() -> Replay {
         let stage_of: HashMap<i32, u32> = [(CHROME, 8), (CODE, 5), (SAFARI, 4), (SLACK, 1), (FORK, 6)].into_iter().collect();
@@ -212,7 +212,7 @@ mod tests {
         // Without the rule, the replay switches back and forth as the app did.
         let before = replay(&notices, &clicks, &stage_of, false);
         assert!(before.iter().filter(|s| s.0 > last_click).count() >= 10, "{before:?}");
-        // With it: at most one switch after his last click.
+        // With it: at most one switch after the owner's last click.
         let after = replay(&notices, &clicks, &stage_of, true);
         let late: Vec<_> = after.iter().filter(|s| s.0 > last_click).collect();
         assert!(late.len() <= 1, "{late:?}");
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn his_activation_under_load_still_switches_late() {
-        // A card click at 0, then his ⌘Tab to Fork at 3000 that reaches us 2.4 s late with
+        // A card click at 0, then the owner's ⌘Tab to Fork at 3000 that reaches us 2.4 s late with
         // nothing newer: it switches.
         let stage_of: HashMap<i32, u32> = [(CODE, 5), (FORK, 6)].into_iter().collect();
         let notices = [Notice { pid: FORK, fired: 3000, decided: 5400 }];

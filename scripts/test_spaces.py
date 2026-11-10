@@ -1016,7 +1016,7 @@ def owners_case(d1, d2):
     parked on Desktop 1 behind Alpha's stage, and the fixture app is the **active** one on
     Desktop 2 (Fixture 3's stage in front). A click on its Dock item: macOS goes to the other
     Desktop holding its windows (Desktop 1) and the app predicts it at the press. An inactive
-    app with a window here stays here (his log 10-13 09:55:50, run go10), so that is not the
+    app with a window here stays here (the owner's log 10-13 09:55:50, run go10), so that is not the
     case. $SM_DOCK_REPEATS arrivals, every one clean (strict)."""
     say("\n== the owner's case: an app with a window on each Desktop, its focused one on the other ==")
     if current_space() != d1:

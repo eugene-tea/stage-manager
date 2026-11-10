@@ -4257,7 +4257,7 @@ mod tests {
 
     #[test]
     fn a_plane_in_its_own_depth_is_drawn_where_the_layout_projects_it() {
-        // His laptop's strip (see strip_layout's tests): planes above, at and below the eye,
+        // The owner's laptop's strip (see strip_layout's tests): planes above, at and below the eye,
         // at rest and slid partly out.
         let m = Metrics::new(&StripStyle::default(), Size::new(1800.0, 1130.0), 1.0, 584.5 - 39.0);
         for (x, top, u, v) in [(15.0, 120.0, 140.0, 105.0), (32.0, 480.0, 120.0, 90.0), (83.0, 900.0, 161.0, 120.0)] {

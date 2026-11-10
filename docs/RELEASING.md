@@ -2,7 +2,7 @@
 
 The public build is a DMG, signed with a Developer ID and notarized by Apple, published on
 GitHub Releases, with a Homebrew cask in the `eugene-tea/homebrew-tap` repository and the info
-page on GitHub Pages. Every step that publishes something is the owner's to run.
+page on GitHub Pages. Every step that publishes something is the maintainer's to run.
 
 Dev builds are unaffected: `make sign`, `make run` and `make install` keep using the local
 self-signed identity (`scripts/sign.sh`).
@@ -105,7 +105,7 @@ version: a tag with a pre-release part (`v1.3.0-rc.1`) is never offered or insta
 first lines of the release notes show in the update alert (up to six lines, Markdown reduced
 to plain text), so lead with what users will notice.
 
-The tag, the release, the tap and the Pages deploy are public: each one only on the owner's
+The tag, the release, the tap and the Pages deploy are public: each one only on the maintainer's
 word.
 
 ## Art

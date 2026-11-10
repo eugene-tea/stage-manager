@@ -3234,7 +3234,7 @@ impl Controller {
                 self.present();
             }
             // The strip has its note: now the order its card shows (`raise_order`), unless the
-            // user clicked since the switch began (this flush may be his next click's).
+            // user clicked since the switch began (this flush may be the owner's next click's).
             self.settle_raise_order(ob, &raises, focus, since);
         }
     }
@@ -3814,7 +3814,7 @@ impl Controller {
                     return;
                 }
                 // Late under load: no longer true, or older than a switch we began since
-                // (round stale-activations). Not his: nothing below runs for it.
+                // (round stale-activations). Not the owner's: nothing below runs for it.
                 let front = super::apps::frontmost_pid();
                 if let Some(why) = stale_activation::judge(pid, fired, self.our_switch, front) {
                     let age_ms = fired.elapsed().as_millis() as u64;
@@ -4263,7 +4263,7 @@ impl Controller {
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
                 let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
-                // His click decides where the keyboard goes: no focus of ours follows it, but
+                // The owner's click decides where the keyboard goes: no focus of ours follows it, but
                 // for a click on an arriving window, which lands now as the switch meant.
                 if for_arriving {
                     self.flush_pending(ob);
@@ -7817,8 +7817,8 @@ mod tests {
             !wallpaper_reveal_enabled(&NativeSettings::default()),
             "absent = Always (Apple's default): macOS reveals on its own, ours never runs alongside"
         );
-        let his: RawSettings = [("AppWindowGroupingBehavior".to_string(), 1), ("GloballyEnabled".to_string(), 0)].into();
-        assert!(!wallpaper_reveal_enabled(&native_settings(&his)), "his Mac: the key is absent");
+        let owners: RawSettings = [("AppWindowGroupingBehavior".to_string(), 1), ("GloballyEnabled".to_string(), 0)].into();
+        assert!(!wallpaper_reveal_enabled(&native_settings(&owners)), "the owner's Mac: the key is absent");
         let always: RawSettings = [("EnableStandardClickToShowDesktop".to_string(), 1)].into();
         assert!(!wallpaper_reveal_enabled(&native_settings(&always)), "macOS reveals on its own");
         let only_sm: RawSettings = [("EnableStandardClickToShowDesktop".to_string(), 0)].into();
@@ -7840,7 +7840,7 @@ mod tests {
 
     #[test]
     fn a_double_click_reveals_and_stays_revealed() {
-        // The model and the controller's decision, wired as `mouse_down` wires them: his log
+        // The model and the controller's decision, wired as `mouse_down` wires them: the owner's log
         // of 10-12 had two clicks 40 ms apart reveal and bring the stage straight back.
         use crate::engine::model::{ModelOptions, Observation};
         use crate::engine::rules::{Decision, Placement, RuleAction};
@@ -7937,7 +7937,7 @@ mod tests {
 
     #[test]
     fn a_dock_click_on_the_other_app_of_a_shared_stage_gives_it_the_keyboard_and_the_front() {
-        // His 10-27 log: one stage holds Mail (B, the key) and Calendar (A); a Dock click on
+        // The owner's 10-27 log: one stage holds Mail (B, the key) and Calendar (A); a Dock click on
         // Calendar switched with Mail's key, no early focus, and our focus activated Mail.
         use crate::engine::model::ModelOptions;
         use crate::engine::rules::{Decision, Placement, RuleAction};
@@ -8019,7 +8019,7 @@ mod tests {
 
     #[test]
     fn only_windows_that_really_stay_shown_can_keep_a_switchs_corner_uncovered() {
-        // 8L5: his windows nearly fill the screen. The outgoing stage's (parking), the
+        // 8L5: the owner's windows nearly fill the screen. The outgoing stage's (parking), the
         // arriving ones, the parked ones, ours, a hidden or non-normal one never count; a
         // pinned or unmanaged window does, with whether a snapshot of it is at hand.
         let own = 500;
@@ -8074,7 +8074,7 @@ mod tests {
 
     #[test]
     fn a_window_the_model_has_parked_counts_as_parked_only_where_it_is_listed_in_the_zone() {
-        // 8L6, his log: window 101 (its stage parked) listed at its restore frame 533,184
+        // 8L6, the owner's log: window 101 (its stage parked) listed at its restore frame 533,184
         // 1741x1173 grew the patch's rectangle and every switch's cover to 473,124 2087x1316.
         let (display, visible) = (Rect::new(0.0, 0.0, 2560.0, 1440.0), Rect::new(0.0, 33.0, 2560.0, 1407.0));
         let list = [

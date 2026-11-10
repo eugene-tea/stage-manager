@@ -3,7 +3,7 @@
 //! The owner's 10-21 18:34: Home (a Catalyst app that stops answering Accessibility) opened
 //! window 35007 and he closed it; no destroyed notification came (every Accessibility call
 //! answered `CannotComplete`). The model kept the window: its stage became a gray card with no
-//! picture, and his click on it ran a switch whose moves all failed before the card went.
+//! picture, and the owner's click on it ran a switch whose moves all failed before the card went.
 //!
 //! The window server is the witness: its complete list (`CGWindowListCopyWindowInfo` with
 //! `kCGWindowListOptionAll`) names every window that exists, on every Desktop, minimized ones

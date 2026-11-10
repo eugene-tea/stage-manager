@@ -5,7 +5,7 @@
 //! The patch used to hide for the whole of Show Desktop (10-13: shown through it, it sat
 //! over a pushed window's edge, a lighter block in the corner), and came back only when a
 //! once-a-second look saw Show Desktop's own window gone, after macOS had slid the windows
-//! back: the slivers were bare until then (his log: 1.2 s).
+//! back: the slivers were bare until then (the owner's log: 1.2 s).
 //!
 //! - **With a still of the desktop** ([`super::patch_still`]) the patch shows what the
 //!   desktop shows there, icons and widgets included, so it has no reason of its own to hide:
@@ -392,7 +392,7 @@ mod tests {
         assert_eq!(panel_place(Some(nudged), Some(PATCH), None, MAIN), PanelPlace::InPlace, "half a point is no move");
         let off = Rect::new(2600.0, 1328.0, 61.0, 112.0);
         assert_eq!(panel_place(Some(off), Some(PATCH), None, MAIN), PanelPlace::Away);
-        // Show Desktop leaves ~20 pt of a pushed window on the display (his log: x=2538).
+        // Show Desktop leaves ~20 pt of a pushed window on the display (the owner's log: x=2538).
         let edge = Rect::new(2540.0, 1328.0, 61.0, 112.0);
         assert_eq!(panel_place(Some(edge), Some(PATCH), None, MAIN), PanelPlace::Moved);
         assert_eq!(panel_place(None, Some(PATCH), None, MAIN), PanelPlace::Unknown, "not listed");
@@ -441,9 +441,9 @@ mod tests {
 
     /// The still's block at the corner (`desktop_shot::BLOCK`).
     const CAP: Rect = Rect::new(2240.0, 1120.0, 320.0, 320.0);
-    /// A parked window at its park frame: a one-point sliver 52 pt tall (his 10-29 corner).
+    /// A parked window at its park frame: a one-point sliver 52 pt tall (the owner's 10-29 corner).
     const PARKED: Rect = Rect::new(2559.0, 1388.0, 1500.0, 1100.0);
-    /// The same window as Show Desktop pushes it partly into view (his 10-29 report: about
+    /// The same window as Show Desktop pushes it partly into view (the owner's 10-29 report: about
     /// 90x130 pt of its corner).
     const PUSHED: Rect = Rect::new(2470.0, 1310.0, 1500.0, 1100.0);
 

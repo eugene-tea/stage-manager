@@ -5,7 +5,7 @@
   `[app] login_start = "background_item"`; the default is the login item (SMAppService.mainApp,
   round reopen-list). SMAppService.agentServiceWithPlistName registers this file from the
   bundle's Contents/Library/LaunchAgents (scripts/bundle.sh puts it there; the signature seals
-  it). On his Mac (11-06) launchd held the job until loginwindow's reopened apps had checked in,
+  it). On the owner's Mac (11-06) launchd held the job until loginwindow's reopened apps had checked in,
   so it started with the login items, no earlier. It stays in the bundle so an agent registered
   by 1.6.x still starts the app at the first login after the update, which moves it back to the
   login item. src/platform/login_item.rs names this label (AGENT_LABEL).

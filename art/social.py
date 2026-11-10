@@ -4,7 +4,7 @@
     python3 art/social.py <out.html>
 
 A WIDTH × HEIGHT card (Open Graph and Twitter's large summary image): the app icon and the
-name, centred and large (a link preview is small in chat apps), on a quiet background in the info page's light colours (his word 10-13:
+name, centred and large (a link preview is small in chat apps), on a quiet background in the info page's light colours (the owner's word 10-13:
 just the icon and the name). The icon is read from docs/assets/app-icon.png. Standard
 library only.
 """

@@ -499,9 +499,9 @@ pub fn click(p: Point, shift: bool) -> Result<(), String> {
 ///
 /// The user's own mouse or trackpad may end it: the window server takes its release
 /// mid-path as the drag's end (the monitor hears a left mouse-up), and the window stays where
-/// the pointer was then (11-06, a live run with the owner at his Mac: Fixture 5 left at
+/// the pointer was then (11-06, a live run with the owner at the owner's Mac: Fixture 5 left at
 /// x -39, short of the strip, and the drop's checks failed). Then nothing more is posted,
-/// the pointer is left to him, and the error starts with [`DRAG_INTERRUPTED`].
+/// the pointer is left to the owner, and the error starts with [`DRAG_INTERRUPTED`].
 pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), String> {
     let (Some(&first), Some(&last)) = (waypoints.first(), waypoints.last()) else {
         return Err("a drag needs points".into());

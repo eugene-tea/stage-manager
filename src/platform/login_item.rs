@@ -2,13 +2,13 @@
 //! launchd agent (round early-start, kept for `[app] login_start = "background_item"`).
 //!
 //! - **The login item** (round reopen-list, the default): macOS opens it once the apps it
-//!   reopens at the login have started (12-27 s after the login on his Mac, 11-06). Stage
+//!   reopens at the login have started (12-27 s after the login on the owner's Mac, 11-06). Stage
 //!   Manager comes earlier with those apps (`[app] reopen_with_apps`,
 //!   [`crate::engine::reopen_list`]), the login item's copy then handing off quietly.
 //! - **The agent:** `SMAppService.agentServiceWithPlistName` with [`AGENT_PLIST`], which
 //!   `scripts/bundle.sh` puts in the bundle's `Contents/Library/LaunchAgents` (sealed by its
 //!   signature): `BundleProgram` the app's own executable, `RunAtLoad`, no `KeepAlive`. On
-//!   his Mac (three restarts, 11-06) launchd held it, "on-demand-only", until loginwindow's
+//!   the owner's Mac (three restarts, 11-06) launchd held it, "on-demand-only", until loginwindow's
 //!   reopened apps had checked in, and it started with the login items: it gained nothing.
 //!   The plist stays in the bundle either way: an agent registered by 1.6.x is launched from
 //!   it at the first login after the update, and moved to the login item by that copy.

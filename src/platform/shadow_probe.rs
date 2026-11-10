@@ -339,7 +339,7 @@ fn measure(mtm: MainThreadMarker, main: &crate::engine::model::Display, v: Varia
 }
 
 /// `--stack N`: the shadows of 1, 2, 4 … `n` titled windows at one frame in the middle, low
-/// level (parked windows share the corner, and their faint shadow tails add up: his 14 parked
+/// level (parked windows share the corner, and their faint shadow tails add up: the owner's 14 parked
 /// windows showed a shadow edge past the one-window reach, 10-30), taken together as one
 /// image of the probe's own windows (`CGWindowListCreateImageFromArray`). Prints one JSON
 /// object: per count, the reach per side at each threshold.

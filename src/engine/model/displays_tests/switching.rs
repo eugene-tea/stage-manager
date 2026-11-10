@@ -49,7 +49,7 @@ fn an_icon_click_on_a_laptop_card_gathers_the_apps_windows_of_the_laptop_only() 
 
 #[test]
 fn a_stage_hotkey_counts_the_strip_of_the_screen_with_the_keyboard() {
-    // The review's W3, his word 11-06: the shortcuts and `ctl switch N` count the strip
+    // The review's W3, the owner's word 11-06: the shortcuts and `ctl switch N` count the strip
     // of the screen the keyboard is on (the focused window's), for the check and the switch.
     // The Studio has three stages, the laptop four: 4 is the laptop's alone.
     let mut e = Env::both();

@@ -1326,7 +1326,7 @@ mod tests {
 
     #[test]
     fn a_draw_puts_the_whole_picture_where_the_screen_shows_it() {
-        // His laptop: a 6016 px square, Fill on 1800x1169.
+        // The owner's laptop: a 6016 px square, Fill on 1800x1169.
         let area = Rect::new(1700.0, 1000.0, 100.0, 169.0);
         let d = draws(Placement::Fill, LAPTOP, square(), area);
         let top = (1169.0 - 1800.0) / 2.0;
@@ -1429,7 +1429,7 @@ mod tests {
     const LA: (f64, f64) = (34.052_222, -118.242_778);
 
     /// The owner's Mac, 2026-10-27 (PDT): stills said frame 4 each minute from 08:30:04 to
-    /// 08:41:06; his screenshot at 08:46:38 shows frame 4 where the old clock drew 0.
+    /// 08:41:06; the owner's screenshot at 08:46:38 shows frame 4 where the old clock drew 0.
     const STILLS_AT_4: [f64; 13] = [
         1_793_115_004.0,
         1_793_115_064.0,

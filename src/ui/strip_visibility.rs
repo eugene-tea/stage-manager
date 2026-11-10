@@ -284,7 +284,7 @@ mod tests {
     /// left edge at 52 pt, slid away at 15 pt; the cards start at 16 pt).
     #[test]
     fn only_a_window_at_the_left_edge_hides_the_strip() {
-        // Every one covers the cards: a strip 320 pt wide (his Studio Display's cards end near
+        // Every one covers the cards: a strip 320 pt wide (the owner's Studio Display's cards end near
         // 308 pt).
         let wide = Rect::new(0.0, 30.0, 320.0, 1410.0);
         let at = |x: f64| Rect::new(x, 100.0, 900.0, 400.0);

@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn a_press_just_outside_a_windows_edge_is_the_edge() {
         let code = Rect::new(315.0, 58.0, 2055.0, 1263.0);
-        assert!(in_resize_band(Point::new(2370.296875, 74.01171875), code), "his press, 0.3 pt out");
+        assert!(in_resize_band(Point::new(2370.296875, 74.01171875), code), "the owner's press, 0.3 pt out");
         assert!(in_resize_band(Point::new(2375.5, 700.0), code), "5.5 pt right of the edge");
         assert!(!in_resize_band(Point::new(2377.0, 700.0), code), "7 pt right, mid edge: past the band");
         assert!(in_resize_band(Point::new(2379.0, 66.0), code), "9 pt right, near the top corner: the corner's target");

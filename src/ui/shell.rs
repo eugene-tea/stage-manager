@@ -420,7 +420,7 @@ impl Shell {
         }
         // A staged copy an earlier update left beside the app (it quit while an update
         // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6);
-        // the update it held is checked for again within the first minute (his go 11-09).
+        // the update it held is checked for again within the first minute (the owner's go 11-09).
         updater::clean_stale_work(|found| later(move || stale_work_found(found)));
         let note = RcBlock::new(|_t: NonNull<NSTimer>| show_update_note());
         // SAFETY: the blocks run on the main run loop, which keeps the timers; we keep them too.
@@ -1168,7 +1168,7 @@ fn install_if_quiet() {
 }
 
 /// The app's exit path, after every window came back (main thread; elsewhere, nothing): a
-/// ready update installs at the user's own Quit, without reopening the app (his go 11-09),
+/// ready update installs at the user's own Quit, without reopening the app (the owner's go 11-09),
 /// and never at a quit that is not theirs ([`self_update::quit_installs`]). The helper
 /// starts right after this, with the rest of the exit.
 pub fn install_on_quit(user_quit: bool, clean: bool, for_logout: bool) {

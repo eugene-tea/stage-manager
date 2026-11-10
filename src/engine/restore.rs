@@ -124,7 +124,7 @@ pub const WINDOW: Duration = Duration::from_secs(5 * 60);
 
 /// How long after the login (or the launch, for a launch a while after it:
 /// [`Settling::rematch_until`]) a window whose title changes may still go to its saved stage
-/// ([`crate::engine::model::Model::window_retitled`]; his word 11-06: apps reopen with us, he
+/// ([`crate::engine::model::Model::window_retitled`]; the owner's word 11-06: apps reopen with us, he
 /// may click before an editor's late title comes).
 pub const REMATCH: Duration = Duration::from_secs(2 * 60);
 

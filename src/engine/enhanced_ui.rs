@@ -4,7 +4,7 @@
 //! An assistive client (a screen reader, a window manager, a password manager, a dictation
 //! tool) may set `AXEnhancedUserInterface` on an app's application element. With it on,
 //! AppKit and Chromium animate a frame change made through Accessibility: a parked window
-//! slides from the park corner to its frame and back (his 11-03: Chrome's window "sliding in
+//! slides from the park corner to its frame and back (the owner's 11-03: Chrome's window "sliding in
 //! from the bottom right corner, not from the strip"), seen outside the switch's snapshot,
 //! which covers only the final frame. Apple's Stage Manager is no Accessibility client and
 //! never shows this. Rectangle and yabai turn the flag off around their moves and back on

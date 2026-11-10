@@ -1050,7 +1050,7 @@ fn shared_stage() -> Env {
 
 #[test]
 fn activating_the_other_app_of_a_shared_stage_brings_its_window_in_front() {
-    // His 10-27 Dock click: Calendar (A) clicked, its stage's key Mail's (B). Apple's comes
+    // The owner's 10-27 Dock click: Calendar (A) clicked, its stage's key Mail's (B). Apple's comes
     // with the clicked app's window in front and focused.
     let mut e = shared_stage();
     let obs = Observation { focused: None, ..e.d.obs() };
@@ -2809,7 +2809,7 @@ fn one_window_dropped_on_another_card_joins_that_stage_alone() {
     assert_eq!(e.m.stage_of(w(1)), e.m.main_active_stage(), "the current stage untouched");
 }
 
-/// Eugene, 11-09: a window moved into a stage is the one cared about. Whichever path moves
+/// The owner, 11-09: a window moved into a stage is the one cared about. Whichever path moves
 /// it (onto another card, out into the current stage, into a gap, a desktop window onto the
 /// strip), it is first in its new stage's order, the card's front window and its key; that
 /// stage shown, it is in front and focused.

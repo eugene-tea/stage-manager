@@ -79,7 +79,7 @@
 //                                      read again every 200 ms (scripts/measure-apple-card-glass.py
 //                                      turns one card white, black and grey in place)
 //   --enhanced-ui | FIXTURE_ENHANCED_UI=1  the app's AXEnhancedUserInterface starts on (as an
-//                                      assistive client leaves Chrome's: his 11-03); it is
+//                                      assistive client leaves Chrome's: the owner's 11-03); it is
 //                                      readable and settable through Accessibility, and while
 //                                      it is on a standard window animates every frame change
 //                                      made from outside (Accessibility's): it is put back and
@@ -355,7 +355,7 @@ final class FixtureApplication: NSApplication {
 /// While the app's enhanced UI is on, a frame change made from outside (Accessibility's
 /// writes: size, position, size) is put back at once and the window slides to it over
 /// [`duration`], each step a real frame the window server lists (Chrome's slide from the park
-/// corner, his 11-03). The writes of one move arrive together: the slide starts once they stop.
+/// corner, the owner's 11-03). The writes of one move arrive together: the slide starts once they stop.
 final class EnhancedMotion {
     let duration = 0.4
     /// Frames are taken from outside only once the windows are in place.

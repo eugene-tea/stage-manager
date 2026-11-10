@@ -14,7 +14,7 @@ const CHAT: &str = "com.example.chat";
 const SAVED_PLAN: Rect = Rect::new(150.0, 60.0, 1170.0, 705.0);
 /// Chat's window as saved.
 const SAVED_TEAM: Rect = Rect::new(200.0, 90.0, 1000.0, 650.0);
-/// Where the editor reopened its window after the restart (his 11-06 case, scaled: 665x401
+/// Where the editor reopened its window after the restart (the owner's 11-06 case, scaled: 665x401
 /// for a saved 2082x1253, about a tenth of the area).
 const SMALL_PLAN: Rect = Rect::new(19.0, 413.0, 374.0, 225.0);
 /// Where Chat reopened its window.
@@ -87,7 +87,7 @@ fn stage(m: &Model, id: u32) -> StageId {
 
 #[test]
 fn the_rule_is_under_half_the_area_and_the_saved_size_fitting_the_screen() {
-    assert!(owes(SMALL_PLAN, SAVED_PLAN, VISIBLE), "his case");
+    assert!(owes(SMALL_PLAN, SAVED_PLAN, VISIBLE), "the owner's case");
     let half = Rect::new(0.0, 25.0, SAVED_PLAN.w / 2.0, SAVED_PLAN.h);
     assert!(!owes(half, SAVED_PLAN, VISIBLE), "half the area is not under half");
     assert!(!owes(Rect::new(0.0, 25.0, 1300.0, 760.0), SAVED_PLAN, VISIBLE), "larger than saved");
@@ -97,7 +97,7 @@ fn the_rule_is_under_half_the_area_and_the_saved_size_fitting_the_screen() {
 
 #[test]
 fn a_window_reopened_much_smaller_gets_its_saved_frame_when_first_shown() {
-    // His 11-06 restart: strong matches (exact titles) at a tenth of their saved size.
+    // The owner's 11-06 restart: strong matches (exact titles) at a tenth of their saved size.
     let mut m = after_restart();
     let a = launch(&mut m, win(21, 50, EDITOR, "Plan.txt", SMALL_PLAN), win(22, 30, CHAT, "Team", SMALL_TEAM));
     assert_eq!(m.current_space(MAIN).0, 5, "the saved Desktop recognized");

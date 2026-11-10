@@ -1,5 +1,5 @@
 #!/bin/bash
-# Live check of an update installed at the user's Quit (his go 11-09), with a local fake
+# Live check of an update installed at the user's Quit (the owner's go 11-09), with a local fake
 # release: a test build (--features update-test) of this checkout runs from a scratch folder,
 # and a copy of it relabelled 99.0.0 sits on a local disk image (a locally signed app trusts
 # its own designated requirement in test builds; STAGE_MANAGER_UPDATE_DMG).

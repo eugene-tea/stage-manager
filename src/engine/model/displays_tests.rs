@@ -159,7 +159,7 @@ fn every_screen_has_its_own_space_front_stage_and_strip() {
 
 #[test]
 fn the_park_corner_is_where_no_other_screen_lies_beyond() {
-    // His arrangement: the laptop's right edge touches the Studio's left edge.
+    // The owner's arrangement: the laptop's right edge touches the Studio's left edge.
     assert_eq!(laptop().corner, Corner::BottomLeft);
     assert_eq!(studio().corner, Corner::BottomRight);
     // A laptop below a 5K: bottom-right still (nothing right of or below it).
@@ -1275,7 +1275,7 @@ fn a_window_reopened_on_its_own_screen_stays_where_its_app_put_it() {
 // ----- Desktop ids across a restart (round desktop-ids) ----------------------------------
 //
 // The model's Desktop ids are its own: a saved Desktop keeps its id only when it is found
-// again. 11-06 08:27 his apps had listed no window yet at the launch: the laptop arrived on
+// again. 11-06 08:27 the owner's apps had listed no window yet at the launch: the laptop arrived on
 // nothing, stayed the model's first Space (renumbered past the saved ids: 19), and saved 17's
 // windows came in as strays "from other Desktops"; the laptop's front, reopened on the 5K,
 // stayed there. macOS keeps one Desktop for the laptop: that one is the laptop's saved one.
@@ -1308,7 +1308,7 @@ fn saved_on(d: &Display, id: u64, current: bool, stages: Vec<crate::engine::pers
     }
 }
 
-/// His desk before the 08:26 restart: the laptop's one Desktop (17: the player in front, the
+/// The owner's desk before the 08:26 restart: the laptop's one Desktop (17: the player in front, the
 /// web browser and the disk tool cards), the 5K's two (1: notes in front, mail a card; 2,
 /// shown: the editor's two windows).
 fn three_desktops() -> Vec<crate::engine::persist::SavedSpace> {

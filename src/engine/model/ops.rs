@@ -401,7 +401,7 @@ impl Model {
         }
     }
 
-    /// The screen the keyboard is on, for the stage hotkeys and `ctl switch N` (his word,
+    /// The screen the keyboard is on, for the stage hotkeys and `ctl switch N` (the owner's word,
     /// 11-06): the focused window's, as the model has it when it manages the window, else
     /// `shown_on` (the screen most of the focused window shows on, as the platform reads it:
     /// an unmanaged or full-screen window), else the main screen (no focused window).
@@ -1000,7 +1000,7 @@ impl Model {
     /// merge_on_drop`, an extension): `id` alone (with its children) joins `into`'s stage in
     /// front of its windows, its key window, as a card dropped there would
     /// ([`Model::merge_stages`]): the window just moved is the one cared about, drawn at the
-    /// card's front and raised last and focused when that stage shows (Eugene, 11-09: it went
+    /// card's front and raised last and focused when that stage shows (the owner, 11-09: it went
     /// behind them all). Both stages are inactive, so nothing moves on screen: the window
     /// stays parked with its saved frame. `into` keeps its slot, number and name; the stage it left keeps
     /// its other windows in their order, its slot and its number (its key moves on when it was
@@ -1127,7 +1127,7 @@ impl Model {
     /// A card dropped onto another card (`[strip] merge_on_drop`, an extension: Apple's strip
     /// does not merge): every window of `stage` joins `into`, in front of `into`'s own windows
     /// and in its own order, each child with its parent: the card just dropped is the one
-    /// cared about (Eugene, 11-09), so its key window (or its first) is `into`'s key, raised
+    /// cared about (the owner, 11-09), so its key window (or its first) is `into`'s key, raised
     /// last and focused when that stage shows. Both stages are inactive, so nothing moves on
     /// screen: the windows stay parked with their saved frames. `into` keeps its slot and name
     /// and takes the more recent of the two recencies; `stage`'s slot frees by the slot rule

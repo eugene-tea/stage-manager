@@ -986,7 +986,7 @@ mod slide_activation {
     use crate::engine::focus_replay::{FocusReplay, Wanted};
     use crate::engine::slide_hold::{SlideHold, Step, Wait, activation_waits, asks_focus, slide_listed};
 
-    /// The owner's case (10-23, 11:57:50): the editor (pid 10, his browser that day) has a
+    /// The owner's case (10-23, 11:57:50): the editor (pid 10, the owner's browser that day) has a
     /// window on each Desktop. Desktop 1 shows the editor's stage (window 1); on Desktop 2 the
     /// chat's stage shows and the editor's window 3 waits parked. The user is on Desktop 2.
     fn editor_parked_on_desktop_2() -> Mac {
@@ -1516,7 +1516,7 @@ mod arranged_ahead {
         let none = AppFacts::default();
         assert!(
             mac.m.dock_arrival(10, none, Some(w(1))).is_err(),
-            "another app active, the editor's focused window on Desktop 1: macOS stays here (his log 09:55:50, run go10)"
+            "another app active, the editor's focused window on Desktop 1: macOS stays here (the owner's log 09:55:50, run go10)"
         );
         assert!(mac.m.dock_arrival(10, none, Some(w(3))).is_err(), "its focused window here: macOS stays");
         assert!(mac.m.dock_arrival(10, none, None).is_err(), "no answer, a window here: on the safe side, none");
@@ -1586,8 +1586,8 @@ mod arranged_ahead {
 mod identity {
     use super::*;
 
-    /// Desktop 0 (his "Desktop 2"): five apps, a stage each. Desktop 1: seven other windows
-    /// (more than Desktop 0, as his 11 against 7).
+    /// Desktop 0 (the owner's "Desktop 2"): five apps, a stage each. Desktop 1: seven other windows
+    /// (more than Desktop 0, as the owner's 11 against 7).
     fn his_desktops() -> Mac {
         let mut mac = Mac::new();
         mac.put(0, 1, 10, "com.example.editor", "Work notes");
@@ -1791,7 +1791,7 @@ mod identity {
         assert!(music.is_some_and(|m| mac.m.strip_slots(MAIN).contains(&m)), "the declared stage stays, in the strip");
     }
 
-    /// Desktop 1 (his app's Space 3): Messages alone in a stage, parked; Desktop 0: the
+    /// Desktop 1 (the owner's app's Space 3): Messages alone in a stage, parked; Desktop 0: the
     /// browser active, an editor in the strip.
     fn messages_on_desktop_1() -> (Mac, SpaceId, StageId) {
         let mut mac = Mac::new();

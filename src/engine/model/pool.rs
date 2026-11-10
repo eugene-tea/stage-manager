@@ -718,7 +718,7 @@ impl Model {
     /// match takes it out of the stage it is in and into its saved stage, as if it had shown
     /// so (parked there when that stage is not in front; no switch). Per window, not the
     /// restore window: Stage Manager opens with the apps macOS reopens, and a click on one
-    /// window says nothing of another still opening (his word 11-06). The actions.
+    /// window says nothing of another still opening (the owner's word 11-06). The actions.
     pub fn window_retitled(&mut self, id: WindowId) -> Vec<Action> {
         let mut actions = Vec::new();
         if !self.may_rematch(id) {
