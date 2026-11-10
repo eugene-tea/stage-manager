@@ -65,7 +65,10 @@ one showed it peeking out on the right (23 and 47 pt; up 34 and 13 pt, so Apple'
 vary with the windows; ours are the fixture's). A third app's windows join the second's
 (not measured). The icons sit 10.5 pt right of the card's left edge and 10.5 pt above its
 bottom (the lowest window's: 10 pt above Green's bottom, at Blue's), and stay put while the
-card grows. Corners 8 pt (`corner_radius`; fitted to the rounding of three cards' top-left
+card grows. They are the variants the Dock shows (macOS 26's icon and widget style: Default,
+Dark, Clear or Tinted, light, dark or following the appearance): in Dark Mode Apple's cards
+showed Mail's, Finder's, Messages' and Safari's dark icons (11-09). Ours fetches each icon per
+look (`ui::app_icons`) and again at an appearance change. Corners 8 pt (`corner_radius`; fitted to the rounding of three cards' top-left
 corners, ours read 4 at 4). The card's shadow is barely there: 5 to 8 levels darker in the
 first two pixels below a card, gone by 4 (2 pt), 3 to 6 levels for a pixel beside its far
 edge, none above it; a Core Animation render of a card fitted to the bottom, top and far

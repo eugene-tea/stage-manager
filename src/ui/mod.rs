@@ -3,6 +3,7 @@
 
 pub mod about;
 pub mod alert;
+pub mod app_icons;
 pub mod app_menu;
 pub mod card_glass;
 pub mod corner_patch;
