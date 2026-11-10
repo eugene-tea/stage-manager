@@ -12,6 +12,8 @@
 #   scripts/test-stages.sh m3 safety       # some phases
 #   scripts/test-stages.sh behave          # an app's front window on arrival; a card dropped
 #                                          # on the other screen (round parity-behave)
+#   scripts/test-stages.sh screens         # two screens (skipped with one): ⌘-Tab to a card on the other
+#                                          # screen, full screen there, Mission Control (PLAN live checks 3-5)
 #   scripts/test-stages.sh glass           # the cards' glass (captures on): white, grey and black
 #                                          # cards and a switch's snapshots against the model
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
