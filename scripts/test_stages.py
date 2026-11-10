@@ -97,8 +97,10 @@ start at its first signal (the copy turned regular, a Dock icon, by STAGE_MANAGE
 repeats ignored, a cancel resuming at once (the copy an accessory app again, lsappinfo's
 UIElement), the apps quitting while
 it holds with the file kept, and the next session bringing each window back into its stage at
-its saved frame (one reopened clamped against the park corner, one at the park spot); and the
-same with no early signal, from the entries kept with `quit_at`. Hands off the Mac during this
+its saved frame (one reopened clamped against the park corner, one at the park spot); a quit
+at a logout left unclean by a frozen app, the guardian bringing its window back and then
+reopening the app at the cancel; and the same with no early signal, from the entries kept
+with `quit_at`. Hands off the Mac during this
 phase: a click or key press ends the restore window early). Run by name only: still (the
 corner patch drawn from a still of the desktop, with window captures on: a disk image of the
 test's own mounted and its icon placed under the park corner; the patch shows over it, the
@@ -6412,7 +6414,7 @@ def restore_after_logout(run_id):
     say("\n-- a logout, simulated (STAGE_MANAGER_LOGOUT_NOTE): the head start at its first signal")
     note = f"dev.eugene.stagemanager.test.logout.{run_id}"
     env = {k: {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_SESSION": f"logout {k} {run_id}", "STAGE_MANAGER_LOGOUT_NOTE": note}
-           for k in "DEFG"}
+           for k in "DEFGH"}
     # Session D's copy joins the reopen list at the simulated logout (a test run only): its
     # Dock icon comes at the head start and goes at the cancel (fix-cancel-dock-icon).
     env["D"]["STAGE_MANAGER_TEST_REOPEN_LIST"] = "1"
@@ -6529,6 +6531,7 @@ def restore_after_logout(run_id):
         check(wait_until(lambda: "the logout goes on (the session ends): nothing is opened" in log_text(), 5, "the end") is not None,
               "its stop signal (the session ending) ends the wait with nothing opened")
     all_onscreen("session E quit")
+    logout_unclean_quit(note, env["H"])
 
     say("-- no early signal (the 10-16 restart): the apps quit first, then the app")
     stop_all_fixtures()
@@ -6591,6 +6594,61 @@ def restore_after_logout(run_id):
             check(by_title(s)["Bravo 1"].get("restored") is None, "matched to no saved window: Apple's rule")
     stop_app()
     all_onscreen("logout sub-phase quit")
+    stop_all_fixtures()
+
+
+def logout_unclean_quit(note, env):
+    """Round logout-cancel: a quit at a logout that leaves a window away (Bravo's app frozen,
+    SIGSTOP: it answers nothing at the head start or the quit) is unclean, and the parked file
+    says it was for a logout. The guardian brings the window back once Bravo answers (SIGCONT),
+    then waits for the cancel as after a clean quit, and the cancel would open the app again."""
+    say("-- an unclean quit at a logout: Bravo frozen with its window parked; the cancel still reopens")
+    stop_all_fixtures()
+    try:
+        os.remove(os.path.join(HOME, "state.json"))
+    except FileNotFoundError:
+        pass
+    start_extra("a", 1)
+    start_extra("b", 1)
+    s = start_app(2, extra_env=env)
+    if not check(s is not None, "session H: app up with Alpha and Bravo"):
+        return
+    do("switch", number_of(s, "Alpha 1"))
+    bravo = next((w for w in state()["windows"] if base_title(w["title"]) == "Bravo 1"), None)
+    b = extra_pid("b")
+    if not check(bool(bravo and bravo["parked"] and b), "session H: Bravo's stage in the strip, its window parked"):
+        return
+    pid = app_pid()
+    guards = guardian_pids(pid)
+    before = len(log_text())
+    os.kill(b, signal.SIGSTOP)
+    try:
+        check(post_note(note), "the logout note is posted in session H")
+        check(wait_until(lambda: "not every window came back at the logout's head start" in log_text()[before:], 20,
+                         "H's head start") is not None, "the head start cannot bring Bravo's window back (its app frozen)")
+        ctl("quit")
+        wait_gone(pid, 40)
+        after = lambda: log_text()[before:]
+        check(re.search(r"quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled.* clean=false|"
+                        r"clean=false.*quit for a logout, restart or shutdown: the guardian opens", after()) is not None,
+              "the quit at the logout is unclean and says it was for a logout")
+        check("not every window could be restored; the guardian will scan after exit" in after(), "the guardian takes over")
+        check(wait_until(lambda: "with windows still away; listening for a cancel while they are brought back" in after(), 10,
+                         "the guardian's listening") is not None, "the parked file says logout: the guardian listens for a cancel during its watch")
+        wins, d = fixture_windows([EXTRA["b"][0]])
+        check(any(is_parked(w["bounds"], d) for w in wins), "Bravo's window waits in the park zone while its app is frozen")
+        check("would open the bundle again" not in after(), "nothing is opened without a cancel")
+    finally:
+        os.kill(b, signal.SIGCONT)
+    check(wait_until(lambda: "the recovery watch after the quit for a logout is done; waiting for a cancel" in after(), 30,
+                     "the recovery watch to end") is not None, "Bravo answers: its window back, the guardian waits for the cancel as after a clean quit")
+    all_onscreen("session H's recovery watch")
+    check(post_note(note + ".cancelled"), "the cancel note is posted after the recovery watch")
+    check(wait_until(lambda: "guardian: a test run: would open the bundle again" in after(), 5, "the relaunch") is not None,
+          "a cancel after an unclean quit at a logout opens the app again (a test run only says so)")
+    for g in guards:
+        wait_gone(g, 5)
+    check(not pids_of(f"stage-manager --guardian {pid}$"), "session H's guardian ends after the cancel")
     stop_all_fixtures()
 
 

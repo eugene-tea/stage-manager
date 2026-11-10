@@ -3,6 +3,8 @@
 ## Unreleased
 
 - The shadow under the app icons on cards is lighter and tighter, as Apple's is.
+- When you cancel a logout, restart or shutdown after Stage Manager quit for it, Stage Manager
+  now opens again even if some windows didn't come back at the quit.
 
 ## 1.8.2 — 2026-11-09
 

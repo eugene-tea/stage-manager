@@ -452,19 +452,27 @@ mod app {
         let reason = stage_manager::ui::app_menu::system_quit_reason();
         let (head_start, logout_reason) = (wm_thread::quit_after_head_start(), reason.is_some_and(logout_watch::logout_reason));
         let user_quit = stage_manager::ui::app_menu::user_quit();
+        // A quit at a logout: the guardian waits for its cancel, which opens the app again
+        // (round logout-cancel-relaunch); never after the user's own Quit.
+        let marker = logout_watch::quit_marker(head_start, logout_reason, user_quit);
+        let for_logout = marker == logout_watch::LOGOUT_MARK;
+        if for_logout {
+            tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), clean = ok, "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
+        }
         if ok {
-            // A quit at a logout: the guardian waits for its cancel, which opens the app again
-            // (round logout-cancel-relaunch); never after the user's own Quit.
-            let marker = logout_watch::quit_marker(head_start, logout_reason, user_quit);
-            if marker == logout_watch::LOGOUT_MARK {
-                tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
-            }
             safety::mark_clean_exit(marker);
-        } else if safety::passed_on() {
-            // Only handed-over windows still away (round 8N): this app's guardian takes them over.
-            tracing::info!("handed-over windows still away: this app's guardian takes them over");
         } else {
-            tracing::error!("not every window could be restored; the guardian will scan after exit");
+            // Unclean at a logout too (round logout-cancel): the parked file says so, and the
+            // guardian listens for the cancel through its recovery watch.
+            if for_logout {
+                safety::mark_logout_quit();
+            }
+            if safety::passed_on() {
+                // Only handed-over windows still away (round 8N): this app's guardian takes them over.
+                tracing::info!("handed-over windows still away: this app's guardian takes them over");
+            } else {
+                tracing::error!("not every window could be restored; the guardian will scan after exit");
+            }
         }
         ctl::remove_socket();
         // No app is left with its enhanced UI off by us (round enhanced-ui).

@@ -741,7 +741,12 @@ background (`open -g -a`), which restores the stages saved at the head start, in
 session, by window id, as an accessory app (not macOS's reopen at a login: the reopen list's
 mark is cleared as at any launch). A logout that goes on ends the session and the guardian
 with it, nothing opened; so does the end of the ten minutes, or the app already running
-again. The guardian is no app: `loginwindow` never waits for it.
+again. The same goes for a quit at a logout that left windows away (an app that did not
+answer, a window gone): the parked file says the quit was for a logout, and the guardian
+listens for the cancel while it brings those windows back. A cancel heard meanwhile opens the
+app at once (it adopts those windows, or takes the rest of the watch, as after a crash); once
+every window is back with no cancel yet, the guardian waits as after a clean quit, the ten
+minutes counted from the quit. The guardian is no app: `loginwindow` never waits for it.
 
 An app that quits keeps its windows' places in the saved stages for two minutes (no card
 meanwhile), so stages whose apps quit before macOS announced the logout still come back after

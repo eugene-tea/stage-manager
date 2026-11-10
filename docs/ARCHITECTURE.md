@@ -76,7 +76,9 @@ A parked window that never returns is the worst bug.
    only moves windows out of the park zone. Once a new copy reports `adopted`, it hands over
    the rest (`ctl take-watch`; an unsigned sender's only as the app sees them parked) and
    exits. A pass listing nothing on screen is blind: nothing moves. After a quit at a
-   logout it waits for a cancel and reopens the app.
+   logout it waits for a cancel and reopens the app; after an unclean one (the parked file
+   says `logout`) it listens through its watch, opens the app at a cancel heard then, and
+   once every window is back waits as after a clean quit.
 6. **Recovery scan** (launch, guardian, main display change): a window in a park zone goes
    back to a crashed copy's registered frame, else its saved frame (main display of the
    saved size only), else centered; silent apps retried 30 s, two apps a pass. A sliver
