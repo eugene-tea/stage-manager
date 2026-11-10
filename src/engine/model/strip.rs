@@ -176,7 +176,7 @@ impl Model {
             .into_iter()
             .filter(|s| {
                 s.space == space
-                    && if Some(s.id) == active { !s.windows.is_empty() } else { self.strip_eligible(s.id) }
+                    && if Some(s.id) == active { !s.windows.is_empty() } else { self.strip_shows(s.id) }
             })
             .filter_map(|s| self.card(s.id, Some(s.id) == active))
             .collect();
@@ -389,7 +389,7 @@ impl Model {
             .filter(|w| {
                 self.windows
                     .get(w)
-                    .is_some_and(|w| w.meta.role == WindowRole::Standard)
+                    .is_some_and(|w| w.meta.role == WindowRole::Standard && !self.hidden_apps.contains(&w.meta.pid))
             })
             .collect();
         let mut apps = Vec::new();
@@ -418,6 +418,12 @@ impl Model {
         };
         !self.is_active(id)
             && (!s.windows.is_empty() || s.name.as_deref().is_some_and(|n| self.is_declared(n)))
+    }
+
+    /// An eligible stage ([`Model::strip_eligible`]) whose card shows: not one whose windows
+    /// all belong to hidden apps ([`Model::hidden_stage`]).
+    pub(crate) fn strip_shows(&self, id: StageId) -> bool {
+        self.strip_eligible(id) && !self.hidden_stage(id)
     }
 
     /// The stage `leaving` gives up the active spot to `target`, whose card showed in the slot
@@ -483,30 +489,44 @@ impl Model {
 
     /// Keeps the slots consistent: only eligible stages, no duplicates, at most `capacity`
     /// (evicting least recently used), and free room refilled with the most recent stages
-    /// that are out of view.
+    /// that are out of view. A stage whose apps are all hidden leaves its slot to the most
+    /// recent stage out of view, in place, and the slot is noted for its return
+    /// ([`Model::app_unhidden`]; Apple's, measured 11-09).
     pub(crate) fn normalize_slots(&mut self) {
         let spaces: Vec<SpaceId> = self.spaces.iter().map(|s| s.id).collect();
         self.slots.retain(|d, _| spaces.contains(d));
+        let alive: HashSet<StageId> = self.stages.iter().map(|s| s.id).collect();
+        self.hidden_slots.retain(|s, _| alive.contains(s));
         for space in spaces {
             let capacity = self.capacity_of(space);
-            let mut slots = self.slots.remove(&space).unwrap_or_default();
             let mut seen = Vec::new();
-            slots.retain(|&s| {
-                let keep = !seen.contains(&s)
-                    && self.stage(s).is_some_and(|st| st.space == space)
-                    && self.strip_eligible(s);
+            // A hidden stage's slot stays as a hole (`None`) until refilled below.
+            let mut holes: Vec<Option<StageId>> = Vec::new();
+            for s in self.slots.remove(&space).unwrap_or_default() {
+                if seen.contains(&s) || !self.stage(s).is_some_and(|st| st.space == space) || !self.strip_eligible(s) {
+                    seen.push(s);
+                    continue;
+                }
                 seen.push(s);
-                keep
-            });
-            while slots.len() > capacity {
-                let oldest = slots
-                    .iter()
-                    .enumerate()
-                    .min_by_key(|(_, s)| self.stage(**s).map_or(0, |st| st.last_active))
-                    .map(|(i, _)| i);
+                if self.hidden_stage(s) {
+                    self.hidden_slots.insert(s, holes.len());
+                    holes.push(None);
+                } else {
+                    holes.push(Some(s));
+                }
+            }
+            while holes.len() > capacity {
+                let oldest = match holes.iter().rposition(Option::is_none) {
+                    Some(i) => Some(i),
+                    None => holes
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, s)| s.and_then(|s| self.stage(s)).map_or(0, |st| st.last_active))
+                        .map(|(i, _)| i),
+                };
                 match oldest {
                     Some(i) => {
-                        slots.remove(i);
+                        holes.remove(i);
                     }
                     None => break,
                 }
@@ -514,17 +534,25 @@ impl Model {
             let mut out_of_view: Vec<(u64, StageId)> = self
                 .stages
                 .iter()
-                .filter(|s| {
-                    s.space == space && !slots.contains(&s.id) && self.strip_eligible(s.id)
-                })
+                .filter(|s| s.space == space && !holes.contains(&Some(s.id)) && self.strip_shows(s.id))
                 .map(|s| (s.last_active, s.id))
                 .collect();
             out_of_view.sort_by(|a, b| b.cmp(a));
-            for (_, id) in out_of_view {
+            let mut fill = out_of_view.into_iter().map(|o| o.1);
+            for hole in holes.iter_mut().filter(|h| h.is_none()) {
+                match fill.next() {
+                    Some(id) => *hole = Some(id),
+                    None => break,
+                }
+            }
+            let mut slots: Vec<StageId> = holes.into_iter().flatten().collect();
+            for id in fill {
                 if slots.len() >= capacity {
                     break;
                 }
-                slots.push(id);
+                if !slots.contains(&id) {
+                    slots.push(id);
+                }
             }
             self.slots.insert(space, slots);
         }

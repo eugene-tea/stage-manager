@@ -64,6 +64,8 @@ pub struct Metrics {
     pub behind_scale: f64,
     pub second_app_dx: f64,
     pub second_app_dy: f64,
+    pub third_app_dx: f64,
+    pub third_app_dy: f64,
     pub max_windows: usize,
     /// The turn, radians.
     pub tilt: f64,
@@ -75,6 +77,8 @@ pub struct Metrics {
     pub icon_dx: f64,
     pub icon_dy: f64,
     pub icon_step: f64,
+    /// The icons' step on a card of three apps or more.
+    pub icon_step_three: f64,
     pub icon_max: usize,
     pub hover_scale: f64,
     /// How far a thumbnail's or icon's shadow reaches past it, sideways.
@@ -104,6 +108,8 @@ impl Metrics {
             behind_scale: c.behind_scale,
             second_app_dx: c.second_app_dx * k,
             second_app_dy: c.second_app_dy * k,
+            third_app_dx: c.third_app_dx * k,
+            third_app_dy: c.third_app_dy * k,
             max_windows: c.max_windows.max(1),
             tilt: c.tilt.or(auto_tilt).to_radians(),
             perspective: c.perspective.or(auto_d) * k,
@@ -112,6 +118,7 @@ impl Metrics {
             icon_dx: i.center_dx * k,
             icon_dy: i.center_dy * k,
             icon_step: i.step * k,
+            icon_step_three: i.step_three * k,
             icon_max: i.max,
             hover_scale: c.hover_scale,
             shadow: (c.shadow_radius + c.shadow_offset_x.abs()).max(i.shadow_radius) * k,
@@ -198,14 +205,17 @@ impl Metrics {
     /// card's left edge ([`arrange_card`]): the front app's windows step `stack_dx` (the
     /// deepest at 0); a second app's start `second_app_dx` to either side of the front
     /// window (at most `max_windows - 1` of them), so whichever group is leftmost starts at 0
-    /// and the other `second_app_dx` right of it. A column too full shrinks them toward 0.
+    /// and the other `second_app_dx` right of it; a third app's start `third_app_dx` from the
+    /// front window toward the second's side. A column too full shrinks them toward 0.
     fn plane_offsets(&self) -> Vec<f64> {
         let n = self.max_windows;
         let side = self.second_app_dx.abs();
+        let third = self.third_app_dx.abs();
         let front = (0..n).map(|j| j as f64 * self.stack_dx);
         let second = (0..n.saturating_sub(1)).map(|j| j as f64 * self.stack_dx);
         let shifted: Vec<f64> = front.clone().chain(second.clone()).map(|x| x + side).collect();
-        front.chain(second).chain(shifted).chain(std::iter::once(0.0)).collect()
+        let thirds: Vec<f64> = second.clone().flat_map(|x| [x + third, x + side - third, x + third - side]).collect();
+        front.chain(second).chain(shifted).chain(thirds).chain(std::iter::once(0.0)).collect()
     }
 
     /// The far edge of a window's plane whose left edge is at `x`, `u` wide before the turn
@@ -231,8 +241,16 @@ impl Metrics {
             return f64::NEG_INFINITY;
         }
         // A column too full scales the icons' offsets and size toward the corner.
-        let last = self.icon_dx + (self.icon_max - 1) as f64 * self.icon_step;
+        let last = (1..=self.icon_max).map(|n| self.icon_dx + self.icon_offset(n - 1, n)).fold(f64::NEG_INFINITY, f64::max);
         self.card_x + (last + self.icon_size / 2.0).max(0.0)
+    }
+
+    /// How far right of the first icon the `i`th of `count` icons sits (before a column too
+    /// full scales it): `icon_step` apart on a card of two apps, `icon_step_three` on one of
+    /// three or more (Apple's, measured 11-09: 36 and 18 pt).
+    pub fn icon_offset(&self, i: usize, count: usize) -> f64 {
+        let step = if count >= 3 { self.icon_step_three } else { self.icon_step };
+        i as f64 * step
     }
 
     /// The leftmost point any card can draw at rest (panel coordinates): its leftmost
@@ -435,16 +453,26 @@ fn stacked_height(sizes: &[Size], up: &[f64], grow: f64) -> f64 {
 /// the screen ([`second_app_side`]) and `second_app_dy` up, every window centered on one line
 /// (so the window behind peeks out above and to its side), and the whole card grown, sizes
 /// only, until it is `min_height` tall (Apple's pair measured 96 pt). A third app's windows
-/// join the second's group (not measured on Apple's).
+/// (and any further app's) sit `third_app_dx` from the front window toward the second app's
+/// side and `third_app_dy` up, behind the others at the top (Apple's card of three, measured
+/// 11-09: the second app's window where it sits on a card of two, the third's 0.29 of that
+/// sideways and 1.6 times as high).
 pub fn arrange_card(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<ThumbSlot>) {
     let windows = &card.windows[..card.windows.len().min(m.max_windows)];
     if windows.is_empty() {
         let s = m.thumb_size(&Rect::new(0.0, 0.0, 800.0, 600.0));
         return (Size::new(s.w * scale, s.h * scale), Vec::new());
     }
-    // App group of each window: 0 for the front window's app, 1 for any other; and its depth
-    // among earlier windows of the same group.
-    let groups: Vec<usize> = windows.iter().map(|w| usize::from(w.pid != windows[0].pid)).collect();
+    // App group of each window: 0 for the front window's app, 1 for the second app (by its
+    // front-most window), 2 for any other; and its depth among earlier windows of the same
+    // group.
+    let mut apps: Vec<i32> = Vec::new();
+    for w in windows {
+        if !apps.contains(&w.pid) {
+            apps.push(w.pid);
+        }
+    }
+    let groups: Vec<usize> = windows.iter().map(|w| apps.iter().position(|&p| p == w.pid).unwrap_or(0).min(2)).collect();
     let depth: Vec<usize> = (0..windows.len()).map(|i| (0..i).filter(|&j| groups[j] == groups[i]).count()).collect();
     let second = groups.iter().position(|&g| g == 1);
     let sizes: Vec<Size> = windows
@@ -459,10 +487,20 @@ pub fn arrange_card(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<
     let side = second.map_or(1.0, |i| second_app_side(&windows[0].frame, &windows[i].frame));
     // Apple steps toward the front: the deepest window of a group sits leftmost.
     let in_group = |g: usize| groups.iter().filter(|&&x| x == g).count();
+    let group_dx = |g: usize| match g {
+        0 => 0.0,
+        1 => side * m.second_app_dx,
+        _ => side * m.third_app_dx,
+    };
+    let group_dy = |g: usize| match g {
+        0 => 0.0,
+        1 => m.second_app_dy,
+        _ => m.third_app_dy,
+    };
     let dx: Vec<f64> = (0..windows.len())
-        .map(|i| groups[i] as f64 * side * m.second_app_dx + (in_group(groups[i]) - 1 - depth[i]) as f64 * m.stack_dx)
+        .map(|i| group_dx(groups[i]) + (in_group(groups[i]) - 1 - depth[i]) as f64 * m.stack_dx)
         .collect();
-    let up: Vec<f64> = groups.iter().map(|&g| g as f64 * m.second_app_dy).collect();
+    let up: Vec<f64> = groups.iter().map(|&g| group_dy(g)).collect();
     // Several apps: the card as a whole at least `min_height` tall, its windows grown (their
     // offsets kept), never wider than `max_width`.
     let grow = if second.is_some() && stacked_height(&sizes, &up, 1.0) < m.min_height {
@@ -504,7 +542,8 @@ pub fn arrange_card(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<
 /// The app icons of a card, relative to its top-left corner: centered `icon_dx` right of the
 /// card's leftmost window's left edge and `icon_dy` down from the card's bottom (its lowest
 /// window's; Apple's icons on a card of two apps sat 10 pt above the front window's bottom,
-/// the window behind ending 10 pt higher), the next app `icon_step` right.
+/// the window behind ending 10 pt higher), the next app `icon_step` right (`icon_step_three`
+/// on a card of three apps or more: [`Metrics::icon_offset`]).
 fn icons_for(card: &CardSnapshot, thumbs: &[ThumbSlot], size: Size, m: &Metrics, scale: f64) -> Vec<(i32, Rect)> {
     if m.icon_size <= 0.0 {
         return Vec::new();
@@ -518,11 +557,12 @@ fn icons_for(card: &CardSnapshot, thumbs: &[ThumbSlot], size: Size, m: &Metrics,
     let left = thumbs.iter().map(|t| t.rect.x).fold(f64::INFINITY, f64::min);
     let corner = Point::new(if left.is_finite() { left } else { 0.0 }, size.h);
     let s = m.icon_size * scale;
+    let count = pids.len().min(m.icon_max);
     pids.iter()
         .take(m.icon_max)
         .enumerate()
         .map(|(i, &pid)| {
-            let cx = corner.x + (m.icon_dx + i as f64 * m.icon_step) * scale;
+            let cx = corner.x + (m.icon_dx + m.icon_offset(i, count)) * scale;
             let cy = corner.y + m.icon_dy * scale;
             (pid, Rect::new(cx - s / 2.0, cy - s / 2.0, s, s))
         })
@@ -1091,10 +1131,11 @@ mod tests {
         assert_eq!((t[0].rect.x, t[1].rect.x), (0.0, 42.0), "right of it: on the right");
         assert!(t[1].rect.y < t[0].rect.y, "raised either way");
         assert_eq!(second_app_side(&front, &front), -1.0, "level: on the left, as one app's");
-        // A third app's window joins the second's group, one step on (not measured on Apple's).
-        let c = card_at(1, &[(1, 10, front), (2, 20, right), (3, 30, right)]);
+        // A third app's window sits `third_app_dx` toward the second's side (Apple's card of
+        // three, 11-09), wherever it is on the screen.
+        let c = card_at(1, &[(1, 10, front), (2, 20, right), (3, 30, left)]);
         let (_, t) = arrange_card(&c, &m, 1.0);
-        assert_eq!((t[0].rect.x, t[1].rect.x, t[2].rect.x), (0.0, 58.0, 42.0));
+        assert_eq!((t[0].rect.x, t[1].rect.x, t[2].rect.x), (0.0, 42.0, 12.0));
     }
 
     #[test]
@@ -1131,6 +1172,33 @@ mod tests {
         assert!((bottom - l[0].frame.h).abs() < 1e-9, "the card's bottom");
         assert_eq!(icons[1].1.x - icons[0].1.x, 36.0);
         assert_eq!(icons[0].1.w, 38.0);
+    }
+
+    /// Apple's card of three apps (measured 11-09 on a 5K, Red 1 in front, Green, Blue): the
+    /// icons 18 pt apart (36 on a card of two); the second app's window where a card of two
+    /// puts it, the third's a little toward the same side and higher, behind at the top.
+    #[test]
+    fn a_card_of_three_apps_overlaps_its_icons_and_raises_the_third_app() {
+        let m = five_k();
+        let f = |x: f64| Rect::new(x, 300.0, 1000.0, 700.0);
+        let three = card_at(1, &[(1, 10, f(800.0)), (2, 20, f(500.0)), (3, 30, f(600.0))]);
+        let l = &layout_column(&[three], 1410.0, &m)[0];
+        let icons = &l.icons;
+        assert_eq!(icons.len(), 3);
+        assert!((icons[1].1.x - icons[0].1.x - 18.0).abs() < 1e-9 && (icons[2].1.x - icons[1].1.x - 18.0).abs() < 1e-9);
+        let (red, green, blue) = (l.thumbs[0].rect, l.thumbs[1].rect, l.thumbs[2].rect);
+        // Green on the left as on a card of two, 15 pt up (the windows centered on one line).
+        assert!((red.x - green.x - 42.0).abs() < 1e-9);
+        let mid = |r: Rect| r.y + r.h / 2.0;
+        assert!((mid(red) - mid(green) - 15.0).abs() < 1e-9);
+        // Blue 12 pt toward Green's side and 24 pt up: behind them both, at the top.
+        assert!((red.x - blue.x - 12.0).abs() < 1e-9);
+        assert!((mid(red) - mid(blue) - 24.0).abs() < 1e-9);
+        assert!(blue.y < green.y && green.y < red.y);
+        // A card of two keeps its 36 pt step.
+        let two = card_at(2, &[(1, 10, f(800.0)), (2, 20, f(500.0))]);
+        let l = &layout_column(&[two], 1410.0, &m)[0];
+        assert_eq!(l.icons[1].1.x - l.icons[0].1.x, 36.0);
     }
 
     #[test]

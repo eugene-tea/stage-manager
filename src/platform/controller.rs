@@ -3775,9 +3775,14 @@ impl Controller {
             }
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
             WinEvent::Deminiaturized(id) => self.on_deminiaturized(ob, id),
+            WinEvent::AppHidden(pid) => self.on_app_hidden(ob, pid),
+            WinEvent::AppUnhidden(pid) => self.on_app_unhidden(ob, pid),
             // Logged by the observer; a running switch's windows came first (above).
-            WinEvent::AppHidden(_) | WinEvent::AppUnhidden(_) | WinEvent::AppTookActivation(_) => {}
+            WinEvent::AppTookActivation(_) => {}
             WinEvent::AppTerminated(pid) => {
+                if let Some(m) = self.model.as_mut() {
+                    m.forget_hidden_app(pid);
+                }
                 // Its icon leaves the Dock unless pinned: the strip may follow.
                 self.dock_order.soon(now);
                 self.keep_quit_windows(pid, now);
@@ -4066,6 +4071,34 @@ impl Controller {
                 })
             })
         })
+    }
+
+    /// An app was hidden (⌘H, Hide Others, the app itself; Apple's, measured 11-09): its
+    /// windows leave the cards, a stage of its alone leaves the strip, and when that stage
+    /// was in front the most recent stage comes in front ([`Model::app_hidden`]). The hidden
+    /// windows are parked first, unanimated: macOS has taken them off the screen already, so
+    /// there is nothing to shrink into a card; the stage coming in front grows as on a click.
+    fn on_app_hidden(&mut self, ob: &mut Observer, pid: i32) {
+        let obs = self.observe(ob);
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.app_hidden(pid, &obs);
+        let switched = actions.iter().any(|a| matches!(a, Action::SetFrame { .. }));
+        tracing::info!(pid, switched, "app hidden: its windows leave the strip; the most recent stage comes in front if it was in front");
+        let hidden = |id: WindowId| m.window(id).is_some_and(|w| w.meta.pid == pid);
+        let (quiet, rest): (Vec<Action>, Vec<Action>) =
+            actions.into_iter().partition(|a| matches!(a, Action::Park { id, .. } if hidden(*id)));
+        self.execute(ob, quiet);
+        self.execute_animated(ob, rest);
+    }
+
+    /// An app was unhidden: a stage of its that left the strip comes back as a card in the
+    /// slot it left, not in front ([`Model::app_unhidden`]); an activation with it (⌘-Tab, a
+    /// Dock click) switches as any activation does, on its own event.
+    fn on_app_unhidden(&mut self, ob: &Observer, pid: i32) {
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.app_unhidden(pid);
+        tracing::info!(pid, "app unhidden: its stage's card is back in the strip");
+        self.execute(ob, actions);
     }
 
     /// The Shift sugar for an activation that would switch stages: when Shift was held (not
@@ -6144,7 +6177,7 @@ impl Controller {
                 counters::bump(Count::CardClick);
                 tracing::info!(stage, number = m.stage_number(StageId(stage)), shift, "card clicked");
                 refused = m.switch_refused(StageId(stage)).filter(|r| *r != SwitchRefused::InFront).map(|r| (stage, r));
-                if shift { m.merge_into_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
+                if shift { m.add_card_front_to_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
             }
             StripEvent::CardDropped { stage, window, x, y } if drop_to.is_some_and(|d| m.stage(StageId(stage)).is_some_and(|s| s.display != d)) => {
                 counters::bump(Count::Drop);
