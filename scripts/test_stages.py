@@ -1666,6 +1666,12 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
         if at_once in at_once_ok:
             skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
                  f"the activation arrived at once by design ({at_once})")
+        elif at_once == "the corner patch has no picture of the wallpaper now" and "the sun is near a frame change" in log_text():
+            # A dynamic wallpaper near a change of frame turns the patch off by design (the
+            # still would change under it), so there is no picture to cover the corner with
+            # (11-09 evening, Desktop 1's solar wallpaper near sunset).
+            skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
+                 f"the activation arrived at once by design: the corner patch is off while the dynamic wallpaper nears a change of frame")
         elif owners_window_only(at_once, at_once_ids, listed):
             skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
                  f"a window of the owner's (not a fixture's: {at_once_ids}) stays shown into the park corner with no "
