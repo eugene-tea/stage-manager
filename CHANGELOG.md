@@ -41,8 +41,8 @@
   earlier but never installed is checked again within a minute of opening, not a day later.
 - With "Click wallpaper to reveal desktop: Only in Stage Manager", a press a hair outside a
   window is its edge: resizing no longer sends your stage to the strip mid-drag (VS Code came
-  back with its side panels folded), and a click a little further out reveals the desktop
-  only when you let go without dragging. Pressing a file or folder on the desktop no longer
+  back with its side panels folded), and a click on the wallpaper reveals the desktop when
+  you let go, as with Apple's, never for a drag or a press held about half a second. Pressing a file or folder on the desktop no longer
   reveals it either: you can select it or drag it onto a window, as with Apple's.
 - Clicks on the wallpaper and the Dock work after a screenshot, and while Notification Center
   keeps an invisible window over the screen: macOS leaves such windows for minutes, and

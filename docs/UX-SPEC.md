@@ -272,13 +272,18 @@ through: a click under it is on whatever is below. A press on a file or folder o
 desktop, or its name, is Finder's, as on Apple's: it selects it or starts dragging it, and
 nothing is revealed. The icons are the ones read for the corner patch (every 5 s); when none
 are that fresh the press waits up to 60 ms for a read, and where they cannot be read at all
-the press counts as on the wallpaper. A press just outside a window is its edge, as on Apple's: macOS
-gives every resizable window a band a few points wide outside its frame where a press takes
-the edge to resize it, so a press within 6 pt of any window's edge (10 pt near a corner), any
-stage's, reveals nothing. Within 16 pt of a window the reveal waits for the release and runs
-only when the pointer is still where it pressed (within 4 pt): a press there that turns into a
-drag (a resize, a rubber-band selection) reveals nothing, so no window is ever parked while a
-press may still hold its edge. Further out the reveal runs on the press, at once.
+the press counts as on the wallpaper. The reveal runs on the release, never on the press, as
+Apple's does (measured 11-09 at 60 fps, presses held still on bare wallpaper: held 120 to
+460 ms the desktop is revealed, the reveal starting about as much later as the press was held
+longer; held 480 ms to 2 s nothing happens at all). So a click reveals only when the pointer
+is still where it pressed (within 4 pt) and the press lasted under 470 ms; a press that turns
+into a drag (a resize, a rubber-band selection) or is held longer reveals nothing, and no
+window is ever parked while a press may still hold its edge. A press just outside a window is
+its edge, as on Apple's: macOS gives a resizable window a band outside its frame where a
+press takes the edge to resize it (measured 11-09 with no Stage Manager running: up to 3 pt
+outside the right edge grabs it, 4 pt doesn't; 3 pt out past a corner diagonally doesn't), so
+a press within 6 pt of any window's edge (10 pt near a corner), any stage's, reveals nothing:
+twice macOS's band, a margin for other windows.
 
 **Drag and drop.** A card dragged into the main area turns into its window the moment the
 pointer leaves the strip's column, and joins the current stage where you drop it. As
