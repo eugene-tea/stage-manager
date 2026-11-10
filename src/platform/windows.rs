@@ -70,6 +70,14 @@ pub fn on_screen() -> Vec<CgWindow> {
     query(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements)
 }
 
+/// The on-screen windows front to back with the desktop's own among them (the desktop
+/// picture, Finder's icons, the window server's backdrop, all far below layer 0): one query.
+/// Only the test's desktop clicks need those listed ([`super::input::desktop_click`]: where
+/// the desktop is topmost); every other reader leaves them out.
+pub fn on_screen_with_desktop() -> Vec<CgWindow> {
+    query(CGWindowListOption::OptionOnScreenOnly)
+}
+
 /// The windows `ids` as the window server describes them now, on screen or not, on any
 /// Desktop (`CGWindowListCreateDescriptionFromArray`): one query for a few windows, no walk
 /// of every window as [`list_windows`] does. An id the window server does not know is left
