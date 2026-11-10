@@ -517,7 +517,10 @@ pub fn drag(waypoints: &[Point], shift: bool, hold: Duration) -> Result<(), Stri
     std::thread::sleep(Duration::from_millis(120));
     let ups = LEFT_UPS.load(Ordering::Relaxed);
     let interrupted = |posted: usize| {
-        let why = drag_interrupted(ups, LEFT_UPS.load(Ordering::Relaxed), left_button_down())?;
+        // A press the minimize tap swallowed (the yellow button) never reaches the session's
+        // button state: held there, the button is down; any release, the user's too, ends it.
+        let down = left_button_down() || super::minimize_tap::holding_press();
+        let why = drag_interrupted(ups, LEFT_UPS.load(Ordering::Relaxed), down)?;
         if shift {
             release_shift();
         }

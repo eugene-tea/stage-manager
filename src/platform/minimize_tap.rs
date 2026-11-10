@@ -117,6 +117,18 @@ static BACK_ON_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
 const NOTES_MAX: usize = 64;
 
+/// The tap holds a left press it swallowed (on a minimize button), its release not come yet:
+/// the session's button state never saw that press ([`holding_press`]).
+static HOLDING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the tap holds a left press it swallowed, its release not come yet. The session's
+/// button state reads such a press as up (the window server never got it); a synthetic drag's
+/// guard against the user's own release counts the button down while this holds
+/// ([`super::input::drag`]). A real release ends it, swallowed or not.
+pub fn holding_press() -> bool {
+    HOLDING.load(Ordering::Relaxed)
+}
+
 /// The WM thread's handle: swallowed minimizes go there.
 pub fn set_handle(h: WmHandle) {
     let _ = WM.set(h);
@@ -379,6 +391,7 @@ fn on_mouse(kind: CGEventType, at: Point, flags: CGEventFlags) -> bool {
         }
         _ => Gate::Pass,
     };
+    HOLDING.store(gate.holding(), Ordering::Relaxed);
     match g {
         Gate::Pass => false,
         Gate::Swallow => true,
