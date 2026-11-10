@@ -733,8 +733,14 @@ pub fn run_client(words: &[String]) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    // A Desktop switch waits for the Space change (up to SPACE_WAIT) before it answers.
-    let timeout = if words[0] == "debug-space" { SPACE_WAIT + Duration::from_secs(5) } else { Duration::from_secs(5) };
+    // A Desktop switch waits for the Space change (up to SPACE_WAIT) before it answers; a
+    // scripted drag answers once it has run its whole path, which grows with its points (the
+    // capture phase's drag past the column and back four times took 5.4 s on 11-09).
+    let timeout = match words[0].as_str() {
+        "debug-space" => SPACE_WAIT + Duration::from_secs(5),
+        "debug-drag" => Duration::from_secs(30),
+        _ => Duration::from_secs(5),
+    };
     match request(&words.join(" "), timeout) {
         Ok(reply) => {
             println!("{reply}");
