@@ -11,10 +11,6 @@ features wait for 2.0.
 
 **Still open**
 
-- **VoiceOver read aloud on the strip (E), 5 min.** Each card reads its front window's title as Apple's,
-  VO-Space switches stages, Add to Stage adds the front window. With VoiceOver on, a hit test at a card
-  answers its button wherever the pointer is (catching windows under the cards, unchecked live); hearing
-  them needs Eugene.
 - **The last frame of the shadow handover: proposed to close.** Since 1.8.2 a landing shows no darker
   frame about half the time, otherwise one (up to 15 levels on Finder's heavier shadow), more under load.
   Two shadows overlapping always read darker unless one goes on the very frame the other comes; macOS
@@ -35,6 +31,11 @@ features wait for 2.0.
 - From the Apple session: Shift-click takes only the card's front window; a card of three apps (icons
   18 pt apart, the third window behind at the top); a hidden app's card leaves the strip and comes back to
   its slot unhidden, the most recent stage coming in front if the hidden one was.
+- VoiceOver reaches the cards (found live: the pointer's hit test went past the strip to Finder's
+  desktop, and the strip takes no keyboard focus). While VoiceOver or Switch Control is on, each card has
+  a see-through window that catches the hit test; each card reads its front window's title with Apple's
+  actions, Press and Add to Stage (checked against Apple's live, 11-09 20:48; Eugene heard ours read).
+  No keyboard route without taking focus: `.github/ACCESSIBILITY.md` says how to reach them.
 - Live checks done: the never-run suite checks (`safety park capture parity displays`, 228 passed); ⌘-Tab
   to the other screen, full screen on one screen and Mission Control with two screens (new `screens`
   phase); a window moved to another Desktop in Mission Control (it leaves its stage and carries a stage of
