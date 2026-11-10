@@ -109,7 +109,7 @@ use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NS
 use objc2_quartz_core::{
     CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CASpringAnimation, CATextLayer,
     CATransaction, CATransform3D, CATransformLayer, NSValueCATransform3DAdditions, kCAAlignmentCenter, kCAAlignmentLeft,
-    kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCAMediaTimingFunctionEaseOut, kCATruncationEnd,
+    kCAFilterTrilinear, kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCAMediaTimingFunctionEaseOut, kCATruncationEnd,
 };
 
 use crate::config::{Rgba, StripLevel, StripStyle};
@@ -2917,11 +2917,12 @@ impl Strip {
     fn repaint_icons(&mut self) {
         self.icons.clear();
         let look = app_icons::current_look(self.mtm);
+        let scale = self.scale;
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for layers in self.pane.cards.values() {
             for ((pid, rect), layer) in layers.layout.icons.iter().zip(&layers.icons) {
-                set_icon(layer, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w)));
+                set_icon(layer, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w, scale)));
             }
         }
         CATransaction::commit();
@@ -3038,16 +3039,22 @@ impl Strip {
         let mut icon_layers = Vec::new();
         let icon_style = &style.icons;
         let look = app_icons::current_look(self.mtm);
+        let scale = self.scale;
         for (pid, rect) in &layout.icons {
             let icon = CALayer::new();
             icon.setFrame(cg_rect(&rect.translate(layout.frame.x, layout.frame.y)));
             // SAFETY: framework constant.
             icon.setContentsGravity(unsafe { kCAGravityResizeAspect });
+            // The image is drawn at this size ([`app_icons::render`]); while the strip scales
+            // it, mipmaps keep its edges smooth.
+            icon.setContentsScale(scale);
+            // SAFETY: framework constant.
+            icon.setMinificationFilter(unsafe { kCAFilterTrilinear });
             icon.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
             icon.setShadowOpacity(icon_style.shadow_opacity as f32);
             icon.setShadowRadius(icon_style.shadow_radius * k);
             icon.setShadowOffset(CGSize::new(0.0, icon_style.shadow_offset_y * k));
-            set_icon(&icon, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w)));
+            set_icon(&icon, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w, scale)));
             icon.setZPosition(1.0);
             unit.addSublayer(&icon);
             icon_layers.push(icon);

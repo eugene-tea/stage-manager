@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- The app icons on cards are drawn sharp at their size, as Apple's are; their edges were
+  jagged and their pictures grainy.
+
 ## 1.8.3 — 2026-11-09
 
 - Minimizing a window with the yellow button or ⌘M sends it straight into a new card at the
