@@ -452,19 +452,27 @@ mod app {
         let reason = stage_manager::ui::app_menu::system_quit_reason();
         let (head_start, logout_reason) = (wm_thread::quit_after_head_start(), reason.is_some_and(logout_watch::logout_reason));
         let user_quit = stage_manager::ui::app_menu::user_quit();
+        // A quit at a logout: the guardian waits for its cancel, which opens the app again
+        // (round logout-cancel-relaunch); never after the user's own Quit.
+        let marker = logout_watch::quit_marker(head_start, logout_reason, user_quit);
+        let for_logout = marker == logout_watch::LOGOUT_MARK;
+        if for_logout {
+            tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), clean = ok, "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
+        }
         if ok {
-            // A quit at a logout: the guardian waits for its cancel, which opens the app again
-            // (round logout-cancel-relaunch); never after the user's own Quit.
-            let marker = logout_watch::quit_marker(head_start, logout_reason, user_quit);
-            if marker == logout_watch::LOGOUT_MARK {
-                tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
-            }
             safety::mark_clean_exit(marker);
-        } else if safety::passed_on() {
-            // Only handed-over windows still away (round 8N): this app's guardian takes them over.
-            tracing::info!("handed-over windows still away: this app's guardian takes them over");
         } else {
-            tracing::error!("not every window could be restored; the guardian will scan after exit");
+            // Unclean at a logout too (round logout-cancel): the parked file says so, and the
+            // guardian listens for the cancel through its recovery watch.
+            if for_logout {
+                safety::mark_logout_quit();
+            }
+            if safety::passed_on() {
+                // Only handed-over windows still away (round 8N): this app's guardian takes them over.
+                tracing::info!("handed-over windows still away: this app's guardian takes them over");
+            } else {
+                tracing::error!("not every window could be restored; the guardian will scan after exit");
+            }
         }
         ctl::remove_socket();
         // No app is left with its enhanced UI off by us (round enhanced-ui).
@@ -602,6 +610,13 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
+            Command::DebugPointerBack => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-pointer-back needs STAGE_MANAGER_TEST=1");
+                }
+                input::pointer_back();
+                json!({ "ok": true })
+            }
             Command::DebugSpace { direction, numpad } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-space needs STAGE_MANAGER_TEST=1");
@@ -678,6 +693,23 @@ mod app {
                 let mut shown = false;
                 DispatchQueue::main().exec_sync(|| shown = strip::debug_hover(at));
                 json!({ "ok": true, "shown": shown })
+            }
+            Command::DebugCmdM => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-cmd-m needs STAGE_MANAGER_TEST=1");
+                }
+                let own = std::process::id() as i32;
+                let front = apps::frontmost_pid();
+                if !front.is_some_and(|p| p != own && input::test_pids().contains(&p)) {
+                    return ctl::error_reply(&format!("debug-cmd-m: the frontmost app (pid {front:?}) is not a STAGE_MANAGER_ONLY app; refused"));
+                }
+                match space_keys::post_with_command(stage_manager::engine::minimize_press::KEY_M) {
+                    Ok(()) => {
+                        tracing::info!(front = ?front, "debug-cmd-m: Cmd-M typed");
+                        json!({ "ok": true })
+                    }
+                    Err(e) => ctl::error_reply(&e),
+                }
             }
             Command::DebugExpose { which } => {
                 if std::env::var_os(TEST_ENV).is_none() {

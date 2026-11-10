@@ -44,7 +44,10 @@ second, the guardian's log saying it brought it back) and only then ends; a full
 window's Space has no strip, entering and leaving full screen (twice) keeps the Desktop's id,
 its stages and windows, and the engine's view does not flap; Mission Control and App Exposé
 (typed through the app, left with Escape, never a Desktop change) hide the strip, which then
-comes back on the same Desktop with each Desktop's pane still on its own Desktop.
+comes back on the same Desktop with each Desktop's pane still on its own Desktop; with
+`[reveal] edge_tab` on, the edge tab shows on the Desktop shown only while that Desktop's
+strip is covered (Desktop 1 covered, Desktop 2 clear: a tab on 1, none on 2; Desktop 2
+covered: its own), and back on Desktop 1 its strip and tab are as before.
 
 Every app run's log is kept (stage-manager.run-NN.log in the test home, renamed from the
 day's YYYY-MM-DD.log; the guardian writes on into its run's file).
@@ -597,6 +600,11 @@ planned steps (hands-free):
               predicted at the press (Fixture 1) and clean (strict, as above)
   back        (already on Desktop 1 after the activation, else ctl debug-space <back>); checks as guided
               (Desktop 2's pane stays there)
+  edge tab    on Desktop 1: [reveal] edge_tab on (a live reload); ctl debug-frame <a shown Desktop 1 window> to
+              the strip's column: the strip slides out, a tab flush left; ctl debug-space <toward>: Desktop 2's
+              windows moved clear of the strip, its own strip shown, no tab on screen; a Desktop 2 window over
+              the column: Desktop 2's own tab, put back: it goes; ctl debug-space <back>: Desktop 1's strip still
+              hidden and its tab where it was; the key off: no tab; the Desktop 1 window put back
   quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided
   guardian    debug-space <back> to Desktop 1; kill -9 the app; checks: still parked, the guardian waits;
               `open -n <app> --args debug-post-space <toward>` (app down) to Desktop 2, else activate Bravo;
@@ -829,6 +837,9 @@ def run():
     home_display = next((s["display"] for s in sp.get("list", []) if s.get("id") == d2), None)
     on_home = [s for s in sp.get("list", []) if s.get("display") == home_display]
     check(len(on_home) == 2, f"ctl dump lists two Spaces on the fixture's screen: {sp}")
+
+    say("\n== the edge tab across Desktops: each Desktop's own, shown by its own strip ==")
+    edge_tab_across_desktops(d1, d2)
 
     say("\n== quit with a window parked on Desktop 2 ==")
     s = state()
@@ -1328,6 +1339,122 @@ def probe_moves_elsewhere(d1, left):
           + (f": {hits[:3]}" if hits else ""))
     check(bool(back and ts.close(back, before, tol=2.0)), "the probe's window is back where it was")
     return took
+
+
+def front_shown(s):
+    """The shown standard windows of the Desktop shown (its active stage's), front first."""
+    return [w for w in s["windows"] if w["space"] == s["space"] and not w["parked"] and w["role"] == "standard"]
+
+
+def cover_strip(s, what):
+    """Moves a shown window of the Desktop shown over the strip's column, its left edge 4 pt
+    in from the screen's (the strip hides under it, Apple's auto-hide). Returns (id, the frame
+    to put it back at), or None with a failed check."""
+    shown = front_shown(s)
+    if not check(bool(shown), f"{what}: a shown window to cover the strip with"):
+        return None
+    w, vis = shown[0], s["display"]["visible"]
+    r = w["restore"]
+    got = ctl("debug-frame", w["id"], vis["x"] + 4, r["y"], r["w"], r["h"])
+    check(got.get("ok"), f"{what}: {w['title']} moved over the strip's column ({got.get('error', 'ok')})")
+    return w["id"], r
+
+
+def put_back(cover):
+    if cover:
+        wid, r = cover
+        ctl("debug-frame", wid, r["x"], r["y"], r["w"], r["h"])
+        time.sleep(0.6)
+
+
+def tab_at_edge(tab, s):
+    """The edge tab `tab` (ts.edge_tab) is flush left and vertically centred on the main display."""
+    vis, b = s["display"]["visible"], tab["bounds"]
+    return b["x"] <= vis["x"] + 1 and abs(b["y"] + b["h"] / 2 - (vis["y"] + vis["h"] / 2)) <= 2
+
+
+def pane_of(s, desk):
+    """The strip pane the Desktop shown uses, when it is Desktop `desk`'s and on the Space shown."""
+    p = s.get("strip_panel") or {}
+    return p if p.get("space") == desk and p.get("on_active_space") else None
+
+
+def edge_tab_across_desktops(d1, d2):
+    """PLAN since 1.8.0: the edge tab across Desktops. `[reveal] edge_tab` (an extension, off
+    by default) shows a slim tab at the left edge while a window of the active stage hides the
+    strip. Each Desktop has its own strip pane and its own tab, and a tab lives on the Desktop
+    it was first shown on: the tab shows on the Desktop shown when that Desktop's strip is
+    hidden, never on another. Starts and ends on Desktop 1, the key turned on by a live
+    reload and off again, every window moved put back.
+
+    Desktop 1, a window over the strip's column: the strip slides out, the tab shows flush
+    left. Desktop 2, its windows clear of the strip: its own strip shown on its own pane, no tab
+    on screen (Desktop 1's stays there); a window of Desktop 2 over the column: Desktop 2's own
+    tab; put back, it goes. Desktop 1 again: its strip still hidden, its tab where it was. The
+    key off: no tab, even with the strip covered."""
+    s = state()
+    if not check(s["space"] == d1, f"edge tab: on Desktop 1 to start (Space {s['space']})"):
+        return
+    covers = {}
+    try:
+        if not check(ts.set_config_live("[reveal]\nedge_tab = true\n"), "edge tab: the key turned on (a live reload)"):
+            return
+        covers["d1"] = cover_strip(s, "Desktop 1")
+        tab1 = ts.wait_until(lambda: ts.edge_tab() if not (state().get("strip_panel") or {}).get("shown") else None,
+                             8, "Desktop 1's strip out and its tab")
+        if not check(tab1 is not None, f"Desktop 1: the strip slides out under the window, the tab shows ({state().get('strip_panel')})"):
+            return
+        check(tab_at_edge(tab1, state()), f"Desktop 1: the tab flush left, vertically centred ({ts.fmt(tab1['bounds'])})")
+        check(pane_of(state(), d1) is not None, f"Desktop 1: the strip's pane is Desktop 1's ({state().get('strip_panel')})")
+
+        go("d2", "Switch to Desktop 2")
+        s = ts.wait_state(lambda x: x["space"] == d2, "Desktop 2 recognized", timeout=5)
+        if not check(s is not None, "edge tab: on Desktop 2"):
+            return
+        clear_of_strip(s)
+        shown2 = ts.wait_until(lambda: pane_of(state(), d2) if (state().get("strip_panel") or {}).get("shown") else None,
+                               6, "Desktop 2's strip shown")
+        check(shown2 is not None, f"Desktop 2, its windows clear of the strip: its own strip shows ({state().get('strip_panel')})")
+        check(ts.wait_until(lambda: ts.edge_tab() is None or None, 3, "no tab on Desktop 2") is not None,
+              f"Desktop 2: no tab on screen (Desktop 1's stays on Desktop 1; {ts.edge_tab() and ts.fmt(ts.edge_tab()['bounds'])})")
+        covers["d2"] = cover_strip(state(), "Desktop 2")
+        tab2 = ts.wait_until(lambda: ts.edge_tab() if not (state().get("strip_panel") or {}).get("shown") else None,
+                             8, "Desktop 2's strip out and its tab")
+        check(tab2 is not None, f"Desktop 2, a window over the strip: its strip slides out, its own tab shows ({state().get('strip_panel')})")
+        if tab2:
+            check(tab_at_edge(tab2, state()), f"Desktop 2: the tab flush left, vertically centred ({ts.fmt(tab2['bounds'])})")
+            check(pane_of(state(), d2) is not None, f"Desktop 2: the strip's pane is still Desktop 2's ({state().get('strip_panel')})")
+        put_back(covers.pop("d2"))
+        back2 = ts.wait_until(lambda: ts.edge_tab() is None and (state().get("strip_panel") or {}).get("shown") or None,
+                              6, "Desktop 2's strip back")
+        check(back2 is not None, "Desktop 2, the window put back: the tab goes, the strip shows again")
+
+        go("d1", "Switch back to Desktop 1")
+        s = ts.wait_state(lambda x: x["space"] == d1, "Desktop 1 recognized", timeout=5)
+        if not check(s is not None, "edge tab: back on Desktop 1"):
+            return
+        again = ts.wait_until(lambda: ts.edge_tab() if pane_of(state(), d1) else None, 6, "Desktop 1's tab again")
+        check(again is not None and not (state().get("strip_panel") or {}).get("shown"),
+              f"Desktop 1 again: as before, its strip hidden under the window and its tab shown ({state().get('strip_panel')})")
+        if again:
+            check(ts.close(again["bounds"], tab1["bounds"], 1.0),
+                  f"Desktop 1: its tab where it was ({ts.fmt(again['bounds'])}, was {ts.fmt(tab1['bounds'])})")
+        check(ts.set_config_live(""), "edge tab: the key turned off")
+        gone = ts.wait_until(lambda: ts.edge_tab() is None or None, 4, "the tab to go with the key off")
+        check(gone is not None, "the key off: no tab, even with the strip covered")
+    finally:
+        # The key off first (a plain write: the app reloads it by itself), so a stopped run
+        # leaves no tab for the next one; then what was moved, where its Desktop shows.
+        cfg = os.path.join(ts.HOME, "config.toml")
+        if os.path.exists(cfg) and "edge_tab" in open(cfg).read():
+            open(cfg, "w").close()
+        here = state().get("space")
+        for name, desk in (("d2", d2), ("d1", d1)):
+            if covers.get(name) and here == desk:
+                put_back(covers.pop(name))
+        left = [c[0] for c in covers.values() if c]
+        if left:
+            say(f"    (left over the strip's column on the other Desktop: window {left})")
 
 
 def expose_on_desktop_2(d1, d2):

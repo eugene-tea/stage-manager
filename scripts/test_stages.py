@@ -33,9 +33,11 @@ is moved or resized, ever; with `[windows] fit = "narrow"` windows kept clear of
 first start, switch and creation, a too-wide one narrowed and given back its exact frame on
 quit; with `fit = "move"` plus the launch reveal and the edge tab turned on, those; a
 menu-path quit right after a first start with many windows), parity (the generated config has
-no live values and registers no hotkey; Cmd-M sends a window to the strip, its picture from
-its Dock tile, the window never shown outside the corner past two frames after the genie,
-sampled every 8 ms; a click on a
+no live values and registers no hotkey; an app's own minimize sends a window to the strip, its
+picture from its Dock tile, the window never shown outside the corner past two frames after the
+genie, sampled every 8 ms; Cmd-M and the yellow button send one straight to the top card with no
+genie, never in the Dock, only at its frame or parked, and the button pressed and dragged off
+does nothing; a click on a
 card's app icon brings every window of that app), motion (the strip below windows, also
 while a window is dragged over it, with the dragged window's card in the motion overlay; a
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
@@ -97,8 +99,10 @@ start at its first signal (the copy turned regular, a Dock icon, by STAGE_MANAGE
 repeats ignored, a cancel resuming at once (the copy an accessory app again, lsappinfo's
 UIElement), the apps quitting while
 it holds with the file kept, and the next session bringing each window back into its stage at
-its saved frame (one reopened clamped against the park corner, one at the park spot); and the
-same with no early signal, from the entries kept with `quit_at`. Hands off the Mac during this
+its saved frame (one reopened clamped against the park corner, one at the park spot); a quit
+at a logout left unclean by a frozen app, the guardian bringing its window back and then
+reopening the app at the cancel; and the same with no early signal, from the entries kept
+with `quit_at`. Hands off the Mac during this
 phase: a click or key press ends the restore window early). Run by name only: still (the
 corner patch drawn from a still of the desktop, with window captures on: a disk image of the
 test's own mounted and its icon placed under the park corner; the patch shows over it, the
@@ -1301,7 +1305,7 @@ def phase_m6():
 
 
 def phase_strip():
-    say("\n== the strip end to end: a card click switches, a shift-click merges ==")
+    say("\n== the strip end to end: a card click switches, a shift-click adds the card's front window ==")
     stop_app()
     stop_fixture()
     p = os.path.join(HOME, "state.json")
@@ -1329,10 +1333,18 @@ def phase_strip():
     consistent("after the card click")
     do("switch", 1)
     time.sleep(1.5)
+    # Apple's (measured 11-09): a Shift-click adds the card's front window alone (its stage's
+    # last used), whatever part of the card is under the pointer; the rest stays a card.
+    card = stage_titles(state()).get(2, [])
+    front = card[0] if card else None
     r = ctl("debug-click", x, y, "shift")
     check(r.get("ok"), f"shift-clicked the card ({r.get('error', 'ok')})")
-    s = wait_until(lambda: (lambda x: x if len(x["stages"]) == 1 else None)(state()), 3, "the shift-click to merge")
-    check(s is not None and len(stage_titles(s)[1]) == 4, "a shift-click brings the card's windows into the active stage")
+    s = wait_until(lambda: (lambda x: x if len(stage_titles(x).get(1, [])) == 2 else None)(state()), 3, "the shift-click to add a window")
+    got = stage_titles(s) if s else {}
+    check(s is not None and front is not None and got.get(1, [None])[0] == front and sorted(got[1]) == sorted([front, "Fixture 3"]),
+          f"a shift-click brings the card's front window ({front}) alone into the active stage, in front ({got})")
+    check(s is not None and s["strip"] == [2] and sorted(got.get(2, [])) == sorted(t for t in card if t != front),
+          f"the card's other windows stay a card in its slot ({got}, strip {s and s['strip']})")
     consistent("after the shift-click")
     stop_app()
     all_onscreen("strip quit")
@@ -1654,6 +1666,12 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
         if at_once in at_once_ok:
             skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
                  f"the activation arrived at once by design ({at_once})")
+        elif at_once == "the corner patch has no picture of the wallpaper now" and "the sun is near a frame change" in log_text():
+            # A dynamic wallpaper near a change of frame turns the patch off by design (the
+            # still would change under it), so there is no picture to cover the corner with
+            # (11-09 evening, Desktop 1's solar wallpaper near sunset).
+            skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
+                 f"the activation arrived at once by design: the corner patch is off while the dynamic wallpaper nears a change of frame")
         elif owners_window_only(at_once, at_once_ids, listed):
             skip(f"{what}: the grow from its card, the clean corner, the early keyboard",
                  f"a window of the owner's (not a fixture's: {at_once_ids}) stays shown into the park corner with no "
@@ -1943,22 +1961,64 @@ def phase_native():
     wallpaper_edge()
 
 
+# The edge check's fixture frame and how far around it the check presses: the sweeps' drags
+# reach 62 pt right of its right edge and 12 pt above its top, the long press lies EDGE_FAR
+# left of its left edge.
+EDGE_FRAME = (800.0, 500.0)
+EDGE_FAR = 120.0
+
+
+def edge_zone(f):
+    """Everything the edge check presses or drags across around fixture frame `f`, with room."""
+    return {"x": f["x"] - EDGE_FAR - 40, "y": f["y"] - 40, "w": f["w"] + EDGE_FAR + 40 + 100, "h": f["h"] + 70}
+
+
+def edge_frame(s, icons):
+    """A frame on the main display for the edge check's fixture window where all the check
+    presses (`edge_zone`) is clear of every other app's window (with the owner's Stage Manager
+    quit for a run his windows stay where they are: 11-09 at 14:00 and 15:11 one of his was
+    at the old fixed spot, 2362,480), of Finder's desktop icons `icons` (grown by their
+    labels, as the app knows them), of the strip's column and of both bottom corners (the
+    park corner and its patch). Tried right to left, top to bottom; None when nowhere is."""
+    vis, display = s["display"]["visible"], s["display"]["frame"]
+    w, h = EDGE_FRAME
+    left = vis["x"] + s["strip_width"] + 20
+    corners = [{"x": vis["x"] + vis["w"] - 420, "y": vis["y"] + vis["h"] - 420, "w": 420, "h": 420},
+               {"x": vis["x"], "y": vis["y"] + vis["h"] - 420, "w": 420, "h": 420}]
+    taken = [o["bounds"] for o in others_at(vis, above=True, display=display)] + icons + corners
+    for y in range(int(vis["y"] + 200), int(vis["y"] + vis["h"] - h - 40), 60):
+        for x in range(int(vis["x"] + vis["w"] - w - 200), int(left + EDGE_FAR + 40) - 1, -60):
+            f = {"x": float(x), "y": float(y), "w": w, "h": h}
+            if not any(intersect(edge_zone(f), r) for r in taken):
+                return f
+    return None
+
+
 def wallpaper_edge():
     """A press just outside a window is its edge, never a wallpaper click (11-09: VS Code's
     right edge pressed 0.3 pt outside its frame sent the stage to the strip; the window parked
     while he kept dragging and shrank to its minimum in the park corner). macOS gives a
-    resizable window a band a few points wide outside its frame where a press takes its edge.
+    resizable window a band a few points wide outside its frame where a press takes its edge;
+    ours is 6 pt along an edge, 10 at a corner. The desktop is revealed on the release of a
+    still click shorter than 470 ms, as Apple's; a drag or a long press reveals nothing.
 
-    1. A press 2 pt right of a fixture's right edge, dragged 60 pt right: the stage stays, the
+    Alpha 1 is the fixture pressed around; Alpha 2 sits parked in a stage of its own, so the
+    corner patch reads Finder's desktop icons and the presses keep clear of them. The fixture
+    goes where nothing of anyone else's lies around it (`edge_frame`): every press is posted
+    only where the desktop itself is topmost (`ctl debug-desktop`), never on a real window.
+
+    1. A press 2 pt right of the right edge, dragged 60 pt right: the stage stays, the
        window is never parked, macOS resizes it (its band took the press).
     2. A sweep: a press k pt right of the edge (mid edge, then out past the top-right corner),
        dragged 40 pt: whether macOS took the edge (the window grew) is printed, the band's real
        reach for the main thread (macOS's own, measured 11-09: 3 pt grabs, 4 doesn't). A
        drag reveals nothing, anywhere.
-    3. A still click 10 pt out (past our band): the desktop is revealed on the release, as
-       Apple's (never on the press); a click again brings the stage back.
-    4. A still press held 700 ms, far from the window: nothing is revealed (Apple's reveals
-       only for a click shorter than about 470 ms).
+    3. A quick still click 4 pt out (past macOS's band, in ours): nothing is revealed, the
+       press is logged as the window's edge.
+    4. A quick still click 10 pt out (past our band): the desktop is revealed on the release,
+       as Apple's (never on the press); a click again brings the stage back.
+    5. A still press held 600 ms, off the window: nothing is revealed (Apple's reveals only
+       for a click shorter than about 470 ms).
     Same gate as `native_wallpaper`: Apple's Stage Manager off, "Click wallpaper to reveal
     desktop" Only in Stage Manager (with Always, macOS itself would act on the presses)."""
     say("-- a press just outside a window's edge: the edge, no wallpaper click")
@@ -1970,18 +2030,37 @@ def wallpaper_edge():
         return
     try:
         write_config(None)
-        start_extra("a", 1)
+        start_extra("a", 2)
         activate("a")
         time.sleep(1.0)
-        if not check(start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"}) is not None, "app up with one fixture window"):
+        if not check(start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"}) is not None, "app up with two fixture windows"):
             return
-        s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage")
-        if not check(s is not None, "Alpha 1 is shown"):
+        s = wait_state(lambda x: {"Alpha 1", "Alpha 2"} <= set(by_title(x)), "Alpha's windows")
+        if not check(s is not None, "Alpha 1 and Alpha 2 are managed"):
             return
-        wid = by_title(s)["Alpha 1"]["id"]
+        t = by_title(s)
+        wid = t["Alpha 1"]["id"]
+        do("new", t["Alpha 2"]["id"])
+        s = wait_state(lambda x: by_title(x)["Alpha 2"]["home"] != by_title(x)["Alpha 1"]["home"], "Alpha 2 in a stage of its own")
+        if s is not None and not shown(s, "Alpha 1"):
+            do("switch", by_title(s)["Alpha 1"]["home"])
+        s = wait_state(lambda x: shown(x, "Alpha 1") and by_title(x)["Alpha 2"]["parked"], "Alpha 1 shown, Alpha 2 parked")
+        if not check(s is not None, "Alpha 1 is shown, Alpha 2 parked in a stage of its own"):
+            return
+        # The patch at the park corner reads Finder's icons (a list once known; None unknown).
+        known = wait_until(lambda: (lambda i: (i,) if i is not None else None)((state().get("desktop_still") or {}).get("icons")),
+                           6, "Finder's desktop icons read")
+        icons = known[0] if known else []
+        if not known:
+            say("    Finder's desktop icons are not known: the presses keep clear of other apps' windows only")
+        s = state()
         vis = s["display"]["visible"]
-        # Its right edge 200 pt in from the screen's, clear of the strip on the left.
-        frame = {"x": vis["x"] + vis["w"] - 1000, "y": vis["y"] + 200, "w": 800, "h": 500}
+        frame = edge_frame(s, icons)
+        if frame is None:
+            skip("wallpaper edge", f"no spot on the main display clear of other apps' windows and {len(icons)} desktop icon(s) "
+                 f"for a {EDGE_FRAME[0]:.0f}x{EDGE_FRAME[1]:.0f} window and the presses around it")
+            return
+        say(f"    the fixture at {fmt(frame)}, the presses within {fmt(edge_zone(frame))} ({len(icons)} desktop icon(s) known)")
 
         def put_back():
             ctl("debug-frame", wid, frame["x"], frame["y"], frame["w"], frame["h"])
@@ -1993,9 +2072,12 @@ def wallpaper_edge():
             return r
 
         put_back()
+        if not check(close(live_frame("Alpha 1"), frame, 2.0), f"Alpha 1 at its frame ({fmt(live_frame('Alpha 1'))})"):
+            return
         right, mid, top = frame["x"] + frame["w"], frame["y"] + frame["h"] / 2, frame["y"]
 
         say("-- 1. pressed 2 pt outside the right edge and dragged")
+        bands = log_text().count("resize band")
         r = press_drag((right + 2, mid), (right + 62, mid))
         if not r.get("ok"):
             skip("wallpaper edge", f"the press's path is not all desktop ({r.get('error')})")
@@ -2004,7 +2086,7 @@ def wallpaper_edge():
         a1 = by_title(s)["Alpha 1"]
         check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"the stage stays ({stage_titles(s)})")
         check(not a1["parked"], "the window is never parked")
-        check("resize band" in log_text(), "the press is logged as the window's edge")
+        check(log_text().count("resize band") > bands, "the press is logged as the window's edge")
         grown = live_frame("Alpha 1")
         say(f"    the window after the drag: {fmt(grown)} (macOS resized it: {grown['w'] > frame['w'] + 20})")
 
@@ -2026,28 +2108,39 @@ def wallpaper_edge():
                       f"{where}, {at[0] - right:.0f} pt out: a drag reveals nothing ({stage_titles(s)})")
             say(f"    {where}, pt out -> macOS took the edge: {', '.join(took)}")
 
-        say("-- 3. a still click 10 pt out: the desktop, on the release")
+        say("-- 3. a quick still click 4 pt out, in our band: the window's edge, nothing revealed")
         put_back()
+        bands = log_text().count("resize band")
+        r = ctl("debug-desktop", f"{right + 4:.1f}", f"{mid:.1f}")
+        if check(r.get("ok"), f"clicked 4 pt out ({r.get('error', 'ok')})"):
+            time.sleep(1.5)
+            s = state()
+            check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"a click in the resize band reveals nothing ({stage_titles(s)})")
+            check(log_text().count("resize band") > bands, "the click is logged as the window's edge")
+
+        say("-- 4. a quick still click 10 pt out: the desktop, on the release")
+        put_back()
+        released = log_text().count('on="release"')
         r = ctl("debug-desktop", f"{right + 10:.1f}", f"{mid:.1f}")
         if check(r.get("ok"), f"clicked 10 pt out ({r.get('error', 'ok')})"):
             time.sleep(1.5)
             s = state()
             check(s["desktop_revealed"] and by_title(s)["Alpha 1"]["parked"], "the desktop is revealed")
-            check('on="release"' in log_text() or "on=release" in log_text(), "the reveal ran on the release")
+            check(log_text().count('on="release"') > released, "the reveal ran on the release")
             ctl("debug-desktop", f"{right + 10:.1f}", f"{mid:.1f}")
             s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage back")
             check(s is not None, "a click again brings the stage back")
             check(s is not None and close(live_frame("Alpha 1"), frame), "at its frame")
 
-        say("-- 4. a still press held 700 ms on the wallpaper: no click")
-        # Halfway between the strip's column and the window's left edge.
-        far = ((vis["x"] + state()["strip_width"] + frame["x"]) / 2, mid)
-        r = ctl("debug-desktop", f"{far[0]:.1f}", f"{far[1]:.1f}", "hold", "700")
+        say("-- 5. a still press held 600 ms on the wallpaper: no click")
+        far = (frame["x"] - EDGE_FAR, mid)
+        longs = log_text().count("a long press on the wallpaper")
+        r = ctl("debug-desktop", f"{far[0]:.1f}", f"{far[1]:.1f}", "hold", "600")
         if r.get("ok"):
             time.sleep(1.5)
             s = state()
-            check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"a long press reveals nothing ({stage_titles(s)})")
-            check("a long press on the wallpaper" in log_text(), "the long press is logged as no click")
+            check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"a 600 ms press reveals nothing ({stage_titles(s)})")
+            check(log_text().count("a long press on the wallpaper") > longs, "the long press is logged as no click")
         else:
             skip("wallpaper long press", f"the point is not bare desktop ({r.get('error')})")
         consistent("wallpaper edge")
@@ -2363,12 +2456,14 @@ def our_windows(pid=None):
     return [w for w in wins if w["pid"] == pid and w["onscreen"]]
 
 
-def others_at(rect):
+def others_at(rect, above=False, display=None):
     """Shown windows of another app than the fixtures' and ours that reach `rect`, as the
     window server lists them (`probe-windows --all`: ids, pids and bounds, never a title).
     With the owner's Stage Manager quit for a run his windows stay where they are, and one
     reaching a park corner keeps that corner's patch down (`a shown window reaches the
-    corner`): a check of the patch there skips, never fails."""
+    corner`): a check of the patch there skips, never fails. `above`: the windows above
+    layer 0 too (the Dock, a floating panel), but for one covering the whole of `display`
+    (Notification Center's full-screen window, which the app looks through off its banners)."""
     r = run([BIN, "probe-windows", "--all"], timeout=10)
     try:
         wins = json.loads(r.stdout)["windows"]
@@ -2380,7 +2475,11 @@ def others_at(rect):
             mine |= set(probe(b).get("pids", []))
         except (json.JSONDecodeError, AttributeError):
             pass
-    return [w for w in wins if w["layer"] == 0 and w["onscreen"] and w.get("alpha", 1) > 0
+    def counts(w):
+        if w["layer"] == 0:
+            return True
+        return above and w["layer"] > 0 and not (display and contains(w["bounds"], display, 2.0))
+    return [w for w in wins if counts(w) and w["onscreen"] and w.get("alpha", 1) > 0
             and w["pid"] not in mine and intersect(w["bounds"], rect)]
 
 
@@ -2463,6 +2562,25 @@ def skip(what, why):
     """Notes a check not made (counted apart from passes and failures)."""
     skipped.append(what)
     say(f"  skip {what}: {why}")
+
+
+def pointer_off_strip(s, what):
+    """Rests the pointer over the active stage's window well right of the strip's panel (a
+    synthetic hover, only over a fixture's window or ours): a revealed strip hides only once
+    the pointer is off it, and the owner's own pointer may rest on its column. The next
+    synthetic click or drag, or `ctl debug-pointer-back`, puts it back where it was."""
+    vis = s["display"]["visible"]
+    active = [w for w in s["windows"] if w["home"] == s["active"] and w["role"] == "standard" and not w["parked"]]
+    f = max((w["restore"] for w in active), key=lambda b: b["w"] * b["h"], default=None)
+    x = vis["x"] + 700
+    if f is None or not (f["x"] <= x <= f["x"] + f["w"]):
+        say(f"  pointer left where it is for {what}: no active window under {x:.0f}")
+        return False
+    r = ctl("debug-hover", x, f["y"] + f["h"] / 2, 100)
+    if blocked(r, f"{what} (the pointer moved off the strip)"):
+        return False
+    say(f"  pointer off the strip at {x:.0f},{f['y'] + f['h'] / 2:.0f} for {what} ({r.get('error', 'ok')})")
+    return bool(r.get("ok"))
 
 
 def blocked(reply, what):
@@ -3169,6 +3287,29 @@ def center(f):
     return (f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
 
 
+def icon_against_window(q, icon, h):
+    """The icon's top-left corner `icon` against its window drawn as the quad `q` (four
+    corners from the top left, clockwise; `ctl debug-strip`'s `thumb_corners`) whose left edge
+    is `h` long before the turn (`thumb_size`). A card grows each window about its own middle
+    and keeps its icons as they are, as Apple's (UX-SPEC, the strip's cards): the growth's
+    fixed point is where the quad's diagonals cross, its scale the left edge's length over
+    `h`; the icon is measured from the left edge's bottom end put back at rest size, so the
+    pair reads the same at any growth and anywhere the card is drawn (strip.rs's
+    `a_dragged_card_grows_about_its_own_middle_wherever_it_is_drawn`). None for a flat quad."""
+    (ax, ay), (cx, cy) = q[0], q[1]
+    rx, ry = q[2][0] - ax, q[2][1] - ay
+    tx, ty = q[3][0] - cx, q[3][1] - cy
+    den = rx * ty - ry * tx
+    if abs(den) < 1e-9 or h <= 0:
+        return None
+    u = ((cx - ax) * ty - (cy - ay) * tx) / den
+    mx, my = ax + u * rx, ay + u * ry
+    s = math.hypot(q[3][0] - q[0][0], q[3][1] - q[0][1]) / h
+    if s <= 0:
+        return None
+    return (icon[0] - (mx + (q[3][0] - mx) / s), icon[1] - (my + (q[3][1] - my) / s))
+
+
 def inside(p, f, pad=0.0):
     return f["x"] - pad <= p[0] <= f["x"] + f["w"] + pad and f["y"] - pad <= p[1] <= f["y"] + f["h"] + pad
 
@@ -3858,19 +3999,24 @@ def phase_slots():
             next((c["z"] for c in p["cards"] if c["stage"] == dragged), 0) > max([c["z"] for c in p["cards"] if c["stage"] != dragged] or [0])
             for p in lifted)
         check(bool(lifted) and on_top, f"the dragged card is above every other card while dragged and gliding ({len(lifted)} of {len(seen)} samples)")
-        # The icon against the front thumbnail's left edge (its turn's axis, which the
-        # perspective leaves in place), in units of that edge's length (the hover scale
-        # grows both alike).
+        # The icon against its front window as drawn. Since 1.8.0 a card grows each window
+        # about its own middle and keeps its icons at their size, as Apple's (the press eases
+        # the card to press_scale, the drag back to hover_scale while it moves): the window's
+        # left edge alone moves against the icon as the growth runs, so the icon is read
+        # against that edge put back at rest size about the window's middle
+        # (`icon_against_window`). It keeps its place through the drag and the glide.
         rel = []
         for p in lifted:
             c = next((c for c in p["cards"] if c["stage"] == dragged), None)
-            if c and c.get("thumb_left_edge") and c.get("icons"):
-                (tx, ty), (bx, by) = [(q["x"], q["y"]) for q in c["thumb_left_edge"]]
-                ic, h = c["icons"][0], max(by - ty, 1.0)
-                rel.append(((ic["x"] - bx) / h, (ic["y"] - by) / h, h))
-        if check(len(rel) >= 3, f"the dragged card's thumbnail and icon were sampled ({len(rel)} samples)"):
-            dev = max(max(abs(r[0] - rel[0][0]), abs(r[1] - rel[0][1])) * r[2] for r in rel)
-            check(dev <= 1.0, f"its icon keeps its place on the thumbnail through the drag and the glide (largest drift {dev:.2f} pt)")
+            if c and c.get("thumb_corners") and c.get("thumb_size") and c.get("icons"):
+                q = [(v["x"], v["y"]) for v in c["thumb_corners"]]
+                r = icon_against_window(q, (c["icons"][0]["x"], c["icons"][0]["y"]), c["thumb_size"]["h"])
+                if r is not None:
+                    rel.append(r)
+        if check(len(rel) >= 3, f"the dragged card's window and icon were sampled ({len(rel)} samples)"):
+            dev = max(max(abs(r[0] - rel[0][0]), abs(r[1] - rel[0][1])) for r in rel)
+            check(dev <= 1.0, f"its icon keeps its place on its window through the drag and the glide, "
+                              f"the window grown about its own middle (largest drift {dev:.2f} pt)")
         time.sleep(0.5)
         st = state()
         n = numbers_by_id(st).get(dragged)
@@ -4995,7 +5141,13 @@ def phase_visible():
     a1 = live_frame("Alpha 1")
     check(close(a1, wide), f"nudge-only: the too-wide window stays where it is ({fmt(a1)}, was {fmt(wide)})")
     check(edge_tab() is None, "the strip is shown for a moment at launch (no tab yet)")
-    tab = wait_until(edge_tab, 8, "the edge tab")
+    # The announced strip then hides as a revealed one does: once the pointer has been off it
+    # for `hide_delay_ms`. A pointer resting on the strip's column keeps it (11-09: the
+    # owner's pointer rested there through three runs, so the strip stayed and no tab came).
+    # The pointer goes over Alpha 1, right of the strip, as a person's leaves it; it comes
+    # back with the tab's click below.
+    pointer_off_strip(s, "the launch reveal's end")
+    tab = wait_until(edge_tab, 3.0 + 4.0 + 3.0, "the edge tab (launch_reveal_ms, then hide_delay_ms off the strip)")
     check("a window covers the strip; showing it for a moment" in log_text(), "the launch announce ran")
     if check(tab is not None, f"the edge tab appears at layer 3 with our pid ({fmt(tab['bounds']) if tab else None})"):
         b = tab["bounds"]
@@ -5029,8 +5181,11 @@ def phase_visible():
             check(bool(through), f"a click on the strip's empty column goes through to the window below ({r.get('error', 'ok')})")
         else:
             check(False, f"the strip shows over Alpha 1 for the click-through check (shown {shown}, Alpha 1 {fmt(a1)})")
+        # The click put the pointer back where the owner had it: off the strip again.
+        pointer_off_strip(s, "the strip's auto-hide after the click-through")
         back = wait_until(edge_tab, 8, "the tab to come back once the pointer is away")
         check(back is not None, "the strip auto-hides again and the tab returns")
+    ctl("debug-pointer-back")
     stop_app()
     all_onscreen("nudge-only quit")
 
@@ -5108,7 +5263,7 @@ def phase_parity():
     check(r.stdout == text, "and it is exactly `config --print-defaults`")
     check("hotkeys registered active=0" in log_text(), "no global hotkey registered")
 
-    say("-- Cmd-M sends the window to the strip as a card of its own")
+    say("-- an app's own minimize (as Window > Minimize): macOS's genie, then the strip as a card of its own")
     s = state()
     t = by_title(s)
     alpha = s["active"] if t["Alpha 1"]["home"] == s["active"] else t["Alpha 1"]["home"]
@@ -5135,10 +5290,66 @@ def phase_parity():
         check(a1["parked"] and stage_titles(s)[a1["home"]] == ["Alpha 1"] and a1["home"] in s["strip"],
               f"1.5 s on, the card is still there: Alpha 1 parked in its own stage ({stage_titles(s)}, strip {s['strip']})")
         check(s["active"] == alpha, "and the view still on the current stage")
-    minimize_path_check(sampler_out(sampler, "Cmd-M"), a1_id, log_text()[before_min:])
-    consistent("Cmd-M")
+    minimize_path_check(sampler_out(sampler, "an app's own minimize"), a1_id, log_text()[before_min:])
+    consistent("an app's own minimize")
     wins, d = fixture_windows([EXTRA["a"][0]])
     check(len([w for w in wins if w["bounds"]["h"] > 60]) == 2, "the window is not left in the Dock (both Alpha windows listed)")
+
+    # Round minimize-direct: Apple's (11-09) plays no genie; the yellow button and Cmd-M are
+    # caught before macOS starts its own, and the window flies from its frame into a new card
+    # at the top of the strip.
+    say("-- Cmd-M: straight to the strip, no genie, its card at the top")
+    s = state()
+    a2 = by_title(s)["Alpha 2"]
+    r = ctl("debug-frame", a2["id"], *(int(round(a2["restore"][k])) for k in ("x", "y", "w", "h")))
+    check(r.get("ok"), f"Alpha 2 focused ({r.get('error', 'ok')})")
+    time.sleep(0.8)
+    s = state()
+    a2 = by_title(s)["Alpha 2"]
+    before_min = len(log_text())
+    sampler = start_sampler([EXTRA["a"][0]], 2000, every=8)
+    time.sleep(0.3)
+    r = ctl("debug-cmd-m")
+    check(r.get("ok"), f"Cmd-M typed ({r.get('error', 'ok')})")
+    s = wait_state(lambda x: by_title(x)["Alpha 2"]["parked"], "Alpha 2 to go to the strip")
+    if check(s is not None, "Cmd-M sends the window to the strip"):
+        home = by_title(s)["Alpha 2"]["home"]
+        check(stage_titles(s)[home] == ["Alpha 2"] and s["strip"][:1] == [home],
+              f"as a card of its own, at the top of the strip ({s['strip']})")
+    direct_minimize_check(sampler_out(sampler, "Cmd-M"), a2["id"], a2["restore"], log_text()[before_min:], "Cmd-M")
+    consistent("Cmd-M")
+
+    say("-- the yellow button: pressed and dragged off it does nothing; a click goes straight to the strip")
+    s = state()
+    do("switch", by_title(s)["Bravo 1"]["home"])
+    time.sleep(1.2)
+    s = state()
+    b1 = by_title(s)["Bravo 1"]
+    r = ctl("debug-minimize-button", b1["id"])
+    if check(r.get("ok"), f"Bravo 1's minimize button read ({r.get('error', 'ok')})"):
+        f = r["frame"]
+        cx, cy = f["x"] + f["w"] / 2, f["y"] + f["h"] / 2
+        r = ctl("debug-drag", cx, cy, cx + 80, cy + 40)
+        check(r.get("ok"), f"pressed on the button and dragged off ({r.get('error', 'ok')})")
+        time.sleep(0.8)
+        s = state()
+        b = by_title(s)["Bravo 1"]
+        wins, _ = fixture_windows([EXTRA["b"][0]])
+        listed = next((w for w in wins if w["id"] == b1["id"]), None)
+        check(not b["parked"] and listed is not None and listed["onscreen"] and close(listed["bounds"], b1["restore"]),
+              f"dragged off: not minimized, and the window did not move ({fmt(listed['bounds']) if listed else 'not listed'})")
+        before_min = len(log_text())
+        sampler = start_sampler([EXTRA["b"][0]], 2000, every=8)
+        time.sleep(0.3)
+        r = ctl("debug-click", cx, cy)
+        check(r.get("ok"), f"the yellow button clicked ({r.get('error', 'ok')})")
+        s = wait_state(lambda x: by_title(x)["Bravo 1"]["parked"], "Bravo 1 to go to the strip")
+        if check(s is not None, "the yellow button sends the window to the strip"):
+            home = by_title(s)["Bravo 1"]["home"]
+            check(stage_titles(s)[home] == ["Bravo 1"] and s["strip"][:1] == [home],
+                  f"as a card of its own, at the top of the strip ({s['strip']})")
+        direct_minimize_check(sampler_out(sampler, "the yellow button"), b1["id"], b1["restore"], log_text()[before_min:], "the yellow button")
+        consistent("the yellow button")
 
     say("-- a click on a card's app icon brings every window of that app")
     s = state()
@@ -5166,6 +5377,46 @@ def phase_parity():
 DOCK_BAND = 100.0
 
 
+def direct_minimize_check(p, wid, frame, log, what):
+    """Round minimize-direct, from the window server's samples (`p`, probe-windows every 8 ms)
+    of a window minimized by the yellow button or Cmd-M, caught before macOS's genie, and the
+    app's log of it (`log`): it never goes into the Dock (always listed on screen), it shows
+    only at its frame (`frame`) or parked, and ends parked; the strip's picture of it starts at
+    its frame, full size (the outgoing flight of a switch), and macOS's minimize never happened."""
+    if p is None:
+        return
+    d = p["display"]
+    seen = []
+    for smp in p.get("samples", []):
+        w = next((w for w in smp["windows"] if w["id"] == wid), None)
+        if w:
+            seen.append((smp["t"], w["onscreen"], w["bounds"]))
+    if not check(len(seen) > 10, f"{what}: the window sampled ({len(seen)} samples)"):
+        return
+    last = None
+    t0 = seen[0][0]
+    for t, on, b in seen:
+        place = f"{b['x']:.0f},{b['y']:.0f} {b['w']:.0f}x{b['h']:.0f} {'on' if on else 'off'}"
+        if place != last:
+            say(f"    +{(t - t0) * 1000:4.0f} ms  {place}")
+            last = place
+    check(all(on for _, on, _ in seen), f"{what}: never in the Dock (listed on screen in every sample)")
+    elsewhere = [b for _, _, b in seen if not close(b, frame, 2.0) and not is_parked(b, d)]
+    check(not elsewhere, f"{what}: only at its frame or parked ({len(elsewhere)} samples elsewhere{', first ' + fmt(elsewhere[0]) if elsewhere else ''})")
+    check(is_parked(seen[-1][2], d), f"{what}: it ends parked ({fmt(seen[-1][2])})")
+    caught = [ln for ln in log.splitlines() if "straight to the strip, no genie" in ln]
+    check(bool(caught), f"{what}: caught before macOS ({caught[-1][caught[-1].find('window minimized'):] if caught else 'no line'})")
+    genie = [ln for ln in log.splitlines() if "window minimized: it goes to the strip instead of the Dock" in ln]
+    check(not genie, f"{what}: macOS's own minimize never happened ({len(genie)} lines)")
+    ghost = [ln for ln in log.splitlines() if "transition ghost" in ln and f"window={wid} " in ln and "outgoing=true" in ln]
+    if ghost:
+        m = re.search(r"start=(-?[\d.]+),(-?[\d.]+) ([\d.]+)x([\d.]+)", ghost[-1])
+        if m:
+            w, h = float(m.group(3)), float(m.group(4))
+            check(abs(w - frame["w"]) <= 4 and abs(h - frame["h"]) <= 4,
+                  f"{what}: the strip's picture starts at the window's frame ({w:.0f}x{h:.0f}, the window {frame['w']:.0f}x{frame['h']:.0f})")
+
+
 def minimize_path_check(p, wid, log):
     """Round minimize-flow, from the window server's samples (`p`, probe-windows every 8 ms) of
     a window minimized while Stage Manager sends it to the strip, and the app's log of it
@@ -5182,11 +5433,11 @@ def minimize_path_check(p, wid, log):
         w = next((w for w in smp["windows"] if w["id"] == wid), None)
         if w:
             seen.append((smp["t"], w["onscreen"], w["bounds"]))
-    if not check(len(seen) > 10, f"Cmd-M: the window sampled ({len(seen)} samples)"):
+    if not check(len(seen) > 10, f"own minimize: the window sampled ({len(seen)} samples)"):
         return
     # The genie into the Dock: until the window is first listed off screen.
     docked = next((i for i, (_, on, _) in enumerate(seen) if not on), None)
-    if not check(docked is not None, "Cmd-M: the window went into the Dock (listed off screen)"):
+    if not check(docked is not None, "own minimize: the window went into the Dock (listed off screen)"):
         return
     t0 = seen[docked][0]
     last, runs, run, band_ms = None, [], [], 0.0
@@ -5207,25 +5458,25 @@ def minimize_path_check(p, wid, log):
     if run:
         runs.append(run)
     worst = max(((r[-1] - r[0]) * 1000 + 8 for r in runs), default=0.0)
-    check(worst <= 40.0, f"Cmd-M: after the genie the window never shows outside the corner past two frames (longest {worst:.0f} ms, {len(runs)} times)")
-    check(band_ms <= 400.0, f"Cmd-M: its un-minimize sinks out of the Dock tile quickly ({band_ms:.0f} ms in the bottom band)")
+    check(worst <= 40.0, f"own minimize: after the genie the window never shows outside the corner past two frames (longest {worst:.0f} ms, {len(runs)} times)")
+    check(band_ms <= 400.0, f"own minimize: its un-minimize sinks out of the Dock tile quickly ({band_ms:.0f} ms in the bottom band)")
     end = seen[-1]
-    check(end[1] and is_parked(end[2], d), f"Cmd-M: it ends parked ({end[2]})")
+    check(end[1] and is_parked(end[2], d), f"own minimize: it ends parked ({end[2]})")
     ghost = [ln for ln in log.splitlines() if "transition ghost" in ln and f"window={wid} " in ln]
     tile = [ln for ln in log.splitlines() if "a minimized window's picture comes out of its Dock tile" in ln or "a minimized window's card fades in" in ln]
-    check(bool(tile), f"Cmd-M: the strip's picture starts at the Dock tile, or the card fades in ({tile[-1:] or 'no line'})")
+    check(bool(tile), f"own minimize: the strip's picture starts at the Dock tile, or the card fades in ({tile[-1:] or 'no line'})")
     if ghost:
         m = re.search(r"start=(-?[\d.]+),(-?[\d.]+) ([\d.]+)x([\d.]+)", ghost[-1])
         if m:
             w, h = float(m.group(3)), float(m.group(4))
-            check(w <= 200 and h <= 200, f"Cmd-M: no full-size picture at the old frame ({w:.0f}x{h:.0f} at the start)")
+            check(w <= 200 and h <= 200, f"own minimize: no full-size picture at the old frame ({w:.0f}x{h:.0f} at the start)")
     dived = [ln for ln in log.splitlines() if "window minimized: it goes to the strip" in ln]
     say(f"    {dived[-1][dived[-1].find('window minimized'):] if dived else 'no minimize line'}")
     # 11-09 14:49: an auto-hidden Dock listed the tile under the screen's edge, the dive was
     # left out (dive=None) and the window rose to its full height on the way to the corner.
     # With the tile read and no screen below the Dock's edge, the dive is taken.
     if dived and "tile=Some(" in dived[-1]:
-        check("dive=Some(" in dived[-1], "Cmd-M: the window was put beyond the Dock's edge while minimized (the dive)")
+        check("dive=Some(" in dived[-1], "own minimize: the window was put beyond the Dock's edge while minimized (the dive)")
 
 
 def start_extra_frames(k, n, frames):
@@ -6412,7 +6663,7 @@ def restore_after_logout(run_id):
     say("\n-- a logout, simulated (STAGE_MANAGER_LOGOUT_NOTE): the head start at its first signal")
     note = f"dev.eugene.stagemanager.test.logout.{run_id}"
     env = {k: {"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_SESSION": f"logout {k} {run_id}", "STAGE_MANAGER_LOGOUT_NOTE": note}
-           for k in "DEFG"}
+           for k in "DEFGH"}
     # Session D's copy joins the reopen list at the simulated logout (a test run only): its
     # Dock icon comes at the head start and goes at the cancel (fix-cancel-dock-icon).
     env["D"]["STAGE_MANAGER_TEST_REOPEN_LIST"] = "1"
@@ -6529,6 +6780,7 @@ def restore_after_logout(run_id):
         check(wait_until(lambda: "the logout goes on (the session ends): nothing is opened" in log_text(), 5, "the end") is not None,
               "its stop signal (the session ending) ends the wait with nothing opened")
     all_onscreen("session E quit")
+    logout_unclean_quit(note, env["H"])
 
     say("-- no early signal (the 10-16 restart): the apps quit first, then the app")
     stop_all_fixtures()
@@ -6591,6 +6843,61 @@ def restore_after_logout(run_id):
             check(by_title(s)["Bravo 1"].get("restored") is None, "matched to no saved window: Apple's rule")
     stop_app()
     all_onscreen("logout sub-phase quit")
+    stop_all_fixtures()
+
+
+def logout_unclean_quit(note, env):
+    """Round logout-cancel: a quit at a logout that leaves a window away (Bravo's app frozen,
+    SIGSTOP: it answers nothing at the head start or the quit) is unclean, and the parked file
+    says it was for a logout. The guardian brings the window back once Bravo answers (SIGCONT),
+    then waits for the cancel as after a clean quit, and the cancel would open the app again."""
+    say("-- an unclean quit at a logout: Bravo frozen with its window parked; the cancel still reopens")
+    stop_all_fixtures()
+    try:
+        os.remove(os.path.join(HOME, "state.json"))
+    except FileNotFoundError:
+        pass
+    start_extra("a", 1)
+    start_extra("b", 1)
+    s = start_app(2, extra_env=env)
+    if not check(s is not None, "session H: app up with Alpha and Bravo"):
+        return
+    do("switch", number_of(s, "Alpha 1"))
+    bravo = next((w for w in state()["windows"] if base_title(w["title"]) == "Bravo 1"), None)
+    b = extra_pid("b")
+    if not check(bool(bravo and bravo["parked"] and b), "session H: Bravo's stage in the strip, its window parked"):
+        return
+    pid = app_pid()
+    guards = guardian_pids(pid)
+    before = len(log_text())
+    os.kill(b, signal.SIGSTOP)
+    try:
+        check(post_note(note), "the logout note is posted in session H")
+        check(wait_until(lambda: "not every window came back at the logout's head start" in log_text()[before:], 20,
+                         "H's head start") is not None, "the head start cannot bring Bravo's window back (its app frozen)")
+        ctl("quit")
+        wait_gone(pid, 40)
+        after = lambda: log_text()[before:]
+        check(re.search(r"quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled.* clean=false|"
+                        r"clean=false.*quit for a logout, restart or shutdown: the guardian opens", after()) is not None,
+              "the quit at the logout is unclean and says it was for a logout")
+        check("not every window could be restored; the guardian will scan after exit" in after(), "the guardian takes over")
+        check(wait_until(lambda: "with windows still away; listening for a cancel while they are brought back" in after(), 10,
+                         "the guardian's listening") is not None, "the parked file says logout: the guardian listens for a cancel during its watch")
+        wins, d = fixture_windows([EXTRA["b"][0]])
+        check(any(is_parked(w["bounds"], d) for w in wins), "Bravo's window waits in the park zone while its app is frozen")
+        check("would open the bundle again" not in after(), "nothing is opened without a cancel")
+    finally:
+        os.kill(b, signal.SIGCONT)
+    check(wait_until(lambda: "the recovery watch after the quit for a logout is done; waiting for a cancel" in after(), 30,
+                     "the recovery watch to end") is not None, "Bravo answers: its window back, the guardian waits for the cancel as after a clean quit")
+    all_onscreen("session H's recovery watch")
+    check(post_note(note + ".cancelled"), "the cancel note is posted after the recovery watch")
+    check(wait_until(lambda: "guardian: a test run: would open the bundle again" in after(), 5, "the relaunch") is not None,
+          "a cancel after an unclean quit at a logout opens the app again (a test run only says so)")
+    for g in guards:
+        wait_gone(g, 5)
+    check(not pids_of(f"stage-manager --guardian {pid}$"), "session H's guardian ends after the cancel")
     stop_all_fixtures()
 
 
@@ -7473,8 +7780,273 @@ def phase_displays():
     check(bool(wins) and not stuck, f"displays quit: every fixture window on screen, on both screens (parked: {stuck})")
 
 
+# ----- screens: PLAN's live checks 3 to 5 (round screens-phase) ----------------------------
+
+
+def screens_zone(d):
+    """A display of `ctl state`'s `displays`, as `is_parked` takes it."""
+    return {**d["frame"], "visible": d["visible"], "corner": d["corner"]}
+
+
+def screens_consistent(what):
+    """On every screen: each managed fixture window shown or in its own screen's park zone as
+    the model has it (`consistent` reads the main screen's zone only)."""
+    s = state()
+    wins, _ = fixture_windows()
+    cg = {w["id"]: w for w in wins}
+    zones = {d["id"]: screens_zone(d) for d in s.get("displays", [])}
+    bad = []
+    for w in s["windows"]:
+        c, z = cg.get(w["id"]), zones.get(w.get("display"))
+        if c is None or z is None or w.get("role") != "standard":
+            continue
+        if w["parked"] != is_parked(c["bounds"], z):
+            bad.append(f"{w['title']} {'parked' if w['parked'] else 'shown'} in the model, at {fmt(c['bounds'])}")
+    return check(not bad, f"{what}: every fixture window where the model has it, on both screens" + (f" ({'; '.join(bad)})" if bad else ""))
+
+
+def strip_orders_since(mark):
+    """The display of every `transition: strip order` line logged since `mark` (one a
+    transition, naming the screen it plays on)."""
+    return [int(m.group(1)) for m in re.finditer(r"transition: strip order id=\d+ display=(\d+)", log_text()[mark:])]
+
+
+def activate_by_script(path):
+    """Activates the running app at `path` the way ⌘-Tab does (no click, no window raised by
+    hand): AppleScript's `activate`, addressed by path (never by bundle ID: every worktree
+    registers its own copy under the same one)."""
+    r = subprocess.run(["osascript", "-e", f'tell application "{path}" to activate'], capture_output=True, text=True, timeout=10)
+    return r.returncode == 0, r.stderr.strip()[:160]
+
+
+def new_main_window(title):
+    """One more window of the main fixture (SIGUSR1, ordered front without activating), with
+    its app made active first: the fixture opens it on `NSScreen.main`, the screen of the key
+    window, so the main screen is made that one (A's stage is in front there already)."""
+    subprocess.run(["open", FIX_APP], check=True)
+    wait_until(lambda: frontmost_bundle() == FIX_ID, 4, "the main fixture frontmost")
+    time.sleep(0.8)  # past the activation echo window
+    os.kill(pids_of(FIX_EXE)[0], signal.SIGUSR1)
+    return wait_until(lambda: (lambda s: s if title in by_title(s) else None)(state()), 8, f"{title} managed")
+
+
+def phase_screens():
+    """PLAN "Live checks" 3 to 5 as a phase (round screens-phase), fixture windows only.
+    Skipped with one screen. Fixture 1 and 2 (A, one stage) and Alpha 1 (a card) stay on the
+    main screen; Bravo 1 (B), then Charlie 1, moved to the other screen by Accessibility
+    (`debug-frame`, as phase_displays does), so B's stage is a card there.
+
+    3. ⌘-Tab to the other screen: A's stage in front on the main screen, B activated as
+       ⌘-Tab does (AppleScript `activate`): one `transition: strip order` logged, on the
+       other screen only; the main screen's `active_stage` unchanged; B shown there.
+    4. Full screen on one screen: `debug-fullscreen <B> on`; a new Fixture window opened on the
+       main screen joins A's stage there, the main screen's strip stays, and "a full-screen
+       app's Space shows on another screen" is logged for the other screen only (never the
+       main screen's "Space changed: a full-screen app's Space"). `off`: B back in its stage.
+    5. Mission Control (`debug-expose mission-control`): a Fixture window opened while it shows
+       is held, then placed once it has closed (`debug-expose escape`), and both screens'
+       strips come back on the same Desktops.
+    After the quit every fixture window is on screen, on both screens."""
+    say("\n== screens: ⌘-Tab, full screen and Mission Control with two screens ==")
+    stop_app()
+    stop_fixture()
+    for k in EXTRA:
+        stop_extra(k)
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_fixture(2)
+    for k in ("a", "b", "c"):
+        start_extra(k, 1)
+    s = start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app manages the 5 fixture windows"):
+        return
+    screens = s.get("displays", [])
+    if len(screens) < 2:
+        skip("screens", f"one screen ({len(screens)} reported); two are needed")
+        stop_app()
+        all_onscreen("screens quit")
+        return
+    main, other = screens[0], screens[1]
+    main_id, other_id = main["id"], other["id"]
+    say(f"  main {main_id} {fmt(main['frame'])}; other {other_id} {fmt(other['frame'])}")
+
+    def screen(x, d):
+        return next(k for k in x["displays"] if k["id"] == d)
+
+    t = by_title(s)
+    ids = {n: t[n]["id"] for n in ("Fixture 1", "Fixture 2", "Alpha 1", "Bravo 1", "Charlie 1")}
+    b_id = ids["Bravo 1"]
+    check(all(w["display"] == main_id for w in s["windows"]), "every fixture window is the main screen's at launch")
+    ov = other["visible"]
+    for k, n, at in (("b", "Bravo 1", (120.0, 100.0)), ("c", "Charlie 1", (420.0, 220.0))):
+        # One stage per app at the first start, one in front: `debug-frame` moves a shown
+        # window only (live 11-09: Bravo 1 was a card, "not a shown managed window"), so its
+        # stage is brought in first, by activating its app.
+        activate(k)
+        x = wait_state(lambda y: not by_title(y)[n]["parked"] and screen(y, main_id)["active_stage"] == by_title(y)[n]["stage"],
+                       f"{n}'s stage in front on the main screen", timeout=6)
+        if not check(x is not None, f"{n}'s stage brought in on the main screen first"):
+            stop_app()
+            return
+        time.sleep(0.8)  # past the activation echo window and its switch
+        r = ctl("debug-frame", ids[n], ov["x"] + at[0], ov["y"] + at[1], 640, 420)
+        if not check(r.get("ok"), f"{n} moved to the other screen ({r.get('error', 'ok')})"):
+            stop_app()
+            return
+        x = wait_state(lambda y: by_title(y)[n]["display"] == other_id and screen(y, other_id)["active_stage"] == by_title(y)[n]["stage"],
+                       f"{n} in front on the other screen", timeout=8)
+        if not check(x is not None, f"{n} is the other screen's, a stage of its own in front there"):
+            stop_app()
+            return
+    s = wait_state(lambda y: by_title(y)["Bravo 1"]["parked"], "Bravo's stage a card on the other screen")
+    if not check(s is not None, "B (Bravo 1) sent to a card on the other screen"):
+        stop_app()
+        return
+    b_stage = by_title(s)["Bravo 1"]["stage"]
+    a_stage = by_title(s)["Fixture 1"]["stage"]
+    check(by_title(s)["Bravo 1"]["home"] in screen(s, other_id)["strip"],
+          f"B's card is in the other screen's strip ({screen(s, other_id)['strip']})")
+
+    # 3. ⌘-Tab to the other screen.
+    say("-- 3. ⌘-Tab to a card on the other screen")
+    subprocess.run(["open", FIX_APP], check=True)
+    s = wait_state(lambda y: screen(y, main_id)["active_stage"] == a_stage, "A's stage in front on the main screen")
+    if not check(s is not None and frontmost_bundle() == FIX_ID, f"A's stage in front on the main screen, its app frontmost ({frontmost_bundle()})"):
+        stop_app()
+        return
+    time.sleep(1.0)  # past the activation echo window, and its transition logged
+    main_front = screen(s, main_id)["active_stage"]
+    mark = len(log_text())
+    ok, err = activate_by_script(EXTRA["b"][1])
+    if not check(ok, f"B activated by AppleScript ({err or 'ok'})"):
+        stop_app()
+        return
+    x = wait_state(lambda y: not by_title(y)["Bravo 1"]["parked"] and screen(y, other_id)["active_stage"] == b_stage, "B's stage in front on the other screen")
+    time.sleep(1.5)  # a second transition, if any, is logged by now
+    s = state()
+    orders = strip_orders_since(mark)
+    check(x is not None and by_title(s)["Bravo 1"]["display"] == other_id,
+          f"B is shown on the other screen, its stage in front there (front id {screen(s, other_id)['active_stage']}, B's {b_stage})")
+    check(orders == [other_id], f"one transition, on the other screen only (displays of the transitions logged: {orders}; other {other_id}, main {main_id})")
+    check(screen(s, main_id)["active_stage"] == main_front and not by_title(s)["Fixture 1"]["parked"],
+          f"the main screen's active_stage did not change (id {screen(s, main_id)['active_stage']}, was {main_front})")
+    check(frontmost_bundle() == EXTRA["b"][0], f"B's app is frontmost ({frontmost_bundle()})")
+    screens_consistent("after ⌘-Tab")
+
+    # 4. Full screen on one screen.
+    say("-- 4. full screen on the other screen; the main screen goes on")
+    main_strip = screen(s, main_id)["strip"]
+    mark = len(log_text())
+    r = ctl("debug-fullscreen", b_id, "on")
+    if not check(r.get("ok"), f"debug-fullscreen B on ({r.get('via', r.get('error'))})"):
+        stop_app()
+        return
+    x = wait_state(lambda y: screen(y, other_id).get("fullscreen"), "the other screen to show B's full-screen Space", timeout=10)
+    if not check(x is not None, "the app sees a full-screen Space on the other screen"):
+        ctl("debug-fullscreen", b_id, "off")
+        time.sleep(3.0)
+        stop_app()
+        return
+    s = new_main_window("Fixture 3")
+    if check(s is not None, "a new Fixture window (Fixture 3) opened while B is full screen is managed"):
+        s = wait_state(lambda y: by_title(y)["Fixture 3"]["stage"] == screen(y, main_id)["active_stage"] and not by_title(y)["Fixture 3"]["parked"],
+                       "Fixture 3 in the main screen's stage") or s
+        w = by_title(s)["Fixture 3"]
+        check(w["display"] == main_id and w["stage"] == a_stage and not w["parked"] and w["id"] not in s.get("unplaced", []),
+              f"it joins the main screen's stage, shown (display {w['display']}, stage id {w['stage']}, A's {a_stage}, unplaced {s.get('unplaced')})")
+    s = state()
+    panel = screen(s, main_id).get("strip_panel") or {}
+    check(not screen(s, main_id).get("fullscreen") and panel.get("shown") and screen(s, main_id)["strip"] == main_strip,
+          f"the main screen's strip stays (full screen {screen(s, main_id).get('fullscreen')}, panel shown {panel.get('shown')}, strip {screen(s, main_id)['strip']}, was {main_strip})")
+    text = log_text()[mark:]
+    other_lines = re.findall(r"a full-screen app's Space shows on another screen .*screen=(\d+)", text)
+    check(other_lines and all(int(v) == other_id for v in other_lines),
+          f"\"a full-screen app's Space shows on another screen\" logged for the other screen only (screens {other_lines})")
+    check("Space changed: a full-screen app's Space" not in text and "Space changed during a full-screen animation" not in text,
+          "nothing logged as a full-screen Space on the main screen")
+    mark = len(log_text())
+    r = ctl("debug-fullscreen", b_id, "off")
+    check(r.get("ok"), f"debug-fullscreen B off ({r.get('via', r.get('error'))})")
+    x = wait_state(lambda y: not screen(y, other_id).get("fullscreen") and by_title(y)["Bravo 1"]["stage"] == b_stage
+                   and not by_title(y)["Bravo 1"]["parked"] and by_title(y)["Bravo 1"]["display"] == other_id,
+                   "B back in its stage on the other screen", timeout=10)
+    s = x or state()
+    w = by_title(s).get("Bravo 1") or {}
+    check(x is not None, f"B comes back to its stage, shown on the other screen (stage id {w.get('stage')}, was {b_stage}; display {w.get('display')}; parked {w.get('parked')})")
+    check("another screen shows a Desktop again" in log_text()[mark:], "the other screen's Desktop is logged back")
+    time.sleep(1.0)
+    screens_consistent("after full screen")
+
+    # 5. Mission Control.
+    say("-- 5. Mission Control with two screens")
+    s = wait_state(lambda y: all((screen(y, d).get("strip_panel") or {}).get("shown") for d in (main_id, other_id)), "both strips shown", timeout=4) or state()
+    check(all((screen(s, d).get("strip_panel") or {}).get("shown") for d in (main_id, other_id)),
+          f"both screens' strips show first (main {screen(s, main_id).get('strip_panel')}, other {screen(s, other_id).get('strip_panel')})")
+    spaces_before = {d: screen(s, d)["space"] for d in (main_id, other_id)}
+    space_before = ctl("space").get("space")
+    # The main fixture frontmost: Escape reaches only a fixture, and its new window opens on
+    # the main screen (NSScreen.main, the key window's).
+    subprocess.run(["open", FIX_APP], check=True)
+    wait_until(lambda: frontmost_bundle() == FIX_ID, 4, "the main fixture frontmost")
+    time.sleep(0.8)
+    if frontmost_bundle() != FIX_ID:
+        check(False, f"a fixture is frontmost (so Escape reaches only a fixture); front is {frontmost_bundle()}")
+        stop_app()
+        return
+    mark = len(log_text())
+    r = ctl("debug-expose", "mission-control")
+    if not r.get("ok") and "turned off" in str(r.get("error")):
+        say(f"  {r.get('error')}; opening Mission Control (com.apple.exposelauncher) instead")
+        r = {"ok": subprocess.run(["open", "-b", "com.apple.exposelauncher"]).returncode == 0, "key": "exposelauncher"}
+    if not check(r.get("ok"), f"Mission Control's shortcut typed ({r.get('key', r.get('error'))})"):
+        stop_app()
+        return
+    frozen = wait_until(lambda: ctl("space").get("inference_frozen") is True, 4, "the app to see Mission Control")
+    check(bool(frozen), "the app sees Mission Control")
+    os.kill(pids_of(FIX_EXE)[0], signal.SIGUSR1)
+    # The window server lists it a moment after the signal; the app sees it then and holds it.
+    wait_until(lambda: len(fixture_windows([FIX_ID])[0]) >= 4, 3, "Fixture 4 listed")
+    time.sleep(1.0)
+    y = state(landed=False)
+    f4 = by_title(y).get("Fixture 4")
+    placed_early = f4 is not None and f4["stage"] is not None and f4["id"] not in y.get("unplaced", [])
+    if frozen:
+        check(not placed_early and bool(y.get("unplaced")),
+              f"Fixture 4, opened while Mission Control shows, waits unplaced (placed already: {placed_early}; unplaced {y.get('unplaced')})")
+    else:
+        skip("Fixture 4 held while Mission Control shows", "the app never saw Mission Control")
+    ctl("debug-expose", "escape")
+    wait_until(lambda: ctl("space").get("inference_frozen") is False, 6, "Mission Control to close")
+    s = wait_state(lambda y: "Fixture 4" in by_title(y) and by_title(y)["Fixture 4"]["stage"] is not None
+                   and by_title(y)["Fixture 4"]["id"] not in y.get("unplaced", []) and not by_title(y)["Fixture 4"]["parked"],
+                   "Fixture 4 placed", timeout=8)
+    if check(s is not None, "Fixture 4 is placed once Mission Control has closed"):
+        w = by_title(s)["Fixture 4"]
+        check(w["display"] == main_id and w["stage"] == screen(s, main_id)["active_stage"],
+              f"in the main screen's stage in front (display {w['display']}, stage id {w['stage']}, front {screen(s, main_id)['active_stage']})")
+    s = wait_state(lambda y: all((screen(y, d).get("strip_panel") or {}).get("shown") for d in (main_id, other_id)), "both strips back", timeout=5) or state()
+    check(all((screen(s, d).get("strip_panel") or {}).get("shown") for d in (main_id, other_id)),
+          f"both screens' strips come back (main {screen(s, main_id).get('strip_panel')}, other {screen(s, other_id).get('strip_panel')})")
+    spaces_after = {d: screen(s, d)["space"] for d in (main_id, other_id)}
+    check(spaces_after == spaces_before and ctl("space").get("space") == space_before,
+          f"on the same Desktops (Spaces {spaces_before} then {spaces_after}; main {space_before})")
+    text = log_text()[mark:]
+    say(f"  logged: Mission Control seen on the main screen {'Mission Control or App Exposé shows: no Space is inferred from the window list' in text}, on the other "
+        f"{'Mission Control or App Exposé shows on another screen' in text}")
+    screens_consistent("after Mission Control")
+    stop_app()
+    s_wins, _ = fixture_windows()
+    zones = [screens_zone(d) for d in screens]
+    stuck = [fmt(w["bounds"]) for w in s_wins if any(is_parked(w["bounds"], z) for z in zones)]
+    check(bool(s_wins) and not stuck, f"screens quit: every fixture window on screen, on both screens (parked: {stuck})")
+    for k in EXTRA:
+        stop_extra(k)
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays", "screens"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -7493,7 +8065,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "displays": phase_displays, "crop": phase_crop, "behave": phase_behave}[p]()
+             "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

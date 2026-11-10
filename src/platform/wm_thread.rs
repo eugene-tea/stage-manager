@@ -46,6 +46,7 @@ use super::controller::Controller;
 use super::handoff::TakenWatch;
 use super::ctl::Command;
 use super::input::InputEvent;
+use super::minimize_tap::{self, MinimizeAsk};
 use super::launch_scan;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
@@ -116,6 +117,10 @@ pub enum WmCommand {
     /// Global input in another app (left mouse down/up, key down); for a mouse-up over the
     /// visible strip, the slot a window dropped there goes to.
     Input(InputEvent, Option<StripDrop>),
+    /// A minimize the minimize tap caught before macOS's genie (the yellow button, ⌘M):
+    /// the window goes to the strip, or is minimized as macOS would when Stage Manager cannot
+    /// take it now ([`super::minimize_tap`]).
+    Minimize(MinimizeAsk),
     /// A hotkey was pressed.
     Hotkey(HotkeyCommand),
     /// Input from the strip.
@@ -152,6 +157,7 @@ impl WmCommand {
             WmCommand::NativeSettings(_) => "command NativeSettings",
             WmCommand::Displays(..) => "command Displays",
             WmCommand::Input(..) => "command Input",
+            WmCommand::Minimize(_) => "command Minimize",
             WmCommand::Hotkey(_) => "command Hotkey",
             WmCommand::Strip(_) => "command Strip",
             WmCommand::SpaceChanged => "command SpaceChanged",
@@ -435,6 +441,12 @@ impl WmState {
             // may show on this Space now (as while standing down).
             WmCommand::SpaceChanged if !self.logout.admits(Work::SpaceChange) => self.retry_held(),
             WmCommand::LogoutSignal(name, signal, at) => self.logout_signal(&name, signal, at),
+            // The tap swallowed the person's minimize: never lost. While nothing is arranged
+            // it is macOS's, genie and all.
+            WmCommand::Minimize(ask) => match self.arranging() {
+                true => self.controller.minimize_direct(&mut self.observer, ask),
+                false => ask.as_macos("Stage Manager is not arranging windows now"),
+            },
             WmCommand::Shutdown(reply) if matches!(self.logout.quit(), Quit::Done { .. }) => {
                 // The head start did the work: nothing is unparked or saved again (the
                 // controller is a fresh one with no stages; saving it would write none).
@@ -860,8 +872,20 @@ impl WmState {
         step("rescan", || self.rescan_pass());
         step("events", || self.pump());
         step("controller tick", || self.controller.tick(&mut self.observer));
+        // The minimize tap passes everything while nothing is arranged.
+        minimize_tap::admit(self.arranging());
+        step("minimize tap", minimize_tap::refresh);
         // An app's enhanced UI a restore could not put back, or held off too long: on again.
         step("enhanced UI sweep", enhanced_ui::sweep);
+    }
+
+    /// Whether windows are arranged now: not standing down for Apple's Stage Manager, no
+    /// logout coming, and Accessibility on when managing (the gates the user's input meets
+    /// in [`Self::handle`]).
+    fn arranging(&self) -> bool {
+        self.logout.admits(Work::Input)
+            && self.stand_down.admits(Work::Input)
+            && (!self.controller.managing() || self.observer.observing())
     }
 
     /// One slice of the scans waiting ([`Rescan`]): apps a scan could not read, tried again
@@ -977,6 +1001,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
         tracing::info!("management restricted to {}", list.join(", "));
     }
     let mut observer = Observer::new(std::process::id() as i32, only);
+    minimize_tap::set_handle(own.clone());
     let probes = own.clone();
     observer.set_probe_notify(Arc::new(move |note| {
         probes.send(WmCommand::Probe(note));

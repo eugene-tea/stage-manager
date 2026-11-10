@@ -2,7 +2,9 @@
 //! launch in its own session, it waits for the app to exit (kqueue `NOTE_EXIT`). After a
 //! clean exit (the app's clean-exit marker) it has nothing to do, unless the app quit for a
 //! logout: it then waits a while for the logout's cancel, which opens the app again
-//! ([`super::logout_watch`], round logout-cancel-relaunch). Otherwise:
+//! ([`super::logout_watch`], round logout-cancel-relaunch). Otherwise (an unclean quit at a
+//! logout listens for that cancel throughout, the parked file saying so, round
+//! logout-cancel):
 //!
 //! 1. It reads the windows the app had registered (the parked file the registry keeps,
 //!    [`paths::parked_file`]) and runs the recovery scan.
@@ -235,13 +237,14 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     tracing::debug!(parent, "guardian watching");
     wait_for_exit(parent);
+    let exited = Instant::now();
     let marker = paths::clean_exit_marker(parent as u32);
     let parked_file = paths::parked_file(parent as u32);
     if let Ok(text) = std::fs::read_to_string(&marker) {
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_file(&parked_file);
         // A quit at a logout: a cancel opens the app again (round logout-cancel-relaunch).
-        if logout_watch::quit_for_logout(&text) {
+        if logout_watch::after_exit(Some(&text), false).listen {
             install_stop_handlers();
             super::logout_watch::run(parent as u32, &stop_signal);
             return ExitCode::SUCCESS;
@@ -250,6 +253,18 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let file = safety::read_parked_file(parent as u32);
+    // An unclean quit at a logout (round logout-cancel): the cancel is listened for from the
+    // exit on, through the recovery watch, then waited for as after a clean quit.
+    let listen = logout_watch::after_exit(None, file.logout).listen;
+    let ears = if listen { super::logout_watch::Ears::open(exited) } else { None };
+    let mut lookout = ears.as_ref().map(|_| logout_watch::Watch::new(exited));
+    if ears.is_some() {
+        tracing::info!(
+            parent,
+            watch_s = logout_watch::WATCH.as_secs(),
+            "guardian: the app quit for a logout, restart or shutdown with windows still away; listening for a cancel while they are brought back (one opens Stage Manager again)"
+        );
+    }
     // The park zone sits above a bottom Dock: the app's visible frame, not a guess.
     match file.visible {
         Some(v) => safety::assume_visible_frame(v),
@@ -266,10 +281,26 @@ pub fn run(args: &[String]) -> ExitCode {
     install_stop_handlers();
     // The window server lists moved windows at their new frames a moment later.
     std::thread::sleep(SETTLE);
-    watch(parent as u32, &registered, &scope);
+    let mut pause = |d: Duration| match &ears {
+        Some(e) => {
+            e.pause(d);
+            super::logout_watch::look(e, &mut lookout, &stop_signal);
+        }
+        None => std::thread::sleep(d),
+    };
+    watch(parent as u32, &registered, &scope, &mut pause);
     // No app is left with its enhanced UI off by the guardian (round enhanced-ui).
     enhanced_ui::restore_all("guardian");
     let _ = std::fs::remove_file(&parked_file);
+    if let Some(ears) = &ears
+        && lookout.is_some()
+    {
+        tracing::info!(
+            since_quit_s = exited.elapsed().as_secs(),
+            "guardian: the recovery watch after the quit for a logout is done; waiting for a cancel (one opens Stage Manager again)"
+        );
+        super::logout_watch::wait(ears, lookout, &stop_signal);
+    }
     ExitCode::SUCCESS
 }
 
@@ -312,8 +343,9 @@ fn scan_scope(registered: &[Registered]) -> safety::ScanScope {
     }
 }
 
-/// The watch after the scan: see the module docs.
-fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope) {
+/// The watch after the scan: see the module docs. `pause` waits between two passes (and
+/// listens for a logout's cancel meanwhile, after an unclean quit at a logout).
+fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope, pause: &mut dyn FnMut(Duration)) {
     let mut w = Watch::new(registered);
     let mut reported: Option<Vec<(u32, bool)>> = None;
     let mut attempts: HashMap<u32, Attempts> = HashMap::new();
@@ -336,7 +368,7 @@ fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope) {
         if matches!(pass, Some(Pass::Done)) {
             return;
         }
-        std::thread::sleep(POLL);
+        pause(POLL);
     }
 }
 

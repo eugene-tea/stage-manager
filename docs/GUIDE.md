@@ -219,8 +219,8 @@ with Apple's.
 - To move a whole card of several windows (up or down, onto another card, or into the
   middle), drag it by its app icons. A card of one window moves whole wherever you hold it.
 
-Shift-click a card to bring its windows into the current stage without leaving it, as with
-Apple's. Hold Shift while you open an app, or Shift-click it in the Dock, to bring it here too
+Shift-click a card to bring its front window into the current stage without leaving it, as
+with Apple's; the rest of the card stays in the strip. Hold Shift while you open an app, or Shift-click it in the Dock, to bring it here too
 (**Hold Shift to choose the stage** in Settings → Stages turns this off).
 
 ### New apps in the current stage

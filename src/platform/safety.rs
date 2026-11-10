@@ -320,12 +320,28 @@ fn lock_written() -> MutexGuard<'static, Option<ParkedFile>> {
     PARKED_WRITTEN.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Set by an unclean quit at a logout ([`mark_logout_quit`]): the parked file says so from
+/// then on.
+static LOGOUT_QUIT: AtomicBool = AtomicBool::new(false);
+
+/// An unclean quit at a logout (not every window came back; round logout-cancel): the parked
+/// file says so, written even with no window registered, so the guardian listens for the
+/// logout's cancel through its recovery watch and opens the app again at one.
+pub fn mark_logout_quit() {
+    LOGOUT_QUIT.store(true, Ordering::SeqCst);
+    let listed = registered(&lock_registry());
+    write_parked_file(&listed);
+}
+
 /// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, with the
 /// main display's visible frame, written atomically and flushed to disk before the rename
-/// ([`super::durable`]); removed when the registry is empty.
+/// ([`super::durable`]); removed when the registry is empty (unless it marks a logout's quit,
+/// [`mark_logout_quit`]).
 fn write_parked_file(listed: &[Registered]) {
-    let empty = listed.is_empty();
-    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used() };
+    let logout = LOGOUT_QUIT.load(Ordering::SeqCst);
+    let empty = listed.is_empty() && !logout;
+    let file =
+        ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout };
     let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;

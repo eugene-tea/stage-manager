@@ -342,6 +342,12 @@ pub struct ParkedFile {
     /// empty in files of earlier versions.
     #[serde(default)]
     pub zones: Vec<ParkZone>,
+    /// The app quit for a logout with windows still away (round logout-cancel): its guardian
+    /// listens for the logout's cancel through its recovery watch
+    /// ([`super::logout_watch::after_exit`]). False in files of earlier versions and while the
+    /// app runs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub logout: bool,
 }
 
 impl ParkedFile {
@@ -355,7 +361,7 @@ impl ParkedFile {
         }
         Ok(match serde_json::from_slice(bytes)? {
             Any::File(f) => f,
-            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new() },
+            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new(), logout: false },
         })
     }
 }
@@ -678,9 +684,15 @@ mod tests {
             windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false }],
             corners: vec![Corner::BottomLeft],
             zones: vec![ParkZone { frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0), visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0), corners: vec![Corner::BottomLeft] }],
+            logout: false,
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
+        assert!(!String::from_utf8_lossy(&json).contains("logout"), "written only at an unclean quit for a logout");
+        // An unclean quit at a logout says so (round logout-cancel).
+        let at_logout = ParkedFile { logout: true, windows: vec![], ..f.clone() };
+        let json = serde_json::to_vec(&at_logout).unwrap_or_default();
+        assert_eq!(ParkedFile::from_json(&json).ok(), Some(at_logout));
         let old = serde_json::to_vec(&f.windows).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, corners: vec![], zones: vec![], ..f.clone() }));
         // A file of a version that hid apps (`[windows] hide_parked_apps`, before 1.8): its

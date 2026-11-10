@@ -597,6 +597,29 @@ impl Model {
         actions
     }
 
+    /// A Shift-click on `stage`'s card, as Apple's does (measured 11-09): the card's front
+    /// window alone (its stage's last used, drawn in front, with its children) joins the
+    /// active stage of its Space, in front and focused, whatever part of the card the pointer
+    /// was on; the rest of the card stays in the strip, in its slot, with its number (its key
+    /// moves to its next window). A stage of one window is [`Model::merge_into_active`] of it.
+    /// A no-op as [`Model::merge_into_active`].
+    pub fn add_card_front_to_active(&mut self, stage: StageId, obs: &Observation) -> Vec<Action> {
+        let front = self.stage(stage).and_then(|s| {
+            s.windows
+                .iter()
+                .copied()
+                .find(|w| self.windows.get(w).is_some_and(|w| w.meta.role == WindowRole::Standard && !self.hidden_apps.contains(&w.meta.pid)))
+        });
+        let Some(front) = front else {
+            return self.merge_into_active(stage, obs);
+        };
+        let Some((id, home, space)) = self.card_window(stage, front) else { return Vec::new() };
+        if self.alone_in(home, id) {
+            return self.merge_into_active(home, obs);
+        }
+        self.bring_into_active(space, &[id], &[home], obs)
+    }
+
     /// Pins a window (a child stands for its parent) so it shows on every stage of its Space
     /// and is never parked, or unpins it into the active stage of its Space. A window seen on
     /// every Space (sticky) stays pinned.
@@ -750,17 +773,46 @@ impl Model {
         actions
     }
 
-    /// ⌘M on a shown window (`[windows] minimize_to_strip`): instead of the Dock, the window
-    /// goes to the strip as a stage of its own, as Apple's does; the view does not switch.
-    /// The platform un-minimizes it after parking it. A no-op for pinned, parked or unknown
-    /// windows.
+    /// A minimize of a shown window (`[windows] minimize_to_strip`): instead of the Dock, the
+    /// window goes to the strip as a stage of its own, as Apple's does; the view does not
+    /// switch. Its card takes the top slot and the other cards move down one, as Apple's
+    /// (recorded 11-09; in place, `[strip] order`, it takes its own place). Caught before
+    /// macOS's genie (the yellow button, ⌘M: [`crate::engine::minimize_press`]) nothing else
+    /// is needed; after it, the platform un-minimizes the window once parked. A no-op for
+    /// pinned, parked or unknown windows.
     pub fn minimize_to_strip(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
         let Some(id) = self.resolve_standard(id) else { return Vec::new() };
         let Some(w) = self.windows.get(&id) else { return Vec::new() };
         if w.parked || w.home == Home::Pinned {
             return Vec::new();
         }
-        self.send_window(id, Target::New, obs)
+        let space = w.space;
+        let actions = self.send_window(id, Target::New, obs);
+        if !self.options.strip.order.in_place()
+            && let Some(Home::Stage(stage)) = self.windows.get(&id).map(|w| w.home)
+            && let Some(slots) = self.slots.get_mut(&space)
+            && let Some(i) = slots.iter().position(|&s| s == stage)
+        {
+            let s = slots.remove(i);
+            slots.insert(0, s);
+        }
+        actions
+    }
+
+    /// The windows a minimize is caught on before macOS's genie
+    /// ([`crate::engine::minimize_press`]): standard, shown in their stage on a shown Desktop,
+    /// not pinned and not on every Desktop. A minimize of any other goes to macOS.
+    pub fn minimizable_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.windows
+            .values()
+            .filter(|w| {
+                w.meta.role == WindowRole::Standard
+                    && !w.parked
+                    && !w.sticky
+                    && matches!(w.home, Home::Stage(_))
+                    && self.is_shown_space(w.space)
+            })
+            .map(|w| w.meta.id)
     }
 
     /// Moves app `pid`'s windows from `space`'s inactive stages into its active one (only the

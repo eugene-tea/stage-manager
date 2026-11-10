@@ -5,11 +5,13 @@
 //! and at a cancel opens the installed bundle it runs from again (`open -g -a`: LaunchServices,
 //! in the background, nothing brought forward). A stop signal (the session ending: the logout
 //! goes on), [`WATCH`] with no cancel, or Stage Manager running again ends it with nothing
-//! opened. A test run (`STAGE_MANAGER_TEST` or `STAGE_MANAGER_HOME`) never opens anything: it
+//! opened. After an unclean quit at a logout the guardian listens the same way from the exit
+//! on, between the passes of its recovery watch ([`look`]), then waits on once the watch is
+//! done ([`wait`]; round logout-cancel). A test run (`STAGE_MANAGER_TEST` or `STAGE_MANAGER_HOME`) never opens anything: it
 //! logs what it would open (an app opened by LaunchServices would not inherit the test's
 //! environment and would manage the real windows).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::rc::Rc;
@@ -28,74 +30,119 @@ const SLICE: Duration = Duration::from_millis(100);
 /// How long `open` may take before the guardian stops waiting for it.
 const OPEN_WAIT: Duration = Duration::from_secs(10);
 
-/// Waits after the app (`parent`) quit for a logout (module docs). `stopped`: the stop signal
-/// the guardian received, if any. Returns once the watch has ended.
-pub fn run(parent: u32, stopped: &dyn Fn() -> Option<i32>) {
-    let Some(mtm) = MainThreadMarker::new() else {
-        tracing::warn!(parent, "guardian: not on the main thread; a cancelled logout cannot open Stage Manager again");
-        return;
-    };
-    let quit = Instant::now();
-    tracing::info!(
-        parent,
-        watch_s = WATCH.as_secs(),
-        "guardian: the app quit for a logout, restart or shutdown; waiting for a cancel (one opens Stage Manager again)"
-    );
-    let heard: Rc<RefCell<Vec<(String, Signal)>>> = Rc::default();
-    let sink = heard.clone();
-    let _observers = apps::observe_logout(mtm, move |name, signal| sink.borrow_mut().push((name.to_string(), signal)));
-    let mut watch = Watch::new(quit);
-    let mut said_idle = false;
-    loop {
+/// The logout signals the guardian hears from the app's exit on (module docs): its observers,
+/// and what arrived since the last look.
+pub struct Ears {
+    heard: Rc<RefCell<Vec<(String, Signal)>>>,
+    _observers: apps::LogoutObservers,
+    /// The app's exit (logged as the time since the quit).
+    quit: Instant,
+    said_idle: Cell<bool>,
+}
+
+impl Ears {
+    /// Starts listening (main thread only: the signals come through its run loop). `quit`: the
+    /// app's exit.
+    pub fn open(quit: Instant) -> Option<Self> {
+        let Some(mtm) = MainThreadMarker::new() else {
+            tracing::warn!("guardian: not on the main thread; a cancelled logout cannot open Stage Manager again");
+            return None;
+        };
+        let heard: Rc<RefCell<Vec<(String, Signal)>>> = Rc::default();
+        let sink = heard.clone();
+        let observers = apps::observe_logout(mtm, move |name, signal| sink.borrow_mut().push((name.to_string(), signal)));
+        Some(Ears { heard, _observers: observers, quit, said_idle: Cell::new(false) })
+    }
+
+    /// Runs the run loop for `d`, so signals arrive (slept instead when it has no source).
+    pub fn pause(&self, d: Duration) {
         // SAFETY: the default mode is a valid framework static.
-        let result = CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, SLICE.as_secs_f64(), false);
+        let result = CFRunLoop::run_in_mode(unsafe { kCFRunLoopDefaultMode }, d.as_secs_f64(), false);
         if result == CFRunLoopRunResult::Finished {
-            // No source in the mode yet: the slice is slept instead of spun.
-            if !said_idle {
+            if !self.said_idle.replace(true) {
                 tracing::debug!("guardian: the run loop has no source; sleeping between looks");
-                said_idle = true;
             }
-            std::thread::sleep(SLICE);
+            std::thread::sleep(d);
         }
-        let now = Instant::now();
-        let mut events: Vec<Heard> = heard
+    }
+
+    /// What arrived since the last look, each logged, and a stop signal (`stopped`) last;
+    /// [`Heard::Nothing`] when nothing did.
+    fn heard(&self, now: Instant, stopped: &dyn Fn() -> Option<i32>) -> Vec<Heard> {
+        let since_quit_ms = now.duration_since(self.quit).as_millis() as u64;
+        let mut events: Vec<Heard> = self
+            .heard
             .borrow_mut()
             .drain(..)
             .map(|(name, signal)| {
                 tracing::info!(
                     signal = name.as_str(),
                     cancel = signal == Signal::Cancelled,
-                    since_quit_ms = now.duration_since(quit).as_millis() as u64,
+                    since_quit_ms,
                     "guardian: logout signal after the quit"
                 );
                 Heard::Signal(signal)
             })
             .collect();
         if let Some(sig) = stopped() {
-            tracing::info!(signal = sig, since_quit_ms = now.duration_since(quit).as_millis() as u64, "guardian: told to stop");
+            tracing::info!(signal = sig, since_quit_ms, "guardian: told to stop");
             events.push(Heard::Stopped);
         }
         if events.is_empty() {
             events.push(Heard::Nothing);
         }
-        for h in events {
-            match watch.step(h, now, instance::running) {
-                Next::Wait => {}
-                Next::Relaunch => {
-                    tracing::info!(
-                        since_quit_s = now.duration_since(quit).as_secs(),
-                        "guardian: the logout was cancelled after the app quit: opening Stage Manager again (it restores the stages saved at the logout)"
-                    );
-                    relaunch();
-                    return;
-                }
-                Next::End(why) => {
-                    log_end(why, now.duration_since(quit));
-                    return;
-                }
+        events
+    }
+}
+
+/// One look at what `ears` heard, for `watch` (`None` once it ended): a cancel opens Stage
+/// Manager again ([`relaunch`]); the watch ends at it, or with nothing opened (logged).
+/// The guardian's recovery watch calls it between passes (an unclean quit at a logout, round
+/// logout-cancel); [`wait`] after it.
+pub fn look(ears: &Ears, watch: &mut Option<Watch>, stopped: &dyn Fn() -> Option<i32>) {
+    let Some(w) = watch.as_mut() else { return };
+    let now = Instant::now();
+    for h in ears.heard(now, stopped) {
+        match w.step(h, now, instance::running) {
+            Next::Wait => {}
+            Next::Relaunch => {
+                tracing::info!(
+                    since_quit_s = now.duration_since(ears.quit).as_secs(),
+                    "guardian: the logout was cancelled after the app quit: opening Stage Manager again (it restores the stages saved at the logout)"
+                );
+                *watch = None;
+                relaunch();
+                return;
+            }
+            Next::End(why) => {
+                log_end(why, now.duration_since(ears.quit));
+                *watch = None;
+                return;
             }
         }
     }
+}
+
+/// Waits with `ears` until `watch` ends (module docs): after a clean quit at a logout, or
+/// once the recovery watch after an unclean one is done with no cancel yet.
+pub fn wait(ears: &Ears, mut watch: Option<Watch>, stopped: &dyn Fn() -> Option<i32>) {
+    while watch.is_some() {
+        ears.pause(SLICE);
+        look(ears, &mut watch, stopped);
+    }
+}
+
+/// Waits after the app (`parent`) quit cleanly for a logout (module docs). `stopped`: the
+/// stop signal the guardian received, if any. Returns once the watch has ended.
+pub fn run(parent: u32, stopped: &dyn Fn() -> Option<i32>) {
+    let quit = Instant::now();
+    let Some(ears) = Ears::open(quit) else { return };
+    tracing::info!(
+        parent,
+        watch_s = WATCH.as_secs(),
+        "guardian: the app quit for a logout, restart or shutdown; waiting for a cancel (one opens Stage Manager again)"
+    );
+    wait(&ears, Some(Watch::new(quit)), stopped);
 }
 
 /// The end of a watch with nothing opened, in plain words.

@@ -4,98 +4,58 @@ What's still to do. What shipped is in [CHANGELOG.md](CHANGELOG.md), how the app
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), how it should behave is in [docs/UX-SPEC.md](docs/UX-SPEC.md),
 and what users asked for is in [docs/FEATURE-REQUESTS.md](docs/FEATURE-REQUESTS.md).
 
-## 1.8.0
+## 1.8.x: everything known broken or unchecked
 
-- **Accessibility** (`.github/ACCESSIBILITY.md`), in progress: VoiceOver labels on the strip's
-  cards (which stage, which apps), Reduce Motion worked out from first principles, and a review
-  of the whole app.
-- **The edge tab across Desktops** goes in `test_spaces.py`.
-- **After the release:** look at the repository's tabs on GitHub (README, Accessibility, Security,
-  Contributing) once 1.8.0 is live; the files themselves were reviewed before it.
+Version 1 is Apple's Stage Manager, copied with nothing left: these are fixes and checks only. New
+features wait for 2.0.
 
-## 1.9
+**Still open**
 
-- **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
-  Window, Quit App. A named stage shows its name on hover (R7).
-- **Stages in the menu bar menu**, click one to switch (R2).
-- **Drop a window on a card** to add it to that stage (R3b).
-- **"Only the main screen" in Settings** (`[displays] main_only`, off; R8). The setting is read at launch, so
-  turning it on or off quits the app (every window comes back) and opens it again, as an update does. Its
-  line in Settings says so.
-- **Scroll the strip past its capacity**, with a "+N" mark (R5).
-- **No stage switches the user didn't ask for** (R6): an activation with no click or key press just before
-  it doesn't switch stages, and that app's card glows.
-- **One stage across all screens** (R8, second half), an option, off. One strip, on the main screen. A
-  switch brings a stage's windows back on every screen. Still open: what it means when "Displays have
-  separate Spaces" is on, and the lid and restart rules once a window moved to another screen keeps its
-  stage.
-- **Save `state.json` off the window thread** if 1.8's timing shows saves over about 10 ms: a writer thread
-  that keeps only the newest state, finished before the quit's save.
-- **Reopen after a cancelled logout even when some windows didn't come back.** Today only a clean quit at
-  a logout reopens the app on a cancel. The parked file says "logout", and the guardian waits for the
-  cancel once its recovery watch is done.
+Nothing.
 
-- **Two suite checks that fail since 1.8.0** (`visible`, `slots`; the same on 1.8.1 and 1.8.2):
-  "the edge tab appears at layer 3" times out after the launch announce, and "its icon keeps its place on
-  the thumbnail" sees the icon drift about 28 pt during a card drag. Check each against the app's behaviour
-  (1.8.0 changed the card drag and the icons) and fix the app or the check.
+**Done on 11-09 evening** (live on the 5K and the laptop screen; dev, unreleased)
 
-- **The last frame of the shadow handover.** Since 1.8.2 an incoming window's snapshot drops its
-  shadow in one step once the window server lists the window in place: about half the landings show
-  no darker frame, the rest one (up to 15 levels on Finder's heavier shadow), more under load. The
-  window server shows the window a frame before our layer change reaches the screen. Find a way to
-  take that frame back without guessing early (a lighter edge, 11-01).
+- The two suite checks failing since 1.8.0: the edge tab check left the pointer on the strip (check
+  fixed); the icon drift was real, a card's hover growth followed its old slot during a fast drag (app
+  fixed). `visible` and `slots`: 288 passed.
+- `wallpaper_edge` runs (the desktop lookup missed the desktop's own windows); the edge tab across
+  Desktops is in `test_spaces.py` (223 passed).
+- A cancelled logout reopens the app after an unclean quit too (`restore`, the frozen-Bravo case).
+- Minimize as Apple's: the yellow button and ⌘M fly the window straight into a new card at the top, no
+  genie (measured on Apple's 11-09, `parity` 49 passed). Window ▸ Minimize, a title-bar double-click and
+  an app's own minimize still play the genie first, then come to the strip.
+- From the Apple session: Shift-click takes only the card's front window; a card of three apps (icons
+  18 pt apart, the third window behind at the top); a hidden app's card leaves the strip and comes back to
+  its slot unhidden, the most recent stage coming in front if the hidden one was.
+- VoiceOver reaches the cards (found live: the pointer's hit test went past the strip to Finder's
+  desktop, and the strip takes no keyboard focus). While VoiceOver or Switch Control is on, each card has
+  a see-through window that catches the hit test; each card reads its front window's title with Apple's
+  actions, Press and Add to Stage (checked against Apple's live, 11-09 20:48; Eugene heard ours read).
+  No keyboard route without taking focus: `.github/ACCESSIBILITY.md` says how to reach them.
+- Live checks done: the never-run suite checks (`safety park capture parity displays`, 228 passed); ⌘-Tab
+  to the other screen, full screen on one screen and Mission Control with two screens (new `screens`
+  phase); a window moved to another Desktop in Mission Control (it leaves its stage and carries a stage of
+  its own there; the Desktop left keeps its stages).
+- Apple's measured, nothing to change: the card glass in Dark Mode (0.78 / 0.93 / 0.82, ours 0.78 / 0.95 /
+  0.78, within the fit); Option-click is a plain click; ⌘\` raises the app's other window in its stage;
+  no spring loading (a window brought to the strip hides it near the edge, or makes a new card dropped
+  low, as ours); the card count by height (4 at a 13-inch Air's, 6 at the Studio Display's); Reduce
+  Motion: Apple's switch is a cross-fade of about 80 ms, its minimize a fade out in place of about
+  130 ms (ours fades 200 ms, worked out from the accessibility guidance, kept).
 
-## Live checks
+**Settled, nothing to do**
 
-**One session, about 52 minutes.** Use the dev app and fixture windows only, with the 5K and the laptop
-screen both attached. The main thread runs it, with Eugene at the Mac for the steps marked (E).
+- The last frame of the shadow handover: a known gap (UX-SPEC, Known gaps), Eugene's call 11-09.
+- Apple's auto-hide, measured (six runs, 11-09 20:2x): a strip brought back by the pointer at the edge
+  starts sliding out either about 0.1 s or about 1.1 s after the pointer leaves it, three runs each, with
+  no difference found between them (the same card, size and path). Ours: 500 ms, kept between them.
+- How soon Apple's switch starts after a click: its first frame about 65 to 85 ms after the click (four
+  of six; two took about 315 ms, not explained). Ours: 50 to 90 ms. Nothing to change.
 
-1. **The suite's new checks, 13 min.** `scripts/test-stages.sh safety park capture parity` on today's
-   build: `kill -9` with a dialog open, an app answering late at the quit, a fit move then a
-   crash, a dialog opened in a hidden stage, a window showing only a piece at the corner, no
-   captures while the strip is hidden, and a minimized window's way to the strip sampled every
-   8 ms (its places are printed: after the genie only the sink out of the Dock tile, then the
-   corner). Hands off the Mac; they have never run.
-2. **Both screens, 5 min.** `scripts/test-stages.sh displays` on today's build. All checks pass, including
-   each screen's own card glass and corner patch (`displays[i].pictures`, `displays[i].corner_patch.shown`).
-3. **⌘-Tab to the other screen, 3 min.** Put fixture B on the laptop screen (`ctl debug-frame`) as a stage of
-   its own, then send it to a card there. Bring fixture A's stage to the front on the 5K. Activate B the way
-   ⌘-Tab does (`osascript … to activate`). In the log: one `transition` on the laptop screen only. The 5K's
-   `displays[0].active_stage` doesn't change.
-4. **Full screen on one screen, 4 min.** `ctl debug-fullscreen <B> on` on the laptop screen, then open a new
-   fixture window on the 5K. It joins the 5K's stage, the 5K's strip stays, and "a full-screen Space shows"
-   is logged for the laptop screen only. Then `debug-fullscreen <B> off`: B comes back to its stage.
-5. **Mission Control, 3 min.** `ctl debug-expose mission-control`. A fixture window opened while it's up is
-   placed once it ends, and both strips come back on the same Desktop.
-6. **A window moved to another Desktop of the laptop screen (E), 4 min.** Eugene drags fixture B in Mission
-   Control to the laptop screen's second Desktop. In the log: B leaves its stage, and on that Desktop it
-   starts a stage of its own. Back on the first Desktop, its stages are as they were.
-7. **Apple's Stage Manager, measured (E), 16 min.** Eugene turns on Apple's Stage Manager and Dark Mode.
-   - `scripts/measure-apple-card-glass.py`, in Dark Mode.
-   - Then, in Light Mode, on fixture cards:
-     - Shift-click on a card of two apps: whole card, or the app under the pointer?
-     - Option-click on a card.
-     - ⌘H, then ⌘\`.
-     - The auto-hide delay and a new card's fade (recordings).
-     - A card of three apps.
-   - **Minimize, one 30 s recording** (screen recording at 60 fps, the 5K only; round minimize-flow).
-     Fixture `--windows 2` as one stage, two cards of other fixtures in the strip. At 0 s the yellow
-     button on Fixture 1; at 10 s ⌘M on Fixture 2; at 20 s Reduce Motion on, ⌘M on the window
-     brought back from Fixture 1's card. Read frame by frame: does a genie into the Dock play at all;
-     where the window shrinks to (the new card's slot: top or bottom of the strip) and in how many
-     frames; does it turn and take on the card's glass on the way, or fly flat; does its card appear
-     at once, fade or slide; does the Dock show anything (a tile, a bounce); and what Reduce Motion
-     makes of it. Constants that may change after it: the flight's spring (today `[animation]
-     shrink_*`, a pair of its own if Apple's is faster), where the picture starts and its size
-     (`ui::minimize_motion::start`: the Dock tile, at the size the genie left the window), the
-     card's fade without a tile and under Reduce Motion (`display_options::FADE_MS`), and the new
-     card's slot (the engine's `Target::New`). macOS's own genie stays: Stage Manager hears of a
-     minimize only after it.
-   - With Reduce Motion on: one switch recorded (for the accessibility round).
-   - Eugene turns Apple's Stage Manager and Dark Mode back off.
-8. **VoiceOver on the strip (E), 5 min.** The accessibility round's checklist: each card reads its stage and
-   apps, and VO-Space switches stages.
+
+- Saving `state.json` off the window thread: 1422 saves on 11-08 and 11-09 took 4.9 ms typically, 9 ms
+  at the 99th percentile, 29 ms at most.
+- Accessibility (1.8.0) and the GitHub tabs (checked after 1.8.0).
 
 **When it happens, no session needed:**
 
@@ -108,3 +68,21 @@ screen both attached. The main thread runs it, with Eugene at the Mac for the st
   System Events (`osascript -e 'tell application "System Events" to count windows of every process'`). If
   any are listed, our quit fixed it: the menu line then says "Quit and reopen Stage Manager", and the bug
   is ours. If none are listed, lock and unlock the screen and count again.
+
+## 2.0: new features
+
+- **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
+  Window, Quit App. A named stage shows its name on hover (R7).
+- **Stages in the menu bar menu**, click one to switch (R2).
+- **Drop a window on a card** to add it to that stage (R3b). Apple's strip hides instead (11-09); spring
+  loading, if Apple's has it, is a 1.8.x check.
+- **"Only the main screen" in Settings** (`[displays] main_only`, off; R8). The setting is read at launch, so
+  turning it on or off quits the app (every window comes back) and opens it again, as an update does. Its
+  line in Settings says so.
+- **Scroll the strip past its capacity**, with a "+N" mark (R5).
+- **No stage switches the user didn't ask for** (R6): an activation with no click or key press just before
+  it doesn't switch stages, and that app's card glows.
+- **One stage across all screens** (R8, second half), an option, off. One strip, on the main screen. A
+  switch brings a stage's windows back on every screen. Still open: what it means when "Displays have
+  separate Spaces" is on, and the lid and restart rules once a window moved to another screen keeps its
+  stage.

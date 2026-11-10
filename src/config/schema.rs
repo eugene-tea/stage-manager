@@ -262,6 +262,8 @@ pub const KEYS: &[KeyDef] = &[
     k("cards", "behind_scale", f(0.3, 1.0), "1.0", "Each window behind another of the same app is drawn this much smaller."),
     k("cards", "second_app_dx", f(-300.0, 300.0), "42.0", "On a card of several apps, a second app's window sits this far from the front window, toward its side on the screen (it peeks out on that side)."),
     k("cards", "second_app_dy", f(-300.0, 300.0), "15.0", "...and this far up (the windows centered on one line otherwise)."),
+    k("cards", "third_app_dx", f(-300.0, 300.0), "12.0", "On a card of three apps, the third app's window sits this far from the front window, toward the second app's side (Apple's, measured: about 0.29 of the second's)."),
+    k("cards", "third_app_dy", f(-300.0, 300.0), "24.0", "...and this far up, behind the others at the top (Apple's, measured: about 1.6 times the second's)."),
     k("cards", "hover_scale", f(1.0, 2.0), "1.11",
         "The card under the pointer grows by this factor, about its center (Apple's, measured on a card of one window: 1.11)."),
     k("cards", "hover_ms", i(0, 3000), "400",
@@ -285,10 +287,11 @@ pub const KEYS: &[KeyDef] = &[
     k("icons", "center_dx", f(-300.0, 300.0), "10.5", "The icon's center, right of the card's leftmost window's left edge."),
     k("icons", "center_dy", f(-300.0, 300.0), "-10.5", "The icon's center, below the card's bottom (its lowest window's; up is negative)."),
     k("icons", "step", f(0.0, 300.0), "36.0", "A second app's icon sits this far right of the first."),
+    k("icons", "step_three", f(0.0, 300.0), "18.0", "On a card of three apps or more, each icon sits this far right of the one before (Apple's, measured: 18, the icons overlapping)."),
     k("icons", "max", i(0, 10), "3", "Most icons on one card."),
-    k("icons", "shadow_radius", f(0.0, 100.0), "3.0", "Blur radius of the icon's shadow."),
-    k("icons", "shadow_opacity", f(0.0, 1.0), "0.6", "Opacity of the icon's shadow."),
-    k("icons", "shadow_offset_y", f(-100.0, 100.0), "1.5", "Vertical offset of the icon's shadow (down is positive)."),
+    k("icons", "shadow_radius", f(0.0, 100.0), "2.0", "Blur radius of the icon's shadow."),
+    k("icons", "shadow_opacity", f(0.0, 1.0), "0.3", "Opacity of the icon's shadow."),
+    k("icons", "shadow_offset_y", f(-100.0, 100.0), "1.0", "Vertical offset of the icon's shadow (down is positive)."),
     // [motion]
     k("motion", "spring_stiffness", f(1.0, 10_000.0), "289.0",
         "Spring stiffness of cards gliding to new slots (a switch's swap, a reorder, a drop making room). Apple's, measured: 289 (99 % by about 375 ms)."),
@@ -591,6 +594,8 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-38.toml"),
     include_str!("legacy/default-39.toml"),
     include_str!("legacy/default-40.toml"),
+    include_str!("legacy/default-41.toml"),
+    include_str!("legacy/default-42.toml"),
 ];
 
 #[cfg(test)]

@@ -5,6 +5,7 @@ pub mod about;
 pub mod alert;
 pub mod app_icons;
 pub mod app_menu;
+pub mod assistive;
 pub mod card_glass;
 pub mod corner_patch;
 pub mod corner_settle;
@@ -28,6 +29,7 @@ pub mod strip_access;
 pub mod strip_demo;
 pub mod strip_layout;
 pub mod strip_model;
+pub mod strip_reach;
 #[cfg(feature = "debug-render")]
 pub mod strip_render;
 pub mod strip_visibility;

@@ -12,6 +12,14 @@
 //! the session and the guardian with it (its stop signal: nothing is opened); none of
 //! [`WATCH`] passes with no cancel, or the app runs again already: nothing is opened either.
 //!
+//! A quit at a logout that left windows away (an app not answering, a window gone: no
+//! clean-exit marker) says so in the parked file instead, and the guardian listens for the
+//! cancel from the exit on, while its recovery watch brings those windows back
+//! ([`after_exit`]): a cancel heard during the watch opens the app at once (the new copy
+//! adopts the windows, or takes the rest of the watch, as after any crash), and once the
+//! watch is done with no cancel yet, the guardian waits as after a clean quit (round
+//! logout-cancel, 1.8.x).
+//!
 //! The guardian is no app: `loginwindow` never waits for it, and the app's own quit is as
 //! quick as before.
 
@@ -41,6 +49,27 @@ pub fn quit_marker(after_head_start: bool, logout_reason: bool, user_quit: bool)
 /// Whether a clean-exit marker's text says the app quit for a logout.
 pub fn quit_for_logout(marker: &str) -> bool {
     marker.trim() == LOGOUT_MARK
+}
+
+/// What the guardian does once the app it watches has exited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AfterExit {
+    /// Run the recovery scan and watch: no clean-exit marker, not every window came back.
+    pub recover: bool,
+    /// Listen for the logout's cancel from the exit on (through the recovery watch, then
+    /// [`WATCH`] as after a clean quit): the app quit for a logout.
+    pub listen: bool,
+}
+
+/// The guardian's plan after the exit: `marker`, the clean-exit marker's text (`None`: no
+/// marker, an unclean exit); `parked_logout`, whether the parked file says the quit was for a
+/// logout (an unclean quit at a logout writes it there, [`quit_marker`] deciding as for the
+/// marker; a crash never does).
+pub fn after_exit(marker: Option<&str>, parked_logout: bool) -> AfterExit {
+    match marker {
+        Some(text) => AfterExit { recover: false, listen: quit_for_logout(text) },
+        None => AfterExit { recover: true, listen: parked_logout },
+    }
 }
 
 /// `keyAEQuitReason` values (AERegistry.h) that mean a logout, restart or shutdown: `logo`,
@@ -194,6 +223,64 @@ mod tests {
         assert_eq!(quit_marker(true, true, true), CLEAN_MARK, "the user's own Quit during a logout is never undone");
         assert_eq!(quit_marker(false, false, false), CLEAN_MARK, "any other quit");
         assert!(quit_for_logout("logout\n") && !quit_for_logout("clean\n") && !quit_for_logout(""));
+    }
+
+    /// The guardian end to end, as decisions: the exit (`marker`, `parked_logout`), what it
+    /// hears while its recovery watch runs (`during`, only when it recovers), then after it
+    /// (`after`). Whether it opened the app, and when (`true`: during the recovery watch).
+    fn guardian(marker: Option<&str>, parked_logout: bool, during: &[Heard], after: &[Heard]) -> Option<bool> {
+        let t = Instant::now();
+        let plan = after_exit(marker, parked_logout);
+        let mut watch = plan.listen.then(|| Watch::new(t));
+        let hear = |heard: &[Heard], at: u32, watch: &mut Option<Watch>| -> bool {
+            for (i, h) in heard.iter().enumerate() {
+                let Some(w) = watch.as_mut() else { return false };
+                match w.step(*h, t + S * (at + i as u32), || false) {
+                    Next::Wait => {}
+                    Next::Relaunch => {
+                        *watch = None;
+                        return true;
+                    }
+                    Next::End(_) => *watch = None,
+                }
+            }
+            false
+        };
+        if plan.recover && hear(during, 1, &mut watch) {
+            return Some(true);
+        }
+        // The recovery watch done (or none): the clean quit's wait, if still listening.
+        hear(after, 100, &mut watch).then_some(false)
+    }
+
+    const CANCEL: Heard = Heard::Signal(Signal::Cancelled);
+    const COMING: Heard = Heard::Signal(Signal::Coming);
+
+    #[test]
+    fn what_the_guardian_does_after_the_exit() {
+        assert_eq!(after_exit(Some("clean\n"), false), AfterExit { recover: false, listen: false });
+        assert_eq!(after_exit(Some("logout\n"), false), AfterExit { recover: false, listen: true });
+        assert_eq!(after_exit(None, false), AfterExit { recover: true, listen: false }, "a crash, or an unclean user's Quit");
+        assert_eq!(after_exit(None, true), AfterExit { recover: true, listen: true }, "an unclean quit at a logout");
+        assert_eq!(after_exit(Some("clean\n"), true), AfterExit { recover: false, listen: false }, "the marker decides a clean exit");
+    }
+
+    /// Clean or unclean quit, at a logout or not, cancelled or not (round logout-cancel).
+    #[test]
+    fn a_cancel_reopens_after_a_clean_or_an_unclean_quit_at_a_logout() {
+        let (clean, logout) = (Some("clean\n"), Some("logout\n"));
+        // Clean quits.
+        assert_eq!(guardian(logout, false, &[], &[CANCEL]), Some(false), "clean, logout, cancel: opened");
+        assert_eq!(guardian(logout, false, &[], &[COMING, Heard::Stopped]), None, "clean, logout, it goes on");
+        assert_eq!(guardian(clean, false, &[], &[CANCEL]), None, "clean, no logout: nothing listens");
+        // Unclean quits at a logout: a cancel during the recovery watch opens at once; one
+        // after it, as after a clean quit.
+        assert_eq!(guardian(None, true, &[CANCEL], &[]), Some(true), "unclean, logout, cancel during the watch");
+        assert_eq!(guardian(None, true, &[Heard::Nothing, COMING], &[CANCEL]), Some(false), "unclean, logout, cancel after the watch");
+        assert_eq!(guardian(None, true, &[COMING], &[Heard::Stopped, CANCEL]), None, "unclean, logout, it goes on");
+        assert_eq!(guardian(None, true, &[Heard::Stopped], &[CANCEL]), None, "the session ends during the watch: nothing after");
+        // Unclean, no logout (a crash, the user's Quit): recovery only, a cancel is nobody's.
+        assert_eq!(guardian(None, false, &[CANCEL], &[CANCEL]), None, "unclean, no logout");
     }
 
     #[test]

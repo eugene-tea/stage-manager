@@ -372,11 +372,12 @@ mod tests {
         let t = e.apply(a).expect("a transition");
         let after = e.order();
         let stage = e.stage_of(8);
-        assert_eq!(after[..before.len()], before[..], "the cards stay");
-        assert_eq!(after.last(), Some(&stage));
+        // Apple's (11-09): the new card at the top, the others one slot down.
+        assert_eq!(after[0], stage, "the new card takes the top slot");
+        assert_eq!(after[1..], before[..], "the other cards move down one, in their order");
         assert_aims(&e, &t, &before, "cmd-m");
         assert_eq!(t.outgoing.len(), 1);
-        assert_eq!(t.outgoing[0].slot, Some(after.len() - 1));
+        assert_eq!(t.outgoing[0].slot, Some(0));
     }
 
     #[test]

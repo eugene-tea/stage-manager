@@ -62,10 +62,15 @@ line, the window behind 15 pt up: `second_app_dy`), Green's bottom 96 pt below B
 edge at 128.5 pt where Blue alone reaches 105. The window behind peeks out on the side it
 sits on the screen: two of the owner's cards with the other app's window right of the front
 one showed it peeking out on the right (23 and 47 pt; up 34 and 13 pt, so Apple's offsets
-vary with the windows; ours are the fixture's). A third app's windows join the second's
-(not measured). The icons sit 10.5 pt right of the card's left edge and 10.5 pt above its
+vary with the windows; ours are the fixture's). A card of three apps (measured 11-09, Red 1
+in front, Green, Blue): the second app's window where a card of two puts it (Green on the
+left, its left edge 42 pt out and 15 pt up), the third's behind both at the top, its left
+edge 12 pt toward the second's side and 24 pt up (`third_app_dx`, `third_app_dy`: 0.29 and
+1.6 times the second's, read on the hovered card against a card of two hovered the same
+way); a fourth app's windows join the third's (not measured). The icons sit 10.5 pt right of the card's left edge and 10.5 pt above its
 bottom (the lowest window's: 10 pt above Green's bottom, at Blue's), and stay put while the
-card grows. They are the variants the Dock shows (macOS 26's icon and widget style: Default,
+card grows. On a card of two apps the second icon sits 36 pt right of the first (`[icons]
+step`); on a card of three they overlap, 18 pt apart (`step_three`, measured 11-09). They are the variants the Dock shows (macOS 26's icon and widget style: Default,
 Dark, Clear or Tinted, light, dark or following the appearance): in Dark Mode Apple's cards
 showed Mail's, Finder's, Messages' and Safari's dark icons (11-09). Ours fetches each icon per
 look (`ui::app_icons`) and again at an appearance change. Corners 8 pt (`corner_radius`; fitted to the rounding of three cards' top-left
@@ -73,16 +78,22 @@ corners, ours read 4 at 4). The card's shadow is barely there: 5 to 8 levels dar
 first two pixels below a card, gone by 4 (2 pt), 3 to 6 levels for a pixel beside its far
 edge, none above it; a Core Animation render of a card fitted to the bottom, top and far
 edges of two cards gives `shadow_radius` 1, `shadow_opacity` 0.3, `shadow_offset_y` 1 (the
-same render read our old 4 / 0.4 / 2 within a level). The icon's shadow is darker than the
-card's and soft, above the icon as well as below (on the card it covers: 17 levels at a
-pixel, gone by 12): `[icons] shadow_radius` 3, `shadow_opacity` 0.6, `shadow_offset_y` 1.5
-(fitted the same way, looser: a range of 3 to 4, 0.5 to 0.7, 1 to 1.5 fits). Hovered, each
+same render read our old 4 / 0.4 / 2 within a level). The icon's shadow is faint and tight:
+measured 11-09 evening against Apple's in Dark Mode on the same wallpaper (the owner's two
+screenshots), below the icon over the wallpaper it darkens by about 30 % at the edge, 16 %
+three pixels down, and is gone by 8 (4 pt): `[icons] shadow_radius` 2, `shadow_opacity` 0.3,
+`shadow_offset_y` 1, within 2 to 3 % of Apple's from three pixels down. The morning's fit on
+the card under the icon (3, 0.6, 1.5) read twice as dark and twice as wide on the wallpaper. Hovered, each
 window of a card grows by about 11 % about its own middle and the offsets between them stay
 (a single card 178 → 199 pt wide; the pair's offsets 42 and 18 pt both ways, the pair's
 bounds 7 % wider, 9 % taller; Blue's and Green's middles moved under half a point), and the
 app icons neither move nor grow (their boxes the same to the pixel on the 2x stills of a
 single card and of the pair). Ours does the same, and grows a card a dragged card would
-merge into and shrinks a pressed one the same way (Apple's press not measured). A popup open on a window (a popover, a child window sticking out
+merge into and shrinks a pressed one the same way (Apple's press not measured). The growth
+goes with the card: dragged in the column or gliding to its slot, each window grows about
+its own middle where the card is drawn, so the card moves as one piece, its windows on its
+icons, as Apple's does (11-09: while the growth from the press back to the hover size still
+ran, a card dragged 250 pt down was drawn 27 pt off its icons, then jumped back). A popup open on a window (a popover, a child window sticking out
 of it) shows on its card beside the window, at its true size and place, as on Apple's; the
 window keeps its own size on the card, and nothing outside a window is drawn. A palette
 far from its window (more than the window's own width or height past it, or on another
@@ -123,7 +134,12 @@ ahead of the spring while it rises and gains height on it, so it seems to come u
 card's bottom; one shrinking into its card drops and loses height first, staying wide and
 flat, then slides into the card and turns. In flight a window turns about its vertical
 middle, so its left side comes toward you as it turns.
-Shift-click a card to bring its windows into the current stage; Option-click is a plain click.
+Shift-click a card to add its front window (its stage's last used, drawn in front) to the
+current stage, in front with the keyboard, whatever part of the card the pointer is on; the
+rest of the card stays in the strip in its slot (Apple's, measured 11-09 on a card of two
+apps, whichever app's part was clicked, and on a card of one app's two windows). A card of
+one window brings its stage in whole. Option-click is a plain click, as on Apple's (checked
+11-09: no app is hidden).
 Clicking a card's app icon brings every window of that app, from all stages.
 
 **Activation.** ⌘-Tab, ⌘⇧-Tab or a Dock click to an app in another stage switches to that
@@ -175,6 +191,17 @@ With One at a Time, only the app's most recent window shows, and clicking its ca
 opens its next window.
 
 **⌘M** sends the window to the strip as a card of its own, not to the Dock.
+
+**⌘H** (and Hide Others, or an app hiding itself) takes the app's windows off its cards. A
+stage of that app alone leaves the strip entirely: the most recent stage out of view takes
+its slot. When it was the stage in front, the most recent stage comes in front, as on a
+click. Unhidden without an activation, the stage comes back as a card in the slot it left,
+not in front, and the stage in front stays (the card that took the slot goes out of view
+when the strip is full). Unhidden by an activation (⌘-Tab, a Dock click), it comes in front
+as any activation does. A stage shared with other apps stays, showing theirs (Apple's,
+measured 11-09 with an app of two windows alone in front; a shared stage not measured).
+**⌘\`** brings the app's other window in front in its stage, and nothing else (checked
+11-09).
 
 **Desktops.** Each Desktop has its own stages, active stage and strip, listing only its
 windows. The same app can have stages on several Desktops. A card click never changes the
@@ -614,26 +641,53 @@ A window of a combined card lifts off as that picture from the first move, insid
 too, where Apple's leaves it on the card until the pointer is about 245 pt from the edge
 (Drag and drop, above).
 
-**Minimize** (the yellow button, ⌘M, Window → Minimize, or an app minimizing its own window)
-sends the window to the strip as a card of its own, but macOS's genie into the Dock plays
-first: Stage Manager hears of the minimize only once the window is in the Dock. Apple's
-window shrinks straight into the strip (how exactly is not recorded yet). Then one motion: a
-picture of the window comes out of its Dock tile (its own tile, or its app's icon with
-"Minimize windows into application icon"), the size the genie left it at, and flies into its
-card. With no tile on that screen or no picture of the window, the card fades in where it
-lands; under Reduce Motion the card's fade is all. No full-size picture ever shows where the
-window was.
+**Minimize** sends the window to the strip as a card of its own, as Apple's does. Apple's,
+recorded 11-09 on the 5K at 60 fps (the yellow button on a 900×632 window): no genie and
+nothing in the Dock. From the first moving frame the window flies straight into a new card at
+the top of the strip (the other cards slide down one slot), turning and shrinking as a stage
+leaving in a switch does, its app icon on it early; about 450 ms to rest, most of it in the
+first 220 ms. With Reduce Motion on the window fades out in place over about 8 frames and the
+card appears.
 
-The window itself has to leave the Dock to be parked, and macOS animates every un-minimize
-out of the Dock tile toward the window's frame, whatever that frame (on screen, off every
-display, with its app hidden: measured 11-09). So while it is still in the Dock it is put
-beyond the screen edge the Dock is on, in line with its park frame (2000 pt past every
-display): its un-minimize sinks out of the tile off the screen within the Dock's band
-(gone in about 0.2 s) instead of rising and crossing the screen to the corner, macOS sets it
-down in the corner, and it is parked again the moment it is down. Where that way would pass
+Ours catches the two usual ways before macOS starts its genie, in an event tap
+(`platform::minimize_tap`, decided in `engine::minimize_press`):
+
+- **The yellow button** (a plain click; ⌥-click, ⇧-click and ⌃-click stay macOS's): a press
+  near the top-left corner of a window in a shown stage, with that window topmost there (not
+  under a card, the edge tab or Settings), is hit-tested through its app's Accessibility at the
+  press (0.1 s budget each call; our own windows are never asked). On that window's enabled minimize button the press,
+  its drags and its release are swallowed; a release on the button minimizes, one dragged off
+  does nothing, as the button's own.
+- **⌘M** (no other modifier) while the frontmost app's focused window is a managed one with
+  an enabled minimize button and a settable `AXMinimized`. Any other window keeps its app's ⌘M.
+
+The window then leaves as a stage does in a switch: its picture flies from its frame into
+its new card at the top of the strip, the others gliding one slot down; under Reduce Motion
+its picture fades out where it is while the card fades in. In place (`[strip] order`) the
+card takes its own place instead.
+
+Everything else is macOS's minimize first: Window → Minimize from the menu bar, a
+double-click on the title bar set to minimize, an app minimizing its own window, ⌥⌘M, an
+answer that did not come in time, a full-screen Space, Mission Control. Stage Manager hears
+of those only once the genie has put the window in the Dock; then one motion: a picture of
+the window comes out of its Dock tile (its own tile, or its app's icon with "Minimize windows
+into application icon"), the size the genie left it at, and flies into its card. With no
+tile on that screen or no picture of the window, the card fades in where it lands; under
+Reduce Motion the card's fade is all. No full-size picture ever shows where the window was.
+
+After a genie the window itself has to leave the Dock to be parked, and macOS animates every
+un-minimize out of the Dock tile toward the window's frame, whatever that frame (on screen,
+off every display, with its app hidden: measured 11-09). So while it is still in the Dock it
+is put beyond the screen edge the Dock is on, in line with its park frame (2000 pt past every
+display): its un-minimize sinks out of the tile off the screen within the Dock's band (gone
+in about 0.2 s) instead of rising and crossing the screen to the corner, macOS sets it down
+in the corner, and it is parked again the moment it is down. Where that way would pass
 another screen it goes to the park frame as before. macOS's un-minimize focuses the window:
 that is never taken for a window you brought out (only a focus or a drag of yours after the
 park counts as that).
+
+`[windows] minimize_to_strip = false`: nothing is caught, and every minimize goes into the
+Dock.
 
 **Desktop items are left alone.** Hiding Finder's desktop icons is outside a window
 manager's reach through public API.
@@ -739,7 +793,12 @@ background (`open -g -a`), which restores the stages saved at the head start, in
 session, by window id, as an accessory app (not macOS's reopen at a login: the reopen list's
 mark is cleared as at any launch). A logout that goes on ends the session and the guardian
 with it, nothing opened; so does the end of the ten minutes, or the app already running
-again. The guardian is no app: `loginwindow` never waits for it.
+again. The same goes for a quit at a logout that left windows away (an app that did not
+answer, a window gone): the parked file says the quit was for a logout, and the guardian
+listens for the cancel while it brings those windows back. A cancel heard meanwhile opens the
+app at once (it adopts those windows, or takes the rest of the watch, as after a crash); once
+every window is back with no cancel yet, the guardian waits as after a clean quit, the ten
+minutes counted from the quit. The guardian is no app: `loginwindow` never waits for it.
 
 An app that quits keeps its windows' places in the saved stages for two minutes (no card
 meanwhile), so stages whose apps quit before macOS announced the logout still come back after
@@ -863,7 +922,8 @@ still turns everything off, fades included.
 
 | Case | Full motion | Under Reduce Motion | Why |
 |---|---|---|---|
-| A minimized window going to the strip | its picture flies from its Dock tile into its card | its card fades in at its slot; no picture | the window is already gone into the Dock (macOS's own animation, which follows Reduce Motion itself); the card fading in says where it went |
+| A window minimized to the strip (the yellow button, ⌘M) | its picture flies from its frame into its new card, as a stage leaving does | its picture fades out where it is while its card fades in at its slot, as Apple's (11-09) | as the switch below; the card fading in says where it went |
+| A window minimized to the strip after macOS's genie (the menu, an app's own) | its picture flies from its Dock tile into its card | its card fades in at its slot; no picture | the window is already gone into the Dock (macOS's own animation, which follows Reduce Motion itself); the card fading in says where it went |
 | The switch (also the desktop reveal, an activation, a drop) | windows fly between card and frame at full-screen scale, turned and scaled in depth | a cross-fade where the windows are: the outgoing pictures fade out at their frames while their stage's card fades in at its slot; the incoming pictures fade in at their frames while their card fades out | the largest trigger of all: depth, scale and a 3D turn over most of the screen. The card fading in at its slot as the windows fade out says where they went; the same unveil, handover and landing rules hold, with no spring travel |
 | The strip sliding out and in | 286 pt sideways, in 3D | fades in at its place; fades out where it is, then leaves the screen unseen | a large surface moving across the screen |
 | Hover | the card's windows grow 11 % on a spring | no growth; the glass still turns solid | scaling by itself; the colour change alone still shows which card is under the pointer |
@@ -884,20 +944,49 @@ and followed live; the strip repaints at once.
 
 ### VoiceOver
 
-The strip's view is a group, "Stages", holding one button per card, framed where the card
-rests: "Stage 3: Safari, Notes" (the ⌃⌥N number), or the stage's name with its apps; the
-current stage's card (`[strip] active = "card"`) adds "current stage". Its help says
-"Switches to this stage."; pressing it (VoiceOver's press) switches as a click does, and each
-app has a custom action, "Show all Safari windows", as a click on its icon. The list follows
-the cards as they change, keeping each card's element; it is empty while the strip is out of
-sight. The edge tab is a button, "Stages", that reveals the strip.
+**Apple's** (observed 11-09 with the Accessibility API, Apple's Stage Manager on): each card
+is an `AXButton` of WindowManager, framed where the card is, labelled with its front
+window's title alone ("Activity Monitor"; no stage number, no other app's name), with the
+actions `AXPress` (a click: the stage comes in front) and `AXAddToStage` (Shift-click's
+add). A system-wide hit test at a card's middle (`AXUIElementCopyElementAtPosition`, how
+VoiceOver finds what is under the pointer) answers that button wherever the pointer is.
+
+**Ours.** The strip's view is a group, "Stages", holding one button per card, framed where
+the card rests, labelled as Apple's: the front window's title; a card of several apps reads
+its front window's alone, as Apple's. Where we add to it: an untitled front window reads its
+app's name; a stage with a name (`[stages] names`, a `stage:` rule) says it first ("Mail:
+Inbox"); with nothing known the card says its ⌃⌥N number ("Stage 3"); the current stage's
+card (`[strip] active = "card"`) adds "current stage". A window retitled while it fronts a
+card renews the label. Its help says "Switches to this stage."; `AXPress` switches as a
+click does, `AXAddToStage` adds the front window to the stage in front as a Shift-click
+does (not offered on the current stage's card), and each app has a custom action, "Show all
+Safari windows", as a click on its icon. The list follows the cards as they change, keeping
+each card's element; it is empty while the strip is out of sight. The edge tab is a button,
+"Stages", that reveals the strip.
+
+**Reaching the cards.** The window server passes a hit test over a window that ignores the
+mouse, as it does a click, and the strip's pane lets the mouse through except while the
+pointer is on a card (one flag per window, set by where the pointer is). So a hit test at a
+card with the pointer elsewhere answered Finder's desktop beneath (found 11-09).
+While VoiceOver or Switch Control is on (read from macOS and followed live), each card gets
+a transparent catching window of its own exactly where it rests, just under the pane:
+hit tests there answer the card's button, the pointer's events there go to the strip as
+the pane's own would, and the empty column and the gaps between cards still let clicks
+through. With neither on, nothing changes. The strip never takes keyboard focus (a
+non-activating panel, as Apple's strip never takes it from the window in front), so
+VoiceOver reaches the cards through the pointer: the pointer over the strip, or VoiceOver
+set to move its cursor with the mouse pointer.
 
 ## Known gaps
 
-- Not yet seen live with ours, built from the one-screen code and checked by the suite's
-  `displays` phase: a second screen's own card glass and corner patch, a full-screen app or
-  Mission Control on one screen while windows arrive on the other, ⌘-Tab to the other
-  screen's stage, and a window moved to another Desktop of the second screen.
+- A window coming in from the strip can show one frame of a darker shadow as it lands
+  (about half the landings, up to 15 levels within 45 pt of its edge on Finder's heavier
+  shadow; more often when the Mac is busy). Two shadows overlap for that frame: the
+  window's own, which macOS shows the moment the window is in place, and its picture's,
+  which ours drops as soon as macOS reports the window there but which reaches the screen
+  about a frame later. macOS gives no way to drop another app's window shadow, and no
+  signal comes before the window is on screen; dropping it earlier by a guess shows a
+  lighter edge instead (11-01). Measured 11-09 at 60 fps on VS Code, Safari and Finder.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.
@@ -921,14 +1010,16 @@ sight. The edge tab is a button, "Stages", that reveals the strip.
   window.
 - A switch's motion starts once the windows you leave have moved to the hiding corner behind
   their pictures, or they would show around them: about 50 to 90 ms after the click (11-09's
-  log; the `transition: the motion starts` line has it as `motion_ms`). How soon Apple's starts
-  after the click is not measured.
+  log; the `transition: the motion starts` line has it as `motion_ms`). Apple's first frame
+  comes about 65 to 85 ms after the click (11-09, four clicks of six).
 - A card dragged from the main screen's strip onto the laptop's screen landed with the
   pointer 39 pt in and 353 pt down on Apple's (once, measured 11-09): its rule across screens
   is not known; ours holds it as on its own screen.
-- Not measured yet on Apple's: the auto-hide delay (ours: 500 ms), a new card's fade, a
-  Shift-click on a card holding several apps, a card of three or more apps, and what decides
-  how far the other app's window peeks out (ours: always the fixture's 42 and 15 pt, on its
+- Apple's auto-hide comes either about 0.1 s or about 1.1 s after the pointer leaves the
+  strip (six runs, 11-09, no difference found between them); ours waits 500 ms.
+- Not measured yet on Apple's: a card of four or more apps, which side a third app's window takes when it sits on the
+  other side of the front window from the second app's (ours: the second's side), and what
+  decides how far the other app's window peeks out (ours: always the fixture's 42 and 15 pt, on its
   side of the screen).
 - Where Apple places a window moved to another Desktop is unverified. Ours places it as a
   window of its app opening there: in that app's most recent stage on that Desktop, else a

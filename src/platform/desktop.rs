@@ -277,6 +277,18 @@ pub fn seen_through(w: &CgWindow, p: Point) -> bool {
     looked_through(overlay_of(w), w.pid, || element_pid_at(p))
 }
 
+/// Runs `f` on the system-wide element with the process's global messaging timeout set to
+/// `seconds`, then puts it back to [`super::wm_thread::AX_TIMEOUT_SECONDS`]: another thread's
+/// Accessibility call made meanwhile only gets the shorter budget. Elements `f` gets from the
+/// system-wide one are on the global timeout too while it runs.
+pub fn with_system_wide<T>(seconds: f32, f: impl FnOnce(&super::ax::AxElement) -> T) -> T {
+    let system = super::ax::AxElement::system_wide();
+    let _ = system.set_messaging_timeout(seconds);
+    let out = f(&system);
+    let _ = system.set_messaging_timeout(super::wm_thread::AX_TIMEOUT_SECONDS);
+    out
+}
+
 /// The messaging timeout of [`element_pid_at`]: a hung Notification Center holds the caller
 /// up this long at most, and the point then counts as its own.
 pub const ELEMENT_AT_TIMEOUT_SECONDS: f32 = 0.1;
@@ -288,10 +300,7 @@ pub const ELEMENT_AT_TIMEOUT_SECONDS: f32 = 0.1;
 /// [`super::wm_thread::AX_TIMEOUT_SECONDS`] after: another thread's Accessibility call made
 /// meanwhile only gets the shorter budget.
 pub fn element_pid_at(p: Point) -> Option<i32> {
-    let system = super::ax::AxElement::system_wide();
-    let _ = system.set_messaging_timeout(ELEMENT_AT_TIMEOUT_SECONDS);
-    let pid = system.element_at(p).and_then(|e| e.pid());
-    let _ = system.set_messaging_timeout(super::wm_thread::AX_TIMEOUT_SECONDS);
+    let pid = with_system_wide(ELEMENT_AT_TIMEOUT_SECONDS, |system| system.element_at(p).and_then(|e| e.pid()));
     match pid {
         Ok(pid) => Some(pid),
         Err(e) => {

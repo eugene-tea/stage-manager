@@ -32,6 +32,12 @@ pub mod names {
     pub const FULLSCREEN: &str = "AXFullScreen";
     pub const FULLSCREEN_BUTTON: &str = "AXFullScreenButton";
     pub const CLOSE_BUTTON: &str = "AXCloseButton";
+    /// A window's minimize button (`kAXMinimizeButtonAttribute`), and that button's subrole
+    /// (`kAXMinimizeButtonSubrole`): the same name.
+    pub const MINIMIZE_BUTTON: &str = "AXMinimizeButton";
+    /// The window an element belongs to (`kAXWindowAttribute`).
+    pub const WINDOW: &str = "AXWindow";
+    pub const ENABLED: &str = "AXEnabled";
     pub const PRESS: &str = "AXPress";
     pub const HIDDEN: &str = "AXHidden";
     pub const ENHANCED_USER_INTERFACE: &str = "AXEnhancedUserInterface";
@@ -332,6 +338,59 @@ impl AxElement {
         Ok((role, frame))
     }
 
+    /// What the minimize gate needs of the element under a press, in one message
+    /// (`AXUIElementCopyMultipleAttributeValues`): its subrole, whether it is enabled, the
+    /// window it belongs to and its frame; each `None` when the element lacks it.
+    pub fn button_facts(&self) -> AxResult<ButtonFacts> {
+        let attrs = [names::SUBROLE, names::ENABLED, names::WINDOW, names::POSITION, names::SIZE].map(CFString::from_static_str);
+        let values = self.multiple(&attrs)?;
+        let subrole = values.get(0).and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()));
+        let enabled = values.get(1).and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()));
+        let window = values.get(2).and_then(|v| v.downcast::<AXUIElement>().ok().map(AxElement));
+        let position: Option<CGPoint> = values.get(3).and_then(|v| ax_value(&v, AXValueType::CGPoint));
+        let size: Option<CGSize> = values.get(4).and_then(|v| ax_value(&v, AXValueType::CGSize));
+        let frame = position.zip(size).map(|(p, s)| Rect::new(p.x, p.y, s.width, s.height)).filter(Rect::is_finite);
+        Ok(ButtonFacts { subrole, enabled, window, frame })
+    }
+
+    /// The values of `attrs` in one message, in order (an attribute the element lacks comes
+    /// back as an error value).
+    fn multiple(&self, attrs: &[CFRetained<CFString>]) -> AxResult<CFRetained<CFArray<CFType>>> {
+        let attrs = CFArray::from_retained_objects(attrs);
+        let mut out: *const CFArray = std::ptr::null();
+        // SAFETY: an array of attribute-name strings and a valid out pointer; on success it
+        // holds a +1 reference to an array of the values, in order.
+        let code = unsafe {
+            self.0.copy_multiple_attribute_values(attrs.as_opaque(), AXCopyMultipleAttributeOptions::empty(), NonNull::from(&mut out))
+        };
+        AxError::check(code)?;
+        let ptr = NonNull::new(out.cast_mut()).ok_or(AxError::NO_VALUE)?;
+        // SAFETY: the Copy rule hands us ownership of one reference to a CFArray of CF values.
+        Ok(unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(ptr)) })
+    }
+
+    /// `AXMinimizeButton` of a window.
+    pub fn minimize_button(&self) -> AxResult<AxElement> {
+        self.element_attr(names::MINIMIZE_BUTTON)
+    }
+
+    /// `AXEnabled`; an element without the attribute is enabled.
+    pub fn is_enabled(&self) -> AxResult<bool> {
+        match self.bool_attr(names::ENABLED) {
+            Err(e) if e == AxError::ATTRIBUTE_UNSUPPORTED || e == AxError::NO_VALUE => Ok(true),
+            other => other,
+        }
+    }
+
+    /// Whether attribute `name` is settable (`AXUIElementIsAttributeSettable`).
+    pub fn is_settable(&self, name: &str) -> AxResult<bool> {
+        let attr = CFString::from_str(name);
+        let mut settable: u8 = 0;
+        // SAFETY: valid element and attribute name; `settable` is a valid out pointer.
+        AxError::check(unsafe { self.0.is_attribute_settable(&attr, NonNull::from(&mut settable)) })?;
+        Ok(settable != 0)
+    }
+
     /// `AXWindows` of an application element.
     pub fn windows(&self) -> AxResult<Vec<AxElement>> {
         let v = self.attribute(names::WINDOWS)?;
@@ -522,6 +581,19 @@ impl AxElement {
         AxError::check(unsafe { _AXUIElementGetWindow(&self.0, &mut id) })?;
         if id == 0 { Err(AxError::NO_VALUE) } else { Ok(id) }
     }
+}
+
+/// What [`AxElement::button_facts`] reads of an element.
+#[derive(Debug, Clone, Default)]
+pub struct ButtonFacts {
+    /// `AXSubrole`.
+    pub subrole: Option<String>,
+    /// `AXEnabled`.
+    pub enabled: Option<bool>,
+    /// `AXWindow`.
+    pub window: Option<AxElement>,
+    /// `AXPosition` and `AXSize`.
+    pub frame: Option<Rect>,
 }
 
 /// `v` as an `AXValue` of `kind` (`CGPoint`/`CGSize`); `None` for anything else (an error

@@ -1707,6 +1707,122 @@ fn merge_leaves_pinned_windows_alone() {
     assert_eq!(e.members(1), [2, 3]);
 }
 
+// ----- Shift-click: the card's front window joins the current stage (Apple's, 11-09) -------
+
+/// The windows of stage `id`, front to back.
+fn windows_of(e: &Env, id: StageId) -> Vec<u32> {
+    e.m.stage(id).map(|s| s.windows.iter().map(|x| x.0).collect()).unwrap_or_default()
+}
+
+#[test]
+fn a_shift_click_on_a_card_of_two_apps_adds_only_its_front_window() {
+    let mut e = stages(4, 6);
+    let (s2, s4) = (stage_holding(&e, 2), stage_holding(&e, 4));
+    // Window 3 (app 13) joins stage 2 in front, so its card shows 3 in front of 2 (app 12).
+    // Stage 4 is in front.
+    e.send(3, Target::Number(2));
+    assert_eq!(windows_of(&e, s2), [3, 2]);
+    assert_eq!(e.m.main_active_stage(), Some(s4));
+    let slots = e.slot_numbers();
+    let obs = e.d.obs();
+    let a = e.m.add_card_front_to_active(s2, &obs);
+    e.run(a.clone());
+    assert_eq!(windows_of(&e, s4), [3, 4], "the front window alone joins, in front");
+    assert_eq!(windows_of(&e, s2), [2], "the app behind stays on the card");
+    assert!(!e.d.parked(w(3)) && e.d.parked(w(2)));
+    assert_eq!(e.d.focused, Some(w(3)));
+    assert_eq!(e.slot_numbers(), slots, "the card keeps its slot and number");
+    assert_eq!(a.last(), Some(&Action::StateChanged));
+}
+
+#[test]
+fn a_shift_click_on_a_card_of_one_app_and_two_windows_adds_its_front_window() {
+    let mut e = stages(2, 6);
+    let (s1, s2) = (stage_holding(&e, 1), stage_holding(&e, 2));
+    // Stage 1: windows 1 and 5 of app 10, 5 in front (after a ⌘` on Apple's); stage 2 in front.
+    e.add(meta(5, 10, "com.example.a"), RuleAction::Current);
+    e.send(5, Target::Number(1));
+    assert_eq!(windows_of(&e, s1), [5, 1]);
+    assert_eq!(e.m.main_active_stage(), Some(s2));
+    let obs = e.d.obs();
+    let a = e.m.add_card_front_to_active(s1, &obs);
+    e.run(a);
+    assert_eq!(windows_of(&e, s2), [5, 2]);
+    assert_eq!(windows_of(&e, s1), [1], "its other window stays a card in that slot");
+    assert_eq!(e.slot_numbers(), [1]);
+}
+
+#[test]
+fn a_shift_click_on_a_card_of_one_window_brings_its_stage_in() {
+    let mut e = stages(3, 6);
+    let (s1, s3) = (stage_holding(&e, 1), stage_holding(&e, 3));
+    let obs = e.d.obs();
+    let a = e.m.add_card_front_to_active(s1, &obs);
+    e.run(a);
+    assert_eq!(windows_of(&e, s3), [1, 3]);
+    assert!(e.m.stage(s1).is_none(), "the emptied stage is gone");
+    assert!(e.m.add_card_front_to_active(s3, &e.d.obs()).is_empty(), "the stage in front: nothing");
+}
+
+// ----- hidden apps (⌘H; Apple's, 11-09) --------------------------------------------------------
+
+#[test]
+fn hiding_the_app_in_front_brings_the_most_recent_stage_and_its_card_leaves_the_strip() {
+    // Seven stages, five slots: stage 7 in front, 1-5 in the strip, 6 out of view.
+    let mut e = stages(7, 5);
+    e.switch(2);
+    e.switch(7);
+    assert_eq!(e.active_number(), 7);
+    let before = e.slot_numbers();
+    let out = (1..=6).find(|n| !before.contains(n)).expect("one stage out of view");
+    let at = before.iter().position(|&n| n == 2).expect("2 in the strip");
+    let obs = e.d.obs();
+    let a = e.m.app_hidden(17, &obs);
+    e.run(a);
+    assert_eq!(e.active_number(), 2, "the most recent stage comes in front");
+    let after = e.slot_numbers();
+    assert!(!after.contains(&7), "the hidden app's stage left the strip: {after:?}");
+    assert_eq!(after[at], out, "the stage out of view took its slot: {after:?}");
+    assert!(e.d.parked(w(7)));
+    // Unhidden, no activation: back as a card in that slot, not in front.
+    let a = e.m.app_unhidden(17);
+    e.run(a);
+    assert_eq!(e.active_number(), 2, "the stage in front stays");
+    let back = e.slot_numbers();
+    assert_eq!(back[at], 7, "back in the slot it left: {back:?}");
+    assert!(!back.contains(&out), "the card that took the slot goes out of view: {back:?}");
+}
+
+#[test]
+fn a_hidden_apps_card_leaves_the_strip_and_comes_back_in_its_slot() {
+    let mut e = stages(4, 6);
+    assert_eq!(e.slot_numbers(), [1, 2, 3]);
+    let a = e.m.app_hidden(12, &e.d.obs());
+    e.run(a);
+    assert_eq!(e.slot_numbers(), [1, 3], "no card for the hidden app");
+    assert_eq!(e.active_number(), 4, "nothing switches");
+    let a = e.m.app_unhidden(12);
+    e.run(a);
+    assert_eq!(e.slot_numbers(), [1, 2, 3]);
+    assert!(e.m.app_unhidden(12).is_empty(), "not hidden: nothing");
+}
+
+#[test]
+fn a_hidden_apps_window_leaves_a_shared_card_which_stays() {
+    let mut e = stages(3, 6);
+    e.send(3, Target::Number(2));
+    e.switch(1);
+    let a = e.m.app_hidden(13, &e.d.obs());
+    e.run(a);
+    let card = e.m.strip().into_iter().find(|c| c.number == 2).expect("the shared card stays");
+    assert_eq!(card.windows, [w(2)], "the hidden app's window is not drawn");
+    assert_eq!(card.apps, [12]);
+    // A Shift-click takes the front window shown, not the hidden one.
+    let a = e.m.add_card_front_to_active(card.stage, &e.d.obs());
+    e.run(a);
+    assert_eq!(e.members(1), [2, 1]);
+}
+
 // ----- merge by dropping a card on a card -------------------------------------------------
 
 /// The stage holding window `id`.
@@ -3079,6 +3195,58 @@ fn minimize_sends_the_window_to_the_strip_and_keeps_the_view() {
     assert_eq!(e.m.window(w(1)).map(|x| x.restore), before, "its frame waits for its return");
     let obs = e.d.obs();
     assert!(e.m.minimize_to_strip(w(1), &obs).is_empty(), "a parked window is left alone");
+}
+
+/// Apple's, recorded 11-09: a minimized window's new card is the strip's top one, the other
+/// cards one slot down. In place (`[strip] order`) it takes its own place.
+#[test]
+fn a_minimized_windows_card_takes_the_top_slot() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::New);
+    e.add(meta(4, 12, "com.example.c"), RuleAction::Current);
+    let before = e.m.strip_slots(MAIN);
+    assert_eq!(before.len(), 2, "two cards: {before:?}");
+    let obs = e.d.obs();
+    let a = e.m.minimize_to_strip(w(4), &obs);
+    e.run(a);
+    let after = e.m.strip_slots(MAIN);
+    assert_eq!(Some(after[0]), e.m.stage_of(w(4)), "the new card on top: {after:?}");
+    assert_eq!(after[1..], before[..], "the others one slot down, in their order");
+
+    let mut options = ModelOptions::default();
+    options.strip.order = StripOrder::InPlace;
+    let mut e = Env::with(options);
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::Current);
+    let before = e.m.strip_slots(MAIN);
+    let obs = e.d.obs();
+    let a = e.m.minimize_to_strip(w(3), &obs);
+    e.run(a);
+    let after = e.m.strip_slots(MAIN);
+    assert_eq!(after[..before.len()], before[..], "in place: the cards keep their places");
+    assert_eq!(after.last().copied(), e.m.stage_of(w(3)), "the new stage's own place, last");
+}
+
+/// The windows a minimize is caught on before macOS's genie: shown standard stage members
+/// only, never a parked, pinned or child window.
+#[test]
+fn a_minimize_is_caught_on_shown_stage_windows_only() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::New);
+    let mut sheet = meta(4, 12, "com.example.c");
+    sheet.role = WindowRole::Child { parent: Some(w(3)) };
+    e.add(sheet, RuleAction::Current);
+    let obs = e.d.obs();
+    let a = e.m.toggle_pin(w(2), &obs);
+    e.run(a);
+    let mut ids: Vec<u32> = e.m.minimizable_windows().map(|w| w.0).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [3], "window 1 parked (its stage left), 2 pinned, 4 a sheet");
 }
 
 #[test]

@@ -124,7 +124,9 @@ use crate::ui::overlay::GlassLook;
 use crate::ui::app_icons;
 use crate::ui::card_glass;
 use crate::ui::display_options;
+use crate::ui::assistive;
 use crate::ui::strip_access;
+use crate::ui::strip_reach;
 use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Grip, Metrics};
 use crate::ui::strip_model::{self, CardChange, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
@@ -394,6 +396,8 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
     // Reduce Motion and Reduce Transparency: read now, followed live; the glass repaints.
     display_options::install(|| with_strips(Strip::display_options_changed));
+    // VoiceOver or Switch Control: the cards hit-testable where they rest while one is on.
+    assistive::install(|| with_strips(Strip::update_access));
     strip_model::set_presenter(|snapshot| {
         DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
@@ -600,8 +604,37 @@ fn snapshot_arrived(id: u32, picture: Picture) {
 
 /// A card's accessibility element was pressed (VoiceOver): the strip keyed `strip` sends what
 /// a click would, outside its borrow ([`strip_access::PressSink`]).
-fn access_pressed(strip: u32, stage: u64, pid: Option<i32>) {
-    if let Some(Some(e)) = with_strip_of(strip, |s| s.access_press(stage, pid)) {
+fn access_pressed(strip: u32, stage: u64, press: strip_access::Press) {
+    if let Some(Some(e)) = with_strip_of(strip, |s| s.access_press(stage, press)) {
+        strip_model::emit(e);
+    }
+}
+
+/// The pointer on a card's catching window ([`strip_reach`]): the strip keyed `strip` takes
+/// it as its own view would, emitting outside its borrow.
+fn reach_mouse(strip: u32, mouse: strip_reach::Mouse) {
+    use strip_reach::Mouse;
+    let event = with_strip_of(strip, |s| {
+        let local = |s: &Strip, p: NSPoint| {
+            let (g, at) = (s.geometry.global, s.geometry.global_point(p));
+            Point::new(at.x - g.x, at.y - g.y)
+        };
+        match mouse {
+            Mouse::Moved(p) => {
+                let at = local(s, p);
+                s.end_lost_drag();
+                s.hover_at(Some(at));
+                None
+            }
+            Mouse::Down(p) => s.mouse_down(local(s, p)),
+            Mouse::Dragged => {
+                s.mouse_dragged();
+                None
+            }
+            Mouse::Up(p, flags) => s.mouse_up(local(s, p), click_adds(flags)),
+        }
+    });
+    if let Some(Some(e)) = event {
         strip_model::emit(e);
     }
 }
@@ -658,7 +691,7 @@ define_class!(
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
             let p = self.local_point(event);
-            let shift = event.modifierFlags().contains(NSEventModifierFlags::Shift);
+            let shift = click_adds(event.modifierFlags());
             // Emit outside the borrow: the sink may call back into the strip.
             if let Some(Some(e)) = with_strip_of(self.strip(), |s| s.mouse_up(p, shift)) {
                 tracing::debug!(?e, "strip click");
@@ -976,12 +1009,12 @@ impl Geometry {
 /// the card draws them in their order, back to front, with the same transforms as before.
 struct Depth {
     /// Covers the panel, anchored at the eye; its `sublayerTransform` is the strip's slide
-    /// and the perspective ([`perspective`]), and a thumbnail depth's `transform` its window's
-    /// growth (hovered, pressed: [`Strip::window_transform`]).
+    /// and the perspective ([`perspective`]).
     space: Retained<CALayer>,
     /// The 3D group inside it: its `position` is the card's offset from where its content
     /// was built. Every depth of a card gets the same position and glide in the same
-    /// transaction, so the card moves as one unit.
+    /// transaction, so the card moves as one unit. A thumbnail depth's `transform` is its
+    /// window's growth (hovered, pressed: [`growth`]), which moves with it.
     unit: Retained<CATransformLayer>,
 }
 
@@ -1117,6 +1150,27 @@ fn scale_about(s: f64, c: Point, anchor: Point) -> CATransform3D {
     CATransform3D::new_translation(-dx, -dy, 0.0)
         .concat(CATransform3D::new_scale(s, s, 1.0))
         .concat(CATransform3D::new_translation(dx, dy, 0.0))
+}
+
+/// A thumbnail depth's growth by `s` (hovered, pressed): the window's plane, whose left
+/// edge's middle is at `at` (its unit's coordinates, as `fill_card` places it) and `w` wide
+/// before the turn, grown within its own plane about its middle, as Apple's card grows each
+/// window about its own middle. Set on the depth's unit, it moves with the card: dragged or
+/// gliding, the window stays on its icons (11-09: a growth about the slot's middle on the
+/// depth's container, its spring still running, drew a card dragged 250 pt down 27 pt off
+/// its icons). Drawn, it is the 2D growth about the projected middle the layout models
+/// ([`CardLayout::thumb_center`]) within half a point.
+fn growth(m: &Metrics, at: Point, w: f64, s: f64) -> CATransform3D {
+    if s == 1.0 {
+        return identity();
+    }
+    // The plane's middle: half its width along its turn from its left edge's middle.
+    let t = turn(m);
+    let half = w / 2.0;
+    let mid = [at.x + half * t.m11, at.y + half * t.m12, half * t.m13];
+    CATransform3D::new_translation(-mid[0], -mid[1], -mid[2])
+        .concat(CATransform3D::new_scale(s, s, s))
+        .concat(CATransform3D::new_translation(mid[0], mid[1], mid[2]))
 }
 
 /// A card container's `sublayerTransform`: slid `dx` in 3D, then the perspective.
@@ -1712,6 +1766,8 @@ struct Pane {
     built: Option<(Arc<StripStyle>, f64)>,
     /// Its cards for VoiceOver: one element each, children of its view.
     access: strip_access::Access,
+    /// A catching window under each card while an assistive app is on.
+    reach: strip_reach::Reach,
 }
 
 impl Pane {
@@ -1776,7 +1832,14 @@ impl Pane {
             geometry: None,
             built: None,
             access: strip_access::Access::default(),
+            reach: strip_reach::Reach::default(),
         }
+    }
+
+    /// Puts the panel at `level`, its cards' catching windows with it.
+    fn set_level(&self, level: isize) {
+        self.panel.setLevel(level);
+        self.reach.set_level(level);
     }
 
     /// Ordered in and on the Space shown now.
@@ -2153,9 +2216,10 @@ impl Strip {
         let resting = self.style.level == StripLevel::AboveWindows;
         if self.pane.lifted.is_some_and(|l| l != resting) {
             // Only the level: ordering it in now could take it to another Space.
-            self.pane.panel.setLevel(if resting { NSFloatingWindowLevel } else { BELOW_WINDOWS });
+            self.pane.set_level(if resting { NSFloatingWindowLevel } else { BELOW_WINDOWS });
             self.pane.lifted = Some(resting);
         }
+        self.pane.reach.clear(&self.pane.panel);
     }
 
     /// Makes the pane of the Desktop shown the active one: the pane on it already, else one
@@ -2450,19 +2514,28 @@ impl Strip {
                 _ => to_global(layer.convertRect_toLayer(b, Some(root))),
             }
         };
+        // Points of a plane (its bounds coordinates) where they are drawn, global.
+        let drawn_points = |layer: &CALayer, points: &[CGPoint]| -> Vec<Point> {
+            points
+                .iter()
+                .map(|&p| {
+                    let q = match (drawn(layer), root_drawn.as_deref()) {
+                        (Some(l), Some(r)) => l.convertPoint_toLayer(p, Some(r)),
+                        _ => layer.convertPoint_toLayer(p, Some(root)),
+                    };
+                    Point::new(g.x + q.x, g.y + q.y)
+                })
+                .collect()
+        };
+        // A plane's four corners from the top left, clockwise, and its size before the turn.
+        let corners = |layer: &CALayer| {
+            let b = layer.bounds().size;
+            let ends = [CGPoint::new(0.0, 0.0), CGPoint::new(b.width, 0.0), CGPoint::new(b.width, b.height), CGPoint::new(0.0, b.height)];
+            (drawn_points(layer, &ends), Size::new(b.width, b.height))
+        };
         // A plane's left edge (its turn's axis, at depth 0: no perspective moves it), top and
         // bottom, global.
-        let left_edge = |layer: &CALayer| {
-            let b = layer.bounds();
-            let ends = [CGPoint::new(0.0, 0.0), CGPoint::new(0.0, b.size.height)];
-            ends.map(|p| {
-                let q = match (drawn(layer), root_drawn.as_deref()) {
-                    (Some(l), Some(r)) => l.convertPoint_toLayer(p, Some(r)),
-                    _ => layer.convertPoint_toLayer(p, Some(root)),
-                };
-                Point::new(g.x + q.x, g.y + q.y)
-            })
-        };
+        let left_edge = |layer: &CALayer| drawn_points(layer, &[CGPoint::new(0.0, 0.0), CGPoint::new(0.0, layer.bounds().size.height)]);
         // Which window's picture an image layer holds (its contents are that picture's image).
         let shows = |image: &CALayer| -> Option<u32> {
             // SAFETY: reading a layer's contents, set only to CGImages here.
@@ -2478,6 +2551,7 @@ impl Strip {
                 let l = self.pane.cards.get(&c.stage)?;
                 let front = l.planes.last().map(|(_, p)| in_root(p));
                 let edge = l.planes.last().map(|(_, p)| left_edge(p));
+                let quad = l.planes.last().map(|(_, p)| corners(p));
                 let icons: Vec<Rect> = l.icons.iter().map(|x| in_root(x)).collect();
                 // Each window's plane and where its picture is drawn (past the plane where
                 // child windows stick out).
@@ -2501,6 +2575,9 @@ impl Strip {
                     "opacity": l.card.opacity(),
                     "thumb": front,
                     "thumb_left_edge": edge,
+                    // The front window's plane as drawn, and its size before the turn.
+                    "thumb_corners": quad.as_ref().map(|(q, _)| q.clone()),
+                    "thumb_size": quad.as_ref().map(|(_, s)| *s),
                     "icons": icons,
                     "planes": planes,
                 }))
@@ -2575,44 +2652,56 @@ impl Strip {
             }
             let m = self.m();
             let frames: Vec<(u64, Rect)> = self.layouts.iter().filter(|l| !placeholder(l.stage)).map(|l| (l.stage, l.bounds(m))).collect();
-            strip_access::items(&cards, &frames, |pid| self.app_names.get(&pid).cloned().flatten())
+            let p = self.pane.panel.frame();
+            let panel = Rect::new(p.origin.x, p.origin.y, p.size.width, p.size.height);
+            strip_access::items(&cards, &frames, panel, |pid| self.app_names.get(&pid).cloned().flatten())
         } else {
             Vec::new()
         };
+        let frames: Vec<(u64, Rect)> = items.iter().map(|i| (i.stage, i.frame)).collect();
         self.pane.access.update(&self.pane.view, self.display, items, access_pressed);
+        self.update_reach(&frames);
     }
 
-    /// VoiceOver pressed `stage`'s card (`pid`: its action for that app): the event a click
-    /// on it (or on that app's icon) sends, when the card can be pressed now.
-    fn access_press(&mut self, stage: u64, pid: Option<i32>) -> Option<StripEvent> {
+    /// Puts a catching window under each listed card (`frames`: Cocoa screen coordinates)
+    /// while an assistive app is on and the strip shows, so a hit test there finds the card
+    /// whatever the pointer does ([`strip_reach`]); none otherwise.
+    fn update_reach(&mut self, frames: &[(u64, Rect)]) {
+        let on = assistive::on() && self.pane.shown && self.pane.panel.isVisible();
+        let wanted = strip_reach::targets(on, frames)
+            .into_iter()
+            .filter_map(|(stage, frame)| Some((stage, frame, self.pane.access.element(stage)?.clone())))
+            .collect();
+        self.pane.reach.update(self.mtm, &self.pane.panel, self.display, wanted, reach_mouse);
+    }
+
+    /// VoiceOver pressed `stage`'s card, or asked one of its actions: the event the click it
+    /// stands for sends ([`strip_access::event_for`]), when the card can be pressed now.
+    fn access_press(&mut self, stage: u64, press: strip_access::Press) -> Option<StripEvent> {
         if !self.pane.shown || placeholder(stage) || self.motion.holds(stage) || !self.layouts.iter().any(|l| l.stage == stage) {
             return None;
         }
         self.prefetch(Some(stage));
-        tracing::debug!(stage, ?pid, "strip card pressed through accessibility");
-        Some(match pid {
-            Some(pid) => StripEvent::IconClicked { stage, pid },
-            None => StripEvent::CardClicked { stage, shift: false },
-        })
+        tracing::debug!(stage, ?press, "strip card pressed through accessibility");
+        Some(strip_access::event_for(stage, press))
     }
 
-    /// The transform of the depth of window `id` on the card at `layout` (its container is
-    /// anchored at the eye): a scale by [`Strip::card_scale`] about that window's own middle
-    /// ([`CardLayout::thumb_center`]), as Apple's card grows each of its windows, the offsets
-    /// between them kept; the icons, badge and name (the top depth) stay as they are.
-    fn window_transform(&self, layout: &CardLayout, id: u32) -> CATransform3D {
-        let s = self.card_scale(layout.stage);
+    /// Each thumbnail depth's unit transform on `stage`'s card, back to front as its depths:
+    /// a scale by [`Strip::card_scale`] of each window about its own middle ([`growth`]), as
+    /// Apple's card grows each of its windows, the offsets between them kept; the icons,
+    /// badge and name (the top depth) stay as they are.
+    fn depth_transforms(&self, stage: u64) -> Vec<CATransform3D> {
+        let s = self.card_scale(stage);
         let m = self.m();
-        match layout.thumbs.iter().position(|t| t.id == id).and_then(|i| layout.thumb_center(m, i)) {
-            Some(c) if s != 1.0 => scale_about(s, c, m.eye),
-            _ => identity(),
-        }
-    }
-
-    /// Each thumbnail depth's transform on `stage`'s card at `layout` ([`Strip::window_transform`]),
-    /// back to front as its depths.
-    fn depth_transforms(&self, stage: u64, layout: &CardLayout) -> Vec<CATransform3D> {
-        self.pane.cards.get(&stage).map_or_else(Vec::new, |l| l.planes.iter().map(|(id, _)| self.window_transform(layout, *id)).collect())
+        self.pane.cards.get(&stage).map_or_else(Vec::new, |l| {
+            l.planes
+                .iter()
+                .map(|(_, plane)| {
+                    let at = plane.position();
+                    growth(m, Point::new(at.x, at.y), plane.bounds().size.width, s)
+                })
+                .collect()
+        })
     }
 
     /// Where a card's unit sits: its content was built for the card at `built`, and the card
@@ -2677,18 +2766,17 @@ impl Strip {
                 (true, false)
             }
         };
-        // Where the card's content is drawn now (panel coordinates, before its hover scale)
-        // and the middle its hover scale is about: read once, before anything changes, so a
-        // rebuild glides on from there (re-reading the presentation layer after the model
-        // changed in this transaction gave a start relative to the old build: round 9C).
-        let m = self.m().clone();
-        let (drawn, old_center) = match self.pane.cards.get(&card.stage) {
+        // Where the card's content is drawn now (panel coordinates): read once, before
+        // anything changes, so a rebuild glides on from there (re-reading the presentation
+        // layer after the model changed in this transaction gave a start relative to the old
+        // build: round 9C).
+        let drawn = match self.pane.cards.get(&card.stage) {
             Some(l) => {
                 // SAFETY: presentationLayer returns a copy of the drawn state or nil.
                 let at = unsafe { l.top.unit.presentationLayer() }.map_or_else(|| l.top.unit.position(), |p| p.position());
-                (Point::new(l.built.x + at.x, l.built.y + at.y), l.layout.hover_center(&m))
+                Point::new(l.built.x + at.x, l.built.y + at.y)
             }
-            None => (Point::new(layout.frame.x, layout.frame.y), layout.hover_center(&m)),
+            None => Point::new(layout.frame.x, layout.frame.y),
         };
         if rebuild {
             self.fill_card(card.stage, layout, card);
@@ -2709,21 +2797,21 @@ impl Strip {
         let swap = glide.is_some() && self.reduced() && !self.motion.holds(card.stage);
         let glide = glide.filter(|_| !swap);
         let swap_fade = self.reduced_fade();
-        let grown = self.depth_transforms(card.stage, layout);
-        let scale = self.card_scale(card.stage);
+        let grown = self.depth_transforms(card.stage);
         if let Some(layers) = self.pane.cards.get_mut(&card.stage) {
-            // The whole card glides to its new place as one unit, from where it is drawn: its
-            // hover scale is about its slot's middle, so the start is put where the scale
-            // about the new slot draws it as now (a dropped card never jumps past its slot).
+            // The whole card glides to its new place as one unit, from where it is drawn: each
+            // window's growth rides on its unit ([`growth`]), so the windows and the icons
+            // go together and a dropped card never jumps.
             let to = Self::unit_offset(layout, layers.built);
-            let now = Point::new(drawn.x - layers.built.x, drawn.y - layers.built.y);
-            let from = motion_math::rescaled_start(now, scale, old_center, layout.hover_center(&m));
-            layers.move_units(glide, CGPoint::new(from.x, from.y), to);
+            let from = CGPoint::new(drawn.x - layers.built.x, drawn.y - layers.built.y);
+            layers.move_units(glide, from, to);
             if swap && ((from.x - to.x).abs() >= 0.25 || (from.y - to.y).abs() >= 0.25) {
                 fade_in(&layers.card, swap_fade);
             }
+            // The size only: a growth under way (its spring is about the same middle, in the
+            // unit) runs on to it.
             for (d, t) in layers.depths.iter().zip(grown) {
-                d.space.setTransform(t);
+                d.unit.setTransform(t);
             }
             layers.snapshot = card.clone();
             layers.layout = layout.clone();
@@ -3776,11 +3864,13 @@ impl Strip {
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for stage in stages.into_iter().flatten() {
-            let Some(layout) = self.layouts.iter().find(|l| l.stage == stage).cloned() else { continue };
-            let grown = self.depth_transforms(stage, &layout);
+            if !self.layouts.iter().any(|l| l.stage == stage) {
+                continue;
+            }
+            let grown = self.depth_transforms(stage);
             if let Some(layers) = self.pane.cards.get(&stage) {
                 for (d, t) in layers.depths.iter().zip(grown) {
-                    ease_transform(&d.space, t, e);
+                    ease_transform(&d.unit, t, e);
                 }
             }
         }
@@ -3949,7 +4039,7 @@ impl Strip {
             return;
         }
         self.pane.lifted = Some(lift);
-        self.pane.panel.setLevel(if lift { NSFloatingWindowLevel } else { BELOW_WINDOWS });
+        self.pane.set_level(if lift { NSFloatingWindowLevel } else { BELOW_WINDOWS });
         // Only a pane already on its Desktop: a first order-in decides the Desktop it lives on.
         if lift && self.pane.placed && !self.snapshot.fullscreen {
             self.pane.panel.orderFrontRegardless();
@@ -4041,9 +4131,26 @@ fn slide_card_starts(mut starts: Starts, dx: f64) -> Starts {
     starts
 }
 
+/// True when a click on a card with `flags` held is a Shift-click (the card's front window
+/// joins the current stage, [`StripEvent::CardClicked`]'s `shift`). Option is no modifier
+/// here: an Option-click is a plain click, as on Apple's (checked 11-09: no app hidden).
+fn click_adds(flags: NSEventModifierFlags) -> bool {
+    flags.contains(NSEventModifierFlags::Shift)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Apple's, checked 11-09: an Option-click on a card is a plain click (no app hidden, no
+    /// window added); only Shift makes a click add the card's front window.
+    #[test]
+    fn an_option_click_on_a_card_is_a_plain_click() {
+        assert!(!click_adds(NSEventModifierFlags::Option));
+        assert!(!click_adds(NSEventModifierFlags::empty()));
+        assert!(click_adds(NSEventModifierFlags::Shift));
+        assert!(click_adds(NSEventModifierFlags::Shift | NSEventModifierFlags::Option));
+    }
 
     /// Owner 11-09: a card drawn before its picture arrives is faint, never the dark plate: the
     /// glass's under at `empty_opacity`, or with no under black darkening the wallpaper as
@@ -4164,5 +4271,85 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Where the point `p` of the plane whose left edge's middle is at `at` (its unit's
+    /// coordinates) is drawn with its unit's transform `unit` and the unit at `offset`.
+    fn drawn_in_unit(m: &Metrics, at: Point, size: Size, p: Point, unit: &CATransform3D, offset: Point) -> Point {
+        let turned = apply(&turn(m), [p.x, p.y - size.h / 2.0, 0.0]);
+        let g = apply(unit, [at.x + turned[0], at.y + turned[1], turned[2]]);
+        let q = apply(&perspective(m, 0.0), [offset.x + g[0] - m.eye.x, offset.y + g[1] - m.eye.y, g[2]]);
+        Point::new(m.eye.x + q[0] / q[3], m.eye.y + q[1] / q[3])
+    }
+
+    /// The icon at `icon` against its window drawn as the quad `q` (corners from the top
+    /// left, clockwise) whose left edge is `h` long before the turn, as the live suite reads
+    /// it: the growth's fixed point is where the quad's diagonals cross (the plane's middle),
+    /// the scale the left edge's length over `h`, and the icon is measured from the left
+    /// edge's bottom end put back at rest size.
+    fn icon_against_window(q: &[Point; 4], icon: Point, h: f64) -> Point {
+        let (a, r) = (q[0], Point::new(q[2].x - q[0].x, q[2].y - q[0].y));
+        let (c, t) = (q[1], Point::new(q[3].x - q[1].x, q[3].y - q[1].y));
+        let u = ((c.x - a.x) * t.y - (c.y - a.y) * t.x) / (r.x * t.y - r.y * t.x);
+        let mid = Point::new(a.x + u * r.x, a.y + u * r.y);
+        let s = (q[3].x - q[0].x).hypot(q[3].y - q[0].y) / h;
+        Point::new(icon.x - (mid.x + (q[3].x - mid.x) / s), icon.y - (mid.y + (q[3].y - mid.y) / s))
+    }
+
+    /// The 1.8.x live suite (11-09, "a card dragged down passes over the others whole"): a
+    /// card dragged 250 pt down while its growth from the press back to the hover size still
+    /// ran was drawn 27-29 pt off its icons. The growth was about the window's middle at its
+    /// slot, on the depth's container, while the card moved in its unit. Now each window
+    /// grows about its own middle in its unit ([`growth`]): wherever the card is drawn,
+    /// pressed or hovered, its windows stay on its icons, and the growth is the one the layout
+    /// models (2D, about the projected middle) within half a point.
+    #[test]
+    fn a_dragged_card_grows_about_its_own_middle_wherever_it_is_drawn() {
+        use crate::ui::strip_model::CardWindow;
+        let m = Metrics::new(&StripStyle::default(), Size::new(2560.0, 1410.0), 1.0, 720.0 - 30.0);
+        let card = |stage: u64| CardSnapshot {
+            stage,
+            windows: vec![CardWindow { id: stage as u32, pid: 1, frame: Rect::new(20.0, 58.0, 700.0, 432.0) }],
+            apps: vec![1],
+            ..Default::default()
+        };
+        let cards: Vec<CardSnapshot> = (1..=6).map(card).collect();
+        let l = strip_layout::layout_column(&cards, 1410.0, &m).remove(0);
+        let t = &l.thumbs[0];
+        let size = Size::new(t.rect.w, t.rect.h);
+        let at = Point::new(l.frame.x + t.rect.x, l.frame.y + t.rect.y + t.rect.h / 2.0);
+        let corners = [Point::new(0.0, 0.0), Point::new(size.w, 0.0), Point::new(size.w, size.h), Point::new(0.0, size.h)];
+        let (_, icon) = l.icons[0];
+        let press = StripStyle::default().cards.press_scale;
+        let mut seen = Vec::new();
+        let mut before = Vec::new();
+        for s in [press, 1.0, m.hover_scale] {
+            for dy in [0.0, 120.0, 250.0] {
+                let offset = Point::new(0.0, dy);
+                let icon_at = Point::new(l.frame.x + icon.x, l.frame.y + icon.y + dy);
+                let q = corners.map(|c| drawn_in_unit(&m, at, size, c, &growth(&m, at, size.w, s), offset));
+                seen.push(icon_against_window(&q, icon_at, size.h));
+                // As the layout models it: the window at rest where the card is, grown about
+                // its projected middle there.
+                let b = m.projected_bounds(at.x, at.y - size.h / 2.0 + dy, size.w, size.h);
+                let c = Point::new(b.x + b.w / 2.0, b.y + b.h / 2.0);
+                for (k, corner) in corners.iter().enumerate() {
+                    let rest = drawn_in_unit(&m, at, size, *corner, &identity(), offset);
+                    let want = Point::new(c.x + s * (rest.x - c.x), c.y + s * (rest.y - c.y));
+                    assert!((q[k].x - want.x).abs() < 0.5 && (q[k].y - want.y).abs() < 0.5, "{s} at {dy}: {:?} vs {want:?}", q[k]);
+                }
+                // 1.8.0's: the growth about the window's middle at its slot, the card moved.
+                let slot = l.thumb_center(&m, 0).unwrap_or(c);
+                let old = corners.map(|corner| {
+                    let rest = drawn_in_unit(&m, at, size, corner, &identity(), offset);
+                    Point::new(slot.x + s * (rest.x - slot.x), slot.y + s * (rest.y - slot.y))
+                });
+                before.push(icon_against_window(&old, icon_at, size.h));
+            }
+        }
+        let drift = |v: &[Point]| v.iter().map(|p| (p.x - v[0].x).abs().max((p.y - v[0].y).abs())).fold(0.0, f64::max);
+        assert!(drift(&seen) < 1e-6, "the icon on its window: {seen:?}");
+        let old = drift(&before);
+        assert!((25.0..30.0).contains(&old), "1.8.0's growth drew it {old:.2} pt off its icons");
     }
 }

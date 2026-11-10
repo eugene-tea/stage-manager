@@ -99,6 +99,7 @@ use serde_json::{Value, json};
 use super::ax::{AxElement, AxError};
 use super::ctl::Command;
 use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
+use super::minimize_tap::MinimizeAsk;
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
@@ -117,6 +118,7 @@ use crate::engine::stale_activation;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::minimize;
+use crate::engine::minimize_press::Minimizable;
 use crate::engine::park::{Corner, ParkRequest, choose_corner};
 use crate::engine::recovery::{self, Known};
 use crate::engine::sliver;
@@ -137,7 +139,7 @@ use crate::engine::save_clock::SaveClock;
 use crate::engine::settings::{NativeSettings, PrefValue};
 use crate::logbook::counters::{self, Count};
 use crate::ui::strip_model::{self, CardSnapshot, CardWindow, Minimized, StripDrop, StripEvent, StripSnapshot, Transition};
-use crate::ui::{motion_math, transition_plan};
+use crate::ui::{assistive, motion_math, transition_plan};
 
 mod arrival;
 mod ax_blind;
@@ -2316,6 +2318,7 @@ impl Controller {
             self.settle_raise_order(ob, &raises, focus, now);
         }
         self.publish_shield();
+        self.publish_minimizable(ob);
         self.update_patch();
         self.remember();
         if changed {
@@ -3597,6 +3600,7 @@ impl Controller {
             }
             WinEvent::Moved(id) => {
                 self.maybe_start_drag(ob, id, now);
+                self.publish_minimizable(ob);
                 let frame = ob.window(id).map(|w| w.frame);
                 let ours = self.echoes.is_window_echo(id, now);
                 if !ours
@@ -3637,9 +3641,14 @@ impl Controller {
                 {
                     // A window titled late (an Electron app's) may be a saved one after all.
                     let actions = m.window_retitled(WindowId(id));
+                    // VoiceOver reads a card by its front window's title (as Apple's): a card's
+                    // front window retitled is presented again while an assistive app listens.
+                    let fronts_card = assistive::on() && fronts_a_card(m, WindowId(id));
                     self.mark_dirty();
                     if !actions.is_empty() {
                         self.execute(ob, actions);
+                        self.present();
+                    } else if fronts_card {
                         self.present();
                     }
                 }
@@ -3775,9 +3784,14 @@ impl Controller {
             }
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
             WinEvent::Deminiaturized(id) => self.on_deminiaturized(ob, id),
+            WinEvent::AppHidden(pid) => self.on_app_hidden(ob, pid),
+            WinEvent::AppUnhidden(pid) => self.on_app_unhidden(ob, pid),
             // Logged by the observer; a running switch's windows came first (above).
-            WinEvent::AppHidden(_) | WinEvent::AppUnhidden(_) | WinEvent::AppTookActivation(_) => {}
+            WinEvent::AppTookActivation(_) => {}
             WinEvent::AppTerminated(pid) => {
+                if let Some(m) = self.model.as_mut() {
+                    m.forget_hidden_app(pid);
+                }
                 // Its icon leaves the Dock unless pinned: the strip may follow.
                 self.dock_order.soon(now);
                 self.keep_quit_windows(pid, now);
@@ -4026,6 +4040,77 @@ impl Controller {
         }
     }
 
+    /// A minimize the minimize tap caught before macOS's genie (the yellow button, ⌘M;
+    /// [`super::minimize_tap`]): with `[windows] minimize_to_strip` the window goes straight
+    /// to the strip, as Apple's (recorded 11-09): it leaves as a stage does in a switch, its
+    /// picture flying from its frame into a new card at the top of the strip, the other cards
+    /// one slot down; under Reduce Motion it fades out where it is while its card fades in.
+    /// It never goes into the Dock. When it cannot go now (the setting off, no stage change
+    /// possible, a window no longer shown in its stage) it is minimized as macOS would: the
+    /// tap swallowed the person's minimize, so it is never lost.
+    pub fn minimize_direct(&mut self, ob: &mut Observer, ask: MinimizeAsk) {
+        let id = ask.window;
+        let waited_ms = ask.at.elapsed().as_millis() as u64;
+        let Some(m) = self.model.as_ref() else { return ask.as_macos("not managing windows") };
+        let Some(w) = m.window(WindowId(id)) else { return ask.as_macos("not a managed window") };
+        if w.parked {
+            tracing::debug!(id, by = ask.by.name(), "a caught minimize of a window already parked: nothing");
+            return;
+        }
+        let display = w.meta.display;
+        let why = if !self.store.config().windows.minimize_to_strip {
+            Some("[windows] minimize_to_strip is off")
+        } else if let Some(why) = self.frozen_reason() {
+            Some(why)
+        } else if self.fullscreen_on(display) {
+            Some("a full-screen app's Space shows on its screen")
+        } else if self.overview.showing().is_some() {
+            Some("Mission Control, App Expose or Show Desktop shows")
+        } else if !m.minimizable_windows().any(|w| w.0 == id) {
+            Some("not a window shown in its stage")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            return ask.as_macos(why);
+        }
+        self.end_restore(ob, "a minimize", End::User);
+        let obs = self.observe(ob);
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.minimize_to_strip(WindowId(id), &obs);
+        if actions.is_empty() {
+            return ask.as_macos("the stage model kept it");
+        }
+        tracing::info!(id, by = ask.by.name(), waited_ms, "window minimized: straight to the strip, no genie (caught before macOS)");
+        self.minimizing = None;
+        self.execute_animated(ob, actions);
+    }
+
+    /// Tells the minimize tap ([`super::minimize_tap`]) which windows a minimize is caught on,
+    /// with their tracked frames: the model's shown stage windows
+    /// ([`Model::minimizable_windows`]), none held behind a transition's snapshots or on a
+    /// screen showing a full-screen app; none at all with `[windows] minimize_to_strip` off,
+    /// no stage change possible or an overview showing. Cheap (no Accessibility call); after
+    /// every batch, every move and every tick.
+    fn publish_minimizable(&self, ob: &Observer) {
+        let Some(m) = &self.model else {
+            super::minimize_tap::publish(Minimizable::default());
+            return;
+        };
+        let on = self.store.config().windows.minimize_to_strip && !self.frozen() && self.overview.showing().is_none();
+        let windows = if on {
+            m.minimizable_windows()
+                .filter(|id| self.pending.as_ref().is_none_or(|p| !p.entries.contains_key(&id.0)))
+                .filter(|id| m.window(*id).is_some_and(|w| !self.fullscreen_on(w.meta.display)))
+                .filter_map(|id| ob.window(id.0).map(|w| (id.0, w.frame)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        let dock = self.dock_bar.as_ref().map(|(_, b)| b.clone()).unwrap_or_default();
+        super::minimize_tap::publish(Minimizable { on, windows, dock });
+    }
+
     /// A window un-minimized on its way to the strip ([`Self::on_minimized`]) is down: AppKit
     /// has set it where it keeps a title bar on screen (from beyond the Dock's edge, in the park
     /// corner, or at that edge for a side Dock). It is parked again now, before the reconcile's
@@ -4066,6 +4151,34 @@ impl Controller {
                 })
             })
         })
+    }
+
+    /// An app was hidden (⌘H, Hide Others, the app itself; Apple's, measured 11-09): its
+    /// windows leave the cards, a stage of its alone leaves the strip, and when that stage
+    /// was in front the most recent stage comes in front ([`Model::app_hidden`]). The hidden
+    /// windows are parked first, unanimated: macOS has taken them off the screen already, so
+    /// there is nothing to shrink into a card; the stage coming in front grows as on a click.
+    fn on_app_hidden(&mut self, ob: &mut Observer, pid: i32) {
+        let obs = self.observe(ob);
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.app_hidden(pid, &obs);
+        let switched = actions.iter().any(|a| matches!(a, Action::SetFrame { .. }));
+        tracing::info!(pid, switched, "app hidden: its windows leave the strip; the most recent stage comes in front if it was in front");
+        let hidden = |id: WindowId| m.window(id).is_some_and(|w| w.meta.pid == pid);
+        let (quiet, rest): (Vec<Action>, Vec<Action>) =
+            actions.into_iter().partition(|a| matches!(a, Action::Park { id, .. } if hidden(*id)));
+        self.execute(ob, quiet);
+        self.execute_animated(ob, rest);
+    }
+
+    /// An app was unhidden: a stage of its that left the strip comes back as a card in the
+    /// slot it left, not in front ([`Model::app_unhidden`]); an activation with it (⌘-Tab, a
+    /// Dock click) switches as any activation does, on its own event.
+    fn on_app_unhidden(&mut self, ob: &Observer, pid: i32) {
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.app_unhidden(pid);
+        tracing::info!(pid, "app unhidden: its stage's card is back in the strip");
+        self.execute(ob, actions);
     }
 
     /// The Shift sugar for an activation that would switch stages: when Shift was held (not
@@ -6144,7 +6257,7 @@ impl Controller {
                 counters::bump(Count::CardClick);
                 tracing::info!(stage, number = m.stage_number(StageId(stage)), shift, "card clicked");
                 refused = m.switch_refused(StageId(stage)).filter(|r| *r != SwitchRefused::InFront).map(|r| (stage, r));
-                if shift { m.merge_into_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
+                if shift { m.add_card_front_to_active(StageId(stage), &obs) } else { m.switch_to(StageId(stage), &obs) }
             }
             StripEvent::CardDropped { stage, window, x, y } if drop_to.is_some_and(|d| m.stage(StageId(stage)).is_some_and(|s| s.display != d)) => {
                 counters::bump(Count::Drop);
@@ -6365,6 +6478,7 @@ impl Controller {
     /// Housekeeping, about every 250 ms: debounced save, config polling, strip refresh.
     pub fn tick(&mut self, ob: &mut Observer) {
         let now = Instant::now();
+        self.publish_minimizable(ob);
         if let Some(s) = self.phase.switching().filter(|s| s.overdue(now)) {
             tracing::warn!(id = s.id, max_ms = s.max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
             self.flush_pending(ob);
@@ -6706,6 +6820,15 @@ impl Controller {
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
             }
+            Command::DebugMinimizeButton { id } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-minimize-button needs STAGE_MANAGER_TEST=1" });
+                }
+                match test_window(ob, id, "debug-minimize-button").and_then(|e| e.minimize_button().and_then(|b| b.frame()).map_err(|e| e.to_string())) {
+                    Ok(r) => json!({ "ok": true, "frame": { "x": r.x, "y": r.y, "w": r.w, "h": r.h } }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            }
             Command::DebugStaleHandle { id } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-stale-handle needs STAGE_MANAGER_TEST=1" });
@@ -6789,6 +6912,7 @@ impl Controller {
             }
             Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
             | Command::DebugHover { .. }
+            | Command::DebugPointerBack
             | Command::DebugDrag { .. }
             | Command::DebugDesktop { .. }
             | Command::DebugStrip
@@ -6797,6 +6921,7 @@ impl Controller {
             | Command::DebugGlass { .. }
             | Command::DebugStripHover { .. }
             | Command::DebugSpace { .. }
+            | Command::DebugCmdM
             | Command::DebugExpose { .. } => {
                 json!({ "ok": false, "error": "not a WM command" })
             }
@@ -7086,6 +7211,15 @@ fn listed_bounds(list: &[windows::CgWindow]) -> Vec<(u32, Rect)> {
     list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect()
 }
 
+/// True when `id` is the front window of a stage in the strip (a parked one's): the window a
+/// card's accessibility label reads.
+fn fronts_a_card(m: &Model, id: WindowId) -> bool {
+    m.window(id).is_some_and(|w| match w.home {
+        Home::Stage(s) => w.parked && m.stage(s).is_some_and(|s| s.windows.first() == Some(&id)),
+        _ => false,
+    })
+}
+
 /// The strip's cards of `space`, in slot order.
 fn cards_in(m: &Model, space: SpaceId) -> Vec<CardSnapshot> {
     m.strip_in(space)
@@ -7093,6 +7227,7 @@ fn cards_in(m: &Model, space: SpaceId) -> Vec<CardSnapshot> {
         .map(|c| CardSnapshot {
             stage: c.stage.0,
             number: c.number,
+            title: c.windows.first().and_then(|id| m.window(*id)).map(|w| w.meta.title.clone()).unwrap_or_default(),
             name: c.name,
             windows: c
                 .windows

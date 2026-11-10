@@ -17,7 +17,8 @@
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen, `debug-close ID` closes one (its close button), `debug-stale-handle ID` takes our handle on one
+//! screen, `debug-close ID` closes one (its close button), `debug-minimize-button ID` gives its
+//! minimize button's frame, `debug-cmd-m` types ⌘M while one is frontmost, `debug-stale-handle ID` takes our handle on one
 //! for dead until it is looked up afresh (round stale-handles), `debug-expose
 //! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
 //! Escape, to leave it), `debug-toggle-strip` shows or hides the strip, `debug-strip` tells what the strip draws this frame (cards in slot
@@ -29,7 +30,8 @@
 //! the strip pane's mean colour in a region, read back from its own window (the cards' glass
 //! checked against its model, which `debug-strip` gives per plane); `debug-strip-hover X Y |
 //! leave` hands the strip's own view a mouse-moved (or mouse-exited) event there, the pointer
-//! never moving (a hovered card's glass). `space` (any
+//! never moving (a hovered card's glass), and `debug-pointer-back` puts the pointer back where
+//! it was before a `debug-hover` moved it, with no click. `space` (any
 //! time) is the Space shown as the engine sees it.
 //!
 //! **Who may ask** ([`Peer`]): the socket is created owner-only (`0600`, under a umask, so
@@ -128,6 +130,10 @@ pub enum Command {
         /// How long to rest there, in milliseconds.
         ms: u64,
     },
+    /// Puts the pointer back where it was before a `DebugHover` moved it, with no click
+    /// (needs `STAGE_MANAGER_TEST=1`): a check that ends on a hover leaves the owner's pointer
+    /// where he had it.
+    DebugPointerBack,
     /// A synthetic left-button drag through global points, posted only when every point is
     /// over our own windows or a `STAGE_MANAGER_ONLY` app's (needs `STAGE_MANAGER_TEST=1`).
     DebugDrag {
@@ -205,6 +211,16 @@ pub enum Command {
         /// The window id.
         id: u32,
     },
+    /// The frame of a `STAGE_MANAGER_ONLY` app's window's minimize button, read through
+    /// Accessibility (needs `STAGE_MANAGER_TEST=1`): where `debug-click` presses the yellow
+    /// button.
+    DebugMinimizeButton {
+        /// The window id.
+        id: u32,
+    },
+    /// Types ⌘M at the HID tap, only while a `STAGE_MANAGER_ONLY` app is frontmost (needs
+    /// `STAGE_MANAGER_TEST=1`).
+    DebugCmdM,
     /// Takes our Accessibility handle on a `STAGE_MANAGER_ONLY` app's window for dead
     /// (`kAXErrorInvalidUIElement`) until it is looked up afresh, as Music's was on 11-04
     /// (round stale-handles); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
@@ -311,6 +327,7 @@ impl Command {
                 let ms = ms.parse::<u64>().map_err(|_| format!("expected milliseconds, got {ms:?}"))?;
                 Ok(Self::DebugHover { x: coord(x)?, y: coord(y)?, ms })
             }
+            ["debug-pointer-back"] => Ok(Self::DebugPointerBack),
             ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
                 Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty() })
@@ -374,6 +391,11 @@ impl Command {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
             }
+            ["debug-minimize-button", id] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                Ok(Self::DebugMinimizeButton { id })
+            }
+            ["debug-cmd-m"] => Ok(Self::DebugCmdM),
             ["debug-stale-handle", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugStaleHandle { id })
@@ -711,8 +733,14 @@ pub fn run_client(words: &[String]) -> ExitCode {
         );
         return ExitCode::from(2);
     }
-    // A Desktop switch waits for the Space change (up to SPACE_WAIT) before it answers.
-    let timeout = if words[0] == "debug-space" { SPACE_WAIT + Duration::from_secs(5) } else { Duration::from_secs(5) };
+    // A Desktop switch waits for the Space change (up to SPACE_WAIT) before it answers; a
+    // scripted drag answers once it has run its whole path, which grows with its points (the
+    // capture phase's drag past the column and back four times took 5.4 s on 11-09).
+    let timeout = match words[0].as_str() {
+        "debug-space" => SPACE_WAIT + Duration::from_secs(5),
+        "debug-drag" => Duration::from_secs(30),
+        _ => Duration::from_secs(5),
+    };
     match request(&words.join(" "), timeout) {
         Ok(reply) => {
             println!("{reply}");
@@ -828,6 +856,7 @@ mod tests {
         assert!(Command::parse("debug-strip-hover 80").is_err());
         assert_eq!(Command::parse("debug-hover 1 720 400"), Ok(Command::DebugHover { x: 1.0, y: 720.0, ms: 400 }));
         assert!(Command::parse("debug-hover 1 720").is_err());
+        assert_eq!(Command::parse("debug-pointer-back"), Ok(Command::DebugPointerBack));
         assert_eq!(
             Command::parse("debug-drag 1 2 3 4 shift"),
             Ok(Command::DebugDrag { points: vec![Point::new(1.0, 2.0), Point::new(3.0, 4.0)], shift: true, hold_ms: 400 })
@@ -868,6 +897,8 @@ mod tests {
         assert_eq!(Command::parse("debug-fullscreen 42 on"), Ok(Command::DebugFullscreen { id: 42, on: true }));
         assert_eq!(Command::parse("debug-fullscreen 42 off"), Ok(Command::DebugFullscreen { id: 42, on: false }));
         assert_eq!(Command::parse("debug-close 42"), Ok(Command::DebugClose { id: 42 }));
+        assert_eq!(Command::parse("debug-minimize-button 42"), Ok(Command::DebugMinimizeButton { id: 42 }));
+        assert_eq!(Command::parse("debug-cmd-m"), Ok(Command::DebugCmdM));
         assert!(Command::parse("debug-close").is_err());
         assert_eq!(Command::parse("debug-stale-handle 42"), Ok(Command::DebugStaleHandle { id: 42 }));
         assert!(Command::parse("debug-stale-handle").is_err());
