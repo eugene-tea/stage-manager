@@ -40,6 +40,12 @@ and what users asked for is in [docs/FEATURE-REQUESTS.md](docs/FEATURE-REQUESTS.
   the thumbnail" sees the icon drift about 28 pt during a card drag. Check each against the app's behaviour
   (1.8.0 changed the card drag and the icons) and fix the app or the check.
 
+- **The last frame of the shadow handover.** Since 1.8.2 an incoming window's snapshot drops its
+  shadow in one step once the window server lists the window in place: about half the landings show
+  no darker frame, the rest one (up to 15 levels on Finder's heavier shadow), more under load. The
+  window server shows the window a frame before our layer change reaches the screen. Find a way to
+  take that frame back without guessing early (a lighter edge, 11-01).
+
 ## Live checks
 
 **One session, about 52 minutes.** Use the dev app and fixture windows only, with the 5K and the laptop
