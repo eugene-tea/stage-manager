@@ -73,11 +73,14 @@ self-signed identity (`scripts/sign.sh`).
      Homebrew cask (`target/release/stage-manager.rb`) with the version and the DMG's sha256.
 5. Try the DMG on a clean account or Mac: open it, drag the app to Applications, launch, and
    check that no Gatekeeper warning appears.
-6. Push `dev`, move `master` forward to it, and tag the release (annotated):
+6. Push `dev`, add the release's commit to `master` (dev's files, the CHANGELOG section as
+   the message), push it, and tag that commit (annotated):
 
    ```sh
-   git push origin dev && git push origin dev:master
-   git tag -a vX.Y.Z -m "Stage Manager X.Y.Z" && git push origin vX.Y.Z
+   git push origin dev
+   scripts/master-commit.sh release X.Y.Z "X.Y.Z: what a user notices, in a few words"
+   git push origin master
+   git tag -a vX.Y.Z -m "Stage Manager X.Y.Z" master && git push origin vX.Y.Z
    ```
 
 7. Publish (the DMG's name stays `Stage-Manager.dmg` in every release, so

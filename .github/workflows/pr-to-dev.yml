@@ -1,0 +1,48 @@
+# Pull requests go to `dev`. `master` is the default branch, so GitHub opens them against it;
+# this moves each one to `dev`. A branch made from `master` shares no history with `dev`
+# (master holds one commit per release), so it can't move as it is: the comment says how to
+# put it on `dev`.
+#
+# pull_request_target runs this file as it is on `master`, never the pull request's code: it
+# checks nothing out and only calls GitHub's API.
+name: pull requests to dev
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+    branches: [master]
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  retarget:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Move to dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_LABEL: ${{ github.event.pull_request.head.label }}
+        run: |
+          if gh api "repos/$REPO/compare/dev...$HEAD_LABEL" --jq .merge_base_commit.sha >/dev/null 2>&1; then
+            gh api -X PATCH "repos/$REPO/pulls/$NUMBER" -f base=dev >/dev/null
+            gh pr comment "$NUMBER" -R "$REPO" --body \
+              'Moved to `dev`: pull requests go there, and `master` holds releases only.'
+          else
+            gh pr comment "$NUMBER" -R "$REPO" --body-file - <<'EOF'
+          This branch starts from `master`, which holds releases only and shares no history with `dev`, where the work happens. To put your commits on `dev`:
+
+          ```sh
+          git remote add upstream https://github.com/eugene-tea/stage-manager.git  # once
+          git fetch upstream
+          git rebase --onto upstream/dev upstream/master <your-branch>
+          git push --force-with-lease
+          ```
+
+          Then change this pull request's base to `dev` (Edit, next to the title).
+          EOF
+          fi
