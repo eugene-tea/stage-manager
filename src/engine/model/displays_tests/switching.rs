@@ -1,4 +1,4 @@
-//! Switching and the strip on two screens (the Fable review before 1.7, "Switching and the
+//! Switching and the strip on two screens (the review before 1.7, "Switching and the
 //! strip"): what the engine answers for a window, an icon click, a hotkey and a hide when the
 //! focus or the stage is on the screen that is not the main one. Made-up titles only.
 
@@ -49,7 +49,7 @@ fn an_icon_click_on_a_laptop_card_gathers_the_apps_windows_of_the_laptop_only() 
 
 #[test]
 fn a_stage_hotkey_counts_the_strip_of_the_screen_with_the_keyboard() {
-    // The Codex review's W3, his word 11-06: the shortcuts and `ctl switch N` count the strip
+    // The review's W3, his word 11-06: the shortcuts and `ctl switch N` count the strip
     // of the screen the keyboard is on (the focused window's), for the check and the switch.
     // The Studio has three stages, the laptop four: 4 is the laptop's alone.
     let mut e = Env::both();
@@ -82,23 +82,4 @@ fn a_stage_hotkey_counts_the_strip_of_the_screen_with_the_keyboard() {
     assert_eq!(e.m.keyboard_display(Some(WindowId(99)), Some(LAPTOP)), LAPTOP);
     assert_eq!(e.m.keyboard_display(None, None), STUDIO);
     assert_eq!(e.m.keyboard_display(None, Some(DisplayId(77))), STUDIO, "a screen the model does not know: the main one");
-}
-
-#[test]
-fn hiding_an_app_judges_the_screen_its_windows_are_on() {
-    // Switching 6: Chrome is wholly on the laptop, a card there.
-    let mut e = Env::both();
-    let [_, _, _, chrome, _] = measured_desk(&mut e);
-    let p = e.m.app_park(20);
-    assert_eq!((p.windows, p.shown), (1, 0));
-    assert_eq!(p.keep.iter().map(|k| k.0).collect::<Vec<_>>(), vec![5], "the laptop's card waits in place while hidden: {chrome:?}");
-    assert!(p.stage_here);
-    // The laptop's desktop revealed: its front is empty, its Desktop then known by the
-    // slivers alone, so its apps stay parked; the Studio's apps are not concerned.
-    let obs = e.d.obs();
-    let a = e.m.reveal_desktop_on(Some(LAPTOP), &obs);
-    e.run(a);
-    assert!(e.m.active_stage(LAPTOP).and_then(|s| e.m.stage(s)).is_some_and(|s| s.windows.is_empty()), "revealed");
-    assert!(!e.m.app_park(20).stage_here, "the laptop's front has no window");
-    assert!(e.m.app_park(12).stage_here, "Music, on the Studio: its screen's front shows Code");
 }

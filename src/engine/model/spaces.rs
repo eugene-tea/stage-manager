@@ -231,7 +231,7 @@ impl Model {
     /// Forgets a Space that is not shown and has no window: its stages, active stage, strip
     /// and reveal; pending stages go back to the saved Spaces waiting for a visit (the
     /// entries of its apps that quit with them). One with no pending stage but entries of
-    /// apps that quit is kept until those are pruned, so the file still writes them (Fable
+    /// apps that quit is kept until those are pruned, so the file still writes them (review
     /// E5: an app alone on a Desktop the user left lost its quit grace).
     fn prune_space(&mut self, space: SpaceId) {
         if self.is_shown_space(space) || self.windows.values().any(|w| w.space == space) {
@@ -340,7 +340,7 @@ impl Model {
     /// now: a Desktop saved on a screen connected now whose origin moved since (Displays
     /// settings rearranged while the app was not running, another screen made main) has its
     /// windows' saved and pre-fit frames moved by the same offset, and takes the new origin,
-    /// as macOS moves a screen's windows along (R2 of the Codex review: a laptop Desktop
+    /// as macOS moves a screen's windows along (R2 of the review: a laptop Desktop
     /// saved at x −1440 put its windows back at −1440 with the laptop now on the right). A
     /// Desktop saved before files kept the origin keeps its frames while each of them still
     /// lies on that screen (the origin taken as unchanged), else uses none
@@ -1077,7 +1077,7 @@ impl Model {
             .or_else(|| carried.iter().copied().max_by_key(|s| self.stage(*s).map_or(0, |st| st.last_active)))
             .unwrap_or(carried[0]);
         // The target is bare, so its active stage is empty; a declared one whose name no
-        // carried stage has stays (in the strip) but gives way too (Fable E1: it held the
+        // carried stage has stays (in the strip) but gives way too (review E1: it held the
         // Desktop and every carried window was parked).
         let current = self.active.get(&target).copied();
         if current.is_none_or(|c| placeholders.contains(&c) || self.stage_is_empty(c)) {
@@ -1109,7 +1109,7 @@ impl Model {
         // The Spaces they came from: forgotten when empty; else, when their active stage went,
         // a fresh empty active stage (as Apple's: the Desktop left shows nothing, every stage
         // still there keeps its card). Never one of their parked stages made active without
-        // its windows shown: no card, its app "present", ⌘-Tab doing nothing (Fable H3).
+        // its windows shown: no card, its app "present", ⌘-Tab doing nothing (review H3).
         let froms: BTreeSet<SpaceId> = whole.iter().map(|(_, from)| *from).collect();
         for from in froms {
             if self.space_is_empty(from) && !self.is_shown_space(from) {

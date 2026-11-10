@@ -1,5 +1,5 @@
 //! Why a managed window is off screen, asked through Accessibility without letting a hung app
-//! starve the WM thread (the review of 1.1.0, Fable H1), decided without touching anything.
+//! starve the WM thread (the review of 1.1.0, H1), decided without touching anything.
 //!
 //! The Spaces check asks, once a second, for every managed window of the Desktop shown that is
 //! not on screen: is its app hidden, is the window minimized, is it in full screen. Each

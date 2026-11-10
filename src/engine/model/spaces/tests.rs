@@ -179,7 +179,7 @@ fn two_desktops() -> Mac {
 
 #[test]
 fn a_desktop_left_after_its_only_app_quit_keeps_the_quit_window_for_the_file() {
-    // Fable E5 (10-29): chat alone on Desktop 1 quits (the logout's apps quit before its
+    // Review E5 (10-29): chat alone on Desktop 1 quits (the logout's apps quit before its
     // signal); the user goes to Desktop 0 and the empty Desktop 1 was forgotten with the
     // entry kept for the file, so the two-minute quit grace restored nothing there.
     let mut mac = Mac::new();
@@ -1761,7 +1761,7 @@ mod identity {
 
     #[test]
     fn carried_stages_keep_their_active_stage_beside_an_empty_declared_one() {
-        // Fable E1 (10-29): with `[stages] names` set, the new id's declared stage (named,
+        // Review E1 (10-29): with `[stages] names` set, the new id's declared stage (named,
         // empty, made active by the arrival) is no placeholder for the unnamed carried
         // stages; it stayed active and every carried window was parked.
         let mut mac = Mac::new();
@@ -2081,7 +2081,7 @@ mod identity {
     }
 }
 
-/// Fable H3 (1.1.0): the shown stage carried to a new Desktop in Mission Control leaves the
+/// Review H3 (1.1.0): the shown stage carried to a new Desktop in Mission Control leaves the
 /// old Desktop a fresh empty active stage; its parked stage keeps its card, and ⌘-Tab to its
 /// app brings it.
 #[test]
@@ -2113,7 +2113,7 @@ fn the_desktop_left_by_its_shown_stage_keeps_every_card() {
     assert!(!mac.parked(2));
 }
 
-/// Fable's section 4, test 1: random moves of windows between Desktops (Mission Control),
+/// The review's section 4, test 1: random moves of windows between Desktops (Mission Control),
 /// Desktop changes, new windows, card clicks and app activations; after each step every
 /// Desktop has an active stage of its own, no active stage holds a parked window, every
 /// window of an inactive stage is parked, every member lives on its stage's Desktop, and

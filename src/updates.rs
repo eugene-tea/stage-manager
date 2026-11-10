@@ -206,7 +206,7 @@ pub fn parse_release(json: &str) -> Result<Release, String> {
     }
     let page = v["html_url"].as_str().filter(|u| page_allowed(u)).unwrap_or(RELEASES_URL).to_string();
     // The release's disk image is always `Stage-Manager.dmg` under this repository; no other
-    // asset, name or host is ever offered (review: Grok Medium 6, Fable L2).
+    // asset, name or host is ever offered (review Medium 6 and L2).
     let asset = v["assets"]
         .as_array()
         .into_iter()
@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(elsewhere.page, RELEASES_URL, "only this repository's pages are opened (L2)");
     }
 
-    /// Grok Medium 6: only this repository's `Stage-Manager.dmg` on github.com, never another
+    /// Review Medium 6: only this repository's `Stage-Manager.dmg` on github.com, never another
     /// disk image, another name or another host.
     #[test]
     fn only_the_releases_own_disk_image_is_chosen() {

@@ -1,0 +1,17 @@
+name: Feature request
+description: Something Stage Manager could do.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Apple's way stays the default, so a new feature is an option you turn on.
+        [FEATURE-REQUESTS](https://github.com/eugene-tea/stage-manager/blob/HEAD/docs/FEATURE-REQUESTS.md)
+        lists what has been asked for already.
+  - type: textarea
+    id: want
+    attributes:
+      label: What you would like
+      description: What you want to do, and what gets in the way today.
+    validations:
+      required: true

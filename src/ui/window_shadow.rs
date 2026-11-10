@@ -30,7 +30,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo};
-use objc2_foundation::{NSNumber, NSString, NSValue};
+use objc2_foundation::{NSArray, NSNumber, NSString, NSValue};
 use objc2_quartz_core::{CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming, CATransform3D, kCAFillModeBackwards};
 
 use crate::platform::capture::Picture;
@@ -345,17 +345,19 @@ impl ShadowLayers {
         self.rim.setTransform(self.rim_transform(size));
     }
 
-    /// Moves the shadow from around a plane of `from` to around one of `to` on `spring`, as
-    /// the plane's bounds move, `duration` seconds long as they do (in the caller's
-    /// transaction).
-    pub fn spring_layout(&self, from: CGSize, to: CGSize, spring: Spring, duration: f64) {
+    /// Moves the shadow through planes of `sizes` at `key_times` (fractions of `duration`), as
+    /// the plane's bounds go through them on a flight's path (in the caller's transaction).
+    pub fn path_layout(&self, sizes: &[CGSize], key_times: &NSArray<NSNumber>, duration: f64) {
+        let Some(&last) = sizes.last() else { return };
         self.image.setPosition(CGPoint::new(-self.extent, -self.extent));
-        self.image.setBounds(self.bounds(to));
-        let anim = crate::ui::overlay::spring_anim(spring, "bounds", &NSValue::new(self.bounds(from)), &NSValue::new(self.bounds(to)), duration);
+        self.image.setBounds(self.bounds(last));
+        self.rim.setTransform(self.rim_transform(last));
+        let bounds: Vec<Retained<AnyObject>> = sizes.iter().map(|s| crate::ui::overlay::as_value(NSValue::new(self.bounds(*s)))).collect();
+        let anim = crate::ui::overlay::keyframes("bounds", &bounds, key_times, duration);
         self.image.addAnimation_forKey(&anim, Some(&NSString::from_str("bounds")));
-        self.rim.setTransform(self.rim_transform(to));
-        let (a, b) = (crate::ui::overlay::transform_value(self.rim_transform(from)), crate::ui::overlay::transform_value(self.rim_transform(to)));
-        let anim = crate::ui::overlay::spring_anim(spring, "transform", &a, &b, duration);
+        let rims: Vec<Retained<AnyObject>> =
+            sizes.iter().map(|s| crate::ui::overlay::as_value(crate::ui::overlay::transform_value(self.rim_transform(*s)))).collect();
+        let anim = crate::ui::overlay::keyframes("transform", &rims, key_times, duration);
         self.rim.addAnimation_forKey(&anim, Some(&NSString::from_str("transform")));
     }
 

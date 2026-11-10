@@ -177,7 +177,7 @@ pub struct SavedScreen {
     pub h: f64,
     /// The screen's left edge in global coordinates when saved: the saved frames of its
     /// Space are in that arrangement's coordinates. Absent in files written before 11-06
-    /// (R2 of the Codex review).
+    /// (R2 of the review).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub x: Option<f64>,
     /// Its top edge, as `x`.
@@ -317,7 +317,7 @@ impl StateFile {
     ///
     /// A Space not shown in the file's session (`unvisited`) was not looked for there: its
     /// windows age by its `last_seen` instead, given up as above only once it was last shown
-    /// more than [`UNSEEN_KEEP`] before the file's save (the Fable review of 11-06, restore
+    /// more than [`UNSEEN_KEEP`] before the file's save (the review of 11-06, restore
     /// 3: a Desktop not visited in one session lost its stages at the next restart). Every
     /// Space is unvisited in the new session until it shows.
     pub fn start_new_session(&mut self) -> usize {

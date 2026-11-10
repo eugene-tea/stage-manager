@@ -9,7 +9,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Stage Manager</title>
-<meta name="description" content="Stage Manager for macOS: looks and works like Apple’s, then more. Your stages survive a restart. Free and open source.">
+<meta name="description" content="Stage Manager for macOS works like Apple’s, plus what people have asked Apple for: your stages come back after a restart. Free and open source.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" type="image/png" href="assets/app-icon.png">
 <link rel="apple-touch-icon" href="assets/app-icon.png">
@@ -144,6 +144,9 @@
   footer { padding: 48px 0; color: var(--secondary); font-size: 13px; text-align: center; }
   footer nav { margin-bottom: 12px; font-size: 15px; }
   footer nav a { margin: 0 12px; }
+  /* Catalogs the app is listed on: their badges, kept here so the page loads nothing from elsewhere. */
+  footer .listed { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin: 0 0 16px; }
+  footer .listed img { display: block; width: auto; height: 40px; }
   /* Centred lines (and the card titles) wrap into even lines, never a lone word. */
   h1, h2, h3, .lede, .meta, .privacy, footer p { text-wrap: balance; }
 
@@ -195,38 +198,38 @@
 
 <section class="alt">
   <div class="wrap">
-    <h2>Like Apple’s. Then more.</h2>
-    <p class="lede">It looks and works like Apple’s Stage Manager. A few extras come switched on, and Settings has more.</p>
+    <h2>What it is</h2>
+    <p class="lede">It works and looks like the Stage Manager built into macOS, plus what people have asked Apple for since 2022. None of it changes how Apple’s clicks, drags and keys work; if you never use it, it behaves exactly like&nbsp;Apple’s.</p>
     <div class="grid">
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.5 4v4h-4"/></svg>
-        <h3>Survives a restart</h3>
-        <p>Your stages, their order and the stage in front come back after a reboot, as fully as macOS allows.</p>
+        <h3>Stages after a restart</h3>
+        <p>Your stages come back after a restart, in the same order.</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="7" width="12" height="12" rx="2.5"/><rect x="9" y="3" width="12" height="12" rx="2.5"/></svg>
-        <h3>Merge with a drop</h3>
-        <p>Drop one card on another to make one stage. Drag a window to the strip to split it off.</p>
+        <h3>Combine stages</h3>
+        <p>Drop one card on another to combine the two stages.</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5.5h3.5M3 12h3.5M3 18.5h3.5"/><rect x="9.5" y="3.5" width="12" height="17" rx="3"/><path d="M9.5 8h12"/></svg>
-        <h3>A strip that stays put</h3>
-        <p>Each stage keeps its place, or follows your Dock’s order. Windows can keep clear of the strip.</p>
+        <h3>Your own card order</h3>
+        <p>Keep the cards in your own order, or in your Dock’s order (Settings).</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M12 8.5v7M8.5 12h7"/></svg>
-        <h3>New apps join you</h3>
-        <p>Open an app straight into the stage you are in. Hold Shift to give it a stage of its own.</p>
+        <h3>Open an app here</h3>
+        <p>Hold Shift while opening an app to put it in the stage you are in, not a new one.</p>
       </div>
       <div class="card">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="6" width="19" height="12" rx="3"/><path d="M6.5 10h1M10 10h1M13.5 10h1M17 10h.5M7 14h10"/></svg>
-        <h3>Shortcuts if you want them</h3>
-        <p>⌃⌥1–9 switches stages or sends a window to one. Everything works without them&nbsp;too.</p>
+        <h3>Keyboard shortcuts</h3>
+        <p>Switch stages, or send a window to one, with ⌃⌥1–9 (turned on in&nbsp;Settings).</p>
       </div>
       <div class="card">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4.5 6v5.5c0 4.5 3.2 8.2 7.5 9.5 4.3-1.3 7.5-5 7.5-9.5V6z"/><path d="m8.8 12 2.2 2.2 4.2-4.4"/></svg>
-        <h3>Your windows come back</h3>
-        <p>When Stage Manager quits, updates or crashes, every hidden window returns to the&nbsp;screen.</p>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 4v16"/><rect x="9" y="5" width="12" height="14" rx="2.5"/><path d="m6.5 12 1.5 0"/></svg>
+        <h3>Windows clear of the strip</h3>
+        <p>Windows move just clear of the strip, so the cards stay in view (Settings).</p>
       </div>
     </div>
   </div>
@@ -266,6 +269,14 @@
       <a href="https://github.com/eugene-tea/stage-manager">Source</a>
       <a href="https://github.com/eugene-tea/stage-manager/releases">Releases</a>
     </nav>
+    <div class="listed">
+      <a href="https://alternativeto.net/software/stage-manager/about/?utm_source=badge&amp;utm_medium=referral" rel="noopener">
+        <picture>
+          <source srcset="assets/badges/alternativeto-dark.svg" media="(prefers-color-scheme: dark)">
+          <img src="assets/badges/alternativeto-light.svg" alt="Stage Manager on AlternativeTo" width="118" height="40">
+        </picture>
+      </a>
+    </div>
     <p>By <a href="https://github.com/eugene-tea">Eugene T</a>. Stage Manager is an independent project and is not affiliated with, endorsed by or sponsored by Apple Inc. Apple, Mac and macOS are trademarks of Apple&nbsp;Inc.</p>
   </div>
 </footer>

@@ -1,6 +1,6 @@
 [package]
 name = "stage-manager"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2024"
 # The oldest Rust that builds it (let chains); rust-toolchain.toml pins the one used.
 rust-version = "1.88"
@@ -15,6 +15,11 @@ path = "src/main.rs"
 [lib]
 name = "stage_manager"
 path = "src/lib.rs"
+
+# Draws the menu bar glyph to PNGs: cargo run --example glyph_png -- <out-dir>
+[[example]]
+name = "glyph_png"
+path = "art/tools/glyph_png.rs"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

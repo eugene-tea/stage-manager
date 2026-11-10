@@ -1,0 +1,43 @@
+name: Bug
+description: Something does not work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: Stage Manager version
+      description: In the menu bar icon's menu, About Stage Manager.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: dropdown
+    id: screens
+    attributes:
+      label: Screens
+      options:
+        - One
+        - Two or more
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log (optional)
+      description: >
+        Set `[log] level = "debug"` in the config file and choose **Mark a Problem** in the
+        menu right after it happens. The day's log is in `~/Library/Logs/Stage Manager`.
+        It shows window titles only as short codes, but it does name your apps: read it
+        before pasting.
+      render: text

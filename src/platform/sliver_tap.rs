@@ -154,6 +154,17 @@ fn listed(list: &[CgWindow]) -> Vec<Listed> {
     list.iter().map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer }).collect()
 }
 
+/// `near` without macOS's click-through overlays ([`super::desktop::seen_through`], their
+/// owners read from `list`): a press under one reaches the sliver below, so the tap judges it
+/// as if the overlay were not there (11-09: Notification Center's full-screen layer 23 over
+/// the main screen would otherwise own every corner press). Asked only of the few windows
+/// near the zones, above layer 0.
+fn without_overlays(near: Vec<Listed>, list: &[CgWindow]) -> Vec<Listed> {
+    near.into_iter()
+        .filter(|n| n.layer <= 0 || !list.iter().find(|w| w.id == n.id).is_some_and(|w| super::desktop::seen_through(w, list)))
+        .collect()
+}
+
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
     /// Whether some process has secure event input on (a password field): public HIToolbox.
@@ -237,7 +248,7 @@ fn back_on(off_by_input: bool, last: Option<Instant>, now: Instant, secure_input
 pub fn refresh(list: Option<&[CgWindow]>) {
     let seen = judged_zones()
         .zip(list)
-        .map(|(zones, list)| Seen { at: Instant::now(), windows: near_zones(listed(list), &zones) });
+        .map(|(zones, list)| Seen { at: Instant::now(), windows: without_overlays(near_zones(listed(list), &zones), list) });
     if let Ok(mut s) = SEEN.lock() {
         *s = seen;
     }

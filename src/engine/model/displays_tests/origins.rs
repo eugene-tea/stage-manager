@@ -1,4 +1,4 @@
-//! Saved frames across a change of the screens' arrangement (R2 of the Codex review before
+//! Saved frames across a change of the screens' arrangement (R2 of the review before
 //! 1.7): `state.json` keeps global frames, and a screen moved in Displays settings while the
 //! app was not running (the laptop from the 5K's left to its right) moves its Desktops'
 //! saved frames along with it. Made-up titles only.

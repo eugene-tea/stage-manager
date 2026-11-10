@@ -263,7 +263,7 @@ impl Model {
     /// The window itself is not restored even when parked: it no longer exists, and a frame
     /// sent to it would only fail and be retried as a window left in the corner. A window that
     /// still exists and leaves the model goes through [`Model::window_left_space`], which
-    /// brings it back first (the module's invariant; Fable E9).
+    /// brings it back first (the module's invariant; review E9).
     pub fn remove_window(&mut self, id: WindowId) -> Vec<Action> {
         let mut actions = Vec::new();
         let Some(w) = self.windows.get(&id) else {
@@ -415,8 +415,8 @@ impl Model {
 
     /// The Desktop whose stages the stage hotkeys and `ctl switch N` count: the one the
     /// keyboard's screen shows (`keyboard`, [`Model::keyboard_display`]). One answer for the
-    /// platform's "is there a stage `n`" and the switch itself (the Fable review's switching
-    /// 4: the check read the main screen, the switch the focused one; the Codex review's W3:
+    /// platform's "is there a stage `n`" and the switch itself (the review's switching
+    /// 4: the check read the main screen, the switch the focused one; the review's W3:
     /// the main screen's count refused a stage only the other screen has).
     pub fn hotkey_space(&self, keyboard: DisplayId) -> SpaceId {
         self.current_space(self.known_display(keyboard))
@@ -766,8 +766,6 @@ impl Model {
     /// Moves app `pid`'s windows from `space`'s inactive stages into its active one (only the
     /// most recent one when `one`); see [`Model::bring_app_here`].
     fn gather_app(&mut self, pid: Pid, space: SpaceId, obs: &Observation, one: bool) -> Vec<Action> {
-        let mut actions = Vec::new();
-        let display = self.space_display(space);
         let active = self.ensure_active(space);
         let mut sources: Vec<(u64, StageId, Vec<WindowId>)> = self
             .stages
@@ -789,12 +787,25 @@ impl Model {
         if one {
             moving.truncate(1);
         }
+        let sources: Vec<StageId> = sources.into_iter().map(|s| s.1).collect();
+        self.bring_into_active(space, &moving, &sources, obs)
+    }
+
+    /// Moves `moving` (standard windows of inactive stages of `space`, front first) into
+    /// `space`'s active stage, in front and in their order, each with its children: their old
+    /// stages keep their other windows (an old key moves to the next window), the moved ones
+    /// are restored and raised, and the first is focused. `sources` are the stages they came
+    /// from: an emptied one goes away. No actions when `moving` is empty.
+    fn bring_into_active(&mut self, space: SpaceId, moving: &[WindowId], sources: &[StageId], obs: &Observation) -> Vec<Action> {
+        let mut actions = Vec::new();
         if moving.is_empty() {
             return actions;
         }
+        let display = self.space_display(space);
+        let active = self.ensure_active(space);
         self.revealed.remove(&space);
         self.capture(active, obs);
-        for &id in &moving {
+        for &id in moving {
             if let Some(Home::Stage(s)) = self.windows.get(&id).map(|w| w.home)
                 && let Some(stage) = self.stage_mut(s)
             {
@@ -807,7 +818,7 @@ impl Model {
         }
         let t = self.tick();
         if let Some(a) = self.stage_mut(active) {
-            let mut windows = moving.clone();
+            let mut windows = moving.to_vec();
             windows.append(&mut a.windows);
             a.windows = windows;
             a.key = moving.first().copied();
@@ -829,7 +840,7 @@ impl Model {
         if let Some(&first) = moving.first() {
             actions.push(Action::Focus { id: first });
         }
-        for (_, s, _) in sources {
+        for &s in sources {
             self.drop_if_dead(s, &mut actions);
         }
         self.normalize_slots();
@@ -856,35 +867,221 @@ impl Model {
         if self.is_active(stage) {
             return Vec::new();
         }
-        if let Some(front) = s.windows.first().copied()
-            && let Some(w) = self.windows.get(&front)
-        {
-            let d = *self.display(w.meta.display);
-            let old = w.restore;
-            let v = d.visible;
-            // A fresh placement, not a frame the user left: the whole width on screen when
-            // it fits, as before.
-            let x = if old.w <= v.w { top_left.x.min(v.max_x() - old.w).max(v.x) } else { top_left.x };
-            let placed = d.reach(Rect::new(x, top_left.y, old.w, old.h));
-            let (dx, dy) = (placed.x - old.x, placed.y - old.y);
-            self.move_restore(front, placed);
-            for c in self.children_of(front) {
-                let Some(cw) = self.windows.get(&c) else { continue };
-                let moved = self.display(cw.meta.display).reach(cw.restore.translate(dx, dy));
-                self.move_restore(c, moved);
-            }
+        if let Some(front) = s.windows.first().copied() {
+            self.place_dropped(front, top_left);
         }
         self.merge_into_active(stage, obs)
     }
 
+    /// Puts `id`'s saved frame where a drop at `top_left` lands it ([`Model::merge_into_active_at`]):
+    /// its size kept, moved left onto the visible frame when it fits, within reach
+    /// ([`Display::reach`]), its children moved by the same offset, each as the user's move.
+    fn place_dropped(&mut self, id: WindowId, top_left: Point) {
+        let Some(w) = self.windows.get(&id) else { return };
+        let d = *self.display(w.meta.display);
+        let old = w.restore;
+        let v = d.visible;
+        // A fresh placement, not a frame the user left: the whole width on screen when it
+        // fits, as before.
+        let x = if old.w <= v.w { top_left.x.min(v.max_x() - old.w).max(v.x) } else { top_left.x };
+        let placed = d.reach(Rect::new(x, top_left.y, old.w, old.h));
+        let (dx, dy) = (placed.x - old.x, placed.y - old.y);
+        self.move_restore(id, placed);
+        for c in self.children_of(id) {
+            let Some(cw) = self.windows.get(&c) else { continue };
+            let moved = self.display(cw.meta.display).reach(cw.restore.translate(dx, dy));
+            self.move_restore(c, moved);
+        }
+    }
+
+    /// One window dragged out of a card of several and dropped in the main area, as Apple's
+    /// does with each window of a combined card: `id` alone (with its children) joins the
+    /// active stage of the card's Space in front, focused, with its top-left corner at
+    /// `top_left` as [`Model::merge_into_active_at`] places it. The stage it came from keeps
+    /// its other windows in their order, its slot and its number (its key moves to its next
+    /// window when it was this one). `stage` is the card's: the window's own stage may be
+    /// another of the card's (a "One at a Time" group). The window alone in its stage is
+    /// [`Model::merge_into_active_at`] of that stage. A no-op for an unknown window or stage,
+    /// a window not in an inactive stage of the card's Space, or a Space not shown now.
+    pub fn move_window_into_active_at(&mut self, stage: StageId, id: WindowId, top_left: Point, obs: &Observation) -> Vec<Action> {
+        let Some((id, home, space)) = self.card_window(stage, id) else { return Vec::new() };
+        if self.alone_in(home, id) {
+            return self.merge_into_active_at(home, top_left, obs);
+        }
+        self.place_dropped(id, top_left);
+        self.bring_into_active(space, &[id], &[home], obs)
+    }
+
+    /// One window dragged off a card of several and dropped into a gap between the strip's
+    /// cards (an extension, as a window dragged by its title bar onto the strip,
+    /// [`Model::drop_window_on_strip`]): `id` (with its children) goes into a new stage of its
+    /// own, parked with its saved frame, whose card takes the slot right above `before`'s card
+    /// (the bottom for `None`) by [`Model::move_card`]'s rule (following the Dock, its Dock
+    /// place). Nothing moves on screen and the view does not switch. The stage it left keeps
+    /// its other windows in their order, its slot and its number (its key moves to its next
+    /// window when it was this one). The window alone in its stage is that card moved
+    /// ([`Model::move_card`]). A no-op as [`Model::move_window_into_active_at`].
+    pub fn move_window_to_new_stage(&mut self, stage: StageId, id: WindowId, before: Option<StageId>) -> Vec<Action> {
+        let Some((id, home, space)) = self.card_window(stage, id) else { return Vec::new() };
+        if self.alone_in(home, id) {
+            return self.move_card(home, before);
+        }
+        let Some((display, recency)) = self.stage(home).map(|s| (s.display, s.last_active)) else { return Vec::new() };
+        let new = self.create_stage(space, None);
+        self.take_off(home, id);
+        self.set_home(id, Home::Stage(new), display);
+        // As recent as the stage it came from: a full strip never drops its card first.
+        if let Some(s) = self.stage_mut(new) {
+            s.windows = vec![id];
+            s.key = Some(id);
+            s.last_active = recency;
+        }
+        self.strip_enter(space, new);
+        if before != Some(new) {
+            self.place_card(new, before, false);
+        }
+        self.normalize_slots();
+        vec![Action::StateChanged]
+    }
+
+    /// One window dragged off a card of several and dropped onto another card (`[strip]
+    /// merge_on_drop`, an extension): `id` alone (with its children) joins `into`'s stage in
+    /// front of its windows, its key window, as a card dropped there would
+    /// ([`Model::merge_stages`]): the window just moved is the one cared about, drawn at the
+    /// card's front and raised last and focused when that stage shows (Eugene, 11-09: it went
+    /// behind them all). Both stages are inactive, so nothing moves on screen: the window
+    /// stays parked with its saved frame. `into` keeps its slot, number and name; the stage it left keeps
+    /// its other windows in their order, its slot and its number (its key moves on when it was
+    /// this one). Into the active stage (a card of it shows only with `[strip] active =
+    /// "card"`) the window comes forward, as when dragged out ([`Model::move_window_into_active_at`]
+    /// without the drop point). The window alone in its stage merges that stage. With "One at
+    /// a Time", a grouped card's window goes into the stage whose slot that card sits in. A
+    /// no-op as [`Model::move_window_into_active_at`], and onto its own stage or a stage of
+    /// another Space.
+    pub fn move_window_to_stage(&mut self, stage: StageId, id: WindowId, into: StageId, obs: &Observation) -> Vec<Action> {
+        let Some((id, home, space)) = self.card_window(stage, id) else { return Vec::new() };
+        let into = if self.options.settings.app_windows == AppWindows::OneAtATime { self.slot_showing(space, into).unwrap_or(into) } else { into };
+        let Some(display) = self.stage(into).filter(|d| d.space == space).map(|d| d.display) else { return Vec::new() };
+        if into == home {
+            return Vec::new();
+        }
+        if self.alone_in(home, id) {
+            return self.merge_one(home, into, obs);
+        }
+        if self.is_active(into) {
+            return self.bring_into_active(space, &[id], &[home], obs);
+        }
+        self.take_off(home, id);
+        self.set_home(id, Home::Stage(into), display);
+        if let Some(d) = self.stage_mut(into) {
+            d.windows.insert(0, id);
+            d.key = Some(id);
+        }
+        self.normalize_slots();
+        vec![Action::StateChanged]
+    }
+
+    /// The window `id` of `stage`'s card, the inactive stage it lives in (another of the
+    /// card's with "One at a Time") and their Space, when that Space shows now: what the ops
+    /// that take one window off a card of several act on.
+    fn card_window(&self, stage: StageId, id: WindowId) -> Option<(WindowId, StageId, SpaceId)> {
+        let space = self.stage(stage)?.space;
+        let id = self.resolve_standard(id)?;
+        let Home::Stage(home) = self.windows.get(&id)?.home else { return None };
+        let src = self.stage(home)?;
+        (src.space == space && self.is_shown_space(space) && !self.is_active(home) && src.windows.contains(&id)).then_some((id, home, space))
+    }
+
+    /// `id` is the only window of `stage`.
+    fn alone_in(&self, stage: StageId, id: WindowId) -> bool {
+        self.stage(stage).is_some_and(|s| s.windows.iter().all(|&w| w == id))
+    }
+
+    /// Takes `id` off `stage`'s windows; the stage's key moves to its next window when it was
+    /// this one.
+    fn take_off(&mut self, stage: StageId, id: WindowId) {
+        if let Some(s) = self.stage_mut(stage) {
+            s.windows.retain(|&w| w != id);
+            if s.key == Some(id) {
+                s.key = s.windows.first().copied();
+            }
+        }
+    }
+
+    /// A card dragged out of one screen's strip and dropped on screen `to`: what a drop in its
+    /// own screen's main area does ([`Model::merge_into_active_at`], or with `window`, one
+    /// window of a card of several, [`Model::move_window_into_active_at`]), on that screen. The
+    /// windows join the active stage of the Desktop `to` shows, in front, the first focused,
+    /// the front one with its top-left corner at `top_left`; the others keep their places
+    /// relative to the visible frame ([`Display::adopt`]). They are that screen's from now on;
+    /// the stage they leave goes when emptied, its card with it, and nothing else changes on
+    /// the screen they left (Apple's, 11-09: a card dragged from the 5K's strip onto the
+    /// laptop opened its window there). Windows of the card still awaited after a restart stay
+    /// with its stage. `to` the card's own screen (or unknown) is the drop on its own screen.
+    /// A no-op for an unknown stage or window, the active stage, or a card on
+    /// a Desktop not shown.
+    pub fn drop_card_on_display(
+        &mut self,
+        stage: StageId,
+        window: Option<WindowId>,
+        top_left: Point,
+        to: DisplayId,
+        obs: &Observation,
+    ) -> Vec<Action> {
+        let Some(src) = self.stage(stage) else { return Vec::new() };
+        let (from, space) = (src.display, src.space);
+        if to == from || !self.displays.iter().any(|d| d.id == to) {
+            return match window {
+                Some(w) => self.move_window_into_active_at(stage, w, top_left, obs),
+                None => self.merge_into_active_at(stage, top_left, obs),
+            };
+        }
+        if !self.is_shown_space(space) {
+            return Vec::new();
+        }
+        // The windows that go and the stages they leave: one window of a card of several (its
+        // own stage may be another of the card's, a "One at a Time" group), else the card's.
+        let alone = window.and_then(|w| self.resolve_standard(w)).and_then(|id| match self.windows.get(&id).map(|w| w.home) {
+            Some(Home::Stage(home)) => Some((id, home)),
+            _ => None,
+        });
+        let (moving, home) = match alone {
+            Some((id, home)) if self.stage(home).is_some_and(|h| h.windows.len() > 1 && h.windows.contains(&id)) => (vec![id], home),
+            Some((_, home)) => (self.stage(home).map(|h| h.windows.clone()).unwrap_or_default(), home),
+            None => (self.stage(stage).map(|s| s.windows.clone()).unwrap_or_default(), stage),
+        };
+        let Some(h) = self.stage(home) else { return Vec::new() };
+        if moving.is_empty() || h.space != space || self.is_active(home) {
+            return Vec::new();
+        }
+        let target = self.current_space(to);
+        let (there, here) = (*self.display(to), *self.display(from));
+        for &id in &moving {
+            let mut group = vec![id];
+            group.extend(self.children_of(id));
+            for g in &group {
+                if let Some(w) = self.windows.get_mut(g) {
+                    w.restore = there.adopt(w.restore, &here);
+                    w.original = w.original.map(|o| there.adopt(o, &here));
+                    w.meta.display = to;
+                }
+            }
+            self.set_space(&group, target);
+        }
+        self.place_dropped(moving[0], top_left);
+        self.bring_into_active(target, &moving, &[home], obs)
+    }
+
     /// A card dropped onto another card (`[strip] merge_on_drop`, an extension: Apple's strip
-    /// does not merge): every window of `stage` joins `into`, behind `into`'s own windows and
-    /// in its own order, each child with its parent. Both stages are inactive, so nothing
-    /// moves on screen: the windows stay parked with their saved frames. `into` keeps its
-    /// slot, name and key window (an empty one takes `stage`'s) and the more recent of the
-    /// two recencies; `stage`'s slot frees by the slot rule (the cards below close up, and a
-    /// free slot takes the most recent stage out of view). `stage`'s windows still awaited
-    /// after a restart move with it, behind, in saved order (R5). The emptied stage goes away
+    /// does not merge): every window of `stage` joins `into`, in front of `into`'s own windows
+    /// and in its own order, each child with its parent: the card just dropped is the one
+    /// cared about (Eugene, 11-09), so its key window (or its first) is `into`'s key, raised
+    /// last and focused when that stage shows. Both stages are inactive, so nothing moves on
+    /// screen: the windows stay parked with their saved frames. `into` keeps its slot and name
+    /// and takes the more recent of the two recencies; `stage`'s slot frees by the slot rule
+    /// (the cards below close up, and a free slot takes the most recent stage out of view).
+    /// `stage`'s windows still awaited after a restart move with it, in front, in saved order
+    /// (R5). The emptied stage goes away
     /// unless it is declared in config. Into the active stage (a card of it shows only in
     /// place with `[strip] active = "card"`) it is [`Model::merge_into_active`]. A no-op for one
     /// stage onto itself, an unknown stage, the active stage dropped on a card, stages of two
@@ -954,7 +1151,7 @@ impl Model {
         let members = src.windows.clone();
         let src_key = src.key.filter(|k| members.contains(k));
         let recency = src.last_active.max(dest.last_active);
-        self.merge_pending(stage, into, false);
+        self.merge_pending(stage, into, true);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()
@@ -974,9 +1171,12 @@ impl Model {
             }
         }
         if let Some(d) = self.stage_mut(into) {
-            d.windows.extend(members.iter().copied());
-            if d.key.is_none_or(|k| !d.windows.contains(&k)) {
-                d.key = src_key.or(d.windows.first().copied());
+            let behind = std::mem::take(&mut d.windows);
+            d.windows = members.iter().copied().chain(behind).collect();
+            if let Some(key) = src_key.or(members.first().copied()) {
+                d.key = Some(key);
+            } else if d.key.is_none_or(|k| !d.windows.contains(&k)) {
+                d.key = d.windows.first().copied();
             }
             d.last_active = recency;
         }
@@ -1326,7 +1526,7 @@ impl Model {
         if self.settling() {
             // No stage switch while the login settles (as for any focus), but the window the
             // user dragged out of the corner must not sit shown while counted parked until
-            // `match_screen` parks it again (the Fable review's E7): it joins the active
+            // `match_screen` parks it again (the review's E7): it joins the active
             // stage where it was dropped.
             return self.adopt_shown(id, frame, obs);
         }
@@ -1346,7 +1546,7 @@ impl Model {
     /// A parked window the screen shows out of the park zone where the user wants it (the
     /// focused window, one they moved; a drop while the login settles) joins the active stage
     /// of its Space as shown, at `frame` (its restore frame from now on), with no move and no
-    /// raise: it is there already, in front of the user (the Fable review's L1: the model's
+    /// raise: it is there already, in front of the user (the review's L1: the model's
     /// parked flag and the screen agree). Its children come back beside it. Its stage, left
     /// empty, goes unless declared. The key window when it is the focused one. Nothing for a
     /// window not parked, pinned, or on a Space not shown.

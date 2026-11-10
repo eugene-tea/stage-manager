@@ -825,7 +825,10 @@ def run():
         ok, told = ts.panes_hide_in_expose(state())
         check(ok, f"both panes are Transient, not Stationary, joining no other Space ({told})")
     sp = spaces()
-    check(len(sp.get("list", [])) == 2, f"ctl dump lists two Spaces: {sp}")
+    # Only the fixture's screen counts: a second screen lists Desktops of its own (11-09).
+    home_display = next((s["display"] for s in sp.get("list", []) if s.get("id") == d2), None)
+    on_home = [s for s in sp.get("list", []) if s.get("display") == home_display]
+    check(len(on_home) == 2, f"ctl dump lists two Spaces on the fixture's screen: {sp}")
 
     say("\n== quit with a window parked on Desktop 2 ==")
     s = state()
@@ -911,7 +914,9 @@ def run():
                 break
         check(True, f"round {round_no}: the engine knows a full-screen Space shows")
         check(holds(lambda: spaces().get("fullscreen") is True, 3), f"round {round_no}: it stays known for three seconds (no flapping)")
-        panel = ts.strip_panel([w for w in ts.our_windows() if w.get("onscreen", True)])
+        # The main screen's full-screen Space: another screen keeps its own strip (11-09).
+        panel = ts.strip_panel([w for w in ts.our_windows() if w.get("onscreen", True)
+                                and w.get("bounds", {}).get("x", 0) >= 0])
         check(panel is None, f"round {round_no}: no strip on the full-screen Space ({panel and panel['bounds']})")
         if AUTO:
             WATCH.pause()

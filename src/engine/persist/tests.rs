@@ -68,7 +68,7 @@ fn json_round_trip() {
     assert!(file.to_json().expect("encodes").contains("\"role\": \"standard\""));
 }
 
-/// Grok M1 (1.1.0): a frame that is not finite never turns into a file no load reads back
+/// Review M1 (1.1.0): a frame that is not finite never turns into a file no load reads back
 /// (`serde_json` writes NaN as `null`); the save is refused instead, so the old file stays.
 #[test]
 fn a_non_finite_frame_is_refused_not_written() {

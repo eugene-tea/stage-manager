@@ -196,7 +196,7 @@ impl Model {
             }
         }
         // An app quiet for its minute: its windows of Desktops not shown yet wait for their
-        // Desktop alone (R3 of the Codex review).
+        // Desktop alone (R3 of the review).
         let open = |w: &SavedWindow| w.role == SavedRole::Standard && !self.restore.pool_closed.contains(&w.bundle_id);
         for (i, l) in self.leftovers.iter().enumerate().filter(|(_, l)| saved_ok(l)) {
             for (j, st) in l.stages.iter().enumerate() {
@@ -418,7 +418,7 @@ impl Model {
     /// Drops the waiting entry at `spot` (a rule placed its window, or the window stays where
     /// Apple's rule put it): a stage of the model left with nothing goes, a saved Desktop
     /// left with nothing too. A stage that goes hands its orphans to the active stage, shown:
-    /// their frames go into `actions` (Fable E2: discarded, a parked orphan counted shown
+    /// their frames go into `actions` (review E2: discarded, a parked orphan counted shown
     /// stayed in the corner).
     fn drop_spot(&mut self, spot: Spot, actions: &mut Vec<Action>) {
         match spot {
@@ -657,7 +657,7 @@ impl Model {
                 tracing::debug!(id = v.0, desktop, in_place, own, "restore: a voter that can adopt nothing goes back to its saved stage here");
             }
             // Back at its own frame (no saved frame taken), it keeps the frame it had before
-            // fitting (Fable E10: `lift` dropped it).
+            // fitting (review E10: `lift` dropped it).
             if let Some(w) = self.windows.get_mut(&v)
                 && w.original.is_none()
                 && same_frame(w.restore, meta.frame)
@@ -783,7 +783,7 @@ impl Model {
     }
 
     /// True when a new title may still move a window of app `pid` ([`Model::window_retitled`]):
-    /// a key press in that app then touches its focused window (the Fable review of 11-06,
+    /// a key press in that app then touches its focused window (the review of 11-06,
     /// restore 2: a window its app focused at the login, typed in, was the late title's to
     /// park), and the platform asks which one only then.
     pub fn may_rematch_app(&self, pid: super::Pid) -> bool {
@@ -887,7 +887,7 @@ impl Model {
 
     /// Forgets what the restore remembers of windows and stages that are gone: a stage whose
     /// voter left ([`Model::follow_stage`]) once that window is gone, a merge or a waiting
-    /// front naming a stage gone (Fable E10: kept for the whole run). Each is read only for a
+    /// front naming a stage gone (review E10: kept for the whole run). Each is read only for a
     /// window or stage that exists, so nothing changes but the memory.
     pub(crate) fn prune_restore_refs(&mut self) {
         let windows = &self.windows;

@@ -10,8 +10,18 @@
 //!   captures off (`[strip] capture = false`, `STAGE_MANAGER_NO_CAPTURE`) or refused by
 //!   macOS, plain ghosts (a light card) move instead.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
-//!   snapshots appear exactly over them and shrink into their card's slot on the spring;
-//!   incoming windows' snapshots grow from their card to their frames. The slot is the
+//!   snapshots appear exactly over them and shrink into their card's slot on the spring (a
+//!   minimized window's, already in the Dock, comes out of its Dock tile instead, or its card
+//!   fades in: [`Transition::minimized`], [`crate::ui::minimize_motion`]);
+//!   incoming windows' snapshots grow from their card to their frames, both along Apple's
+//!   path (`motion_math::Path`: the window's picture, never stretched, turned about its
+//!   middle and seen from Apple's flight eye in front of the display's middle, its size, turn
+//!   and height on the spring and its sideways place ahead toward the window's end; a
+//!   dropped window's card goes straight). Both start on one
+//!   frame, as Apple's do, once the outgoing windows have parked behind their snapshots (the
+//!   controller's note, [`PARK_WAIT_MAX`] at most): until then every snapshot holds still, the
+//!   incoming ones on their cards, so no outgoing window shows at full size beside a moving
+//!   snapshot ([`Rise`]); with nothing leaving the motion starts at once. The slot is the
 //!   engine's ([`MovingWindow::slot`], `ui::transition_plan`), never one the strip works out
 //!   on its own; once the incoming windows are in place their frames are read back and their
 //!   snapshots finish exactly there. Each snapshot's start, end and slot are logged and kept
@@ -71,8 +81,10 @@ use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
 use crate::platform::windows;
 use crate::ui::motion_math::{
-    Plane, SHOWN_FADE, SnapshotCache, Spring, settle_time, shown_handover, shown_lands, shows_at, switch_spring, travel, unveil_time,
+    Plane, SHOWN_FADE, SnapshotCache, Spring, Toward, path_settle_time, settle_time, shown_handover, shown_lands, shows_at, shrink_spring,
+    switch_spring, travel, unveil_time,
 };
+use crate::ui::minimize_motion;
 use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, GlassLook, Overlay};
 use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
@@ -86,7 +98,8 @@ const SETTLED: f64 = 0.002;
 /// A card dragged out keeps its ghost on screen at most this long while its windows'
 /// transition is on its way.
 const LANDING_MAX: f64 = 1.0;
-/// Outgoing snapshots start shrinking after this at the latest, parked or not (seconds).
+/// A switch's motion starts after this at the latest, its outgoing windows parked or not
+/// (seconds; [`Strip::outgoing_parked`]).
 const PARK_WAIT_MAX: f64 = 0.2;
 /// How often a landed switch's held cover looks whether the patch shows (seconds: a frame).
 const HOLD_POLL: f64 = 1.0 / 60.0;
@@ -126,14 +139,24 @@ struct Running {
     /// The incoming snapshots' group, above the outgoing ones: they land as one picture
     /// ([`GhostGroup`]).
     incoming: Option<GhostGroup>,
+    /// Under Reduce Motion, the outgoing snapshots' group (they fade out as one picture).
+    outgoing: Option<GhostGroup>,
+    /// Under Reduce Motion, the cross-fade's length (seconds): nothing moves, the snapshots
+    /// fade where the windows are ([`crossfade_times`]).
+    crossfade: Option<f64>,
     /// Outgoing snapshots waiting for their windows to park: (index in `ghosts`, card plane,
-    /// the card's glass there).
-    waiting: Vec<(usize, Plane, Option<GlassLook>)>,
+    /// the card's glass there, the path's lean: a window's into its card, a dropped window's
+    /// card straight).
+    waiting: Vec<(usize, Plane, Option<GlassLook>, Toward)>,
+    /// The incoming snapshots' motion, waiting with the outgoing ones until their windows
+    /// have parked ([`Rise`]); taken when it starts.
+    rise: Option<Rise>,
+    /// When the snapshots were drawn (the motion starts then, or once the outgoing windows
+    /// have parked).
+    drawn_at: Instant,
     /// Cards hidden until their snapshots land.
     held: Vec<u64>,
     timers: Vec<Retained<NSTimer>>,
-    /// The window in place the snapshots pass under ([`Transition::under`]).
-    under: Option<u32>,
     /// The park corner's cover while the incoming windows wait there ([`Transition::corner`]).
     corner: Option<Ghost>,
     /// Where that cover is, what it shows, and the screen it is on.
@@ -167,6 +190,23 @@ struct Running {
     /// The landing was due once already (its outgoing snapshots settled): a landing moved
     /// earlier needs a timer of its own.
     settled: bool,
+}
+
+/// A switch's incoming motion before it starts: everything starts on one frame, as Apple's
+/// does, once the outgoing windows have parked behind their snapshots (they never show at full
+/// size beside a moving snapshot), or at once when nothing leaves.
+struct Rise {
+    /// The incoming snapshots: (index in `ghosts`, the window's plane, the card's glass at
+    /// the start).
+    ghosts: Vec<(usize, Plane, Option<GlassLook>)>,
+    /// When the strip unveils the incoming windows, from the motion's start (seconds;
+    /// [`unveil_time`]), if any come.
+    unveil: Option<f64>,
+    /// How long past the unveil the landing may wait for them to show ([`SHOWN_MAX`], or
+    /// [`LATE_MAX`] with late windows).
+    wait: f64,
+    /// Late windows are among them ([`Transition::late`]).
+    late: bool,
 }
 
 /// A landed switch's incoming snapshots fading out over their windows as one picture
@@ -375,6 +415,14 @@ fn draws_motion(animates: bool, fullscreen: bool) -> bool {
     animates && !fullscreen
 }
 
+/// A Reduce Motion switch's times for a cross-fade of `fade` seconds: (the unveil, when the
+/// incoming snapshots are opaque over their frames and the windows go in place under them;
+/// when the outgoing snapshots have faded out and the switch may land). Both at the fade's
+/// end: nothing travels, so nothing waits for a spring to settle.
+fn crossfade_times(fade: f64) -> (f64, f64) {
+    (fade, fade)
+}
+
 /// Runs `f` once on the main run loop after `seconds`, in every mode (also while a menu
 /// tracks the pointer or a card is dragged: the review's U10, one-shots in the default mode
 /// left a lifted card lifted and a merged card's layer behind).
@@ -403,9 +451,14 @@ impl Strip {
         self.motion.overlay.shown().then(|| (self.motion.overlay.window_number(), self.motion.overlay.origin()))
     }
 
-    /// The windows' spring (`[animation]` at its speed).
+    /// The spring of windows growing out of the strip (`[animation] spring_*` at its speed).
     fn spring(&self) -> Spring {
         switch_spring(&self.style)
+    }
+
+    /// The spring of windows shrinking into the strip (`[animation] shrink_*` at its speed).
+    fn shrink(&self) -> Spring {
+        shrink_spring(&self.style)
     }
 
     /// The shadows a snapshot can carry at full size (`[animation] shadow`): the key window's
@@ -457,8 +510,9 @@ impl Strip {
         (GhostShadow { window: if key { active } else { inactive }, corner, window_size: (frame.w, frame.h), card, amount }, note)
     }
 
-    /// Lays the overlay over the main display with the strip's eye, and has the snapshots'
-    /// shadows drawn for its scale ahead of the first switch.
+    /// Lays the overlay over the main display with the strip's eye (the snapshots' planes are
+    /// given through it; they fly through Apple's flight eye, which the overlay sets over the
+    /// display), and has the snapshots' shadows drawn for its scale ahead of the first switch.
     fn place_overlay(&mut self) {
         let g = &self.geometry;
         let eye = Point::new(g.global.x + g.m.eye.x, g.global.y + g.m.eye.y);
@@ -478,10 +532,11 @@ impl Strip {
         let x = g.x - o.x + layout.frame.x + slot.rect.x + self.current_dx();
         let top = g.y - o.y + layout.frame.y + slot.rect.y;
         let mut plane = Plane::thumb(x, top, slot.rect.size(), m.tilt, self.style.cards.corner_radius * m.k);
-        // As the card is drawn: grown under the pointer, or pressed (the click's card).
+        // As the card is drawn: grown under the pointer, or pressed (the click's card), each
+        // window about its own middle.
         let s = self.card_scale(layout.stage);
         if s != 1.0 {
-            let c = layout.hover_center(m);
+            let c = layout.thumb_center(m, index).unwrap_or_else(|| layout.hover_center(m));
             let c = Point::new(g.x - o.x + c.x + self.current_dx(), g.y - o.y + c.y);
             plane.left_mid = Point::new(c.x + (plane.left_mid.x - c.x) * s, c.y + (plane.left_mid.y - c.y) * s);
             plane.size = Size::new(plane.size.w * s, plane.size.h * s);
@@ -606,7 +661,6 @@ impl Strip {
         }
         self.place_overlay();
         let under = t.under;
-        let below = self.overlay_below(under);
         let style = self.style.animation.clone();
         let spring = self.spring();
         let o = self.motion.overlay.origin();
@@ -623,6 +677,13 @@ impl Strip {
         // The outgoing windows leave `cover_ms` after their snapshots are drawn: the
         // snapshots' shadows come in around then, as the windows' go.
         let (out_begin, out_duration) = handover(style.cover_ms as f64 / 1000.0, 2.0 * style.cover_ms as f64 / 1000.0);
+        // Reduce Motion: a cross-fade where the windows are (UX-SPEC, "Reduce Motion").
+        let crossfade = crate::ui::display_options::reduced(&style).then(|| crate::ui::display_options::fade_seconds(&style));
+        let mut outgoing: Option<GhostGroup> = None;
+        // A minimized window's: its picture flies from the Dock (the overlay goes above the
+        // Dock for it), or its card fades in (no picture moves).
+        let mut from_dock = false;
+        let mut fade_in: Vec<u64> = Vec::new();
         for w in &t.outgoing {
             let id = w.window.id;
             let (end, card, aimed, glass) =
@@ -630,8 +691,53 @@ impl Strip {
                     Some((p, stage, slot, glass)) => (p, Some(stage), Some(slot), glass),
                     None => (self.offscreen_plane(w.window.frame), None, None, None),
                 };
+            // A window already in the Dock (minimized): its picture comes out of its Dock tile,
+            // or its card fades in; never a full-size picture where it was before the genie.
+            if let Some(m) = t.minimized.filter(|m| m.window == id) {
+                let image = self.motion.cache.get(id).cloned().or_else(|| self.thumbs.get(&id).cloned());
+                let frame = w.window.frame;
+                match minimize_motion::start(m.tile, frame.size(), image.is_some() || plain, crossfade.is_some(), self.screen_global()) {
+                    minimize_motion::Start::Tile(at_rect) => {
+                        let corner = self.style.cards.corner_radius * self.m().k * (at_rect.w / frame.w.max(1.0)).min(1.0);
+                        let at = Plane::window(at_rect, o, corner);
+                        // Card-sized: the card's shadow, not a window's.
+                        let (shadow, note) = self.ghost_shadow(id, image.as_ref(), frame, false, 0.0);
+                        let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0, None);
+                        report.push(GhostReport {
+                            window: id,
+                            outgoing: true,
+                            stage: w.stage,
+                            slot: w.slot,
+                            aimed_slot: aimed,
+                            start: self.plane_rect(&at),
+                            end: self.plane_rect(&end),
+                            real: None,
+                            at_unveil: None,
+                            shown_ms: None,
+                            handover_ms: None,
+                            shadow: Some(note),
+                        });
+                        tracing::debug!(id, tile = ?m.tile, start = %at_rect, "a minimized window's picture comes out of its Dock tile");
+                        waiting.push((ghosts.len(), end, glass, Toward::Card));
+                        ghosts.push(ghost);
+                        cover.outgoing = true;
+                        from_dock = true;
+                        if let Some(stage) = card.filter(|s| !held.contains(s)) {
+                            held.push(stage);
+                        }
+                    }
+                    minimize_motion::Start::Fade => {
+                        tracing::debug!(id, tile = ?m.tile, reduced = crossfade.is_some(), picture = image.is_some(), "a minimized window's card fades in");
+                        if let Some(stage) = card.filter(|s| !fade_in.contains(s)) {
+                            fade_in.push(stage);
+                        }
+                    }
+                }
+                continue;
+            }
             // A window dropped on the strip: its card under the pointer becomes the snapshot.
             let dragged = self.motion.window_card.take_if(|c| c.window == id);
+            let toward = if dragged.is_some() { Toward::Straight } else { Toward::Card };
             let (ghost, shadow_note) = match dragged {
                 Some(c) => (c.ghost, None),
                 None => {
@@ -642,13 +748,16 @@ impl Strip {
                     }
                     let at = Plane::window(w.window.frame, o, style.corner_radius);
                     let (shadow, note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_out == Some(id), 1.0);
-                    let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0, None);
+                    let group = if crossfade.is_some() { Some(&*outgoing.get_or_insert_with(|| self.motion.overlay.group())) } else { None };
+                    let ghost = self.motion.overlay.ghost(id, image.as_ref(), at, &shadow, 1.0, group);
                     ghost.fade_shadow(0.0, 1.0, out_begin, out_duration);
                     (ghost, Some(note))
                 }
             };
             // It holds still over the window until the window has parked behind it.
             let start = Plane::window(w.window.frame, o, style.corner_radius);
+            // Under Reduce Motion it never leaves: it fades out there.
+            let shown_end = if crossfade.is_some() { start } else { end };
             report.push(GhostReport {
                 window: id,
                 outgoing: true,
@@ -656,14 +765,14 @@ impl Strip {
                 slot: w.slot,
                 aimed_slot: aimed,
                 start: self.plane_rect(&start),
-                end: self.plane_rect(&end),
+                end: self.plane_rect(&shown_end),
                 real: None,
                 at_unveil: None,
                 shown_ms: None,
                 handover_ms: None,
                 shadow: shadow_note,
             });
-            waiting.push((ghosts.len(), end, glass));
+            waiting.push((ghosts.len(), end, glass, toward));
             ghosts.push(ghost);
             cover.outgoing = true;
             if let Some(stage) = card.filter(|s| !held.contains(s)) {
@@ -671,7 +780,9 @@ impl Strip {
             }
         }
         // The incoming snapshots go into one group, above the outgoing ones (made with the first).
+        // They start growing with the outgoing ones ([`Rise`]).
         let mut incoming: Option<GhostGroup> = None;
+        let mut rising = Vec::new();
         for w in &t.incoming {
             let id = w.window.id;
             let image = self.motion.cache.get(id).cloned().or_else(|| self.thumbs.get(&id).cloned());
@@ -679,15 +790,25 @@ impl Strip {
                 tracing::debug!(id, "no snapshot of an incoming window; it just comes");
                 continue;
             };
-            let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), 0.0);
-            let group = incoming.get_or_insert_with(|| self.motion.overlay.group());
-            let mut ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0, Some(group));
+            let end = Plane::window(w.window.frame, o, style.corner_radius);
+            // Under Reduce Motion it starts at its window's frame, looking as the window, and
+            // fades in there (its group, from transparent).
+            let (start, glass, amount) = if crossfade.is_some() { (end, None, 1.0) } else { (start, glass, 0.0) };
+            let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), amount);
+            let group = incoming.get_or_insert_with(|| {
+                let g = self.motion.overlay.group();
+                if crossfade.is_some() {
+                    g.set_opacity(0.0);
+                }
+                g
+            });
+            let ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0, Some(group));
             // From its card's look.
             ghost.set_glass(glass.as_ref(), 1.0);
-            let end = Plane::window(w.window.frame, o, style.corner_radius);
-            ghost.spring_to(end, spring);
-            ghost.spring_shadow(1.0, spring);
-            ghost.spring_glass(glass.as_ref(), 0.0, spring);
+            if crossfade.is_some() {
+                ghost.set_shadow_amount(1.0);
+            }
+            rising.push((ghosts.len(), end, glass));
             report.push(GhostReport {
                 window: id,
                 outgoing: false,
@@ -705,8 +826,9 @@ impl Strip {
             ghosts.push(ghost);
             cover.incoming = true;
         }
+        self.fade_in_cards(&fade_in);
         if ghosts.is_empty() {
-            if let Some(g) = &incoming {
+            for g in incoming.iter().chain(&outgoing) {
                 g.remove();
             }
             strip_model::cover(t.id, cover);
@@ -726,7 +848,7 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
-        self.show_overlay(below);
+        self.show_overlay(under, from_dock);
         self.motion.overlay.flush();
         self.motion.landing = None;
         // The cards' thumbnails are not captured while the snapshots move.
@@ -737,9 +859,11 @@ impl Strip {
         // The incoming windows take their place once their snapshots as shown are within a
         // point of them: the farthest edge's travel decides when.
         let travel = report.iter().filter(|g| !g.outgoing).fold(0.0, |m: f64, g| m.max(travel(g.start, g.end)));
-        let unveil = cover.incoming.then(|| unveil_time(&self.style, travel));
-        let started = Instant::now();
-        let unveil_at = unveil.map(|u| started + Duration::from_secs_f64(u));
+        let unveil = cover.incoming.then(|| match crossfade {
+            Some(fade) => crossfade_times(fade).0,
+            None => unveil_time(&self.style, travel),
+        });
+        let drawn_at = Instant::now();
         // Late windows (an app we hid, unhidden after the unveil) show when their app says so,
         // bounded: their snapshots wait for that ([`Self::late_shown`]).
         let late: Vec<u32> = t.late.iter().copied().filter(|w| ghosts.iter().any(|g| g.window == *w)).collect();
@@ -749,33 +873,24 @@ impl Strip {
         let unshown: Vec<u32> =
             if unveil.is_some() { ghosts.iter().filter(|g| t.incoming.iter().any(|w| w.window.id == g.window)).map(|g| g.window).collect() } else { Vec::new() };
         let wait = if late.is_empty() { SHOWN_MAX } else { LATE_MAX.max(SHOWN_MAX) };
-        let lands_after = unveil.map(|u| started + Duration::from_secs_f64(u + wait + SHOWN_FADE + AFTER_UNVEIL));
-        if let Some(u) = unveil.filter(|_| !late.is_empty()) {
-            timers.push(after(u + LATE_MAX, move || {
-                with_strip_of(display, |s| s.late_shown(id, None, None));
-            }));
-        }
+        let rise = Rise { ghosts: rising, unveil, wait, late: !late.is_empty() };
         // The key window's snapshot, taken parked and inactive, again once it is key.
         if let Some(key) = t.key_in.filter(|k| !late.contains(k) && ghosts.iter().any(|g| g.window == *k) && !plain) {
             timers.push(after(RECAPTURE_AFTER, move || {
                 with_strip_of(display, |s| s.recapture_key(id, key));
             }));
         }
-        if let Some(unveil) = unveil {
-            timers.push(after(unveil, move || {
-                // The strip busy (never expected from a timer): the unveil still goes.
-                if with_strip_of(display, |s| s.unveil(id)).is_none() {
-                    strip_model::emit(StripEvent::Unveil { id });
-                }
-            }));
-        }
-        if waiting.is_empty() {
-            timers.push(after(settle_time(spring, SETTLED), move || {
+        let rises_now = waiting.is_empty();
+        if rises_now {
+            let settles = crossfade.map_or_else(|| settle_time(spring, SETTLED), |fade| crossfade_times(fade).1);
+            timers.push(after(settles, move || {
                 with_strip_of(display, |s| s.end_transition(id));
             }));
         } else {
+            // The whole motion waits for the outgoing windows to park behind their snapshots
+            // (the controller's note, [`Self::outgoing_parked`]), this long at most.
             timers.push(after(PARK_WAIT_MAX, move || {
-                with_strip_of(display, |s| s.outgoing_parked(id));
+                with_strip_of(display, |s| s.outgoing_parked_as(id, true));
             }));
         }
         let unveil_ms = unveil.map(|u| (u * 1000.0).round() as u64);
@@ -809,21 +924,26 @@ impl Strip {
             corner_picture,
             travel,
             unveil_ms,
+            motion_ms: None,
+            motion_waited_out: None,
         });
         self.motion.running =
             Some(Running {
                 id,
                 ghosts,
                 incoming,
+                outgoing,
+                crossfade,
                 waiting,
+                rise: Some(rise),
+                drawn_at,
                 held,
                 timers,
-                under,
                 corner,
                 corner_at,
                 arrived,
-                lands_after,
-                unveil_at,
+                lands_after: None,
+                unveil_at: None,
                 unshown,
                 late_key: t.key_in.filter(|k| late.contains(k)),
                 late: late.clone(),
@@ -833,6 +953,27 @@ impl Strip {
                 final_land: None,
                 settled: false,
             });
+        if rises_now {
+            self.start_motion(id, false);
+        }
+    }
+
+    /// The cards of `stages` fade in at their slots ([`crate::ui::display_options::fade_seconds`]): a
+    /// minimized window's card with no picture to fly from the Dock, or under Reduce Motion.
+    fn fade_in_cards(&self, stages: &[u64]) {
+        let fade = crate::ui::display_options::fade_seconds(&self.style.animation);
+        for stage in stages {
+            if let Some(layers) = self.pane.cards.get(stage) {
+                layers.card.setOpacity(1.0);
+                super::fade_in(&layers.card, fade);
+            }
+        }
+    }
+
+    /// This strip's screen (global, top-left): where its overlay draws.
+    fn screen_global(&self) -> Rect {
+        let g = &self.geometry;
+        Rect::new(g.screen.origin.x, g.primary_height - (g.screen.origin.y + g.screen.size.height), g.screen.size.width, g.screen.size.height)
     }
 
     /// The park corner's cover for transition `id` (global): the corner patch's picture of it,
@@ -877,12 +1018,23 @@ impl Strip {
                     a.1 = *real;
                 }
                 let to = Plane::window(*real, o, corner);
+                // Not moving yet (the outgoing windows still parking): it starts toward there.
+                if let Some(rise) = r.rise.as_mut() {
+                    for (i, end, _) in rise.ghosts.iter_mut() {
+                        if r.ghosts.get(*i).is_some_and(|g| g.window == *window) {
+                            *end = to;
+                        }
+                    }
+                }
                 for g in r.ghosts.iter_mut().filter(|g| g.window == *window && g.target.tilt == 0.0) {
                     let t = g.target;
                     let off = (t.left_mid.x - to.left_mid.x).abs().max((t.left_mid.y - to.left_mid.y).abs()).max((t.size.w - to.size.w).abs()).max((t.size.h - to.size.h).abs());
                     tracing::debug!(id, window, real = %real, off, "transition: ghost end vs the window's real frame");
-                    if off > 0.25 {
-                        g.spring_to(to, spring);
+                    if off > 0.25 && r.crossfade.is_some() {
+                        // Reduce Motion: it fades in where the window is, never travels.
+                        g.set(to);
+                    } else if off > 0.25 {
+                        g.spring_to(to, spring, Toward::Window);
                         g.spring_shadow(1.0, spring);
                     }
                 }
@@ -898,23 +1050,118 @@ impl Strip {
         });
     }
 
-    /// The outgoing windows of transition `id` have parked: their snapshots shrink into their
-    /// cards now, and the transition ends when they land.
+    /// The outgoing windows of transition `id` have parked (the controller's note): the motion
+    /// starts.
     pub(super) fn outgoing_parked(&mut self, id: u64) {
+        self.outgoing_parked_as(id, false);
+    }
+
+    /// The outgoing windows of transition `id` have parked, or the wait for them ran out
+    /// (`waited_out`, [`PARK_WAIT_MAX`]): the whole motion starts on this frame, the outgoing
+    /// snapshots shrinking into their cards as the incoming ones grow ([`Rise`]), and the
+    /// transition ends when the outgoing ones land.
+    fn outgoing_parked_as(&mut self, id: u64, waited_out: bool) {
+        // Its timers come back to this strip (round displays-live-1).
+        let display = self.display;
+        let spring = self.shrink();
+        if self.motion.running.as_ref().is_none_or(|r| r.id != id || r.waiting.is_empty()) {
+            return;
+        }
+        // One commit for both ways: every spring begins on the same frame.
+        objc2_quartz_core::CATransaction::begin();
+        self.start_motion(id, waited_out);
+        let crossfade = self.motion.running.as_ref().and_then(|r| r.crossfade.filter(|_| r.id == id));
+        if let Some(fade) = crossfade {
+            // Reduce Motion: the outgoing snapshots fade out where they are, as one picture,
+            // while their cards fade in at their slots (where the windows went).
+            let mut held = Vec::new();
+            if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+                if let Some(g) = &r.outgoing {
+                    g.fade_to(0.0, fade);
+                }
+                for (i, ..) in std::mem::take(&mut r.waiting) {
+                    if let Some(g) = r.ghosts.get(i).filter(|g| !g.grouped()) {
+                        g.fade_to(0.0, fade);
+                    }
+                }
+                held.clone_from(&r.held);
+            }
+            for stage in &held {
+                if let Some(layers) = self.pane.cards.get(stage) {
+                    layers.card.setOpacity(1.0);
+                    super::fade_in(&layers.card, fade);
+                }
+            }
+            objc2_quartz_core::CATransaction::commit();
+            if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+                r.timers.push(after(crossfade_times(fade).1, move || {
+                    with_strip_of(display, |s| s.end_transition(id));
+                }));
+            }
+            return;
+        }
+        if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+            for (i, end, glass, toward) in std::mem::take(&mut r.waiting) {
+                if let Some(g) = r.ghosts.get_mut(i) {
+                    g.spring_to(end, spring, toward);
+                    g.spring_shadow(0.0, spring);
+                    g.spring_glass(glass.as_ref(), 1.0, spring);
+                }
+            }
+        }
+        objc2_quartz_core::CATransaction::commit();
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        // Shrinking into a card trails the spring sideways: it lands once that part is in too.
+        r.timers.push(after(path_settle_time(spring, SETTLED, Toward::Card), move || {
+            with_strip_of(display, |s| s.end_transition(id));
+        }));
+    }
+
+    /// Starts transition `id`'s incoming motion ([`Rise`]): the snapshots grow from their cards
+    /// on the switch spring, and the unveil, the late windows' wait and the earliest landing
+    /// count from now. `waited_out`: the outgoing windows' note never came within
+    /// [`PARK_WAIT_MAX`]. Logged with how long after the snapshots were drawn (kept for `ctl
+    /// state`, [`TransitionReport::motion_ms`]).
+    fn start_motion(&mut self, id: u64, waited_out: bool) {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
         let spring = self.spring();
-        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id && !r.waiting.is_empty()) else { return };
-        for (i, end, glass) in std::mem::take(&mut r.waiting) {
-            if let Some(g) = r.ghosts.get_mut(i) {
-                g.spring_to(end, spring);
-                g.spring_shadow(0.0, spring);
-                g.spring_glass(glass.as_ref(), 1.0, spring);
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        let Some(rise) = r.rise.take() else { return };
+        if let (Some(fade), Some(group)) = (r.crossfade, &r.incoming) {
+            // Reduce Motion: the incoming snapshots fade in at their windows' frames.
+            group.fade_to(1.0, fade);
+        }
+        for (i, end, glass) in rise.ghosts.iter().filter(|_| r.crossfade.is_none()) {
+            if let Some(g) = r.ghosts.get_mut(*i) {
+                g.spring_to(*end, spring, Toward::Window);
+                g.spring_shadow(1.0, spring);
+                g.spring_glass(glass.as_ref(), 0.0, spring);
             }
         }
-        r.timers.push(after(settle_time(spring, SETTLED), move || {
-            with_strip_of(display, |s| s.end_transition(id));
-        }));
+        let started = Instant::now();
+        r.unveil_at = rise.unveil.map(|u| started + Duration::from_secs_f64(u));
+        r.lands_after = rise.unveil.map(|u| started + Duration::from_secs_f64(u + rise.wait + SHOWN_FADE + AFTER_UNVEIL));
+        if let Some(u) = rise.unveil.filter(|_| rise.late) {
+            r.timers.push(after(u + LATE_MAX, move || {
+                with_strip_of(display, |s| s.late_shown(id, None, None));
+            }));
+        }
+        if let Some(unveil) = rise.unveil {
+            r.timers.push(after(unveil, move || {
+                // The strip busy (never expected from a timer): the unveil still goes.
+                if with_strip_of(display, |s| s.unveil(id)).is_none() {
+                    strip_model::emit(StripEvent::Unveil { id });
+                }
+            }));
+        }
+        let outgoing = r.waiting.len();
+        let motion_ms = started.saturating_duration_since(r.drawn_at).as_millis() as u64;
+        tracing::debug!(id, motion_ms, waited_out, outgoing, incoming = rise.ghosts.len(), "transition: the motion starts, the outgoing and the incoming snapshots on one frame");
+        strip_model::update_transition(id, |t| {
+            t.motion_ms = Some(motion_ms);
+            t.motion_waited_out = Some(waited_out);
+        });
     }
 
     /// Transition `id`'s incoming snapshots are within a point of their windows as shown:
@@ -1131,38 +1378,13 @@ impl Strip {
         objc2_quartz_core::CATransaction::commit();
     }
 
-    /// Where the overlay goes for a transition (`under`: its window in place): just under the
-    /// strip's pane while the strip is raised over windows (the edge revealing it, or its
-    /// level above windows), so snapshots grow from and shrink into the cards from behind
-    /// them (drawn over the cards and gone at the end, the cards popped back to the front:
-    /// 10-13, a laptop with windows over the strip); else just under `under`; above every
-    /// window while a dragged window's card shows, or with neither.
-    fn overlay_below(&self, under: Option<u32>) -> Option<(u32, isize)> {
-        if self.motion.window_card.is_some() {
-            return None;
-        }
-        if self.pane.lifted == Some(true) {
-            return u32::try_from(self.pane.panel.windowNumber()).ok().map(|n| (n, objc2_app_kit::NSFloatingWindowLevel));
-        }
-        under.map(|id| (id, objc2_app_kit::NSNormalWindowLevel))
-    }
-
-    /// The strip was raised or lowered: a running transition's overlay goes where it now
-    /// belongs ([`Self::overlay_below`]).
-    pub(super) fn reorder_overlay(&mut self) {
-        let Some(under) = self.motion.running.as_ref().map(|r| r.under) else { return };
-        let below = self.overlay_below(under);
-        self.show_overlay(below);
-    }
-
-    /// Shows the overlay where [`Self::overlay_below`] puts it: above every window while a
-    /// dragged window's card shows (it passes over the raised strip's cards), else under
-    /// `below`, or above every normal window and below floating ones.
-    fn show_overlay(&mut self, below: Option<(u32, isize)>) {
-        if self.motion.window_card.is_some() {
-            self.motion.overlay.show_on_top();
-        } else {
-            self.motion.overlay.show_below(below);
+    /// Shows the overlay where [`overlay_place`] puts it (`from_dock`: a picture leaves the
+    /// Dock, which it must pass over).
+    fn show_overlay(&mut self, under: Option<u32>, from_dock: bool) {
+        match overlay_place(self.motion.window_card.is_some() || from_dock, under) {
+            OverlayPlace::OnTop => self.motion.overlay.show_on_top(),
+            OverlayPlace::Under(id) => self.motion.overlay.show_under(Some(id)),
+            OverlayPlace::OverWindows => self.motion.overlay.show_under(None),
         }
     }
 
@@ -1194,11 +1416,16 @@ impl Strip {
         let hold = facts.filter(|(f, _)| cover_holds(f)).and_then(|(f, screen)| r.corner.take().map(|g| (g, f, screen)));
         // Landed, the incoming snapshots fade out over their windows as one picture (their
         // group: never one through another, 11-02); the rest go at once.
-        let (fade, gone): (Vec<Ghost>, Vec<Ghost>) = std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && g.grouped());
+        let arrived = &r.arrived;
+        let (fade, gone): (Vec<Ghost>, Vec<Ghost>) =
+            std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && g.grouped() && arrived.iter().any(|(w, _)| *w == g.window));
         let group = r.incoming.take();
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
         for g in gone.iter().chain(&r.corner) {
+            g.remove();
+        }
+        if let Some(g) = r.outgoing.take() {
             g.remove();
         }
         let group = match group {
@@ -1364,8 +1591,18 @@ impl Strip {
             c.ghost.set_image(&picture, false);
             c.has_image = true;
         }
+        // A card dragged past the column: its ghost drawn as the window takes the newer
+        // snapshot; one waiting at the card's size for it turns into the window now.
+        let dragged = self.card_drag.as_ref().filter(|d| d.window == id).map(|d| (d.ghost_out, d.ghost_window));
+        if let Some(ghost) = self.card_drag.as_mut().filter(|d| d.window == id && d.ghost_window).and_then(|d| d.ghost.as_mut()) {
+            ghost.set_image(&picture);
+        }
         self.motion.cache.insert(id, picture, bytes);
         strip_model::publish_snapshots(self.display, self.motion.cache.ids());
+        if dragged == Some((true, false)) {
+            tracing::debug!(window = id, "card drag: the window's full-size snapshot arrived; the ghost turns into the window");
+            self.mouse_dragged();
+        }
     }
 
     /// While a window is dragged with the pointer over the strip column (`over`, global), its
@@ -1411,9 +1648,50 @@ impl Strip {
 
 }
 
+/// Where the motion overlay goes for a transition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverlayPlace {
+    /// Above every window, floating ones and the raised strip included: only while a
+    /// dragged window's card shows (it passes over the raised strip's cards).
+    OnTop,
+    /// Just under this window (in place, at the normal level), as Apple's snapshots pass
+    /// behind a window just opened or activated.
+    Under(u32),
+    /// Above every normal window, below floating ones.
+    OverWindows,
+}
+
+/// Where the overlay goes for a transition (`under`: its window in place). Whether the strip
+/// is raised does not matter: the overlay's own level is under floating windows, so it is
+/// under the raised strip (its cards cover the snapshots growing from and shrinking into
+/// them) and under always-on-top windows, which stay on top through a switch. Until 11-09 a
+/// raised strip put the overlay at the floating level, just under the strip, and so over an
+/// always-on-top window.
+fn overlay_place(window_card: bool, under: Option<u32>) -> OverlayPlace {
+    match (window_card, under) {
+        (true, _) => OverlayPlace::OnTop,
+        (false, Some(id)) => OverlayPlace::Under(id),
+        (false, None) => OverlayPlace::OverWindows,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reduce Motion: the windows go in place once the snapshots over them are opaque, and the
+    /// switch lands once the leaving ones are gone; both within the short fade.
+    #[test]
+    fn a_crossfade_unveils_and_lands_at_the_fades_end() {
+        let style = crate::config::AnimationStyle { reduce_motion: crate::config::ReduceMotion::On, ..crate::config::Config::default().style.animation };
+        let fade = crate::ui::display_options::fade_seconds(&style);
+        let (unveil, lands) = crossfade_times(fade);
+        assert_eq!(unveil, fade, "never before the snapshots are opaque");
+        assert_eq!(lands, fade);
+        assert!(lands <= 0.25, "short: {lands}");
+        let full = unveil_time(&crate::config::Config::default().style, 600.0);
+        assert!(unveil < full, "the cross-fade is quicker than the flight it stands in for: {unveil} vs {full}");
+    }
 
     /// U8: no transition is drawn on a full-screen Space (the overlay cannot show there).
     #[test]
@@ -1421,5 +1699,14 @@ mod tests {
         assert!(draws_motion(true, false));
         assert!(!draws_motion(true, true));
         assert!(!draws_motion(false, false));
+    }
+
+    /// The overlay never goes to the floating level for a switch (an always-on-top window
+    /// stays on top); only a dragged window's card takes it above everything.
+    #[test]
+    fn the_overlay_stays_under_floating_windows_in_a_switch() {
+        assert_eq!(overlay_place(false, None), OverlayPlace::OverWindows);
+        assert_eq!(overlay_place(false, Some(7)), OverlayPlace::Under(7));
+        assert_eq!(overlay_place(true, Some(7)), OverlayPlace::OnTop);
     }
 }

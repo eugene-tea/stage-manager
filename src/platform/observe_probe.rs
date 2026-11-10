@@ -365,13 +365,23 @@ mod tests {
         assert!(!probes.running(LATE));
     }
 
+    /// Like [`fake`], the stuck app hanging a second: the bound below keeps room for a slow,
+    /// shared CI machine (a 250 ms hang left 120 ms and failed there).
+    fn fake_hanging(pid: i32) -> Answer {
+        if pid == STUCK {
+            std::thread::sleep(Duration::from_millis(1000));
+            return Answer::NotYet;
+        }
+        fake(pid)
+    }
+
     #[test]
     fn asking_at_once_waits_a_bounded_time_and_keeps_who_answered() {
         let t0 = Instant::now();
-        let answered = ask_once(&[STUCK, 4003, 4004], fake, Duration::from_millis(120));
+        let answered = ask_once(&[STUCK, 4003, 4004], fake_hanging, Duration::from_millis(120));
         let took = t0.elapsed();
         assert_eq!(answered, [4003, 4004].into_iter().collect());
-        assert!(took < Duration::from_millis(240), "the stuck app's timeout is not waited out ({took:?})");
+        assert!(took < Duration::from_millis(600), "the stuck app's hang is not waited out ({took:?})");
     }
 
     #[test]

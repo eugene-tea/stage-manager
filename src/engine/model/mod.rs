@@ -33,7 +33,6 @@
 
 mod ahead;
 mod away;
-mod hide;
 mod ops;
 mod pending;
 mod pool;
@@ -422,7 +421,7 @@ pub struct Model {
     /// Stages of saved Desktops not visited that the pool emptied (moved whole to a part):
     /// kept in place so stage indices hold, left out of `state.json`.
     pub(crate) pooled_out: HashSet<(u64, usize)>,
-    /// Saved stages merged into another stage (the Codex review of 10-21, R5): a stray of one
+    /// Saved stages merged into another stage (the review of 10-21, R5): a stray of one
     /// (`pool.rs`) joins the stage it was merged into, when that is on its Desktop, instead
     /// of making the old stage again.
     pub(crate) merged: HashMap<pool::Kin, StageId>,
@@ -625,7 +624,7 @@ impl Model {
     }
 
     /// True when `stage` is the front stage of a Desktop some screen shows now, whichever
-    /// screen: its windows are on screen, not cards (the Fable review's switching 1: the
+    /// screen: its windows are on screen, not cards (the review's switching 1: the
     /// main screen's front alone made every window of the laptop's front "elsewhere").
     pub fn stage_in_front(&self, stage: StageId) -> bool {
         self.stage(stage).is_some_and(|s| self.is_shown_space(s.space) && self.active.get(&s.space) == Some(&stage))

@@ -1,8 +1,9 @@
 # Stage Manager — development
 
 How to build, sign, run and test Stage Manager. The architecture and its safety layers are
-in [PLAN.md](../PLAN.md); how the app should behave is in [UX-SPEC.md](UX-SPEC.md);
-publishing a release is in [RELEASING.md](RELEASING.md).
+in [ARCHITECTURE.md](ARCHITECTURE.md); what is still to do in [PLAN.md](../PLAN.md); how the
+app should behave is in [UX-SPEC.md](UX-SPEC.md); publishing a release is in
+[RELEASING.md](RELEASING.md).
 
 ## Requirements
 
@@ -67,10 +68,13 @@ running from anywhere else: `make run` stops only the dev copy's own process.
 its ctl socket and reading the window server's view of the windows:
 
 ```sh
-scripts/test-stages.sh                    # every phase
-scripts/test-stages.sh m3 safety          # some phases: m3 safety m4 m6 restore strip native
+scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore strip native
                                           # visible parity motion slots expose capture raise park
-scripts/test-stages.sh hide               # [windows] hide_parked_apps; by name only, as still
+                                          # offscreen enhanced stale handles displays
+scripts/test-stages.sh m3 safety          # some phases
+scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
+                                          # card drawn whole, one of its windows lifted off
+                                          # alone in the column, dropped in a gap, dragged out)
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
@@ -92,6 +96,14 @@ Rules for every run that manages windows:
 
 Synthetic clicks and drags are posted only where the app's own or a fixture's windows are
 topmost along the whole path, and the pointer is put back afterwards.
+
+`scripts/test-update-quit.sh` checks an update installed at the user's Quit with a local
+fake release: a test build (`--features update-test`) runs from a scratch folder, a copy
+relabelled 99.0.0 sits on a local disk image, and the script checks that `ctl quit` installs
+nothing, the next launch removes the left-behind copy and owes an early check, and the
+menu's Quit (`ctl debug-menu-quit`) installs 99.0.0 without reopening it. It manages no app
+and refuses to run beside a running Stage Manager; run it while at the Mac (an automatic
+install goes by itself after 120 s with no input).
 
 ### The fixture app
 
@@ -123,6 +135,7 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 | `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | with `STAGE_MANAGER_ONLY` set only: activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
 | `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
 | `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
+| `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only: `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
 | `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` toggle Apple's Stage Manager (it restores the setting on exit) |
 
 ## The ctl socket
@@ -160,7 +173,7 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make
 
 Exit status is 0 on success, 1 on an error reply and 2 when the app is not running. With
 `STAGE_MANAGER_TEST=1` the `debug-*` commands post clicks, drags, Desktop and Mission
-Control shortcuts, and full-screen toggles for the scripted checks, and `debug-stale-handle
+Control shortcuts, full-screen toggles and the strip shown or hidden for the scripted checks, and `debug-stale-handle
 ID` takes our handle on a window for dead until it is looked up afresh (`test-stages.sh
 handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` windows. See
 `src/platform/ctl.rs`.
@@ -197,6 +210,10 @@ menu. Day files are capped in size and kept 14 days.
   warning and error, deduplicated: short enough to paste.
 - `stage-manager mark ["note"]` (or **Mark a Problem** in the menu) writes a marked block
   with the app's state and the last 30 seconds of detailed lines.
+- At `debug`, a task that held the window thread 100 ms or more (a command, a tick, an
+  Accessibility callback) logs one `slow WM task` line: its name, how long, the tick's slowest
+  part, and how many such lines were held back (one a second per task at most). Each
+  `state saved` line says how long the save took (`ms`, `encode_ms`, `write_ms`).
 
 Window titles go into the log, and into a mark's state dumps, as a short hash
 (`#1a2b3c4d`, the same for the same title in every process on this Mac: it is keyed with a

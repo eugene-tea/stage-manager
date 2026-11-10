@@ -75,10 +75,36 @@ impl Mode {
 
 /// How close to the screen's left edge (the strip's left edge) a window's left edge must come
 /// for the strip to slide away, in points. Apple's strip stays up under a window that covers
-/// the cards and goes only once the window's left edge is about 50 pt from the screen's left
-/// edge (the owner's eye on his Studio Display, 11-05: VS Code dragged left over the cards
-/// from about 308 pt); before, ours hid at any overlap of the column.
-pub const COVER_EDGE: f64 = 50.0;
+/// the cards and goes only once the window covers the cards' left edge too: recorded 11-09 on
+/// a Studio Display, it stayed up with a dragged window's left edge at 52 pt and slid away at
+/// 15 pt, its cards starting 16 pt from the edge. 20 pt is the cards' edge and a few points
+/// (the exact point between 16 and 52 pt was not measured). The owner's eye of 11-05 put it at
+/// about 50 pt, which the recordings showed too early; before that, ours hid at any overlap of
+/// the column.
+pub const COVER_EDGE: f64 = 20.0;
+
+/// What may hold the strip above windows ([`lifted`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Lift {
+    /// `[strip] level = "above-windows"`.
+    pub always: bool,
+    /// A card of the strip is being dragged.
+    pub card_drag: bool,
+    /// A switch is starting or running while the strip is up (the leaving windows still
+    /// cover it until their snapshots land).
+    pub transition: bool,
+    /// The edge reveals the strip over a window that covers it.
+    pub edge_reveal: bool,
+    /// A window is being dragged with the pointer over the strip column.
+    pub window_drag_over: bool,
+}
+
+/// Whether the strip goes above windows. A window dragged over it is not a reason: Apple's
+/// cards stay under the dragged window (recorded 11-09); its card-sized picture follows the
+/// pointer above everything instead, and the drop into the strip works as before.
+pub fn lifted(l: Lift) -> bool {
+    l.always || l.card_drag || l.transition || l.edge_reveal
+}
 
 /// Whether any of `frames` (the active stage's shown windows) hides the strip whose area is
 /// `strip` (global coordinates): it reaches into the strip's area and its left edge is within
@@ -111,7 +137,7 @@ pub struct Visibility {
     /// The edge tab's area (global), when it shows: resting on it counts as the edge.
     tab: Option<Rect>,
     /// The left edge of the strip's screen (global x): the edge zone starts there, so a
-    /// pointer on a screen further left is never at this strip's edge (the Codex review's
+    /// pointer on a screen further left is never at this strip's edge (the review's
     /// S2). `None` until the strip says (unbounded).
     screen_left: Option<f64>,
     /// Delays and the edge zone.
@@ -232,6 +258,18 @@ mod tests {
         t0 + Duration::from_millis(n)
     }
 
+    /// Apple's cards stay under a window dragged over them (11-09): the drag alone never lifts
+    /// the strip; a card drag, a switch, the edge reveal and the config's level still do.
+    #[test]
+    fn a_window_dragged_over_the_strip_leaves_it_below_windows() {
+        assert!(!lifted(Lift { window_drag_over: true, ..Lift::default() }));
+        assert!(!lifted(Lift::default()));
+        assert!(lifted(Lift { always: true, ..Lift::default() }));
+        assert!(lifted(Lift { card_drag: true, ..Lift::default() }));
+        assert!(lifted(Lift { transition: true, window_drag_over: true, ..Lift::default() }));
+        assert!(lifted(Lift { edge_reveal: true, ..Lift::default() }));
+    }
+
     #[test]
     fn modes_follow_the_flags() {
         assert_eq!(Mode::of(false, false, false), Mode::Off);
@@ -241,8 +279,9 @@ mod tests {
         assert_eq!(Mode::of(true, false, true), Mode::EdgeOnly);
     }
 
-    /// 11-05: only a window whose left edge comes within 50 pt of the screen's left edge
-    /// hides the strip; one over the cards further right leaves it shown, as Apple's does.
+    /// Only a window that covers the cards' left edge hides the strip; one over the cards
+    /// further right leaves it shown, as Apple's does (recorded 11-09: shown with the window's
+    /// left edge at 52 pt, slid away at 15 pt; the cards start at 16 pt).
     #[test]
     fn only_a_window_at_the_left_edge_hides_the_strip() {
         // Every one covers the cards: a strip 320 pt wide (his Studio Display's cards end near
@@ -250,17 +289,18 @@ mod tests {
         let wide = Rect::new(0.0, 30.0, 320.0, 1410.0);
         let at = |x: f64| Rect::new(x, 100.0, 900.0, 400.0);
         assert!(hides_strip(&[at(0.0)], &wide), "flush left");
-        assert!(hides_strip(&[at(49.0)], &wide), "49 pt in");
-        assert!(hides_strip(&[at(50.0)], &wide), "50 pt in: the threshold itself");
-        assert!(!hides_strip(&[at(51.0)], &wide), "51 pt in: shown, under the window");
+        assert!(hides_strip(&[at(15.0)], &wide), "15 pt in: Apple's slid away");
+        assert!(hides_strip(&[at(20.0)], &wide), "20 pt in: the threshold itself");
+        assert!(!hides_strip(&[at(21.0)], &wide), "21 pt in: shown, under the window");
+        assert!(!hides_strip(&[at(50.0)], &wide), "50 pt in: Apple's stayed up (52 pt)");
         assert!(!hides_strip(&[at(300.0)], &wide), "300 pt in, over the cards: shown");
         assert!(!hides_strip(&[at(320.0)], &wide), "clear of the column");
         assert!(hides_strip(&[at(-40.0)], &wide), "past the left edge");
-        assert!(hides_strip(&[at(300.0), at(20.0)], &STRIP), "any one of the stage's windows");
+        assert!(hides_strip(&[at(300.0), at(10.0)], &STRIP), "any one of the stage's windows");
         // The threshold counts from the screen's left edge (a screen further right).
         let right = Rect::new(1440.0, 30.0, 200.0, 1410.0);
-        assert!(hides_strip(&[Rect::new(1480.0, 100.0, 900.0, 400.0)], &right));
-        assert!(!hides_strip(&[Rect::new(1500.0, 100.0, 900.0, 400.0)], &right));
+        assert!(hides_strip(&[Rect::new(1455.0, 100.0, 900.0, 400.0)], &right));
+        assert!(!hides_strip(&[Rect::new(1480.0, 100.0, 900.0, 400.0)], &right));
         // At the edge but not in the strip's area (another screen, above its rows): shown.
         assert!(!hides_strip(&[Rect::new(0.0, 1500.0, 900.0, 400.0)], &STRIP));
         assert!(!hides_strip(&[Rect::new(-950.0, 100.0, 900.0, 400.0)], &STRIP));
@@ -331,8 +371,10 @@ mod tests {
         let away = Some(Point::new(900.0, 500.0));
         assert!(!v.step(Mode::EdgeOnly, away, &STRIP, t).shown);
         assert!(!v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 0)).shown);
-        assert!(!v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 200)).shown);
-        assert!(v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 260)).shown);
+        // Apple's dwell, measured 11-09 (its slide starts ~180 ms after the pointer gets
+        // there; ours polls and draws in the rest).
+        assert!(!v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 100)).shown);
+        assert!(v.step(Mode::EdgeOnly, edge, &STRIP, ms(t, 140)).shown);
         // Moving into the strip keeps it.
         assert!(v.step(Mode::EdgeOnly, inside, &STRIP, ms(t, 2000)).shown);
         // Leaving: still shown before the delay, hidden after it.
@@ -341,7 +383,7 @@ mod tests {
         assert!(!v.step(Mode::EdgeOnly, away, &STRIP, ms(t, 2610)).shown);
     }
 
-    /// The Codex review's S2: the laptop left of the main screen (global x below 0); a
+    /// The review's S2: the laptop left of the main screen (global x below 0); a
     /// pointer on it was at the main strip's edge, revealed it and held it open.
     #[test]
     fn a_pointer_on_a_screen_to_the_left_is_not_at_the_strips_edge() {
@@ -375,10 +417,10 @@ mod tests {
         let mut v = Visibility::default();
         let t = Instant::now();
         assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, t).shown);
-        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(40.0, 500.0)), &STRIP, ms(t, 120)).shown);
+        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(40.0, 500.0)), &STRIP, ms(t, 100)).shown);
         assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 300)).shown);
-        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 500)).shown);
-        assert!(v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 560)).shown);
+        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 400)).shown);
+        assert!(v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, ms(t, 440)).shown);
         // The edge outside the strip's rows (the menu bar) does not count.
         let mut v = Visibility::default();
         assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 5.0)), &STRIP, t).shown);
@@ -393,8 +435,8 @@ mod tests {
         v.set_tab(Some(tab));
         let on_tab = Some(Point::new(8.0, 730.0));
         assert!(!v.step(Mode::EdgeOnly, on_tab, &STRIP, t).shown);
-        assert!(!v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 200)).shown);
-        assert!(v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 260)).shown, "same dwell as the edge");
+        assert!(!v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 100)).shown);
+        assert!(v.step(Mode::EdgeOnly, on_tab, &STRIP, ms(t, 140)).shown, "same dwell as the edge");
         let mut v = Visibility::default();
         v.set_tab(Some(tab));
         v.reveal_now();

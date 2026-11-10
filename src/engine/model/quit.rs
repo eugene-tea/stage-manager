@@ -18,7 +18,7 @@
 //! - **Kept for a while** ([`Model::prune_quit`]): an entry older than `QUIT_KEEP` at a save is
 //!   dropped, and so are an app's entries when the app shows a window again in this session
 //!   ([`Model::forget_quit_of`]): it is back, its windows go by the usual rules.
-//! - **Frames kept a day** ([`QuitFrame`], W2 of the Fable review of 10-29): an app that saves
+//! - **Frames kept a day** ([`QuitFrame`], W2 of the review of 10-29): an app that saves
 //!   its own window frames (Chrome, Terminal, an Electron app) writes the park frame for a
 //!   window parked at its quit and reopens it in the corner. The window's real frame is kept
 //!   by app and title for [`QUIT_FRAMES_KEEP`], whatever the app does meanwhile, and a window

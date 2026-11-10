@@ -11,7 +11,7 @@
 //!   show on another display either (so a window on a second display to the bottom-right of
 //!   the main one is left alone);
 //! - a stranded window goes back to the frame a crashed copy registered for it (its parked
-//!   file, by window id: exact, and fresher than any save; S4 of the Fable review of 10-29),
+//!   file, by window id: exact, and fresher than any save; S4 of the review of 10-29),
 //!   else its frame from `state.json` (any Space; the same window id first, then exact
 //!   bundle ID + title, then bundle ID only when one candidate is left, each saved window
 //!   used once: [`super::window_match`]; a child only as the very window, by its id), else
@@ -123,7 +123,7 @@ impl ScanDisplays {
     /// The visible frame a window at `frame` belongs to: the secondary display whose park
     /// zone holds it; else the main display's when the main display's own zone does; else
     /// the managed display holding the most of it (a restore frame on the second screen
-    /// goes back there, not centered on the main one: the Fable review of 11-06, restore 1);
+    /// goes back there, not centered on the main one: the review of 11-06, restore 1);
     /// else the main display's.
     pub fn visible_for(&self, frame: Rect) -> Rect {
         if let Some(z) = self.zone_of(frame) {
@@ -316,7 +316,7 @@ pub struct Registered {
     /// earlier versions (then any frame but the pre-fit one counts as still fitted).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fitted_at: Option<Rect>,
-    /// Taken from a guardian not signed like this app (the Codex review of 10-21, R4;
+    /// Taken from a guardian not signed like this app (the review of 10-21, R4;
     /// [`super::handoff::vet`]): nothing vouches that we parked it, so it is any app's window
     /// to the park test (no sliver, no tiny size), never fitted, and reached only while the
     /// window server lists it on screen in the park zone. False in files of earlier versions.
@@ -342,19 +342,6 @@ pub struct ParkedFile {
     /// empty in files of earlier versions.
     #[serde(default)]
     pub zones: Vec<ParkZone>,
-    /// Apps we hid (`[windows] hide_parked_apps`): the guardian unhides each one still
-    /// running under the same bundle id. Empty in files of earlier versions.
-    #[serde(default)]
-    pub hidden: Vec<HiddenApp>,
-}
-
-/// An app we hid, as the parked file records it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HiddenApp {
-    /// Its process id.
-    pub pid: i32,
-    /// Its bundle id (a pid reused by another app is not unhidden).
-    pub bundle: String,
 }
 
 impl ParkedFile {
@@ -368,7 +355,7 @@ impl ParkedFile {
         }
         Ok(match serde_json::from_slice(bytes)? {
             Any::File(f) => f,
-            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new(), hidden: Vec::new() },
+            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new() },
         })
     }
 }
@@ -520,7 +507,7 @@ mod tests {
         assert!(!is_parked(p[2].1, MAIN));
     }
 
-    /// S1 (the Fable review of 10-29): a parked dialog never matched (standard windows only)
+    /// S1 (the review of 10-29): a parked dialog never matched (standard windows only)
     /// and was always centered. Saved as a child with its id (this session's: a quit, a
     /// crash), it is found as the very window; a child never matches by title, nor takes
     /// the app-alone pass from a standard window, nor is a standard window taken for one.
@@ -550,7 +537,7 @@ mod tests {
         assert_eq!(p, vec![(0, dialog_at, FrameSource::Saved), (1, doc_at, FrameSource::Saved)], "each its own");
     }
 
-    /// S4 (the Fable review of 10-29): after a crash the scan used `state.json` (a save up to
+    /// S4 (the review of 10-29): after a crash the scan used `state.json` (a save up to
     /// a debounce old, a retitled window by app alone, a child never) and centered what it
     /// could not match. A window the crashed copy registered goes back to its registered
     /// frame first, by id, however small or thin a sliver of it shows.
@@ -570,7 +557,7 @@ mod tests {
         assert_eq!(plan_sourced(&[a], Some(&st), &displays())[0].2, FrameSource::Saved, "without it: state.json");
     }
 
-    /// S6 (the Fable review of 10-29): `state.json` frames saved on a main display of another
+    /// S6 (the review of 10-29): `state.json` frames saved on a main display of another
     /// size are not used by the scan (as a restore does not use them); the stranded window is
     /// centered at its own size. A file that does not say keeps them.
     #[test]
@@ -587,7 +574,7 @@ mod tests {
         assert_eq!(plan_sourced(&ws, Some(&st), &displays())[0].2, FrameSource::Saved, "a file that does not say");
     }
 
-    /// Grok High 2 (1.1.0): two stranded windows of one app whose titles changed keep their
+    /// Review High 2 (1.1.0): two stranded windows of one app whose titles changed keep their
     /// own frames when their ids were saved (this session's), whatever the saved order.
     #[test]
     fn stranded_windows_are_found_by_window_id_first() {
@@ -605,7 +592,7 @@ mod tests {
         assert_eq!(p, vec![(0, b, FrameSource::Saved), (1, a, FrameSource::Saved)]);
     }
 
-    /// Grok High 2: without ids or titles to tell them apart, two stranded windows of one app
+    /// Review High 2: without ids or titles to tell them apart, two stranded windows of one app
     /// are centered, never handed each other's (or a window on screen's) frame.
     #[test]
     fn app_alone_never_guesses_between_windows() {
@@ -691,12 +678,15 @@ mod tests {
             windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false }],
             corners: vec![Corner::BottomLeft],
             zones: vec![ParkZone { frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0), visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0), corners: vec![Corner::BottomLeft] }],
-            hidden: vec![HiddenApp { pid: 12, bundle: "com.example.a".into() }],
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
         let old = serde_json::to_vec(&f.windows).unwrap_or_default();
-        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, corners: vec![], zones: vec![], hidden: vec![], ..f.clone() }));
+        assert_eq!(ParkedFile::from_json(&old).ok(), Some(ParkedFile { visible: None, corners: vec![], zones: vec![], ..f.clone() }));
+        // A file of a version that hid apps (`[windows] hide_parked_apps`, before 1.8): its
+        // list of them is not read.
+        let hid = br#"{"visible":null,"windows":[],"hidden":[{"pid":12,"bundle":"com.example.a"}]}"#;
+        assert_eq!(ParkedFile::from_json(hid).ok().map(|f| f.windows.len()), Some(0));
         // A file of the version before corners: bottom-right only.
         let before = br#"{"visible":null,"windows":[]}"#;
         assert_eq!(ParkedFile::from_json(before).ok().map(|f| f.corners), Some(vec![]));
@@ -704,7 +694,7 @@ mod tests {
         assert!(ParkedFile::from_json(b"{").is_err());
     }
 
-    /// The Fable review of 11-06, restore 1: after a crash, a window parked on the second
+    /// The review of 11-06, restore 1: after a crash, a window parked on the second
     /// screen goes back to its frame there, not centered on the main screen.
     #[test]
     fn a_restore_frame_on_the_second_screen_stays_there() {

@@ -73,7 +73,14 @@ self-signed identity (`scripts/sign.sh`).
      Homebrew cask (`target/release/stage-manager.rb`) with the version and the DMG's sha256.
 5. Try the DMG on a clean account or Mac: open it, drag the app to Applications, launch, and
    check that no Gatekeeper warning appears.
-6. Publish (the DMG's name stays `Stage-Manager.dmg` in every release, so
+6. Push `dev`, move `master` forward to it, and tag the release (annotated):
+
+   ```sh
+   git push origin dev && git push origin dev:master
+   git tag -a vX.Y.Z -m "Stage Manager X.Y.Z" && git push origin vX.Y.Z
+   ```
+
+7. Publish (the DMG's name stays `Stage-Manager.dmg` in every release, so
    `https://github.com/eugene-tea/stage-manager/releases/latest/download/Stage-Manager.dmg`,
    the info page's Download button, always serves the newest):
 
@@ -82,7 +89,7 @@ self-signed identity (`scripts/sign.sh`).
      --title "Stage Manager X.Y.Z" --notes-file <release notes>.md
    ```
 
-7. Homebrew: copy `target/release/stage-manager.rb` to `Casks/stage-manager.rb` in the tap,
+8. Homebrew: copy `target/release/stage-manager.rb` to `Casks/stage-manager.rb` in the tap,
    commit (`stage-manager X.Y.Z`) and push. Check it with `brew tap eugene-tea/tap`, then
    `brew audit --cask --online eugene-tea/tap/stage-manager` and
    `brew install --cask eugene-tea/tap/stage-manager`. The cask says `auto_updates true`: the
@@ -104,8 +111,8 @@ word.
 ## Art
 
 - `make icon` regenerates the app icon from `art/icon.py` (an Icon Composer document,
-  `art/AppIcon.icon`, compiled with Xcode 26's `actool` to `resources/Assets.car`, plus the
-  fallback `resources/AppIcon.icns` and the info page's icons). The outputs are committed, so
+  `art/AppIcon.icon`, compiled with Xcode 26's `actool` to `packaging/Assets.car`, plus the
+  fallback `packaging/AppIcon.icns` and the info page's icons). The outputs are committed, so
   building needs no Xcode. `ICON_VARIANT=graphite|aurora` builds another variant. The
   `.icon` opens in Icon Composer (`/Applications/Xcode.app/Contents/Applications/Icon
   Composer.app`) for hand tuning; then compile it with `ICON_FROM_DOCUMENT=1 make icon`

@@ -1,4 +1,4 @@
-//! A parked window the screen contradicts, decided every tick (the Fable review of 10-29:
+//! A parked window the screen contradicts, decided every tick (the review of 10-29:
 //! L1, K2, S5 and E7 are one problem, the model's `parked` flag and the screen disagreeing,
 //! reconciled until then only by a Space arrival's `match_screen`).
 //!

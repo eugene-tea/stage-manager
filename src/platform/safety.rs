@@ -1,5 +1,5 @@
 //! Safety: no window stays parked. A parked window that never comes back is the worst bug
-//! this app can have, so there are seven layers (PLAN.md, "Safety"):
+//! this app can have, so there are seven layers (docs/ARCHITECTURE.md, "Safety"):
 //!
 //! 1. **Registry**: every parked window's AX element and (clamped) restore frame, kept in sync
 //!    by the controller before and after each batch of actions.
@@ -43,11 +43,8 @@
 //! ([`super::handoff::TakenWatch`]) until each is back, gone, or in the model. A quit is clean
 //! only once none is left ([`taken_len`]).
 //!
-//! **Hidden apps** (`[windows] hide_parked_apps`): every app we hid is recorded beside the
-//! registry ([`set_hidden`]) and in the parked file, and every path that unparks unhides it
-//! too ([`unhide_ours`]): quit, the panic hook, the signals and, from the parked file, the
-//! guardian. An app is unhidden only while its pid still runs the same bundle id; an app the
-//! user hid is never recorded, so never unhidden.
+//! No app is hidden by this app: `[windows] hide_parked_apps` and its list of hidden apps in
+//! the parked file were retired on 11-09.
 
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -66,7 +63,7 @@ use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RE
 use crate::engine::park::Corner;
 use crate::engine::persist::StateFile;
 use crate::engine::model::Display;
-use crate::engine::recovery::{self, HiddenApp, Known, LiveWindow, ParkZone, ParkedFile, Registered, ScanDisplays};
+use crate::engine::recovery::{self, Known, LiveWindow, ParkZone, ParkedFile, Registered, ScanDisplays};
 use crate::logbook::counters::{self, Count};
 
 /// Assumed menu bar height when the visible frame is unknown (guardian).
@@ -192,55 +189,6 @@ static HELD: Mutex<BTreeMap<u32, ParkedEntry>> = Mutex::new(BTreeMap::new());
 
 fn lock_held() -> MutexGuard<'static, BTreeMap<u32, ParkedEntry>> {
     HELD.lock().unwrap_or_else(|p| p.into_inner())
-}
-
-/// Apps we hid, by pid, with their bundle ids.
-static HIDDEN: Mutex<BTreeMap<i32, String>> = Mutex::new(BTreeMap::new());
-
-fn hidden_now() -> Vec<HiddenApp> {
-    HIDDEN.lock().map(|h| h.iter().map(|(&pid, b)| HiddenApp { pid, bundle: b.clone() }).collect()).unwrap_or_default()
-}
-
-/// Records exactly the apps we hid now (pid, bundle id), for every unpark path and the
-/// guardian.
-pub fn set_hidden(apps: BTreeMap<i32, String>) {
-    let changed = HIDDEN.lock().map(|mut h| std::mem::replace(&mut *h, apps) != *h).unwrap_or(false);
-    if changed {
-        let listed = registered(&lock_registry());
-        write_parked_file(&listed);
-    }
-}
-
-/// Unhides every app we hid that still runs under the same bundle id, and forgets them;
-/// returns how many were asked. Never waits on the lock longer than a try.
-pub fn unhide_ours(reason: &str) -> usize {
-    let apps = match HIDDEN.try_lock() {
-        Ok(mut h) => std::mem::take(&mut *h),
-        Err(_) => return 0,
-    };
-    let n = unhide_apps(reason, apps.into_iter().map(|(pid, bundle)| HiddenApp { pid, bundle }));
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
-    n
-}
-
-/// Unhides each app still running under its recorded bundle id (the guardian's, from the
-/// parked file, too); returns how many were asked.
-pub fn unhide_apps(reason: &str, apps: impl IntoIterator<Item = HiddenApp>) -> usize {
-    let mut n = 0;
-    for app in apps {
-        let running = NSRunningApplication::runningApplicationWithProcessIdentifier(app.pid);
-        let same = running.as_ref().and_then(|r| r.bundleIdentifier()).is_some_and(|b| b.to_string() == app.bundle);
-        match running {
-            Some(r) if same => {
-                let ok = r.unhide();
-                n += 1;
-                tracing::info!(reason, pid = app.pid, bundle = app.bundle, ok, "safety: an app we hid is unhidden");
-            }
-            _ => tracing::debug!(reason, pid = app.pid, bundle = app.bundle, "safety: an app we hid is gone (or its pid is another app's)"),
-        }
-    }
-    n
 }
 
 /// The main display's visible frame as last reported (for scans in this process).
@@ -376,9 +324,8 @@ fn lock_written() -> MutexGuard<'static, Option<ParkedFile>> {
 /// main display's visible frame, written atomically and flushed to disk before the rename
 /// ([`super::durable`]); removed when the registry is empty.
 fn write_parked_file(listed: &[Registered]) {
-    let hidden = hidden_now();
-    let empty = listed.is_empty() && hidden.is_empty();
-    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), hidden };
+    let empty = listed.is_empty();
+    let file = ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used() };
     let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
@@ -604,7 +551,6 @@ pub fn emergency_unpark(reason: &str) -> bool {
 }
 
 fn unpark_all(reason: &str) -> bool {
-    unhide_ours(reason);
     match unpark_registry(Duration::from_millis(200), REGISTRY_RETRY_BUDGET) {
         Some(r) if r.failed == 0 => {
             if r.restored > 0 {
@@ -651,7 +597,7 @@ fn stranded_ids(registered: &BTreeSet<u32>) -> Vec<u32> {
 /// windows the model manages, and the windows `state.json` names (this session's ids). The
 /// park test counts a sliver only for these ([`Known`]); an app's other windows are any
 /// app's, so a user's window of that app pushed off the corner is left where it is at a quit,
-/// a stand-down or a logout (S9 of the Fable review of 10-29). A leftovers check that could not bring every
+/// a stand-down or a logout (S9 of the review of 10-29). A leftovers check that could not bring every
 /// window back hands what it knew to the next try ([`Self::kept_for_retry`]): a stand-down
 /// drops `state.json` and the model before it looks again (the review of 6X2, 2).
 #[derive(Debug, Clone, Default)]
@@ -880,7 +826,7 @@ extern "C" fn on_signal(sig: libc::c_int) {
     }
 }
 
-/// SIGABRT (a double panic, a C abort): async-signal-safe only (Fable M3, Grok High 3). It
+/// SIGABRT (a double panic, a C abort): async-signal-safe only (review M3 and High 3). It
 /// never locks, allocates, logs or calls Accessibility, which could deadlock on a lock the
 /// aborting thread holds and keep a dying process alive (answering `ping`, blocking every
 /// relaunch, the guardian never woken). It wakes the signal watcher through the self-pipe,
@@ -1438,7 +1384,7 @@ mod tests {
         assert!(!GUARDED.with(Cell::get), "flag reset after a panic");
     }
 
-    /// Fable M2: a helper thread's body runs guarded, so its panic is caught on that thread
+    /// Review M2: a helper thread's body runs guarded, so its panic is caught on that thread
     /// (the panic hook neither unparks nor exits) and the feature degrades instead.
     #[test]
     fn a_guarded_thread_survives_its_panic() {
@@ -1461,7 +1407,7 @@ mod tests {
         assert!(waits_for_watcher(7));
     }
 
-    /// Fable M3: the abort handler's wait is bounded, whether the watcher answers or not.
+    /// Review M3: the abort handler's wait is bounded, whether the watcher answers or not.
     #[test]
     fn the_abort_wait_is_bounded() {
         let slept = std::cell::Cell::new(Duration::ZERO);
@@ -1508,7 +1454,7 @@ mod tests {
         assert_eq!(ours.candidate(1), Candidate::Real);
     }
 
-    /// S1 (the Fable review of 10-29): the frames an unpark restored reach the leftovers
+    /// S1 (the review of 10-29): the frames an unpark restored reach the leftovers
     /// check, and a stand-down's reach the quit's retry after it; a later unpark's frame wins.
     #[test]
     fn the_unparks_frames_reach_the_leftovers_check() {
@@ -1519,7 +1465,7 @@ mod tests {
         assert_eq!(kept.unparked, BTreeMap::from([(1, a), (2, b)]));
     }
 
-    /// S9 (the Fable review of 10-29): at a quit, a stand-down or a logout a sliver counts as
+    /// S9 (the review of 10-29): at a quit, a stand-down or a logout a sliver counts as
     /// parked only for a window known by its id (registered, the model's, named by this
     /// session's `state.json`), no longer for any window of an app with one saved: the
     /// user's other window of that app, pushed off the corner, stays where they put it.

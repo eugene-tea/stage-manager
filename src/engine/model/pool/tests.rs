@@ -278,7 +278,7 @@ fn a_saved_desktops_windows_of_apps_not_running_at_the_end_are_given_up() {
 
 #[test]
 fn a_quiet_apps_windows_of_a_desktop_not_shown_wait_for_that_desktop_alone() {
-    // R3 of the Codex review: Desktop 1, not visited, waits for mail's inbox; Mail runs (its
+    // R3 of the review: Desktop 1, not visited, waits for mail's inbox; Mail runs (its
     // archive back on Desktop 2) and opens nothing for a minute. Its next window "Inbox" an
     // hour later, on Desktop 2, is a new window by Apple's rule, not one of Desktop 1's.
     let mut m = login_on_desktop_2();
@@ -761,7 +761,7 @@ fn a_card_or_number_of_a_voters_stage_that_goes_follows_its_window() {
 
 #[test]
 fn what_the_restore_remembers_of_a_window_or_stage_goes_with_it() {
-    // Fable E10 (10-29): `followed`, `merged` and the waiting fronts kept stages and windows
+    // Review E10 (10-29): `followed`, `merged` and the waiting fronts kept stages and windows
     // gone for the rest of the run.
     let mut d2 = desktop_2();
     d2.stages[2].name = Some("Plan".into());
@@ -806,7 +806,7 @@ fn a_voter_back_in_its_own_desktops_stage_leaves_the_entry_it_voted_with() {
 
 #[test]
 fn an_orphan_parked_in_a_stage_a_rule_empties_is_brought_back_on_screen() {
-    // Fable E2 (10-29): a rule places the one window a waiting stage still waits for; the
+    // Review E2 (10-29): a rule places the one window a waiting stage still waits for; the
     // stage goes, its orphan dialog (parked with it) moves to the active stage and is shown,
     // but `drop_spot` threw away the frame that shows it: counted shown, left in the corner.
     let mut m = launched(vec![desktop_2()], Restore::same_session("A"));
@@ -829,7 +829,7 @@ fn an_orphan_parked_in_a_stage_a_rule_empties_is_brought_back_on_screen() {
 
 #[test]
 fn a_voter_placed_at_its_own_frame_keeps_the_frame_it_had_before_fitting() {
-    // Fable E10 (10-29): `lift` dropped `original`, so a fitted voter placed back at its own
+    // Review E10 (10-29): `lift` dropped `original`, so a fitted voter placed back at its own
     // frame (the display not the saved size: no saved frames) lost the frame quit and every
     // safety path put it back at.
     let restore = Restore::after_restart("B").with_display(Some((1920.0, 1080.0)));
@@ -994,7 +994,7 @@ fn a_window_the_user_touched_stays_where_it_is_when_its_title_comes() {
 
 #[test]
 fn a_key_press_in_a_window_a_late_title_could_move_makes_it_the_users() {
-    // The Fable review of 11-06, restore 2: the IDE focused its late-titled window itself at
+    // The review of 11-06, restore 2: the IDE focused its late-titled window itself at
     // the login (no press, no touch), and he types in it. The platform asks the app's focused
     // window at a key press only while one of its windows may still be re-matched; touched,
     // its title no longer moves it.

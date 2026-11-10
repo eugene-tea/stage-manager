@@ -56,7 +56,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
 | `strip.show_numbers` | `false` | true or false | Draw each card's stage number (for the hotkeys). Apple shows none. |
 | `strip.show_names` | `false` | true or false | Draw stage names under cards. Apple shows none. |
-| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column: the panel, and the area windows keep clear of with fit. |
+| `strip.width` | `200.0` | number, 60 to 800 | Width of the strip column, the area windows keep clear of with fit (cards draw past it where they reach). |
 | `strip.capacity` | `0` | whole number, 0 to 30 | Most cards shown; 0 counts them from the screen's visible height (Apple: 5 at 1130 pt, 6 at 1410 pt). |
 | `strip.capacity_pitch` | `190.0` | number, 20 to 2000 | With capacity = 0: room per card, in points of visible height. |
 | `strip.capacity_margin` | `60.0` | number, 0 to 2000 | With capacity = 0: visible height kept free above and below the cards. |
@@ -76,61 +76,67 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `cards.perspective` | `"auto"` | "auto" or a number, 50 to 50000 | Eye distance in points; "auto" is Apple's for the screen (1346 at 1800 pt wide, 2260 at 2560). |
 | `cards.perspective_x` | `15.0` | number, -3000 to 3000 | The eye's horizontal position, from the screen's left edge. |
 | `cards.perspective_y` | `0.0` | number, -3000 to 3000 | The eye's height, from the screen's vertical middle (down is positive). |
-| `cards.corner_radius` | `4.0` | number, 0 to 60 | Corner radius of each window's thumbnail. |
+| `cards.corner_radius` | `8.0` | number, 0 to 60 | Corner radius of each window's thumbnail (Apple's, measured on a 5K display: 8). |
 | `cards.border_width` | `0.5` | number, 0 to 10 | Width of the thin edge around each thumbnail. |
 | `cards.border_color` | `"#ffffff2e"` | color "#rrggbb" or "#rrggbbaa" | Color of that edge. |
-| `cards.shadow_radius` | `4.0` | number, 0 to 100 | Blur radius of each thumbnail's shadow. |
-| `cards.shadow_opacity` | `0.4` | number, 0 to 1 | Opacity of that shadow. |
+| `cards.shadow_radius` | `1.0` | number, 0 to 100 | Blur radius of each thumbnail's shadow (Apple's is barely there: about 2 pt below a card, 1 pt beside it). |
+| `cards.shadow_opacity` | `0.3` | number, 0 to 1 | Opacity of that shadow. |
 | `cards.shadow_offset_x` | `0.0` | number, -100 to 100 | Horizontal offset of that shadow. |
-| `cards.shadow_offset_y` | `2.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
+| `cards.shadow_offset_y` | `1.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
 | `cards.shadow_color` | `"#000000"` | color "#rrggbb" or "#rrggbbaa" | Color of that shadow. |
 | `cards.max_windows` | `3` | whole number, 1 to 8 | Most windows drawn on one card. |
-| `cards.stack_dx` | `17.0` | number, -200 to 200 | Windows of one app step this far right toward the front one (the one behind peeks out on the left). |
+| `cards.stack_dx` | `16.0` | number, -200 to 200 | Windows of one app step this far right toward the front one (the one behind peeks out on the left). |
 | `cards.behind_scale` | `1.0` | number, 0.3 to 1 | Each window behind another of the same app is drawn this much smaller. |
-| `cards.second_app_dx` | `68.0` | number, -300 to 300 | A second app's window sits this far right of the first. |
-| `cards.second_app_dy` | `14.0` | number, -300 to 300 | ...and this far up. |
-| `cards.hover_scale` | `1.06` | number, 1 to 2 | The card under the pointer grows by this factor, about its center. |
-| `cards.hover_ms` | `210` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, eased out, in milliseconds (Apple's, measured: 208 growing, 220 shrinking). |
+| `cards.second_app_dx` | `42.0` | number, -300 to 300 | On a card of several apps, a second app's window sits this far from the front window, toward its side on the screen (it peeks out on that side). |
+| `cards.second_app_dy` | `15.0` | number, -300 to 300 | ...and this far up (the windows centered on one line otherwise). |
+| `cards.hover_scale` | `1.11` | number, 1 to 2 | The card under the pointer grows by this factor, about its center (Apple's, measured on a card of one window: 1.11). |
+| `cards.hover_ms` | `400` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, in milliseconds: a spring, 99 % there by then, half way at a quarter of it (Apple's, measured: about 400). |
 | `cards.press_scale` | `0.987` | number, 0.5 to 1 | A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more). |
 | `cards.press_ms` | `100` | whole number, 0 to 3000 | How long the press takes, eased out, in milliseconds (Apple's, measured: 90 % at 72 ms, done by 100). |
-| `cards.fade_ms` | `200` | whole number, 0 to 3000 | How long a new card takes to fade in, in milliseconds (not measured on Apple's). |
+| `cards.fade_ms` | `200` | whole number, 0 to 3000 | How long a new card takes to fade in, and a window's picture arriving on a card drawn without one, in milliseconds (not measured on Apple's). |
+| `cards.empty_opacity` | `0.35` | number, 0 to 1 | A window on a card before its picture arrives (at launch): its glass at this opacity, nearly see-through, with the card's edge; its picture fades in over fade_ms. |
 | `cards.window_opacity` | `0.78` | number, 0 to 1 | How opaque each window's picture is on its card: Apple's cards let the wallpaper through (0.78, measured on a card read white, black and grey); 1 draws them opaque. |
 | `cards.hover_window_opacity` | `1.0` | number, 0 to 1 | The same on the card under the pointer (or a dragged card's target), eased with its growth: Apple's hovered card turns solid. The value of window_opacity turns the fade off. |
 | `cards.backdrop_saturation` | `0.95` | number, 0 to 2 | Behind each window's picture on a card, the wallpaper's colour there (its average behind the thumbnail), at this saturation of the wallpaper's own: 0 grey, 1 as it is. |
 | `cards.backdrop_brightness` | `0.78` | number, 0 to 2 | ...and at this brightness of the wallpaper's own (Apple's darkens it a little). |
 | `icons.size` | `38.0` | number, 0 to 300 | Size of the app icon image (macOS icons carry a margin; about 31 pt shows). 0 hides icons. |
-| `icons.center_dx` | `10.5` | number, -300 to 300 | The icon's center, right of the card's bottom-left corner (its leftmost window's). |
-| `icons.center_dy` | `-10.5` | number, -300 to 300 | The icon's center, below the card's bottom-left corner (up is negative). |
+| `icons.center_dx` | `10.5` | number, -300 to 300 | The icon's center, right of the card's leftmost window's left edge. |
+| `icons.center_dy` | `-10.5` | number, -300 to 300 | The icon's center, below the card's bottom (its lowest window's; up is negative). |
 | `icons.step` | `36.0` | number, 0 to 300 | A second app's icon sits this far right of the first. |
 | `icons.max` | `3` | whole number, 0 to 10 | Most icons on one card. |
-| `icons.shadow_radius` | `4.0` | number, 0 to 100 | Blur radius of the icon's shadow. |
-| `icons.shadow_opacity` | `0.3` | number, 0 to 1 | Opacity of the icon's shadow. |
-| `icons.shadow_offset_y` | `2.0` | number, -100 to 100 | Vertical offset of the icon's shadow (down is positive). |
+| `icons.shadow_radius` | `3.0` | number, 0 to 100 | Blur radius of the icon's shadow. |
+| `icons.shadow_opacity` | `0.6` | number, 0 to 1 | Opacity of the icon's shadow. |
+| `icons.shadow_offset_y` | `1.5` | number, -100 to 100 | Vertical offset of the icon's shadow (down is positive). |
 | `motion.spring_stiffness` | `289.0` | number, 1 to 10000 | Spring stiffness of cards gliding to new slots (a switch's swap, a reorder, a drop making room). Apple's, measured: 289 (99 % by about 375 ms). |
 | `motion.spring_damping` | `34.0` | number, 0 to 1000 | Spring damping of the cards' glide (34 with stiffness 289 and mass 1: critically damped, no overshoot). |
 | `motion.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the cards' glide. |
 | `motion.slide_stiffness` | `282.0` | number, 1 to 10000 | Spring stiffness of the strip sliding out and back in (auto-hide, a window over it). Apple's, measured: 282 (99 % by about 400 ms). |
 | `motion.slide_damping` | `33.6` | number, 0 to 1000 | Spring damping of the slide (33.6 with stiffness 282 and mass 1: critically damped). |
 | `motion.slide_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the slide. |
-| `motion.slide_distance` | `286.0` | number, 0 to 3000 | How far left the cards slide when the strip hides. |
+| `motion.slide_distance` | `286.0` | number, 0 to 3000 | How far left the cards slide when the strip hides; further when the widest card needs it to leave the screen. |
 | `reveal.edge_width` | `2.0` | number, 0 to 100 | The pointer within this many points of the left edge counts as at the edge. |
-| `reveal.delay_ms` | `250` | whole number, 0 to 10000 | Resting at the left edge this long brings a hidden strip back. |
+| `reveal.delay_ms` | `130` | whole number, 0 to 10000 | Resting at the left edge this long brings a hidden strip back (Apple's slide starts about 180 ms after the pointer reaches the edge; the poll and the drawing take the rest). |
 | `reveal.hide_delay_ms` | `500` | whole number, 0 to 10000 | A strip brought back hides again this long after the pointer leaves it. |
-| `reveal.poll_ms` | `60` | whole number, 10 to 1000 | How often the pointer is checked while the strip is hidden. |
+| `reveal.poll_ms` | `30` | whole number, 10 to 1000 | How often the pointer is checked while it rests at the edge or the strip is brought back. |
 | `reveal.edge_tab` | `false` | true or false | Show a slim tab at the left edge while a window hides the strip (an extension). |
 | `reveal.launch_reveal` | `false` | true or false | Show a covered strip for a moment at launch (an extension). |
 | `reveal.launch_reveal_ms` | `3000` | whole number, 0 to 60000 | How long that launch showing lasts. |
 | `drag.threshold` | `5.0` | number, 0 to 100 | A press that moves farther than this (points, at least 5) drags the card; less is a click. |
 | `drag.merge_zone` | `0.5` | number, 0 to 1 | With merge_on_drop: the middle part of a card's height (0.5 = the middle half) where a dragged card drops onto it; above and below, it goes between cards. |
-| `drag.grow_distance` | `260.0` | number, 1 to 3000 | Past the strip, the dragged card grows to its window's size over this distance. |
+| `drag.appear_ms` | `100` | whole number, 0 to 2000 | Past the strip a dragged card shows its window, turned as the card; the window slides under the pointer in this many milliseconds (Apple's, measured: about 100). |
+| `drag.window_grab_x` | `96.0` | number, 0 to 1000 | A card dragged out holds its window with the pointer this far right of the window's left edge, wherever the card was pressed (Apple's, measured: 96; at most half the window's width). |
+| `drag.window_grab_y` | `100.0` | number, 0 to 1000 | ...and this far below the window's top edge (Apple's, measured: 100; at most half its height). |
 | `drag.lifted_opacity` | `0.3` | number, 0 to 1 | Opacity of a card in the strip while it is dragged out. |
 | `drag.ghost_opacity` | `0.92` | number, 0 to 1 | Opacity of the dragged copy of the card, and of a window's card while it is dragged over the strip. |
 | `drag.merge_ms` | `200` | whole number, 0 to 3000 | How long a card dropped onto another takes to shrink into it and fade, in milliseconds (an extension; Apple's has no merge). |
 | `animation.enabled` | `true` | true or false | Animate as Apple does: switches, the desktop reveal, Cmd-M and drops, and the strip's slides, glides, hover and press. false: everything jumps. |
 | `animation.speed` | `1.0` | number, 0 to 4 | Speed of every animation: 1 is Apple's, 2 twice as fast, 0.5 half as fast (0.25 to 4); 0 is no animation, as enabled = false. It multiplies every spring and duration of [animation], [motion], [cards] and [drag]. |
-| `animation.spring_stiffness` | `272.0` | number, 1 to 10000 | Spring stiffness of the windows' motion in a switch, the desktop reveal, Cmd-M and drops. Apple's, measured: 272 (99 % by about 400 ms). |
-| `animation.spring_damping` | `33.0` | number, 0 to 1000 | Spring damping of the windows' motion (33 with stiffness 272 and mass 1: critically damped, no overshoot). |
-| `animation.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the windows' motion. |
+| `animation.spring_stiffness` | `289.0` | number, 1 to 10000 | Spring stiffness of windows growing out of the strip: a switch's incoming windows, the desktop coming back, a card dropped in the middle. Apple's, measured: 289 (99 % by about 390 ms; the window's sideways motion and width run ahead of it, as Apple's do). |
+| `animation.spring_damping` | `34.0` | number, 0 to 1000 | Spring damping of windows growing out of the strip (34 with stiffness 289 and mass 1: critically damped, no overshoot). |
+| `animation.spring_mass` | `1.0` | number, 0.01 to 100 | Spring mass of windows growing out of the strip. |
+| `animation.shrink_stiffness` | `289.0` | number, 1 to 10000 | Spring stiffness of windows shrinking into the strip: the stage you leave, the desktop reveal, Cmd-M, a window dropped on the strip. Apple's, measured: 289, the growing windows' spring (the window drops and loses height on it; its sideways motion and width trail it). |
+| `animation.shrink_damping` | `34.0` | number, 0 to 1000 | Spring damping of windows shrinking into the strip (34 with stiffness 289 and mass 1: critically damped). |
+| `animation.shrink_mass` | `1.0` | number, 0.01 to 100 | Spring mass of windows shrinking into the strip. |
 | `animation.unpark_at` | `0.99` | number, 0.5 to 1 | The earliest an incoming window takes its place behind its growing snapshot: the motion as shown at least this far along (0.99 = 99 %). It waits longer when the snapshot is still more than 1 pt from the window on any edge (about 600 ms for a window growing from its card). |
 | `animation.cover_ms` | `20` | whole number, 0 to 500 | Outgoing windows leave this long after their snapshots are drawn over them, so the snapshots are on screen first. |
 | `animation.corner_radius` | `0.0` | number, 0 to 60 | Corner radius of a snapshot at full size; 0 keeps the window's own shape (the card's radius is [cards] corner_radius). |
@@ -140,6 +146,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `animation.shadow_offset_y` | `10.0` | number, -100 to 100 | Vertical offset of that shadow (down is positive). |
 | `animation.snapshot_interval_ms` | `2000` | whole number, 0 to 60000 | How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip. |
 | `animation.snapshot_cache_mb` | `512` | whole number, 16 to 8192 | Most memory kept for full-size window snapshots; the oldest go first. |
+| `animation.reduce_motion` | `"system"` | "system", "on", "off" | Reduce Motion: "system" follows macOS (System Settings > Accessibility > Display > Reduce motion); "on" always, "off" never. With it, nothing flies, slides, grows or turns: a switch is a short cross-fade, the strip fades in and out, cards change place with a fade and do not grow under the pointer. |
 | `animation.activation_grows` | `true` | true or false | Cmd-Tab, a Dock click or a click on a parked sliver to an app in another stage: true grows its windows from their card like a card click, as Apple does (the corner where they wait is covered meanwhile); false brings them to their frames at once, with no motion. |
 | `windows.fit` | `"off"` | "off", "move", "narrow" | Keep placed windows clear of the strip: "move" right just enough, "narrow" also too-wide ones. Apple: "off". |
 | `windows.fit_margin` | `16.0` | number, 0 to 500 | With fit: room kept between the strip column and the windows. |
@@ -147,8 +154,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `windows.focus_echo_ms` | `700` | whole number, 0 to 10000 | Focus changes this soon after we moved a window are taken as our own and never switch stages. |
 | `windows.park_inside` | `1.0` | number, -10000 to 32 | Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it. |
 | `windows.park_drop` | `-1.0` | number, -32 to 10000 | How far below the display's bottom edge a parked window's top is asked (-1: one point above it). macOS keeps each app's title strip on screen; scripts/probe_park.py measures it. |
-| `windows.hide_parked_apps` | `false` | true or false | An app whose every window (every Desktop) sits in inactive stages is hidden, as Cmd-H does, instead of leaving slivers in the corner; Cmd-Tab and the Dock show its stage in place. A prototype: off by default. |
-| `windows.corner_patch` | `true` | true or false | Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour, until checked live) or a desktop icon lies under it. |
+| `windows.corner_patch` | `true` | true or false | Cover the parked windows' slivers with the desktop under them, so the corner is clean as Apple's: a still of the desktop (wallpaper, icons and widgets as shown) where Screen Recording is allowed, else the desktop picture drawn from its file, which steps aside while it cannot be drawn exactly (videos, aerials, shuffles, Photos; Center and Tile, and Fit with no fill colour) or a desktop icon lies under it. |
 | `windows.corner_patch_reach` | `"auto"` | "auto" or a number, 0 to 400 | How far past a sliver the corner patch reaches, in points, to cover its shadow: "auto" is a parked (inactive) window's shadow, side by side; a number is used on every side. |
 | `windows.inert_slivers` | `true` | true or false | A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release). |
 | `displays.main_only` | `false` | true or false | Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages. Read at launch: quit and open Stage Manager again after changing it. |

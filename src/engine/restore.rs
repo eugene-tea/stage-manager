@@ -114,7 +114,7 @@ pub const QUIT_KEEP: Duration = Duration::from_secs(120);
 pub const UNSEEN_KEEP: Duration = Duration::from_secs(30 * 86_400);
 
 /// How long the frames of an app's windows are kept after it quit, for a window it opens
-/// again in the park zone ([`crate::engine::model::Model::add_window`]; W2 of the Fable review
+/// again in the park zone ([`crate::engine::model::Model::add_window`]; W2 of the review
 /// of 10-29): an app that saves its own window frames wrote the park frame for a window
 /// parked at its quit, and reopens it there, a day later as well as a minute later.
 pub const QUIT_FRAMES_KEEP: Duration = Duration::from_secs(24 * 60 * 60);
@@ -159,13 +159,13 @@ pub struct Restore {
     /// frames are used only on that screen at that size.
     pub screens: BTreeMap<u64, (String, i64, i64)>,
     /// Saved Desktops whose frames apply nowhere: saved before files kept the screen's origin,
-    /// their frames no longer on that screen now (it moved in the arrangement; R2 of the Codex
+    /// their frames no longer on that screen now (it moved in the arrangement; R2 of the
     /// review). Their windows keep the frames their apps give them, as on another screen.
     pub frames_off: std::collections::BTreeSet<u64>,
     /// Apps quiet for [`QUIET`] (their pending windows given up,
     /// [`crate::engine::model::Model::expire_pending`]): their entries on the saved Desktops
     /// not visited yet wait for that Desktop's first show alone, and no longer take a window
-    /// shown on another Desktop (the pool; R3 of the Codex review: Finder's new window for
+    /// shown on another Desktop (the pool; R3 of the review: Finder's new window for
     /// a saved folder an hour later went into a stage of a Desktop never shown).
     pub pool_closed: std::collections::BTreeSet<String>,
     /// Apps with entries on a saved Desktop shown for the first time since the platform last

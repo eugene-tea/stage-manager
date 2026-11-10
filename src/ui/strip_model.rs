@@ -41,9 +41,9 @@ pub struct StripSnapshot {
     /// screen's left edge over the strip ([`crate::ui::strip_visibility::hides_strip`]; a
     /// window being dragged is left out).
     pub active_frames: Vec<Rect>,
-    /// A managed window is being dragged by its title bar: the strip reveals itself while the
-    /// pointer is over the strip area and shows a drop target (a placeholder card sized
-    /// like the window's pre-drag frame). Releasing there sends the window to a stage of its
+    /// A managed window is being dragged by its title bar: while the pointer is over the strip
+    /// area the strip shows (below the window, as Apple's) with a drop target (a placeholder
+    /// card sized like the window's pre-drag frame) and the window's card follows the pointer. Releasing there sends the window to a stage of its
     /// own; the controller decides that from the mouse-up.
     pub window_drag: Option<CardWindow>,
     /// Where the button went down for that drag (global, top-left): the point of the window
@@ -119,10 +119,26 @@ pub struct Transition {
     /// The incoming window the switch makes key (the batch's focus, else the front one; none
     /// when the focus goes to a window already in place).
     pub key_in: Option<u32>,
-    /// Incoming windows that show only once their app is unhidden and active again after the
-    /// unveil (`[windows] hide_parked_apps`: hidden in place, our unhide at the landing): their
-    /// snapshots hand over and land when [`StripSnapshot::late`] says so, not at the unveil.
+    /// Incoming windows that show only after the unveil: their snapshots hand over and land
+    /// when [`StripSnapshot::late`] says so, not at the unveil. Nothing sends any since
+    /// `[windows] hide_parked_apps` (an app hidden in place, unhidden at the landing) was
+    /// retired on 11-09.
     pub late: Vec<u32>,
+    /// An outgoing window already in the Dock (minimized: `[windows] minimize_to_strip`): its
+    /// picture starts at its Dock tile, or its card fades in ([`crate::ui::minimize_motion`]),
+    /// never at the frame it had before the genie.
+    pub minimized: Option<Minimized>,
+}
+
+/// A minimized window on its way to the strip ([`Transition::minimized`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Minimized {
+    /// The window.
+    pub window: u32,
+    /// Its Dock tile (global, top-left), read through the Dock's Accessibility: its own
+    /// minimized-window item, else its app's icon (macOS's "minimize windows into
+    /// application icon"). `None`: not read.
+    pub tile: Option<Rect>,
 }
 
 /// Late incoming windows of transition `id` ([`Transition::late`]) on their way to the screen.
@@ -210,17 +226,38 @@ pub struct CardSnapshot {
 
 impl CardSnapshot {
     /// This card after `dropped`'s stage merged into it (`[strip] merge_on_drop`), as the
-    /// engine's merge leaves it: its own windows in front, `dropped`'s behind them in their
-    /// order, and `dropped`'s apps after its own. The strip draws it while a card is held
+    /// engine's merge leaves it: `dropped`'s windows in front in their order (the one just
+    /// moved is the one cared about, 11-09), its own behind them, and the apps in icon order,
+    /// by their front-most window (`dropped`'s first). The strip draws it while a card is held
     /// over this one, and until the controller's next snapshot after the drop.
     pub fn merged_with(&self, dropped: &CardSnapshot) -> CardSnapshot {
         let mut card = self.clone();
-        card.windows.extend(dropped.windows.iter().copied().filter(|w| !self.windows.iter().any(|o| o.id == w.id)));
-        for pid in &dropped.apps {
+        card.windows = dropped.windows.iter().copied().chain(self.windows.iter().copied().filter(|w| !dropped.windows.iter().any(|d| d.id == w.id))).collect();
+        card.apps = Vec::new();
+        for pid in dropped.apps.iter().chain(self.apps.iter()) {
             if !card.apps.contains(pid) {
                 card.apps.push(*pid);
             }
         }
+        card
+    }
+
+    /// This card after its window `id` was dragged out alone (Apple's: each window of a
+    /// combined card drags out on its own): its other windows in their order, and the apps
+    /// they belong to. The strip draws it from the drop until the controller's next snapshot.
+    pub fn without_window(&self, id: u32) -> CardSnapshot {
+        let mut card = self.clone();
+        card.windows.retain(|w| w.id != id);
+        card.apps.retain(|pid| card.windows.iter().any(|w| w.pid == *pid));
+        card
+    }
+
+    /// This card's window `id` alone, as the card it makes when dragged off this one (what a
+    /// card it is held over shows in front of its own windows).
+    pub fn only_window(&self, id: u32) -> CardSnapshot {
+        let mut card = self.clone();
+        card.windows.retain(|w| w.id == id);
+        card.apps.retain(|pid| card.windows.iter().any(|w| w.pid == *pid));
         card
     }
 }
@@ -288,8 +325,10 @@ pub enum StripEvent {
     CardPressed { stage: u64 },
     /// A card was dragged out of the strip and released in the main area: its windows join
     /// the active stage, and the stage's front window goes with its top-left corner at
-    /// (`x`, `y`) (global, top-left origin), so its title bar lands under the pointer.
-    CardDropped { stage: u64, x: f64, y: f64 },
+    /// (`x`, `y`) (global, top-left origin), so its title bar lands under the pointer. With
+    /// `window` (a card of several windows, pressed on that one; Apple's), that window alone
+    /// joins and goes there; its stage keeps the others.
+    CardDropped { stage: u64, window: Option<u32>, x: f64, y: f64 },
     /// A card's app icon was clicked: switch to the card's stage and bring every window of
     /// that app there (Apple: clicking the icon shows all of the app's windows).
     IconClicked { stage: u64, pid: i32 },
@@ -299,6 +338,14 @@ pub enum StripEvent {
     /// A card was dropped onto another card (`[strip] merge_on_drop`): `stage`'s windows join
     /// `into`'s stage, which keeps its slot.
     CardMerged { stage: u64, into: u64 },
+    /// One window of a card of several, dragged off it alone, was released in a gap between
+    /// the strip's cards (an extension): it gets a stage of its own, whose card goes right
+    /// above `before`'s (the bottom for `None`); `stage` keeps its other windows.
+    WindowToNewCard { stage: u64, window: u32, before: Option<u64> },
+    /// One window of a card of several, dragged off it alone, was released onto another card
+    /// (`[strip] merge_on_drop`): it alone joins `into`'s stage; `stage` keeps its other
+    /// windows.
+    WindowToCard { stage: u64, window: u32, into: u64 },
     /// The incoming windows of transition `id` are covered by their growing snapshots: put
     /// them in place now.
     Unveil { id: u64 },
@@ -623,6 +670,13 @@ pub struct TransitionReport {
     pub travel: f64,
     /// When the strip unveils the incoming windows, after the motion starts (ms), if any.
     pub unveil_ms: Option<u64>,
+    /// When the motion started, after the snapshots were drawn (ms): the outgoing and the
+    /// incoming snapshots start on one frame, once the outgoing windows have parked behind
+    /// theirs (at once when nothing leaves).
+    pub motion_ms: Option<u64>,
+    /// The motion started because the wait for the outgoing windows to park ran out (200 ms),
+    /// not at their note.
+    pub motion_waited_out: Option<bool>,
 }
 
 fn transition_report_slot() -> &'static Mutex<Option<TransitionReport>> {
@@ -750,14 +804,27 @@ mod tests {
     }
 
     #[test]
-    fn a_merged_card_keeps_its_windows_in_front_and_adds_the_dropped_ones_behind() {
+    fn a_merged_card_shows_the_dropped_windows_in_front_of_its_own() {
         let win = |id: u32, pid: i32| CardWindow { id, pid, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
         let target = CardSnapshot { stage: 2, number: 2, name: Some("Work".into()), windows: vec![win(5, 50), win(6, 60)], apps: vec![50, 60], ..Default::default() };
         let dropped = CardSnapshot { stage: 7, number: 3, name: None, windows: vec![win(9, 60), win(8, 80)], apps: vec![60, 80], ..Default::default() };
         let m = target.merged_with(&dropped);
         assert_eq!((m.stage, m.number, m.name.as_deref()), (2, 2, Some("Work")), "the target's identity");
-        assert_eq!(m.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [5, 6, 9, 8]);
-        assert_eq!(m.apps, [50, 60, 80]);
+        assert_eq!(m.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [9, 8, 5, 6]);
+        assert_eq!(m.apps, [60, 80, 50]);
+    }
+
+    #[test]
+    fn a_window_dragged_out_alone_leaves_the_others_and_their_apps() {
+        let win = |id: u32, pid: i32| CardWindow { id, pid, frame: Rect::new(0.0, 0.0, 800.0, 600.0) };
+        let card = CardSnapshot { stage: 2, number: 2, windows: vec![win(5, 50), win(6, 60), win(7, 50)], apps: vec![50, 60], ..Default::default() };
+        let left = card.without_window(6);
+        assert_eq!((left.stage, left.number), (2, 2));
+        assert_eq!(left.windows.iter().map(|w| w.id).collect::<Vec<_>>(), [5, 7]);
+        assert_eq!(left.apps, [50], "the app with no window left loses its icon");
+        assert_eq!(card.without_window(5).apps, [50, 60], "an app with a window left keeps it");
+        let lifted = card.only_window(6);
+        assert_eq!((lifted.windows.iter().map(|w| w.id).collect::<Vec<_>>(), lifted.apps), (vec![6], vec![60]), "the window lifted off, with its app");
     }
 
     #[test]

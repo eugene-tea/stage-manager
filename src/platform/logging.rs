@@ -424,7 +424,7 @@ fn spawn_ticker() {
         loop {
             // A little past the hour, so the stamp is on the new hour's side.
             std::thread::sleep(Duration::from_millis(now().millis_to_next_hour() + 250));
-            // A panic here must not take the app down (Fable M2): the next hour tries again.
+            // A panic here must not take the app down (review M2): the next hour tries again.
             let _ = super::safety::guarded("the log's hourly counts and prune", || {
                 write_counts("hour");
                 prune(now().date);

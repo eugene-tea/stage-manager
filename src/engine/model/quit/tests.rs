@@ -435,7 +435,7 @@ fn an_app_launched_in_the_restore_window_keeps_its_minute() {
     assert_eq!(m.pending_count(), 0);
 }
 
-/// W2 (the Fable review of 10-29): Chat saves its own window frames. Its window was parked
+/// W2 (the review of 10-29): Chat saves its own window frames. Its window was parked
 /// when it quit, so it wrote the park frame, and an hour later it reopens the window in the
 /// corner. The window takes the frame it had at the quit (by app and title, else the app's
 /// only one left), not the center; once, and not past a day.

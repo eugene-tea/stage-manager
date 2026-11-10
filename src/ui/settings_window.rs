@@ -1,7 +1,8 @@
 //! The Settings window, in the shape of a Mac app's Settings (Safari, Mail, Xcode): a toolbar
 //! of panes (`NSWindowToolbarStyle::Preference`, an SF Symbol and a label each), one pane
-//! shown at a time, the window titled after it. Each pane is a grouped form in the look of
-//! System Settings ([`form`]).
+//! shown at a time, the window titled after it. Each pane is a plain form
+//! ([`form::Style::Plain`]): rows straight on the window background, as in those apps, since
+//! the toolbar already groups them.
 //!
 //! - **General:** launch at login, the menu bar icon, automatic update checks, installing
 //!   updates automatically, the version with Check for Updates….
@@ -34,13 +35,13 @@ use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
-    NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSImage, NSPopUpButton, NSScreen, NSScrollView,
+    NSAccessibility, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSImage, NSPopUpButton, NSScreen, NSScrollView,
     NSSlider, NSSwitch, NSTextAlignment, NSTickMarkPosition, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
     NSToolbarItem, NSView, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
-use super::form::{self, ActionTarget, FlippedView, Form, Row};
+use super::form::{self, ActionTarget, FlippedView, Form, Row, Style};
 use crate::config::{AppConfig, Config, FitMode};
 use crate::engine::model::StripOrder;
 use crate::platform::login_item::LoginStatus;
@@ -470,7 +471,10 @@ fn change_for(c: &Controls, t: isize) -> Option<Change> {
         tag::ORDER => order_change(c.order.indexOfSelectedItem()),
         tag::FIT => Change::Fit(FIT_MODES[(c.fit.indexOfSelectedItem().max(0) as usize).min(2)]),
         tag::HOTKEYS => Change::Hotkeys(on(&c.hotkeys)),
-        tag::SPEED => Change::Speed(SPEEDS[(c.speed.doubleValue().round().max(0.0) as usize).min(SPEEDS.len() - 1)]),
+        tag::SPEED => {
+            describe_speed(&c.speed);
+            Change::Speed(SPEEDS[(c.speed.doubleValue().round().max(0.0) as usize).min(SPEEDS.len() - 1)])
+        }
         tag::OPEN => Change::OpenConfig,
         tag::REVEAL => Change::RevealConfig,
         tag::COPY => Change::CopyAgentInstructions,
@@ -508,6 +512,17 @@ fn view<T: AsRef<NSView>>(v: &T) -> Retained<NSView> {
     v.as_ref().retain()
 }
 
+/// What VoiceOver reads as the speed slider's value: the speed, not the stop's number.
+pub fn speed_words(speed: f64) -> String {
+    if (speed - 1.0).abs() < 1e-9 { "Native".to_string() } else { format!("{}×", (speed * 100.0).round() / 100.0) }
+}
+
+/// Gives the speed slider its value in words ([`speed_words`]) for where it stands.
+fn describe_speed(slider: &NSSlider) {
+    let stop = (slider.doubleValue().round().max(0.0) as usize).min(SPEEDS.len() - 1);
+    slider.setAccessibilityValueDescription(Some(&NSString::from_str(&speed_words(SPEEDS[stop]))));
+}
+
 /// The speed slider with Slower · Native · Faster under it.
 fn speed_view(mtm: MainThreadMarker, width: f64, stop: usize, enabled: bool, target: &ActionTarget) -> (Retained<NSView>, Retained<NSSlider>, f64) {
     let view = FlippedView::new(mtm, NSSize::new(width, 40.0));
@@ -520,6 +535,8 @@ fn speed_view(mtm: MainThreadMarker, width: f64, stop: usize, enabled: bool, tar
     slider.setContinuous(false);
     slider.setDoubleValue(stop as f64);
     slider.setEnabled(enabled);
+    slider.setAccessibilityLabel(Some(&NSString::from_str("Animation speed")));
+    describe_speed(&slider);
     form::wire(&slider, target, tag::SPEED);
     slider.setFrame(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, 24.0)));
     view.addSubview(&slider);
@@ -598,7 +615,7 @@ fn general(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwitch>, 
         Row::new("Check for updates automatically", Some(view(&updates)))
             .detail("Once a day, from GitHub. Nothing about you or this Mac is sent."),
         Row::new("Install updates automatically", Some(view(&install)))
-            .detail("While you're away from the Mac; otherwise Stage Manager asks first. Your windows come back before it relaunches."),
+            .detail("While you're away from the Mac or when you quit Stage Manager; otherwise it asks first. Your windows come back before it installs."),
         Row::new(&format!("Stage Manager {}", v.version), Some(view(&m.button("Check for Updates…", tag::CHECK)))),
     ]);
     (login, icon, updates, install)
@@ -609,22 +626,36 @@ fn stage_manager(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwi
     let mut apple = Row::new("Apple's Stage Manager", None);
     if v.apple_on {
         apple = apple.detail("On. This app stands down until Apple's is off: it arranges nothing and shows no strip.");
-        apple.trailing.push(view(&m.button("Turn Off", tag::TURN_OFF)));
+        let off = m.button("Turn Off", tag::TURN_OFF);
+        off.setAccessibilityLabel(Some(&NSString::from_str("Turn Off Apple's Stage Manager")));
+        apple.trailing.push(view(&off));
     } else {
         apple = apple.detail("Off. This app takes its place.");
     }
     let recent = m.switch(v.show_recent_apps, tag::RECENT);
     let grouping = m.popup(&["All at Once", "One at a Time"], if v.all_at_once { 0 } else { 1 }, tag::GROUPING);
-    let wallpaper = if v.wallpaper_only_in_stage_manager { "Only in Stage Manager" } else { "Always" };
     f.group(vec![
         apple,
         Row::new("Show recent apps in Stage Manager", Some(view(&recent))),
         Row::new("Show windows from an application", Some(view(&grouping))),
         Row::new("Click wallpaper to reveal desktop", Some(view(&m.button("Desktop & Dock Settings…", tag::DESKTOP_DOCK))))
-            .detail(format!("{wallpaper}. Set in System Settings → Desktop & Dock.")),
+            .detail(wallpaper_detail(v.wallpaper_only_in_stage_manager)),
     ]);
     f.footnote("These are macOS's own Stage Manager settings, shared with System Settings → Desktop & Dock.");
     (recent, grouping)
+}
+
+/// What "Click wallpaper to reveal desktop" does here, under the macOS setting. With Always
+/// macOS itself moves every window aside on a wallpaper click (Apple's Stage Manager is off
+/// while this app runs), and this app cannot stop it without writing that setting, which it
+/// never does: only "Only in Stage Manager" leaves the click to it, and then the stage goes
+/// into the strip as on Apple's (UX-SPEC, "macOS settings come first").
+fn wallpaper_detail(only_in_stage_manager: bool) -> &'static str {
+    if only_in_stage_manager {
+        "Only in Stage Manager. The stage goes into the strip, as in Apple's."
+    } else {
+        "Always. macOS moves every window aside; with Only in Stage Manager, the stage goes into the strip, as in Apple's."
+    }
 }
 
 /// The Stages pane: where windows and apps go.
@@ -659,7 +690,7 @@ fn windows(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSPopUpButt
     let fit = m.popup(&FIT_TITLES, fit_index, tag::FIT);
     let hotkeys = m.switch(v.hotkeys, tag::HOTKEYS);
     m.ours(tag::SPEED);
-    let (speed_below, speed, speed_h) = speed_view(m.mtm, f.inner() - 24.0, speed_stop(v.speed), v.animations_on, m.target);
+    let (speed_below, speed, speed_h) = speed_view(m.mtm, f.row_inner(), speed_stop(v.speed), v.animations_on, m.target);
     let mut speed_row = Row::new("Animation speed", None);
     if !v.animations_on {
         speed_row = speed_row.detail("Animations are off in the config file ([animation] enabled = false or speed = 0).");
@@ -690,7 +721,7 @@ fn advanced(f: &mut Form, m: &Maker, v: &SettingsValues) -> Retained<NSButton> {
     let copy = m.button("Copy Instructions for Agents", tag::COPY);
     rows.push(
         Row::new("Ask an AI agent", Some(view(&copy)))
-            .detail("The easiest way to change anything else is to ask an AI agent (Claude Code, Codex, …) to do it."),
+            .detail("The easiest way to change anything else is to ask an AI assistant to do it."),
     );
     f.group(rows);
     f.footnote("Changes apply at once and are saved in the config file, keeping its comments.");
@@ -723,19 +754,19 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (V
     };
     let maker = |pane: Pane| Maker { mtm, target, pane };
 
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let (login, icon, updates, install) = general(&mut f, &maker(Pane::General), v);
     add(Pane::General, f);
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let (recent, grouping) = stage_manager(&mut f, &maker(Pane::StageManager), v);
     add(Pane::StageManager, f);
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let ([restore, new_apps, shift, merge], order) = stages(&mut f, &maker(Pane::Stages), v);
     add(Pane::Stages, f);
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let (fit, speed, hotkeys) = windows(&mut f, &maker(Pane::Windows), v);
     add(Pane::Windows, f);
-    let mut f = Form::new(mtm, WIDTH);
+    let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
     let copy = advanced(&mut f, &maker(Pane::Advanced), v);
     add(Pane::Advanced, f);
 
@@ -793,6 +824,8 @@ pub fn create(mtm: MainThreadMarker, values: SettingsValues, pane: Pane) -> Reta
     toolbar.setAutosavesConfiguration(false);
     window.setToolbar(Some(&toolbar));
     window.setToolbarStyle(NSWindowToolbarStyle::Preference);
+    // Full Keyboard Access: Tab reaches every control of the pane shown, as panes swap.
+    window.setAutorecalculatesKeyViewLoop(true);
     OPEN.with(|o| {
         *o.borrow_mut() = Some(Open {
             window: window.clone(),
@@ -877,6 +910,7 @@ pub fn apply(values: SettingsValues) {
         c.fit.selectItemAtIndex(FIT_MODES.iter().position(|m| *m == values.fit).unwrap_or(0) as isize);
         set_switch(&c.hotkeys, values.hotkeys);
         c.speed.setDoubleValue(speed_stop(values.speed) as f64);
+        describe_speed(&c.speed);
         let wallpaper_changed = open.shown.wallpaper_only_in_stage_manager != values.wallpaper_only_in_stage_manager
             || open.shown.config_error != values.config_error;
         open.shown = values;
@@ -928,6 +962,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_speed_slider_reads_its_speed() {
+        assert_eq!(speed_words(1.0), "Native");
+        assert_eq!(speed_words(0.33), "0.33×");
+        assert_eq!(speed_words(2.0), "2×");
+        assert_eq!(speed_words(SPEEDS[0]), "0.25×");
+    }
+
+    #[test]
     fn the_slider_stops_at_apples_speed_in_the_middle() {
         assert_eq!(SPEEDS[SPEEDS.len() / 2], 1.0, "Native in the middle");
         assert_eq!(speed_stop(1.0), 4);
@@ -940,6 +982,15 @@ mod tests {
         for (i, s) in SPEEDS.iter().enumerate() {
             assert_eq!(speed_stop(*s), i, "every stop maps to itself");
         }
+    }
+
+    /// 11-09: with Always, macOS moves the windows aside and Apple's stage-to-strip needs Only
+    /// in Stage Manager; the row says so, and what each value does.
+    #[test]
+    fn the_wallpaper_row_says_what_each_value_does() {
+        assert!(wallpaper_detail(false).starts_with("Always. macOS moves every window aside"));
+        assert!(wallpaper_detail(false).contains("with Only in Stage Manager, the stage goes into the strip"));
+        assert!(wallpaper_detail(true).starts_with("Only in Stage Manager. The stage goes into the strip"));
     }
 
     #[test]

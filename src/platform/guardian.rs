@@ -258,12 +258,6 @@ pub fn run(args: &[String]) -> ExitCode {
     // Windows may sit at any corner the app parked them in this run, on any of its screens.
     safety::assume_corners(&file.corners);
     safety::assume_zones(&file.zones);
-    // Apps the app hid instead of parking: shown again first (their windows sit at their own
-    // frames, or parked, which the scan and the watch below cover).
-    if !file.hidden.is_empty() {
-        let n = safety::unhide_apps("guardian", file.hidden.iter().cloned());
-        tracing::warn!(hidden = file.hidden.len(), unhidden = n, "guardian: apps the app hid are unhidden");
-    }
     let registered = file.windows;
     tracing::warn!(parent, registered = registered.len(), visible = ?file.visible, corners = ?file.corners, "guardian: {UNCLEAN_EXIT}; running the recovery scan");
     let scope = scan_scope(&registered);

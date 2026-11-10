@@ -20,7 +20,7 @@ format = "ULFO"  # lzfse: smaller than zlib, read by every macOS the app support
 filesystem = "HFS+"
 files = [app]
 symlinks = {"Applications": "/Applications"}
-icon = os.path.join(root, "resources", "AppIcon.icns")  # the mounted volume's icon
+icon = os.path.join(root, "packaging", "AppIcon.icns")  # the mounted volume's icon
 
 background = os.path.join(root, "art", "dmg", "background.png" if theme == "light" else "dark/background.png")
 window_rect = ((200, 140), (art.WIDTH, art.HEIGHT))
