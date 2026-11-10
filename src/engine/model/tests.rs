@@ -3081,6 +3081,58 @@ fn minimize_sends_the_window_to_the_strip_and_keeps_the_view() {
     assert!(e.m.minimize_to_strip(w(1), &obs).is_empty(), "a parked window is left alone");
 }
 
+/// Apple's, recorded 11-09: a minimized window's new card is the strip's top one, the other
+/// cards one slot down. In place (`[strip] order`) it takes its own place.
+#[test]
+fn a_minimized_windows_card_takes_the_top_slot() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::New);
+    e.add(meta(4, 12, "com.example.c"), RuleAction::Current);
+    let before = e.m.strip_slots(MAIN);
+    assert_eq!(before.len(), 2, "two cards: {before:?}");
+    let obs = e.d.obs();
+    let a = e.m.minimize_to_strip(w(4), &obs);
+    e.run(a);
+    let after = e.m.strip_slots(MAIN);
+    assert_eq!(Some(after[0]), e.m.stage_of(w(4)), "the new card on top: {after:?}");
+    assert_eq!(after[1..], before[..], "the others one slot down, in their order");
+
+    let mut options = ModelOptions::default();
+    options.strip.order = StripOrder::InPlace;
+    let mut e = Env::with(options);
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+    e.add(meta(3, 11, "com.example.b"), RuleAction::Current);
+    let before = e.m.strip_slots(MAIN);
+    let obs = e.d.obs();
+    let a = e.m.minimize_to_strip(w(3), &obs);
+    e.run(a);
+    let after = e.m.strip_slots(MAIN);
+    assert_eq!(after[..before.len()], before[..], "in place: the cards keep their places");
+    assert_eq!(after.last().copied(), e.m.stage_of(w(3)), "the new stage's own place, last");
+}
+
+/// The windows a minimize is caught on before macOS's genie: shown standard stage members
+/// only, never a parked, pinned or child window.
+#[test]
+fn a_minimize_is_caught_on_shown_stage_windows_only() {
+    let mut e = Env::new();
+    e.add(meta(1, 10, "com.example.a"), RuleAction::Native);
+    e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
+    e.add(meta(3, 12, "com.example.c"), RuleAction::New);
+    let mut sheet = meta(4, 12, "com.example.c");
+    sheet.role = WindowRole::Child { parent: Some(w(3)) };
+    e.add(sheet, RuleAction::Current);
+    let obs = e.d.obs();
+    let a = e.m.toggle_pin(w(2), &obs);
+    e.run(a);
+    let mut ids: Vec<u32> = e.m.minimizable_windows().map(|w| w.0).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [3], "window 1 parked (its stage left), 2 pinned, 4 a sheet");
+}
+
 #[test]
 fn one_at_a_time_a_click_on_the_grouped_card_puts_the_leaving_stage_in_that_slot() {
     // V2: the grouped card sits in its first stage's slot but carries the app's least

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Minimizing a window with the yellow button or ⌘M sends it straight into a new card at the
+  top of the strip, as Apple's does, with no genie into the Dock first.
 - The shadow under the app icons on cards is lighter and tighter, as Apple's is.
 - When you cancel a logout, restart or shutdown after Stage Manager quit for it, Stage Manager
   now opens again even if some windows didn't come back at the quit.

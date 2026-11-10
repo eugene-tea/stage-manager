@@ -99,6 +99,7 @@ use serde_json::{Value, json};
 use super::ax::{AxElement, AxError};
 use super::ctl::Command;
 use super::input::{self, InputEvent, InputKind, Modifiers, Triggers};
+use super::minimize_tap::MinimizeAsk;
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
@@ -117,6 +118,7 @@ use crate::engine::stale_activation;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::minimize;
+use crate::engine::minimize_press::Minimizable;
 use crate::engine::park::{Corner, ParkRequest, choose_corner};
 use crate::engine::recovery::{self, Known};
 use crate::engine::sliver;
@@ -2316,6 +2318,7 @@ impl Controller {
             self.settle_raise_order(ob, &raises, focus, now);
         }
         self.publish_shield();
+        self.publish_minimizable(ob);
         self.update_patch();
         self.remember();
         if changed {
@@ -3597,6 +3600,7 @@ impl Controller {
             }
             WinEvent::Moved(id) => {
                 self.maybe_start_drag(ob, id, now);
+                self.publish_minimizable(ob);
                 let frame = ob.window(id).map(|w| w.frame);
                 let ours = self.echoes.is_window_echo(id, now);
                 if !ours
@@ -4024,6 +4028,76 @@ impl Controller {
                 tracing::warn!(id, "cannot restore the minimized window: {e}");
             }
         }
+    }
+
+    /// A minimize the minimize tap caught before macOS's genie (the yellow button, ⌘M;
+    /// [`super::minimize_tap`]): with `[windows] minimize_to_strip` the window goes straight
+    /// to the strip, as Apple's (recorded 11-09): it leaves as a stage does in a switch, its
+    /// picture flying from its frame into a new card at the top of the strip, the other cards
+    /// one slot down; under Reduce Motion it fades out where it is while its card fades in.
+    /// It never goes into the Dock. When it cannot go now (the setting off, no stage change
+    /// possible, a window no longer shown in its stage) it is minimized as macOS would: the
+    /// tap swallowed the person's minimize, so it is never lost.
+    pub fn minimize_direct(&mut self, ob: &mut Observer, ask: MinimizeAsk) {
+        let id = ask.window;
+        let waited_ms = ask.at.elapsed().as_millis() as u64;
+        let Some(m) = self.model.as_ref() else { return ask.as_macos("not managing windows") };
+        let Some(w) = m.window(WindowId(id)) else { return ask.as_macos("not a managed window") };
+        if w.parked {
+            tracing::debug!(id, by = ask.by.name(), "a caught minimize of a window already parked: nothing");
+            return;
+        }
+        let display = w.meta.display;
+        let why = if !self.store.config().windows.minimize_to_strip {
+            Some("[windows] minimize_to_strip is off")
+        } else if let Some(why) = self.frozen_reason() {
+            Some(why)
+        } else if self.fullscreen_on(display) {
+            Some("a full-screen app's Space shows on its screen")
+        } else if self.overview.showing().is_some() {
+            Some("Mission Control, App Expose or Show Desktop shows")
+        } else if !m.minimizable_windows().any(|w| w.0 == id) {
+            Some("not a window shown in its stage")
+        } else {
+            None
+        };
+        if let Some(why) = why {
+            return ask.as_macos(why);
+        }
+        self.end_restore(ob, "a minimize", End::User);
+        let obs = self.observe(ob);
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.minimize_to_strip(WindowId(id), &obs);
+        if actions.is_empty() {
+            return ask.as_macos("the stage model kept it");
+        }
+        tracing::info!(id, by = ask.by.name(), waited_ms, "window minimized: straight to the strip, no genie (caught before macOS)");
+        self.minimizing = None;
+        self.execute_animated(ob, actions);
+    }
+
+    /// Tells the minimize tap ([`super::minimize_tap`]) which windows a minimize is caught on,
+    /// with their tracked frames: the model's shown stage windows
+    /// ([`Model::minimizable_windows`]), none held behind a transition's snapshots or on a
+    /// screen showing a full-screen app; none at all with `[windows] minimize_to_strip` off,
+    /// no stage change possible or an overview showing. Cheap (no Accessibility call); after
+    /// every batch, every move and every tick.
+    fn publish_minimizable(&self, ob: &Observer) {
+        let Some(m) = &self.model else {
+            super::minimize_tap::publish(Minimizable::default());
+            return;
+        };
+        let on = self.store.config().windows.minimize_to_strip && !self.frozen() && self.overview.showing().is_none();
+        let windows = if on {
+            m.minimizable_windows()
+                .filter(|id| self.pending.as_ref().is_none_or(|p| !p.entries.contains_key(&id.0)))
+                .filter(|id| m.window(*id).is_some_and(|w| !self.fullscreen_on(w.meta.display)))
+                .filter_map(|id| ob.window(id.0).map(|w| (id.0, w.frame)))
+                .collect()
+        } else {
+            HashMap::new()
+        };
+        super::minimize_tap::publish(Minimizable { on, windows });
     }
 
     /// A window un-minimized on its way to the strip ([`Self::on_minimized`]) is down: AppKit
@@ -6365,6 +6439,7 @@ impl Controller {
     /// Housekeeping, about every 250 ms: debounced save, config polling, strip refresh.
     pub fn tick(&mut self, ob: &mut Observer) {
         let now = Instant::now();
+        self.publish_minimizable(ob);
         if let Some(s) = self.phase.switching().filter(|s| s.overdue(now)) {
             tracing::warn!(id = s.id, max_ms = s.max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
             self.flush_pending(ob);
@@ -6706,6 +6781,15 @@ impl Controller {
                     Err(e) => json!({ "ok": false, "error": e }),
                 }
             }
+            Command::DebugMinimizeButton { id } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-minimize-button needs STAGE_MANAGER_TEST=1" });
+                }
+                match test_window(ob, id, "debug-minimize-button").and_then(|e| e.minimize_button().and_then(|b| b.frame()).map_err(|e| e.to_string())) {
+                    Ok(r) => json!({ "ok": true, "frame": { "x": r.x, "y": r.y, "w": r.w, "h": r.h } }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                }
+            }
             Command::DebugStaleHandle { id } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-stale-handle needs STAGE_MANAGER_TEST=1" });
@@ -6797,6 +6881,7 @@ impl Controller {
             | Command::DebugGlass { .. }
             | Command::DebugStripHover { .. }
             | Command::DebugSpace { .. }
+            | Command::DebugCmdM
             | Command::DebugExpose { .. } => {
                 json!({ "ok": false, "error": "not a WM command" })
             }

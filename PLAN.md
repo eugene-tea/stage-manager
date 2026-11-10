@@ -26,8 +26,10 @@ features wait for 2.0.
   no darker frame, the rest one (up to 15 levels on Finder's heavier shadow), more under load. The
   window server shows the window a frame before our layer change reaches the screen. Find a way to
   take that frame back without guessing early (a lighter edge, 11-01).
-- **Minimize as Apple's does**, once the minimize recording below is read: Apple's shows no genie into
-  the Dock (11-09); ours lets macOS's genie play, then brings the window back to the strip.
+- **Minimize as Apple's does: done** (round minimize-direct; live check 1 below). The yellow button and
+  ⌘M are caught before macOS's genie and the window flies from its frame into a new card at the top of
+  the strip. Window ▸ Minimize, a title-bar double-click and an app's own minimize still play the genie
+  first, then come back to the strip (UX-SPEC, "Minimize").
 - **Whatever the Apple session below finds different.**
 
 **Settled, nothing to do**
@@ -46,8 +48,9 @@ screen both attached. The main thread runs it, with Eugene at the Mac for the st
    build: `kill -9` with a dialog open, an app answering late at the quit, a fit move then a
    crash, a dialog opened in a hidden stage, a window showing only a piece at the corner, no
    captures while the strip is hidden, and a minimized window's way to the strip sampled every
-   8 ms (its places are printed: after the genie only the sink out of the Dock tile, then the
-   corner). Hands off the Mac; they have never run.
+   8 ms (its places are printed): ⌘M and the yellow button never put it in the Dock (at its frame,
+   then parked, its picture flying from its frame into the top card); an app's own minimize after the
+   genie only sinks out of the Dock tile, then the corner. Hands off the Mac; they have never run.
 2. **Both screens, 5 min.** `scripts/test-stages.sh displays` on today's build. All checks pass, including
    each screen's own card glass and corner patch (`displays[i].pictures`, `displays[i].corner_patch.shown`).
 3. **⌘-Tab to the other screen, 3 min.** Put fixture B on the laptop screen (`ctl debug-frame`) as a stage of
@@ -84,8 +87,10 @@ screen both attached. The main thread runs it, with Eugene at the Mac for the st
      shrink_*`, a pair of its own if Apple's is faster), where the picture starts and its size
      (`ui::minimize_motion::start`: the Dock tile, at the size the genie left the window), the
      card's fade without a tile and under Reduce Motion (`display_options::FADE_MS`), and the new
-     card's slot (the engine's `Target::New`). macOS's own genie stays: Stage Manager hears of a
-     minimize only after it.
+     card's slot (the engine's `Target::New`). Read 11-09 for the yellow button (no genie, the top
+     slot, ~450 ms): the yellow button and ⌘M are now caught before the genie; still to read from
+     this recording: ⌘M's and Reduce Motion's frames against ours, and whether `[animation] shrink_*`
+     wants a pair of its own.
    - With Reduce Motion on: one switch recorded (for the accessibility round).
    - Eugene turns Apple's Stage Manager and Dark Mode back off.
 8. **VoiceOver on the strip (E), 5 min.** The accessibility round's checklist: each card reads its stage and

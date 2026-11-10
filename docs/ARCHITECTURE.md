@@ -45,7 +45,10 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   dragged window's card shows).
 - **Threads:** every AX call runs on the WM thread with a 0.25 s timeout; the main thread
   never calls AX. Apps that do not answer yet (a login, the launch's recovery scan) are
-  asked on threads of their own, so one busy app holds up no other. Frame writes run with
+  asked on threads of their own, so one busy app holds up no other. The minimize tap
+  (`platform::minimize_tap`) asks on its own thread too, at 0.1 s a call and only for a press
+  near a managed window's title-bar buttons or ⌘M: a minimize caught there goes to the WM
+  thread as a command. Frame writes run with
   the app's `AXEnhancedUserInterface` off (`platform::enhanced_ui`), on again after (also at
   quit, panic and SIGABRT). A late activation notice acts only if it fired after our latest
   switch began and its app is still frontmost (`engine::stale_activation`). A handle answering `kAXErrorInvalidUIElement` is looked up

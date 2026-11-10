@@ -616,26 +616,52 @@ A window of a combined card lifts off as that picture from the first move, insid
 too, where Apple's leaves it on the card until the pointer is about 245 pt from the edge
 (Drag and drop, above).
 
-**Minimize** (the yellow button, ⌘M, Window → Minimize, or an app minimizing its own window)
-sends the window to the strip as a card of its own, but macOS's genie into the Dock plays
-first: Stage Manager hears of the minimize only once the window is in the Dock. Apple's
-window shrinks straight into the strip (how exactly is not recorded yet). Then one motion: a
-picture of the window comes out of its Dock tile (its own tile, or its app's icon with
-"Minimize windows into application icon"), the size the genie left it at, and flies into its
-card. With no tile on that screen or no picture of the window, the card fades in where it
-lands; under Reduce Motion the card's fade is all. No full-size picture ever shows where the
-window was.
+**Minimize** sends the window to the strip as a card of its own, as Apple's does. Apple's,
+recorded 11-09 on the 5K at 60 fps (the yellow button on a 900×632 window): no genie and
+nothing in the Dock. From the first moving frame the window flies straight into a new card at
+the top of the strip (the other cards slide down one slot), turning and shrinking as a stage
+leaving in a switch does, its app icon on it early; about 450 ms to rest, most of it in the
+first 220 ms. With Reduce Motion on the window fades out in place over about 8 frames and the
+card appears.
 
-The window itself has to leave the Dock to be parked, and macOS animates every un-minimize
-out of the Dock tile toward the window's frame, whatever that frame (on screen, off every
-display, with its app hidden: measured 11-09). So while it is still in the Dock it is put
-beyond the screen edge the Dock is on, in line with its park frame (2000 pt past every
-display): its un-minimize sinks out of the tile off the screen within the Dock's band
-(gone in about 0.2 s) instead of rising and crossing the screen to the corner, macOS sets it
-down in the corner, and it is parked again the moment it is down. Where that way would pass
+Ours catches the two usual ways before macOS starts its genie, in an event tap
+(`platform::minimize_tap`, decided in `engine::minimize_press`):
+
+- **The yellow button** (a plain click; ⌥-click, ⇧-click and ⌃-click stay macOS's): a press
+  near the top-left corner of a window in a shown stage is hit-tested through Accessibility
+  at the press (0.1 s budget each call). On that window's enabled minimize button the press,
+  its drags and its release are swallowed; a release on the button minimizes, one dragged off
+  does nothing, as the button's own.
+- **⌘M** (no other modifier) while the frontmost app's focused window is a managed one with
+  an enabled minimize button and a settable `AXMinimized`. Any other window keeps its app's ⌘M.
+
+The window then leaves as a stage does in a switch: its picture flies from its frame into
+its new card at the top of the strip, the others gliding one slot down; under Reduce Motion
+its picture fades out where it is while the card fades in. In place (`[strip] order`) the
+card takes its own place instead.
+
+Everything else is macOS's minimize first: Window → Minimize from the menu bar, a
+double-click on the title bar set to minimize, an app minimizing its own window, ⌥⌘M, an
+answer that did not come in time, a full-screen Space, Mission Control. Stage Manager hears
+of those only once the genie has put the window in the Dock; then one motion: a picture of
+the window comes out of its Dock tile (its own tile, or its app's icon with "Minimize windows
+into application icon"), the size the genie left it at, and flies into its card. With no
+tile on that screen or no picture of the window, the card fades in where it lands; under
+Reduce Motion the card's fade is all. No full-size picture ever shows where the window was.
+
+After a genie the window itself has to leave the Dock to be parked, and macOS animates every
+un-minimize out of the Dock tile toward the window's frame, whatever that frame (on screen,
+off every display, with its app hidden: measured 11-09). So while it is still in the Dock it
+is put beyond the screen edge the Dock is on, in line with its park frame (2000 pt past every
+display): its un-minimize sinks out of the tile off the screen within the Dock's band (gone
+in about 0.2 s) instead of rising and crossing the screen to the corner, macOS sets it down
+in the corner, and it is parked again the moment it is down. Where that way would pass
 another screen it goes to the park frame as before. macOS's un-minimize focuses the window:
 that is never taken for a window you brought out (only a focus or a drag of yours after the
 park counts as that).
+
+`[windows] minimize_to_strip = false`: nothing is caught, and every minimize goes into the
+Dock.
 
 **Desktop items are left alone.** Hiding Finder's desktop icons is outside a window
 manager's reach through public API.
@@ -870,7 +896,8 @@ still turns everything off, fades included.
 
 | Case | Full motion | Under Reduce Motion | Why |
 |---|---|---|---|
-| A minimized window going to the strip | its picture flies from its Dock tile into its card | its card fades in at its slot; no picture | the window is already gone into the Dock (macOS's own animation, which follows Reduce Motion itself); the card fading in says where it went |
+| A window minimized to the strip (the yellow button, ⌘M) | its picture flies from its frame into its new card, as a stage leaving does | its picture fades out where it is while its card fades in at its slot, as Apple's (11-09) | as the switch below; the card fading in says where it went |
+| A window minimized to the strip after macOS's genie (the menu, an app's own) | its picture flies from its Dock tile into its card | its card fades in at its slot; no picture | the window is already gone into the Dock (macOS's own animation, which follows Reduce Motion itself); the card fading in says where it went |
 | The switch (also the desktop reveal, an activation, a drop) | windows fly between card and frame at full-screen scale, turned and scaled in depth | a cross-fade where the windows are: the outgoing pictures fade out at their frames while their stage's card fades in at its slot; the incoming pictures fade in at their frames while their card fades out | the largest trigger of all: depth, scale and a 3D turn over most of the screen. The card fading in at its slot as the windows fade out says where they went; the same unveil, handover and landing rules hold, with no spring travel |
 | The strip sliding out and in | 286 pt sideways, in 3D | fades in at its place; fades out where it is, then leaves the screen unseen | a large surface moving across the screen |
 | Hover | the card's windows grow 11 % on a spring | no growth; the glass still turns solid | scaling by itself; the colour change alone still shows which card is under the pointer |
