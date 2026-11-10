@@ -2,7 +2,7 @@
 
 The public build is a DMG, signed with a Developer ID and notarized by Apple, published on
 GitHub Releases, with a Homebrew cask in the `eugene-tea/homebrew-tap` repository and the info
-page on GitHub Pages. Every step that publishes something is the owner's to run.
+page on GitHub Pages. Every step that publishes something is the maintainer's to run.
 
 Dev builds are unaffected: `make sign`, `make run` and `make install` keep using the local
 self-signed identity (`scripts/sign.sh`).
@@ -73,11 +73,14 @@ self-signed identity (`scripts/sign.sh`).
      Homebrew cask (`target/release/stage-manager.rb`) with the version and the DMG's sha256.
 5. Try the DMG on a clean account or Mac: open it, drag the app to Applications, launch, and
    check that no Gatekeeper warning appears.
-6. Push `dev`, move `master` forward to it, and tag the release (annotated):
+6. Push `dev`, add the release's commit to `master` (dev's files, the CHANGELOG section as
+   the message), push it, and tag that commit (annotated):
 
    ```sh
-   git push origin dev && git push origin dev:master
-   git tag -a vX.Y.Z -m "Stage Manager X.Y.Z" && git push origin vX.Y.Z
+   git push origin dev
+   scripts/master-commit.sh release X.Y.Z "X.Y.Z: what a user notices, in a few words"
+   git push origin master
+   git tag -a vX.Y.Z -m "Stage Manager X.Y.Z" master && git push origin vX.Y.Z
    ```
 
 7. Publish (the DMG's name stays `Stage-Manager.dmg` in every release, so
@@ -105,7 +108,7 @@ version: a tag with a pre-release part (`v1.3.0-rc.1`) is never offered or insta
 first lines of the release notes show in the update alert (up to six lines, Markdown reduced
 to plain text), so lead with what users will notice.
 
-The tag, the release, the tap and the Pages deploy are public: each one only on the owner's
+The tag, the release, the tap and the Pages deploy are public: each one only on the maintainer's
 word.
 
 ## Art

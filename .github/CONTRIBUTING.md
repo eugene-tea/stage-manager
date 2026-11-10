@@ -1,7 +1,14 @@
 # Contributing
 
-Pull requests are welcome; open them against `dev`, the default branch (`master` holds
-releases only, see [AGENTS.md](../AGENTS.md)). A few things keep them easy to take.
+Pull requests are welcome. They go to `dev`, where the work happens, a commit at a time.
+`master`, the branch GitHub shows first, holds one commit per release and shares no history
+with `dev` (see [AGENTS.md](../AGENTS.md)). So:
+
+- When you fork, untick **Copy the `master` branch only**, so your fork has `dev`.
+- Make your branch from `dev`, and open the pull request against `dev`.
+
+A pull request opened against `master` is moved to `dev`; one made from `master` gets a
+comment with the commands that put it on `dev`. A few things keep them easy to take.
 
 **Apple's way stays the default.** With an empty config file, Stage Manager looks and
 behaves like Apple's. A new behaviour is an option, off by default (or, if it changes

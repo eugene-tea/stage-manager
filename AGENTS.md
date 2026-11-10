@@ -16,12 +16,16 @@ their settings is a different job: [docs/AGENTS.md](docs/AGENTS.md).)
 
 ## Branches
 
-- **`dev`** is the default branch and holds all the work. Pull requests go to `dev`. CI
-  (`make check`) runs on every push to it and on every pull request.
-- **`master`** holds releases only: at each release it moves forward to the released `dev`
-  commit, which gets an annotated tag `vX.Y.Z` and a GitHub release with the DMG. The info
-  page is served from `master`'s `docs/`, so a change to the page also moves `master`.
-  Nothing else does.
+- **`dev`** holds all the work, a commit at a time. Pull requests go to `dev`; one opened
+  against `master` is moved there (`.github/workflows/pr-to-dev.yml`). CI (`make check`)
+  runs on every push to it and on every pull request.
+- **`master`** is the default branch, the one GitHub shows and `git clone` checks out: one
+  commit per release, with dev's files at that release and its CHANGELOG section as the
+  message, tagged `vX.Y.Z` (annotated) with a GitHub release and the DMG. It shares no
+  history with `dev`; `scripts/master-commit.sh` writes its commits. GitHub reads the info
+  page (`docs/`) and the contributing notes, templates and workflows (`.github/`) from
+  `master`, so a change to those also adds a commit to `master` (`master-commit.sh repo`).
+  Nothing else does. Only the owner can update `master` (a ruleset).
 - Versions: a change users can notice bumps the minor (1.7.0 → 1.8.0); a patch is for fixes
   that change no behaviour.
 

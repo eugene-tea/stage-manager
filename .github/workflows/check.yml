@@ -3,7 +3,7 @@
 name: check
 
 on:
-  # dev only: master moves by fast-forward to a commit dev already checked.
+  # dev only: a commit on master has the files of a dev commit already checked.
   push:
     branches: [dev]
   pull_request:
