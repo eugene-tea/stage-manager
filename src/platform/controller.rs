@@ -54,9 +54,10 @@
 //! - **Wallpaper clicks**: a click on the wallpaper reveals the desktop: ours with "Click
 //!   wallpaper to reveal desktop" set to Only in Stage Manager, macOS's own with Always (the
 //!   default, also when the key is unset), never both ([`wallpaper_click`]); a double click
-//!   is one click. A press in a window's resize band, just outside its frame, is its edge,
-//!   never a wallpaper click; one a little further out reveals on a still release only
-//!   ([`desktop_click::edge_zone`]). macOS hands the desktop to Finder, so Finder's activation and its main
+//!   is one click. The reveal runs on the release, as Apple's: a still click shorter than
+//!   [`desktop_click::CLICK_HOLD`] reveals, a drag or a long press reveals nothing; a press in
+//!   a window's resize band, just outside its frame, is its edge, never a wallpaper click
+//!   ([`desktop_click::reveals_on_release`], [`desktop_click::in_any_resize_band`]). macOS hands the desktop to Finder, so Finder's activation and its main
 //!   window's focus follow the click; that echo never switches stages or unparks a window
 //!   ([`DesktopEcho`]), as with Apple's. A deliberate Finder activation (Dock click, ⌘Tab,
 //!   its card) still brings its stage.
@@ -814,13 +815,14 @@ struct Press {
     live: HashMap<u32, Rect>,
 }
 
-/// A wallpaper press just outside a window's resize band ([`desktop_click::EdgeZone::Near`]):
-/// its reveal waits for the release, and runs only for a still one
-/// ([`desktop_click::still_release`]); a drag reveals nothing.
+/// A wallpaper press whose reveal waits for the release, as Apple's: it runs only for a still,
+/// short one ([`desktop_click::reveals_on_release`]); a drag or a long press reveals nothing.
 #[derive(Debug, Clone, Copy)]
 struct WallpaperPress {
     at: Point,
     screen: DisplayId,
+    /// When it was pressed ([`InputEvent::stamp`]).
+    stamp: f64,
 }
 
 /// A managed window being dragged by the user.
@@ -4165,7 +4167,7 @@ impl Controller {
                     tracing::debug!("click during a transition, on an arriving window");
                     false
                 } else {
-                    self.mouse_down(ob, &list, event.at, event.clicks)
+                    self.mouse_down(&list, event.at, event.clicks, event.stamp)
                 };
                 if !wallpaper && self.desktop_echo.user_acted() {
                     tracing::debug!("a click off the wallpaper: Finder's next activation is deliberate");
@@ -4179,7 +4181,7 @@ impl Controller {
                 let _ = self.dock_released(ob, event.at, modifiers, now);
                 self.press = None;
                 if let Some(press) = self.wallpaper_press.take() {
-                    self.wallpaper_released(ob, press, event.at);
+                    self.wallpaper_released(ob, press, event.at, event.stamp);
                 }
                 self.focus_after_press_done(ob);
                 let Some(drag) = self.drag.take() else { return };
@@ -5822,13 +5824,13 @@ impl Controller {
         }
     }
 
-    /// A left mouse-down in another app at `p`, the `clicks`th click of a multiple click:
-    /// on the wallpaper it reveals the desktop ([`wallpaper_click`]: ours only with "Only in
-    /// Stage Manager"; a double click is one click; near a window's edge, on a still release:
-    /// [`desktop_click::EdgeZone`]). True when it was a wallpaper click,
-    /// whoever reveals: Finder's activation and focus that follow are its echo
-    /// ([`DesktopEcho`]) either way.
-    pub fn mouse_down(&mut self, ob: &mut Observer, list: &[windows::CgWindow], p: Point, clicks: i64) -> bool {
+    /// A left mouse-down in another app at `p` (at `stamp`: [`InputEvent::stamp`]), the
+    /// `clicks`th click of a multiple click: on the wallpaper it reveals the desktop on its
+    /// release ([`wallpaper_click`]: ours only with "Only in Stage Manager"; a double click is
+    /// one click; a drag or a long press reveals nothing: [`Self::wallpaper_released`]). True
+    /// when it was a wallpaper click, whoever reveals: Finder's activation and focus that
+    /// follow are its echo ([`DesktopEcho`]) either way.
+    pub fn mouse_down(&mut self, list: &[windows::CgWindow], p: Point, clicks: i64, stamp: f64) -> bool {
         if self.model.is_none() {
             return false;
         }
@@ -5847,8 +5849,7 @@ impl Controller {
         }
         // Just outside a window, in its resize band, the press takes the window's edge (11-09:
         // VS Code's right edge, 0.3 pt out, parked mid-resize): the window's, not the desktop's.
-        let zone = desktop_click::edge_zone(p, desktop::resizable_frames(&list));
-        if zone == desktop_click::EdgeZone::Band {
+        if desktop_click::in_any_resize_band(p, desktop::resizable_frames(&list)) {
             tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "a press in a window's resize band: its edge, no wallpaper click");
             return false;
         }
@@ -5863,15 +5864,12 @@ impl Controller {
             return true;
         }
         match wallpaper_click(&self.settings, clicks) {
-            WallpaperClick::Toggle if zone == desktop_click::EdgeZone::Near => {
-                // The band may reach further on some window: nothing parks while the press
-                // could hold an edge. A still release reveals; a drag reveals nothing.
-                tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "wallpaper press near a window's edge: the reveal waits for the release");
-                self.wallpaper_press = Some(WallpaperPress { at: p, screen: screen.id });
-            }
             WallpaperClick::Toggle => {
-                tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "wallpaper click");
-                self.reveal_on(ob, Some(screen.id), true);
+                // Apple's reveals on the release of a short still click, never on the press:
+                // nothing parks while the press may still turn into a drag (a resize, a
+                // rubber-band selection) or be held.
+                tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "wallpaper press: the reveal waits for the release");
+                self.wallpaper_press = Some(WallpaperPress { at: p, screen: screen.id, stamp });
             }
             WallpaperClick::LeftToMacOs => {
                 self.macos_reveal_at = Some(Instant::now());
@@ -5892,18 +5890,23 @@ impl Controller {
         true
     }
 
-    /// The release of a wallpaper press near a window's edge ([`WallpaperPress`]) at `up`:
-    /// where it was pressed, the click reveals now; moved, it was a drag (a resize, a
-    /// rubber-band selection) and nothing is revealed.
-    fn wallpaper_released(&mut self, ob: &mut Observer, press: WallpaperPress, up: Point) {
+    /// The release of a wallpaper press ([`WallpaperPress`]) at `up` (at `stamp`): where it was
+    /// pressed and within [`desktop_click::CLICK_HOLD`], the click reveals now; moved, it was a
+    /// drag (a resize, a rubber-band selection), and held longer it was no click (Apple's
+    /// reveals nothing for either).
+    fn wallpaper_released(&mut self, ob: &mut Observer, press: WallpaperPress, up: Point, stamp: f64) {
         if self.model.is_none() || self.frozen_on(press.screen) {
             return;
         }
-        if desktop_click::still_release(press.at, up) {
-            tracing::info!(x = press.at.x, y = press.at.y, screen = press.screen.0, on = "release", "wallpaper click");
+        let held = Duration::try_from_secs_f64(stamp - press.stamp).unwrap_or(Duration::ZERO);
+        let held_ms = held.as_millis() as u64;
+        if desktop_click::reveals_on_release(press.at, up, held) {
+            tracing::info!(x = press.at.x, y = press.at.y, screen = press.screen.0, held_ms, on = "release", "wallpaper click");
             self.reveal_on(ob, Some(press.screen), true);
+        } else if desktop_click::reveals_on_release(press.at, up, Duration::ZERO) {
+            tracing::info!(x = up.x, y = up.y, held_ms, "a long press on the wallpaper: no click, nothing revealed");
         } else {
-            tracing::info!(x = up.x, y = up.y, "a drag from the wallpaper near a window's edge: nothing revealed");
+            tracing::info!(x = up.x, y = up.y, held_ms, "a drag from the wallpaper: nothing revealed");
         }
     }
 

@@ -574,13 +574,13 @@ mod app {
                     Err(e) => ctl::error_reply(&e),
                 }
             }
-            Command::DebugDesktop { at, double, to } => {
+            Command::DebugDesktop { at, double, to, hold } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-desktop needs STAGE_MANAGER_TEST=1");
                 }
                 let posted = match to {
                     Some(to) => input::desktop_drag(at, to),
-                    None => input::desktop_click(at, double),
+                    None => input::desktop_click(at, double, hold.map(Duration::from_millis)),
                 };
                 match posted {
                     Ok(()) => json!({ "ok": true }),

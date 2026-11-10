@@ -69,6 +69,9 @@ pub struct InputEvent {
     pub clicks: i64,
     /// For a key-down, its virtual key code ([`KEY_TAB`], …); `None` for a mouse event.
     pub key: Option<u16>,
+    /// When it happened: macOS's timestamp, seconds since the Mac started (a press's hold is
+    /// measured on these, not on when the main thread got to each event).
+    pub stamp: f64,
 }
 
 /// The Tab key's virtual key code.
@@ -128,6 +131,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
             other_modifiers: flags.intersects(NSEventModifierFlags::Option | NSEventModifierFlags::Control),
             clicks,
             key,
+            stamp: event.timestamp(),
         });
     });
     let mask = NSEventMask::LeftMouseDown
@@ -579,9 +583,10 @@ fn desktop_at(list: &[windows::CgWindow], p: Point, own: i32, through: &dyn Fn(&
 }
 
 /// A synthetic click (or double click) at `p` on the desktop itself (test only: a fixture's
-/// desktop icon under the corner patch), only where nothing but the desktop lies
-/// ([`desktop_at`]). The pointer goes back where it was.
-pub fn desktop_click(p: Point, double: bool) -> Result<(), String> {
+/// desktop icon under the corner patch, a wallpaper click), only where nothing but the desktop
+/// lies ([`desktop_at`]). `hold`: the press is held still that long before its release (a
+/// single click; a quick one without). The pointer goes back where it was.
+pub fn desktop_click(p: Point, double: bool, hold: Option<Duration>) -> Result<(), String> {
     let own = std::process::id() as i32;
     let list = windows::list_windows();
     desktop_at(&list, p, own, &|w| super::desktop::seen_through(w, &list))?;
@@ -590,7 +595,8 @@ pub fn desktop_click(p: Point, double: bool) -> Result<(), String> {
     for clicks in 1..=if double { 2 } else { 1 } {
         for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
             post_mouse_clicks(kind, p, false, clicks)?;
-            std::thread::sleep(Duration::from_millis(40));
+            let rest = if kind == CGEventType::LeftMouseDown { hold } else { None };
+            std::thread::sleep(rest.unwrap_or(Duration::from_millis(40)));
         }
     }
     if let Some(back) = back {
@@ -805,7 +811,7 @@ mod tests {
     }
 
     fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {
-        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, clicks, key }
+        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, clicks, key, stamp: 0.0 }
     }
 
     #[test]

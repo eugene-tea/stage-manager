@@ -1953,9 +1953,12 @@ def wallpaper_edge():
        window is never parked, macOS resizes it (its band took the press).
     2. A sweep: a press k pt right of the edge (mid edge, then out past the top-right corner),
        dragged 40 pt: whether macOS took the edge (the window grew) is printed, the band's real
-       reach for the main thread. Every press here is within 16 pt, so none reveals.
-    3. A still click 10 pt out (past our band, near it): the desktop is revealed on the
-       release; a click again brings the stage back.
+       reach for the main thread (macOS's own, measured 11-09: 3 pt grabs, 4 doesn't). A
+       drag reveals nothing, anywhere.
+    3. A still click 10 pt out (past our band): the desktop is revealed on the release, as
+       Apple's (never on the press); a click again brings the stage back.
+    4. A still press held 700 ms, far from the window: nothing is revealed (Apple's reveals
+       only for a click shorter than about 470 ms).
     Same gate as `native_wallpaper`: Apple's Stage Manager off, "Click wallpaper to reveal
     desktop" Only in Stage Manager (with Always, macOS itself would act on the presses)."""
     say("-- a press just outside a window's edge: the edge, no wallpaper click")
@@ -2035,6 +2038,18 @@ def wallpaper_edge():
             s = wait_state(lambda x: shown(x, "Alpha 1"), "Alpha's stage back")
             check(s is not None, "a click again brings the stage back")
             check(s is not None and close(live_frame("Alpha 1"), frame), "at its frame")
+
+        say("-- 4. a still press held 700 ms on the wallpaper: no click")
+        # Halfway between the strip's column and the window's left edge.
+        far = ((vis["x"] + state()["strip_width"] + frame["x"]) / 2, mid)
+        r = ctl("debug-desktop", f"{far[0]:.1f}", f"{far[1]:.1f}", "hold", "700")
+        if r.get("ok"):
+            time.sleep(1.5)
+            s = state()
+            check(not s["desktop_revealed"] and shown(s, "Alpha 1"), f"a long press reveals nothing ({stage_titles(s)})")
+            check("a long press on the wallpaper" in log_text(), "the long press is logged as no click")
+        else:
+            skip("wallpaper long press", f"the point is not bare desktop ({r.get('error')})")
         consistent("wallpaper edge")
     finally:
         stop_app()
