@@ -13,10 +13,6 @@ features wait for 2.0.
 
 - **VoiceOver read aloud on the strip (E), 5 min.** Each card reads its stage and apps, and VO-Space
   switches stages. The labels are in the Accessibility tree (checked 11-09); hearing them needs Eugene.
-- **The auto-hide delay on Apple's** (ours: `[reveal] hide_delay_ms` 500): a strip brought back by the
-  pointer, then the pointer away from it; how long until Apple's slides out. One recording.
-- **How soon Apple's switch starts after the click** (ours: 50 to 90 ms, `motion_ms`). One recording with
-  the click on the log's clock.
 - **The last frame of the shadow handover: proposed to close.** Since 1.8.2 a landing shows no darker
   frame about half the time, otherwise one (up to 15 levels on Finder's heavier shadow), more under load.
   Two shadows overlapping always read darker unless one goes on the very frame the other comes; macOS
@@ -49,6 +45,12 @@ features wait for 2.0.
   130 ms (ours fades 200 ms, worked out from the accessibility guidance, kept).
 
 **Settled, nothing to do**
+- Apple's auto-hide, measured (six runs, 11-09 20:2x): a strip brought back by the pointer at the edge
+  starts sliding out either about 0.1 s or about 1.1 s after the pointer leaves it, three runs each, with
+  no difference found between them (the same card, size and path). Ours: 500 ms, kept between them.
+- How soon Apple's switch starts after a click: its first frame about 65 to 85 ms after the click (four
+  of six; two took about 315 ms, not explained). Ours: 50 to 90 ms. Nothing to change.
+
 
 - Saving `state.json` off the window thread: 1422 saves on 11-08 and 11-09 took 4.9 ms typically, 9 ms
   at the 99th percentile, 29 ms at most.
