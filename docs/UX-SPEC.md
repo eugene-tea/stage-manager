@@ -84,7 +84,11 @@ window of a card grows by about 11 % about its own middle and the offsets betwee
 bounds 7 % wider, 9 % taller; Blue's and Green's middles moved under half a point), and the
 app icons neither move nor grow (their boxes the same to the pixel on the 2x stills of a
 single card and of the pair). Ours does the same, and grows a card a dragged card would
-merge into and shrinks a pressed one the same way (Apple's press not measured). A popup open on a window (a popover, a child window sticking out
+merge into and shrinks a pressed one the same way (Apple's press not measured). The growth
+goes with the card: dragged in the column or gliding to its slot, each window grows about
+its own middle where the card is drawn, so the card moves as one piece, its windows on its
+icons, as Apple's does (11-09: while the growth from the press back to the hover size still
+ran, a card dragged 250 pt down was drawn 27 pt off its icons, then jumped back). A popup open on a window (a popover, a child window sticking out
 of it) shows on its card beside the window, at its true size and place, as on Apple's; the
 window keeps its own size on the card, and nothing outside a window is drawn. A palette
 far from its window (more than the window's own width or height past it, or on another

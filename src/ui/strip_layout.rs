@@ -382,7 +382,7 @@ impl CardLayout {
     }
 
     /// The middle of the card's turned thumbnails: a reference point that moves with the
-    /// card's slot (a glide from a grown card starts from it, [`super::motion_math::rescaled_start`]).
+    /// card's slot (a card merged into another shrinks about it).
     pub fn hover_center(&self, m: &Metrics) -> Point {
         let mut r: Option<Rect> = None;
         for t in &self.thumbs {
