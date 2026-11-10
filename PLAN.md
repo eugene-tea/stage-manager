@@ -35,6 +35,11 @@ and what users asked for is in [docs/FEATURE-REQUESTS.md](docs/FEATURE-REQUESTS.
   a logout reopens the app on a cancel. The parked file says "logout", and the guardian waits for the
   cancel once its recovery watch is done.
 
+- **Two suite checks that fail since 1.8.0** (`visible`, `slots`; the same on 1.8.1 and 1.8.2):
+  "the edge tab appears at layer 3" times out after the launch announce, and "its icon keeps its place on
+  the thumbnail" sees the icon drift about 28 pt during a card drag. Check each against the app's behaviour
+  (1.8.0 changed the card drag and the icons) and fix the app or the check.
+
 ## Live checks
 
 **One session, about 52 minutes.** Use the dev app and fixture windows only, with the 5K and the laptop
