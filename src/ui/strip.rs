@@ -121,6 +121,7 @@ use crate::platform::capture_pixels;
 use crate::ui::glass_math::Glass;
 use crate::ui::motion_math::{self, DropSpot};
 use crate::ui::overlay::GlassLook;
+use crate::ui::app_icons;
 use crate::ui::card_glass;
 use crate::ui::display_options;
 use crate::ui::strip_access;
@@ -1336,18 +1337,28 @@ fn as_object_cf(s: &NSString) -> &objc2_core_foundation::CFType {
     unsafe { &*(s as *const NSString).cast::<objc2_core_foundation::CFType>() }
 }
 
-/// An app's icon as an image for a layer, rendered at `points` × 2 pixels.
-fn app_icon(pid: i32, points: f64) -> Option<CFRetained<CGImage>> {
-    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
-    let icon = app.icon()?;
-    let side = (points * 2.0).clamp(32.0, 1024.0);
-    let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(side, side));
-    // SAFETY: a valid proposed rect pointer and no context or hints.
-    let image = unsafe { icon.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
-    // SAFETY: the Retained<CGImage> owns one reference; re-wrap it as CFRetained.
-    let ptr = NonNull::new(Retained::into_raw(image))?;
-    // SAFETY: as above; the pointer came from `into_raw`, so its reference moves over.
-    Some(unsafe { CFRetained::from_raw(ptr) })
+/// Shows `image` in an icon layer; none (an app still launching, its icon not found) leaves
+/// the layer as it is.
+fn set_icon(layer: &CALayer, image: Option<&CFRetained<CGImage>>) {
+    if let Some(img) = image {
+        // SAFETY: a CGImage is valid layer contents.
+        unsafe { layer.setContents(Some(as_object(&**img))) };
+    }
+}
+
+/// How long after an appearance change the cards' icons are fetched again: the app's
+/// effective appearance and IconServices may still be the old ones at the notification, so
+/// twice, at [`corner_patch::SETTLE`](super::corner_patch::SETTLE) and once more later.
+const ICONS_AGAIN: [Duration; 2] = [super::corner_patch::SETTLE, Duration::from_millis(1500)];
+
+/// The appearance changed (main thread, at `AppleInterfaceThemeChangedNotification`): every
+/// strip's icons are fetched again in the look the Dock shows ([`app_icons`]), shortly after
+/// and once more later ([`ICONS_AGAIN`]).
+pub fn icons_changed() {
+    for after in ICONS_AGAIN {
+        let when = dispatch2::DispatchTime::try_from(after).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = DispatchQueue::main().after(when, || with_strips(Strip::repaint_icons));
+    }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1830,7 +1841,8 @@ struct Strip {
     /// transition takes it, the press turns into a drag, or nothing came of the click.
     squeezed: Option<u64>,
     thumbs: HashMap<u32, Picture>,
-    icons: HashMap<i32, Option<CFRetained<CGImage>>>,
+    /// App icons by pid and look ([`app_icons`]).
+    icons: app_icons::IconCache<CFRetained<CGImage>>,
     /// Apps' names by pid, for the cards' VoiceOver labels.
     app_names: HashMap<i32, Option<String>>,
     visibility: Visibility,
@@ -1883,7 +1895,7 @@ impl Strip {
             pressed: None,
             squeezed: None,
             thumbs: HashMap::new(),
-            icons: HashMap::new(),
+            icons: app_icons::IconCache::default(),
             app_names: HashMap::new(),
             visibility: Visibility::default(),
             poll_timer: None,
@@ -2813,6 +2825,20 @@ impl Strip {
         }
     }
 
+    /// Every card's app icons fetched again, in the look the Dock shows now ([`icons_changed`]).
+    fn repaint_icons(&mut self) {
+        self.icons.clear();
+        let look = app_icons::current_look(self.mtm);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for layers in self.pane.cards.values() {
+            for ((pid, rect), layer) in layers.layout.icons.iter().zip(&layers.icons) {
+                set_icon(layer, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w)));
+            }
+        }
+        CATransaction::commit();
+    }
+
     /// (Re)builds a card's thumbnail planes, icons, badge and name.
     fn fill_card(&mut self, stage: u64, layout: &CardLayout, card: &CardSnapshot) {
         let m = self.m().clone();
@@ -2923,6 +2949,7 @@ impl Strip {
         // App icons, flat (depth 0), in panel coordinates, above the card's planes.
         let mut icon_layers = Vec::new();
         let icon_style = &style.icons;
+        let look = app_icons::current_look(self.mtm);
         for (pid, rect) in &layout.icons {
             let icon = CALayer::new();
             icon.setFrame(cg_rect(&rect.translate(layout.frame.x, layout.frame.y)));
@@ -2932,16 +2959,7 @@ impl Strip {
             icon.setShadowOpacity(icon_style.shadow_opacity as f32);
             icon.setShadowRadius(icon_style.shadow_radius * k);
             icon.setShadowOffset(CGSize::new(0.0, icon_style.shadow_offset_y * k));
-            let side = rect.w;
-            // An icon not found (an app still launching) is looked up again next time.
-            if self.icons.get(pid).is_none_or(|i| i.is_none()) {
-                let found = app_icon(*pid, side);
-                self.icons.insert(*pid, found);
-            }
-            if let Some(Some(img)) = self.icons.get(pid) {
-                // SAFETY: a CGImage is valid layer contents.
-                unsafe { icon.setContents(Some(as_object(&**img))) };
-            }
+            set_icon(&icon, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w)));
             icon.setZPosition(1.0);
             unit.addSublayer(&icon);
             icon_layers.push(icon);

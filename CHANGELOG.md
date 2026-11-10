@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- The app icons on the cards follow Dark Mode and the icon style you pick in System Settings
+  (Appearance, Icon and widget style), as the Dock's do: in Dark Mode, Mail, Finder and Safari
+  show their dark icons. Before, the cards kept the icons they first showed.
+
 ## 1.8.0 — 2026-11-09
 
 - A switch moves as Apple's does, matched frame by frame to recordings of both. A window
