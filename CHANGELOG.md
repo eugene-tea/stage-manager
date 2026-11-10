@@ -8,7 +8,6 @@
   stage you used before it comes in front. Unhiding it puts its card back where it was.
 - A card of three apps looks like Apple's: the third app's window behind the others at the
   top, and the app icons closer together, overlapping.
-
 - Minimizing a window with the yellow button or ⌘M sends it straight into a new card at the
   top of the strip, as Apple's does, with no genie into the Dock first.
 - The shadow under the app icons on cards is lighter and tighter, as Apple's is.
