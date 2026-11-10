@@ -1,11 +1,5 @@
 # Changelog
 
-## Unreleased
-
-- The app icons on the cards follow Dark Mode and the icon style you pick in System Settings
-  (Appearance, Icon and widget style), as the Dock's do: in Dark Mode, Mail, Finder and Safari
-  show their dark icons. Before, the cards kept the icons they first showed.
-
 ## 1.8.0 — 2026-11-09
 
 - A switch moves as Apple's does, matched frame by frame to recordings of both. A window
@@ -21,6 +15,8 @@
   card under the pointer grows a little more and eases in; on a card of two apps each window
   grows on its own and the icons stay put. At launch, a card still waiting for its picture is
   faint glass, not a dark grey block. Nothing on a card is cut off at the strip's right edge.
+- In Dark Mode the cards show the apps' dark icons, as the Dock does, and they follow the icon
+  style chosen in System Settings → Appearance.
 - The strip comes back sooner when you rest the pointer at the left edge (after about 180 ms,
   as Apple's, not 320), and slides away only once a window covers the cards' left edge
   (about 20 points from the screen's edge, not 50).
