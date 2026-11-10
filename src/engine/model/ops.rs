@@ -773,17 +773,46 @@ impl Model {
         actions
     }
 
-    /// ⌘M on a shown window (`[windows] minimize_to_strip`): instead of the Dock, the window
-    /// goes to the strip as a stage of its own, as Apple's does; the view does not switch.
-    /// The platform un-minimizes it after parking it. A no-op for pinned, parked or unknown
-    /// windows.
+    /// A minimize of a shown window (`[windows] minimize_to_strip`): instead of the Dock, the
+    /// window goes to the strip as a stage of its own, as Apple's does; the view does not
+    /// switch. Its card takes the top slot and the other cards move down one, as Apple's
+    /// (recorded 11-09; in place, `[strip] order`, it takes its own place). Caught before
+    /// macOS's genie (the yellow button, ⌘M: [`crate::engine::minimize_press`]) nothing else
+    /// is needed; after it, the platform un-minimizes the window once parked. A no-op for
+    /// pinned, parked or unknown windows.
     pub fn minimize_to_strip(&mut self, id: WindowId, obs: &Observation) -> Vec<Action> {
         let Some(id) = self.resolve_standard(id) else { return Vec::new() };
         let Some(w) = self.windows.get(&id) else { return Vec::new() };
         if w.parked || w.home == Home::Pinned {
             return Vec::new();
         }
-        self.send_window(id, Target::New, obs)
+        let space = w.space;
+        let actions = self.send_window(id, Target::New, obs);
+        if !self.options.strip.order.in_place()
+            && let Some(Home::Stage(stage)) = self.windows.get(&id).map(|w| w.home)
+            && let Some(slots) = self.slots.get_mut(&space)
+            && let Some(i) = slots.iter().position(|&s| s == stage)
+        {
+            let s = slots.remove(i);
+            slots.insert(0, s);
+        }
+        actions
+    }
+
+    /// The windows a minimize is caught on before macOS's genie
+    /// ([`crate::engine::minimize_press`]): standard, shown in their stage on a shown Desktop,
+    /// not pinned and not on every Desktop. A minimize of any other goes to macOS.
+    pub fn minimizable_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.windows
+            .values()
+            .filter(|w| {
+                w.meta.role == WindowRole::Standard
+                    && !w.parked
+                    && !w.sticky
+                    && matches!(w.home, Home::Stage(_))
+                    && self.is_shown_space(w.space)
+            })
+            .map(|w| w.meta.id)
     }
 
     /// Moves app `pid`'s windows from `space`'s inactive stages into its active one (only the

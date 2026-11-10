@@ -182,7 +182,7 @@ unsafe extern "C" {
 }
 
 /// Whether secure event input is on now.
-fn secure_input_on() -> bool {
+pub(super) fn secure_input_on() -> bool {
     // SAFETY: no arguments; callable from any thread.
     unsafe { IsSecureEventInputEnabled() != 0 }
 }
@@ -246,7 +246,7 @@ static BACK_ON_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Whether a tap macOS switched off for user input goes on again: once secure input is off,
 /// and not sooner than [`BACK_ON_EVERY`] after the last time.
-fn back_on(off_by_input: bool, last: Option<Instant>, now: Instant, secure_input: impl FnOnce() -> bool) -> bool {
+pub(super) fn back_on(off_by_input: bool, last: Option<Instant>, now: Instant, secure_input: impl FnOnce() -> bool) -> bool {
     off_by_input && last.is_none_or(|t| now.saturating_duration_since(t) >= BACK_ON_EVERY) && !secure_input()
 }
 

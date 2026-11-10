@@ -21,6 +21,7 @@ pub mod hidden_tab;
 pub mod leftovers;
 pub mod logout_watch;
 pub mod minimize;
+pub mod minimize_press;
 pub mod model;
 pub mod not_ours;
 pub mod observe_retry;

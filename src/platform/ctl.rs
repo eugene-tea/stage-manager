@@ -17,7 +17,8 @@
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
-//! screen, `debug-close ID` closes one (its close button), `debug-stale-handle ID` takes our handle on one
+//! screen, `debug-close ID` closes one (its close button), `debug-minimize-button ID` gives its
+//! minimize button's frame, `debug-cmd-m` types ⌘M while one is frontmost, `debug-stale-handle ID` takes our handle on one
 //! for dead until it is looked up afresh (round stale-handles), `debug-expose
 //! mission-control|app-windows|show-desktop|escape` types Mission Control's own shortcut (or
 //! Escape, to leave it), `debug-toggle-strip` shows or hides the strip, `debug-strip` tells what the strip draws this frame (cards in slot
@@ -210,6 +211,16 @@ pub enum Command {
         /// The window id.
         id: u32,
     },
+    /// The frame of a `STAGE_MANAGER_ONLY` app's window's minimize button, read through
+    /// Accessibility (needs `STAGE_MANAGER_TEST=1`): where `debug-click` presses the yellow
+    /// button.
+    DebugMinimizeButton {
+        /// The window id.
+        id: u32,
+    },
+    /// Types ⌘M at the HID tap, only while a `STAGE_MANAGER_ONLY` app is frontmost (needs
+    /// `STAGE_MANAGER_TEST=1`).
+    DebugCmdM,
     /// Takes our Accessibility handle on a `STAGE_MANAGER_ONLY` app's window for dead
     /// (`kAXErrorInvalidUIElement`) until it is looked up afresh, as Music's was on 11-04
     /// (round stale-handles); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
@@ -380,6 +391,11 @@ impl Command {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugClose { id })
             }
+            ["debug-minimize-button", id] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                Ok(Self::DebugMinimizeButton { id })
+            }
+            ["debug-cmd-m"] => Ok(Self::DebugCmdM),
             ["debug-stale-handle", id] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugStaleHandle { id })
@@ -875,6 +891,8 @@ mod tests {
         assert_eq!(Command::parse("debug-fullscreen 42 on"), Ok(Command::DebugFullscreen { id: 42, on: true }));
         assert_eq!(Command::parse("debug-fullscreen 42 off"), Ok(Command::DebugFullscreen { id: 42, on: false }));
         assert_eq!(Command::parse("debug-close 42"), Ok(Command::DebugClose { id: 42 }));
+        assert_eq!(Command::parse("debug-minimize-button 42"), Ok(Command::DebugMinimizeButton { id: 42 }));
+        assert_eq!(Command::parse("debug-cmd-m"), Ok(Command::DebugCmdM));
         assert!(Command::parse("debug-close").is_err());
         assert_eq!(Command::parse("debug-stale-handle 42"), Ok(Command::DebugStaleHandle { id: 42 }));
         assert!(Command::parse("debug-stale-handle").is_err());

@@ -33,9 +33,11 @@ is moved or resized, ever; with `[windows] fit = "narrow"` windows kept clear of
 first start, switch and creation, a too-wide one narrowed and given back its exact frame on
 quit; with `fit = "move"` plus the launch reveal and the edge tab turned on, those; a
 menu-path quit right after a first start with many windows), parity (the generated config has
-no live values and registers no hotkey; Cmd-M sends a window to the strip, its picture from
-its Dock tile, the window never shown outside the corner past two frames after the genie,
-sampled every 8 ms; a click on a
+no live values and registers no hotkey; an app's own minimize sends a window to the strip, its
+picture from its Dock tile, the window never shown outside the corner past two frames after the
+genie, sampled every 8 ms; Cmd-M and the yellow button send one straight to the top card with no
+genie, never in the Dock, only at its frame or parked, and the button pressed and dragged off
+does nothing; a click on a
 card's app icon brings every window of that app), motion (the strip below windows, also
 while a window is dragged over it, with the dragged window's card in the motion overlay; a
 window dropped above the first card takes that slot; a card dragged to another slot keeps it
@@ -5255,7 +5257,7 @@ def phase_parity():
     check(r.stdout == text, "and it is exactly `config --print-defaults`")
     check("hotkeys registered active=0" in log_text(), "no global hotkey registered")
 
-    say("-- Cmd-M sends the window to the strip as a card of its own")
+    say("-- an app's own minimize (as Window > Minimize): macOS's genie, then the strip as a card of its own")
     s = state()
     t = by_title(s)
     alpha = s["active"] if t["Alpha 1"]["home"] == s["active"] else t["Alpha 1"]["home"]
@@ -5282,10 +5284,66 @@ def phase_parity():
         check(a1["parked"] and stage_titles(s)[a1["home"]] == ["Alpha 1"] and a1["home"] in s["strip"],
               f"1.5 s on, the card is still there: Alpha 1 parked in its own stage ({stage_titles(s)}, strip {s['strip']})")
         check(s["active"] == alpha, "and the view still on the current stage")
-    minimize_path_check(sampler_out(sampler, "Cmd-M"), a1_id, log_text()[before_min:])
-    consistent("Cmd-M")
+    minimize_path_check(sampler_out(sampler, "an app's own minimize"), a1_id, log_text()[before_min:])
+    consistent("an app's own minimize")
     wins, d = fixture_windows([EXTRA["a"][0]])
     check(len([w for w in wins if w["bounds"]["h"] > 60]) == 2, "the window is not left in the Dock (both Alpha windows listed)")
+
+    # Round minimize-direct: Apple's (11-09) plays no genie; the yellow button and Cmd-M are
+    # caught before macOS starts its own, and the window flies from its frame into a new card
+    # at the top of the strip.
+    say("-- Cmd-M: straight to the strip, no genie, its card at the top")
+    s = state()
+    a2 = by_title(s)["Alpha 2"]
+    r = ctl("debug-frame", a2["id"], *(int(round(a2["restore"][k])) for k in ("x", "y", "w", "h")))
+    check(r.get("ok"), f"Alpha 2 focused ({r.get('error', 'ok')})")
+    time.sleep(0.8)
+    s = state()
+    a2 = by_title(s)["Alpha 2"]
+    before_min = len(log_text())
+    sampler = start_sampler([EXTRA["a"][0]], 2000, every=8)
+    time.sleep(0.3)
+    r = ctl("debug-cmd-m")
+    check(r.get("ok"), f"Cmd-M typed ({r.get('error', 'ok')})")
+    s = wait_state(lambda x: by_title(x)["Alpha 2"]["parked"], "Alpha 2 to go to the strip")
+    if check(s is not None, "Cmd-M sends the window to the strip"):
+        home = by_title(s)["Alpha 2"]["home"]
+        check(stage_titles(s)[home] == ["Alpha 2"] and s["strip"][:1] == [home],
+              f"as a card of its own, at the top of the strip ({s['strip']})")
+    direct_minimize_check(sampler_out(sampler, "Cmd-M"), a2["id"], a2["restore"], log_text()[before_min:], "Cmd-M")
+    consistent("Cmd-M")
+
+    say("-- the yellow button: pressed and dragged off it does nothing; a click goes straight to the strip")
+    s = state()
+    do("switch", by_title(s)["Bravo 1"]["home"])
+    time.sleep(1.2)
+    s = state()
+    b1 = by_title(s)["Bravo 1"]
+    r = ctl("debug-minimize-button", b1["id"])
+    if check(r.get("ok"), f"Bravo 1's minimize button read ({r.get('error', 'ok')})"):
+        f = r["frame"]
+        cx, cy = f["x"] + f["w"] / 2, f["y"] + f["h"] / 2
+        r = ctl("debug-drag", cx, cy, cx + 80, cy + 40)
+        check(r.get("ok"), f"pressed on the button and dragged off ({r.get('error', 'ok')})")
+        time.sleep(0.8)
+        s = state()
+        b = by_title(s)["Bravo 1"]
+        wins, _ = fixture_windows([EXTRA["b"][0]])
+        listed = next((w for w in wins if w["id"] == b1["id"]), None)
+        check(not b["parked"] and listed is not None and listed["onscreen"] and close(listed["bounds"], b1["restore"]),
+              f"dragged off: not minimized, and the window did not move ({fmt(listed['bounds']) if listed else 'not listed'})")
+        before_min = len(log_text())
+        sampler = start_sampler([EXTRA["b"][0]], 2000, every=8)
+        time.sleep(0.3)
+        r = ctl("debug-click", cx, cy)
+        check(r.get("ok"), f"the yellow button clicked ({r.get('error', 'ok')})")
+        s = wait_state(lambda x: by_title(x)["Bravo 1"]["parked"], "Bravo 1 to go to the strip")
+        if check(s is not None, "the yellow button sends the window to the strip"):
+            home = by_title(s)["Bravo 1"]["home"]
+            check(stage_titles(s)[home] == ["Bravo 1"] and s["strip"][:1] == [home],
+                  f"as a card of its own, at the top of the strip ({s['strip']})")
+        direct_minimize_check(sampler_out(sampler, "the yellow button"), b1["id"], b1["restore"], log_text()[before_min:], "the yellow button")
+        consistent("the yellow button")
 
     say("-- a click on a card's app icon brings every window of that app")
     s = state()
@@ -5313,6 +5371,46 @@ def phase_parity():
 DOCK_BAND = 100.0
 
 
+def direct_minimize_check(p, wid, frame, log, what):
+    """Round minimize-direct, from the window server's samples (`p`, probe-windows every 8 ms)
+    of a window minimized by the yellow button or Cmd-M, caught before macOS's genie, and the
+    app's log of it (`log`): it never goes into the Dock (always listed on screen), it shows
+    only at its frame (`frame`) or parked, and ends parked; the strip's picture of it starts at
+    its frame, full size (the outgoing flight of a switch), and macOS's minimize never happened."""
+    if p is None:
+        return
+    d = p["display"]
+    seen = []
+    for smp in p.get("samples", []):
+        w = next((w for w in smp["windows"] if w["id"] == wid), None)
+        if w:
+            seen.append((smp["t"], w["onscreen"], w["bounds"]))
+    if not check(len(seen) > 10, f"{what}: the window sampled ({len(seen)} samples)"):
+        return
+    last = None
+    t0 = seen[0][0]
+    for t, on, b in seen:
+        place = f"{b['x']:.0f},{b['y']:.0f} {b['w']:.0f}x{b['h']:.0f} {'on' if on else 'off'}"
+        if place != last:
+            say(f"    +{(t - t0) * 1000:4.0f} ms  {place}")
+            last = place
+    check(all(on for _, on, _ in seen), f"{what}: never in the Dock (listed on screen in every sample)")
+    elsewhere = [b for _, _, b in seen if not close(b, frame, 2.0) and not is_parked(b, d)]
+    check(not elsewhere, f"{what}: only at its frame or parked ({len(elsewhere)} samples elsewhere{', first ' + fmt(elsewhere[0]) if elsewhere else ''})")
+    check(is_parked(seen[-1][2], d), f"{what}: it ends parked ({fmt(seen[-1][2])})")
+    caught = [ln for ln in log.splitlines() if "straight to the strip, no genie" in ln]
+    check(bool(caught), f"{what}: caught before macOS ({caught[-1][caught[-1].find('window minimized'):] if caught else 'no line'})")
+    genie = [ln for ln in log.splitlines() if "window minimized: it goes to the strip instead of the Dock" in ln]
+    check(not genie, f"{what}: macOS's own minimize never happened ({len(genie)} lines)")
+    ghost = [ln for ln in log.splitlines() if "transition ghost" in ln and f"window={wid} " in ln and "outgoing=true" in ln]
+    if ghost:
+        m = re.search(r"start=(-?[\d.]+),(-?[\d.]+) ([\d.]+)x([\d.]+)", ghost[-1])
+        if m:
+            w, h = float(m.group(3)), float(m.group(4))
+            check(abs(w - frame["w"]) <= 4 and abs(h - frame["h"]) <= 4,
+                  f"{what}: the strip's picture starts at the window's frame ({w:.0f}x{h:.0f}, the window {frame['w']:.0f}x{frame['h']:.0f})")
+
+
 def minimize_path_check(p, wid, log):
     """Round minimize-flow, from the window server's samples (`p`, probe-windows every 8 ms) of
     a window minimized while Stage Manager sends it to the strip, and the app's log of it
@@ -5329,11 +5427,11 @@ def minimize_path_check(p, wid, log):
         w = next((w for w in smp["windows"] if w["id"] == wid), None)
         if w:
             seen.append((smp["t"], w["onscreen"], w["bounds"]))
-    if not check(len(seen) > 10, f"Cmd-M: the window sampled ({len(seen)} samples)"):
+    if not check(len(seen) > 10, f"own minimize: the window sampled ({len(seen)} samples)"):
         return
     # The genie into the Dock: until the window is first listed off screen.
     docked = next((i for i, (_, on, _) in enumerate(seen) if not on), None)
-    if not check(docked is not None, "Cmd-M: the window went into the Dock (listed off screen)"):
+    if not check(docked is not None, "own minimize: the window went into the Dock (listed off screen)"):
         return
     t0 = seen[docked][0]
     last, runs, run, band_ms = None, [], [], 0.0
@@ -5354,25 +5452,25 @@ def minimize_path_check(p, wid, log):
     if run:
         runs.append(run)
     worst = max(((r[-1] - r[0]) * 1000 + 8 for r in runs), default=0.0)
-    check(worst <= 40.0, f"Cmd-M: after the genie the window never shows outside the corner past two frames (longest {worst:.0f} ms, {len(runs)} times)")
-    check(band_ms <= 400.0, f"Cmd-M: its un-minimize sinks out of the Dock tile quickly ({band_ms:.0f} ms in the bottom band)")
+    check(worst <= 40.0, f"own minimize: after the genie the window never shows outside the corner past two frames (longest {worst:.0f} ms, {len(runs)} times)")
+    check(band_ms <= 400.0, f"own minimize: its un-minimize sinks out of the Dock tile quickly ({band_ms:.0f} ms in the bottom band)")
     end = seen[-1]
-    check(end[1] and is_parked(end[2], d), f"Cmd-M: it ends parked ({end[2]})")
+    check(end[1] and is_parked(end[2], d), f"own minimize: it ends parked ({end[2]})")
     ghost = [ln for ln in log.splitlines() if "transition ghost" in ln and f"window={wid} " in ln]
     tile = [ln for ln in log.splitlines() if "a minimized window's picture comes out of its Dock tile" in ln or "a minimized window's card fades in" in ln]
-    check(bool(tile), f"Cmd-M: the strip's picture starts at the Dock tile, or the card fades in ({tile[-1:] or 'no line'})")
+    check(bool(tile), f"own minimize: the strip's picture starts at the Dock tile, or the card fades in ({tile[-1:] or 'no line'})")
     if ghost:
         m = re.search(r"start=(-?[\d.]+),(-?[\d.]+) ([\d.]+)x([\d.]+)", ghost[-1])
         if m:
             w, h = float(m.group(3)), float(m.group(4))
-            check(w <= 200 and h <= 200, f"Cmd-M: no full-size picture at the old frame ({w:.0f}x{h:.0f} at the start)")
+            check(w <= 200 and h <= 200, f"own minimize: no full-size picture at the old frame ({w:.0f}x{h:.0f} at the start)")
     dived = [ln for ln in log.splitlines() if "window minimized: it goes to the strip" in ln]
     say(f"    {dived[-1][dived[-1].find('window minimized'):] if dived else 'no minimize line'}")
     # 11-09 14:49: an auto-hidden Dock listed the tile under the screen's edge, the dive was
     # left out (dive=None) and the window rose to its full height on the way to the corner.
     # With the tile read and no screen below the Dock's edge, the dive is taken.
     if dived and "tile=Some(" in dived[-1]:
-        check("dive=Some(" in dived[-1], "Cmd-M: the window was put beyond the Dock's edge while minimized (the dive)")
+        check("dive=Some(" in dived[-1], "own minimize: the window was put beyond the Dock's edge while minimized (the dive)")
 
 
 def start_extra_frames(k, n, frames):

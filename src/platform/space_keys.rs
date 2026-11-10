@@ -264,6 +264,25 @@ pub fn post(key: &SpaceKey, numpad: bool) -> Result<(), String> {
     result
 }
 
+/// The Command key's virtual key code and flag.
+const COMMAND_KEY: u16 = 55;
+const COMMAND: u64 = 0x10_0000;
+
+/// Posts ⌘ and one key (⌘M): Command down, the key down and up with the Command flag,
+/// Command up with no flags (the session's modifier state clean after).
+pub fn post_with_command(keycode: u16) -> Result<(), String> {
+    let pause = Duration::from_millis(30);
+    post_key(COMMAND_KEY, true, COMMAND)?;
+    std::thread::sleep(pause);
+    let result = post_key(keycode, true, COMMAND).and_then(|_| {
+        std::thread::sleep(pause);
+        post_key(keycode, false, COMMAND)
+    });
+    std::thread::sleep(pause);
+    post_key(COMMAND_KEY, false, 0)?;
+    result
+}
+
 /// Posts one key with no modifiers (Escape, to leave Mission Control or App Exposé).
 pub fn post_plain(keycode: u16) -> Result<(), String> {
     post_key(keycode, true, 0)?;

@@ -694,6 +694,23 @@ mod app {
                 DispatchQueue::main().exec_sync(|| shown = strip::debug_hover(at));
                 json!({ "ok": true, "shown": shown })
             }
+            Command::DebugCmdM => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-cmd-m needs STAGE_MANAGER_TEST=1");
+                }
+                let own = std::process::id() as i32;
+                let front = apps::frontmost_pid();
+                if !front.is_some_and(|p| p != own && input::test_pids().contains(&p)) {
+                    return ctl::error_reply(&format!("debug-cmd-m: the frontmost app (pid {front:?}) is not a STAGE_MANAGER_ONLY app; refused"));
+                }
+                match space_keys::post_with_command(stage_manager::engine::minimize_press::KEY_M) {
+                    Ok(()) => {
+                        tracing::info!(front = ?front, "debug-cmd-m: Cmd-M typed");
+                        json!({ "ok": true })
+                    }
+                    Err(e) => ctl::error_reply(&e),
+                }
+            }
             Command::DebugExpose { which } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-expose needs STAGE_MANAGER_TEST=1");
