@@ -7473,8 +7473,263 @@ def phase_displays():
     check(bool(wins) and not stuck, f"displays quit: every fixture window on screen, on both screens (parked: {stuck})")
 
 
+# ----- screens: PLAN's live checks 3 to 5 (round screens-phase) ----------------------------
+
+
+def screens_zone(d):
+    """A display of `ctl state`'s `displays`, as `is_parked` takes it."""
+    return {**d["frame"], "visible": d["visible"], "corner": d["corner"]}
+
+
+def screens_consistent(what):
+    """On every screen: each managed fixture window shown or in its own screen's park zone as
+    the model has it (`consistent` reads the main screen's zone only)."""
+    s = state()
+    wins, _ = fixture_windows()
+    cg = {w["id"]: w for w in wins}
+    zones = {d["id"]: screens_zone(d) for d in s.get("displays", [])}
+    bad = []
+    for w in s["windows"]:
+        c, z = cg.get(w["id"]), zones.get(w.get("display"))
+        if c is None or z is None or w.get("role") != "standard":
+            continue
+        if w["parked"] != is_parked(c["bounds"], z):
+            bad.append(f"{w['title']} {'parked' if w['parked'] else 'shown'} in the model, at {fmt(c['bounds'])}")
+    return check(not bad, f"{what}: every fixture window where the model has it, on both screens" + (f" ({'; '.join(bad)})" if bad else ""))
+
+
+def strip_orders_since(mark):
+    """The display of every `transition: strip order` line logged since `mark` (one a
+    transition, naming the screen it plays on)."""
+    return [int(m.group(1)) for m in re.finditer(r"transition: strip order id=\d+ display=(\d+)", log_text()[mark:])]
+
+
+def activate_by_script(path):
+    """Activates the running app at `path` the way ⌘-Tab does (no click, no window raised by
+    hand): AppleScript's `activate`, addressed by path (never by bundle ID: every worktree
+    registers its own copy under the same one)."""
+    r = subprocess.run(["osascript", "-e", f'tell application "{path}" to activate'], capture_output=True, text=True, timeout=10)
+    return r.returncode == 0, r.stderr.strip()[:160]
+
+
+def new_main_window(title):
+    """One more window of the main fixture (SIGUSR1, ordered front without activating), with
+    its app made active first: the fixture opens it on `NSScreen.main`, the screen of the key
+    window, so the main screen is made that one (A's stage is in front there already)."""
+    subprocess.run(["open", FIX_APP], check=True)
+    wait_until(lambda: frontmost_bundle() == FIX_ID, 4, "the main fixture frontmost")
+    time.sleep(0.8)  # past the activation echo window
+    os.kill(pids_of(FIX_EXE)[0], signal.SIGUSR1)
+    return wait_until(lambda: (lambda s: s if title in by_title(s) else None)(state()), 8, f"{title} managed")
+
+
+def phase_screens():
+    """PLAN "Live checks" 3 to 5 as a phase (round screens-phase), fixture windows only.
+    Skipped with one screen. Fixture 1 and 2 (A, one stage) and Alpha 1 (a card) stay on the
+    main screen; Bravo 1 (B), then Charlie 1, moved to the other screen by Accessibility
+    (`debug-frame`, as phase_displays does), so B's stage is a card there.
+
+    3. ⌘-Tab to the other screen: A's stage in front on the main screen, B activated as
+       ⌘-Tab does (AppleScript `activate`): one `transition: strip order` logged, on the
+       other screen only; the main screen's `active_stage` unchanged; B shown there.
+    4. Full screen on one screen: `debug-fullscreen <B> on`; a new Fixture window opened on the
+       main screen joins A's stage there, the main screen's strip stays, and "a full-screen
+       app's Space shows on another screen" is logged for the other screen only (never the
+       main screen's "Space changed: a full-screen app's Space"). `off`: B back in its stage.
+    5. Mission Control (`debug-expose mission-control`): a Fixture window opened while it shows
+       is held, then placed once it has closed (`debug-expose escape`), and both screens'
+       strips come back on the same Desktops.
+    After the quit every fixture window is on screen, on both screens."""
+    say("\n== screens: ⌘-Tab, full screen and Mission Control with two screens ==")
+    stop_app()
+    stop_fixture()
+    for k in EXTRA:
+        stop_extra(k)
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_fixture(2)
+    for k in ("a", "b", "c"):
+        start_extra(k, 1)
+    s = start_app(5, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app manages the 5 fixture windows"):
+        return
+    screens = s.get("displays", [])
+    if len(screens) < 2:
+        skip("screens", f"one screen ({len(screens)} reported); two are needed")
+        stop_app()
+        all_onscreen("screens quit")
+        return
+    main, other = screens[0], screens[1]
+    main_id, other_id = main["id"], other["id"]
+    say(f"  main {main_id} {fmt(main['frame'])}; other {other_id} {fmt(other['frame'])}")
+
+    def screen(x, d):
+        return next(k for k in x["displays"] if k["id"] == d)
+
+    t = by_title(s)
+    ids = {n: t[n]["id"] for n in ("Fixture 1", "Fixture 2", "Alpha 1", "Bravo 1", "Charlie 1")}
+    b_id = ids["Bravo 1"]
+    check(all(w["display"] == main_id for w in s["windows"]), "every fixture window is the main screen's at launch")
+    ov = other["visible"]
+    for n, at in (("Bravo 1", (120.0, 100.0)), ("Charlie 1", (420.0, 220.0))):
+        r = ctl("debug-frame", ids[n], ov["x"] + at[0], ov["y"] + at[1], 640, 420)
+        if not check(r.get("ok"), f"{n} moved to the other screen ({r.get('error', 'ok')})"):
+            stop_app()
+            return
+        x = wait_state(lambda y: by_title(y)[n]["display"] == other_id and screen(y, other_id)["active_stage"] == by_title(y)[n]["stage"],
+                       f"{n} in front on the other screen", timeout=8)
+        if not check(x is not None, f"{n} is the other screen's, a stage of its own in front there"):
+            stop_app()
+            return
+    s = wait_state(lambda y: by_title(y)["Bravo 1"]["parked"], "Bravo's stage a card on the other screen")
+    if not check(s is not None, "B (Bravo 1) sent to a card on the other screen"):
+        stop_app()
+        return
+    b_stage = by_title(s)["Bravo 1"]["stage"]
+    a_stage = by_title(s)["Fixture 1"]["stage"]
+    check(by_title(s)["Bravo 1"]["home"] in screen(s, other_id)["strip"],
+          f"B's card is in the other screen's strip ({screen(s, other_id)['strip']})")
+
+    # 3. ⌘-Tab to the other screen.
+    say("-- 3. ⌘-Tab to a card on the other screen")
+    subprocess.run(["open", FIX_APP], check=True)
+    s = wait_state(lambda y: screen(y, main_id)["active_stage"] == a_stage, "A's stage in front on the main screen")
+    if not check(s is not None and frontmost_bundle() == FIX_ID, f"A's stage in front on the main screen, its app frontmost ({frontmost_bundle()})"):
+        stop_app()
+        return
+    time.sleep(1.0)  # past the activation echo window, and its transition logged
+    main_front = screen(s, main_id)["active_stage"]
+    mark = len(log_text())
+    ok, err = activate_by_script(EXTRA["b"][1])
+    if not check(ok, f"B activated by AppleScript ({err or 'ok'})"):
+        stop_app()
+        return
+    x = wait_state(lambda y: not by_title(y)["Bravo 1"]["parked"] and screen(y, other_id)["active_stage"] == b_stage, "B's stage in front on the other screen")
+    time.sleep(1.5)  # a second transition, if any, is logged by now
+    s = state()
+    orders = strip_orders_since(mark)
+    check(x is not None and by_title(s)["Bravo 1"]["display"] == other_id,
+          f"B is shown on the other screen, its stage in front there (front id {screen(s, other_id)['active_stage']}, B's {b_stage})")
+    check(orders == [other_id], f"one transition, on the other screen only (displays of the transitions logged: {orders}; other {other_id}, main {main_id})")
+    check(screen(s, main_id)["active_stage"] == main_front and not by_title(s)["Fixture 1"]["parked"],
+          f"the main screen's active_stage did not change (id {screen(s, main_id)['active_stage']}, was {main_front})")
+    check(frontmost_bundle() == EXTRA["b"][0], f"B's app is frontmost ({frontmost_bundle()})")
+    screens_consistent("after ⌘-Tab")
+
+    # 4. Full screen on one screen.
+    say("-- 4. full screen on the other screen; the main screen goes on")
+    main_strip = screen(s, main_id)["strip"]
+    mark = len(log_text())
+    r = ctl("debug-fullscreen", b_id, "on")
+    if not check(r.get("ok"), f"debug-fullscreen B on ({r.get('via', r.get('error'))})"):
+        stop_app()
+        return
+    x = wait_state(lambda y: screen(y, other_id).get("fullscreen"), "the other screen to show B's full-screen Space", timeout=10)
+    if not check(x is not None, "the app sees a full-screen Space on the other screen"):
+        ctl("debug-fullscreen", b_id, "off")
+        time.sleep(3.0)
+        stop_app()
+        return
+    s = new_main_window("Fixture 3")
+    if check(s is not None, "a new Fixture window (Fixture 3) opened while B is full screen is managed"):
+        s = wait_state(lambda y: by_title(y)["Fixture 3"]["stage"] == screen(y, main_id)["active_stage"] and not by_title(y)["Fixture 3"]["parked"],
+                       "Fixture 3 in the main screen's stage") or s
+        w = by_title(s)["Fixture 3"]
+        check(w["display"] == main_id and w["stage"] == a_stage and not w["parked"] and w["id"] not in s.get("unplaced", []),
+              f"it joins the main screen's stage, shown (display {w['display']}, stage id {w['stage']}, A's {a_stage}, unplaced {s.get('unplaced')})")
+    s = state()
+    panel = screen(s, main_id).get("strip_panel") or {}
+    check(not screen(s, main_id).get("fullscreen") and panel.get("shown") and screen(s, main_id)["strip"] == main_strip,
+          f"the main screen's strip stays (full screen {screen(s, main_id).get('fullscreen')}, panel shown {panel.get('shown')}, strip {screen(s, main_id)['strip']}, was {main_strip})")
+    text = log_text()[mark:]
+    other_lines = re.findall(r"a full-screen app's Space shows on another screen .*screen=(\d+)", text)
+    check(other_lines and all(int(v) == other_id for v in other_lines),
+          f"\"a full-screen app's Space shows on another screen\" logged for the other screen only (screens {other_lines})")
+    check("Space changed: a full-screen app's Space" not in text and "Space changed during a full-screen animation" not in text,
+          "nothing logged as a full-screen Space on the main screen")
+    mark = len(log_text())
+    r = ctl("debug-fullscreen", b_id, "off")
+    check(r.get("ok"), f"debug-fullscreen B off ({r.get('via', r.get('error'))})")
+    x = wait_state(lambda y: not screen(y, other_id).get("fullscreen") and by_title(y)["Bravo 1"]["stage"] == b_stage
+                   and not by_title(y)["Bravo 1"]["parked"] and by_title(y)["Bravo 1"]["display"] == other_id,
+                   "B back in its stage on the other screen", timeout=10)
+    s = x or state()
+    w = by_title(s).get("Bravo 1") or {}
+    check(x is not None, f"B comes back to its stage, shown on the other screen (stage id {w.get('stage')}, was {b_stage}; display {w.get('display')}; parked {w.get('parked')})")
+    check("another screen shows a Desktop again" in log_text()[mark:], "the other screen's Desktop is logged back")
+    time.sleep(1.0)
+    screens_consistent("after full screen")
+
+    # 5. Mission Control.
+    say("-- 5. Mission Control with two screens")
+    s = wait_state(lambda y: all((screen(y, d).get("strip_panel") or {}).get("shown") for d in (main_id, other_id)), "both strips shown", timeout=4) or state()
+    check(all((screen(s, d).get("strip_panel") or {}).get("shown") for d in (main_id, other_id)),
+          f"both screens' strips show first (main {screen(s, main_id).get('strip_panel')}, other {screen(s, other_id).get('strip_panel')})")
+    spaces_before = {d: screen(s, d)["space"] for d in (main_id, other_id)}
+    space_before = ctl("space").get("space")
+    # The main fixture frontmost: Escape reaches only a fixture, and its new window opens on
+    # the main screen (NSScreen.main, the key window's).
+    subprocess.run(["open", FIX_APP], check=True)
+    wait_until(lambda: frontmost_bundle() == FIX_ID, 4, "the main fixture frontmost")
+    time.sleep(0.8)
+    if frontmost_bundle() != FIX_ID:
+        check(False, f"a fixture is frontmost (so Escape reaches only a fixture); front is {frontmost_bundle()}")
+        stop_app()
+        return
+    mark = len(log_text())
+    r = ctl("debug-expose", "mission-control")
+    if not r.get("ok") and "turned off" in str(r.get("error")):
+        say(f"  {r.get('error')}; opening Mission Control (com.apple.exposelauncher) instead")
+        r = {"ok": subprocess.run(["open", "-b", "com.apple.exposelauncher"]).returncode == 0, "key": "exposelauncher"}
+    if not check(r.get("ok"), f"Mission Control's shortcut typed ({r.get('key', r.get('error'))})"):
+        stop_app()
+        return
+    frozen = wait_until(lambda: ctl("space").get("inference_frozen") is True, 4, "the app to see Mission Control")
+    check(bool(frozen), "the app sees Mission Control")
+    os.kill(pids_of(FIX_EXE)[0], signal.SIGUSR1)
+    # The window server lists it a moment after the signal; the app sees it then and holds it.
+    wait_until(lambda: len(fixture_windows([FIX_ID])[0]) >= 4, 3, "Fixture 4 listed")
+    time.sleep(1.0)
+    y = state(landed=False)
+    f4 = by_title(y).get("Fixture 4")
+    placed_early = f4 is not None and f4["stage"] is not None and f4["id"] not in y.get("unplaced", [])
+    if frozen:
+        check(not placed_early and bool(y.get("unplaced")),
+              f"Fixture 4, opened while Mission Control shows, waits unplaced (placed already: {placed_early}; unplaced {y.get('unplaced')})")
+    else:
+        skip("Fixture 4 held while Mission Control shows", "the app never saw Mission Control")
+    ctl("debug-expose", "escape")
+    wait_until(lambda: ctl("space").get("inference_frozen") is False, 6, "Mission Control to close")
+    s = wait_state(lambda y: "Fixture 4" in by_title(y) and by_title(y)["Fixture 4"]["stage"] is not None
+                   and by_title(y)["Fixture 4"]["id"] not in y.get("unplaced", []) and not by_title(y)["Fixture 4"]["parked"],
+                   "Fixture 4 placed", timeout=8)
+    if check(s is not None, "Fixture 4 is placed once Mission Control has closed"):
+        w = by_title(s)["Fixture 4"]
+        check(w["display"] == main_id and w["stage"] == screen(s, main_id)["active_stage"],
+              f"in the main screen's stage in front (display {w['display']}, stage id {w['stage']}, front {screen(s, main_id)['active_stage']})")
+    s = wait_state(lambda y: all((screen(y, d).get("strip_panel") or {}).get("shown") for d in (main_id, other_id)), "both strips back", timeout=5) or state()
+    check(all((screen(s, d).get("strip_panel") or {}).get("shown") for d in (main_id, other_id)),
+          f"both screens' strips come back (main {screen(s, main_id).get('strip_panel')}, other {screen(s, other_id).get('strip_panel')})")
+    spaces_after = {d: screen(s, d)["space"] for d in (main_id, other_id)}
+    check(spaces_after == spaces_before and ctl("space").get("space") == space_before,
+          f"on the same Desktops (Spaces {spaces_before} then {spaces_after}; main {space_before})")
+    text = log_text()[mark:]
+    say(f"  logged: Mission Control seen on the main screen {'Mission Control or App Exposé shows: no Space is inferred from the window list' in text}, on the other "
+        f"{'Mission Control or App Exposé shows on another screen' in text}")
+    screens_consistent("after Mission Control")
+    stop_app()
+    s_wins, _ = fixture_windows()
+    zones = [screens_zone(d) for d in screens]
+    stuck = [fmt(w["bounds"]) for w in s_wins if any(is_parked(w["bounds"], z) for z in zones)]
+    check(bool(s_wins) and not stuck, f"screens quit: every fixture window on screen, on both screens (parked: {stuck})")
+    for k in EXTRA:
+        stop_extra(k)
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays", "screens"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -7493,7 +7748,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "displays": phase_displays, "crop": phase_crop, "behave": phase_behave}[p]()
+             "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
