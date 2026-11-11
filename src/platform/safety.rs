@@ -1269,12 +1269,13 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
 }
 
 /// A later look for the windows an earlier check left ([`leftovers_back_knowing`]'s answer,
-/// merged with what is known now), with no unpark before it (a Desktop shows while a
-/// stand-down's window is still away). `moved`: windows were moved a moment ago all the same
-/// (held ones brought back). With nothing moved the list is read as it stands, and read
-/// again without a wait when no window could be asked to move
-/// ([`leftovers::settle_before`], [`leftovers::settle_after`]). While the app arranges
-/// windows again, `ours` names the windows parked on purpose ([`Ours::leaving`]).
+/// merged with what is known now), with no unpark before it (a Desktop showed while a
+/// stand-down's window is still away). `moved`: the list may still be changing (windows
+/// moved a moment ago), and gets its settle as after an unpark. Else the caller has let it
+/// settle already: it is read as it stands, and read again without a wait when no window
+/// could be asked to move ([`leftovers::settle_before`], [`leftovers::settle_after`]).
+/// While the app arranges windows again, `ours` names the windows parked on purpose
+/// ([`Ours::leaving`]).
 pub fn leftovers_retry(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     leftovers_check(reason, ours, moved)
 }

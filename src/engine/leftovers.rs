@@ -85,10 +85,10 @@ pub fn settle<T>(
 
 /// How long a leftovers check lets the window server's list settle before its first read:
 /// [`UNPARK_SETTLE`] when windows were moved a moment ago (`moved`: the unpark of a quit, a
-/// stand-down or a logout; held windows just brought back), none for a later look with
-/// nothing moved since (a Desktop change while a window is still away). The list is then as
-/// it stands, and the wait would only hold the window thread, a second at every Desktop
-/// change, for as long as that window stays away.
+/// stand-down or a logout), none for a later look whose caller has waited that long already
+/// without holding the window thread (a Desktop change while a window is still away, looked
+/// at on a later tick). Slept out here, the wait held the thread a second at every Desktop
+/// change for as long as that window stayed away.
 pub fn settle_before(moved: bool) -> Duration {
     if moved { UNPARK_SETTLE } else { Duration::ZERO }
 }
@@ -264,15 +264,15 @@ mod tests {
         ScanDisplays::new(MAIN, VISIBLE, vec![], [Corner::BottomRight])
     }
 
-    /// A later look at windows still away (a Desktop change, nothing moved since) reads the
-    /// list as it stands: with a window out of reach on another Desktop each of the two reads
-    /// used to wait out its whole settle, two seconds of the window thread at every Desktop
-    /// change. After an unpark, and once the check itself asked a window to move, the list
-    /// still gets its settle.
+    /// A later look at windows still away (a Desktop change, its settle waited out on the
+    /// ticks) reads the list as it stands: with a window out of reach on another Desktop each
+    /// of the two reads used to wait out its whole settle, two seconds of the window thread at
+    /// every Desktop change. After an unpark, and once the check itself asked a window to
+    /// move, the list still gets its settle.
     #[test]
     fn a_later_look_with_nothing_moved_does_not_wait_for_the_list() {
         assert_eq!(settle_before(true), UNPARK_SETTLE, "after an unpark");
-        assert_eq!(settle_before(false), Duration::ZERO, "nothing moved since the last look");
+        assert_eq!(settle_before(false), Duration::ZERO, "the caller waited on its ticks");
         assert_eq!(settle_after(true, 0), UNPARK_SETTLE, "after an unpark, as before");
         assert_eq!(settle_after(false, 1), UNPARK_SETTLE, "a window was asked to move");
         assert_eq!(settle_after(false, 0), Duration::ZERO, "none could be reached: nothing to land");
