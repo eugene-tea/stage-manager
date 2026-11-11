@@ -796,6 +796,28 @@ fn found_order(mut run: Vec<u32>, pid: impl Fn(u32) -> Option<i32>, z: impl Fn(u
     out
 }
 
+/// Whether an app's activation is held, nothing switching for it now. `frozen`: no stage
+/// change on the main screen ([`Controller::frozen`]: a full-screen app's Space there, a
+/// Space change settling, the lock); `screens_frozen`: for each screen holding a window of
+/// the app, that screen's own answer ([`Controller::frozen_on`]). Held while frozen, unless
+/// the app's windows are all on screens that take input: a full-screen app on the main screen
+/// stops nothing on the other (UX-SPEC, "Screens"), and macOS takes the user to no Desktop of
+/// the main screen for an app with no window there. An app with no window placed is held as
+/// before (its window may be on a Desktop not visited).
+fn activation_held(frozen: bool, screens_frozen: impl IntoIterator<Item = bool>) -> bool {
+    if !frozen {
+        return false;
+    }
+    let mut placed = false;
+    for screen_frozen in screens_frozen {
+        if screen_frozen {
+            return true;
+        }
+        placed = true;
+    }
+    !placed
+}
+
 /// Whether a left press reads the window server's list: Stage Manager manages windows
 /// (`managing`) and something can act on the press, the Dock's prediction (not `frozen`: no
 /// full-screen Space on the main screen, no Space change settling, no lock) or a wallpaper
@@ -3713,8 +3735,10 @@ impl Controller {
                 let pid = ob.window(id).map(|w| w.pid);
                 let unknown = self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_none());
                 let elsewhere = self.model.as_ref().is_some_and(|m| m.waits_on_another_space(WindowId(id)));
+                // Its own screen's answer: a full-screen app on the other screen stops nothing here.
+                let frozen = self.frozen_for_window(id);
                 if let Some(pid) = pid
-                    && (self.frozen() || elsewhere || (unknown && self.unplaced.contains(&id)))
+                    && (frozen || elsewhere || (unknown && self.unplaced.contains(&id)))
                 {
                     // Its Desktop is not recognized yet (a Dock click or ⌘Tab to a window of
                     // another Desktop, often before the Space change notice): replayed once
@@ -3725,7 +3749,7 @@ impl Controller {
                     self.after_hold(ob, now);
                     return;
                 }
-                if self.frozen() {
+                if frozen {
                     return;
                 }
                 self.forget_held(ob);
@@ -3861,7 +3885,7 @@ impl Controller {
                 self.echoes.user_switched();
                 self.flush_superseded(ob, "an activation");
                 self.show_strip_after_desktop("an app was activated");
-                if self.frozen() {
+                if self.activation_frozen(pid) {
                     tracing::debug!(pid, "activation held until the Desktop is recognized");
                     self.focus_replay.hold(Wanted::App(pid), now);
                     self.after_hold(ob, now);
@@ -3968,8 +3992,12 @@ impl Controller {
             slide_hold::Step::Wait => return,
             slide_hold::Step::Arrived | slide_hold::Step::Decide => self.slide_hold = None,
         }
+        let frozen = match hold.wanted {
+            Wanted::Window { id, .. } => self.frozen_for_window(id.0),
+            Wanted::App(pid) => self.activation_frozen(pid),
+        };
         if step == slide_hold::Step::Arrived
-            || self.frozen()
+            || frozen
             || self.focus_replay.peek(now).map(Wanted::pid) != Some(hold.wanted.pid())
         {
             // A Space change came (its arrival replays what is held), or the user acted
@@ -4601,6 +4629,23 @@ impl Controller {
     /// change settling and the lock hold every screen.
     fn frozen_on(&self, display: DisplayId) -> bool {
         self.fullscreen_on(display) || self.phase.changing() || self.locked
+    }
+
+    /// [`Self::frozen`] for a focus of window `id`: its own screen's answer
+    /// ([`Self::frozen_on`]) when the model places it, the main screen's for one it does not.
+    fn frozen_for_window(&self, id: u32) -> bool {
+        match self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.meta.display) {
+            Some(display) => self.frozen_on(display),
+            None => self.frozen(),
+        }
+    }
+
+    /// [`Self::frozen`] for an activation of app `pid` ([`activation_held`]): the screens its
+    /// windows are on answer for it.
+    fn activation_frozen(&self, pid: i32) -> bool {
+        let screens: BTreeSet<DisplayId> =
+            self.model.as_ref().map(|m| m.windows().filter(|w| w.meta.pid == pid).map(|w| w.meta.display).collect()).unwrap_or_default();
+        activation_held(self.frozen(), screens.into_iter().map(|d| self.frozen_on(d)))
     }
 
     /// The screen the keyboard is on ([`Model::keyboard_display`]): the focused window's, by
@@ -7570,6 +7615,18 @@ mod tests {
         assert!(!fullscreen_there(laptop, main, true, others), "the laptop's Desktop goes on");
         assert!(!fullscreen_there(main, main, false, others), "the third screen's stops nothing on the main one");
         assert!(fullscreen_there(third, main, false, others));
+    }
+
+    /// A full-screen app on the main screen held every activation, so Cmd-Tab or a Dock click
+    /// to an app whose stage is a card on the other screen brought nothing. Its windows'
+    /// screens answer: held only when one of them takes no input, or none is known.
+    #[test]
+    fn an_activation_is_held_only_for_a_screen_of_the_apps_that_takes_no_input() {
+        assert!(!activation_held(false, [false, true]), "nothing frozen on the main screen: decided as before");
+        assert!(!activation_held(true, [false]), "full screen on the main screen, the app's windows on the other");
+        assert!(activation_held(true, [false, true]), "one of its windows on the full-screen app's screen: macOS may go there");
+        assert!(activation_held(true, [true]), "a Space change settling or the lock holds every screen");
+        assert!(activation_held(true, []), "no window of the app placed: held as before");
     }
 
     /// A full-screen app on the main screen: a press on the other screen, whose wallpaper

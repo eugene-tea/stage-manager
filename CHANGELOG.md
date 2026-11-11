@@ -5,6 +5,9 @@
 - With two screens and a full-screen app on the main one, a click in a window on the other
   screen is no longer taken for a click on the wallpaper (with "Click wallpaper to reveal
   desktop: Only in Stage Manager" it sent that screen's windows to the strip).
+- With a full-screen app on the main screen, ⌘Tab, a Dock click or a click to an app whose
+  stage is a card on the other screen brings that stage in front, as with nothing in full
+  screen; and a window minimized on that screen goes to the strip, not the Dock.
 - Hide Others (⌥⌘H) while the stage in front holds none of the front app's windows (Finder
   in front after a click on the desktop, or the stage on another screen) no longer brings a
   stage of an app just hidden in front, which unhid that app again.
