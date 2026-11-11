@@ -481,8 +481,7 @@ mod tests {
 
     #[test]
     fn reads_wait_for_the_desktop_to_settle() {
-        let mut d = Screen::default();
-        d.space = Some((1, Instant::now()));
+        let d = Screen { space: Some((1, Instant::now())), ..Screen::default() };
         assert!(d.settling(Instant::now()));
         assert!(!d.settling(Instant::now() + SETTLE));
     }
