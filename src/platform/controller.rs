@@ -110,7 +110,7 @@ use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_click;
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
-use crate::engine::displays::{display_kept, display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display};
+use crate::engine::displays::{display_kept, display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display, returned_screens};
 use crate::engine::early_start;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
@@ -5962,14 +5962,12 @@ impl Controller {
             // A display came, went or moved (never the launch's first reading): what the
             // checks counted as moves before it is stale, and the moves, activations and
             // focuses that follow are macOS's ([`DISPLAY_SETTLE`]).
+            let settling = self.displays_settling();
             self.displays_changed_at = Some(heard);
             self.elsewhere.clear();
             let added: Vec<DisplayId> = displays.iter().filter(|d| !self.displays.iter().any(|o| o.id == d.id)).map(|d| d.id).collect();
-            if added.is_empty() {
-                self.displays_added.retain(|id| displays.iter().any(|d| d.id == *id));
-            } else {
-                self.displays_added = added;
-            }
+            let connected: Vec<DisplayId> = displays.iter().map(|d| d.id).collect();
+            self.displays_added = returned_screens(&self.displays_added, settling, added, &connected);
         }
         self.displays = displays.clone();
         let mut actions = Vec::new();

@@ -138,6 +138,22 @@ pub fn displays_changed(before: &[(DisplayId, Rect)], after: &[(DisplayId, Rect)
     !before.is_empty() && before != after
 }
 
+/// The screens that came back in the display change settling now: where macOS puts windows
+/// back as a screen returns ([`crate::engine::model::Model::returned_display`]). `added`:
+/// the screens this change brought; with none, those `kept` from the change before that are
+/// still `connected`, but only while that change still settles (`settling`: a screen coming
+/// back is often heard as two changes, the second adding nothing). A change heard after the
+/// settle starts afresh: a screen that came back hours ago is not one coming back now.
+pub fn returned_screens(kept: &[DisplayId], settling: bool, added: Vec<DisplayId>, connected: &[DisplayId]) -> Vec<DisplayId> {
+    if !added.is_empty() {
+        added
+    } else if settling {
+        kept.iter().copied().filter(|id| connected.contains(id)).collect()
+    } else {
+        Vec::new()
+    }
+}
+
 /// True when an activation or a focus heard now is macOS's after a display change, not the
 /// user's (module docs): the displays changed `since_change` ago, within `settle`, and the
 /// user's last click or key press (`since_press` ago) came before the change. `None`: no
@@ -325,6 +341,18 @@ mod tests {
         assert_eq!(display_of(Rect::new(2561.0, 1407.0, 800.0, 600.0), &both), None);
         assert_eq!(display_of(HEADLESS, &both), None);
         assert_eq!(display_of(Rect::new(100.0, 100.0, 800.0, 600.0), &[]), None);
+    }
+
+    #[test]
+    fn a_screen_counts_as_come_back_only_through_its_own_changes_settle() {
+        let (studio, laptop) = (DisplayId(1), DisplayId(2));
+        // The lid opened: the laptop came back.
+        assert_eq!(returned_screens(&[], false, vec![laptop], &[studio, laptop]), vec![laptop]);
+        // Heard again within the settle, nothing added: still the laptop, while connected.
+        assert_eq!(returned_screens(&[laptop], true, Vec::new(), &[studio, laptop]), vec![laptop]);
+        assert!(returned_screens(&[laptop], true, Vec::new(), &[studio]).is_empty(), "gone again");
+        // The Studio's scaling changed an hour later: no screen is coming back.
+        assert!(returned_screens(&[laptop], false, Vec::new(), &[studio, laptop]).is_empty());
     }
 
     #[test]
