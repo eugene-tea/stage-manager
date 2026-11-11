@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- After a restart, a window waiting in its card for its saved size still gets it in the right
+  place when the screens were rearranged, or another screen made the main one, before its card
+  was first clicked. It came back hanging off the edge of its screen.
+
 ## 1.8.4 — 2026-11-10
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were

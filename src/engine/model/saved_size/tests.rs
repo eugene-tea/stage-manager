@@ -2,7 +2,7 @@
 //! restore-saved-size). Made-up titles only.
 
 use super::*;
-use crate::engine::model::{Action, ModelOptions, Observation, Pid, StageId};
+use crate::engine::model::{Action, Display, ModelOptions, Observation, Pid, StageId};
 use crate::engine::persist::{LaunchHints, SavedSpace, SavedStage, SavedWindow, StateFile};
 use crate::engine::restore::Restore;
 use crate::engine::testkit::*;
@@ -200,4 +200,33 @@ fn switched_off_every_window_keeps_its_apps_frame() {
     let chat = stage(&m, 22);
     let a = m.switch_to(chat, &Observation::default());
     assert_eq!(set_frame(&a, 22), Some(SMALL_TEAM), "{a:?}");
+}
+
+#[test]
+fn an_owed_frame_moves_with_its_screen_when_the_arrangement_changes() {
+    // Chat's card waits, owed its saved frame; then another screen becomes the main one and
+    // this screen's origin moves a screen's width to the left (global coordinates start at
+    // the main screen). macOS moves the screen's windows along: so does what is owed.
+    let mut m = after_restart();
+    launch(&mut m, win(21, 50, EDITOR, "Plan.txt", SMALL_PLAN), win(22, 30, CHAT, "Team", SMALL_TEAM));
+    assert!(m.owes_saved_size(w(22)));
+    let (dx, dy) = (-1440.0, 120.0);
+    let moved = Display { frame: FRAME.translate(dx, dy), visible: VISIBLE.translate(dx, dy), ..display() };
+    m.set_displays(vec![moved]);
+    assert_eq!(saved_frame(&m, "Team"), Some(SAVED_TEAM.translate(dx, dy)), "state.json keeps it where the screen is now");
+    let chat = stage(&m, 22);
+    let a = m.switch_to(chat, &Observation::default());
+    assert_eq!(set_frame(&a, 22), Some(SAVED_TEAM.translate(dx, dy)), "{a:?}");
+}
+
+#[test]
+fn an_owed_frame_stays_owed_when_its_screen_comes_back_under_another_id() {
+    // The same screen (its identity) reported under a new display id, where it was.
+    let mut m = after_restart();
+    launch(&mut m, win(21, 50, EDITOR, "Plan.txt", SMALL_PLAN), win(22, 30, CHAT, "Team", SMALL_TEAM));
+    m.set_displays(vec![Display { id: DisplayId(7), ..display() }]);
+    assert!(m.owes_saved_size(w(22)));
+    let chat = stage(&m, 22);
+    let a = m.switch_to(chat, &Observation::default());
+    assert_eq!(set_frame(&a, 22), Some(SAVED_TEAM), "{a:?}");
 }

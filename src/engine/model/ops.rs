@@ -1838,6 +1838,7 @@ impl Model {
                 w.original = w.original.map(|f| f.translate(dx, dy));
             }
             self.move_pending_frames(d.id, dx, dy);
+            self.move_owed_frames(d.id, dx, dy);
         }
         let gone: Vec<Display> = before.iter().filter(|o| !displays.iter().any(|d| d.id == o.id)).copied().collect();
         let removed = !gone.is_empty();
@@ -2325,6 +2326,7 @@ impl Model {
         if let Some(space) = self.current.remove(&old) {
             self.current.insert(new, space);
         }
+        self.relabel_owed(old, new);
     }
 
     /// Replaces the declared stage names (config reload). New names get a stage; stages whose
