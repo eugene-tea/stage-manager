@@ -1062,6 +1062,27 @@ fn saved_frames_come_back_only_on_a_display_of_the_saved_size() {
 }
 
 #[test]
+fn a_window_at_the_park_corner_at_the_launch_takes_no_frame_saved_on_another_screen() {
+    // Saved on a 2560×1440 main display; the test display is 1440×900. The editor reopened
+    // "Notes.txt" at the park corner (it had saved that frame itself): on screen at the
+    // launch, it comes out of the corner at its own size, as one found later does (S6), never
+    // at the frame it had on the other display.
+    let corner = park_frame(Size::new(640.0, 420.0), FRAME);
+    let live = [win(23, 50, EDITOR, "Plan.txt", DEFAULT), win(24, 50, EDITOR, "Notes.txt", corner)];
+    let mut m = restoring_after(vec![desktop_5()], Restore::after_restart("B").with_display(Some((2560.0, 1440.0))));
+    let a = m.arrive(MAIN, &live, &[], &LaunchHints::default());
+    assert_eq!(m.current_space(MAIN).0, 5, "the saved Desktop recognized by its titles");
+    let restore = m.window(w(24)).map(|x| x.restore);
+    assert!(restore.is_some_and(|r| !parked_at(r) && r != F_NOTES && (r.w, r.h) == (640.0, 420.0)), "{restore:?}");
+    assert_eq!(set_frame(&a, 24), restore, "brought out of the corner: {a:?}");
+    // The same display size: its saved frame.
+    let mut m = restoring_after(vec![desktop_5()], Restore::after_restart("B").with_display(Some((1440.0, 900.0))));
+    let a = m.arrive(MAIN, &live, &[], &LaunchHints::default());
+    assert_eq!(m.window(w(24)).map(|x| x.restore), Some(F_NOTES));
+    assert_eq!(set_frame(&a, 24), Some(F_NOTES), "{a:?}");
+}
+
+#[test]
 fn restore_after_restart_off_keeps_nothing_waiting_as_before() {
     // The setting off: a launch after a restart behaves as 1.2.0 did.
     let mut m = restoring_after(vec![desktop_5()], Restore::off_after_restart("B"));

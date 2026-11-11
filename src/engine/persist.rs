@@ -545,7 +545,8 @@ pub(crate) enum LaunchFrames {
     /// Confident matches their saved frames; the active stage's and pinned windows are
     /// restored there (a launch that restores frames).
     Saved,
-    /// Their live frames (a live frame in a park zone always falls back to the saved one).
+    /// Their live frames (a live frame in a park zone falls back to the saved one where saved
+    /// frames apply on its screen, else comes on screen at its own size).
     Live,
     /// Confident matches their saved frames, a shown one moved there; the rest untouched (an
     /// adoption's windows).
@@ -874,7 +875,8 @@ impl Model {
     ///
     /// Windows of the Space's inactive stages are parked; with `restore_frames` the active
     /// stage's and pinned windows get their saved frames, else they keep their live frames (a
-    /// live frame in a park zone always falls back to the saved one). Windows already known
+    /// live frame in a park zone falls back to the saved one where saved frames apply on its
+    /// screen, else comes on screen at its own size). Windows already known
     /// are skipped. Other Spaces are left alone.
     pub fn apply_launch(
         &mut self,
@@ -930,7 +932,7 @@ impl Model {
             let pending = self.mark_pending(&st.pending);
             if standing.is_empty() && pending.is_empty() && Some(i) != assignment.active_index && !declared {
                 for w in members.iter().filter(|w| w.pinned) {
-                    self.insert_restored(metas[&w.id], w, Home::Pinned, matched_frames);
+                    self.insert_restored(metas[&w.id], w, Home::Pinned, matched_frames, origin.or(Some(space.0)));
                 }
                 continue;
             }
@@ -948,7 +950,7 @@ impl Model {
                 } else {
                     Home::Stage(sid)
                 };
-                self.insert_restored(metas[&w.id], w, home, matched_frames);
+                self.insert_restored(metas[&w.id], w, home, matched_frames, origin.or(Some(space.0)));
                 if frames == LaunchFrames::Live {
                     // Reopened much smaller than saved: its saved frame when first shown.
                     self.owe_saved_size(metas[&w.id], w, origin.or(Some(space.0)));
@@ -1248,16 +1250,25 @@ impl Model {
         }
     }
 
+    /// Puts window `meta` into the model from its saved entry `saved` (of saved Desktop
+    /// `desktop`), its restore frame the saved one (`restore_frames`, a confident match) or
+    /// its live one. A live frame out of sight at the park corner takes the saved one where
+    /// saved frames apply on its screen ([`Model::frames_fit`]); on another screen or size it
+    /// comes on screen at its own size, as a window found later does
+    /// ([`Model::insert_from_pending`]; S6 of the review of 10-29: a frame from another
+    /// display is no frame the user gave it here).
     fn insert_restored(
         &mut self,
         meta: &WindowMeta,
         saved: &AssignedWindow,
         home: Home,
         restore_frames: bool,
+        desktop: Option<u64>,
     ) {
         let display = self.known_display(meta.display);
         let live_parked = self.display(display).hides(meta.frame);
-        let base = if (restore_frames && saved.grade.confident()) || live_parked || meta.frame.is_degenerate() {
+        let fit = self.frames_fit(display, desktop);
+        let base = if (restore_frames && saved.grade.confident()) || (live_parked && fit) || meta.frame.is_degenerate() {
             saved.frame
         } else {
             meta.frame

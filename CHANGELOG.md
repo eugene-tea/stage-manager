@@ -8,6 +8,9 @@
 - At login, an app that stops answering partway through being set up no longer holds
   everything else up for up to a second. At one login, switching to an app's stage came two
   seconds late.
+- After a restart on another screen, or the same screen at another size, a window its app
+  reopened at the corner where cards are kept comes on screen at its own size. It took the
+  frame it had on the other screen, which could be larger than this one.
 
 ## 1.8.4 — 2026-11-10
 
