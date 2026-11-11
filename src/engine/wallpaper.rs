@@ -295,10 +295,17 @@ pub fn covered(draws: &[Draw], size: Size) -> bool {
 /// default reach makes, so most rectangles are crops of one render.
 pub const BLOCK: Size = Size::new(480.0, 560.0);
 
-/// The screen-local region to render for a patch at `patch` (screen-local): the bottom-right
-/// [`BLOCK`] grown to hold the patch, on the screen, in whole points.
+/// The screen-local region to render for a patch at `patch` (screen-local): the [`BLOCK`] at
+/// the screen's corner the patch lies at (the bottom-right one, Apple's, unless another screen
+/// is beyond it: [`crate::engine::park::choose_corner`]) grown to hold the patch, on the
+/// screen, in whole points. With the block always at the bottom-right, a patch at the left
+/// side had the screen's whole width rendered.
 pub fn region(screen: Size, patch: Rect) -> Rect {
-    let block = Rect::new(screen.w - BLOCK.w, screen.h - BLOCK.h, BLOCK.w, BLOCK.h);
+    let right = patch.x + patch.w / 2.0 >= screen.w / 2.0;
+    let bottom = patch.y + patch.h / 2.0 >= screen.h / 2.0;
+    let x = if right { screen.w - BLOCK.w } else { 0.0 };
+    let y = if bottom { screen.h - BLOCK.h } else { 0.0 };
+    let block = Rect::new(x, y, BLOCK.w, BLOCK.h);
     let r = block.union(&patch);
     let (x, y) = (r.x.floor().max(0.0), r.y.floor().max(0.0));
     let (mx, my) = (r.max_x().ceil().min(screen.w), r.max_y().ceil().min(screen.h));
@@ -1359,6 +1366,18 @@ mod tests {
         // A small screen: the region stays on it.
         let small = Size::new(400.0, 300.0);
         assert_eq!(region(small, Rect::new(350.0, 250.0, 50.0, 50.0)), Rect::new(0.0, 0.0, 400.0, 300.0));
+    }
+
+    /// A screen that parks at its bottom-left corner: the block is rendered there, never the
+    /// screen's whole width.
+    #[test]
+    fn the_region_is_at_the_patchs_corner() {
+        let patch = Rect::new(0.0, 1043.0, 61.0, 126.0);
+        let r = region(LAPTOP, patch);
+        assert_eq!(r, Rect::new(0.0, LAPTOP.h - BLOCK.h, BLOCK.w, BLOCK.h));
+        assert!(crop_px(r, patch, 2.0).is_some());
+        let top = Rect::new(1799.0, 30.0, 1.0, 300.0);
+        assert_eq!(region(LAPTOP, top), Rect::new(LAPTOP.w - BLOCK.w, 0.0, BLOCK.w, BLOCK.h));
     }
 
     #[test]

@@ -270,6 +270,10 @@ pub(super) struct Motion {
     fading: Option<Fading>,
 }
 
+/// The most app icons a strip keeps (one per app and look); past it, those of apps on no
+/// card go.
+const KEPT_ICONS: usize = 128;
+
 impl Motion {
     /// The snapshot last taken of window `id` for a ghost, if still kept.
     pub(super) fn snapshot(&self, id: u32) -> Option<&Picture> {
@@ -359,9 +363,8 @@ impl Motion {
         // A cover held on the Desktop left goes with it.
         self.drop_hold();
         self.drop_fading();
-        if self.running.is_none() && self.window_card.is_none() {
-            self.overlay.renew(mtm);
-        }
+        // In use (a transition, a dragged window's card): the fresh panel comes once it hides.
+        self.overlay.renew(mtm, self.running.is_some() || self.window_card.is_some());
     }
 
     /// A thumbnail arrived: the dragged window's card uses it while it has no snapshot.
@@ -1520,6 +1523,10 @@ impl Strip {
             // The card's windows joined the stage without a transition (animation off).
             self.motion.landing = None;
         }
+        // The icons of apps long gone from the cards go (past a cap: no fetch again at every
+        // Desktop change).
+        let apps: Vec<i32> = self.snapshot.cards.iter().flat_map(|c| c.apps.iter().copied()).collect();
+        self.icons.trim(KEPT_ICONS, |pid| apps.contains(&pid));
         let dragging = self.snapshot.window_drag.is_some();
         match (dragging, self.motion.drag_monitor.is_some()) {
             (true, false) => {

@@ -456,10 +456,17 @@ pub fn published_cards_of(display: u32) -> Vec<(u64, Rect)> {
     card_frames().lock().ok().and_then(|f| f.get(&display).cloned()).unwrap_or_default()
 }
 
-/// Forgets the cards of displays no longer there (`kept`: the strips still up).
+/// Forgets what the strips of displays no longer there published (`kept`: the strips still
+/// up): their cards, and the windows they held snapshots and thumbnails of (those stayed, so
+/// [`has_snapshot`] answered for a strip closed).
 pub fn retain_cards_of(kept: &[u32]) {
     if let Ok(mut f) = card_frames().lock() {
         f.retain(|d, _| kept.contains(d));
+    }
+    for ids in [snapshot_ids(), picture_ids()] {
+        if let Ok(mut s) = ids.lock() {
+            s.retain(|d, _| kept.contains(d));
+        }
     }
 }
 
@@ -776,6 +783,18 @@ mod tests {
         assert!(!published_cards().contains(&(4, other)), "the main strip's cards are its own");
         publish_cards(9_101, Vec::new());
         assert!(!every_published_card().contains(&(4, other)), "a strip hidden publishes none");
+    }
+
+    /// A strip closed with its display leaves no snapshot ids behind.
+    #[test]
+    fn a_display_gone_takes_its_published_snapshots() {
+        publish_snapshots(9_202, [771_001]);
+        publish_pictures(9_202, [771_001]);
+        assert!(has_snapshot(771_001));
+        // The other tests' strips stay.
+        retain_cards_of(&[MAIN_STRIP, 9_101]);
+        assert!(!has_snapshot(771_001));
+        assert!(pictures_of(9_202).is_empty());
     }
 
     /// A late window shown at the unhide, then active at its app's activation, in one note

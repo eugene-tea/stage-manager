@@ -201,6 +201,9 @@ thread_local! {
     /// Every display connected, as last reported ([`displays_changed`]; `None` before the
     /// first report): a snapshot for any other is not drawn ([`draws_strip_for`]).
     static CONNECTED: RefCell<Option<Vec<u32>>> = const { RefCell::new(None) };
+    /// The main screen was handed over and the main strip's panes on the screen left are
+    /// still to close ([`close_strips_gone`]).
+    static MAIN_MOVED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// True when a snapshot for `display` may be drawn: the main strip's, or a display among
@@ -349,25 +352,66 @@ fn present_waiting_others() {
 /// strips of displays gone close, and the main display's strip knows its id.
 pub fn displays_changed(ids: &[u32]) {
     let Some(&main) = ids.first() else { return };
-    MAIN_DISPLAY.store(main, Ordering::Relaxed);
+    let before = MAIN_DISPLAY.swap(main, Ordering::Relaxed);
     CONNECTED.with(|c| *c.borrow_mut() = Some(ids.to_vec()));
-    let gone = OTHERS.with(|o| match o.try_borrow_mut() {
-        Ok(mut others) => {
-            let before = others.len();
-            others.retain(|d, _| ids.contains(d) && *d != main);
-            before - others.len()
-        }
-        Err(_) => 0,
-    });
+    if main_handed_over(before, ids) {
+        MAIN_MOVED.with(|m| m.set(true));
+    }
     WAITING_OTHERS.with(|w| w.borrow_mut().retain(|s| ids.contains(&s.display) && s.display != main));
     let mut kept: Vec<u32> = ids.iter().copied().filter(|d| *d != main).collect();
     kept.push(strip_model::MAIN_STRIP);
     strip_model::retain_cards_of(&kept);
     card_glass::displays_changed(&kept);
     strip_model::retain_panel_statuses_of(&kept);
-    if gone > 0 {
-        tracing::info!(gone, "strip: the strips of displays no longer there closed");
+    close_strips_gone();
+}
+
+/// True when the screen that was the main one (`before`; 0: none reported yet) is still
+/// connected (`ids`, the main one first) and is the main one no more: the menu bar moved to
+/// another screen, or a laptop was docked to a screen that became the main one. The main
+/// display's strip then draws another screen, and the screen left gets a strip of its own.
+fn main_handed_over(before: u32, ids: &[u32]) -> bool {
+    before != 0 && ids.first() != Some(&before) && ids.contains(&before)
+}
+
+/// Closes what the latest display change ([`displays_changed`]) left behind, as soon as the
+/// strips are free: the strips of displays gone (a strip found busy stayed up for a screen
+/// not there, its panels moved by macOS onto the one left), and, when the main screen was
+/// handed over ([`main_handed_over`]), the main strip's panes on the old screen's other
+/// Desktops. Those stayed there with their cards, under the cards of that screen's own new
+/// strip, and one left catching clicks took them for the other screen's layout.
+fn close_strips_gone() {
+    let (connected, main) = (CONNECTED.with(|c| c.borrow().clone()), MAIN_DISPLAY.load(Ordering::Relaxed));
+    let Some(ids) = connected else { return };
+    let mut free = true;
+    if MAIN_MOVED.with(Cell::get) {
+        let closed = STRIP.with(|s| s.try_borrow_mut().ok().map(|mut s| s.as_mut().map_or(0, Strip::close_other_panes)));
+        match closed {
+            Some(closed) => {
+                MAIN_MOVED.with(|m| m.set(false));
+                tracing::info!(closed, "strip: the main screen changed; the main strip's panes on the screen left closed");
+            }
+            None => free = false,
+        }
     }
+    match OTHERS.with(|o| o.try_borrow_mut().ok().map(|mut others| retain_strips(&mut others, &ids, main))) {
+        Some(0) => {}
+        Some(gone) => tracing::info!(gone, "strip: the strips of displays no longer there closed"),
+        None => free = false,
+    }
+    if !free {
+        tracing::debug!("strip: busy at a display change; the strips gone close shortly");
+        let when = dispatch2::DispatchTime::try_from(Duration::from_millis(20)).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = DispatchQueue::main().after(when, close_strips_gone);
+    }
+}
+
+/// Keeps the other displays' strips of the displays connected (`ids`), never one keyed as
+/// the main display (`main`: its strip is [`STRIP`]); how many went.
+fn retain_strips<S>(others: &mut BTreeMap<u32, S>, ids: &[u32], main: u32) -> usize {
+    let before = others.len();
+    others.retain(|d, _| ids.contains(d) && *d != main);
+    before - others.len()
 }
 
 /// Hands every item of `queue` to the receiver in `cell`, in order, when it is free; false
@@ -1874,6 +1918,20 @@ impl Drop for EdgeTab {
     }
 }
 
+impl Drop for Strip {
+    /// A strip that goes (its display did) stops its timers: the run loop keeps a repeating
+    /// timer, and the poll of a strip gone kept firing for good, on the strip made for the
+    /// same display when it came back (one more at every return).
+    fn drop(&mut self) {
+        if let Some(t) = self.poll_timer.take() {
+            t.invalidate();
+        }
+        if let Some((_, Some(t))) = self.lifted_card.take() {
+            t.invalidate();
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // The strip
 
@@ -1907,7 +1965,7 @@ struct Strip {
     /// App icons by pid and look ([`app_icons`]).
     icons: app_icons::IconCache<CFRetained<CGImage>>,
     /// Apps' names by pid, for the cards' VoiceOver labels.
-    app_names: HashMap<i32, Option<String>>,
+    app_names: HashMap<i32, String>,
     visibility: Visibility,
     poll_timer: Option<Retained<NSTimer>>,
     /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
@@ -2199,6 +2257,16 @@ impl Strip {
     }
 
     // -- panes ----------------------------------------------------------------------------
+
+    /// Closes the other Desktops' panes (the strip draws another screen now:
+    /// [`close_strips_gone`]); how many. The pane shown stays and follows the pointer
+    /// afresh.
+    fn close_other_panes(&mut self) -> usize {
+        let closed = self.others.len();
+        self.others.clear();
+        self.update_pass_through(None);
+        closed
+    }
 
     /// The Desktop shown is being left: what the user was doing on its strip ends, its tab
     /// goes and its panel goes back below windows; its cards stay as they are, so it slides
@@ -2646,16 +2714,15 @@ impl Strip {
     fn update_access(&mut self) {
         let items = if self.pane.shown {
             let cards = self.shown_cards();
-            for pid in cards.iter().flat_map(|c| c.apps.iter().copied()) {
-                self.app_names.entry(pid).or_insert_with(|| {
-                    NSRunningApplication::runningApplicationWithProcessIdentifier(pid).and_then(|a| a.localizedName()).map(|n| n.to_string())
-                });
-            }
+            let pids: Vec<i32> = cards.iter().flat_map(|c| c.apps.iter().copied()).collect();
+            remember_names(&mut self.app_names, &pids, |pid| {
+                NSRunningApplication::runningApplicationWithProcessIdentifier(pid).and_then(|a| a.localizedName()).map(|n| n.to_string())
+            });
             let m = self.m();
             let frames: Vec<(u64, Rect)> = self.layouts.iter().filter(|l| !placeholder(l.stage)).map(|l| (l.stage, l.bounds(m))).collect();
             let p = self.pane.panel.frame();
             let panel = Rect::new(p.origin.x, p.origin.y, p.size.width, p.size.height);
-            strip_access::items(&cards, &frames, panel, |pid| self.app_names.get(&pid).cloned().flatten())
+            strip_access::items(&cards, &frames, panel, |pid| self.app_names.get(&pid).cloned())
         } else {
             Vec::new()
         };
@@ -4123,6 +4190,26 @@ impl Strip {
     }
 }
 
+/// The most apps' names kept for VoiceOver; past it, those of apps on no card shown go.
+const KEPT_NAMES: usize = 64;
+
+/// Looks up (`find`) the names of the apps `pids` (those on the cards shown) not known yet.
+/// An app with no name yet (still launching) is asked again next time: kept as nameless, its
+/// card read "Stage N" and offered no "Show all windows" until the app was opened again.
+/// Past [`KEPT_NAMES`], the names of apps on no card shown go.
+fn remember_names(names: &mut HashMap<i32, String>, pids: &[i32], find: impl Fn(i32) -> Option<String>) {
+    for pid in pids {
+        if !names.contains_key(pid)
+            && let Some(name) = find(*pid)
+        {
+            names.insert(*pid, name);
+        }
+    }
+    if names.len() > KEPT_NAMES {
+        names.retain(|pid, _| pids.contains(pid));
+    }
+}
+
 /// Where incoming windows grow from, by window: the plane and the card slot, if any.
 type Starts = HashMap<u32, (motion_math::Plane, Option<usize>, Option<GlassLook>)>;
 
@@ -4149,6 +4236,38 @@ fn click_adds(flags: NSEventModifierFlags) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A laptop docked to a screen that becomes the main one: the main strip's panes on the
+    /// laptop's other Desktops close (that screen gets a strip of its own). With the lid
+    /// closed, or at the first report, nothing is handed over.
+    #[test]
+    fn the_main_screen_is_handed_over_only_while_the_old_one_stays() {
+        assert!(main_handed_over(1, &[2, 1]), "docked, the lid open: the external is the main screen now");
+        assert!(!main_handed_over(1, &[2]), "the lid closed: the Desktops move to the screen left, panes and all");
+        assert!(!main_handed_over(1, &[1, 2]), "another screen joined: the main one is the same");
+        assert!(!main_handed_over(0, &[2, 1]), "the first report");
+        let mut others = BTreeMap::from([(1, "laptop"), (2, "external"), (3, "gone")]);
+        assert_eq!(retain_strips(&mut others, &[2, 1], 2), 2, "the display gone, and the one that is the main now");
+        assert_eq!(others.keys().copied().collect::<Vec<_>>(), vec![1]);
+    }
+
+    /// An app still launching has no name yet: asked again at the next look, never kept as
+    /// nameless.
+    #[test]
+    fn an_app_without_a_name_yet_is_asked_again() {
+        let mut names = HashMap::new();
+        remember_names(&mut names, &[7, 8], |pid| (pid == 8).then(|| "Notes".to_string()));
+        assert_eq!(names.get(&7), None);
+        remember_names(&mut names, &[7, 8], |pid| Some(if pid == 7 { "Maps".to_string() } else { "asked twice".to_string() }));
+        assert_eq!(names.get(&7).map(String::as_str), Some("Maps"));
+        assert_eq!(names.get(&8).map(String::as_str), Some("Notes"), "a name found is kept");
+        // Past the cap, only the apps on the cards shown stay.
+        for pid in 100..100 + KEPT_NAMES as i32 {
+            remember_names(&mut names, &[pid], |_| Some("An App".to_string()));
+        }
+        assert!(names.len() <= KEPT_NAMES, "{}", names.len());
+        assert!(!names.contains_key(&7));
+    }
 
     /// Apple's, checked 11-09: an Option-click on a card is a plain click (no app hidden, no
     /// window added); only Shift makes a click add the card's front window.
