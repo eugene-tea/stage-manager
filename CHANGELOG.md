@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Quit (the menu's, or ⌘Q) chosen at a moment the app is busy is tried again for a few
+  seconds; the click was dropped and the app stayed open.
 - An app that quit within two minutes of a logout keeps its place in its stage after the
   restart also on a Desktop the app had only just recognized as a saved one; its windows
   were left out of the saved stages there.

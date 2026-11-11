@@ -14,12 +14,14 @@
 //!   reason (`keyAEQuitReason`: logout, restart, shutdown) is logged and kept
 //!   ([`system_quit_reason`]); the user's own Quit (the menus' item, ⌘Q) is kept apart
 //!   ([`user_quit`]): a cancelled logout opens the app again after the one, never the other
-//!   (round logout-cancel-relaunch).
+//!   (round logout-cancel-relaunch). A user's Quit that cannot run at once is tried again
+//!   the same way for 5 s ([`user_quits`]), then given up with a log line.
 //! - **Main menu:** an accessory app shows no menu bar, but its main menu's key equivalents
 //!   still work while one of its windows is key: ⌘, (Settings), ⌘Q (Quit, the safe one),
 //!   ⌘W and ⌘M, and the edit keys for text.
 
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
@@ -76,11 +78,32 @@ pub fn note_user_quit() {
 /// busy, or a quit that is not theirs is under way), so the mark goes: a later quit from
 /// elsewhere (a logout, `ctl quit`, a signal) is never taken for the user's, which would
 /// keep a cancelled logout from opening the app again and install a ready update at it.
-pub fn user_quits(run: impl FnOnce()) {
+/// The Quit is then tried again as the system's is ([`QUIT_RETRY`], [`QUIT_ATTEMPTS`]: 5 s),
+/// marked as the user's for each try only; it was dropped, and the app stayed open after a
+/// click on Quit.
+pub fn user_quits(run: impl Fn() + Send + Sync + 'static) {
+    try_user_quit(Arc::new(run), 1, after_quit_retry);
+}
+
+/// One try of the user's Quit, and the next one `later` unless it was the last.
+fn try_user_quit(run: Arc<dyn Fn() + Send + Sync>, attempt: u32, later: fn(Box<dyn FnOnce() + Send>)) {
     note_user_quit();
     run();
     USER_QUIT.store(false, Ordering::SeqCst);
-    tracing::warn!("the user's Quit could not run now; choose Quit again");
+    if attempt >= QUIT_ATTEMPTS {
+        tracing::warn!("the user's Quit never ran; choose Quit again");
+        return;
+    }
+    if attempt == 1 {
+        tracing::warn!("the user's Quit could not run at once; trying again");
+    }
+    later(Box::new(move || try_user_quit(run, attempt + 1, later)));
+}
+
+/// Runs `f` on the main queue after [`QUIT_RETRY`].
+fn after_quit_retry(f: Box<dyn FnOnce() + Send>) {
+    let when = DispatchTime::try_from(QUIT_RETRY).unwrap_or(DispatchTime::NOW);
+    let _ = DispatchQueue::main().after(when, f);
 }
 
 /// The current Apple event's `keyAEQuitReason` attribute (AERegistry.h, `why?`), 0 when there
@@ -168,7 +191,8 @@ define_class!(
     }
 );
 
-/// How often and how long a deferred system quit is tried.
+/// How often and how long a quit that could not run at once is tried: the system's, and the
+/// user's own ([`user_quits`]).
 const QUIT_RETRY: Duration = Duration::from_millis(200);
 const QUIT_ATTEMPTS: u32 = 25;
 
@@ -268,11 +292,23 @@ mod tests {
 
     /// A Quit click the app could not run leaves no mark behind: the quit that comes later
     /// (a logout's, `ctl quit`) is not the user's.
+    /// Nor is the click dropped: the Quit is tried again, as the system's is, each try the
+    /// user's own. (One test: the mark is one static.)
     #[test]
-    fn a_user_quit_that_did_not_run_is_not_remembered() {
-        let mut seen_inside = false;
-        user_quits(|| seen_inside = user_quit());
-        assert!(seen_inside, "the Quit that runs reads it as the user's");
-        assert!(!user_quit(), "it returned: it did not run, and the mark is gone");
+    fn a_user_quit_that_did_not_run_is_tried_again_and_not_remembered() {
+        static TRIES: AtomicU32 = AtomicU32::new(0);
+        static AS_USER: AtomicU32 = AtomicU32::new(0);
+        fn at_once(f: Box<dyn FnOnce() + Send>) {
+            assert!(!user_quit(), "between tries the mark is gone");
+            f();
+        }
+        let run = || {
+            TRIES.fetch_add(1, Ordering::SeqCst);
+            AS_USER.fetch_add(u32::from(user_quit()), Ordering::SeqCst);
+        };
+        try_user_quit(Arc::new(run), 1, at_once);
+        assert_eq!(TRIES.load(Ordering::SeqCst), QUIT_ATTEMPTS, "tried for 5 s, then given up");
+        assert_eq!(AS_USER.load(Ordering::SeqCst), QUIT_ATTEMPTS, "the Quit that runs reads it as the user's");
+        assert!(!user_quit(), "it never ran, and the mark is gone");
     }
 }
