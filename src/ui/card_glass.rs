@@ -13,9 +13,12 @@
 //! - **Reads** while the glass is wanted: at the app's poll every [`READ_EVERY`] (cheap: the
 //!   reader keeps what only changes with a file), when the clock's frame boundary passes or
 //!   the appearance changed, and [`SETTLE`] after a Space change (at the change itself
-//!   NSWorkspace may still name the Desktop left's picture; the arriving strip keeps the
-//!   colours it had there meanwhile). A new backdrop recolours the strip shown
-//!   ([`super::strip::glass_changed`]).
+//!   NSWorkspace may still name the Desktop left's picture: no read until then). A new
+//!   backdrop recolours the strip shown ([`super::strip::glass_changed`]).
+//! - **Each Desktop its own**: each Desktop may have a picture of its own, so each keeps the
+//!   backdrop last read there, and a strip colours its cards from its Desktop's (a Desktop
+//!   not read yet: the one read last). A Desktop shown again is never painted from the one
+//!   left meanwhile; a picture another Desktop has is not rendered again.
 //! - **No picture** (one that cannot be drawn: a shuffle, a gap with no fill colour, an
 //!   unreadable file): no backdrop, and the cards are drawn opaque, as before the glass.
 //! - **Cost**: nothing a frame. A card's under is one flat colour (four lookups in the
@@ -23,7 +26,7 @@
 //!   per change, off the main thread.
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -68,11 +71,64 @@ struct Screen {
     reader: Reader,
     /// Its strip's glass is on.
     wanted: bool,
-    /// The last read: when, its clock boundary, its appearance.
-    read: Option<(Instant, Option<Instant>, bool)>,
+    /// The last read: when, its clock boundary, its appearance, the Desktop shown then.
+    read: Option<(Instant, Option<Instant>, bool, Option<u64>)>,
     /// The picture rendered or being rendered (the job's key at [`SAMPLE_SCALE`]).
     key: Option<String>,
     shown: Option<Rc<Shown>>,
+    /// The picture `shown` was rendered from (`key` while no render is under way).
+    shown_key: Option<String>,
+    /// The Desktop its strip shows ([`set_space`]) and when it came: no read for [`SETTLE`]
+    /// after, as NSWorkspace may still name the Desktop left's picture.
+    space: Option<(u64, Instant)>,
+    /// Each Desktop's picture key and backdrop as last read there (none: no picture that can
+    /// be drawn). Each Desktop may have a picture of its own: one shown again is coloured
+    /// from its own at once, never from the Desktop left's until a read (seen 11-10: cards
+    /// flashed the orange of Desktop 1's wallpaper on the purple Desktop 2 for half a second).
+    desktops: HashMap<u64, (Option<String>, Option<Rc<Shown>>)>,
+}
+
+impl Screen {
+    /// The backdrop for the Desktop `space`: its own as last read there, else the one read
+    /// last (a Desktop not read yet).
+    fn backdrop_for(&self, space: u64) -> Option<Rc<Shown>> {
+        match self.desktops.get(&space) {
+            Some((_, shown)) => shown.clone(),
+            None => self.shown.clone(),
+        }
+    }
+
+    /// The Desktop shown now, when known.
+    fn space_now(&self) -> Option<u64> {
+        self.space.map(|(s, _)| s)
+    }
+
+    /// The Desktop shown came less than [`SETTLE`] ago: its picture is not read yet.
+    fn settling(&self, now: Instant) -> bool {
+        self.space.is_some_and(|(_, at)| now.duration_since(at) < SETTLE)
+    }
+
+    /// Keeps the backdrop shown as the Desktop shown's own, unless a render of another
+    /// picture is under way (then the render's delivery keeps it).
+    fn remember(&mut self) {
+        if let Some(space) = self.space_now()
+            && self.shown_key == self.key
+        {
+            self.desktops.insert(space, (self.key.clone(), self.shown.clone()));
+        }
+    }
+
+    /// Shows `shown`, rendered from the picture `key`.
+    fn show(&mut self, key: Option<String>, shown: Option<Rc<Shown>>) {
+        self.key = key.clone();
+        self.shown_key = key;
+        self.shown = shown;
+    }
+
+    /// A backdrop already rendered for the picture `key` (another Desktop with it).
+    fn rendered(&self, key: &str) -> Option<Rc<Shown>> {
+        self.desktops.values().find_map(|(k, shown)| if k.as_deref() == Some(key) { shown.clone() } else { None })
+    }
 }
 
 /// Every screen's glass, by the strip's display key ([`strip_model::MAIN_STRIP`] for the
@@ -86,9 +142,23 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::new(State::default());
 }
 
-/// The backdrop `display`'s strip colours its cards from, when there is one.
-pub fn current(display: u32) -> Option<Rc<Shown>> {
-    STATE.with(|s| s.try_borrow().ok().and_then(|s| s.screens.get(&display).and_then(|d| d.shown.clone())))
+/// The backdrop `display`'s strip colours the cards of the Desktop `space` from, when there
+/// is one.
+pub fn current(display: u32, space: u64) -> Option<Rc<Shown>> {
+    STATE.with(|s| s.try_borrow().ok().and_then(|s| s.screens.get(&display).and_then(|d| d.backdrop_for(space))))
+}
+
+/// `display`'s strip shows the Desktop `space` (at each snapshot): another one waits
+/// [`SETTLE`] for its first read.
+pub fn set_space(display: u32, space: u64) {
+    STATE.with(|s| {
+        if let Ok(mut s) = s.try_borrow_mut() {
+            let d = s.screens.entry(display).or_default();
+            if d.space_now() != Some(space) {
+                d.space = Some((space, Instant::now()));
+            }
+        }
+    });
 }
 
 /// `display`'s strip's glass is `on` (its style, at each snapshot): a first read happens at
@@ -117,7 +187,7 @@ fn wanted() -> Vec<u32> {
 }
 
 /// The app's poll (each second): reads each screen's wallpaper again when its last read is
-/// stale.
+/// stale or was on another Desktop, once the Desktop shown has settled.
 pub fn poll(mtm: MainThreadMarker) {
     let now = Instant::now();
     let dark = wallpaper::dark_appearance(mtm);
@@ -125,7 +195,10 @@ pub fn poll(mtm: MainThreadMarker) {
         let stale = STATE.with(|s| {
             s.try_borrow().is_ok_and(|s| {
                 s.screens.get(&display).is_some_and(|d| {
-                    d.read.is_none_or(|(at, recheck, was_dark)| now.duration_since(at) >= READ_EVERY || recheck.is_some_and(|r| now >= r) || was_dark != dark)
+                    !d.settling(now)
+                        && d.read.is_none_or(|(at, recheck, was_dark, space)| {
+                            now.duration_since(at) >= READ_EVERY || recheck.is_some_and(|r| now >= r) || was_dark != dark || space != d.space_now()
+                        })
                 })
             })
         });
@@ -179,43 +252,60 @@ fn read(mtm: MainThreadMarker, strip: u32) -> Read {
     let job = STATE.with(|s| {
         let Ok(mut s) = s.try_borrow_mut() else { return None };
         let d = s.screens.get_mut(&strip)?;
+        let now = Instant::now();
+        if d.settling(now) {
+            // The Desktop shown just came: its picture is read once settled (the poll).
+            return None;
+        }
         outcome = Read::Same;
         let wall = match &screen {
             Some(screen) => d.reader.read_screen(mtm, screen),
             None => d.reader.read(mtm),
         };
-        d.read = Some((Instant::now(), wall.recheck_at, wall.dark));
+        let space = d.space_now();
+        d.read = Some((now, wall.recheck_at, wall.dark, space));
         match wall.outcome {
             Ok((_, job)) => {
                 let job = Job { scale: SAMPLE_SCALE, ..job };
                 let key = job.key();
                 if d.key.as_deref() == Some(key.as_str()) {
+                    d.remember();
                     return None;
                 }
                 outcome = Read::Changed;
+                if let Some(shown) = d.rendered(&key) {
+                    // Another Desktop's picture, rendered there: no render again.
+                    tracing::debug!(screen = strip, picture = %job.file_name(), frame = job.index, "card glass: the wallpaper rendered for another Desktop");
+                    d.show(Some(key), Some(shown));
+                    d.remember();
+                    dispatch2::DispatchQueue::main().exec_async(move || super::strip::glass_changed(strip));
+                    return None;
+                }
                 tracing::debug!(screen = strip, picture = %job.file_name(), frame = job.index, "card glass: rendering the wallpaper");
                 d.key = Some(key);
-                Some((job, wall.screen))
+                Some((job, wall.screen, space))
             }
             Err(why) => {
-                if d.key.take().is_some() || d.shown.is_some() {
+                if d.key.is_some() || d.shown.is_some() {
                     outcome = Read::Changed;
                     tracing::debug!(screen = strip, why, "card glass: the wallpaper cannot be drawn; the cards are opaque");
-                    d.shown = None;
+                    d.show(None, None);
                     dispatch2::DispatchQueue::main().exec_async(move || super::strip::glass_changed(strip));
                 }
+                d.remember();
                 None
             }
         }
     });
-    if let Some((job, screen)) = job {
-        start_render(strip, job, screen);
+    if let Some((job, screen, space)) = job {
+        start_render(strip, job, screen, space);
     }
     outcome
 }
 
-/// Renders the backdrop on a thread of its own and hands it to the main thread.
-fn start_render(strip: u32, job: Job, screen: Rect) {
+/// Renders the backdrop on a thread of its own and hands it to the main thread; `desktop` is
+/// the Desktop shown when the picture was read.
+fn start_render(strip: u32, job: Job, screen: Rect, desktop: Option<u64>) {
     let key = job.key();
     let spawned = std::thread::Builder::new().name("card-glass-render".into()).spawn(move || {
         let started = Instant::now();
@@ -223,7 +313,7 @@ fn start_render(strip: u32, job: Job, screen: Rect) {
             .unwrap_or_else(|| Err("the render panicked".to_string()));
         tracing::debug!(ms = started.elapsed().as_millis() as u64, ok = result.is_ok(), "card glass: rendered");
         let space = job.space.clone();
-        dispatch2::DispatchQueue::main().exec_async(move || deliver(strip, key, result.map(|backdrop| Shown { backdrop, space })));
+        dispatch2::DispatchQueue::main().exec_async(move || deliver(strip, key, desktop, result.map(|backdrop| Shown { backdrop, space })));
     });
     if let Err(e) = spawned {
         tracing::warn!("card glass: cannot start a render: {e}");
@@ -238,22 +328,32 @@ fn backdrop_of(job: &Job, screen: Rect) -> Result<Backdrop, String> {
     Backdrop::from_bgra(&bytes, w, h, w * 4, screen).ok_or_else(|| "an empty render".to_string())
 }
 
-/// A render arrived for `display` (main thread): kept when it is still the picture read
-/// last.
-fn deliver(strip: u32, key: String, result: Result<Shown, String>) {
+/// A render arrived for `display` (main thread), of the picture read on the Desktop
+/// `desktop`: kept when it is still the picture read last; shown when that Desktop still is.
+fn deliver(strip: u32, key: String, desktop: Option<u64>, result: Result<Shown, String>) {
     let changed = STATE.with(|s| {
         let Ok(mut s) = s.try_borrow_mut() else { return false };
         let Some(d) = s.screens.get_mut(&strip) else { return false };
         if d.key.as_deref() != Some(key.as_str()) {
             return false;
         }
-        match result {
-            Ok(shown) => d.shown = Some(Rc::new(shown)),
+        let shown = match result {
+            Ok(shown) => Some(Rc::new(shown)),
             Err(why) => {
                 tracing::debug!(screen = strip, why, "card glass: the wallpaper's render failed; the cards are opaque");
-                d.shown = None;
+                None
             }
+        };
+        if let Some(space) = desktop {
+            d.desktops.insert(space, (Some(key.clone()), shown.clone()));
         }
+        if d.space_now() != desktop {
+            // Another Desktop came meanwhile: kept as that Desktop's own; the one shown is
+            // read again (its picture found among the Desktops' when it is the same).
+            d.key = d.shown_key.clone();
+            return false;
+        }
+        d.show(Some(key), shown);
         true
     });
     if changed {
@@ -319,4 +419,71 @@ pub fn probe(args: &[String]) -> std::process::ExitCode {
         json!({ "ok": true, "picture": job.file_name(), "frame": job.index, "dark": wall.dark, "space": space, "screen": screen, "rects": out })
     );
     std::process::ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shown(grey: u8) -> Rc<Shown> {
+        let bytes = [grey, grey, grey, 255].repeat(4);
+        let backdrop = Backdrop::from_bgra(&bytes, 2, 2, 8, Rect::new(0.0, 0.0, 2.0, 2.0)).unwrap();
+        Rc::new(Shown { backdrop, space: None })
+    }
+
+    fn on(d: &mut Screen, space: u64) {
+        d.space = Some((space, Instant::now() - SETTLE));
+    }
+
+    #[test]
+    fn a_desktop_shown_again_keeps_its_own_backdrop() {
+        let mut d = Screen::default();
+        let (orange, purple) = (shown(200), shown(40));
+        on(&mut d, 1);
+        d.show(Some("orange".into()), Some(orange.clone()));
+        d.remember();
+        on(&mut d, 3);
+        // Not read yet on Desktop 3: the backdrop read last stands in.
+        assert!(Rc::ptr_eq(&d.backdrop_for(3).unwrap(), &orange));
+        d.show(Some("purple".into()), Some(purple.clone()));
+        d.remember();
+        on(&mut d, 1);
+        // Back on Desktop 1 before any read: its own, never Desktop 3's.
+        assert!(Rc::ptr_eq(&d.backdrop_for(1).unwrap(), &orange));
+        assert!(Rc::ptr_eq(&d.backdrop_for(3).unwrap(), &purple));
+        assert!(Rc::ptr_eq(&d.rendered("purple").unwrap(), &purple));
+        assert!(d.rendered("green").is_none());
+    }
+
+    #[test]
+    fn no_backdrop_is_remembered_while_its_render_is_under_way() {
+        let mut d = Screen::default();
+        on(&mut d, 1);
+        d.show(Some("orange".into()), Some(shown(200)));
+        on(&mut d, 3);
+        d.key = Some("purple".into());
+        d.remember();
+        assert!(!d.desktops.contains_key(&3));
+    }
+
+    #[test]
+    fn a_desktop_whose_picture_cannot_be_drawn_stays_opaque() {
+        let mut d = Screen::default();
+        on(&mut d, 1);
+        d.show(Some("orange".into()), Some(shown(200)));
+        d.remember();
+        on(&mut d, 2);
+        d.show(None, None);
+        d.remember();
+        assert!(d.backdrop_for(2).is_none());
+        assert!(d.backdrop_for(1).is_some());
+    }
+
+    #[test]
+    fn reads_wait_for_the_desktop_to_settle() {
+        let mut d = Screen::default();
+        d.space = Some((1, Instant::now()));
+        assert!(d.settling(Instant::now()));
+        assert!(!d.settling(Instant::now() + SETTLE));
+    }
 }

@@ -4,6 +4,8 @@
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were
   jagged and their pictures grainy.
+- Switching to a Desktop with a wallpaper of its own no longer tints its cards with the
+  wallpaper of the Desktop left for half a second; each Desktop's cards keep its own colours.
 
 ## 1.8.3 — 2026-11-09
 

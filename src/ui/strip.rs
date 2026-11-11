@@ -2102,6 +2102,7 @@ impl Strip {
             self.keep_off_fullscreen();
         } else {
             self.pane.space = snapshot.space;
+            card_glass::set_space(self.display, snapshot.space);
         }
         let force = self.sync_pane(&snapshot.style);
         self.snapshot = snapshot;
@@ -2836,7 +2837,7 @@ impl Strip {
         if !glass.on() {
             return None;
         }
-        let shown = card_glass::current(self.display)?;
+        let shown = card_glass::current(self.display, self.pane.space)?;
         let g = self.geometry.global;
         let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let rgb = glass.under(shown.backdrop.mean(r.translate(g.x, g.y))?);
