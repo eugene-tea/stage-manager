@@ -1137,18 +1137,20 @@ fn install_if_quiet() {
     let now = Instant::now();
     let locked = session::screen_locked();
     let asleep = CGDisplayIsAsleep(CGMainDisplayID());
-    if locked || asleep {
+    // Asked only for an automatic install: a click-asked one never waits for it.
+    let kept_awake = !asked && session::display_kept_awake();
+    if locked || asleep || kept_awake {
         session::saw_rest(now);
     }
     let idle = self_update::idle_after_rest(idle_secs(), session::since_rest(now).map(|d| d.as_secs_f64()));
-    let moment = Moment { buttons_down: NSEvent::pressedMouseButtons() != 0, strip_busy: super::strip::busy(), locked, asleep, idle_secs: idle };
+    let moment = Moment { buttons_down: NSEvent::pressedMouseButtons() != 0, strip_busy: super::strip::busy(), locked, asleep, kept_awake, idle_secs: idle };
     if let Some(wait) = self_update::wait_reason(asked, moment) {
         if wait.is_rest() {
             with(|s| {
                 if let Install::Ready { prepared, told, .. } = &mut s.install
                     && !std::mem::replace(told, true)
                 {
-                    tracing::info!(version = %prepared.version, ?moment, "update: waiting; {}: it installs after the unlock and {} s without input", wait.name(), self_update::AUTO_IDLE_SECS);
+                    tracing::info!(version = %prepared.version, ?moment, "update: waiting; {}: it installs {} s without input after that ends", wait.name(), self_update::AUTO_IDLE_SECS);
                 }
             });
         }

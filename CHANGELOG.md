@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- With "Install updates automatically" on, an update no longer installs in the middle of a
+  film or a video call. Two minutes with no input counted as being away, so every window
+  came back from the strip and the app reopened while you watched. It now waits while
+  anything keeps the display awake, and two more minutes after that ends.
 - After a restart, a window waiting in its card for its saved size still gets it in the right
   place when the screens were rearranged, or another screen made the main one, before its card
   was first clicked. It came back hanging off the edge of its screen.
