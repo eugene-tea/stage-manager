@@ -612,6 +612,23 @@ fn shield_parked(model: impl IntoIterator<Item = u32>, unrestored: impl IntoIter
     parked
 }
 
+/// The parked windows (`parked`: id, Space, that Space's screen) of the other Desktops of
+/// `screen`, which shows `here`: one of them listed on screen means that screen's Desktop
+/// slides. Another screen's parked windows are no such sign: their slivers show in its own
+/// corner all the time, and counted here they read as a slide that never ends (no still of
+/// the desktop was taken while both screens had a stage parked).
+fn parked_on_other_desktops(parked: impl IntoIterator<Item = (u32, SpaceId, DisplayId)>, here: SpaceId, screen: DisplayId) -> HashSet<u32> {
+    parked.into_iter().filter(|(_, space, on)| *on == screen && *space != here).map(|(id, _, _)| id).collect()
+}
+
+/// For how long another screen's Desktop has been read sliding (`None`: it does not), its
+/// clock `since` kept as the main screen's is ([`crate::engine::phase::Tracker::slide_seen`]):
+/// started at the first plan that reads the slide, cleared by one that does not.
+fn slide_clock(since: &mut Option<Instant>, slides: bool, now: Instant) -> Option<Duration> {
+    *since = if slides { Some(since.unwrap_or(now)) } else { None };
+    since.map(|t| now.saturating_duration_since(t))
+}
+
 /// The bounds, as listed in `list`, of a switch's `arriving` windows macOS has raised above the
 /// corner patch, which its cover must hide ([`crate::engine::corner_patch::CoverFacts::raised`]):
 /// those waiting in the park zone (`in_zone`), and the `activated` app's wherever macOS put
@@ -1961,7 +1978,7 @@ impl Controller {
             m.windows().filter(|w| w.parked && w.space == here).map(|w| w.meta.id.0),
             self.unrestored.iter().map(|(id, u)| (*id, u.in_zone)),
         );
-        let parked_elsewhere: HashSet<u32> = m.windows().filter(|w| w.parked && w.space != here).map(|w| w.meta.id.0).collect();
+        let parked_elsewhere = parked_on_other_desktops(m.windows().filter(|w| w.parked).map(|w| (w.meta.id.0, w.space, m.display_of_space(w.space))), here, d.id);
         let parked = parked_in_zone(list, model_parked.iter().copied(), d.frame, d.visible, d.corner);
         // Show Desktop pushes the parked windows partly into view (round
         // show-desktop-patch, part 2): the patch covers what of them shows, until they
@@ -2009,12 +2026,7 @@ impl Controller {
             self.phase.slide_seen(slides, now);
             self.phase.sliding_for(now)
         } else {
-            let track = self.patches.entry(screen).or_default();
-            if !slides {
-                track.slide_since = None;
-            }
-            track.slide_since.get_or_insert(now);
-            slides.then(|| now.saturating_duration_since(track.slide_since.unwrap_or(now)))
+            slide_clock(&mut self.patches.entry(screen).or_default().slide_since, slides, now)
         };
         let track = self.patches.entry(screen).or_default();
         let shown_now = track.sent.as_ref().is_some_and(|p| p.show.is_some());
@@ -7588,6 +7600,31 @@ mod tests {
         assert!(!runs_after_quit(&Action::Raise { id }));
         assert!(!runs_after_quit(&Action::Focus { id }));
         assert!(!runs_after_quit(&Action::StateChanged));
+    }
+
+    /// Two screens, a stage parked on each: the other screen's parked windows, listed in its
+    /// corner all the time, are no sign of this screen's Desktop sliding.
+    #[test]
+    fn another_screens_parked_windows_are_not_another_desktops() {
+        let (main, laptop) = (DisplayId(1), DisplayId(2));
+        let parked = [(10, SpaceId(1), main), (11, SpaceId(2), main), (20, SpaceId(3), laptop)];
+        assert_eq!(parked_on_other_desktops(parked, SpaceId(1), main), HashSet::from([11]));
+        assert_eq!(parked_on_other_desktops(parked, SpaceId(3), laptop), HashSet::new());
+    }
+
+    /// Another screen's slide clock starts at the first plan that reads the slide, not at
+    /// the plan before it.
+    #[test]
+    fn another_screens_slide_clock_starts_with_the_slide() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut since = None;
+        assert_eq!(slide_clock(&mut since, false, t0), None);
+        assert_eq!(since, None, "no slide: no clock");
+        assert_eq!(slide_clock(&mut since, true, at(250)), Some(Duration::ZERO));
+        assert_eq!(slide_clock(&mut since, true, at(500)), Some(Duration::from_millis(250)));
+        assert_eq!(slide_clock(&mut since, false, at(750)), None);
+        assert_eq!(slide_clock(&mut since, true, at(1000)), Some(Duration::ZERO), "a new slide counts afresh");
     }
 
     /// W4: a window whose restore failed is counted parked by the sliver tap and the patch
