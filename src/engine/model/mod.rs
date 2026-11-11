@@ -1122,6 +1122,21 @@ impl Model {
         }
     }
 
+    /// The window a show of `members` (a stage's standard windows, front to back) raises last
+    /// and focuses: `key` when it is one of them, else their first. Never a hidden app's
+    /// window while another member's app is not hidden ([`Model::app_hidden`]): its focus
+    /// would make the hidden app frontmost and unhide it, where Apple's shows such a stage by
+    /// its other windows and leaves the app hidden. A stage of hidden apps alone keeps its
+    /// key: asked for (by its number), it comes with its app.
+    pub(crate) fn focus_key(&self, key: Option<WindowId>, members: &[WindowId]) -> Option<WindowId> {
+        let key = key.filter(|k| members.contains(k)).or(members.first().copied());
+        if self.hidden_apps.is_empty() {
+            return key;
+        }
+        let shown = |id: &WindowId| self.windows.get(id).is_some_and(|w| !self.hidden_apps.contains(&w.meta.pid));
+        key.filter(shown).or_else(|| members.iter().copied().find(shown)).or(key)
+    }
+
     /// Shows a stage: restore frames, raise back to front (each window's children right after
     /// it), the key window and its children raised last whatever their place in the order,
     /// then focus the key window: no other window, of its app or another, is raised between
@@ -1129,10 +1144,7 @@ impl Model {
     pub(crate) fn show_stage(&mut self, stage: StageId, actions: &mut Vec<Action>) {
         let Some(s) = self.stage(stage) else { return };
         let members = s.windows.clone();
-        let key = s
-            .key
-            .filter(|k| members.contains(k))
-            .or(members.first().copied());
+        let key = self.focus_key(s.key, &members);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()

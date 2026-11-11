@@ -22,6 +22,19 @@
 - Closing the lid keeps the laptop's stages as they were also when macOS moves them to another
   Desktop of the remaining screen a moment after the Dock or the resolution changed there;
   their windows were filed one by one into their apps' stages.
+- With two screens and a full-screen app on the main one, a click in a window on the other
+  screen is no longer taken for a click on the wallpaper (with "Click wallpaper to reveal
+  desktop: Only in Stage Manager" it sent that screen's windows to the strip).
+- With a full-screen app on the main screen, ⌘Tab, a Dock click or a click to an app whose
+  stage is a card on the other screen brings that stage in front, as with nothing in full
+  screen; and a window minimized on that screen goes to the strip, not the Dock.
+- Hide Others (⌥⌘H) while the stage in front holds none of the front app's windows (Finder
+  in front after a click on the desktop, or the stage on another screen) no longer brings a
+  stage of an app just hidden in front, which unhid that app again.
+- Switching to a stage shared with a hidden app leaves that app hidden: the keyboard goes
+  to the stage's front window that shows.
+- A window minimized while the Dock is slow to answer no longer holds every stage switch
+  up for seconds.
 
 ## 1.8.4 — 2026-11-10
 
