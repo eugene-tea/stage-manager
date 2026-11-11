@@ -572,6 +572,8 @@ impl Shell {
     fn write_apple(&mut self, key: &str, value: i64) {
         if let Err(e) = native_settings::write(key, value) {
             tracing::warn!(key, "cannot change the macOS setting: {e}");
+            // No new reading will come: the control goes back to the value in force.
+            self.refresh_settings();
         }
         let hooks = self.hooks;
         later(move || (hooks.poll_now)());
@@ -849,6 +851,9 @@ pub fn check(by: Asker) {
         return;
     };
     tracing::info!(manual, "checking for updates");
+    // The app's own signature is read meanwhile, off this thread (once; at launch already
+    // when automatic checks are on): the answer's offer then runs no `codesign` here.
+    updater::warm();
     update_check::check(move |outcome| later(move || on_checked(serial, outcome)));
     let when = dispatch2::DispatchTime::try_from(CHECK_WATCHDOG).unwrap_or(dispatch2::DispatchTime::NOW);
     let _ = dispatch2::DispatchQueue::main().after(when, move || on_checked(serial, Outcome::Failed("GitHub did not answer".into())));

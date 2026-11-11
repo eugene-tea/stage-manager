@@ -49,6 +49,18 @@
   still launching.
 - Turning Apple's Stage Manager on just after a Desktop change no longer leaves a piece of
   the wallpaper drawn over a window's corner.
+- A setting changed in Settings that could not be saved (the config file has an error, or
+  macOS refused the change) no longer leaves its switch showing the new value: the switch
+  goes back to the setting in force.
+- Clicking Copy Instructions for Agents twice in a row no longer leaves the button reading
+  "Copied".
+- The update check and download no longer tell GitHub your preferred languages: macOS added
+  them to each request by itself. The request now names only Stage Manager and its version.
+- An update that installs when you quit Stage Manager no longer goes in under a copy opened
+  again at that very moment: that copy keeps running, and the update waits for the next
+  check.
+- `stage-manager log summary` no longer shows a day's counts as near zero when two lines
+  crossed midnight out of order, or after the clock was set back a day.
 
 ## 1.8.4 — 2026-11-10
 

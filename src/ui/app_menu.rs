@@ -71,6 +71,18 @@ pub fn note_user_quit() {
     USER_QUIT.store(true, Ordering::SeqCst);
 }
 
+/// The user's Quit (a menu's item, ⌘Q): marked as theirs, then `run` (the app's Quit, which
+/// exits and never returns). When `run` returns, the Quit did not run (the app's state was
+/// busy, or a quit that is not theirs is under way), so the mark goes: a later quit from
+/// elsewhere (a logout, `ctl quit`, a signal) is never taken for the user's, which would
+/// keep a cancelled logout from opening the app again and install a ready update at it.
+pub fn user_quits(run: impl FnOnce()) {
+    note_user_quit();
+    run();
+    USER_QUIT.store(false, Ordering::SeqCst);
+    tracing::warn!("the user's Quit could not run now; choose Quit again");
+}
+
 /// The current Apple event's `keyAEQuitReason` attribute (AERegistry.h, `why?`), 0 when there
 /// is none. Call inside `applicationShouldTerminate:`, while the quit event is current.
 fn quit_reason() -> u32 {
@@ -151,8 +163,7 @@ define_class!(
 
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
-            note_user_quit();
-            status_menu::dispatch(MenuAction::Quit);
+            user_quits(|| status_menu::dispatch(MenuAction::Quit));
         }
     }
 );
@@ -249,4 +260,19 @@ pub fn install(mtm: MainThreadMarker, on_event: impl Fn(AppEvent) + 'static) {
     ));
     app.setMainMenu(Some(&main));
     KEEP.with(|k| *k.borrow_mut() = Some(delegate));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Quit click the app could not run leaves no mark behind: the quit that comes later
+    /// (a logout's, `ctl quit`) is not the user's.
+    #[test]
+    fn a_user_quit_that_did_not_run_is_not_remembered() {
+        let mut seen_inside = false;
+        user_quits(|| seen_inside = user_quit());
+        assert!(seen_inside, "the Quit that runs reads it as the user's");
+        assert!(!user_quit(), "it returned: it did not run, and the mark is gone");
+    }
 }
