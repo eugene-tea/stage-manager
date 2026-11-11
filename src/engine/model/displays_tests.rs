@@ -11,6 +11,7 @@ use crate::engine::persist::LaunchHints;
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::testkit::Desk;
 
+mod arrivals;
 mod corner_frame;
 mod lid_open;
 mod origins;

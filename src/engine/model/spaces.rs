@@ -726,8 +726,12 @@ impl Model {
         }
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
-        // A window not on screen here broke its run of hops: it is not on every Space.
-        self.hops.retain(|id, _| known.contains(id));
+        // A window not on screen here broke its run of hops: it is not on every Space. One of
+        // another screen's Desktop is not this arrival's to judge (every screen arrives in
+        // turn at a Space change: the other screen's arrival ended every run on this one).
+        let (windows, spaces) = (&self.windows, &self.spaces);
+        let elsewhere = |id: &WindowId| windows.get(id).is_some_and(|w| spaces.iter().any(|s| s.id == w.space && s.display != display));
+        self.hops.retain(|id, _| known.contains(id) || elsewhere(id));
         if self.restore.after_restart_window() && bare && carried == 0 && !self.leftovers.is_empty() && !self.space_has_pending(target) {
             // Made from a screen no saved Desktop matched while the restore window is open:
             // its confident windows say which saved Desktop it is. A Desktop made after the
@@ -825,10 +829,15 @@ impl Model {
 
     /// Known Spaces other than `target` with a positive score in `all` (more of their windows
     /// on screen than missing) whose windows stay where they are at this arrival: seen so at
-    /// fewer than [`BESIDE_ARRIVALS`] arrivals in a row.
+    /// fewer than [`BESIDE_ARRIVALS`] arrivals in a row on `target`'s screen.
     fn hold_beside(&mut self, target: SpaceId, all: &BTreeMap<SpaceId, (i64, bool, u64)>) -> BTreeSet<SpaceId> {
         let seen: Vec<SpaceId> = all.iter().filter(|(id, (n, _, _))| **id != target && *n > 0).map(|(id, _)| *id).collect();
-        self.beside.retain(|s, _| seen.contains(s));
+        // Only this screen's Desktops are counted here (`all` holds no other): a count kept
+        // for another screen's Desktop is its own arrivals' to end, or two screens arriving
+        // in turn would never reach two in a row.
+        let display = self.space_display(target);
+        let spaces = &self.spaces;
+        self.beside.retain(|s, _| seen.contains(s) || spaces.iter().any(|sp| sp.id == *s && sp.display != display));
         let mut held = BTreeSet::new();
         for s in seen {
             let n = self.beside.entry(s).or_insert(0);

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- With two screens, windows moved to another Desktop in Mission Control (most of a Desktop's
+  windows at once) join that Desktop's stages; they stayed out of them, and the strip kept
+  looking again every other second.
+- With two screens, a window assigned to all Desktops is recognized as one and shows on every
+  stage; it took the Desktop's front stage's place at every Desktop change.
+
 ## 1.8.4 — 2026-11-10
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were
