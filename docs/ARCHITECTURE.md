@@ -69,8 +69,12 @@ A parked window that never returns is the worst bug.
 2. **Quit** unparks everything, saves the stages, then brings back any window still in a
    park zone (registry, unpark or `state.json` frame, else centered). `CannotComplete` is
    retried on unparks only. Bounds: leftovers ≤ 4 s, registry retries ≤ 2 s. Not clean
-   while a managed window is parked on any Space: the guardian takes over. A stand-down
-   (Apple's Stage Manager turned on) ends with the same check.
+   while a managed window is parked on any Space: the guardian takes over. A window whose
+   restore failed counts as parked only while the window server lists it in a park zone
+   (one at its own frame on a Desktop not shown is not: a dead handle, a full-screen
+   window). A stand-down (Apple's Stage Manager turned on) ends with the same check; the
+   windows it could not bring back are looked for again at each Desktop change, the
+   windows parked since left alone.
 3. **Panic hook** unparks (`try_lock`, falls back to the scan).
 4. **SIGTERM/SIGINT/SIGHUP** through a self-pipe to a watcher thread that unparks and exits.
 5. **Guardian** (`stage-manager --guardian <pid>`), restarted if it dies while the app runs:
