@@ -50,8 +50,8 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AllocAnyThread, define_class, msg_send};
 use objc2_foundation::{
-    NSBundle, NSError, NSHTTPCookieAcceptPolicy, NSHTTPURLResponse, NSMutableURLRequest, NSObject, NSObjectProtocol,
-    NSString, NSURL, NSURLRequest, NSURLRequestCachePolicy, NSURLResponse, NSURLSession, NSURLSessionConfiguration,
+    NSBundle, NSError, NSHTTPCookieAcceptPolicy, NSHTTPURLResponse, NSObject, NSObjectProtocol, NSString, NSURL,
+    NSURLRequest, NSURLResponse, NSURLSession, NSURLSessionConfiguration,
     NSURLSessionDelegate, NSURLSessionTask, NSURLSessionTaskDelegate,
 };
 
@@ -321,17 +321,8 @@ fn download(url: &str, dest: &Path, size_hint: Option<u64>) -> Result<(), String
         return Err("the disk image is too large".into());
     }
     let ns_url = NSURL::URLWithString(&NSString::from_str(url)).ok_or("bad URL")?;
-    let request = NSMutableURLRequest::requestWithURL_cachePolicy_timeoutInterval(
-        &ns_url,
-        NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData,
-        REQUEST_TIMEOUT_SECS,
-    );
-    request.setValue_forHTTPHeaderField(Some(&NSString::from_str("application/octet-stream")), &NSString::from_str("Accept"));
-    request.setValue_forHTTPHeaderField(
-        Some(&NSString::from_str(&format!("Stage-Manager/{}", env!("CARGO_PKG_VERSION")))),
-        &NSString::from_str("User-Agent"),
-    );
-    request.setHTTPShouldHandleCookies(false);
+    // The check's request: nothing in it comes from the user's Mac.
+    let request = super::update_check::request(&ns_url, "application/octet-stream", REQUEST_TIMEOUT_SECS);
     let config = NSURLSessionConfiguration::ephemeralSessionConfiguration();
     config.setHTTPCookieStorage(None);
     config.setHTTPShouldSetCookies(false);

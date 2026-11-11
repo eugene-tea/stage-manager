@@ -7,6 +7,8 @@
   goes back to the setting in force.
 - Clicking Copy Instructions for Agents twice in a row no longer leaves the button reading
   "Copied".
+- The update check and download no longer tell GitHub your preferred languages: macOS added
+  them to each request by itself. The request now names only Stage Manager and its version.
 - An update that installs when you quit Stage Manager no longer goes in under a copy opened
   again at that very moment: that copy keeps running, and the update waits for the next
   check.
