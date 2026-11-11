@@ -4416,8 +4416,10 @@ impl Controller {
             self.unplaced.extend(new);
             if let Some(main) = self.model.as_ref().map(|m| *m.main_display()) {
                 let list = windows::list_windows();
+                // Every screen: the main one's arrival goes on to the others. A second
+                // arrival on them from the same list counted as two in a row (a Desktop seen
+                // beside the one shown had its windows taken as moved at once).
                 self.arrive_here(ob, &list, main, None);
-                self.arrive_others(ob, &list);
             }
             return;
         }
