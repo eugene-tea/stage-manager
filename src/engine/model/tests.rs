@@ -1832,12 +1832,26 @@ fn apps_hidden_together_never_bring_a_hidden_apps_stage_in_front() {
     e.switch(2);
     e.switch(4);
     let obs = e.d.obs();
-    let a = e.m.apps_hidden(&[14, 12], &obs);
+    let a = e.m.apps_hidden(&[14, 12], &obs, |_| true);
     assert!(!a.contains(&Action::Focus { id: w(2) }), "a hidden app's window is never focused: {a:?}");
     e.run(a);
     assert!(![2, 4].contains(&e.active_number()), "a stage of an app not hidden comes in front, not {}", e.active_number());
     assert!(e.slot_numbers().iter().all(|n| ![2, 4].contains(n)), "no card for either: {:?}", e.slot_numbers());
-    assert!(e.m.apps_hidden(&[14, 12], &e.d.obs()).is_empty(), "their own notices after: nothing more");
+    assert!(e.m.apps_hidden(&[14, 12], &e.d.obs(), |_| true).is_empty(), "their own notices after: nothing more");
+}
+
+/// A screen that takes no input now (a full-screen app's Space, a Space change settling, the
+/// lock) gets no stage brought in front at a hide: the Desktop the model has there is not
+/// the one in view, and the switch's focus would make macOS go back to it.
+#[test]
+fn a_hide_switches_nothing_on_a_screen_that_takes_no_input() {
+    let mut e = stages(3, 6);
+    let a = e.m.apps_hidden(&[13], &e.d.obs(), |_| false);
+    assert!(a.iter().all(|x| *x == Action::StateChanged), "nothing moves, nothing is focused: {a:?}");
+    e.run(a);
+    assert_eq!(e.active_number(), 3, "the hidden stage stays in front");
+    assert!(e.m.app_is_hidden(13));
+    assert_eq!(e.slot_numbers(), [1, 2]);
 }
 
 /// A stage shared with a hidden app shows by its other windows (its card draws only them):

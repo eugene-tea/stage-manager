@@ -13,7 +13,7 @@
 //!
 //! A stage shared with other apps stays: it shows the others' windows meanwhile.
 
-use super::{Action, Model, Observation, Pid, StageId, WindowRole};
+use super::{Action, DisplayId, Model, Observation, Pid, StageId, WindowRole};
 
 impl Model {
     /// True while app `pid` is hidden ([`Model::app_hidden`]).
@@ -42,7 +42,7 @@ impl Model {
     /// front on a Desktop shown, the most recent stage of that Desktop comes in front
     /// ([`Model::switch_to`]). Nothing when it was hidden already or has no window here.
     pub fn app_hidden(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
-        self.apps_hidden(&[pid], obs)
+        self.apps_hidden(&[pid], obs, |_| true)
     }
 
     /// [`Model::app_hidden`] for every app hidden by now (`pids`: the one whose notice came and
@@ -50,7 +50,13 @@ impl Model {
     /// its own): all are hidden before a stage is picked to come in front, so that stage is
     /// never one of an app just hidden, whose focus would bring the app straight back.
     /// Nothing when none of them is newly hidden with a window here.
-    pub fn apps_hidden(&mut self, pids: &[Pid], obs: &Observation) -> Vec<Action> {
+    ///
+    /// `switches(display)`: whether a stage may come in front on that screen now. Not on one
+    /// showing a full-screen app's Space, nor while a Space change settles or the screen is
+    /// locked (as every other switch): the Desktop the model has there is not the one in view,
+    /// and a focus on it would make macOS slide back to it. The cards change all the same; the
+    /// hidden stage stays in front there until a card is picked.
+    pub fn apps_hidden(&mut self, pids: &[Pid], obs: &Observation, switches: impl Fn(DisplayId) -> bool) -> Vec<Action> {
         let mut news = false;
         for &pid in pids {
             news |= self.hidden_apps.insert(pid) && self.has_app_window(pid);
@@ -64,7 +70,7 @@ impl Model {
         shown.dedup();
         for space in shown {
             let Some(active) = self.active_stage_in(space) else { continue };
-            if !self.hidden_stage(active) {
+            if !self.hidden_stage(active) || !switches(self.space_display(space)) {
                 continue;
             }
             let recent = self

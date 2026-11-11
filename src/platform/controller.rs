@@ -4171,6 +4171,8 @@ impl Controller {
     /// there is nothing to shrink into a card; the stage coming in front grows as on a click.
     fn on_app_hidden(&mut self, ob: &mut Observer, pid: i32) {
         let obs = self.observe(ob);
+        // No stage comes in front on a screen that takes no input now, as for any switch.
+        let frozen: Vec<DisplayId> = self.managed_displays().into_iter().map(|d| d.id).filter(|d| self.frozen_on(*d)).collect();
         let Some(m) = self.model.as_mut() else { return };
         // Hide Others hides several apps together, each with a notice of its own: every
         // managed app macOS says is hidden by now is hidden for the model before it picks the
@@ -4178,7 +4180,7 @@ impl Controller {
         let mut pids = vec![pid];
         let others: BTreeSet<i32> = m.windows().map(|w| w.meta.pid).filter(|p| *p != pid && !m.app_is_hidden(*p)).collect();
         pids.extend(others.into_iter().filter(|p| super::apps::is_hidden(*p) == Some(true)));
-        let actions = m.apps_hidden(&pids, &obs);
+        let actions = m.apps_hidden(&pids, &obs, |d| !frozen.contains(&d));
         let switched = actions.iter().any(|a| matches!(a, Action::SetFrame { .. }));
         tracing::info!(pid, also = ?&pids[1..], switched, "app hidden: its windows leave the strip; the most recent stage comes in front if it was in front");
         let hidden = |id: WindowId| m.window(id).is_some_and(|w| m.app_is_hidden(w.meta.pid));
