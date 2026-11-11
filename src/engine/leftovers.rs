@@ -39,6 +39,16 @@ pub struct QuitLeft {
     pub ordered_out: usize,
 }
 
+/// Whether the main thread runs the quit's unpark itself (the registry, a recovery scan, a
+/// second leftovers check): only when the WM thread gave no `answer`. An answer of "not
+/// every window is back" is final: the WM thread already unparked, retried and looked at the
+/// window server's list, and the same work again from the main thread brought nothing more
+/// back in any quit on record while adding about two seconds to each; the guardian sees to
+/// what is left.
+pub fn quit_falls_back(answer: Option<bool>) -> bool {
+    answer.is_none()
+}
+
 /// Counts what a quit left: `back` (its leftovers check found no window in a park zone; else
 /// `left_not_taken` of them were this app's own, ordered-out children aside), the windows
 /// whose restore failed (`unrestored`), the registry's (`registry`) and the taken ones still
@@ -359,6 +369,13 @@ mod tests {
         assert_eq!(passed, QuitEnd::PassedOn);
         assert!(!passed.clean_for_user() && !passed.marks_clean());
         assert!(QuitEnd::Clean.marks_clean() && QuitEnd::Clean.clean_for_user());
+    }
+
+    #[test]
+    fn the_main_thread_unparks_only_when_the_wm_thread_did_not_answer() {
+        assert!(quit_falls_back(None), "a hung WM thread: the registry and the scan");
+        assert!(!quit_falls_back(Some(true)));
+        assert!(!quit_falls_back(Some(false)), "it answered: the same unpark twice only made the quit two seconds longer");
     }
 
     /// The 11-06 quit, counted: one window (a browser's child panel) unrestored and in the

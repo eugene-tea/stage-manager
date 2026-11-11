@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A Quit that cannot bring every window back (an app that does not answer, a window on
+  another Desktop) no longer tries the whole thing a second time: it ends about two seconds
+  sooner, and the windows left come back as before, once their app answers or their
+  Desktop shows.
 - A small panel that its app closed while it sat in the corner with its stage (a browser's
   pop-up, for one) no longer makes every later Quit count as failed. Such a Quit logged an
   error and did not install a downloaded update. The panel is still watched until its app

@@ -401,8 +401,9 @@ mod app {
     }
 
     /// Quits cleanly (main thread): every parked window back onscreen through the WM thread
-    /// (the registry and a recovery scan as fallbacks), the clean-exit marker for the
-    /// guardian, the socket removed, then exit.
+    /// (the registry and a recovery scan as fallbacks when it does not answer,
+    /// [`leftovers::quit_falls_back`]), the clean-exit marker for the guardian, the socket
+    /// removed, then exit.
     ///
     /// The WM thread is told first ([`safety::request_quit`]) so a long batch of window moves
     /// stops between two actions and Quit is answered next.
@@ -415,18 +416,13 @@ mod app {
         capture::begin_shutdown();
         let timeout = shutdown_timeout(safety::registry_len().max(wm_thread::logout_windows()));
         tracing::info!(timeout_ms = timeout.as_millis() as u64, "quitting: unparking every window");
-        let ok = match WM.get().map(|wm| wm.shutdown(timeout)) {
-            Some(Some(true)) => true,
-            Some(Some(false)) => {
-                tracing::warn!("some windows did not come back through the WM thread; retrying from the registry");
-                registry_then_leftovers("quit")
-            }
-            Some(None) => {
-                tracing::warn!("WM thread did not answer; unparking from the registry");
-                registry_then_leftovers("quit")
-            }
-            None => {
-                tracing::warn!("no WM thread; unparking from the registry");
+        let answer = WM.get().map(|wm| wm.shutdown(timeout));
+        // The WM thread's answer is final, clean or not; only without one does this thread
+        // unpark from the registry.
+        let ok = match answer.flatten() {
+            Some(ok) if !leftovers::quit_falls_back(Some(ok)) => ok,
+            _ => {
+                tracing::warn!(wm_thread = answer.is_some(), "no answer from the WM thread; unparking from the registry");
                 registry_then_leftovers("quit")
             }
         };
