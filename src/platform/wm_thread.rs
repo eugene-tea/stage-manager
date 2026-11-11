@@ -833,15 +833,19 @@ impl WmState {
 
     /// Tries the held windows again, when there are any, and the stand-down's leftovers
     /// (windows still in the park zone that no registry held), knowing what the stand-down's
-    /// check knew of them ([`retry_leftovers`]).
+    /// check knew of them ([`retry_leftovers`]). The app may arrange windows again by now (a
+    /// resume, a cancelled logout): the windows its controller parks stay where they are
+    /// ([`leftovers_now`]), and the look waits for the list only after a move.
     fn retry_held(&mut self) {
         if self.stand_down.stranded() {
+            let held = safety::held_len();
             let mut all_back = safety::retry_held();
+            let moved = safety::held_len() < held;
             if let Some(kept) = self.stand_down_leftovers.take() {
                 self.stand_down_leftovers = retry_leftovers(
                     kept,
-                    || safety::Ours::now(Default::default()),
-                    |ours| safety::leftovers_back_knowing("stand-down, a Desktop shows", ours),
+                    || leftovers_now(safety::Ours::now(Default::default()), safety::parked_on_purpose()),
+                    |ours| safety::leftovers_retry("stand-down, a Desktop shows", ours, moved),
                 );
                 all_back &= self.stand_down_leftovers.is_none();
             }
@@ -971,6 +975,17 @@ fn retry_leftovers(kept: safety::Ours, now: impl FnOnce() -> safety::Ours, check
     check(kept.merged(now()))
 }
 
+/// What a later look for a stand-down's leftovers knows now: `now` (the registry, the taken
+/// windows, `state.json`), leaving alone the windows `parked` on purpose
+/// ([`safety::parked_on_purpose`]: the controller's own, once the app arranges windows again
+/// after a resume or a cancelled logout). The registry's windows are ours to every check, so
+/// without this the look took each stage parked since for a window left in the corner and
+/// brought all of them back on screen, at every Desktop change, while one window of the
+/// stand-down was still away.
+fn leftovers_now(now: safety::Ours, parked: std::collections::BTreeSet<u32>) -> safety::Ours {
+    now.leaving(parked)
+}
+
 /// What a check knows: what an earlier check left on record (`kept`), else nothing more, with
 /// what is known `now` ([`safety::Ours::merged`]).
 fn with_kept(kept: Option<safety::Ours>, now: safety::Ours) -> safety::Ours {
@@ -1090,6 +1105,35 @@ mod tests {
         let fresh = with_kept(None, now);
         assert_eq!(fresh.known(left), Known::Unknown, "nothing kept: only what is known then");
         assert_eq!(fresh.known(held), Known::Registered);
+    }
+
+    /// After a resume (or a cancelled logout) with a window of the stand-down still away, the
+    /// app arranges windows again: the look at every Desktop change must find only what the
+    /// stand-down left, never the windows the controller parks now (they are the registry's,
+    /// so ours to every check: each was brought back on screen).
+    #[test]
+    fn a_later_look_for_a_stand_downs_leftovers_leaves_the_parked_stages_alone() {
+        use std::collections::BTreeSet;
+
+        let (left, held, parked_since) = (31, 40, 7);
+        // The stand-down's check left one window in the corner (kept for the retries).
+        let kept = safety::Ours::from_parts(BTreeSet::new(), [left, parked_since].into(), None).kept_for_retry(&[left]);
+        // Now: the registry holds the held window and one the fresh controller parked.
+        let now = safety::Ours::from_parts([held, parked_since].into(), BTreeSet::new(), None);
+        let parked: BTreeSet<u32> = [parked_since].into();
+        let mut seen = None;
+        let _ = retry_leftovers(kept.clone(), || leftovers_now(now.clone(), parked.clone()), |ours| {
+            seen = Some(ours);
+            None
+        });
+        let ours = seen.expect("the check ran");
+        assert!(ours.left_alone(parked_since), "a stage's window parked since: stays parked");
+        assert!(!ours.left_alone(left), "the window the stand-down left is still looked for");
+        assert!(!ours.left_alone(held), "a held window too");
+        // A check right after an unpark (quit, stand-down) leaves nothing alone, whatever an
+        // earlier look did.
+        let at_quit = with_kept(Some(kept.leaving(parked)), now);
+        assert!(!at_quit.left_alone(parked_since));
     }
 
     /// The review of 6X2, 2: a managed window a busy app left as a sliver at the stand-down
