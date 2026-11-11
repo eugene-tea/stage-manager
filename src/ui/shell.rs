@@ -419,9 +419,12 @@ impl Shell {
             updater::warm();
         }
         // A staged copy an earlier update left beside the app (it quit while an update
-        // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6);
-        // the update it held is checked for again within the first minute (the owner's go 11-09).
-        updater::clean_stale_work(|found| later(move || stale_work_found(found)));
+        // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6) or
+        // automatic installs are on (it then serves the next check, verified again, in place
+        // of the same download at every launch); the update it held is checked for again
+        // within the first minute (the owner's go 11-09).
+        let auto = self.config.app.check_for_updates && self.config.app.install_updates;
+        updater::clean_stale_work(auto, |found| later(move || stale_work_found(found)));
         let note = RcBlock::new(|_t: NonNull<NSTimer>| show_update_note());
         // SAFETY: the blocks run on the main run loop, which keeps the timers; we keep them too.
         unsafe {
@@ -808,8 +811,8 @@ fn first_check() {
 
 /// What the launch found beside the installed app (main thread): an update an earlier run
 /// downloaded and verified that never went in is checked for again at the first check, or at
-/// once when that came already; never trusted from the old folder (it is gone, and a new
-/// check downloads and verifies from scratch).
+/// once when that came already; never trusted from the old folder (it is gone, or kept for
+/// an automatic install and judged whole again before it is used).
 fn stale_work_found(found: StaleWork) {
     if !self_update::checks_early(found) {
         return;
@@ -861,18 +864,19 @@ pub fn check(by: Asker) {
 
 /// The check numbered `serial` ended (its answer, or the watchdog: whichever comes first).
 fn on_checked(serial: u64, outcome: Outcome) {
-    let Some(Some((mtm, skipped, by, auto_install))) = with(|s| {
+    let Some(Some((mtm, skipped, by, auto_install, owed))) = with(|s| {
         let (running, by) = s.update?;
         if running != serial {
             return None;
         }
         s.update = None;
+        let mut owed = false;
         if !matches!(outcome, Outcome::Failed(_)) {
             s.state.last_update_check = Some(now_secs());
-            s.left_behind = false;
+            owed = std::mem::take(&mut s.left_behind);
             s.save_state();
         }
-        Some((s.mtm, s.state.skipped_version.clone(), by, s.config.app.install_updates))
+        Some((s.mtm, s.state.skipped_version.clone(), by, s.config.app.install_updates, owed))
     }) else {
         return;
     };
@@ -917,6 +921,11 @@ fn on_checked(serial: u64, outcome: Outcome) {
                 tracing::info!("automatic update check failed: {e}");
             }
         }
+    }
+    // The check a left-behind update was owed got its answer: a staged copy the launch kept
+    // goes unless an install took it up just now (it uses the copy, or replaces it).
+    if owed && with(|s| matches!(s.install, Install::Idle)) == Some(true) {
+        updater::drop_stale_work();
     }
 }
 

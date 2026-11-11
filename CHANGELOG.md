@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- With "Install updates automatically" on, an update that was downloaded but not installed
+  before Stage Manager quit is no longer downloaded again at every launch: the copy stays,
+  is checked again in full, and is used if it is still the newest version. A Mac whose
+  screen locks or sleeps within two minutes never reached the automatic install, and
+  fetched the same update each time it started.
 - With "Install updates automatically" on, an update no longer installs in the middle of a
   film or a video call. Two minutes with no input counted as being away, so every window
   came back from the strip and the app reopened while you watched. It now waits while

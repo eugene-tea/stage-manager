@@ -6,9 +6,11 @@
 #
 #   1. The update is readied as an automatic install, then `ctl quit` (not the user's Quit):
 #      nothing is installed, no helper starts, the staged copy is left behind.
-#   2. The next launch removes that folder and says it checks again within the first minute.
-#   3. Readied again, then the menu's Quit (`ctl debug-menu-quit`): the helper replaces the
-#      scratch copy with 99.0.0 and opens nothing.
+#   2. The next launch keeps that copy (automatic installs are on) and says it checks again
+#      within the first minute.
+#   3. Readied again from the kept copy, verified again and not downloaded, then the menu's
+#      Quit (`ctl debug-menu-quit`): the helper replaces the scratch copy with 99.0.0 and
+#      opens nothing.
 #
 # Manages no app (STAGE_MANAGER_ONLY names a bundle ID nothing has), in a scratch home, no
 # login item; never touches ~/Applications, the dev copy or the installed app. Refuses to run
@@ -126,15 +128,18 @@ check '! log_text | grep -q "installer helper started"' "no installer helper sta
 check '[ "$(version_of "$APP")" = "$OLD_VERSION" ]' "the copy is still $OLD_VERSION"
 check '[ -d "$WORK" ]' "the staged copy is left behind"
 
-echo "-- 2. the next launch removes it and checks again early"
+echo "-- 2. the next launch keeps it and checks again early"
 start_app || { bad "the test copy did not start again"; exit 1; }
-check 'wait_log 1 "removed a working folder an earlier update left behind" 20' "the left-behind folder is removed"
+check 'wait_log 1 "an earlier run.s downloaded update stays beside the app" 20' "the left-behind copy is kept"
 check 'wait_log 1 "checking again within the first minute" 20' "an early check is owed (test runs make no automatic checks)"
-check '[ ! -d "$WORK" ]' "the working folder is gone"
+check '[ -d "$WORK/Stage Manager.app" ]' "the staged copy is still there"
+check '! log_text | grep -q "removed a working folder"' "nothing was removed"
 
 echo "-- 3. the user's Quit installs it, and nothing reopens"
 "$BIN" ctl debug-update >/dev/null
-check 'wait_log 2 "update: ready to install" 120' "verified again from scratch"
+check 'wait_log 2 "update: ready to install" 120' "ready again"
+check 'log_text | grep -q "the copy an earlier run staged is verified again; nothing is downloaded"' "the kept copy was verified again, not downloaded"
+check '[ "$(log_text | grep -c "update: downloaded; verifying")" -eq 1 ]' "one download in all"
 sleep 2
 if log_text | grep -q "update: installing; quitting first"; then
   bad "the Mac had no input for 120 s, so the automatic install went at once: run again while at the Mac"

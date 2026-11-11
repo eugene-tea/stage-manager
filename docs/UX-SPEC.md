@@ -468,8 +468,9 @@ A downloaded update also installs when you quit Stage Manager: the menu's Quit, 
 Settings and About. It then stays closed (no relaunch: the user asked it to stop). Never at a
 logout, restart or shutdown, while Apple's Stage Manager is on, or when a window could not
 be brought back. A launch that finds a downloaded update an earlier run left (it quit while
-the update waited) checks again within its first minute, from scratch, instead of a day
-later. An automatic install still waits, after an unlock, for 120 s with no input; and
+the update waited) checks again within its first minute instead of a day later; with
+automatic installs on the downloaded copy stays beside the app, and is used only once it
+passed every check again and is the release that check finds (otherwise: from scratch). An automatic install still waits, after an unlock, for 120 s with no input; and
 while any process keeps the display awake (a film, a call: macOS's own sign that someone
 watches with no input) it waits, then counts its 120 s from the end of that.
 An alert that comes from a Settings control (Check for Updates… and the install it leads

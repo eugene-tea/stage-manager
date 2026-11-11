@@ -453,18 +453,39 @@ pub enum StaleWork {
     HelperRuns,
     /// A folder marked [`KEEP_MARK`]: it holds a copy an update could not put back.
     Kept,
+    /// An earlier run's staged update, left where it is: automatic installs are on, and the
+    /// next check uses it, verified again, if it is still the latest ([`staged_serves`]).
+    Staged,
     /// An earlier run's staged update, removed.
     Removed,
     /// An earlier run's staged update that could not be removed.
     NotRemoved,
 }
 
+/// What the launch does with a working folder an earlier run left, once no helper runs and
+/// it is not marked [`KEEP_MARK`]: with automatic installs on (`auto`), a folder that holds a
+/// staged copy (`staged`) and no app set aside (`aside`: an exchange that never finished)
+/// stays for the next check; anything else is removed. A Mac that never sits unlocked and
+/// idle long enough for the automatic install downloaded the same update at every launch.
+pub fn keeps_staged(auto: bool, staged: bool, aside: bool) -> bool {
+    auto && staged && !aside
+}
+
+/// Whether a staged copy an earlier run left serves the release wanted now, in place of a
+/// download: only when it passed the whole of [`judge`] again just now (`judged`: signature,
+/// our requirement and team, notarized, newer than the running app) and is exactly the
+/// version the check found (`wanted`). Never trusted for having been verified before.
+pub fn staged_serves(judged: &Result<Version, Rejection>, wanted: &Version) -> bool {
+    judged.as_ref().is_ok_and(|v| v.cmp(wanted) == std::cmp::Ordering::Equal)
+}
+
 /// Whether the launch checks for updates within its first minute instead of waiting for the
 /// daily check: an earlier run downloaded and verified an update that never went in (it quit
-/// while the update waited). The new check verifies from scratch; the old folder is never
-/// trusted (a fresh download replaces it).
+/// while the update waited). The new check verifies from scratch: a copy still staged is
+/// judged whole again and used only if it is the release the check finds
+/// ([`staged_serves`]); otherwise a fresh download replaces it.
 pub fn checks_early(found: StaleWork) -> bool {
-    matches!(found, StaleWork::Removed | StaleWork::NotRemoved)
+    matches!(found, StaleWork::Staged | StaleWork::Removed | StaleWork::NotRemoved)
 }
 
 /// Whether an automatic check runs now: a left-behind update is owed one (`left_behind`, until
@@ -1135,12 +1156,31 @@ Runtime Version=26.0.0";
         assert!(!quit_installs(QuitFacts { clean: false, ..user }), "windows left for the guardian");
     }
 
+    /// A Mac whose screen locks within two minutes never installs automatically; it downloaded
+    /// the same update again at every launch. The staged copy stays for the next check, and
+    /// serves only verified again and only as the release that check finds.
+    #[test]
+    fn a_staged_copy_is_kept_for_the_next_launch_and_used_only_verified_again() {
+        assert!(keeps_staged(true, true, false));
+        assert!(!keeps_staged(false, true, false), "automatic installs off: nothing waits beside the app");
+        assert!(!keeps_staged(true, false, false), "no copy in the folder");
+        assert!(!keeps_staged(true, true, true), "an exchange that never finished: from scratch");
+        let v = |s: &str| Version::parse(s).expect("version");
+        assert!(staged_serves(&Ok(v("1.9.0")), &v("1.9.0")));
+        assert!(staged_serves(&Ok(v("1.9")), &v("1.9.0")), "compared parsed");
+        assert!(!staged_serves(&Ok(v("1.9.0")), &v("1.9.1")), "a newer release came since: downloaded");
+        assert!(!staged_serves(&Ok(v("1.9.1")), &v("1.9.0")), "never anything but the release found");
+        assert!(!staged_serves(&Err(Rejection::Signature("a sealed resource is missing".into())), &v("1.9.0")), "half copied, or changed");
+        assert!(!staged_serves(&Err(Rejection::NotNewer("1.9.0".into())), &v("1.9.0")), "installed by hand since");
+    }
+
     /// The owner's go 11-09: a staged update an earlier run left is checked again at once, from
     /// scratch; a kept copy (a failed install's) and a running helper's folder are not.
     #[test]
     fn a_left_behind_update_is_checked_again_early() {
         assert!(checks_early(StaleWork::Removed));
         assert!(checks_early(StaleWork::NotRemoved));
+        assert!(checks_early(StaleWork::Staged), "a copy kept for the check is owed that check");
         for w in [StaleWork::Nothing, StaleWork::HelperRuns, StaleWork::Kept] {
             assert!(!checks_early(w), "{w:?}");
         }
