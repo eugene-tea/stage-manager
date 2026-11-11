@@ -47,7 +47,7 @@ impl Controller {
         }
         let screen = d.id.0;
         let key = self.shot_key(d);
-        let block = desktop_shot::block(d.frame, Some(rect));
+        let block = desktop_shot::block(d.frame, Some(rect), d.corner);
         let anim = &config.style.animation;
         let grows = anim.activation_grows && anim.animates() && self.strip_visible;
         let icons = items.is_none_or(|i| i.iter().any(|i| i.intersect(&block).is_some()));
@@ -88,7 +88,7 @@ impl Controller {
         if !self.patches.get(&screen).and_then(|t| t.sent.as_ref()).is_some_and(|p| p.still.is_some() || p.hold) {
             return;
         }
-        let in_corner = desktop_shot::zone(d.frame).contains(at);
+        let in_corner = desktop_shot::zone(d.frame, d.corner).contains(at);
         let on_desktop = in_corner || {
             let own = std::process::id() as i32;
             let list: Vec<_> = windows::list_windows().into_iter().filter(|w| w.pid != own).collect();

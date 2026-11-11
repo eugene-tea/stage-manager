@@ -3027,7 +3027,7 @@ impl Controller {
     /// What a still of the desktop in the park corner of display `d` is of now
     /// ([`desktop_shot::Key`]): the Space count, the display, Finder's icons as last read.
     fn shot_key(&self, d: &Display) -> desktop_shot::Key {
-        desktop_shot::Key::new(self.space_changes, d.frame, self.patch_items.known.as_deref())
+        desktop_shot::Key::new(self.space_changes, d.frame, d.corner, self.patch_items.known.as_deref())
     }
 
     /// The park corner a switch's overlay covers while its incoming windows (`arriving`) wait

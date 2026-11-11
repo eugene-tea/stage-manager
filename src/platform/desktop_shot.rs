@@ -37,6 +37,7 @@ use objc2_core_graphics::CGImage;
 use super::capture::{self, DesktopStill};
 use super::{pixels, wallpaper};
 use crate::engine::geometry::Rect;
+use crate::engine::park::Corner;
 use crate::engine::patch_still::{self as ps, AGAIN_AFTER_TOUCH, Block, FADE, Still};
 use crate::engine::wallpaper as wp;
 
@@ -80,9 +81,10 @@ pub struct Key {
 }
 
 impl Key {
-    /// The key for `display`, Desktop count `space`, from the icons known (`None`: not known).
-    pub fn new(space: u64, display: Rect, known: Option<&[Rect]>) -> Self {
-        let zone = zone(display);
+    /// The key for `display` (its park `corner`), Desktop count `space`, from the icons known
+    /// (`None`: not known).
+    pub fn new(space: u64, display: Rect, corner: Corner, known: Option<&[Rect]>) -> Self {
+        let zone = zone(display, corner);
         let icons = known.map(|k| k.iter().copied().filter(|i| i.intersect(&zone).is_some()).collect());
         Self { space, display, icons }
     }
@@ -118,22 +120,28 @@ pub enum Layers {
 /// [`usable`]'s reason when there is no still at all.
 const NO_STILL: &str = "no still of the desktop yet";
 
-/// The square of side `side` at `display`'s bottom-right corner, on the display.
-fn corner_square(display: Rect, side: f64) -> Rect {
+/// The square of side `side` at `display`'s park `corner`, on the display. A screen whose
+/// bottom-right corner has another screen beyond it parks at another corner
+/// ([`crate::engine::park::choose_corner`]): its still is of that corner (taken at the
+/// bottom-right one, the block grown to hold the patch was the display's whole width, and an
+/// icon moved under the real corner changed no key).
+fn corner_square(display: Rect, side: f64, corner: Corner) -> Rect {
     let w = side.min(display.w);
     let h = side.min(display.h);
-    Rect::new(display.max_x() - w, display.max_y() - h, w, h)
+    let x = if corner.right() { display.max_x() - w } else { display.x };
+    let y = if corner.bottom() { display.max_y() - h } else { display.y };
+    Rect::new(x, y, w, h)
 }
 
-/// The corner whose icons key a still: [`ZONE`] square.
-pub fn zone(display: Rect) -> Rect {
-    corner_square(display, ZONE)
+/// The corner whose icons key a still: [`ZONE`] square at the display's park `corner`.
+pub fn zone(display: Rect, corner: Corner) -> Rect {
+    corner_square(display, ZONE, corner)
 }
 
-/// The block a still takes: the [`BLOCK`] square at the corner, grown to hold `rect` (the
-/// patch's rectangle) when given, on the display, in whole points.
-pub fn block(display: Rect, rect: Option<Rect>) -> Rect {
-    let square = corner_square(display, BLOCK);
+/// The block a still takes: the [`BLOCK`] square at the display's park `corner`, grown to
+/// hold `rect` (the patch's rectangle) when given, on the display, in whole points.
+pub fn block(display: Rect, rect: Option<Rect>, corner: Corner) -> Rect {
+    let square = corner_square(display, BLOCK, corner);
     let r = rect.and_then(|r| r.intersect(&display)).map_or(square, |r| square.union(&r));
     let (x, y) = (r.x.floor().max(display.x), r.y.floor().max(display.y));
     let (mx, my) = (r.max_x().ceil().min(display.max_x()), r.max_y().ceil().min(display.max_y()));
@@ -621,41 +629,54 @@ mod tests {
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
 
     fn meta(key: Key, taken: Instant) -> Meta {
-        Meta { key, region: block(MAIN, None), scale: 2.0, taken, opaque: true, serial: 1 }
+        Meta { key, region: block(MAIN, None, Corner::BottomRight), scale: 2.0, taken, opaque: true, serial: 1 }
     }
 
     #[test]
     fn the_still_takes_the_corner_block_grown_to_hold_the_patch() {
-        assert_eq!(block(MAIN, None), Rect::new(2240.0, 1120.0, 320.0, 320.0));
+        assert_eq!(block(MAIN, None, Corner::BottomRight), Rect::new(2240.0, 1120.0, 320.0, 320.0));
         let big = Rect::new(2100.5, 1300.0, 480.0, 140.0);
-        let b = block(MAIN, Some(big));
+        let b = block(MAIN, Some(big), Corner::BottomRight);
         let on = big.intersect(&MAIN).expect("on the display");
-        assert!(b.contains_rect(&on) && b.contains_rect(&block(MAIN, None)), "{b:?}");
+        assert!(b.contains_rect(&on) && b.contains_rect(&block(MAIN, None, Corner::BottomRight)), "{b:?}");
         assert_eq!((b.x, b.max_x(), b.max_y()), (2100.0, 2560.0, 1440.0));
         // A display smaller than the block: the display.
         let small = Rect::new(0.0, 0.0, 200.0, 150.0);
-        assert_eq!(block(small, None), small);
+        assert_eq!(block(small, None, Corner::BottomRight), small);
     }
 
     #[test]
     fn the_key_holds_only_the_icons_in_the_corner() {
         let near = Rect::new(2400.0, 1300.0, 100.0, 100.0);
         let far = Rect::new(100.0, 100.0, 100.0, 100.0);
-        assert_eq!(Key::new(3, MAIN, Some(&[far, near])).icons, Some(vec![near]));
-        assert_eq!(Key::new(3, MAIN, None).icons, None);
+        assert_eq!(Key::new(3, MAIN, Corner::BottomRight, Some(&[far, near])).icons, Some(vec![near]));
+        assert_eq!(Key::new(3, MAIN, Corner::BottomRight, None).icons, None);
+    }
+
+    /// A screen that parks at its bottom-left corner (another screen right of it): the still
+    /// is of that corner, and the icons there key it.
+    #[test]
+    fn the_block_and_the_icons_are_the_park_corners() {
+        assert_eq!(block(MAIN, None, Corner::BottomLeft), Rect::new(0.0, 1120.0, 320.0, 320.0));
+        let patch = Rect::new(0.0, 1180.0, 40.0, 260.0);
+        assert_eq!(block(MAIN, Some(patch), Corner::BottomLeft), Rect::new(0.0, 1120.0, 320.0, 320.0), "never the display's whole width");
+        assert_eq!(block(MAIN, None, Corner::TopRight), Rect::new(2240.0, 0.0, 320.0, 320.0));
+        let left = Rect::new(100.0, 1300.0, 100.0, 100.0);
+        let right = Rect::new(2400.0, 1300.0, 100.0, 100.0);
+        assert_eq!(Key::new(3, MAIN, Corner::BottomLeft, Some(&[left, right])).icons, Some(vec![left]));
     }
 
     #[test]
     fn a_still_is_due_when_missing_stale_or_for_another_key() {
         let now = Instant::now();
-        let key = Key::new(1, MAIN, Some(&[]));
-        let region = block(MAIN, None);
+        let key = Key::new(1, MAIN, Corner::BottomRight, Some(&[]));
+        let region = block(MAIN, None, Corner::BottomRight);
         assert!(due(None, &key, region, &[], now));
         let m = meta(key.clone(), now);
         assert!(!due(Some(&m), &key, region, &[], now + Duration::from_secs(2)));
         assert!(due(Some(&m), &key, region, &[], now + REFRESH_EVERY));
         assert!(due(Some(&m), &Key { space: 2, ..key.clone() }, region, &[], now));
-        let moved = Key::new(1, MAIN, Some(&[Rect::new(2400.0, 1300.0, 100.0, 100.0)]));
+        let moved = Key::new(1, MAIN, Corner::BottomRight, Some(&[Rect::new(2400.0, 1300.0, 100.0, 100.0)]));
         assert!(due(Some(&m), &moved, region, &[], now), "an icon came into the corner");
         assert!(due(Some(&m), &key, Rect::new(2000.0, 1120.0, 560.0, 320.0), &[], now), "a bigger block");
     }
@@ -664,7 +685,7 @@ mod tests {
     fn a_still_stands_for_the_corner_only_for_its_desktop_icons_and_age() {
         let now = Instant::now();
         let icon = Rect::new(2400.0, 1300.0, 100.0, 100.0);
-        let key = Key::new(1, MAIN, Some(&[icon]));
+        let key = Key::new(1, MAIN, Corner::BottomRight, Some(&[icon]));
         let m = meta(key.clone(), now);
         let corner = Rect::new(2499.0, 1348.0, 61.0, 92.0);
         assert_eq!(usable(Some(&m), corner, &key, now), Ok(Layers::Alone));
@@ -674,9 +695,9 @@ mod tests {
             usable(Some(&m), corner, &Key { space: 2, ..key.clone() }, now),
             Err("the desktop's still is of another Desktop or display")
         );
-        assert_eq!(usable(Some(&m), corner, &Key::new(1, MAIN, Some(&[])), now), Err("the desktop's icons changed since its still"));
+        assert_eq!(usable(Some(&m), corner, &Key::new(1, MAIN, Corner::BottomRight, Some(&[])), now), Err("the desktop's icons changed since its still"));
         // Icons not known now: its age alone.
-        assert_eq!(usable(Some(&m), corner, &Key::new(1, MAIN, None), now), Ok(Layers::Alone));
+        assert_eq!(usable(Some(&m), corner, &Key::new(1, MAIN, Corner::BottomRight, None), now), Ok(Layers::Alone));
         assert_eq!(usable(Some(&m), corner, &key, now + MAX_AGE + Duration::from_secs(1)), Err("the desktop's still is too old"));
         let outside = Rect::new(1900.0, 1348.0, 660.0, 92.0);
         assert_eq!(usable(Some(&m), outside, &key, now), Err("the desktop's still does not hold the corner"));
@@ -705,8 +726,8 @@ mod tests {
     #[test]
     fn a_still_is_taken_again_after_a_touch_a_wallpaper_change_or_a_predicted_frame() {
         let t0 = Instant::now();
-        let key = Key::new(1, MAIN, Some(&[]));
-        let region = block(MAIN, None);
+        let key = Key::new(1, MAIN, Corner::BottomRight, Some(&[]));
+        let region = block(MAIN, None, Corner::BottomRight);
         let m = meta(key.clone(), t0);
         let soon = t0 + Duration::from_secs(1);
         // A press on the desktop at t0 + 1 s: due once its moment came, not before.
@@ -752,7 +773,7 @@ mod tests {
     #[test]
     fn an_answer_older_than_the_still_kept_is_dropped() {
         let t0 = Instant::now();
-        let kept = meta(Key::new(1, MAIN, Some(&[])), t0 + Duration::from_secs(6));
+        let kept = meta(Key::new(1, MAIN, Corner::BottomRight, Some(&[])), t0 + Duration::from_secs(6));
         assert!(newer(None, t0));
         assert!(!newer(Some(&kept), t0), "a stalled capture started before the kept still");
         assert!(!newer(Some(&kept), kept.taken));
