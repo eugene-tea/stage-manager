@@ -24,8 +24,8 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::guardian::{self, Attempts};
-use super::{ctl, safety, windows};
-use crate::engine::guard_watch::{Event, Release, Watch};
+use super::{ctl, safety, session, windows};
+use crate::engine::guard_watch::{Event, LockSeen, Release, Watch};
 use crate::engine::handoff::{Answer, Offer, TakenDrops, Trust, answer_from_reply, vet};
 use crate::engine::recovery::Registered;
 
@@ -90,6 +90,8 @@ pub struct TakenWatch {
     watch: Option<Watch>,
     attempts: HashMap<u32, Attempts>,
     drops: TakenDrops,
+    /// The screen's lock as the passes saw it: the tries start afresh at the unlock.
+    lock: LockSeen,
 }
 
 impl TakenWatch {
@@ -107,6 +109,11 @@ impl TakenWatch {
             return;
         }
         let now = Instant::now();
+        // As the guardian does: behind a locked screen every try failed and the tries slowed
+        // down; at the unlock each is made again at once.
+        if self.lock.unlocked(session::screen_locked()) {
+            self.attempts.clear();
+        }
         // The window server's complete list (every Desktop, ordered-out windows included).
         let list = windows::list_windows();
         let listed: HashSet<u32> = list.iter().map(|c| c.id).collect();

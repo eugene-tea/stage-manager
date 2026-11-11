@@ -61,6 +61,14 @@
   check.
 - `stage-manager log summary` no longer shows a day's counts as near zero when two lines
   crossed midnight out of order, or after the clock was set back a day.
+- Quitting while a window on another Desktop can't be reached (one in full screen, say) no
+  longer counts as a quit that left a window hidden when the window was never hidden: an
+  update that is ready installs at that Quit, and nothing stays running to watch for it.
+- After Apple's Stage Manager is turned off again, or a logout is cancelled, while a window
+  is still out of reach on another Desktop: changing Desktops no longer brings the windows of
+  every other stage back on screen for a moment, nor holds the strip for two seconds.
+- When Stage Manager quit or crashed behind a locked screen, the windows it could not bring
+  back then come back as the screen unlocks, not up to five seconds later.
 
 ## 1.8.4 — 2026-11-10
 

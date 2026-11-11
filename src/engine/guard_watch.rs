@@ -567,6 +567,26 @@ impl Waiting {
     }
 }
 
+/// The screen's lock as a watch's passes saw it. Behind a locked screen Accessibility lists
+/// no window, so every try at a window the window server shows fails, and the platform
+/// slows its tries down (a pass every few seconds). The first pass after the unlock tries
+/// each again at once ([`Self::unlocked`]): a log of 11-06, a copy that quit behind the lock
+/// left nine windows of the shown Desktop parked, and they came back five seconds after the
+/// unlock, at the slow pace's next turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LockSeen {
+    locked: bool,
+}
+
+impl LockSeen {
+    /// Notes whether the screen is `locked` at this pass. True when it was at the pass
+    /// before and no longer is: the tries start afresh.
+    pub fn unlocked(&mut self, locked: bool) -> bool {
+        let was = std::mem::replace(&mut self.locked, locked);
+        was && !locked
+    }
+}
+
 fn waiting(id: u32, pid: i32, registered: Option<Rect>) -> Waiting {
     Waiting { id, pid, registered, fitted: false, fitted_at: None, unvouched: false, look: None, out_since: None, missing_since: None }
 }
@@ -635,6 +655,15 @@ mod tests {
     /// Desktop 2 shows, window 1 at `frame` on screen.
     fn on_desktop_2(frame: Rect) -> Vec<Listed> {
         vec![at(1, frame, true), at(OTHER, Rect::new(80.0, 78.0, 520.0, 392.0), true), at(9, RESTORE, false)]
+    }
+
+    /// Behind a locked screen every try fails and the tries slow down; the pass that first
+    /// sees the screen unlocked starts them afresh, once.
+    #[test]
+    fn the_first_pass_after_an_unlock_starts_the_tries_afresh() {
+        let mut lock = LockSeen::default();
+        let seen: Vec<bool> = [false, true, true, false, false, true, false].into_iter().map(|locked| lock.unlocked(locked)).collect();
+        assert_eq!(seen, [false, false, false, true, false, false, true]);
     }
 
     /// 6X, the owner's log: helper apps' invisible windows (1×1 at 1280,720 seen on the

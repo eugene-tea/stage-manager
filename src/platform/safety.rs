@@ -262,6 +262,15 @@ pub fn held_len() -> usize {
     lock_held().len()
 }
 
+/// The windows the controller parks itself now: the registry's, the held ones aside (those
+/// belong to no controller, [`HELD`]). None while nothing is arranged (standing down, a
+/// logout's hold: the registry holds only held windows then). A later look for windows a
+/// stand-down left leaves these where they are ([`Ours::leaving`]).
+pub fn parked_on_purpose() -> BTreeSet<u32> {
+    let held: BTreeSet<u32> = lock_held().keys().copied().collect();
+    registry_ids().into_iter().filter(|id| !held.contains(id)).collect()
+}
+
 /// Tries every held window again (its Space may show now); those back leave the hold and
 /// the registry. True when none is left.
 pub fn retry_held() -> bool {
@@ -638,6 +647,12 @@ pub struct Ours {
     /// in the park zone at the check goes back there before any `state.json` frame (its
     /// registry entry left as done with the batch).
     pub unparked: BTreeMap<u32, Rect>,
+    /// Windows parked on purpose as the check runs ([`parked_on_purpose`]): left where they
+    /// are ([`Self::left_alone`]). Empty for a check right after an unpark (nothing is parked
+    /// on purpose then); a later look for a stand-down's leftovers, made while the app
+    /// arranges windows again, names the stages' parked windows here, or it would bring every
+    /// one of them back on screen.
+    pub parked_now: BTreeSet<u32>,
 }
 
 impl Ours {
@@ -652,7 +667,19 @@ impl Ours {
 
     /// What is known from the registry's ids, the model's windows and `state.json`.
     pub fn from_parts(registered: BTreeSet<u32>, managed: BTreeSet<u32>, state: Option<StateFile>) -> Self {
-        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new() }
+        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new(), parked_now: BTreeSet::new() }
+    }
+
+    /// `self`, leaving the windows `parked_now` where they are ([`Self::parked_now`]).
+    pub fn leaving(mut self, parked_now: BTreeSet<u32>) -> Self {
+        self.parked_now = parked_now;
+        self
+    }
+
+    /// True when window `id` is parked on purpose now: no check brings it back, whatever
+    /// else is known of it ([`Self::parked_now`]).
+    pub fn left_alone(&self, id: u32) -> bool {
+        self.parked_now.contains(&id)
     }
 
     /// `self`, with the frames the controller's latest unpark restored windows to
@@ -705,6 +732,8 @@ impl Ours {
         self.shown_managed = now.shown_managed;
         // A later unpark's frame is the fresher one.
         self.unparked.extend(now.unparked);
+        // What is parked on purpose is `now`'s alone.
+        self.parked_now = now.parked_now;
         if self.state.is_none() {
             self.state = now.state;
         }
@@ -756,8 +785,9 @@ pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
     let mut registered_tabs = Vec::new();
     let left = list
         .into_iter()
-        // A transparent window is no window we parked (helpers keep such windows anywhere).
-        .filter(|w| w.layer == 0 && w.alpha > 0.0 && displays.parks(w.bounds))
+        // A transparent window is no window we parked (helpers keep such windows anywhere);
+        // one parked on purpose now stays where it is.
+        .filter(|w| w.layer == 0 && w.alpha > 0.0 && !ours.left_alone(w.id) && displays.parks(w.bounds))
         .filter(|w| {
             let bundle = bundles.entry(w.pid).or_insert_with(|| bundle_id_of(w.pid));
             observe::app_allowed(only.as_ref(), own, w.pid, bundle.as_deref())
@@ -1235,13 +1265,31 @@ pub fn leftovers_back(reason: &str, managed: BTreeSet<u32>) -> bool {
 /// check knew, the windows left judged ours ([`Ours::kept_for_retry`]), for the next try:
 /// a stand-down's retries pass it until each window is back (the review of 6X2, 2).
 pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
+    leftovers_check(reason, ours, true)
+}
+
+/// A later look for the windows an earlier check left ([`leftovers_back_knowing`]'s answer,
+/// merged with what is known now), with no unpark before it (a Desktop showed while a
+/// stand-down's window is still away). `moved`: the list may still be changing (windows
+/// moved a moment ago), and gets its settle as after an unpark. Else the caller has let it
+/// settle already: it is read as it stands, and read again without a wait when no window
+/// could be asked to move ([`leftovers::settle_before`], [`leftovers::settle_after`]).
+/// While the app arranges windows again, `ours` names the windows parked on purpose
+/// ([`Ours::leaving`]).
+pub fn leftovers_retry(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
+    leftovers_check(reason, ours, moved)
+}
+
+/// The leftovers check ([`leftovers_back_knowing`], [`leftovers_retry`]); `moved`: windows
+/// were moved a moment before it (the list needs its settle).
+fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     let start = Instant::now();
     let end = start + LEFTOVERS_MAX;
     let read = |max: Duration| {
         let began = Instant::now();
         leftovers::settle(|| stranded_allowed(&ours), max, UNPARK_POLL, || began.elapsed(), std::thread::sleep)
     };
-    let left = read(UNPARK_SETTLE);
+    let left = read(leftovers::settle_before(moved));
     if left.is_empty() {
         LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
         return None;
@@ -1250,8 +1298,8 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
     tracing::warn!(reason, windows = ?seen, "windows still parked after unparking (id, on screen); bringing each back");
     // The second read keeps its full settle unless the first ran long.
     let budget_end = (Instant::now() + LEFTOVER_BUDGET).min(end.checked_sub(UNPARK_SETTLE).unwrap_or(end));
-    let unreached = bring_back_leftovers(reason, &left, budget_end, &ours);
-    let after = read(UNPARK_SETTLE.min(end.saturating_duration_since(Instant::now())));
+    let (unreached, tried) = bring_back(reason, &left, budget_end, &ours);
+    let after = read(leftovers::settle_after(moved, tried).min(end.saturating_duration_since(Instant::now())));
     let took_ms = start.elapsed().as_millis() as u64;
     if after.is_empty() {
         tracing::info!(reason, back = left.len(), took_ms, "every window still parked after unparking is back");
@@ -1280,12 +1328,19 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
 /// Desktop's, an app that does not answer, no time left).
 pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> Vec<u32> {
+    bring_back(reason, left, deadline, ours).0
+}
+
+/// [`bring_back_leftovers`], with how many windows it asked to move (reached, whether the
+/// move went through or not).
+fn bring_back(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> (Vec<u32>, usize) {
     // Each app's enhanced UI off once for all its windows here, not once per window.
     let _quiet = enhanced_ui::Batch::open();
     let displays = scan_displays();
     let state = ours.state.as_ref();
     let mut back = Vec::new();
     let mut unreached = Vec::new();
+    let mut tried = 0;
     for w in left {
         let bundle = bundle_id_of(w.pid);
         let entry = registry_entry(w.id);
@@ -1316,6 +1371,7 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
         let live = LiveWindow { id: Some(w.id), bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };
         let (frame, source) = leftovers::leftover_frame(remembered, &live, state, &displays);
         let known = ours.known(w.id);
+        tried += 1;
         let mut result = set_frame_retrying(&element, w.id, frame, deadline.saturating_duration_since(Instant::now()));
         // The registry's element went stale (the window was reported destroyed while ordered
         // out, its app relaunched it): the app's own list may have it, when that and a try
@@ -1347,7 +1403,7 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
         counters::bump(Count::Recovery);
     }
     registry_forget(&back);
-    unreached
+    (unreached, tried)
 }
 
 #[cfg(test)]
