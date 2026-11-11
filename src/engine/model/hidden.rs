@@ -42,7 +42,20 @@ impl Model {
     /// front on a Desktop shown, the most recent stage of that Desktop comes in front
     /// ([`Model::switch_to`]). Nothing when it was hidden already or has no window here.
     pub fn app_hidden(&mut self, pid: Pid, obs: &Observation) -> Vec<Action> {
-        if !self.hidden_apps.insert(pid) || !self.has_app_window(pid) {
+        self.apps_hidden(&[pid], obs)
+    }
+
+    /// [`Model::app_hidden`] for every app hidden by now (`pids`: the one whose notice came and
+    /// those macOS says are hidden too; Hide Others hides them together, each with a notice of
+    /// its own): all are hidden before a stage is picked to come in front, so that stage is
+    /// never one of an app just hidden, whose focus would bring the app straight back.
+    /// Nothing when none of them is newly hidden with a window here.
+    pub fn apps_hidden(&mut self, pids: &[Pid], obs: &Observation) -> Vec<Action> {
+        let mut news = false;
+        for &pid in pids {
+            news |= self.hidden_apps.insert(pid) && self.has_app_window(pid);
+        }
+        if !news {
             return Vec::new();
         }
         let mut actions = Vec::new();
@@ -86,6 +99,14 @@ impl Model {
             .map(|(&s, &i)| (i, s))
             .collect();
         back.sort();
+        // A slot noted for a stage that shows again otherwise (in front already: the
+        // activation came before this notice) is a slot it left no more.
+        let stale: Vec<StageId> = self.hidden_slots.keys().copied().filter(|s| !self.hidden_stage(*s)).collect();
+        for stage in stale {
+            if !back.iter().any(|b| b.1 == stage) {
+                self.hidden_slots.remove(&stage);
+            }
+        }
         for &(i, stage) in &back {
             self.hidden_slots.remove(&stage);
             let Some(space) = self.stage(stage).map(|s| s.space) else { continue };

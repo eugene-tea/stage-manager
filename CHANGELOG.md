@@ -5,6 +5,11 @@
 - With two screens and a full-screen app on the main one, a click in a window on the other
   screen is no longer taken for a click on the wallpaper (with "Click wallpaper to reveal
   desktop: Only in Stage Manager" it sent that screen's windows to the strip).
+- Hide Others (⌥⌘H) while the stage in front holds none of the front app's windows (Finder
+  in front after a click on the desktop, or the stage on another screen) no longer brings a
+  stage of an app just hidden in front, which unhid that app again.
+- Switching to a stage shared with a hidden app leaves that app hidden: the keyboard goes
+  to the stage's front window that shows.
 
 ## 1.8.4 — 2026-11-10
 

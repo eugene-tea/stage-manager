@@ -561,9 +561,7 @@ impl Model {
                 w.meta.display = display;
             }
         }
-        let key = src_key
-            .filter(|k| members.contains(k))
-            .or(members.first().copied());
+        let key = self.focus_key(src_key, &members);
         let t = self.tick();
         if let Some(a) = self.stage_mut(active) {
             let mut windows = members.clone();

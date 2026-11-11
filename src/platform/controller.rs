@@ -4172,10 +4172,16 @@ impl Controller {
     fn on_app_hidden(&mut self, ob: &mut Observer, pid: i32) {
         let obs = self.observe(ob);
         let Some(m) = self.model.as_mut() else { return };
-        let actions = m.app_hidden(pid, &obs);
+        // Hide Others hides several apps together, each with a notice of its own: every
+        // managed app macOS says is hidden by now is hidden for the model before it picks the
+        // stage that comes in front (asked after the windows were read, the notices' gap past).
+        let mut pids = vec![pid];
+        let others: BTreeSet<i32> = m.windows().map(|w| w.meta.pid).filter(|p| *p != pid && !m.app_is_hidden(*p)).collect();
+        pids.extend(others.into_iter().filter(|p| super::apps::is_hidden(*p) == Some(true)));
+        let actions = m.apps_hidden(&pids, &obs);
         let switched = actions.iter().any(|a| matches!(a, Action::SetFrame { .. }));
-        tracing::info!(pid, switched, "app hidden: its windows leave the strip; the most recent stage comes in front if it was in front");
-        let hidden = |id: WindowId| m.window(id).is_some_and(|w| w.meta.pid == pid);
+        tracing::info!(pid, also = ?&pids[1..], switched, "app hidden: its windows leave the strip; the most recent stage comes in front if it was in front");
+        let hidden = |id: WindowId| m.window(id).is_some_and(|w| m.app_is_hidden(w.meta.pid));
         let (quiet, rest): (Vec<Action>, Vec<Action>) =
             actions.into_iter().partition(|a| matches!(a, Action::Park { id, .. } if hidden(*id)));
         self.execute(ob, quiet);
