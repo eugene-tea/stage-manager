@@ -433,7 +433,8 @@ pub struct Model {
     /// Standard windows of the Desktop a removed display showed, moved onto the main
     /// display's Desktop (`adopt_display`), until an arrival on the main display carries
     /// them or shows another Desktop without them (a notice of their own Desktop keeps them),
-    /// or the next display change: macOS may put them on another Desktop of the main display
+    /// or a screen comes or goes (the same screens reported again, their Dock or resolution
+    /// changed, keep them): macOS may put them on another Desktop of the main display
     /// and show that one, where their stages come whole ([`Model::carry_adopted`]).
     pub(crate) adopted: BTreeSet<WindowId>,
     /// Desktops not shown whose front stage left them (the lid closed: the laptop's front,

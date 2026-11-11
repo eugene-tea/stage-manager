@@ -164,3 +164,51 @@ fn a_desktop_arranged_ahead_on_another_screen_is_settled_by_that_screens_arrival
     assert!(a.contains(&Action::Focus { id: WindowId(9) }), "confirmed: {a:?}");
     assert!(e.m.window(WindowId(9)).is_some_and(|w| !w.parked) && e.m.window(WindowId(8)).is_some_and(|w| w.parked));
 }
+
+#[test]
+fn the_remaining_screen_reported_again_keeps_the_closed_screens_stages_whole() {
+    // The lid closed; a moment later the Dock comes onto the Studio (its visible frame
+    // shrinks: the same screen reported again); then macOS slides the Studio to its other
+    // Desktop with the laptop's two windows on it. The laptop's stages come whole there, as
+    // with no second report: that report forgot which windows the closed screen brought, and
+    // they went one by one into their apps' stages.
+    let mut e = Env::both();
+    let [_, _, _, chrome, finder] = measured_desk(&mut e);
+    let first = e.space_of(STUDIO);
+    // The Studio's other Desktop, visited once: another Chrome window (pid 20, the laptop's app).
+    let gone: Vec<(WindowId, Rect)> = [1u32, 3, 4].iter().map(|id| (WindowId(*id), e.d.frames.remove(&WindowId(*id)).expect("open"))).collect();
+    let a = e.m.arrive(STUDIO, &[], &[WindowId(1), WindowId(3), WindowId(4)], &LaunchHints::default());
+    e.run(a);
+    let second = e.space_of(STUDIO);
+    assert_ne!(second, first);
+    e.open(9, 20, &studio(), (300.0, 300.0), RuleAction::Current);
+    let own = e.d.frames.remove(&WindowId(9)).expect("open");
+    e.d.frames.extend(gone);
+    let live = listed(&e, &[1, 3, 4]);
+    let a = e.m.arrive(STUDIO, &live, &[WindowId(9)], &LaunchHints::default());
+    e.run(a);
+    assert_eq!(e.space_of(STUDIO), first);
+    // The lid closes; the Dock comes onto the Studio.
+    let a = e.m.set_displays(vec![studio()]);
+    e.run(a);
+    assert_eq!(e.m.active_stage(STUDIO), Some(finder));
+    let mut with_dock = studio();
+    with_dock.visible.h -= 80.0;
+    let a = e.m.set_displays(vec![with_dock]);
+    e.run(a);
+    // macOS slides to the other Desktop: its own window, and the laptop's two.
+    for id in [1u32, 3, 4] {
+        e.d.frames.remove(&WindowId(id));
+    }
+    e.d.frames.insert(WindowId(9), own);
+    let live = listed(&e, &[9, 6, 5]);
+    let hints = LaunchHints { z_order: vec![WindowId(6), WindowId(9), WindowId(5)], frontmost: Some(21) };
+    let a = e.m.arrive(STUDIO, &live, &[WindowId(1), WindowId(3), WindowId(4)], &hints);
+    e.run(a);
+    let note = e.m.last_arrival();
+    assert_eq!(e.space_of(STUDIO), second);
+    assert_eq!((note.carried, note.moved), (2, 0), "the laptop's stages came whole: {note:?}");
+    assert_eq!((e.stage_of(6), e.stage_of(5)), (finder, chrome), "the same stages");
+    assert_ne!(e.stage_of(5), e.stage_of(9), "Chrome's laptop window keeps its own stage, not its app's stage here");
+    assert_eq!(e.m.active_stage(STUDIO), Some(finder), "the laptop's front in front");
+}

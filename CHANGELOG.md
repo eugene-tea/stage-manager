@@ -10,6 +10,9 @@
 - With two screens, a Dock click or ⌘-Tab to an app on the other Desktop of the screen without
   the menu bar shows that app's stage there when the Desktop slides in; its window stayed in
   its card.
+- Closing the lid keeps the laptop's stages as they were also when macOS moves them to another
+  Desktop of the remaining screen a moment after the Dock or the resolution changed there;
+  their windows were filed one by one into their apps' stages.
 
 ## 1.8.4 — 2026-11-10
 
