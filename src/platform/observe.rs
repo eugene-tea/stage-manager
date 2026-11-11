@@ -231,6 +231,34 @@ pub fn windows_or_retry<T>(result: Result<Vec<T>, AxError>) -> (Vec<T>, bool) {
     }
 }
 
+/// A registration answered `CannotComplete` after waiting this long timed out (half the WM
+/// thread's 0.25 s messaging timeout): the app is not answering. One answered so sooner was
+/// refused by an app that does answer.
+pub const STALLED: Duration = Duration::from_millis(125);
+
+/// Registers an app's notifications ([`n::APP_LEVEL`]) through `add` (its answer, and how
+/// long it took), in order. The ones the app refused (it lacks them, or says it cannot), when
+/// at least one was taken; an error when none was, when the first answered `CannotComplete`,
+/// or at any that timed out ([`STALLED`]), the rest not asked: the app stopped answering, so
+/// it is asked off the WM thread until it answers and registered whole then
+/// ([`Observer::missed`]). Each registration that times out holds the WM thread for the
+/// messaging timeout: at the 11-10 login an app that answered its first one and none after
+/// held it 0.9 s, and the activation notices behind it waited 2.3 s.
+pub fn register_app_level(mut add: impl FnMut(&'static str) -> (AxResult<()>, Duration)) -> Result<Vec<(&'static str, AxError)>, AxError> {
+    let mut refused = Vec::new();
+    for (i, name) in n::APP_LEVEL.into_iter().enumerate() {
+        match add(name) {
+            (Ok(()), _) => {}
+            (Err(e), took) if e == AxError::CANNOT_COMPLETE && (i == refused.len() || took >= STALLED) => return Err(e),
+            (Err(e), _) => refused.push((name, e)),
+        }
+    }
+    match refused.last() {
+        Some(&(_, e)) if refused.len() == n::APP_LEVEL.len() => Err(e),
+        _ => Ok(refused),
+    }
+}
+
 /// Whether an app may be observed and managed: not us, not excluded, a real pid, and on the
 /// `only` list when there is one.
 pub fn app_allowed(only: Option<&HashSet<String>>, own_pid: i32, pid: i32, bundle_id: Option<&str>) -> bool {
@@ -907,18 +935,13 @@ impl Observer {
         }
         let element = AxElement::application(pid);
         let observer = AxObserver::new(pid, callback)?;
-        let mut registered = 0;
-        let mut last_err = None;
-        for name in n::APP_LEVEL {
-            match observer.add(&element, name, refcon(pid)) {
-                Ok(()) => registered += 1,
-                // Not answering (the timeout): the other registrations would wait it out too.
-                Err(e) if e == AxError::CANNOT_COMPLETE && registered == 0 => return Err(e),
-                Err(e) => last_err = Some(e),
-            }
-        }
-        if registered == 0 {
-            return Err(last_err.unwrap_or(AxError::Value));
+        // A timeout drops `observer` here, and with it what was registered so far.
+        let refused = register_app_level(|name| {
+            let asked = Instant::now();
+            (observer.add(&element, name, refcon(pid)), asked.elapsed())
+        })?;
+        for (name, e) in refused {
+            tracing::debug!(pid, bundle = self.bundle_of(pid), "observing the app without {name}: {e}");
         }
         let (ax_windows, retry) = windows_or_retry(element.windows());
         if retry {
@@ -1498,6 +1521,41 @@ mod tests {
     }
 
     unsafe extern "C-unwind" fn no_callback(_: NonNull<AXObserver>, _: NonNull<AXUIElement>, _: NonNull<CFString>, _: *mut c_void) {}
+
+    /// The 11-10 login: an app answered the first registration and then none (each waited out
+    /// the messaging timeout on the WM thread). The first timeout ends the try, wherever it
+    /// comes; the app is registered whole once it answers.
+    #[test]
+    fn an_app_that_stops_answering_between_registrations_is_not_waited_for() {
+        const TIMEOUT: Duration = Duration::from_millis(250);
+        const AT_ONCE: Duration = Duration::from_millis(2);
+        let asked = RefCell::new(Vec::new());
+        let stalls_after_the_first = |name: &'static str| {
+            asked.borrow_mut().push(name);
+            if asked.borrow().len() == 1 { (Ok(()), AT_ONCE) } else { (Err(AxError::CANNOT_COMPLETE), TIMEOUT) }
+        };
+        assert_eq!(register_app_level(stalls_after_the_first), Err(AxError::CANNOT_COMPLETE));
+        assert_eq!(asked.borrow().len(), 2, "the third is not asked: it would wait out the timeout too");
+        // Not answering at all: one ask, however fast the failure, as before.
+        for took in [TIMEOUT, AT_ONCE] {
+            let mut n = 0;
+            let silent = |_: &'static str| {
+                n += 1;
+                (Err(AxError::CANNOT_COMPLETE), took)
+            };
+            assert_eq!(register_app_level(silent), Err(AxError::CANNOT_COMPLETE));
+            assert_eq!(n, 1);
+        }
+        // An app that answers and lacks one notification (or says at once it cannot) is
+        // observed without it, and the caller told.
+        for e in [AxError::Api(-25207), AxError::CANNOT_COMPLETE] {
+            let lacks_one = |name: &'static str| if name == n::APPLICATION_ACTIVATED { (Err(e), AT_ONCE) } else { (Ok(()), AT_ONCE) };
+            assert_eq!(register_app_level(lacks_one), Ok(vec![(n::APPLICATION_ACTIVATED, e)]));
+        }
+        assert_eq!(register_app_level(|_| (Ok(()), AT_ONCE)), Ok(Vec::new()));
+        // One that takes none is not observed.
+        assert_eq!(register_app_level(|_| (Err(AxError::Api(-25207)), AT_ONCE)), Err(AxError::Api(-25207)));
+    }
 
     /// The pid of a process that has exited (a child run and waited for).
     fn a_gone_pid() -> i32 {

@@ -5,6 +5,9 @@
 - After a restart, a window waiting in its card for its saved size still gets it in the right
   place when the screens were rearranged, or another screen made the main one, before its card
   was first clicked. It came back hanging off the edge of its screen.
+- At login, an app that stops answering partway through being set up no longer holds
+  everything else up for up to a second. At one login, switching to an app's stage came two
+  seconds late.
 
 ## 1.8.4 — 2026-11-10
 
