@@ -22,6 +22,15 @@ UX-SPEC, "Known gaps".
   any are listed, our quit fixed it: the menu line then says "Quit and reopen Stage Manager", and the bug
   is ours. If none are listed, lock and unlock the screen and count again.
 
+**Next session at home:**
+
+- **A first launch with no config**, as a new user sees it. Start the app with `STAGE_MANAGER_HOME` set
+  to an empty scratch folder (the real `~/.config/stage-manager` stays untouched), with the usual windows
+  open across Desktops and screens. Expected (GUIDE "Stages", UX-SPEC): every app with windows gets a
+  stage of its own, as when Apple's is turned on, never all windows in one stage. Check: the cards per
+  app, which stage is in front, windows on other Desktops, the welcome window. Quit and start again from
+  the real config after.
+
 ## 2.0: new features
 
 - **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
