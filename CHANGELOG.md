@@ -7,6 +7,8 @@
   goes back to the setting in force.
 - Clicking Copy Instructions for Agents twice in a row no longer leaves the button reading
   "Copied".
+- `stage-manager log summary` no longer shows a day's counts as near zero when two lines
+  crossed midnight out of order, or after the clock was set back a day.
 
 ## 1.8.4 — 2026-11-10
 

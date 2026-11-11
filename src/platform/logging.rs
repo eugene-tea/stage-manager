@@ -82,6 +82,9 @@ struct Book {
     tag: &'static str,
     pid: u32,
     writer: Mutex<DayWriter>,
+    /// The day the counts run for (the app): the latest date a line carried, moved only
+    /// forward and only under `writer`'s lock ([`Book::roll_over`]).
+    counted: Mutex<Option<Date>>,
     /// The file's filter (the config's level, or `RUST_LOG`).
     file: RwLock<Targets>,
     /// `RUST_LOG` is set: the config's level is ignored.
@@ -261,6 +264,7 @@ impl Book {
             tag: process.tag(),
             pid: std::process::id(),
             writer: Mutex::new(DayWriter::new(dir)),
+            counted: Mutex::new(None),
             file: RwLock::new(file),
             env_override: false,
             verbose: AtomicBool::new(verbose(config)),
@@ -339,12 +343,19 @@ impl Book {
     }
 
     /// A new local day: the app writes the day's counts into the day that ends and starts
-    /// counting again.
+    /// counting again. Only a later date than any line carried is a new day: a line stamped
+    /// before midnight that reaches the file after the day's first (lines are stamped before
+    /// they wait for the writer), or a clock set back, goes into its own day's file
+    /// ([`DayWriter`] opens it) and ends no day. So the day is kept here, never read from the
+    /// file open now.
     fn roll_over(&self, w: &mut DayWriter, stamp: &Stamp) {
-        let Some(old) = w.day() else { return };
-        if old == stamp.date || !self.counting {
+        if !self.counting {
             return;
         }
+        let mut counted = lock(&self.counted);
+        let before = *counted;
+        *counted = Some(before.map_or(stamp.date, |d| d.max(stamp.date)));
+        let Some(old) = before.filter(|d| *d < stamp.date) else { return };
         let counts = counters::global().take();
         let line = self.counts_line(stamp, "day", &counts.fields());
         let _ = w.write(old, &line, Weight::Always, u64::MAX, |_| String::new());
@@ -551,12 +562,16 @@ mod tests {
         assert_eq!((l.second, l.millis), (utc.second, 7));
     }
 
+    /// The tests that roll a day over take the process's counters: one at a time.
+    static ROLLOVERS: Mutex<()> = Mutex::new(());
+
     fn stamp(day: u32, hour: u32) -> Stamp {
         Stamp { date: Date::new(2026, 10, day).expect("valid"), hour, minute: 0, second: 1, millis: 0, offset_minutes: 120 }
     }
 
     #[test]
     fn the_app_rolls_over_at_a_new_date_with_the_days_counts_in_the_day_that_ends() {
+        let _one = lock(&ROLLOVERS);
         let dir = tempfile::tempdir().expect("tempdir");
         let config = LogConfig::default();
         let book = Book::new(Process::App, dir.path().to_path_buf(), &config, targets("info"));
@@ -579,6 +594,36 @@ mod tests {
         guardian.write(&stamp(14, 0), "g2\n", Weight::Detail);
         assert_eq!(read(13), "after midnight\ng\n");
         assert_eq!(read(14), "g2\n");
+    }
+
+    /// Lines are stamped before they wait for the file: one stamped before midnight can land
+    /// after another thread's first line of the new day. It goes into its own day's file and
+    /// starts no rollover, there or at the next line of the new day (each wrote a second
+    /// `COUNT` line of near-empty counts, the last of which the day's summary read as the
+    /// day's counts).
+    #[test]
+    fn a_line_stamped_before_midnight_that_lands_after_it_starts_no_second_rollover() {
+        let _one = lock(&ROLLOVERS);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let book = Book::new(Process::App, dir.path().to_path_buf(), &LogConfig::default(), targets("info"));
+        assert!(book.write(&stamp(12, 23), "before midnight\n", Weight::Detail));
+        assert!(book.write(&stamp(13, 0), "after midnight\n", Weight::Detail));
+        assert!(book.write(&stamp(12, 23), "stamped before, landed after\n", Weight::Detail));
+        assert!(book.write(&stamp(13, 0), "the new day goes on\n", Weight::Detail));
+        let read = |d: u32| std::fs::read_to_string(dir.path().join(format!("2026-10-{d}.log"))).unwrap_or_default();
+        let counts = |text: &str| text.lines().filter(|l| l.contains("COUNT counts kind=day")).count();
+        let old = read(12);
+        assert_eq!(counts(&old), 1, "the day that ended has its counts once:\n{old}");
+        assert!(old.ends_with("stamped before, landed after\n"), "{old}");
+        assert_eq!(read(13), "after midnight\nthe new day goes on\n");
+        // The clock set back a day (a time zone crossed): lines go to that day, no rollover.
+        assert!(book.write(&stamp(11, 23), "a day back\n", Weight::Detail));
+        assert_eq!(read(11), "a day back\n");
+        assert_eq!(counts(&read(13)), 0);
+        // The next new day rolls over as ever, into the day counted last.
+        assert!(book.write(&stamp(14, 0), "the day after\n", Weight::Detail));
+        assert_eq!(counts(&read(13)), 1);
+        assert_eq!(read(14), "the day after\n");
     }
 
     #[test]
