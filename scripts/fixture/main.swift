@@ -430,7 +430,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let motion = EnhancedMotion()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        // The menu bar's screen, the one --frames and the checks mean: `NSScreen.main` is the
+        // screen of the key window or the pointer, and after a drag to the other screen the
+        // windows opened there.
+        let area = NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let all = options.reverse ? Array((0..<options.windows).reversed()) : Array(0..<options.windows)
         // Windows reopened minimized go to the Dock at once; the others follow the delays.
         for i in all where options.minimized.contains(title(i)) { open(i, area: area) }
@@ -696,7 +699,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// SIGVTALRM: a dialog in the middle of the main screen, ordered front without activating.
     func openDialog() {
-        let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let area = NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         let size = NSSize(width: 420, height: 180)
         let panel = DialogPanel(
             contentRect: NSRect(x: area.midX - size.width / 2, y: area.midY - size.height / 2, width: size.width, height: size.height),
@@ -719,7 +722,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// SIGUSR1: one more window, ordered front without activating the app.
     func openAnother() {
-        let area = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let area = NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
         makeWindow(opened, area: area).orderFront(nil)
     }
 
@@ -739,7 +742,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// SIGWINCH: windows parked in the bottom-right corner go "to another Desktop".
     func sendParkedAway() {
-        guard let screen = NSScreen.main?.frame else { return }
+        guard let screen = NSScreen.screens.first?.frame else { return }
         let parked = NSApp.windows.filter { w in
             w.isVisible && !(w is NSPanel) && w.frame.minX >= screen.maxX - 64 && w.frame.maxY <= screen.minY + 64
         }
@@ -750,7 +753,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// SIGALRM: every parked window moves itself to the middle of the screen (an app's own
     /// move while parked), without activating.
     func moveParkedOut() {
-        guard let screen = NSScreen.main?.frame, let area = NSScreen.main?.visibleFrame else { return }
+        guard let screen = NSScreen.screens.first?.frame, let area = NSScreen.screens.first?.visibleFrame else { return }
         let parked = NSApp.windows.filter { w in
             w.isVisible && !(w is NSPanel) && w.frame.minX >= screen.maxX - 64 && w.frame.maxY <= screen.minY + 64
         }
