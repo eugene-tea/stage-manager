@@ -359,9 +359,8 @@ impl Motion {
         // A cover held on the Desktop left goes with it.
         self.drop_hold();
         self.drop_fading();
-        if self.running.is_none() && self.window_card.is_none() {
-            self.overlay.renew(mtm);
-        }
+        // In use (a transition, a dragged window's card): the fresh panel comes once it hides.
+        self.overlay.renew(mtm, self.running.is_some() || self.window_card.is_some());
     }
 
     /// A thumbnail arrived: the dragged window's card uses it while it has no snapshot.
