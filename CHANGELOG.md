@@ -8,6 +8,8 @@
 - After Apple's Stage Manager is turned off again, or a logout is cancelled, while a window
   is still out of reach on another Desktop: changing Desktops no longer brings the windows of
   every other stage back on screen for a moment, nor holds the strip for two seconds.
+- When Stage Manager quit or crashed behind a locked screen, the windows it could not bring
+  back then come back as the screen unlocks, not up to five seconds later.
 
 ## 1.8.4 — 2026-11-10
 
