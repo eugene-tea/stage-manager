@@ -110,7 +110,7 @@ use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_click;
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
-use crate::engine::displays::{display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display};
+use crate::engine::displays::{display_kept, display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display};
 use crate::engine::early_start;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
@@ -1485,8 +1485,15 @@ impl Controller {
     /// window across two screens); the main one when none shows a point of it (off screen,
     /// a park zone's offscreen part).
     fn display_at(&self, frame: Rect) -> DisplayId {
+        self.display_of_window(None, frame)
+    }
+
+    /// [`Self::display_at`] for window `id` at `frame`: one the model manages that shows on
+    /// no display keeps the display it has there ([`display_kept`]), never the main one's.
+    fn display_of_window(&self, id: Option<u32>, frame: Rect) -> DisplayId {
         let rects: Vec<(DisplayId, Rect)> = self.managed_displays().iter().map(|d| (d.id, d.frame)).collect();
-        display_of(frame, &rects).unwrap_or_else(|| self.main_display_id())
+        let had = id.and_then(|id| self.model.as_ref()?.window(WindowId(id))).map(|w| w.meta.display);
+        display_kept(frame, &rects, had).unwrap_or_else(|| self.main_display_id())
     }
 
     /// The engine's view of a tracked window. A child's parent is the frontmost standard
@@ -1512,7 +1519,7 @@ impl Controller {
             title: w.title.clone(),
             role,
             frame: w.frame,
-            display: self.display_at(w.frame),
+            display: self.display_of_window(Some(id), w.frame),
         })
     }
 
