@@ -1,4 +1,4 @@
-//! The lid opened after the user switched on the remaining screen (his run 11-06 12:00:35:
+//! The lid opened after the user switched on the remaining screen (the owner's run 11-06 12:00:35:
 //! the laptop's front and a laptop card he had used on the 5K while the lid was closed never
 //! came back to the laptop; the card he had not touched did). Apple's rule: the stages macOS
 //! moves back are the laptop's again, the window it shows there at a normal frame its front,

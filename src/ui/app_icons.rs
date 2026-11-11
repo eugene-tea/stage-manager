@@ -14,12 +14,17 @@
 //! again when the appearance changes ([`super::strip::icons_changed`]).
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 use std::ptr::NonNull;
 
 use objc2::rc::Retained;
 use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_core_foundation::{CFPreferencesCopyAppValue, CFRetained, CFString, kCFPreferencesAnyApplication};
-use objc2_core_graphics::CGImage;
+use objc2_core_foundation::{CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGBitmapContextCreateImage, CGColorSpace, CGContext, CGImage, CGImageAlphaInfo, CGImageByteOrderInfo,
+    CGInterpolationQuality, kCGColorSpaceSRGB,
+};
 use objc2_foundation::{MainThreadMarker, NSPoint, NSRect, NSSize};
 
 /// The icon and widget style's family: Default (`Regular`), Tinted or Clear.
@@ -95,23 +100,40 @@ pub fn current_look(mtm: MainThreadMarker) -> IconLook {
     IconLook::from_theme(theme.as_deref(), crate::platform::wallpaper::dark_appearance(mtm))
 }
 
-/// App `pid`'s icon as an image for a layer, rendered at `points` × 2 pixels, fetched afresh
-/// from its bundle (a running app's `icon` is the one it was first asked for), else the
-/// running app's.
-pub fn render(pid: i32, points: f64) -> Option<CFRetained<CGImage>> {
+/// App `pid`'s icon as an image for a layer `points` wide on a display of `scale` (its backing
+/// scale factor), fetched afresh from its bundle (a running app's `icon` is the one it was
+/// first asked for), else the running app's.
+///
+/// Drawn at the layer's exact pixel size with high-quality scaling, as Apple's cards show it.
+/// AppKit hands over the next larger stored size (256 px for a 38 pt icon at 2x), and a layer
+/// shrinking that 3.4 times filters it bilinearly without mipmaps: the edges came out stepped
+/// and the glyph grainy (seen 11-10 beside Apple's).
+pub fn render(pid: i32, points: f64, scale: f64) -> Option<CFRetained<CGImage>> {
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     let icon = match app.bundleURL().and_then(|u| u.path()) {
         Some(path) => NSWorkspace::sharedWorkspace().iconForFile(&path),
         None => app.icon()?,
     };
-    let side = (points * 2.0).clamp(32.0, 1024.0);
+    let side = (points * scale.max(1.0)).round().clamp(16.0, 1024.0);
     let mut rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(side, side));
     // SAFETY: a valid proposed rect pointer and no context or hints.
     let image = unsafe { icon.CGImageForProposedRect_context_hints(&mut rect, None, None) }?;
     // SAFETY: the Retained<CGImage> owns one reference; re-wrap it as CFRetained.
     let ptr = NonNull::new(Retained::into_raw(image))?;
     // SAFETY: as above; the pointer came from `into_raw`, so its reference moves over.
-    Some(unsafe { CFRetained::from_raw(ptr) })
+    let source: CFRetained<CGImage> = unsafe { CFRetained::from_raw(ptr) };
+    let px = side as usize;
+    if CGImage::width(Some(&source)) == px && CGImage::height(Some(&source)) == px {
+        return Some(source);
+    }
+    let space = CGColorSpace::with_name(Some(unsafe { kCGColorSpaceSRGB }))?;
+    let info = CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0;
+    // SAFETY: CG allocates the bitmap (null data, bytes per row computed); 8-bit BGRA.
+    let ctx = unsafe { CGBitmapContextCreate(std::ptr::null_mut::<c_void>(), px, px, 8, 0, Some(&space), info) }?;
+    CGContext::set_interpolation_quality(Some(&ctx), CGInterpolationQuality::High);
+    let full = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(side, side));
+    CGContext::draw_image(Some(&ctx), full, Some(&source));
+    CGBitmapContextCreateImage(Some(&ctx))
 }
 
 /// The apps [`probe`] reads, where running (Apple's own, each with dark, tinted and clear
@@ -151,7 +173,7 @@ pub fn probe(args: &[String]) -> std::process::ExitCode {
         for bundle in PROBED {
             let apps = NSRunningApplication::runningApplicationsWithBundleIdentifier(&objc2_foundation::NSString::from_str(bundle));
             let Some(app) = apps.firstObject() else { continue };
-            let mean = render(app.processIdentifier(), 16.0).and_then(|i| mean_rgb(&i));
+            let mean = render(app.processIdentifier(), 16.0, 2.0).and_then(|i| mean_rgb(&i));
             match mean {
                 Some((r, g, b)) => line.push_str(&format!("  {bundle} {r:.2} {g:.2} {b:.2}")),
                 None => line.push_str(&format!("  {bundle} none")),

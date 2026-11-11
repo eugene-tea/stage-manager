@@ -15,7 +15,7 @@
 //!    normal quit path (every window back, the leftovers check), and right before it exits
 //!    it starts the helper: this same binary, already running and trusted, in its
 //!    `--update-helper` mode ([`run_helper`]). The new code never runs before the swap.
-//!    The user's own Quit installs a ready update too ([`hand_off`] with no relaunch; his go
+//!    The user's own Quit installs a ready update too ([`hand_off`] with no relaunch; the owner's go
 //!    11-09): the new version then replaces the old one and is not opened.
 //! 4. **Swap** ([`run_helper`]): the helper waits for the old process to exit, checks the
 //!    staged copy's signature once more, exchanges it with the installed app atomically
@@ -1164,7 +1164,7 @@ mod tests {
         assert!(!app_still_runs(me, Some((1, 0))));
     }
 
-    /// His go 11-09: the user's Quit arms the helper without a relaunch; the quiet moment's
+    /// The owner's go 11-09: the user's Quit arms the helper without a relaunch; the quiet moment's
     /// install keeps it. The armed helper marks the quit as one made for an install.
     #[test]
     fn a_quit_install_arms_the_helper_without_a_relaunch() {

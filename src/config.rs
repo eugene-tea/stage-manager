@@ -1437,7 +1437,7 @@ mod tests {
         assert_eq!((d.appear_ms, d.window_grab_x, d.window_grab_y), (100, 96.0, 100.0), "Apple's card dragged out, measured 11-09");
         let r = &c.style.reveal;
         assert_eq!((r.delay_ms, r.poll_ms), (130, 30), "Apple's edge reveal, measured 11-09");
-        assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "his laptop");
+        assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "the owner's laptop");
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
     }
 

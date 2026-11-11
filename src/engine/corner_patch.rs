@@ -40,7 +40,7 @@
 //!   corner until the snapshots land, wherever the patch could show; where a desktop icon
 //!   lies (or the icons are not known), a still of the desktop instead (round 8L3). Never
 //!   more than the corner's own square ([`COVER_CAP`], round 8L6): the owner's covers of
-//!   2087x1316 pt painted his desktop over his windows for every switch.
+//!   2087x1316 pt painted the owner's desktop over the owner's windows for every switch.
 //! - **The cover's end** ([`cover_holds`]): the patch is often hidden while a switch runs
 //!   (the incoming windows wait in the corner, so no order of the patch is right) and shown
 //!   again only once a plan sees them gone from the corner, which may come after the switch
@@ -122,7 +122,7 @@ impl Default for Reach {
 /// alike): an inactive window's shadow falls downward, so it reaches least above the window
 /// and most below it, and it ends there, whatever its alpha. Its whole extent, not where one
 /// window's shadow fades under 2/255 (18, 11, 18, 25): parked windows share the corner and
-/// their faint tails add up (his 14 showed a darker edge outside an 18 pt patch; 16 stacked
+/// their faint tails add up (the owner's 14 showed a darker edge outside an 18 pt patch; 16 stacked
 /// probe windows reach 16/255 at the extent, `probe-shadow --stack 16`). The corner that shows
 /// of a window parked bottom-right is its top-left.
 pub const DEFAULT_REACH: Reach = Reach { left: 22.0, top: 16.0, right: 22.0, bottom: 30.0 };
@@ -575,8 +575,8 @@ pub const NOTHING_IN_CORNER: &str = "nothing waits in the park corner";
 /// leaves (round 8L6): a parked window shows at most a [`super::park::PARK_SLIVER_LENGTH`]
 /// (256 pt) sliver there, or a [`super::park::PARK_MARGIN`] square, with its shadow's reach
 /// ([`DEFAULT_REACH`], [`ACTIVE_REACH`]) beside it. The owner's covers of up to 2087x1316 pt (10-16, the patch's
-/// rectangle grown by a window the model had parked listed mid-screen) painted his desktop
-/// over his windows for 400 ms at every switch: never again, whatever the rectangles say.
+/// rectangle grown by a window the model had parked listed mid-screen) painted the owner's desktop
+/// over the owner's windows for 400 ms at every switch: never again, whatever the rectangles say.
 pub const COVER_CAP: f64 = 320.0;
 
 /// The most a switch's cover may paint at `display`'s park `corner` (global, top-left;
@@ -924,7 +924,7 @@ mod tests {
 
     #[test]
     fn a_window_that_stays_shown_into_the_corner_is_drawn_on_the_cover_from_its_snapshot() {
-        // 8L5: his windows nearly fill the screen; one that stays (pinned, unmanaged) reaches
+        // 8L5: the owner's windows nearly fill the screen; one that stays (pinned, unmanaged) reaches
         // the corner. With its snapshot the cover draws it, so the grow still runs.
         let f = cover_facts();
         let alone = switch_cover(&f).expect("covered");
@@ -1009,7 +1009,7 @@ mod tests {
         }
     }
 
-    /// The owner's switches of 10-16 (his log, 15:29-15:31): 2560x1440, the incoming and parked
+    /// The owner's switches of 10-16 (the owner's log, 15:29-15:31): 2560x1440, the incoming and parked
     /// windows in the corner where macOS left them, the patch's rectangle in use grown to
     /// 473,124 2087x1316 by a window the model had parked listed at 533,184, and the Dock's
     /// bar as read before each (auto-hidden at the bottom, once mid-magnification).
@@ -1030,7 +1030,7 @@ mod tests {
     #[test]
     fn the_owners_covers_stay_in_the_park_corner() {
         // 8L6: before, the covers were 473,124 2087x1316, 2142,124 418x1316, 2108,124 452x1316,
-        // 2526,124 34x1316 (the part right of the Dock's bar): his desktop painted over his
+        // 2526,124 34x1316 (the part right of the Dock's bar): the owner's desktop painted over the owner's
         // windows for 400 ms at every switch. Now inside the corner's square, every time.
         let cap = cover_cap(MAIN, Corner::BottomRight);
         assert_eq!(cap, Rect::new(2240.0, 1120.0, 320.0, 320.0));
@@ -1106,12 +1106,12 @@ mod tests {
 
     #[test]
     fn the_patch_grows_by_each_sides_reach_an_inactive_shadow_by_default() {
-        // His slivers (10-30): 1x52 pt at the bottom-right corner, a patch of 61x112 at 60 pt
+        // The owner's slivers (10-30): 1x52 pt at the bottom-right corner, a patch of 61x112 at 60 pt
         // on every side. Parked windows are inactive: the default reach is per side.
-        let his = Rect::new(2559.0, 1388.0, 1200.0, 900.0);
-        let r = patch_rect(&[his], MAIN, DEFAULT_REACH).expect("a sliver");
+        let owners = Rect::new(2559.0, 1388.0, 1200.0, 900.0);
+        let r = patch_rect(&[owners], MAIN, DEFAULT_REACH).expect("a sliver");
         assert_eq!(r, Rect::new(2559.0 - DEFAULT_REACH.left, 1388.0 - DEFAULT_REACH.top, 1.0 + DEFAULT_REACH.left, 52.0 + DEFAULT_REACH.top));
-        assert_eq!(patch_rect(&[his], MAIN, Reach::even(60.0)), Some(Rect::new(2499.0, 1328.0, 61.0, 112.0)), "the old reach");
+        assert_eq!(patch_rect(&[owners], MAIN, Reach::even(60.0)), Some(Rect::new(2499.0, 1328.0, 61.0, 112.0)), "the old reach");
         assert!(r.w < 61.0 && r.h < 112.0, "smaller than before: {r:?}");
         // Each side its own: a window of the display's middle grows by each side's reach.
         let mid = Rect::new(1000.0, 500.0, 200.0, 100.0);

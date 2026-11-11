@@ -943,7 +943,7 @@ mod tests {
 
     #[test]
     fn a_piece_at_the_corner_is_told_from_a_window_hung_off_an_edge() {
-        // His laptop (11-06): -1800,271 1800x1169, parking bottom-left; 80 by 32 pt of a
+        // The owner's laptop (11-06): -1800,271 1800x1169, parking bottom-left; 80 by 32 pt of a
         // 1065x915 window at its bottom-left corner.
         let laptop = Rect::new(-1800.0, 271.0, 1800.0, 1169.0);
         let laptop_visible = Rect::new(-1800.0, 310.0, 1800.0, 1130.0);

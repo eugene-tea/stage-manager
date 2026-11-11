@@ -282,7 +282,7 @@ mod tests {
 
     #[test]
     fn accessibility_listing_nothing_while_windows_show_is_blind() {
-        // The 10-13 launches: the window server showed his windows, Accessibility none.
+        // The 10-13 launches: the window server showed the owner's windows, Accessibility none.
         assert_eq!(blindness(false, 7, 0), Some(Blind::AxSilent));
         assert_eq!(blindness(false, BLIND_MIN_WINDOWS, 0), Some(Blind::AxSilent));
         // One window listed: Accessibility works.

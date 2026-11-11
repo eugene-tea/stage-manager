@@ -477,7 +477,7 @@ mod app {
         ctl::remove_socket();
         // No app is left with its enhanced UI off by us (round enhanced-ui).
         stage_manager::platform::enhanced_ui::restore_all("quit");
-        // A ready update installs at the user's own Quit, not reopened (his go 11-09); main
+        // A ready update installs at the user's own Quit, not reopened (the owner's go 11-09); main
         // thread only (the signal watcher's exit installs nothing).
         stage_manager::ui::shell::install_on_quit(user_quit, ok, head_start || logout_reason);
         // An update ready to install: its helper waits for this process to exit (8C).

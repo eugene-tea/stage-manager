@@ -2,7 +2,7 @@
 //!
 //! At login `loginwindow` relaunches the apps of its persistent-apps list about 3 s after
 //! the login and holds the login items until every one of them has checked in (12-27 s on
-//! his Mac, 11-06). The list holds the regular (Dock) apps running as the user logged out;
+//! the owner's Mac, 11-06). The list holds the regular (Dock) apps running as the user logged out;
 //! Stage Manager is an accessory app (`LSUIElement`), so it was never on it and started with
 //! the login items, after the windows had shown. AppKit's header for
 //! `disableRelaunchOnLogin` says an app "running at the time the user logged out" may be
@@ -17,7 +17,7 @@
 //!
 //! [`ReopenSwitch`] is the pure rule; the shell carries out its [`Policy`].
 //!
-//! The switch back can fail: at a cancelled restart on his Mac (11-06) AppKit answered NO and
+//! The switch back can fail: at a cancelled restart on the owner's Mac (11-06) AppKit answered NO and
 //! the Dock icon stayed. A throwaway probe app could not make it fail outside a logout: right
 //! after the switch to regular, 0.1-4 s later, while active, with a status item and its menu
 //! open, in a modal run, with a terminate answered later, and hidden, the switch to accessory
@@ -208,7 +208,7 @@ mod tests {
         assert!(!allowed(true, false, false, true), "nor joins without the login item");
     }
 
-    /// His cancel 11-06: AppKit answered NO and the icon stayed; the switch back now tries
+    /// The owner's cancel 11-06: AppKit answered NO and the icon stayed; the switch back now tries
     /// again until both readings say accessory, seven tries over about 10 s.
     #[test]
     fn the_switch_back_tries_until_it_holds() {

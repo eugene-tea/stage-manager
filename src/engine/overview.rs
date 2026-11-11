@@ -17,7 +17,7 @@
 //! layer 18 for as long as the desktop is revealed. The `Dock` window alone is not one of
 //! them: an auto-hiding Dock lists the same full-display layer-20 window for as long as the
 //! pointer brings it up (measured 10-12 on the owner's Mac: 2.9 s while the pointer rested
-//! on the bottom edge, no `WindowManager` window with it; his Dock clicks to another Desktop
+//! on the bottom edge, no `WindowManager` window with it; the owner's Dock clicks to another Desktop
 //! were read as Mission Control, round 6R). So only `WindowManager`'s window begins one; the
 //! `Dock` window alone only carries a Mission Control already shown through its exit
 //! ([`OverviewWatch::see`]). With none of them up, neither process lists a window covering

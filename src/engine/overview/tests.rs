@@ -381,7 +381,7 @@ fn a_desktop_clicked_in_mission_control_is_handled_once_it_has_closed() {
 }
 
 /// The owner's Dock (auto-hide on) brought up by the pointer resting on the bottom edge
-/// (recorded 10-12 20:44 on his Mac, passively: only the Dock's and WindowManager's windows):
+/// (recorded 10-12 20:44 on the owner's Mac, passively: only the Dock's and WindowManager's windows):
 /// the Dock lists its full-display layer-20 window from 300 ms after the pointer reached the
 /// edge until it hid again 2.9 s later, with no WindowManager window above layer 0.
 fn dock_brought_up(shown_from: u64, hidden_at: u64) -> Vec<Frame> {

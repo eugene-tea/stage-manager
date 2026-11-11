@@ -109,7 +109,7 @@ use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NS
 use objc2_quartz_core::{
     CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CASpringAnimation, CATextLayer,
     CATransaction, CATransform3D, CATransformLayer, NSValueCATransform3DAdditions, kCAAlignmentCenter, kCAAlignmentLeft,
-    kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCAMediaTimingFunctionEaseOut, kCATruncationEnd,
+    kCAFilterTrilinear, kCAGravityResizeAspect, kCAGravityResizeAspectFill, kCAMediaTimingFunctionEaseOut, kCATruncationEnd,
 };
 
 use crate::config::{Rgba, StripLevel, StripStyle};
@@ -2102,6 +2102,7 @@ impl Strip {
             self.keep_off_fullscreen();
         } else {
             self.pane.space = snapshot.space;
+            card_glass::set_space(self.display, snapshot.space);
         }
         let force = self.sync_pane(&snapshot.style);
         self.snapshot = snapshot;
@@ -2836,7 +2837,7 @@ impl Strip {
         if !glass.on() {
             return None;
         }
-        let shown = card_glass::current(self.display)?;
+        let shown = card_glass::current(self.display, self.pane.space)?;
         let g = self.geometry.global;
         let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let rgb = glass.under(shown.backdrop.mean(r.translate(g.x, g.y))?);
@@ -2917,11 +2918,12 @@ impl Strip {
     fn repaint_icons(&mut self) {
         self.icons.clear();
         let look = app_icons::current_look(self.mtm);
+        let scale = self.scale;
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for layers in self.pane.cards.values() {
             for ((pid, rect), layer) in layers.layout.icons.iter().zip(&layers.icons) {
-                set_icon(layer, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w)));
+                set_icon(layer, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w, scale)));
             }
         }
         CATransaction::commit();
@@ -3038,16 +3040,22 @@ impl Strip {
         let mut icon_layers = Vec::new();
         let icon_style = &style.icons;
         let look = app_icons::current_look(self.mtm);
+        let scale = self.scale;
         for (pid, rect) in &layout.icons {
             let icon = CALayer::new();
             icon.setFrame(cg_rect(&rect.translate(layout.frame.x, layout.frame.y)));
             // SAFETY: framework constant.
             icon.setContentsGravity(unsafe { kCAGravityResizeAspect });
+            // The image is drawn at this size ([`app_icons::render`]); while the strip scales
+            // it, mipmaps keep its edges smooth.
+            icon.setContentsScale(scale);
+            // SAFETY: framework constant.
+            icon.setMinificationFilter(unsafe { kCAFilterTrilinear });
             icon.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
             icon.setShadowOpacity(icon_style.shadow_opacity as f32);
             icon.setShadowRadius(icon_style.shadow_radius * k);
             icon.setShadowOffset(CGSize::new(0.0, icon_style.shadow_offset_y * k));
-            set_icon(&icon, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w)));
+            set_icon(&icon, self.icons.get_or_fetch(*pid, look, || app_icons::render(*pid, rect.w, scale)));
             icon.setZPosition(1.0);
             unit.addSublayer(&icon);
             icon_layers.push(icon);
@@ -4257,7 +4265,7 @@ mod tests {
 
     #[test]
     fn a_plane_in_its_own_depth_is_drawn_where_the_layout_projects_it() {
-        // His laptop's strip (see strip_layout's tests): planes above, at and below the eye,
+        // The owner's laptop's strip (see strip_layout's tests): planes above, at and below the eye,
         // at rest and slid partly out.
         let m = Metrics::new(&StripStyle::default(), Size::new(1800.0, 1130.0), 1.0, 584.5 - 39.0);
         for (x, top, u, v) in [(15.0, 120.0, 140.0, 105.0), (32.0, 480.0, 120.0, 90.0), (83.0, 900.0, 161.0, 120.0)] {

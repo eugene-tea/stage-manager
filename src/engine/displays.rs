@@ -197,7 +197,7 @@ mod tests {
     }
 
     /// 11-05 20:25:46: the lid closed at 46.44, Mail activated by macOS at 46.81 with no
-    /// press since; the owner's own click at 49.70 and a ⌘-Tab are his.
+    /// press since; the owner's own click at 49.70 and a ⌘-Tab are the owner's.
     #[test]
     fn a_window_dragged_across_the_seam_moves_when_it_is_let_go() {
         assert!(!display_moves_now(true, false), "the button still down: the drag goes on");
@@ -210,7 +210,7 @@ mod tests {
         let settle = Duration::from_secs(10);
         let ms = Duration::from_millis;
         assert!(macos_after_display_change(Some(ms(370)), ms(20_000), settle), "Mail at 46.81: macOS's");
-        assert!(!macos_after_display_change(Some(ms(3_260)), ms(5), settle), "a click after the change: his");
+        assert!(!macos_after_display_change(Some(ms(3_260)), ms(5), settle), "a click after the change: the owner's");
         assert!(!macos_after_display_change(Some(ms(11_000)), ms(20_000), settle), "past the settle: as ever");
         assert!(!macos_after_display_change(None, ms(20_000), settle), "no display change since the launch");
     }

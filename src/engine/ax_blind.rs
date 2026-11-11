@@ -1,5 +1,5 @@
-//! Accessibility blind for the whole session (his Mac, 11-06): WindowServer hung on wake and
-//! macOS's watchdog logged him out; after the login Accessibility listed no window of any app
+//! Accessibility blind for the whole session (the owner's Mac, 11-06): WindowServer hung on wake and
+//! macOS's watchdog logged the owner out; after the login Accessibility listed no window of any app
 //! (every app answered, with no windows; System Events counted none either), while the window
 //! server showed them all. Only another logout fixes it. Stage Manager can do nothing then: it
 //! says so in its menu and keeps every saved stage, and once Accessibility lists windows again
@@ -185,7 +185,7 @@ impl Watch {
 mod tests {
     use super::*;
 
-    /// His Mac at 15:40 (11-06): 15 windows of 14 apps on screen, every app answering, none
+    /// The owner's Mac at 15:40 (11-06): 15 windows of 14 apps on screen, every app answering, none
     /// listed; logged in long before.
     fn blind_mac() -> Facts {
         Facts { trusted: true, locked: false, overview: false, since_login: Some(Duration::from_secs(2200)), shown: 15, regular: 15, answering: 14, listed: 0 }

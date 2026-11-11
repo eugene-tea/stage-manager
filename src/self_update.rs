@@ -414,7 +414,7 @@ pub struct QuitFacts {
     pub helper_armed: bool,
 }
 
-/// Whether a quit installs the ready update (his go 11-09): only the user's own, clean Quit;
+/// Whether a quit installs the ready update (the owner's go 11-09): only the user's own, clean Quit;
 /// never at a logout, restart or shutdown, while Apple's Stage Manager is on, after windows
 /// were left for the guardian, or on a quit already made for an install (whose helper
 /// reopens the app). Such an install does not reopen the app ([`HelperArgs::relaunch`]).
@@ -1002,7 +1002,7 @@ Runtime Version=26.0.0";
 
     #[test]
     fn an_automatic_install_never_goes_while_the_screen_is_locked_or_the_display_sleeps() {
-        // His log, 10-30: locked at 08:31, 38 min idle at 08:59, the install quit and every
+        // The owner's log, 10-30: locked at 08:31, 38 min idle at 08:59, the install quit and every
         // parked window failed to come back (AX -25202) until the unlock.
         let away = Moment { buttons_down: false, strip_busy: false, locked: false, asleep: false, idle_secs: 2294.0 };
         assert_eq!(wait_reason(false, Moment { locked: true, ..away }), Some(Wait::Locked));
@@ -1064,7 +1064,7 @@ Runtime Version=26.0.0";
         assert!(HelperArgs::parse(&bad).is_err());
     }
 
-    /// His go 11-09: an install at the user's Quit tells the helper not to reopen the app.
+    /// The owner's go 11-09: an install at the user's Quit tells the helper not to reopen the app.
     #[test]
     fn a_quit_install_tells_the_helper_not_to_relaunch() {
         let a = HelperArgs {
@@ -1081,7 +1081,7 @@ Runtime Version=26.0.0";
         assert_eq!(HelperArgs::parse(&words).map(|p| p.relaunch), Ok(false));
     }
 
-    /// His go 11-09: only the user's own clean Quit installs a ready update.
+    /// The owner's go 11-09: only the user's own clean Quit installs a ready update.
     #[test]
     fn only_the_users_own_quit_installs() {
         let user = QuitFacts { user_quit: true, clean: true, for_logout: false, apple_on: false, helper_armed: false };
@@ -1094,7 +1094,7 @@ Runtime Version=26.0.0";
         assert!(!quit_installs(QuitFacts { clean: false, ..user }), "windows left for the guardian");
     }
 
-    /// His go 11-09: a staged update an earlier run left is checked again at once, from
+    /// The owner's go 11-09: a staged update an earlier run left is checked again at once, from
     /// scratch; a kept copy (a failed install's) and a running helper's folder are not.
     #[test]
     fn a_left_behind_update_is_checked_again_early() {
@@ -1194,7 +1194,7 @@ Runtime Version=26.0.0";
         assert_eq!(f.running, Some("new"));
     }
 
-    /// His go 11-09: an install at the user's Quit replaces the app and opens nothing; a
+    /// The owner's go 11-09: an install at the user's Quit replaces the app and opens nothing; a
     /// failure puts the old one back, still without opening anything.
     #[test]
     fn a_quit_install_opens_nothing() {

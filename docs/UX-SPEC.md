@@ -60,7 +60,7 @@ right of Blue's (`second_app_dx`), Green's top 18.3 pt below Blue's (the two cen
 line, the window behind 15 pt up: `second_app_dy`), Green's bottom 96 pt below Blue's top
 (the whole card is held at `min_height`, its windows grown, their offsets kept), Green's far
 edge at 128.5 pt where Blue alone reaches 105. The window behind peeks out on the side it
-sits on the screen: two of the owner's cards with the other app's window right of the front
+sits on the screen: two real cards with the other app's window right of the front
 one showed it peeking out on the right (23 and 47 pt; up 34 and 13 pt, so Apple's offsets
 vary with the windows; ours are the fixture's). A card of three apps (measured 11-09, Red 1
 in front, Green, Blue): the second app's window where a card of two puts it (Green on the
@@ -79,7 +79,7 @@ first two pixels below a card, gone by 4 (2 pt), 3 to 6 levels for a pixel besid
 edge, none above it; a Core Animation render of a card fitted to the bottom, top and far
 edges of two cards gives `shadow_radius` 1, `shadow_opacity` 0.3, `shadow_offset_y` 1 (the
 same render read our old 4 / 0.4 / 2 within a level). The icon's shadow is faint and tight:
-measured 11-09 evening against Apple's in Dark Mode on the same wallpaper (the owner's two
+measured 11-09 evening against Apple's in Dark Mode on the same wallpaper (two
 screenshots), below the icon over the wallpaper it darkens by about 30 % at the edge, 16 %
 three pixels down, and is gone by 8 (4 pt): `[icons] shadow_radius` 2, `shadow_opacity` 0.3,
 `shadow_offset_y` 1, within 2 to 3 % of Apple's from three pixels down. The morning's fit on
@@ -361,7 +361,7 @@ pointer inside the strip. After about 135 pt (16 frames, the pointer about 245 p
 screen's left edge) Green comes out as its own window, turned, about half its width, just
 right of the pointer; within 6 frames (100 ms) it slides under the pointer and keeps
 growing and straightening, full size after about 16 frames, while the card shows Blue alone.
-Ours lifts the window off from the first move instead (past `[drag] threshold`, owner 11-09:
+Ours lifts the window off from the first move instead (past `[drag] threshold`, 11-09:
 with the whole card following the pointer inside the column, "both windows move together"):
 its picture leaves the card at the card's size, turned as the card and flattening on the same
 spring as a card dragged out, held where it was pressed; its plane on the card fades to
@@ -976,6 +976,16 @@ through. With neither on, nothing changes. The strip never takes keyboard focus 
 non-activating panel, as Apple's strip never takes it from the window in front), so
 VoiceOver reaches the cards through the pointer: the pointer over the strip, or VoiceOver
 set to move its cursor with the mouse pointer.
+
+## Measured on Apple's, nothing to change (11-09 evening)
+
+- The card glass in Dark Mode: window opacity 0.78, backdrop saturation 0.93, brightness 0.82
+  (`scripts/measure-apple-card-glass.py`); ours, fitted in Light Mode, 0.78 / 0.95 / 0.78, within the
+  fit's error.
+- The card count follows the visible height: 4 at a 13-inch MacBook Air's (about 925 pt), 6 at the
+  Studio Display's, as reviewers counted; ours gives the same.
+- Reduce Motion on Apple's: a switch is a cross-fade of about 80 ms, a minimize a fade out in place of
+  about 130 ms. Ours fades 200 ms, worked out from the accessibility guidance rather than copied.
 
 ## Known gaps
 

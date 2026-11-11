@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn an_icon_changed_under_the_patch_hides_it_until_the_new_still() {
-        // His 10-30 screenshot: an icon dropped into the corner, its label cut by the old
+        // The owner's 10-30 screenshot: an icon dropped into the corner, its label cut by the old
         // still for about a second.
         let patch = Rect::new(2519.0, 1356.0, 41.0, 84.0);
         let dropped = Rect::new(2440.0, 1300.0, 136.0, 114.0);

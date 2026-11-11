@@ -501,7 +501,7 @@ fn after_the_restore_window_a_pending_match_brings_its_stage_forward() {
 
 /// 11-02 (an Accessibility slowdown at launch): Telegram's, Mail's and Fork's windows were on
 /// screen when the app started, but their apps did not answer, so they were found 4-8 s later,
-/// after his first click had ended the restore window; each brought its saved stage forward,
+/// after the owner's first click had ended the restore window; each brought its saved stage forward,
 /// three switches nobody asked for. A window the window server listed on screen at launch goes
 /// to its stage parked, as during the restore window; one that shows later (opened, shown by
 /// the user) still brings its stage forward.
@@ -1499,7 +1499,7 @@ fn a_stray_of_a_merged_part_joins_the_merge() {
     assert_eq!(m.stage_of(w(42)), Some(chat), "the merge stands for its saved stage's other windows");
 }
 
-// ----- Accessibility blind (round ax-blind, his Mac 11-06) ---------------------------------
+// ----- Accessibility blind (round ax-blind, the owner's Mac 11-06) ---------------------------------
 
 /// Desktop 6, not shown when saved: the browser's and Chat's other windows.
 fn desktop_6() -> SavedSpace {
@@ -1511,7 +1511,7 @@ fn desktop_6() -> SavedSpace {
     d6
 }
 
-/// His screen after the logout of 11-06: 15 windows of 14 apps on screen, every app
+/// The owner's screen after the logout of 11-06: 15 windows of 14 apps on screen, every app
 /// answering, Accessibility listing none.
 fn blind_screen() -> crate::engine::ax_blind::Facts {
     crate::engine::ax_blind::Facts {

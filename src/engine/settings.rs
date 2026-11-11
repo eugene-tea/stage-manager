@@ -174,7 +174,7 @@ mod tests {
         assert!(s.stage_manager_enabled);
         assert!(s.hide_widgets_in_stage_manager);
         assert!(!s.hide_widgets_standard);
-        assert!(s.macos_reveals_desktop_outside_stage_manager, "his key is absent: Always");
+        assert!(s.macos_reveals_desktop_outside_stage_manager, "the owner's key is absent: Always");
     }
 
     #[test]

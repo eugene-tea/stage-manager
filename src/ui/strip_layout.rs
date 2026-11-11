@@ -638,7 +638,7 @@ pub fn ghost_frame(start: Rect, grab: (f64, f64), full: Size, out: bool, hold: (
 /// Whether a dragged card's ghost is drawn as its window, at the window's size: past the
 /// column (`out`) once a full-size snapshot of the window is at hand (`sharp`; the press asks
 /// for one). The card's thumbnail is never stretched to the window's size (11-09: Mail's
-/// 1651 x 1196 window drawn from its thumbnail covered his screen, blurred; Apple's is sharp):
+/// 1651 x 1196 window drawn from its thumbnail covered the owner's screen, blurred; Apple's is sharp):
 /// until the snapshot comes the ghost stays the card's plane under the pointer, and it turns
 /// into the window when the snapshot arrives.
 pub fn ghost_as_window(out: bool, sharp: bool) -> bool {
@@ -718,7 +718,7 @@ mod tests {
         c
     }
 
-    /// His laptop: visible 0,39 1800 × 1130 in a 1800 × 1169 display; the panel starts at
+    /// The owner's laptop: visible 0,39 1800 × 1130 in a 1800 × 1169 display; the panel starts at
     /// y = 39, so the display's middle (584.5) is 545.5 in panel coordinates.
     fn laptop() -> Metrics {
         Metrics::new(&StripStyle::default(), Size::new(1800.0, 1130.0), 1.0, 584.5 - 39.0)
@@ -888,7 +888,7 @@ mod tests {
     fn merge_zones_and_gaps_are_both_wide_on_his_displays() {
         use crate::ui::motion_math::{DropSpot, drop_spot};
         let band = StripStyle::default().drag.merge_zone;
-        // His usual cards: a full-height browser, a terminal, a small Finder window (the
+        // The owner's usual cards: a full-height browser, a terminal, a small Finder window (the
         // smallest card Apple draws), and a tall narrow window.
         for (name, m, (w, h)) in [("laptop", laptop(), (1800.0, 1130.0)), ("5K", five_k(), (2560.0, 1410.0))] {
             let cards = [

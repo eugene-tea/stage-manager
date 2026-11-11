@@ -1,4 +1,4 @@
-//! A window saved showing only a piece at its screen's park corner (his Mac 11-06: an older
+//! A window saved showing only a piece at its screen's park corner (the owner's Mac 11-06: an older
 //! version put the laptop's front at the laptop's park corner, -2864,1408, took it as shown,
 //! and a click brought it in at -2785,1408, 80 by 32 pt of it on the laptop; saved so, the
 //! 14:13 launch made it the laptop's front, invisible, with no card). Such a frame is never a
@@ -9,7 +9,7 @@ use super::*;
 use crate::engine::geometry::Size;
 use crate::engine::park::GRAB_WIDTH;
 
-/// Deep House's window size on his laptop.
+/// Deep House's window size on the owner's laptop.
 const SIZE: (f64, f64) = (1065.0, 915.0);
 
 /// Opens window `id` of `pid` on `display` at `frame` by `action`.
@@ -74,7 +74,7 @@ fn assert_a_card(m: &Model, a: &[Action], display: &Display) {
 
 #[test]
 fn a_launch_with_the_laptops_front_saved_at_its_corner_makes_it_a_card() {
-    // His numbers: the laptop -1800,271 1800x1169, its corner bottom-left; the window
+    // The owner's numbers: the laptop -1800,271 1800x1169, its corner bottom-left; the window
     // 1065x915 at -2785,1408 (80 by 32 pt on the laptop).
     let at = Rect::new(-2785.0, 1408.0, SIZE.0, SIZE.1);
     assert!(!laptop().parks(at), "out of the park zone by its test: the bug");
@@ -110,7 +110,7 @@ fn a_window_hung_off_the_laptops_left_edge_in_the_upper_half_is_shown_where_it_i
 #[test]
 fn a_corner_piece_comes_back_on_screen_and_an_edge_hang_elsewhere_stays() {
     let d = laptop();
-    // His frame, and the 5K's mirror of it: wholly on screen, as near as it fits.
+    // The owner's frame, and the 5K's mirror of it: wholly on screen, as near as it fits.
     let piece = Rect::new(-2785.0, 1408.0, SIZE.0, SIZE.1);
     assert_eq!(d.reach(piece), Rect::new(-1800.0, 525.0, SIZE.0, SIZE.1));
     let s = studio();

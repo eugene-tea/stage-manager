@@ -135,7 +135,7 @@ mod tests {
 
     #[test]
     fn each_connected_screen_takes_its_entry_by_uuid_or_as_main() {
-        // His desk 11-06: the 5K is Main with two Desktops, the laptop one, a screen not
+        // The owner's desk 11-06: the 5K is Main with two Desktops, the laptop one, a screen not
         // connected left out (no Spaces, so no entry here).
         let monitors = [monitor("Main", 2), monitor("37D8832A-2D66-02CA-B9F7-8F30A301B230", 1)];
         let screens = [

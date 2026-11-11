@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.8.4 — 2026-11-10
+
+- The app icons on cards are drawn sharp at their size, as Apple's are; their edges were
+  jagged and their pictures grainy.
+- Switching to a Desktop with a wallpaper of its own no longer tints its cards with the
+  wallpaper of the Desktop left for half a second; each Desktop's cards keep its own colours.
+
 ## 1.8.3 — 2026-11-09
 
 - Minimizing a window with the yellow button or ⌘M sends it straight into a new card at the
