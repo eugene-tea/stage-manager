@@ -14,8 +14,8 @@
 //! The corner patch draws the desktop picture from its file, so it cannot stand for a corner
 //! with icons on it ([`crate::engine::corner_patch`]), and 8L2 gave such a desktop the instant
 //! arrival. This keeps a still of the corner block ([`block`]) taken through ScreenCaptureKit
-//! with every window excluded ([`super::capture::capture_desktop`]: the picture and what lies
-//! on it, nothing else), fresh while it is wanted ([`keep_fresh`], from the WM thread at every
+//! of the desktop-level windows only ([`super::capture::capture_desktop`]: the picture and what
+//! lies on it, nothing else), fresh while it is wanted ([`keep_fresh`], from the WM thread at every
 //! corner patch plan): macOS raises the activated windows in the corner before the app hears
 //! of the activation, and a capture started then would come after the overlay's first frame.
 //!
