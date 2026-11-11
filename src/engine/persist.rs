@@ -389,13 +389,19 @@ impl StateFile {
     /// Stamps the save time `now` (Unix seconds) and each Space's `last_seen`: now for the
     /// Space shown, else what `seen` (the times kept from earlier saves and the loaded file)
     /// or the Space itself says. `seen` learns the shown Space's time.
+    ///
+    /// A Space no save ever saw shown (a file from before the time was kept, a visit shorter
+    /// than the save's wait) takes `now` once, and `seen` keeps it: with no time at all a
+    /// Desktop not visited again never aged ([`StateFile::start_new_session`],
+    /// [`UNSEEN_KEEP`]), and its windows waited in the file for good.
     pub fn stamp(&mut self, now: u64, seen: &mut HashMap<u64, u64>) {
         self.saved_at = Some(now);
         for space in &mut self.spaces {
             if space.current {
                 seen.insert(space.id, now);
             }
-            space.last_seen = seen.get(&space.id).copied().or(space.last_seen);
+            let known = seen.get(&space.id).copied().or(space.last_seen);
+            space.last_seen = Some(*seen.entry(space.id).or_insert(known.unwrap_or(now)));
         }
     }
 
