@@ -468,3 +468,17 @@ fn an_app_reopening_its_window_in_the_corner_gets_its_frame_back_within_a_day() 
     add(&mut m, win(51, 22, CHAT, "Team", elsewhere));
     assert_eq!(m.window(w(51)).map(|x| x.restore), Some(elsewhere), "where its app put it");
 }
+
+/// An app quits on a Desktop that then takes another id (a provisional Desktop adopted as a
+/// saved one): its kept windows follow, or a logout within the two minutes saves the Desktop
+/// without them.
+#[test]
+fn a_quit_apps_windows_follow_their_desktop_when_it_is_relabelled() {
+    let mut m = desk();
+    quit_app(&mut m, &[21], T);
+    let old = m.quit_windows()[0].space;
+    let new = crate::engine::model::SpaceId(old.0 + 40);
+    m.relabel_space(old, new);
+    assert!(m.space_has_quit(new), "the entry is the renamed Desktop's");
+    assert!(!m.space_has_quit(old));
+}

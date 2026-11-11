@@ -329,6 +329,12 @@ impl Model {
                 *from = new;
             }
         }
+        // The entries of apps that quit there follow it, or the file leaves them out.
+        for q in &mut self.quit {
+            if q.space == old {
+                q.space = new;
+            }
+        }
     }
 
     /// Takes the Spaces saved in `state.json`: each is rebuilt on its first visit

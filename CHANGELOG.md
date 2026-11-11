@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- An app that quit within two minutes of a logout keeps its place in its stage after the
+  restart also on a Desktop the app had only just recognized as a saved one; its windows
+  were left out of the saved stages there.
 - A saved-stages file this version cannot read (damaged, or written by a newer version
   before going back to this one) is kept beside it as `state.json.unread`. It was
   replaced by the first save, and its stages were gone.
