@@ -1029,6 +1029,18 @@ fn unrestored_step_at(force: bool, model_parked: Option<bool>, listed: Option<(b
     }
 }
 
+/// The last word of a quit, a stand-down or a logout's head start on a window whose restore
+/// failed, after the unpark and its leftovers check ([`Controller::account_unrestored`]): it is
+/// left only while the window server lists it in a park zone (`in_zone`; `None`: not listed,
+/// closed). One listed out of every park zone on a Desktop not shown is not parked, whatever
+/// its handle answered: nothing is left to bring back, so it keeps neither the exit unclean
+/// nor a guardian waiting (a log of 11-09: a window whose handle had died, listed at its own
+/// frame on another Desktop, made the quit unclean, and the guardian could only wait for that
+/// Desktop to show and let it go unmoved).
+fn left_after_unpark(in_zone: Option<bool>) -> bool {
+    in_zone == Some(true)
+}
+
 /// Whether an [`Unrestored`] window is let go as a hidden tab (8J): only one the model no
 /// longer has (`model_parked` `None`), let go as reported destroyed (`why`: the tab's own
 /// signature; the review of 8J), listed off screen in the park zone (`listed`), and judged
@@ -2820,12 +2832,46 @@ impl Controller {
 
     /// Quit, after its leftovers check: windows whose restore failed are checked against the
     /// window server at once (no wait for the once-a-second check): those seen back out of the
-    /// park zone, or gone, are forgotten; one still in the zone on screen is tried once more.
-    /// Returns how many are left (another Space's, an app that does not answer).
+    /// park zone, or gone, are forgotten; one still in the zone on screen is tried once more;
+    /// one in no park zone on a Desktop not shown is not parked and is forgotten too
+    /// ([`Self::forget_not_parked`]). Returns how many are left (in a park zone on another
+    /// Space, or of an app that does not answer).
     pub fn account_unrestored(&mut self, ob: &Observer) -> usize {
         self.unrestored_checked = Instant::now().checked_sub(UNRESTORED_RETRY).unwrap_or(self.unrestored_checked);
         self.retry_unrestored(ob, false);
+        self.forget_not_parked(ob);
         self.unrestored.len()
+    }
+
+    /// After an unpark (quit, stand-down, a logout's head start): a window whose restore
+    /// failed that the window server lists in no park zone, on any Desktop, is not parked
+    /// ([`left_after_unpark`]) and leaves the registry. The test is the widest one: every
+    /// corner used this run on every screen, slivers counted, and the window's own display's.
+    /// Not while a Desktop change settles or a slide is held: the list is not to be trusted
+    /// then, and the window stays on record as before.
+    fn forget_not_parked(&mut self, ob: &Observer) {
+        if self.unrestored.is_empty() || self.phase.space_settling(Instant::now()) || self.slide_held() {
+            return;
+        }
+        let ids: Vec<u32> = self.unrestored.keys().copied().collect();
+        let listed = windows::describe(&ids);
+        let displays = safety::scan_displays();
+        let before = self.unrestored.len();
+        for id in ids {
+            let at = listed.iter().find(|w| w.id == id);
+            let in_zone = at.map(|w| {
+                displays.parks(w.bounds)
+                    || self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some_and(|x| m.display(x.meta.display).parks(w.bounds)))
+            });
+            if left_after_unpark(in_zone) {
+                continue;
+            }
+            tracing::info!(id, at = ?at.map(|w| w.bounds), onscreen = ?at.map(|w| w.onscreen), "a window whose restore failed is in no park zone: not parked, nothing to bring back");
+            self.unrestored.remove(&id);
+        }
+        if self.unrestored.len() != before {
+            safety::registry_replace(self.parked_entries(ob));
+        }
     }
 
     /// Notes which windows are parked, where every window lives and the strip's slots, for
@@ -7638,6 +7684,19 @@ mod tests {
         assert_eq!(unrestored_step_at(true, Some(true), Some((true, true)), false, false), Done, "parked again by the model");
         assert_eq!(unrestored_step_at(true, None, Some((false, true)), true, false), Done, "a hidden tab");
         assert_eq!(unrestored_step_at(false, Some(false), Some((false, true)), false, false), Wait, "not forced: waits");
+    }
+
+    /// A log of 11-09: a window whose handle had died sat at its own frame on a Desktop not
+    /// shown; its restore failed at the quit, the running app's rule kept it on record (off
+    /// screen: wait), and the quit was unclean for a window that was never in the corner.
+    /// After the unpark only a window listed in a park zone is left.
+    #[test]
+    fn after_the_unpark_only_a_window_in_a_park_zone_is_left() {
+        // The running app's rule for it: wait (it may still show parked on its Desktop).
+        assert_eq!(unrestored_step(Some(false), Some((false, false)), false, false), UnrestoredStep::Wait);
+        assert!(!left_after_unpark(Some(false)), "listed out of every park zone: not parked");
+        assert!(!left_after_unpark(None), "not listed: closed");
+        assert!(left_after_unpark(Some(true)), "in a park zone, on any Desktop: still to bring back");
     }
 
     /// 6X: a parked window the model forgot (it left its Space, its element was reported

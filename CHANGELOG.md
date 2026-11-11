@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Quitting while a window on another Desktop can't be reached (one in full screen, say) no
+  longer counts as a quit that left a window hidden when the window was never hidden: an
+  update that is ready installs at that Quit, and nothing stays running to watch for it.
+
 ## 1.8.4 — 2026-11-10
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were
