@@ -7,6 +7,9 @@
   goes back to the setting in force.
 - Clicking Copy Instructions for Agents twice in a row no longer leaves the button reading
   "Copied".
+- An update that installs when you quit Stage Manager no longer goes in under a copy opened
+  again at that very moment: that copy keeps running, and the update waits for the next
+  check.
 - `stage-manager log summary` no longer shows a day's counts as near zero when two lines
   crossed midnight out of order, or after the clock was set back a day.
 

@@ -878,9 +878,23 @@ struct RealSwap {
     launched_at: Option<u64>,
 }
 
+/// The executable of the app bundle at `bundle`, as the system names a running process's
+/// ([`exe_of`]: no symbolic links in it, `/private/tmp` for `/tmp`), so the two compare. The
+/// bundle's own path may hold links (it is the path the app was opened by).
+fn bundle_exe(bundle: &Path) -> PathBuf {
+    std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf()).join("Contents/MacOS/stage-manager")
+}
+
+/// Whether a process (its executable `exe`, its arguments) is the app itself (no subcommand:
+/// never the user's CLI, the guardian or a helper) running from the bundle at `bundle`.
+fn app_runs_from(exe: &Path, argv: &[String], bundle: &Path) -> bool {
+    exe == bundle_exe(bundle) && self_update::is_app_instance(argv)
+}
+
 impl RealSwap {
-    fn exe(&self) -> PathBuf {
-        self.args.target.join("Contents/MacOS/stage-manager")
+    /// The app instances running from the bundle at `bundle` now, the old process aside.
+    fn instances_from(&self, bundle: &Path) -> Vec<i32> {
+        processes(|exe, argv| app_runs_from(exe, argv, bundle)).filter(|&pid| pid as u32 != self.args.pid).collect()
     }
 
     /// The app the helper opened: the one that answered, else the app instances (no
@@ -891,19 +905,20 @@ impl RealSwap {
             return vec![p as i32];
         }
         let Some(since) = self.launched_at else { return Vec::new() };
-        let exe = self.exe();
-        processes(|e, argv| e == exe && self_update::is_app_instance(argv))
-            .filter(|&pid| pid as u32 != self.args.pid && started_at(pid).is_some_and(|t| t >= since))
-            .collect()
+        self.instances_from(&self.args.target).into_iter().filter(|&pid| started_at(pid).is_some_and(|t| t >= since)).collect()
     }
-}
 
-impl RealSwap {
     /// An app instance runs from the installed executable other than the old process (the
     /// user opened it again after the Quit).
     fn reopened(&self) -> bool {
-        let exe = self.exe();
-        processes(|e, argv| e == exe && self_update::is_app_instance(argv)).any(|pid| pid as u32 != self.args.pid)
+        !self.instances_from(&self.args.target).is_empty()
+    }
+
+    /// After the exchange: an app instance runs from the old bundle, now at the staged path
+    /// (a running process's executable is named where its file is now). The user opened the
+    /// app while the staged copy was verified, before the exchange.
+    fn reopened_under_the_exchange(&self) -> bool {
+        !self.instances_from(&self.args.staged).is_empty()
     }
 }
 
@@ -946,7 +961,14 @@ impl SwapOps for RealSwap {
     }
 
     fn check_installed(&mut self) -> Result<(), String> {
-        verify_copy(&self.args.target, &self.args.requirement, &self.args.version, "installed")
+        verify_copy(&self.args.target, &self.args.requirement, &self.args.version, "installed")?;
+        // Opened again between the staged copy's check and the exchange: that copy runs the
+        // old version from the bundle now in the working folder, which goes next. Its bundle
+        // is put back under it instead (the swap is undone), and the update waits.
+        if self.reopened_under_the_exchange() {
+            return Err("Stage Manager was opened again while the update went in".into());
+        }
+        Ok(())
     }
 
     fn exchange(&mut self) -> Result<(), ExchangeError> {
@@ -1153,6 +1175,29 @@ mod tests {
 
     /// Release builds trust only a Developer ID signature and never read the test hooks.
     /// Review C3: a pid given to another process (another start time) is not the app.
+    /// The helper finds a reopened app, and the new one it must stop, by its executable as
+    /// the system names it: with no links in it. A bundle opened by a path through a link
+    /// (`/tmp`, a linked Applications folder) matched no process, so an app opened again was
+    /// not seen and an unconfirmed new version counted as stopped.
+    #[test]
+    fn the_app_is_found_by_its_bundle_through_a_linked_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join(APP_NAME).join("Contents/MacOS")).expect("bundle");
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real, &linked).expect("link");
+        let running = std::fs::canonicalize(&real).expect("real path").join(APP_NAME).join("Contents/MacOS/stage-manager");
+        let app = vec![running.to_string_lossy().into_owned()];
+        assert!(app_runs_from(&running, &app, &linked.join(APP_NAME)), "opened by the linked path");
+        assert!(app_runs_from(&running, &app, &real.join(APP_NAME)));
+        let mut guardian = app.clone();
+        guardian.extend(["--guardian".to_string(), "42".to_string()]);
+        assert!(!app_runs_from(&running, &guardian, &linked.join(APP_NAME)), "never a helper of the app");
+        assert!(!app_runs_from(&running, &app, &dir.path().join("elsewhere").join(APP_NAME)), "another copy");
+        // A bundle that is gone (moved since) is named as it was.
+        assert_eq!(bundle_exe(Path::new("/nowhere/Stage Manager.app")), PathBuf::from("/nowhere/Stage Manager.app/Contents/MacOS/stage-manager"));
+    }
+
     #[test]
     fn a_reused_pid_is_not_the_app() {
         assert!(same_start(Some((100, 5)), Some((100, 5))));
