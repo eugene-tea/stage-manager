@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- With two screens and a stage parked on each, the corner where parked windows wait keeps
+  its picture of the desktop fresh; it stopped being renewed, so the windows' edges could
+  show there.
+- A screen that parks windows at another corner than the bottom right (another screen is
+  beside it there) keeps that corner's picture right when a desktop icon moves under it.
+- Turning Apple's Stage Manager on just after a Desktop change no longer leaves a piece of
+  the wallpaper drawn over a window's corner.
+
 ## 1.8.4 — 2026-11-10
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were

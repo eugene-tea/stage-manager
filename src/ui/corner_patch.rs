@@ -146,9 +146,11 @@ pub const MAX_SHEETS: usize = 16;
 /// Whether an arriving Desktop's panel still waits for a plan meant for it: the arrival was
 /// noted when the latest plan applied carried the Space-change count `after`, and the WM
 /// thread counts the change only after the main thread hears of it, so a plan for the new
-/// Desktop carries a higher count. At most [`ARRIVAL_WAIT`].
-fn arrival_waits(arrival: Option<(u64, Instant)>, plan_space: u64, now: Instant) -> bool {
-    arrival.is_some_and(|(after, since)| plan_space <= after && now.saturating_duration_since(since) < ARRIVAL_WAIT)
+/// Desktop carries a higher count. At most [`ARRIVAL_WAIT`]. A plan that turns the patch off
+/// (`on` false: a stand-down, the option turned off) is for every Desktop and never waits:
+/// no later plan comes to hide the panel, which stayed drawn over a window brought back.
+fn arrival_waits(arrival: Option<(u64, Instant)>, plan_space: u64, on: bool, now: Instant) -> bool {
+    on && arrival.is_some_and(|(after, since)| plan_space <= after && now.saturating_duration_since(since) < ARRIVAL_WAIT)
 }
 
 /// What the WM thread and the strip read of a screen's shown panel ([`Patch::publish_active`]).
@@ -746,6 +748,9 @@ pub fn display_changed(mtm: MainThreadMarker, kept: &[u32]) {
                 patch.others.clear();
                 patch.settler.clear();
                 patch.wall = None;
+                // The shown panel is placed again: its frame was computed for the old
+                // arrangement (the primary screen's height).
+                patch.active.showing = None;
                 patch.reconcile(mtm);
             }
             true
@@ -934,7 +939,7 @@ impl Patch {
 
     fn reconcile_panel(&mut self, mtm: MainThreadMarker) {
         let now = Instant::now();
-        if arrival_waits(self.arrival, self.plan.space, now) {
+        if arrival_waits(self.arrival, self.plan.space, self.plan.on, now) {
             // The plan is the Desktop left's: the arriving panel stays as it slid in.
             return;
         }
@@ -1293,11 +1298,13 @@ mod tests {
         let t0 = Instant::now();
         // Arrived when the latest plan counted 7 Space changes.
         let arrival = Some((7, t0));
-        assert!(arrival_waits(arrival, 7, t0), "the Desktop left's plan, sent before the WM thread counted the change");
-        assert!(arrival_waits(arrival, 6, t0 + Duration::from_millis(100)), "an older one in flight");
-        assert!(!arrival_waits(arrival, 8, t0), "the WM thread's first plan for the new Desktop");
-        assert!(!arrival_waits(arrival, 7, t0 + ARRIVAL_WAIT), "never longer");
-        assert!(!arrival_waits(None, 7, t0));
+        assert!(arrival_waits(arrival, 7, true, t0), "the Desktop left's plan, sent before the WM thread counted the change");
+        assert!(arrival_waits(arrival, 6, true, t0 + Duration::from_millis(100)), "an older one in flight");
+        assert!(!arrival_waits(arrival, 8, true, t0), "the WM thread's first plan for the new Desktop");
+        assert!(!arrival_waits(arrival, 7, true, t0 + ARRIVAL_WAIT), "never longer");
+        assert!(!arrival_waits(None, 7, true, t0));
+        assert!(!arrival_waits(arrival, 0, false, t0), "a stand-down's plan (no Space count) hides the panel at once");
+        assert!(!arrival_waits(arrival, 7, false, t0), "and so does the patch turned off");
     }
 
     #[test]
