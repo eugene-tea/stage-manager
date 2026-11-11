@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="410" height="96" viewBox="0 0 410 96" role="img" aria-label="Stage Manager on TheMacApps">
+  <rect x="1" y="1" width="408" height="94" rx="15" fill="#fbfaf6" stroke="#d6d2c8" stroke-width="2"/>
+  <rect x="18" y="22" width="52" height="52" rx="13" fill="#20211f"/>
+  <path d="M29 59V35l15 15 15-15v24" fill="none" stroke="#f3efe6" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="88" y="43" fill="#6b675e" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif" font-size="14">RESEARCHED ON THEMACAPPS</text>
+  <text x="88" y="69" fill="#171817" font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, sans-serif" font-size="20" font-weight="700">Independent purchase research</text>
+</svg>
