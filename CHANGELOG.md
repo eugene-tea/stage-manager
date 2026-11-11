@@ -10,6 +10,8 @@
   stage of an app just hidden in front, which unhid that app again.
 - Switching to a stage shared with a hidden app leaves that app hidden: the keyboard goes
   to the stage's front window that shows.
+- A window minimized while the Dock is slow to answer no longer holds every stage switch
+  up for seconds.
 
 ## 1.8.4 — 2026-11-10
 

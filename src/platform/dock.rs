@@ -249,32 +249,60 @@ pub fn app_order(dock: i32) -> Option<Vec<DockApp>> {
 /// its minimized items, just before the Trash), else the icon of its app (`app_path`, the
 /// app bundle's path), where macOS's "Minimize windows into application icon" puts it (seen
 /// 11-09: the un-minimize starts from the app's icon, 61×61 inside its 68×84 item). `None`
-/// when the Dock does not answer or has neither.
+/// when the Dock has neither. A Dock that leaves a call unanswered is asked nothing more
+/// ([`tile_among`]): what was read by then is the answer.
 pub fn minimized_tile(dock: i32, app_path: Option<&str>, title: &str) -> Option<Rect> {
     let t = DOCK_AX_TIMEOUT_SECONDS;
     let lists = AxElement::application(dock).bounded(t, AxElement::children).ok()?;
     let app_path = app_path.map(|p| p.trim_end_matches('/'));
-    let (mut own, mut icon) = (None, None);
-    for list in &lists {
-        let items = match list.bounded(t, AxElement::children) {
-            Ok(items) => items,
-            Err(AxError::CANNOT_COMPLETE) => return None,
-            Err(_) => continue,
-        };
-        for item in items {
-            let Ok(subrole) = item.bounded(t, AxElement::subrole) else { continue };
-            if subrole == names::SUBROLE_MINIMIZED_WINDOW_DOCK_ITEM {
-                if item.bounded(t, AxElement::title).is_ok_and(|s| s == title)
-                    && let Ok(frame) = item.bounded(t, AxElement::frame)
-                {
-                    own = Some(frame);
-                }
-            } else if subrole == names::SUBROLE_APPLICATION_DOCK_ITEM
-                && icon.is_none()
-                && app_path.is_some_and(|want| item.bounded(t, AxElement::url_path).is_ok_and(|p| p.trim_end_matches('/') == want))
-            {
-                icon = item.bounded(t, AxElement::frame).ok();
+    // Each list's items are asked for only once the list before is read through.
+    let items = lists
+        .iter()
+        .map(|list| list.bounded(t, AxElement::children))
+        .take_while(|items| !matches!(items, Err(AxError::CANNOT_COMPLETE)))
+        .flat_map(Result::unwrap_or_default);
+    tile_among(items, |item, want_icon| {
+        let subrole = item.bounded(t, AxElement::subrole)?;
+        if subrole == names::SUBROLE_MINIMIZED_WINDOW_DOCK_ITEM {
+            if item.bounded(t, AxElement::title)? == title {
+                return item.bounded(t, AxElement::frame).map(TileItem::Own);
             }
+        } else if subrole == names::SUBROLE_APPLICATION_DOCK_ITEM
+            && want_icon
+            && let Some(want) = app_path
+            && item.bounded(t, AxElement::url_path)?.trim_end_matches('/') == want
+        {
+            return item.bounded(t, AxElement::frame).map(TileItem::Icon);
+        }
+        Ok(TileItem::Other)
+    })
+}
+
+/// What one Dock item is to a window just minimized ([`minimized_tile`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TileItem {
+    /// The window's own minimized-window item, with its frame.
+    Own(Rect),
+    /// Its app's icon, with its frame.
+    Icon(Rect),
+    /// Neither.
+    Other,
+}
+
+/// The tile among the Dock's `items`, each read by `read` (told whether the app's icon is
+/// still looked for) only when the one before is read: the last [`TileItem::Own`], else the
+/// first [`TileItem::Icon`]. The first call the Dock leaves unanswered (`CannotComplete` at
+/// its timeout) ends the reading, as in [`item_at`] and [`app_order`]: every further item
+/// would hold the WM thread a whole timeout more (a Dock of forty items: four seconds). An
+/// error of any other kind is an item with no such attribute.
+fn tile_among<I>(items: impl IntoIterator<Item = I>, mut read: impl FnMut(&I, bool) -> AxResult<TileItem>) -> Option<Rect> {
+    let (mut own, mut icon) = (None, None);
+    for item in items {
+        match read(&item, icon.is_none()) {
+            Ok(TileItem::Own(frame)) => own = Some(frame),
+            Ok(TileItem::Icon(frame)) => icon = icon.or(Some(frame)),
+            Err(AxError::CANNOT_COMPLETE) => break,
+            Ok(TileItem::Other) | Err(_) => {}
         }
     }
     own.or(icon).filter(|f| !f.is_degenerate())
@@ -306,6 +334,32 @@ pub fn bundle_id_at(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Dock that stops answering mid-read is asked nothing more: each further item would
+    /// wait its whole timeout on the WM thread. What was read by then stands.
+    #[test]
+    fn a_minimized_tile_read_stops_at_the_docks_first_unanswered_call() {
+        let icon = Rect::new(900.0, 1380.0, 68.0, 84.0);
+        let own = Rect::new(1200.0, 1380.0, 68.0, 84.0);
+        let asked = std::cell::Cell::new(0);
+        let items = |answers: Vec<AxResult<TileItem>>| {
+            asked.set(0);
+            tile_among(answers, |a, _| {
+                asked.set(asked.get() + 1);
+                *a
+            })
+        };
+        let mut busy = vec![Ok(TileItem::Other), Ok(TileItem::Icon(icon)), Err(AxError::CANNOT_COMPLETE)];
+        busy.extend(std::iter::repeat_n(Err(AxError::CANNOT_COMPLETE), 40));
+        assert_eq!(items(busy), Some(icon), "the icon read before the Dock stopped answering");
+        assert_eq!(asked.get(), 3, "nothing asked after the first unanswered call");
+        // An item lacking an attribute is passed over; the window's own tile (the last of
+        // them) wins over its app's icon.
+        let all = vec![Ok(TileItem::Icon(icon)), Err(AxError::NO_VALUE), Ok(TileItem::Own(icon)), Ok(TileItem::Own(own)), Ok(TileItem::Other)];
+        assert_eq!(items(all), Some(own));
+        assert_eq!(asked.get(), 5);
+        assert_eq!(items(vec![Ok(TileItem::Other)]), None);
+    }
 
     fn win(pid: i32, layer: i64, bounds: Rect) -> CgWindow {
         CgWindow { id: 1, pid, owner: String::new(), name: None, layer, bounds, onscreen: true, alpha: 1.0 }
