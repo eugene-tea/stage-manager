@@ -572,6 +572,8 @@ impl Shell {
     fn write_apple(&mut self, key: &str, value: i64) {
         if let Err(e) = native_settings::write(key, value) {
             tracing::warn!(key, "cannot change the macOS setting: {e}");
+            // No new reading will come: the control goes back to the value in force.
+            self.refresh_settings();
         }
         let hooks = self.hooks;
         later(move || (hooks.poll_now)());

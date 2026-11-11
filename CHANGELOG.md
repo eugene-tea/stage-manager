@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- A setting changed in Settings that could not be saved (the config file has an error, or
+  macOS refused the change) no longer leaves its switch showing the new value: the switch
+  goes back to the setting in force.
+- Clicking Copy Instructions for Agents twice in a row no longer leaves the button reading
+  "Copied".
+
 ## 1.8.4 — 2026-11-10
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were
