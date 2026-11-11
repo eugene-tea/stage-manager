@@ -97,7 +97,11 @@ A parked window that never returns is the worst bug.
 Never waited on (logged at debug): **hidden tabs** (layer 0, off screen, unlisted by an
 answering app, a same-size sibling) and **other apps' helpers** (in the park zone, off
 screen, unlisted, never registered, managed or saved). A managed, registered or saved
-window always waits.
+window always waits. One kind waits without making a quit unclean: a registered **child
+its app ordered out while parked** (off screen in the zone, its handle dead, unlisted by
+its answering app; the parked file marks it `ordered_out`). No clean-exit marker is
+written, so the guardian keeps it, but the quit logs no error and the user's Quit still
+installs a ready update.
 
 ## Strip order
 

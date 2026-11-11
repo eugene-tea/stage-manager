@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A small panel that its app closed while it sat in the corner with its stage (a browser's
+  pop-up, for one) no longer makes every later Quit count as failed. Such a Quit logged an
+  error and did not install a downloaded update. The panel is still watched until its app
+  lets go of it.
 - With "Install updates automatically" on, an update that was downloaded but not installed
   before Stage Manager quit is no longer downloaded again at every launch: the copy stays,
   is checked again in full, and is used if it is still the newest version. A Mac whose

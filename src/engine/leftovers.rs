@@ -15,11 +15,97 @@
 //! soon as the window server lists the window out of the park zone: a busy app often carries
 //! out the request a moment after the timeout.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use super::geometry::Rect;
 use super::persist::StateFile;
 use super::recovery::{FrameSource, LiveWindow, ScanDisplays, plan_sourced, safe_restore};
+
+/// What a quit's unpark and its checks left away, counted ([`quit_end`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuitLeft {
+    /// Windows the leftovers check left in a park zone: this app's own (not handed over),
+    /// ordered-out children aside.
+    pub leftovers: usize,
+    /// Windows whose restore failed and that are not seen back, ordered-out children aside.
+    pub unrestored: usize,
+    /// Windows still in the registry, ordered-out children aside.
+    pub registered: usize,
+    /// Windows taken from an old guardian still away, ordered-out children aside.
+    pub taken: usize,
+    /// Child windows their apps ordered out while parked
+    /// ([`super::not_ours::ordered_out_child`]) that are still on record.
+    pub ordered_out: usize,
+}
+
+/// Counts what a quit left: `back` (its leftovers check found no window in a park zone; else
+/// `left_not_taken` of them were this app's own, ordered-out children aside), the windows
+/// whose restore failed (`unrestored`), the registry's (`registry`) and the taken ones still
+/// away (`taken`), each without the children judged `ordered_out`, which are counted apart
+/// while any record still holds them.
+pub fn quit_left(
+    back: bool,
+    left_not_taken: usize,
+    unrestored: &BTreeSet<u32>,
+    registry: &BTreeSet<u32>,
+    taken: &BTreeSet<u32>,
+    ordered_out: &BTreeSet<u32>,
+) -> QuitLeft {
+    let besides = |ids: &BTreeSet<u32>| ids.difference(ordered_out).count();
+    let on_record = |id: &&u32| unrestored.contains(id) || registry.contains(id) || taken.contains(id);
+    QuitLeft {
+        leftovers: if back { 0 } else { left_not_taken },
+        unrestored: besides(unrestored),
+        registered: besides(registry),
+        taken: besides(taken),
+        ordered_out: ordered_out.iter().filter(on_record).count(),
+    }
+}
+
+/// How a quit ends for the windows it left ([`quit_end`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitEnd {
+    /// Every window is back: the clean-exit marker is written, the guardian has no work.
+    Clean,
+    /// Only children their apps ordered out while parked are left: nothing can bring one
+    /// back, so the quit counts as clean for the user (no error, a ready update installs),
+    /// but no clean-exit marker is written: the guardian keeps waiting for each, as for any
+    /// registered window.
+    Waits,
+    /// Only windows handed over by an old guardian are left (ordered-out children aside):
+    /// passed on to this app's guardian, a warning.
+    PassedOn,
+    /// A window this app parked is still away: an error, and the guardian brings it back.
+    Unclean,
+}
+
+impl QuitEnd {
+    /// Whether the clean-exit marker is written (the guardian then does nothing).
+    pub fn marks_clean(self) -> bool {
+        self == QuitEnd::Clean
+    }
+
+    /// Whether the quit is clean in the user's eyes: no error, and the user's own Quit
+    /// installs a ready update.
+    pub fn clean_for_user(self) -> bool {
+        matches!(self, QuitEnd::Clean | QuitEnd::Waits)
+    }
+}
+
+/// How a quit ends for what it `left`. A registered window always waits: any window on
+/// record, an ordered-out child too, keeps the clean-exit marker unwritten.
+pub fn quit_end(left: QuitLeft) -> QuitEnd {
+    if left.leftovers > 0 || left.unrestored > 0 || left.registered > 0 {
+        QuitEnd::Unclean
+    } else if left.taken > 0 {
+        QuitEnd::PassedOn
+    } else if left.ordered_out > 0 {
+        QuitEnd::Waits
+    } else {
+        QuitEnd::Clean
+    }
+}
 
 /// After an unpark, how long the window server may take to list the windows in place before
 /// one still in the park zone counts as left there (it lists the old frames for a few
@@ -253,6 +339,50 @@ pub fn retry_quickly<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A child its app ordered out while parked keeps the guardian waiting (no clean-exit
+    /// marker) without making the quit an error or stopping an update at the user's Quit.
+    #[test]
+    fn an_ordered_out_child_keeps_the_guardian_waiting_but_not_the_quit_unclean() {
+        let none = QuitLeft::default();
+        assert_eq!(quit_end(none), QuitEnd::Clean);
+        let waits = quit_end(QuitLeft { ordered_out: 1, ..none });
+        assert_eq!(waits, QuitEnd::Waits);
+        assert!(!waits.marks_clean(), "a registered window always waits: the guardian stays");
+        assert!(waits.clean_for_user(), "no error, and the user's Quit installs a ready update");
+        // Any other window left is counted as before, whatever else is ordered out.
+        for left in [QuitLeft { leftovers: 1, ..none }, QuitLeft { unrestored: 1, ..none }, QuitLeft { registered: 1, ordered_out: 1, ..none }] {
+            assert_eq!(quit_end(left), QuitEnd::Unclean, "{left:?}");
+            assert!(!quit_end(left).clean_for_user() && !quit_end(left).marks_clean());
+        }
+        let passed = quit_end(QuitLeft { taken: 2, ordered_out: 1, ..none });
+        assert_eq!(passed, QuitEnd::PassedOn);
+        assert!(!passed.clean_for_user() && !passed.marks_clean());
+        assert!(QuitEnd::Clean.marks_clean() && QuitEnd::Clean.clean_for_user());
+    }
+
+    /// The 11-06 quit, counted: one window (a browser's child panel) unrestored and in the
+    /// registry, left by the leftovers check and judged ordered out.
+    #[test]
+    fn the_quits_counts_leave_ordered_out_children_aside() {
+        let set = |ids: &[u32]| ids.iter().copied().collect::<BTreeSet<u32>>();
+        let (panel, none) = (set(&[697]), set(&[]));
+        let left = quit_left(false, 0, &panel, &panel, &none, &panel);
+        assert_eq!(left, QuitLeft { ordered_out: 1, ..QuitLeft::default() });
+        assert_eq!(quit_end(left), QuitEnd::Waits);
+        // Not judged so (its app did not answer, a live child on another Desktop): as before.
+        let as_before = quit_left(false, 1, &panel, &panel, &none, &none);
+        assert_eq!(as_before, QuitLeft { leftovers: 1, unrestored: 1, registered: 1, ..QuitLeft::default() });
+        assert_eq!(quit_end(as_before), QuitEnd::Unclean);
+        // Another window left beside it still makes the quit unclean.
+        assert_eq!(quit_end(quit_left(false, 1, &set(&[12, 697]), &set(&[12, 697]), &none, &panel)), QuitEnd::Unclean);
+        // Handed over by an old guardian and found the same way again: not passed on as an
+        // error either; a live handed-over window beside it is passed on as before.
+        assert_eq!(quit_end(quit_left(false, 0, &none, &none, &panel, &panel)), QuitEnd::Waits);
+        assert_eq!(quit_end(quit_left(false, 0, &none, &none, &set(&[40, 697]), &panel)), QuitEnd::PassedOn);
+        // Judged ordered out, then let go by every record (seen gone since): a clean quit.
+        assert_eq!(quit_end(quit_left(true, 0, &none, &none, &none, &panel)), QuitEnd::Clean);
+    }
     use crate::engine::park::{Corner, is_parked};
     use crate::engine::persist::{SavedRole, SavedSpace, SavedStage, SavedWindow};
     use crate::engine::recovery::{Known, is_stranded};

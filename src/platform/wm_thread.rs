@@ -55,7 +55,7 @@ use super::{enhanced_ui, safety};
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
-use crate::engine::leftovers::UNPARK_SETTLE;
+use crate::engine::leftovers::{self, UNPARK_SETTLE};
 use crate::engine::slow_task::{self, SlowTasks};
 use crate::engine::stand_down::{Heard, Logout, Quit, Signal, StandDown, Step, Task, Work, logout_plan, release_plan, resume_plan};
 use crate::ui::strip_model::{StripDrop, StripEvent};
@@ -570,13 +570,23 @@ impl WmState {
                 }
                 // Windows taken from an old guardian (round 8N): those shown come back now;
                 // one still away leaves the exit unclean, so this app's guardian waits for it.
-                let taken_left = self.taken.last_look(&self.controller.model_window_ids());
-                // Every window the leftovers check left was handed over (none this app parked).
-                let only_taken = back || safety::left_not_taken() == 0;
-                let rest_back = only_taken && unrestored == 0 && safety::registry_len() == 0;
-                let ok = rest_back && taken_left == 0;
+                self.taken.last_look(&self.controller.model_window_ids());
+                // What is left, counted: children their apps ordered out while parked aside
+                // (they stay on record and the guardian waits for them, but they do not make
+                // the quit unclean), and the windows the leftovers check left that were
+                // handed over (none this app parked) apart from this app's own.
+                let end = leftovers::quit_end(leftovers::quit_left(
+                    back,
+                    safety::left_not_taken(),
+                    &self.controller.unrestored_ids(),
+                    &safety::registry_ids(),
+                    &safety::taken_ids(),
+                    &safety::ordered_out(),
+                ));
+                let ok = end.marks_clean();
                 // Handed-over windows still away and nothing else: passed on, a warning.
-                safety::set_passed_on(rest_back && taken_left > 0);
+                safety::set_passed_on(end == leftovers::QuitEnd::PassedOn);
+                safety::set_only_ordered_out(end == leftovers::QuitEnd::Waits);
                 self.observer.stop();
                 let _ = self.observer.take_events();
                 if let Some(rl) = CFRunLoop::current() {

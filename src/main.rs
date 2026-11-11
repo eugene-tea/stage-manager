@@ -470,6 +470,10 @@ mod app {
             if safety::passed_on() {
                 // Only handed-over windows still away (round 8N): this app's guardian takes them over.
                 tracing::info!("handed-over windows still away: this app's guardian takes them over");
+            } else if safety::only_ordered_out() {
+                // Only children their apps closed while parked: nothing can bring one back.
+                // No clean-exit marker (the guardian waits for each), and no error.
+                tracing::info!("only windows their apps closed while parked are left in the corner: the guardian keeps waiting for them; the quit counts as clean");
             } else {
                 tracing::error!("not every window could be restored; the guardian will scan after exit");
             }
@@ -479,7 +483,7 @@ mod app {
         stage_manager::platform::enhanced_ui::restore_all("quit");
         // A ready update installs at the user's own Quit, not reopened (the owner's go 11-09); main
         // thread only (the signal watcher's exit installs nothing).
-        stage_manager::ui::shell::install_on_quit(user_quit, ok, head_start || logout_reason);
+        stage_manager::ui::shell::install_on_quit(user_quit, ok || safety::only_ordered_out(), head_start || logout_reason);
         // An update ready to install: its helper waits for this process to exit (8C).
         stage_manager::platform::updater::launch_pending_helper();
         // A capture still in flight at exit makes macOS alert about screen access. Before the

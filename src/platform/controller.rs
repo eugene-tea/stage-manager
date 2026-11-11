@@ -2882,6 +2882,11 @@ impl Controller {
             .with_unparked(self.unparked.clone())
     }
 
+    /// The windows whose restore failed that are still on record.
+    pub fn unrestored_ids(&self) -> BTreeSet<u32> {
+        self.unrestored.keys().copied().collect()
+    }
+
     /// Quit, after its leftovers check: windows whose restore failed are checked against the
     /// window server at once (no wait for the once-a-second check): those seen back out of the
     /// park zone, or gone, are forgotten; one still in the zone on screen is tried once more;

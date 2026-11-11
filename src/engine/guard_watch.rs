@@ -632,7 +632,7 @@ mod tests {
     }
 
     fn reg() -> Vec<Registered> {
-        vec![Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false }]
+        vec![Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false, ordered_out: false }]
     }
 
     fn at(id: u32, bounds: Rect, onscreen: bool) -> Listed {
@@ -699,7 +699,7 @@ mod tests {
     fn a_small_registered_window_is_never_lost() {
         let d = displays();
         let small = Rect::new(2559.0, 1408.0, 40.0, 30.0);
-        let reg = Registered { id: 7, pid: 8, restore: Rect::new(300.0, 300.0, 40.0, 30.0), child: false, fitted: false, fitted_at: None, unvouched: false };
+        let reg = Registered { id: 7, pid: 8, restore: Rect::new(300.0, 300.0, 40.0, 30.0), child: false, fitted: false, fitted_at: None, unvouched: false, ordered_out: false };
         let mut w = Watch::new(&[reg]);
         let listed = [
             Listed { id: 7, pid: 8, bounds: small, onscreen: false, allowed: true },
@@ -946,7 +946,7 @@ mod tests {
     #[test]
     fn a_fitted_window_waits_for_its_pre_fit_frame() {
         let fitted_at = Rect::new(216.0, 218.0, 600.0, 392.0);
-        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: None, unvouched: false }];
+        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: None, unvouched: false, ordered_out: false }];
         let t0 = Instant::now();
         let mut w = Watch::new(&r);
         pass(&mut w, t0, 0, &on_desktop_1());
@@ -972,7 +972,7 @@ mod tests {
     fn a_fitted_window_the_user_moved_is_left_where_they_put_it() {
         let fitted_at = Rect::new(216.0, 218.0, 600.0, 392.0);
         let moved = Rect::new(700.0, 300.0, 600.0, 392.0);
-        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: Some(fitted_at), unvouched: false }];
+        let r = [Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: Some(fitted_at), unvouched: false, ordered_out: false }];
         let t0 = Instant::now();
         let mut w = Watch::new(&r);
         pass(&mut w, t0, 0, &on_desktop_1());
@@ -1000,7 +1000,7 @@ mod tests {
     /// that said fitted never makes it one.
     #[test]
     fn an_unvouched_window_is_reached_only_in_the_park_zone() {
-        let r = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: None, unvouched: true };
+        let r = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: true, fitted_at: None, unvouched: true, ordered_out: false };
         let t0 = Instant::now();
         let mut w = Watch::registered_only(&[r]);
         assert!(!w.waiting().next().is_some_and(|x| x.fitted), "never fitted");
@@ -1024,8 +1024,8 @@ mod tests {
     fn a_new_app_running_takes_over_only_the_windows_it_adopted() {
         let t0 = Instant::now();
         let mut w = Watch::new(&[
-            Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false },
-            Registered { id: 2, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false },
+            Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false, ordered_out: false },
+            Registered { id: 2, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false, ordered_out: false },
         ]);
         let found = Listed { id: 30, pid: 8, bounds: parked(), onscreen: false, allowed: true };
         let mut listed = on_desktop_1();
@@ -1058,8 +1058,8 @@ mod tests {
     #[test]
     fn a_watch_hands_over_and_a_taken_watch_holds_only_what_it_took() {
         let t0 = Instant::now();
-        let r1 = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false };
-        let r2 = Registered { id: 2, pid: 7, restore: RESTORE, child: true, fitted: true, fitted_at: None, unvouched: false };
+        let r1 = Registered { id: 1, pid: 7, restore: RESTORE, child: false, fitted: false, fitted_at: None, unvouched: false, ordered_out: false };
+        let r2 = Registered { id: 2, pid: 7, restore: RESTORE, child: true, fitted: true, fitted_at: None, unvouched: false, ordered_out: false };
         let mut w = Watch::new(&[r1, r2]);
         let found = Listed { id: 30, pid: 8, bounds: parked(), onscreen: false, allowed: true };
         let mut listed = on_desktop_1();
@@ -1092,7 +1092,7 @@ mod tests {
 
     #[test]
     fn registered_restore_frames_are_made_safe() {
-        let r = [Registered { id: 1, pid: 7, restore: parked(), child: false, fitted: false, fitted_at: None, unvouched: false }];
+        let r = [Registered { id: 1, pid: 7, restore: parked(), child: false, fitted: false, fitted_at: None, unvouched: false, ordered_out: false }];
         let w = Watch::new(&r);
         let f = w.waiting().next().and_then(|x| Watch::restore_frame(x, &displays())).unwrap_or_default();
         assert!(!is_stranded(f, &displays(), Known::Registered) && VISIBLE.contains_rect(&f), "{f:?}");

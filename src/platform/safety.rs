@@ -43,6 +43,12 @@
 //! ([`super::handoff::TakenWatch`]) until each is back, gone, or in the model. A quit is clean
 //! only once none is left ([`taken_len`]).
 //!
+//! **A child its app ordered out while parked** ([`crate::engine::not_ours::ordered_out_child`]):
+//! the window server keeps listing it in the corner, off screen, and nothing can move it.
+//! It stays registered and the guardian waits for it as for any other, but a quit whose only
+//! windows left are such children is not unclean for them
+//! ([`crate::engine::leftovers::QuitEnd::Waits`], [`ordered_out`]).
+//!
 //! No app is hidden by this app: `[windows] hide_parked_apps` and its list of hidden apps in
 //! the parked file were retired on 11-09.
 
@@ -163,6 +169,72 @@ pub fn set_passed_on(on: bool) {
 /// True when this quit passes handed-over windows on and nothing else is left.
 pub fn passed_on() -> bool {
     PASSED_ON.load(Ordering::SeqCst)
+}
+
+/// The windows the latest leftovers check left in the park zone and judged children their
+/// apps ordered out while parked ([`judge_ordered_out`]). Locked last, after [`REGISTRY`] and
+/// [`TAKEN`]; never held across either.
+static ORDERED_OUT: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+/// The windows the latest leftovers check judged children their apps ordered out while
+/// parked: still registered, still waited for by the guardian, not counted against a quit.
+pub fn ordered_out() -> BTreeSet<u32> {
+    ORDERED_OUT.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// Notes the latest leftovers check's ordered-out children; the parked file says so for
+/// each (a later copy that takes the guardian's watch then knows).
+fn set_ordered_out(ids: BTreeSet<u32>) {
+    {
+        let mut now = ORDERED_OUT.lock().unwrap_or_else(|p| p.into_inner());
+        if *now == ids {
+            return;
+        }
+        *now = ids;
+    }
+    let listed = registered(&lock_registry());
+    write_parked_file(&listed);
+}
+
+/// Set by a quit whose only windows not back are children their apps ordered out while
+/// parked: the guardian keeps waiting for each, and the quit is clean in the user's eyes.
+static ONLY_ORDERED_OUT: AtomicBool = AtomicBool::new(false);
+
+/// Notes whether this quit leaves only ordered-out children behind.
+pub fn set_only_ordered_out(on: bool) {
+    ONLY_ORDERED_OUT.store(on, Ordering::SeqCst);
+}
+
+/// True when this quit leaves only ordered-out children behind
+/// ([`crate::engine::leftovers::QuitEnd::Waits`]).
+pub fn only_ordered_out() -> bool {
+    ONLY_ORDERED_OUT.load(Ordering::SeqCst)
+}
+
+/// Those of `left` (windows still listed in a park zone after a quit's unpark and its tries)
+/// that are children their apps ordered out while parked
+/// ([`crate::engine::not_ours::ordered_out_child`]). A registry window's handle is asked
+/// now; a taken window has none, and counts only when an earlier quit found its handle dead
+/// ([`Registered::ordered_out`]). Each app is asked for its window list once, and only for a
+/// window nothing else rules out.
+fn judge_ordered_out(left: &[windows::CgWindow]) -> BTreeSet<u32> {
+    let mut lists: std::collections::HashMap<i32, Option<Vec<u32>>> = std::collections::HashMap::new();
+    left.iter()
+        .filter(|w| {
+            let (child, dead) = match (registry_entry(w.id), taken_entry(w.id)) {
+                (Some(e), _) => (e.child, e.child && e.element.role() == Err(AxError::INVALID_ELEMENT)),
+                (None, Some(r)) => (r.child, r.ordered_out),
+                (None, None) => return false,
+            };
+            let listed = hidden_tabs::tab_listed(w);
+            if !crate::engine::not_ours::ordered_out_child(&listed, child, dead, Some(&[])) {
+                return false;
+            }
+            let ax = lists.entry(w.pid).or_insert_with(|| hidden_tabs::ax_window_ids(w.pid));
+            crate::engine::not_ours::ordered_out_child(&listed, child, dead, ax.as_deref())
+        })
+        .map(|w| w.id)
+        .collect()
 }
 
 /// Lets go of taken windows (back, gone, or in the model now).
@@ -304,6 +376,7 @@ pub fn retry_held() -> bool {
 /// The registry as the guardian needs it: ids, pids and restore frames; then the windows
 /// taken from an old guardian that the registry does not hold (round 8N).
 fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
+    let ordered_out = ordered_out();
     let mut listed: Vec<Registered> = map
         .iter()
         .map(|(&id, e)| Registered {
@@ -314,6 +387,7 @@ fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
             fitted: e.fitted.is_some(),
             fitted_at: e.fitted,
             unvouched: false,
+            ordered_out: ordered_out.contains(&id),
         })
         .collect();
     listed.extend(lock_taken().values().filter(|r| !map.contains_key(&r.id)).copied());
@@ -1292,6 +1366,7 @@ fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     let left = read(leftovers::settle_before(moved));
     if left.is_empty() {
         LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
+        set_ordered_out(BTreeSet::new());
         return None;
     }
     let seen: Vec<(u32, bool)> = left.iter().map(|w| (w.id, w.onscreen)).collect();
@@ -1304,13 +1379,23 @@ fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     if after.is_empty() {
         tracing::info!(reason, back = left.len(), took_ms, "every window still parked after unparking is back");
         LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
+        set_ordered_out(BTreeSet::new());
         return None;
     }
     let ids: Vec<u32> = after.iter().map(|w| w.id).collect();
+    // A child its app ordered out while parked: nothing can move it. It stays registered and
+    // waited for; it is only not counted against the quit.
+    let ordered_out = judge_ordered_out(&after);
+    set_ordered_out(ordered_out.clone());
+    if !ordered_out.is_empty() {
+        tracing::info!(reason, windows = ?ordered_out, "a child window its app closed while parked is still listed in the corner, off screen (its handle is dead, its app answers and no longer lists it): it stays registered and the guardian waits for it; a quit is not unclean for it");
+    }
     let taken = taken_ids();
-    let mine: Vec<u32> = ids.iter().copied().filter(|id| !taken.contains(id)).collect();
+    let mine: Vec<u32> = ids.iter().copied().filter(|id| !taken.contains(id) && !ordered_out.contains(id)).collect();
     LEFT_NOT_TAKEN.store(mine.len(), Ordering::SeqCst);
-    if mine.is_empty() {
+    if ordered_out.len() == ids.len() {
+        tracing::info!(reason, windows = ?ids, took_ms, "only windows their apps closed while parked are left in the corner");
+    } else if mine.is_empty() {
         // Only windows handed over by an old guardian (round 8N): passed on, never an error.
         tracing::info!(reason, windows = ?ids, took_ms, "handed-over windows still parked: passed on to the guardian");
     } else {
