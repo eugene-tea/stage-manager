@@ -7,6 +7,9 @@
   looking again every other second.
 - With two screens, a window assigned to all Desktops is recognized as one and shows on every
   stage; it took the Desktop's front stage's place at every Desktop change.
+- With two screens, a Dock click or ⌘-Tab to an app on the other Desktop of the screen without
+  the menu bar shows that app's stage there when the Desktop slides in; its window stayed in
+  its card.
 
 ## 1.8.4 — 2026-11-10
 

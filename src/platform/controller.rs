@@ -4735,7 +4735,9 @@ impl Controller {
             }
         }
         if arrive {
-            self.arrive_others(ob, list);
+            // What is held for that Desktop is replayed there at once.
+            let awaited = self.awaited_elsewhere(now);
+            self.arrive_others_for(ob, list, awaited);
         }
         for id in left {
             let Some(m) = self.model.as_mut() else { return };
@@ -4937,11 +4939,21 @@ impl Controller {
             Verdict::FullScreen => {
                 let new = !self.phase.fullscreen();
                 self.phase.feed(phase::Event::FullScreenCame, now);
-                self.undo_ahead(ob, "a full-screen app's Space came");
+                // An arrangement made ahead on this screen is undone; one on another screen
+                // is that screen's arrival's to settle.
+                if self.ahead_space().is_some_and(|s| self.screen_of_space(s).id == main.id) {
+                    self.undo_ahead(ob, "a full-screen app's Space came");
+                }
                 if new {
                     counters::bump(Count::FullScreen);
                     tracing::info!("Space changed: a full-screen app's Space (no strip)");
                 }
+                // The notice may be another screen's (none names its screen): each is
+                // recognized as at any Space change, whatever the main one shows.
+                let awaited = self.awaited_elsewhere(now);
+                self.defer_present = true;
+                self.arrive_others_for(ob, &list, awaited);
+                self.defer_present = false;
                 self.present();
             }
             Verdict::Desktop => {
@@ -5032,8 +5044,11 @@ impl Controller {
         );
         self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
-        let (more, predicted) = self.settle_ahead(ob, list, after, Instant::now());
+        let (more, predicted) = self.settle_ahead(ob, list, main.id, after, Instant::now());
         actions.extend(more);
+        // A focus or activation still held for a Desktop not shown: maybe another screen's,
+        // recognized below.
+        let awaited = self.awaited_elsewhere(Instant::now());
         // One batch and one strip snapshot for the arrival: the strip of the Desktop shown
         // takes over in its final order, never first with the stage left active.
         self.defer_present = true;
@@ -5042,7 +5057,7 @@ impl Controller {
         // Arriving through an app (Dock, ⌘Tab, an activation) whose window waits in a stage
         // here: show it, as Apple's does, at once (the Desktop's slide is the motion).
         self.bring_focus_forward(ob, "arrival", predicted);
-        self.arrive_others(ob, list);
+        self.arrive_others_for(ob, list, awaited);
         self.defer_present = false;
         self.present();
         self.mark_dirty();
@@ -5069,18 +5084,52 @@ impl Controller {
         (live, self.absent_windows(ob, &on_screen(list), display.id))
     }
 
+    /// What is held now (a window's focus, an app's activation) for a Desktop no screen
+    /// shows yet, with those Desktops ([`Model::spaces_awaited`]): after the main screen's
+    /// arrival, one of them may be another screen's, recognized next
+    /// ([`Self::arrive_others_for`]).
+    fn awaited_elsewhere(&self, now: Instant) -> Option<(Wanted, Vec<SpaceId>)> {
+        let held = self.focus_replay.peek(now)?;
+        let spaces = self.model.as_ref()?.spaces_awaited(held);
+        (!spaces.is_empty()).then_some((held, spaces))
+    }
+
+    /// The other screens' Desktops at a Space change ([`Self::arrive_others`]; no notice names
+    /// the screen whose Desktop changed), then the window the user went there for: when a
+    /// Desktop `awaited` named ([`Self::awaited_elsewhere`]) shows now, or an arrangement
+    /// made ahead there was confirmed, what was held is replayed and its stage comes forward
+    /// there, as on the main screen ([`Self::bring_focus_forward`]). The main screen's own
+    /// replay came first and could do nothing for it: its Desktop was not recognized yet (a
+    /// Dock click or ⌘-Tab to an app on the laptop's other Desktop slid it in with the app's
+    /// window left in its card).
+    fn arrive_others_for(&mut self, ob: &mut Observer, list: &[windows::CgWindow], awaited: Option<(Wanted, Vec<SpaceId>)>) {
+        let predicted = self.arrive_others(ob, list);
+        let Some(m) = self.model.as_ref() else { return };
+        let came = awaited.filter(|(_, spaces)| spaces.iter().any(|s| m.is_shown_space(*s))).map(|(held, _)| held);
+        if came.is_none() && predicted.is_none() {
+            return;
+        }
+        if let Some(held) = came {
+            self.focus_replay.hold(held, Instant::now());
+        }
+        self.bring_focus_forward(ob, "arrival on another screen", predicted);
+    }
+
     /// The other displays' Desktops (round displays), each recognized by the windows on its
     /// screen as the main display's is ([`Self::arrive_here`]; `list`: the window server's
-    /// list read for it), with none of the main display's extras (no arrangement ahead, no
-    /// focus brought forward, no motion). Called after every arrival on the main display and
-    /// when windows of another Desktop show on a secondary screen.
-    fn arrive_others(&mut self, ob: &mut Observer, list: &[windows::CgWindow]) {
+    /// list read for it), with none of the main display's motion. An arrangement made ahead
+    /// on one of their Desktops is confirmed or undone at that screen's arrival
+    /// ([`Self::settle_ahead`]); the window it was confirmed for is returned. Called after
+    /// every arrival on the main display and when windows of another Desktop show on a
+    /// secondary screen.
+    fn arrive_others(&mut self, ob: &mut Observer, list: &[windows::CgWindow]) -> Option<WindowId> {
         let others: Vec<Display> = self.model.as_ref().map(|m| m.displays().iter().skip(1).copied().collect()).unwrap_or_default();
         if others.is_empty() {
-            return;
+            return None;
         }
         let hints = launch_hints(list);
         let now = Instant::now();
+        let mut predicted = None;
         for d in others {
             // A screen showing an overview, a full-screen animation or a full-screen app's
             // Space: its windows say nothing of its Desktop now (round displays-2).
@@ -5088,16 +5137,16 @@ impl Controller {
                 continue;
             }
             let (live, absent) = self.screen_view(ob, list, d);
-            let Some(m) = self.model.as_ref() else { return };
+            let Some(m) = self.model.as_ref() else { return predicted };
             let new = live.iter().filter(|meta| m.window(meta.id).is_none()).count();
             for meta in &live {
                 self.unplaced.remove(&meta.id.0);
             }
             let hold = self.macos_after_display_change();
-            let Some(m) = self.model.as_mut() else { return };
+            let Some(m) = self.model.as_mut() else { return predicted };
             let before = m.current_space(d.id);
             m.set_hold_arrivals(hold);
-            let actions = m.arrive(d.id, &live, &absent, &hints);
+            let mut actions = m.arrive(d.id, &live, &absent, &hints);
             m.set_hold_arrivals(false);
             let after = m.current_space(d.id);
             let note = m.last_arrival().clone();
@@ -5117,8 +5166,13 @@ impl Controller {
                     "Space changed on another display"
                 );
             }
+            // A Desktop of this screen arranged ahead: confirmed or undone, in its batch.
+            let (more, window) = self.settle_ahead(ob, list, d.id, after, now);
+            actions.extend(more);
+            predicted = predicted.or(window);
             self.execute(ob, actions);
         }
+        predicted
     }
 
     /// True while a settled Space change waits before the Desktop is recognized from `list`:

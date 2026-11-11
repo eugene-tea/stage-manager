@@ -169,6 +169,31 @@ impl Model {
         &self.last_arrival
     }
 
+    /// The Desktops no screen shows now that `held` (a focus or an activation that could not
+    /// act yet, [`crate::engine::focus_replay`]) may be for: its window's Desktop, or for an
+    /// activation every Desktop holding a standard window of the app (windows on every
+    /// Desktop left out). Empty when it can act on a Desktop shown, or names nothing known.
+    /// With several screens the arrivals come in turn: one of these Desktops showing after a
+    /// later screen's arrival is where the user went.
+    pub fn spaces_awaited(&self, held: crate::engine::focus_replay::Wanted) -> Vec<SpaceId> {
+        use crate::engine::focus_replay::Wanted;
+        let waits = |w: &&super::WindowState| !w.sticky && !self.is_shown_space(w.space);
+        let mut spaces: Vec<SpaceId> = match held {
+            Wanted::Window { id, .. } => self.resolve_standard(id).and_then(|w| self.windows.get(&w)).filter(waits).map(|w| w.space).into_iter().collect(),
+            Wanted::App(pid) => {
+                let of_app = |w: &&super::WindowState| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !w.sticky;
+                if self.windows.values().filter(of_app).any(|w| self.is_shown_space(w.space)) {
+                    Vec::new()
+                } else {
+                    self.windows.values().filter(of_app).map(|w| w.space).collect()
+                }
+            }
+        };
+        spaces.sort();
+        spaces.dedup();
+        spaces
+    }
+
     /// True when the windows on screen look like two Desktops at once: two or more known
     /// Spaces with more of their windows on screen than missing, or saved Spaces whose
     /// windows show among the first-seen ones, together (the window list read while a

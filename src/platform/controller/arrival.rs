@@ -46,7 +46,7 @@ use super::{Controller, Unrestored, cards_in};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
 use crate::engine::geometry::Rect;
-use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Display, Model, Observation, SpaceId, StageId, WindowId};
+use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Display, DisplayId, Model, Observation, SpaceId, StageId, WindowId};
 use crate::platform::ax::{AxElement, AxError, AxResult, names};
 use crate::platform::dock::{self, DockItem, DockPress};
 use crate::platform::enhanced_ui;
@@ -1551,9 +1551,13 @@ impl Controller {
         });
     }
 
-    /// A Desktop was recognized (`arrived`): an arrangement made ahead is confirmed (its
+    /// A Desktop was recognized on screen `display` (`arrived`): an arrangement made ahead on a
+    /// Desktop of that screen is confirmed (its
     /// windows raised, the window focused; the stage that was there back if the window is
-    /// gone) or undone. The actions are for the arrival's batch, with the window the arrival
+    /// gone) or undone; one made on another screen's Desktop stands until that screen's own
+    /// arrival (every screen arrives in turn at a Space change: the main screen's arrival,
+    /// its Desktop unchanged, undid the laptop's arrangement as "another Desktop came" before
+    /// the laptop's Desktop was recognized). The actions are for the arrival's batch, with the window the arrival
     /// counts as focused (the predicted one, on a hit: AX may still name the previous
     /// app's); an undo's restores (a Desktop not shown) stay registered until seen. On a hit
     /// with the window still in its stage the moves made at a Dock click get their final
@@ -1563,9 +1567,13 @@ impl Controller {
         &mut self,
         ob: &Observer,
         list: &[CgWindow],
+        display: DisplayId,
         arrived: SpaceId,
         now: Instant,
     ) -> (Vec<Action>, Option<WindowId>) {
+        if !self.ahead.as_ref().is_some_and(|s| self.screen_of_space(s.ahead.space).id == display) {
+            return (Vec::new(), None);
+        }
         let Some(sent) = self.ahead.take() else { return (Vec::new(), None) };
         let hit = sent.ahead.space == arrived;
         let present = self.model.as_ref().is_some_and(|m| m.stage_of(sent.ahead.window) == Some(sent.ahead.stage));
