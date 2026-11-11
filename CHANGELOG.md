@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.4 — 2026-11-10
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were
   jagged and their pictures grainy.
