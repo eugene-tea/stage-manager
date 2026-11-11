@@ -4000,7 +4000,10 @@ impl Controller {
     /// sinks out of the tile off the screen instead of crossing it to the corner, and it is
     /// parked again the moment it is down ([`Self::on_deminiaturized`]).
     fn on_minimized(&mut self, ob: &mut Observer, id: u32) {
-        if !self.store.config().windows.minimize_to_strip || self.frozen() {
+        // Its own screen's answer, as for a minimize caught before the genie
+        // ([`Self::minimize_direct`]): a full-screen app on the other screen stops nothing here.
+        let display = self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.meta.display);
+        if !self.store.config().windows.minimize_to_strip || display.is_none_or(|d| self.frozen_on(d)) {
             return;
         }
         let obs = self.observe(ob);
