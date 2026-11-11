@@ -7,6 +7,13 @@
   show there.
 - A screen that parks windows at another corner than the bottom right (another screen is
   beside it there) keeps that corner's picture right when a desktop icon moves under it.
+- When the main screen changes while the old one stays connected (a laptop docked with its
+  lid open), the old screen's other Desktops no longer show the strip's old cards under the
+  new ones.
+- Changing Desktops in the middle of a stage switch no longer leaves later switches on the
+  new Desktop without their motion.
+- VoiceOver reads an app's name on its card even when the card appeared while the app was
+  still launching.
 - Turning Apple's Stage Manager on just after a Desktop change no longer leaves a piece of
   the wallpaper drawn over a window's corner.
 
