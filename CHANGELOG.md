@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- With two screens and a full-screen app on the main one, a click in a window on the other
+  screen is no longer taken for a click on the wallpaper (with "Click wallpaper to reveal
+  desktop: Only in Stage Manager" it sent that screen's windows to the strip).
+
 ## 1.8.4 — 2026-11-10
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were

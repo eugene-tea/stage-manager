@@ -796,6 +796,17 @@ fn found_order(mut run: Vec<u32>, pid: impl Fn(u32) -> Option<i32>, z: impl Fn(u
     out
 }
 
+/// Whether a left press reads the window server's list: Stage Manager manages windows
+/// (`managing`) and something can act on the press, the Dock's prediction (not `frozen`: no
+/// full-screen Space on the main screen, no Space change settling, no lock) or a wallpaper
+/// click on the screen pressed (`pressed_frozen`: that screen's own answer,
+/// [`Controller::frozen_on`]; `None`: no managed screen there). A full-screen app on the
+/// main screen leaves the other screen's wallpaper click working, so its press reads the list
+/// too: judged on a list not read, every press there was a wallpaper click.
+fn press_reads_list(managing: bool, frozen: bool, pressed_frozen: Option<bool>) -> bool {
+    managing && (!frozen || pressed_frozen == Some(false))
+}
+
 /// True when a move of a shown window while the left button is down is the user dragging
 /// it: the press was on the window (`frame`, its frame at the press, with a margin for the
 /// resize edge) and the pointer has moved since. An app moving its own window while the
@@ -4257,9 +4268,11 @@ impl Controller {
                 self.end_restore(ob, "a click (or a Dock click)", End::User);
                 // One window list for the press: the Dock's bar and the wallpaper are looked
                 // up in it. A press on a Dock item: its click may take the user to another
-                // Desktop.
-                let list = if self.model.is_some() && !self.frozen() { windows::list_windows() } else { Vec::new() };
-                self.dock_pressed(ob, &list, event.at, now);
+                // Desktop. Not read while nothing can act on the press: an unread list is
+                // never an empty one, where every press would be on the wallpaper.
+                let pressed = self.managed_displays().into_iter().find(|d| d.frame.contains(event.at)).map(|d| self.frozen_on(d.id));
+                let list = press_reads_list(self.model.is_some(), self.frozen(), pressed).then(windows::list_windows);
+                self.dock_pressed(ob, list.as_deref().unwrap_or_default(), event.at, now);
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
                 let for_arriving = self.pending.as_ref().is_some_and(|p| p.frames.iter().any(|f| f.contains(event.at)));
@@ -4281,7 +4294,7 @@ impl Controller {
                     tracing::debug!("click during a transition, on an arriving window");
                     false
                 } else {
-                    self.mouse_down(&list, event.at, event.clicks, event.stamp)
+                    list.as_deref().is_some_and(|list| self.mouse_down(list, event.at, event.clicks, event.stamp))
                 };
                 if !wallpaper && self.desktop_echo.user_acted() {
                     tracing::debug!("a click off the wallpaper: Finder's next activation is deliberate");
@@ -7546,6 +7559,19 @@ mod tests {
         assert!(!fullscreen_there(laptop, main, true, others), "the laptop's Desktop goes on");
         assert!(!fullscreen_there(main, main, false, others), "the third screen's stops nothing on the main one");
         assert!(fullscreen_there(third, main, false, others));
+    }
+
+    /// A full-screen app on the main screen: a press on the other screen, whose wallpaper
+    /// click still works, is judged on the window list as read (unread, every press in a
+    /// window there was a wallpaper click and sent that screen's stage to the strip).
+    #[test]
+    fn a_press_on_a_screen_that_takes_input_reads_the_window_list() {
+        assert!(press_reads_list(true, false, Some(false)), "nothing frozen");
+        assert!(press_reads_list(true, true, Some(false)), "full screen on the main screen, a press on the other one");
+        assert!(!press_reads_list(true, true, Some(true)), "a press on the full-screen app's own screen");
+        assert!(!press_reads_list(true, true, None), "frozen, and no managed screen under the press");
+        assert!(press_reads_list(true, false, None), "the Dock's bar is still looked up");
+        assert!(!press_reads_list(false, false, Some(false)), "not managing windows");
     }
 
     /// The review's U1: with the strip hidden no switch animates, so the strip is asked to
