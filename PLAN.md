@@ -35,6 +35,19 @@ UX-SPEC, "Known gaps".
 - **Scroll the strip past its capacity**, with a "+N" mark (R5).
 - **No stage switches the user didn't ask for** (R6): an activation with no click or key press just before
   it doesn't switch stages, and that app's card glows.
+- **⌘M only where it is the app's Minimize.** ⌘M is taken for "minimize to the strip" in any
+  managed window with a minimize button, also in apps that bind ⌘M to something else (an
+  image editor's Curves, a remote desktop that passes it on). Read each app's menu bar once
+  per activation on the WM thread (the item whose `AXMenuItemCmdChar` is M with no other
+  modifier must be the Window menu's minimize item, told by position or identifier, never
+  by its localized title), publish the pids to the key tap as `Minimizable` is, and take the
+  key only for those; an app not read yet keeps its key.
+- **Install a ready update at the lock.** A Mac whose screen locks or sleeps within two
+  minutes never reaches the automatic install (120 s idle, unlocked and awake); it installs
+  at the user's Quit only. Start the install when the lock is announced, before
+  Accessibility stops moving windows (every window back first, as at a logout's head
+  start), or shorten the idle rule; decide which, and what a lock cancelled mid-install
+  leaves on screen.
 - **One stage across all screens** (R8, second half), an option, off. One strip, on the main screen. A
   switch brings a stage's windows back on every screen. Still open: what it means when "Displays have
   separate Spaces" is on, and the lid and restart rules once a window moved to another screen keeps its
