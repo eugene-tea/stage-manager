@@ -1792,8 +1792,6 @@ impl Model {
         if self.options.main_only {
             displays.truncate(1);
         }
-        // Windows adopted at an earlier change are not that any more (the lid opened).
-        self.adopted.clear();
         let mut before = std::mem::take(&mut self.displays);
         // The same display under a new id: by its identity, else the main display when
         // neither id survives.
@@ -1842,6 +1840,13 @@ impl Model {
         }
         let gone: Vec<Display> = before.iter().filter(|o| !displays.iter().any(|d| d.id == o.id)).copied().collect();
         let removed = !gone.is_empty();
+        // Windows adopted at an earlier change are not that any more once a screen comes (the
+        // lid opened) or another goes. The same screens reported again (the Dock moved onto
+        // the remaining one a moment after the lid closed, a resolution) keep them: macOS's
+        // slide to another Desktop with the closed screen's windows may still come.
+        if removed || displays.iter().any(|d| !before.iter().any(|o| o.id == d.id)) {
+            self.adopted.clear();
+        }
         self.displays = displays;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
         self.capacity.retain(|d, _| live.contains(d));

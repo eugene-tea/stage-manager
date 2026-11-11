@@ -11,6 +11,17 @@
 - After a restart on another screen, or the same screen at another size, a window its app
   reopened at the corner where cards are kept comes on screen at its own size. It took the
   frame it had on the other screen, which could be larger than this one.
+- With two screens, windows moved to another Desktop in Mission Control (most of a Desktop's
+  windows at once) join that Desktop's stages; they stayed out of them, and the strip kept
+  looking again every other second.
+- With two screens, a window assigned to all Desktops is recognized as one and shows on every
+  stage; it took the Desktop's front stage's place at every Desktop change.
+- With two screens, a Dock click or ⌘-Tab to an app on the other Desktop of the screen without
+  the menu bar shows that app's stage there when the Desktop slides in; its window stayed in
+  its card.
+- Closing the lid keeps the laptop's stages as they were also when macOS moves them to another
+  Desktop of the remaining screen a moment after the Dock or the resolution changed there;
+  their windows were filed one by one into their apps' stages.
 
 ## 1.8.4 — 2026-11-10
 

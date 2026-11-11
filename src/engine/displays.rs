@@ -120,6 +120,15 @@ pub fn display_of(frame: Rect, displays: &[(DisplayId, Rect)]) -> Option<Display
     best.map(|(id, _)| id)
 }
 
+/// The display window at `frame` belongs to ([`display_of`]), or, when no display shows a
+/// point of it, the display it `had` when that one is still among `displays` (module docs: a
+/// window we parked wholly beyond its screen's edge, `[windows] park_inside` at 0 or below,
+/// stays that screen's; taken for the main screen's, every arrival there counted it as a
+/// window moved onto the main screen's Desktop). `None`: on no display and none kept.
+pub fn display_kept(frame: Rect, displays: &[(DisplayId, Rect)], had: Option<DisplayId>) -> Option<DisplayId> {
+    display_of(frame, displays).or_else(|| had.filter(|h| displays.iter().any(|(id, _)| id == h)))
+}
+
 /// True when the displays changed from `before` to `after` (each display's id and frame, in
 /// order): one added, removed or moved. The launch's first reading (`before` empty) is no
 /// change: nothing macOS does then is the screens' doing, and ⌘-Tab and Dock activations
@@ -127,6 +136,22 @@ pub fn display_of(frame: Rect, displays: &[(DisplayId, Rect)]) -> Option<Display
 /// the launch no activation switched).
 pub fn displays_changed(before: &[(DisplayId, Rect)], after: &[(DisplayId, Rect)]) -> bool {
     !before.is_empty() && before != after
+}
+
+/// The screens that came back in the display change settling now: where macOS puts windows
+/// back as a screen returns ([`crate::engine::model::Model::returned_display`]). `added`:
+/// the screens this change brought; with none, those `kept` from the change before that are
+/// still `connected`, but only while that change still settles (`settling`: a screen coming
+/// back is often heard as two changes, the second adding nothing). A change heard after the
+/// settle starts afresh: a screen that came back hours ago is not one coming back now.
+pub fn returned_screens(kept: &[DisplayId], settling: bool, added: Vec<DisplayId>, connected: &[DisplayId]) -> Vec<DisplayId> {
+    if !added.is_empty() {
+        added
+    } else if settling {
+        kept.iter().copied().filter(|id| connected.contains(id)).collect()
+    } else {
+        Vec::new()
+    }
 }
 
 /// True when an activation or a focus heard now is macOS's after a display change, not the
@@ -316,6 +341,34 @@ mod tests {
         assert_eq!(display_of(Rect::new(2561.0, 1407.0, 800.0, 600.0), &both), None);
         assert_eq!(display_of(HEADLESS, &both), None);
         assert_eq!(display_of(Rect::new(100.0, 100.0, 800.0, 600.0), &[]), None);
+    }
+
+    #[test]
+    fn a_screen_counts_as_come_back_only_through_its_own_changes_settle() {
+        let (studio, laptop) = (DisplayId(1), DisplayId(2));
+        // The lid opened: the laptop came back.
+        assert_eq!(returned_screens(&[], false, vec![laptop], &[studio, laptop]), vec![laptop]);
+        // Heard again within the settle, nothing added: still the laptop, while connected.
+        assert_eq!(returned_screens(&[laptop], true, Vec::new(), &[studio, laptop]), vec![laptop]);
+        assert!(returned_screens(&[laptop], true, Vec::new(), &[studio]).is_empty(), "gone again");
+        // The Studio's scaling changed an hour later: no screen is coming back.
+        assert!(returned_screens(&[laptop], false, Vec::new(), &[studio, laptop]).is_empty());
+    }
+
+    #[test]
+    fn a_window_on_no_display_keeps_the_display_it_had() {
+        let studio = (DisplayId(1), MAIN);
+        let laptop = (DisplayId(2), Rect::new(-1800.0, 271.0, 1800.0, 1169.0));
+        let both = [studio, laptop];
+        // Parked at the laptop's bottom-left corner with `park_inside` 0: its right side on
+        // the laptop's left edge, not a point of it on any display.
+        let parked = Rect::new(-2600.0, 1439.0, 800.0, 600.0);
+        assert_eq!(display_of(parked, &both), None);
+        assert_eq!(display_kept(parked, &both, Some(DisplayId(2))), Some(DisplayId(2)), "the laptop's still");
+        assert_eq!(display_kept(parked, &both, None), None, "a window not managed: the caller's choice");
+        assert_eq!(display_kept(parked, &[studio], Some(DisplayId(2))), None, "its display gone");
+        // On a display, where it shows decides, whatever it had.
+        assert_eq!(display_kept(Rect::new(100.0, 100.0, 800.0, 600.0), &both, Some(DisplayId(2))), Some(DisplayId(1)));
     }
 
     #[test]
