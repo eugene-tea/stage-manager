@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- A saved-stages file this version cannot read (damaged, or written by a newer version
+  before going back to this one) is kept beside it as `state.json.unread`. It was
+  replaced by the first save, and its stages were gone.
 - A Quit that cannot bring every window back (an app that does not answer, a window on
   another Desktop) no longer tries the whole thing a second time: it ends about two seconds
   sooner, and the windows left come back as before, once their app answers or their

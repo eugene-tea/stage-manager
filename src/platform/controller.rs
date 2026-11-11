@@ -1079,6 +1079,33 @@ fn unrestored_step_at(force: bool, model_parked: Option<bool>, listed: Option<(b
     }
 }
 
+/// The name a `state.json` that cannot be read is set aside under, beside it.
+const UNREAD_SUFFIX: &str = ".unread";
+
+/// Reads the saved stages at `path` (`state.json`). A file that is there and cannot be read
+/// (damaged, or written by a later version of the app: a downgrade) is set aside as
+/// `state.json.unread`, replacing an older one, before anything saves over it: the first
+/// save of this run would otherwise be the end of every stage in it. Logged, never shown
+/// (restore is best effort and silent). `None` then, and when there is no file.
+fn read_state_or_set_aside(path: &Path) -> Option<StateFile> {
+    let why = match std::fs::read_to_string(path) {
+        Ok(text) => match StateFile::from_json(&text) {
+            Ok(s) => return Some(s),
+            Err(e) => e,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => format!("state.json: {e}"),
+    };
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(UNREAD_SUFFIX);
+    let aside = path.with_file_name(name);
+    match std::fs::rename(path, &aside) {
+        Ok(()) => tracing::warn!("{why}; starting without saved stages; the file is kept as {}", aside.display()),
+        Err(e) => tracing::warn!("{why}; starting without saved stages; the file could not be set aside ({e}) and the next save replaces it"),
+    }
+    None
+}
+
 /// The last word of a quit, a stand-down or a logout's head start on a window whose restore
 /// failed, after the unpark and its leftovers check ([`Controller::account_unrestored`]): it is
 /// left only while the window server lists it in a park zone (`in_zone`; `None`: not listed,
@@ -3587,11 +3614,9 @@ impl Controller {
     /// `restore_after_restart` off (`[stages]`): after a restart nothing waits (1.2.0). The
     /// restore knows the main display's size when saved (saved frames only on that size).
     fn load_state(restore_after_restart: bool) -> Option<(StateFile, Restore)> {
-        let path = paths::state_file();
-        let text = std::fs::read_to_string(&path).ok()?;
         let current = session::window_session();
-        match StateFile::from_json(&text) {
-            Ok(mut s) => {
+        match read_state_or_set_aside(&paths::state_file()) {
+            Some(mut s) => {
                 let restoring = current.is_some() && !s.same_session(current);
                 // Windows of apps that quit just before the save (a logout whose early signal
                 // never came) wait in their stages after a restart; otherwise they are gone.
@@ -3622,10 +3647,7 @@ impl Controller {
                 let restore = restore.with_display(s.display.as_ref().map(|d| (d.w, d.h)));
                 Some((s, restore))
             }
-            Err(e) => {
-                tracing::warn!("{e}; starting without saved stages");
-                None
-            }
+            None => None,
         }
     }
 
@@ -7685,6 +7707,44 @@ fn activation_frame(tracked: Rect, listed: Option<Rect>, display: Rect, settling
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 1.8 someone goes back to from a later version must not wipe that version's stages:
+    /// the first save replaced a `state.json` this version could not read.
+    #[test]
+    fn a_state_file_that_cannot_be_read_is_set_aside_before_any_save() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.json");
+        let aside = dir.path().join("state.json.unread");
+        assert!(read_state_or_set_aside(&path).is_none(), "no file");
+        assert!(!aside.exists(), "nothing to set aside");
+        // A later version's file.
+        let newer = format!(r#"{{"version": {}, "spaces": [], "stages_of_a_later_version": true}}"#, crate::engine::persist::STATE_VERSION + 1);
+        std::fs::write(&path, &newer).expect("write");
+        assert!(read_state_or_set_aside(&path).is_none());
+        assert!(!path.exists(), "nothing left for the first save to replace");
+        assert_eq!(std::fs::read_to_string(&aside).ok().as_deref(), Some(newer.as_str()), "kept whole");
+        // A damaged file later on replaces the older one set aside.
+        std::fs::write(&path, "{ not json").expect("write");
+        assert!(read_state_or_set_aside(&path).is_none());
+        assert_eq!(std::fs::read_to_string(&aside).ok().as_deref(), Some("{ not json"));
+        // A file this version reads stays where it is.
+        let good = StateFile::single(crate::engine::persist::SavedSpace {
+            screen: None,
+            id: 1,
+            current: true,
+            stages: Vec::new(),
+            active_index: None,
+            strip_slots: Vec::new(),
+            last_seen: None,
+            unvisited: false,
+        })
+        .to_json()
+        .expect("json");
+        std::fs::write(&path, &good).expect("write");
+        assert!(read_state_or_set_aside(&path).is_some());
+        assert!(path.exists());
+        assert_eq!(std::fs::read_to_string(&aside).ok().as_deref(), Some("{ not json"), "untouched");
+    }
 
     /// 11-09 10:00:03: an activation as Show Desktop closed read a window at its pushed-aside
     /// frame and kept it; while Show Desktop may have the windows aside no frame is taken,
