@@ -66,5 +66,7 @@ check on GitHub, which can be turned off.
 - [Notes for AI agents](docs/AGENTS.md): for an assistant changing the settings
 - [Changelog](CHANGELOG.md)
 
-Stage Manager is an independent project with no affiliation to Apple. MIT licensed
-([LICENSE](LICENSE)).
+Stage Manager is an independent project with no affiliation to Apple. The code is MIT licensed
+([LICENSE](LICENSE)). The app icon is excluded from that license and stays © Eugene Tiutiunnyk,
+all rights reserved: `art/AppIcon.icon`, `packaging/AppIcon.icns`, and the images in `docs/assets`
+that show it. The scripts that draw the icon are code and fall under the MIT license.

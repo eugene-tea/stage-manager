@@ -1,5 +1,101 @@
 # Changelog
 
+## 1.8.5 — 2026-11-12
+
+- Quit (the menu's, or ⌘Q) chosen at a moment the app is busy is tried again for a few
+  seconds; the click was dropped and the app stayed open.
+- An app that quit within two minutes of a logout keeps its place in its stage after the
+  restart also on a Desktop the app had only just recognized as a saved one; its windows
+  were left out of the saved stages there.
+- A saved-stages file this version cannot read (damaged, or written by a newer version
+  before going back to this one) is kept beside it as `state.json.unread`. It was
+  replaced by the first save, and its stages were gone.
+- A Quit that cannot bring every window back (an app that does not answer, a window on
+  another Desktop) no longer tries the whole thing a second time: it ends about two seconds
+  sooner, and the windows left come back as before, once their app answers or their
+  Desktop shows.
+- A small panel that its app closed while it sat in the corner with its stage (a browser's
+  pop-up, for one) no longer makes every later Quit count as failed. Such a Quit logged an
+  error and did not install a downloaded update. The panel is still watched until its app
+  lets go of it.
+- With "Install updates automatically" on, an update that was downloaded but not installed
+  before Stage Manager quit is no longer downloaded again at every launch: the copy stays,
+  is checked again in full, and is used if it is still the newest version. A Mac whose
+  screen locks or sleeps within two minutes never reached the automatic install, and
+  fetched the same update each time it started.
+- With "Install updates automatically" on, an update no longer installs in the middle of a
+  film or a video call. Two minutes with no input counted as being away, so every window
+  came back from the strip and the app reopened mid-film. It now waits while
+  anything keeps the display awake, and two more minutes after that ends.
+- After a restart, a window waiting in its card for its saved size still gets it in the right
+  place when the screens were rearranged, or another screen made the main one, before its card
+  was first clicked. It came back hanging off the edge of its screen.
+- At login, an app that stops answering partway through being set up no longer holds
+  everything else up for up to a second. At one login, switching to an app's stage came two
+  seconds late.
+- After a restart on another screen, or the same screen at another size, a window its app
+  reopened at the corner where cards are kept comes on screen at its own size. It took the
+  frame it had on the other screen, which could be larger than this one.
+- With two screens, windows moved to another Desktop in Mission Control (most of a Desktop's
+  windows at once) join that Desktop's stages; they stayed out of them, and the strip kept
+  looking again every other second.
+- With two screens, a window assigned to all Desktops is recognized as one and shows on every
+  stage; it took the Desktop's front stage's place at every Desktop change.
+- With two screens, a Dock click or ⌘-Tab to an app on the other Desktop of the screen without
+  the menu bar shows that app's stage there when the Desktop slides in; its window stayed in
+  its card.
+- Closing the lid keeps the laptop's stages as they were also when macOS moves them to another
+  Desktop of the remaining screen a moment after the Dock or the resolution changed there;
+  their windows were filed one by one into their apps' stages.
+- With two screens and a full-screen app on the main one, a click in a window on the other
+  screen is no longer taken for a click on the wallpaper (with "Click wallpaper to reveal
+  desktop: Only in Stage Manager" it sent that screen's windows to the strip).
+- With a full-screen app on the main screen, ⌘Tab, a Dock click or a click to an app whose
+  stage is a card on the other screen brings that stage in front, as with nothing in full
+  screen; and a window minimized on that screen goes to the strip, not the Dock.
+- Hide Others (⌥⌘H) while the stage in front holds none of the front app's windows (Finder
+  in front after a click on the desktop, or the stage on another screen) no longer brings a
+  stage of an app just hidden in front, which unhid that app again.
+- Switching to a stage shared with a hidden app leaves that app hidden: the keyboard goes
+  to the stage's front window that shows.
+- A window minimized while the Dock is slow to answer no longer holds every stage switch
+  up for seconds.
+- With two screens and a stage parked on each, the corner where parked windows wait keeps
+  its picture of the desktop fresh; it stopped being renewed, so the windows' edges could
+  show there.
+- A screen that parks windows at another corner than the bottom right (another screen is
+  beside it there) keeps that corner's picture right when a desktop icon moves under it.
+- When the main screen changes while the old one stays connected (a laptop docked with its
+  lid open), the old screen's other Desktops no longer show the strip's old cards under the
+  new ones.
+- Changing Desktops in the middle of a stage switch no longer leaves later switches on the
+  new Desktop without their motion.
+- VoiceOver reads an app's name on its card even when the card appeared while the app was
+  still launching.
+- Turning Apple's Stage Manager on just after a Desktop change no longer leaves a piece of
+  the wallpaper drawn over a window's corner.
+- A setting changed in Settings that could not be saved (the config file has an error, or
+  macOS refused the change) no longer leaves its switch showing the new value: the switch
+  goes back to the setting in force.
+- Clicking Copy Instructions for Agents twice in a row no longer leaves the button reading
+  "Copied".
+- The update check and download no longer send the Mac's preferred languages to GitHub:
+  macOS added them to each request by itself. The request now names only Stage Manager and
+  its version.
+- An update that installs at the Quit of Stage Manager no longer goes in under a copy opened
+  again at that very moment: that copy keeps running, and the update waits for the next
+  check.
+- `stage-manager log summary` no longer shows a day's counts as near zero when two lines
+  crossed midnight out of order, or after the clock was set back a day.
+- Quitting while a window on another Desktop can't be reached (one in full screen, say) no
+  longer counts as a quit that left a window hidden when the window was never hidden: an
+  update that is ready installs at that Quit, and nothing stays running to watch for it.
+- After Apple's Stage Manager is turned off again, or a logout is cancelled, while a window
+  is still out of reach on another Desktop: changing Desktops no longer brings the windows of
+  every other stage back on screen for a moment, nor holds the strip for two seconds.
+- When Stage Manager quit or crashed behind a locked screen, the windows it could not bring
+  back then come back as the screen unlocks, not up to five seconds later.
+
 ## 1.8.4 — 2026-11-10
 
 - The app icons on cards are drawn sharp at their size, as Apple's are; their edges were

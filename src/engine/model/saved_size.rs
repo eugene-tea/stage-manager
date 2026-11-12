@@ -15,7 +15,9 @@
 //! line names it. A move or resize the model takes as the user's ends the debt
 //! ([`Model::forgive_saved_size`]), and so does the window's leaving or another screen.
 //! Meanwhile `state.json` keeps the owed frame ([`Model::owed_frame`]): a second restart
-//! before it shows still knows the size. Off (`[restore] saved_size = false`,
+//! before it shows still knows the size. A screen whose origin moves takes its owed frames
+//! along ([`Model::move_owed_frames`]); one seen again under another id keeps them
+//! ([`Model::relabel_owed`]). Off (`[restore] saved_size = false`,
 //! [`super::ModelOptions::keep_app_frames`]): every window keeps the frame its app gives it,
 //! Apple's plain behaviour.
 
@@ -106,6 +108,28 @@ impl Model {
     pub(crate) fn forgive_saved_size(&mut self, id: WindowId) {
         if self.owed.remove(&id).is_some() {
             tracing::debug!(id = id.0, "restore: a window owed its saved size was moved or resized first; it keeps the user's frame");
+        }
+    }
+
+    /// Display `display`'s origin moved by (`dx`, `dy`) ([`Model::set_displays`]: the
+    /// arrangement changed, another screen became main): the saved frames owed on it move
+    /// along, as macOS moves that screen's windows and as its waiting saved frames do
+    /// ([`Model::move_pending_frames`]). An owed frame is in global coordinates: left where
+    /// it was, it would be paid a screen's width off its screen and pulled back only as far
+    /// as its title bar needs.
+    pub(crate) fn move_owed_frames(&mut self, display: DisplayId, dx: f64, dy: f64) {
+        for o in self.owed.values_mut().filter(|o| o.display == display) {
+            o.frame = o.frame.translate(dx, dy);
+            o.original = o.original.map(|f| f.translate(dx, dy));
+        }
+    }
+
+    /// Display `old` is known as `new` from now (the same screen under another id after a
+    /// reconnect): what is owed on it is owed on `new`, not dropped as on another screen
+    /// ([`Model::pay_saved_size`]).
+    pub(crate) fn relabel_owed(&mut self, old: DisplayId, new: DisplayId) {
+        for o in self.owed.values_mut().filter(|o| o.display == old) {
+            o.display = new;
         }
     }
 

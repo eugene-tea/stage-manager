@@ -69,8 +69,13 @@ A parked window that never returns is the worst bug.
 2. **Quit** unparks everything, saves the stages, then brings back any window still in a
    park zone (registry, unpark or `state.json` frame, else centered). `CannotComplete` is
    retried on unparks only. Bounds: leftovers ≤ 4 s, registry retries ≤ 2 s. Not clean
-   while a managed window is parked on any Space: the guardian takes over. A stand-down
-   (Apple's Stage Manager turned on) ends with the same check.
+   while a managed window is parked on any Space: the guardian takes over (the main thread
+   unparks from the registry itself only when the WM thread gave no answer). A window whose
+   restore failed counts as parked only while the window server lists it in a park zone
+   (one at its own frame on a Desktop not shown is not: a dead handle, a full-screen
+   window). A stand-down (Apple's Stage Manager turned on) ends with the same check; the
+   windows it could not bring back are looked for again at each Desktop change, the
+   windows parked since left alone.
 3. **Panic hook** unparks (`try_lock`, falls back to the scan).
 4. **SIGTERM/SIGINT/SIGHUP** through a self-pipe to a watcher thread that unparks and exits.
 5. **Guardian** (`stage-manager --guardian <pid>`), restarted if it dies while the app runs:
@@ -93,7 +98,11 @@ A parked window that never returns is the worst bug.
 Never waited on (logged at debug): **hidden tabs** (layer 0, off screen, unlisted by an
 answering app, a same-size sibling) and **other apps' helpers** (in the park zone, off
 screen, unlisted, never registered, managed or saved). A managed, registered or saved
-window always waits.
+window always waits. One kind waits without making a quit unclean: a registered **child
+its app ordered out while parked** (off screen in the zone, its handle dead, unlisted by
+its answering app; the parked file marks it `ordered_out`). No clean-exit marker is
+written, so the guardian keeps it, but the quit logs no error and the user's Quit still
+installs a ready update.
 
 ## Strip order
 

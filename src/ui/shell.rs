@@ -419,9 +419,12 @@ impl Shell {
             updater::warm();
         }
         // A staged copy an earlier update left beside the app (it quit while an update
-        // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6);
-        // the update it held is checked for again within the first minute (the owner's go 11-09).
-        updater::clean_stale_work(|found| later(move || stale_work_found(found)));
+        // waited, or its helper was killed) goes, unless a helper runs now (review 8C #6) or
+        // automatic installs are on (it then serves the next check, verified again, in place
+        // of the same download at every launch); the update it held is checked for again
+        // within the first minute (the owner's go 11-09).
+        let auto = self.config.app.check_for_updates && self.config.app.install_updates;
+        updater::clean_stale_work(auto, |found| later(move || stale_work_found(found)));
         let note = RcBlock::new(|_t: NonNull<NSTimer>| show_update_note());
         // SAFETY: the blocks run on the main run loop, which keeps the timers; we keep them too.
         unsafe {
@@ -572,6 +575,8 @@ impl Shell {
     fn write_apple(&mut self, key: &str, value: i64) {
         if let Err(e) = native_settings::write(key, value) {
             tracing::warn!(key, "cannot change the macOS setting: {e}");
+            // No new reading will come: the control goes back to the value in force.
+            self.refresh_settings();
         }
         let hooks = self.hooks;
         later(move || (hooks.poll_now)());
@@ -806,8 +811,8 @@ fn first_check() {
 
 /// What the launch found beside the installed app (main thread): an update an earlier run
 /// downloaded and verified that never went in is checked for again at the first check, or at
-/// once when that came already; never trusted from the old folder (it is gone, and a new
-/// check downloads and verifies from scratch).
+/// once when that came already; never trusted from the old folder (it is gone, or kept for
+/// an automatic install and judged whole again before it is used).
 fn stale_work_found(found: StaleWork) {
     if !self_update::checks_early(found) {
         return;
@@ -849,6 +854,9 @@ pub fn check(by: Asker) {
         return;
     };
     tracing::info!(manual, "checking for updates");
+    // The app's own signature is read meanwhile, off this thread (once; at launch already
+    // when automatic checks are on): the answer's offer then runs no `codesign` here.
+    updater::warm();
     update_check::check(move |outcome| later(move || on_checked(serial, outcome)));
     let when = dispatch2::DispatchTime::try_from(CHECK_WATCHDOG).unwrap_or(dispatch2::DispatchTime::NOW);
     let _ = dispatch2::DispatchQueue::main().after(when, move || on_checked(serial, Outcome::Failed("GitHub did not answer".into())));
@@ -856,18 +864,19 @@ pub fn check(by: Asker) {
 
 /// The check numbered `serial` ended (its answer, or the watchdog: whichever comes first).
 fn on_checked(serial: u64, outcome: Outcome) {
-    let Some(Some((mtm, skipped, by, auto_install))) = with(|s| {
+    let Some(Some((mtm, skipped, by, auto_install, owed))) = with(|s| {
         let (running, by) = s.update?;
         if running != serial {
             return None;
         }
         s.update = None;
+        let mut owed = false;
         if !matches!(outcome, Outcome::Failed(_)) {
             s.state.last_update_check = Some(now_secs());
-            s.left_behind = false;
+            owed = std::mem::take(&mut s.left_behind);
             s.save_state();
         }
-        Some((s.mtm, s.state.skipped_version.clone(), by, s.config.app.install_updates))
+        Some((s.mtm, s.state.skipped_version.clone(), by, s.config.app.install_updates, owed))
     }) else {
         return;
     };
@@ -912,6 +921,11 @@ fn on_checked(serial: u64, outcome: Outcome) {
                 tracing::info!("automatic update check failed: {e}");
             }
         }
+    }
+    // The check a left-behind update was owed got its answer: a staged copy the launch kept
+    // goes unless an install took it up just now (it uses the copy, or replaces it).
+    if owed && with(|s| matches!(s.install, Install::Idle)) == Some(true) {
+        updater::drop_stale_work();
     }
 }
 
@@ -1132,18 +1146,20 @@ fn install_if_quiet() {
     let now = Instant::now();
     let locked = session::screen_locked();
     let asleep = CGDisplayIsAsleep(CGMainDisplayID());
-    if locked || asleep {
+    // Asked only for an automatic install: a click-asked one never waits for it.
+    let kept_awake = !asked && session::display_kept_awake();
+    if locked || asleep || kept_awake {
         session::saw_rest(now);
     }
     let idle = self_update::idle_after_rest(idle_secs(), session::since_rest(now).map(|d| d.as_secs_f64()));
-    let moment = Moment { buttons_down: NSEvent::pressedMouseButtons() != 0, strip_busy: super::strip::busy(), locked, asleep, idle_secs: idle };
+    let moment = Moment { buttons_down: NSEvent::pressedMouseButtons() != 0, strip_busy: super::strip::busy(), locked, asleep, kept_awake, idle_secs: idle };
     if let Some(wait) = self_update::wait_reason(asked, moment) {
         if wait.is_rest() {
             with(|s| {
                 if let Install::Ready { prepared, told, .. } = &mut s.install
                     && !std::mem::replace(told, true)
                 {
-                    tracing::info!(version = %prepared.version, ?moment, "update: waiting; {}: it installs after the unlock and {} s without input", wait.name(), self_update::AUTO_IDLE_SECS);
+                    tracing::info!(version = %prepared.version, ?moment, "update: waiting; {}: it installs {} s without input after that ends", wait.name(), self_update::AUTO_IDLE_SECS);
                 }
             });
         }

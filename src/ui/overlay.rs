@@ -713,6 +713,27 @@ pub struct Overlay {
     /// Above every window, floating ones and the raised strip included ([`Self::show_on_top`]):
     /// only while a window dragged over the strip shows its card.
     top: bool,
+    /// A fresh panel is owed ([`Self::renew`] found the overlay in use): taken at the next
+    /// [`Self::hide`].
+    stale: bool,
+}
+
+/// What a Space change asks of the overlay's panel ([`renewal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Renewal {
+    /// A fresh panel now.
+    Now,
+    /// One once the overlay is hidden: what it draws stays up meanwhile.
+    Owed,
+}
+
+/// How the overlay's panel is renewed at a Space change: at once when nothing shows in it
+/// and nothing is about to (`shown`, `in_use`: a transition runs, a dragged window's card
+/// is up), else once it is hidden. Never renewed, a panel shown through the change stayed
+/// the Desktop left's: every later switch on the new Desktop drew its snapshots there, out
+/// of sight, and the windows appeared with no motion until the next Space change.
+pub fn renewal(shown: bool, in_use: bool) -> Renewal {
+    if shown || in_use { Renewal::Owed } else { Renewal::Now }
 }
 
 impl Overlay {
@@ -731,7 +752,7 @@ impl Overlay {
         panel.setContentView(Some(&view));
         let eye = (Point::new(0.0, 0.0), 1.0);
         let flight = Flight::over(0.0, Size::new(100.0, 100.0), 0.0);
-        Self { panel, view, root, space, eye, flight, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false }
+        Self { panel, view, root, space, eye, flight, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false, stale: false }
     }
 
     /// Covers the display `frame` (Cocoa coordinates; `primary_height` flips them), with the
@@ -877,8 +898,11 @@ impl Overlay {
 
     /// A hidden overlay moves its view to a fresh panel (never ordered in yet, so it goes to
     /// the Space shown when it is), keeping its frame; a shown one stays as it is.
-    pub fn renew(&mut self, mtm: MainThreadMarker) {
-        if self.shown {
+    /// `in_use`: something is about to draw in it; then, as for a shown one, the fresh panel
+    /// comes at the next [`Self::hide`] ([`renewal`]).
+    pub fn renew(&mut self, mtm: MainThreadMarker, in_use: bool) {
+        if renewal(self.shown, in_use) == Renewal::Owed {
+            self.stale = true;
             return;
         }
         let panel = make_panel(mtm, self.panel.frame());
@@ -887,13 +911,19 @@ impl Overlay {
         old.close();
         self.under = None;
         self.top = false;
+        self.stale = false;
     }
 
-    /// Hides the overlay.
+    /// Hides the overlay; a fresh panel owed since a Space change is taken now.
     pub fn hide(&mut self) {
         if self.shown {
             self.shown = false;
             self.panel.orderOut(None);
+        }
+        if self.stale
+            && let Some(mtm) = MainThreadMarker::new()
+        {
+            self.renew(mtm, false);
         }
     }
 
@@ -1049,5 +1079,20 @@ impl Overlay {
 impl Drop for Overlay {
     fn drop(&mut self) {
         self.panel.orderOut(None);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A Space change while a switch's snapshots are up: the fresh panel is owed, never
+    /// forgotten; an idle overlay takes it at once.
+    #[test]
+    fn a_space_change_mid_transition_owes_a_fresh_panel() {
+        assert_eq!(renewal(false, false), Renewal::Now);
+        assert_eq!(renewal(true, false), Renewal::Owed, "a cover or a landed snapshot still shows");
+        assert_eq!(renewal(true, true), Renewal::Owed);
+        assert_eq!(renewal(false, true), Renewal::Owed, "a transition about to draw");
     }
 }

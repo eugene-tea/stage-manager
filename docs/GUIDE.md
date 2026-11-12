@@ -360,15 +360,18 @@ approvals stay. If any step fails, the old version stays (or is put back) and sa
 even putting it back fails, both copies are kept and the note at the next launch says where.
 
 Turn on **Install updates automatically** in Settings to skip the question: an update then
-installs while you are away from the Mac, never in the middle of a drag or a switch, and
-never while the screen is locked (it waits until you unlock and step away again).
+installs while you are away from the Mac, never in the middle of a drag or a switch,
+never while the screen is locked (it waits until you unlock and step away again), and never
+while a film plays or a call is on (anything that keeps the display awake).
 
 A downloaded update also installs when you quit Stage Manager (**Quit** in the menu, or ⌘Q
 in Settings and About). It doesn't open again afterwards, since you asked it to stop; the
 new version starts the next time you open it. Logging out, restarting or shutting down
 never installs it, nor does turning on Apple's Stage Manager. If an update was downloaded
-but never installed, the next launch checks again within a minute instead of waiting a day,
-and downloads and checks the new version from scratch.
+but never installed, the next launch checks again within a minute instead of waiting a day.
+With automatic installs on, the copy already downloaded is checked again in full and used
+if it is still the newest version; otherwise the new version is downloaded and checked from
+scratch.
 
 You can turn the daily check off, and **Check for Updates…** in the menu works either way. If
 Stage Manager can't replace itself where it is (it runs from the disk image, or from a

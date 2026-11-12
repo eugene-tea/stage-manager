@@ -66,14 +66,15 @@ impl Tabs {
     }
 }
 
-fn tab_listed(w: &CgWindow) -> TabListed {
+/// `w` as the pure rules read it.
+pub(crate) fn tab_listed(w: &CgWindow) -> TabListed {
     TabListed { id: w.id, pid: w.pid, layer: w.layer, onscreen: w.onscreen, bounds: w.bounds }
 }
 
 /// The window ids app `pid` lists through Accessibility (an app with no window: none);
 /// `None` when it does not answer, or a window's id cannot be read (a window it lists might
 /// then be taken for one it does not).
-fn ax_window_ids(pid: i32) -> Option<Vec<u32>> {
+pub(crate) fn ax_window_ids(pid: i32) -> Option<Vec<u32>> {
     match AxElement::application(pid).windows() {
         Ok(list) => list.iter().map(|w| w.window_id().ok()).collect(),
         Err(e) if e == AxError::NO_VALUE => Some(Vec::new()),

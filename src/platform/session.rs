@@ -18,11 +18,12 @@
 //! starts a restore. Tests simulate a new session with `STAGE_MANAGER_SESSION=<text>`,
 //! honoured only with `STAGE_MANAGER_TEST` set.
 
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFString, CFType};
+use objc2_core_foundation::{CFBoolean, CFDictionary, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::CGSessionCopyCurrentDictionary;
 
 use super::windows::CgWindow;
@@ -155,12 +156,42 @@ pub fn screen_locked() -> bool {
     flag("CGSSessionScreenIsLocked").unwrap_or(false) || flag("kCGSSessionOnConsoleKey") == Some(false)
 }
 
-/// The last moment any reader saw the screen locked or the main display asleep
+#[link(name = "IOKit", kind = "framework")]
+unsafe extern "C" {
+    /// IOKit's power management (`IOPMLib.h`, public): how many times each kind of power
+    /// assertion is held across all processes, as a dictionary of type name to count.
+    fn IOPMCopyAssertionsStatus(status: *mut *const CFDictionary) -> i32;
+}
+
+/// True while some process keeps the display from sleeping (a power assertion: a film
+/// playing, a call, a presentation), which is how macOS itself knows someone is watching
+/// with no input. `false` when the assertions cannot be read.
+pub fn display_kept_awake() -> bool {
+    let mut raw: *const CFDictionary = std::ptr::null();
+    // SAFETY: a valid out-pointer; on success (0) IOKit stores a dictionary we own (the
+    // Copy rule) or leaves it null.
+    let status = unsafe { IOPMCopyAssertionsStatus(&mut raw) };
+    let Some(raw) = NonNull::new(raw.cast_mut()) else { return false };
+    // SAFETY: a +1 dictionary from a Copy function, released when `dict` drops.
+    let dict = unsafe { CFRetained::from_raw(raw) };
+    if status != 0 {
+        return false;
+    }
+    // SAFETY: the assertions dictionary maps CFString names to CF values (checked below).
+    let dict: &CFDictionary<CFString, CFType> = unsafe { &*(&*dict as *const CFDictionary).cast() };
+    crate::self_update::DISPLAY_AWAKE_ASSERTIONS.iter().any(|name| {
+        let count = dict.get(&CFString::from_static_str(name)).and_then(|v| v.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()));
+        count.is_some_and(|c| crate::self_update::keeps_display_awake(name, c))
+    })
+}
+
+/// The last moment any reader saw the screen locked, the main display asleep or kept awake
 /// ([`saw_rest`]).
 static LAST_REST: Mutex<Option<Instant>> = Mutex::new(None);
 
-/// Notes that the screen was seen locked (or the main display asleep) at `at`: the WM
-/// thread's lock poll and a ready update's quiet tick both tell.
+/// Notes that the screen was seen locked (or the main display asleep, or kept awake by a
+/// film or a call) at `at`: the WM thread's lock poll and a ready update's quiet tick both
+/// tell.
 pub fn saw_rest(at: Instant) {
     if let Ok(mut last) = LAST_REST.lock() {
         *last = Some(last.map_or(at, |t| t.max(at)));
@@ -356,6 +387,7 @@ mod tests {
     #[test]
     fn reading_the_real_session_does_not_panic() {
         let _ = screen_locked();
+        let _ = display_kept_awake();
         assert_eq!(window_session(), window_session(), "read once");
     }
 

@@ -433,7 +433,8 @@ pub struct Model {
     /// Standard windows of the Desktop a removed display showed, moved onto the main
     /// display's Desktop (`adopt_display`), until an arrival on the main display carries
     /// them or shows another Desktop without them (a notice of their own Desktop keeps them),
-    /// or the next display change: macOS may put them on another Desktop of the main display
+    /// or a screen comes or goes (the same screens reported again, their Dock or resolution
+    /// changed, keep them): macOS may put them on another Desktop of the main display
     /// and show that one, where their stages come whole ([`Model::carry_adopted`]).
     pub(crate) adopted: BTreeSet<WindowId>,
     /// Desktops not shown whose front stage left them (the lid closed: the laptop's front,
@@ -1121,6 +1122,21 @@ impl Model {
         }
     }
 
+    /// The window a show of `members` (a stage's standard windows, front to back) raises last
+    /// and focuses: `key` when it is one of them, else their first. Never a hidden app's
+    /// window while another member's app is not hidden ([`Model::app_hidden`]): its focus
+    /// would make the hidden app frontmost and unhide it, where Apple's shows such a stage by
+    /// its other windows and leaves the app hidden. A stage of hidden apps alone keeps its
+    /// key: asked for (by its number), it comes with its app.
+    pub(crate) fn focus_key(&self, key: Option<WindowId>, members: &[WindowId]) -> Option<WindowId> {
+        let key = key.filter(|k| members.contains(k)).or(members.first().copied());
+        if self.hidden_apps.is_empty() {
+            return key;
+        }
+        let shown = |id: &WindowId| self.windows.get(id).is_some_and(|w| !self.hidden_apps.contains(&w.meta.pid));
+        key.filter(shown).or_else(|| members.iter().copied().find(shown)).or(key)
+    }
+
     /// Shows a stage: restore frames, raise back to front (each window's children right after
     /// it), the key window and its children raised last whatever their place in the order,
     /// then focus the key window: no other window, of its app or another, is raised between
@@ -1128,10 +1144,7 @@ impl Model {
     pub(crate) fn show_stage(&mut self, stage: StageId, actions: &mut Vec<Action>) {
         let Some(s) = self.stage(stage) else { return };
         let members = s.windows.clone();
-        let key = s
-            .key
-            .filter(|k| members.contains(k))
-            .or(members.first().copied());
+        let key = self.focus_key(s.key, &members);
         let orphans: Vec<WindowId> = self
             .children_in(Home::Stage(stage))
             .into_iter()

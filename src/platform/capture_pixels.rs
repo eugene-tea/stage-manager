@@ -94,6 +94,25 @@ pub fn corner_boxes(w: usize, h: usize) -> [PixelRect; 4] {
     ]
 }
 
+/// The most of an overlap read for its numbers, a side (pixels).
+pub const MIDDLE: usize = 64;
+
+/// The middle of box `r`, at most [`MIDDLE`] a side: what is read of another window's overlap,
+/// whose numbers only go to the log. Read whole, each overlap of a full-size snapshot (three
+/// windows of one app parked together: two overlaps of nearly the whole picture each) was
+/// drawn into a bitmap of its own, some 20 MB, before the snapshot was handed on.
+pub fn middle(r: PixelRect) -> PixelRect {
+    let (w, h) = (r.w.min(MIDDLE), r.h.min(MIDDLE));
+    PixelRect { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h }
+}
+
+/// The four corner boxes' numbers out of a read ([`box_stats`], the corners first); `None`
+/// when one could not be read. Such a corner counted as see-through (alpha 0), and the
+/// picture as a fill, never used.
+pub fn corners_read(read: &[Option<Stats>]) -> Option<[Stats; 4]> {
+    Some([(*read.first()?)?, (*read.get(1)?)?, (*read.get(2)?)?, (*read.get(3)?)?])
+}
+
 /// The numbers of box `r` of `px` (clipped to the image); `None` when nothing of it is in.
 pub fn stats(px: &Pixels, r: PixelRect) -> Option<Stats> {
     let x1 = (r.x + r.w).min(px.w);
@@ -198,6 +217,26 @@ mod tests {
         let c = corners(&px);
         assert!(c[0].alpha == 255 && c[0].spread == 0, "{}", c[0]);
         assert!(flat_fill(&c), "{c:?}");
+    }
+
+    /// An overlap's numbers are read from its middle, a bounded box, whatever its size.
+    #[test]
+    fn an_overlap_is_read_at_its_middle_only() {
+        let whole = PixelRect { x: 10, y: 20, w: 2800, h: 1800 };
+        let m = middle(whole);
+        assert_eq!((m.w, m.h), (MIDDLE, MIDDLE));
+        assert_eq!((m.x, m.y), (10 + (2800 - MIDDLE) / 2, 20 + (1800 - MIDDLE) / 2));
+        let small = PixelRect { x: 3, y: 4, w: 5, h: 100 };
+        assert_eq!(middle(small), PixelRect { x: 3, y: 4 + 18, w: 5, h: MIDDLE });
+    }
+
+    /// A corner that could not be read is no evidence of a fill.
+    #[test]
+    fn an_unread_corner_tells_nothing() {
+        let s = Some(Stats { alpha: 255, mean: 40, spread: 30 });
+        assert!(corners_read(&[s, s, s, s, None]).is_some());
+        assert_eq!(corners_read(&[s, None, s, s]), None);
+        assert_eq!(corners_read(&[s, s]), None);
     }
 
     /// A window's own picture: its rounded corners are see-through.

@@ -11,6 +11,9 @@
 //!    team, notarized, same bundle ID, newer). It is copied beside the installed app (the
 //!    same volume, so the swap is a rename) and the copy is judged again; only then is its
 //!    quarantine cleared. Any failure: nothing is replaced, the reason is logged and shown.
+//!    A copy an earlier run staged and never installed (kept at launch while automatic
+//!    installs are on, [`clean_stale_work`]) is judged the same way and, when it is the
+//!    release wanted, used in place of the download ([`staged_already`]).
 //! 3. **Hand off** ([`hand_off`], [`launch_pending_helper`]): the app quits through its
 //!    normal quit path (every window back, the leftovers check), and right before it exits
 //!    it starts the helper: this same binary, already running and trusted, in its
@@ -50,8 +53,8 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AllocAnyThread, define_class, msg_send};
 use objc2_foundation::{
-    NSBundle, NSError, NSHTTPCookieAcceptPolicy, NSHTTPURLResponse, NSMutableURLRequest, NSObject, NSObjectProtocol,
-    NSString, NSURL, NSURLRequest, NSURLRequestCachePolicy, NSURLResponse, NSURLSession, NSURLSessionConfiguration,
+    NSBundle, NSError, NSHTTPCookieAcceptPolicy, NSHTTPURLResponse, NSObject, NSObjectProtocol, NSString, NSURL,
+    NSURLRequest, NSURLResponse, NSURLSession, NSURLSessionConfiguration,
     NSURLSessionDelegate, NSURLSessionTask, NSURLSessionTaskDelegate,
 };
 
@@ -321,17 +324,8 @@ fn download(url: &str, dest: &Path, size_hint: Option<u64>) -> Result<(), String
         return Err("the disk image is too large".into());
     }
     let ns_url = NSURL::URLWithString(&NSString::from_str(url)).ok_or("bad URL")?;
-    let request = NSMutableURLRequest::requestWithURL_cachePolicy_timeoutInterval(
-        &ns_url,
-        NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData,
-        REQUEST_TIMEOUT_SECS,
-    );
-    request.setValue_forHTTPHeaderField(Some(&NSString::from_str("application/octet-stream")), &NSString::from_str("Accept"));
-    request.setValue_forHTTPHeaderField(
-        Some(&NSString::from_str(&format!("Stage-Manager/{}", env!("CARGO_PKG_VERSION")))),
-        &NSString::from_str("User-Agent"),
-    );
-    request.setHTTPShouldHandleCookies(false);
+    // The check's request: nothing in it comes from the user's Mac.
+    let request = super::update_check::request(&ns_url, "application/octet-stream", REQUEST_TIMEOUT_SECS);
     let config = NSURLSessionConfiguration::ephemeralSessionConfiguration();
     config.setHTTPCookieStorage(None);
     config.setHTTPShouldSetCookies(false);
@@ -553,6 +547,11 @@ fn prepare_blocking(release: &Release) -> Result<Prepared, PrepareError> {
 
 fn prepare_in(release: &Release, trust: &Trust, target: Result<PathBuf, Refusal>, dir: &Path) -> Result<Prepared, PrepareError> {
     let failed = PrepareError::Failed;
+    if let Ok(target) = &target
+        && let Some(prepared) = staged_already(release, trust, target)
+    {
+        return Ok(prepared);
+    }
     let dmg = fetch(release, dir).map_err(failed)?;
     tracing::info!(version = %release.version, "update: downloaded; verifying");
     if trust.strict {
@@ -598,16 +597,41 @@ fn prepare_in(release: &Release, trust: &Trust, target: Result<PathBuf, Refusal>
         return Err(failed(format!("the copy did not verify: {r}")));
     }
     clear_quarantine(&staged);
-    // Reopened after the swap unless the user's Quit installs it ([`hand_off`] decides).
-    let helper = HelperArgs {
+    let helper = helper_args(&target, &staged, &version, trust);
+    Ok(Prepared { version, helper })
+}
+
+/// What the helper is told about the verified copy `staged` of `version`. Reopened after the
+/// swap unless the user's Quit installs it ([`hand_off`] decides).
+fn helper_args(target: &Path, staged: &Path, version: &Version, trust: &Trust) -> HelperArgs {
+    HelperArgs {
         pid: std::process::id(),
-        target,
-        staged,
+        target: target.to_path_buf(),
+        staged: staged.to_path_buf(),
         version: version.to_string(),
         requirement: trust.requirement.clone(),
         relaunch: true,
-    };
-    Ok(Prepared { version, helper })
+    }
+}
+
+/// The copy an earlier run staged beside `target` and never installed (the launch left it:
+/// [`stale_work`]), when it serves `release`: judged whole again here, as a fresh copy is,
+/// and the helper checks it once more before the swap. Nothing is downloaded then. Any other
+/// copy is left for the download's own clearing of the folder.
+fn staged_already(release: &Release, trust: &Trust, target: &Path) -> Option<Prepared> {
+    let (work, staged) = self_update::staging_paths(target)?;
+    let there = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    if !std::fs::symlink_metadata(&staged).is_ok_and(|m| m.is_dir()) || there(&work.join(self_update::KEEP_MARK)) || there(&work.join(self_update::ASIDE_NAME)) {
+        return None;
+    }
+    let judged = self_update::judge(trust, &candidate(&staged, trust), &updates::current());
+    if !self_update::staged_serves(&judged, &release.version) {
+        tracing::info!(wanted = %release.version, ?judged, "update: the copy an earlier run staged is not used; downloading");
+        return None;
+    }
+    tracing::info!(version = %release.version, "update: the copy an earlier run staged is verified again; nothing is downloaded");
+    clear_quarantine(&staged);
+    Some(Prepared { version: release.version.clone(), helper: helper_args(target, &staged, &release.version, trust) })
 }
 
 /// Downloads and verifies `release` off the main thread; `done` runs on the main thread.
@@ -643,29 +667,48 @@ pub fn discard(p: &Prepared) {
     });
 }
 
-/// At launch, off the main thread: removes a working folder an earlier update left beside
-/// this app (the app quit while an update waited, or a helper was killed), unless an update
-/// helper runs now (the folder is its own until it ends); and the disk images kept for
-/// manual installs more than an hour ago. `found` gets what was there (off the main thread):
-/// a removed update is checked for again early ([`self_update::checks_early`]).
-pub fn clean_stale_work(found: impl FnOnce(StaleWork) + Send + 'static) {
-    let _ = std::thread::Builder::new().name("update-clean".into()).spawn(|| {
+/// At launch, off the main thread: looks at a working folder an earlier update left beside
+/// this app (the app quit while an update waited, or a helper was killed). With automatic
+/// installs on (`auto`) a staged copy stays for the check that follows; otherwise the folder
+/// is removed, unless an update helper runs now (the folder is its own until it ends). Also
+/// removes the disk images kept for manual installs more than an hour ago. `found` gets what
+/// was there (off the main thread): a left update is checked for again early
+/// ([`self_update::checks_early`]).
+pub fn clean_stale_work(auto: bool, found: impl FnOnce(StaleWork) + Send + 'static) {
+    let _ = std::thread::Builder::new().name("update-clean".into()).spawn(move || {
         let old = clean_old_downloads(&paths::user_temp_dir(), MANUAL_KEEP);
         if old > 0 {
             tracing::info!(folders = old, "update: removed the disk images kept for earlier manual installs");
         }
-        found(stale_work());
+        found(stale_work(auto));
     });
 }
 
-/// The working folder beside this app: what is there, removing an earlier run's.
-fn stale_work() -> StaleWork {
+/// Removes a staged copy the launch kept for a check whose answer did not use it (no newer
+/// release, one the user skipped, automatic installs turned off since), off the main thread.
+/// A running helper's folder and a marked one stay, as at launch.
+pub fn drop_stale_work() {
+    let _ = std::thread::Builder::new().name("update-clean".into()).spawn(|| {
+        stale_work(false);
+    });
+}
+
+/// The working folder beside this app: what is there, removing an earlier run's unless it
+/// is kept for the next check (`auto`).
+fn stale_work(auto: bool) -> StaleWork {
     let Ok(target) = self_update::install_target(&own_bundle(), true) else { return StaleWork::Nothing };
     let Some((work, _)) = self_update::staging_paths(&target) else { return StaleWork::Nothing };
-    if std::fs::symlink_metadata(&work).is_err() {
+    let helper_runs = processes(|_, argv| self_update::is_update_helper(argv)).next().is_some();
+    stale_work_in(&work, helper_runs, auto)
+}
+
+/// [`stale_work`] for the working folder `work`.
+fn stale_work_in(work: &Path, helper_runs: bool, auto: bool) -> StaleWork {
+    let there = |p: &Path| std::fs::symlink_metadata(p).is_ok();
+    if !there(work) {
         return StaleWork::Nothing;
     }
-    if processes(|_, argv| self_update::is_update_helper(argv)).next().is_some() {
+    if helper_runs {
         tracing::info!("update: an installer helper runs; its working folder stays");
         return StaleWork::HelperRuns;
     }
@@ -673,7 +716,12 @@ fn stale_work() -> StaleWork {
         tracing::warn!("update: {} holds a copy an update could not put back; it stays until the next update", work.display());
         return StaleWork::Kept;
     }
-    match remove_any(&work) {
+    let staged = std::fs::symlink_metadata(work.join(APP_NAME)).is_ok_and(|m| m.is_dir());
+    if self_update::keeps_staged(auto, staged, there(&work.join(self_update::ASIDE_NAME))) {
+        tracing::info!("update: an earlier run's downloaded update stays beside the app; the next check verifies it again before using it");
+        return StaleWork::Staged;
+    }
+    match remove_any(work) {
         Ok(()) => {
             tracing::info!("update: removed a working folder an earlier update left behind");
             StaleWork::Removed
@@ -878,9 +926,23 @@ struct RealSwap {
     launched_at: Option<u64>,
 }
 
+/// The executable of the app bundle at `bundle`, as the system names a running process's
+/// ([`exe_of`]: no symbolic links in it, `/private/tmp` for `/tmp`), so the two compare. The
+/// bundle's own path may hold links (it is the path the app was opened by).
+fn bundle_exe(bundle: &Path) -> PathBuf {
+    std::fs::canonicalize(bundle).unwrap_or_else(|_| bundle.to_path_buf()).join("Contents/MacOS/stage-manager")
+}
+
+/// Whether a process (its executable `exe`, its arguments) is the app itself (no subcommand:
+/// never the user's CLI, the guardian or a helper) running from the bundle at `bundle`.
+fn app_runs_from(exe: &Path, argv: &[String], bundle: &Path) -> bool {
+    exe == bundle_exe(bundle) && self_update::is_app_instance(argv)
+}
+
 impl RealSwap {
-    fn exe(&self) -> PathBuf {
-        self.args.target.join("Contents/MacOS/stage-manager")
+    /// The app instances running from the bundle at `bundle` now, the old process aside.
+    fn instances_from(&self, bundle: &Path) -> Vec<i32> {
+        processes(|exe, argv| app_runs_from(exe, argv, bundle)).filter(|&pid| pid as u32 != self.args.pid).collect()
     }
 
     /// The app the helper opened: the one that answered, else the app instances (no
@@ -891,19 +953,20 @@ impl RealSwap {
             return vec![p as i32];
         }
         let Some(since) = self.launched_at else { return Vec::new() };
-        let exe = self.exe();
-        processes(|e, argv| e == exe && self_update::is_app_instance(argv))
-            .filter(|&pid| pid as u32 != self.args.pid && started_at(pid).is_some_and(|t| t >= since))
-            .collect()
+        self.instances_from(&self.args.target).into_iter().filter(|&pid| started_at(pid).is_some_and(|t| t >= since)).collect()
     }
-}
 
-impl RealSwap {
     /// An app instance runs from the installed executable other than the old process (the
     /// user opened it again after the Quit).
     fn reopened(&self) -> bool {
-        let exe = self.exe();
-        processes(|e, argv| e == exe && self_update::is_app_instance(argv)).any(|pid| pid as u32 != self.args.pid)
+        !self.instances_from(&self.args.target).is_empty()
+    }
+
+    /// After the exchange: an app instance runs from the old bundle, now at the staged path
+    /// (a running process's executable is named where its file is now). The user opened the
+    /// app while the staged copy was verified, before the exchange.
+    fn reopened_under_the_exchange(&self) -> bool {
+        !self.instances_from(&self.args.staged).is_empty()
     }
 }
 
@@ -946,7 +1009,14 @@ impl SwapOps for RealSwap {
     }
 
     fn check_installed(&mut self) -> Result<(), String> {
-        verify_copy(&self.args.target, &self.args.requirement, &self.args.version, "installed")
+        verify_copy(&self.args.target, &self.args.requirement, &self.args.version, "installed")?;
+        // Opened again between the staged copy's check and the exchange: that copy runs the
+        // old version from the bundle now in the working folder, which goes next. Its bundle
+        // is put back under it instead (the swap is undone), and the update waits.
+        if self.reopened_under_the_exchange() {
+            return Err("Stage Manager was opened again while the update went in".into());
+        }
+        Ok(())
     }
 
     fn exchange(&mut self) -> Result<(), ExchangeError> {
@@ -1153,6 +1223,53 @@ mod tests {
 
     /// Release builds trust only a Developer ID signature and never read the test hooks.
     /// Review C3: a pid given to another process (another start time) is not the app.
+    /// The helper finds a reopened app, and the new one it must stop, by its executable as
+    /// the system names it: with no links in it. A bundle opened by a path through a link
+    /// (`/tmp`, a linked Applications folder) matched no process, so an app opened again was
+    /// not seen and an unconfirmed new version counted as stopped.
+    #[test]
+    fn a_launch_keeps_a_staged_copy_only_for_automatic_installs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let work = dir.path().join(self_update::WORK_DIR);
+        assert_eq!(stale_work_in(&work, false, true), StaleWork::Nothing);
+        std::fs::create_dir_all(work.join(APP_NAME).join("Contents")).expect("staged");
+        assert_eq!(stale_work_in(&work, true, false), StaleWork::HelperRuns);
+        assert_eq!(stale_work_in(&work, false, true), StaleWork::Staged, "not downloaded again at every launch");
+        assert!(work.join(APP_NAME).is_dir());
+        // An exchange that never finished left the old app aside: from scratch.
+        std::fs::create_dir_all(work.join(self_update::ASIDE_NAME)).expect("aside");
+        assert_eq!(stale_work_in(&work, false, true), StaleWork::Removed);
+        assert!(!work.exists());
+        // Automatic installs off (or the check's answer did not use it): it goes.
+        std::fs::create_dir_all(work.join(APP_NAME)).expect("staged");
+        assert_eq!(stale_work_in(&work, false, false), StaleWork::Removed);
+        assert!(!work.exists());
+        // A marked folder stays either way.
+        std::fs::create_dir_all(work.join(APP_NAME)).expect("staged");
+        std::fs::write(work.join(self_update::KEEP_MARK), "kept").expect("mark");
+        assert_eq!(stale_work_in(&work, false, false), StaleWork::Kept);
+        assert_eq!(stale_work_in(&work, false, true), StaleWork::Kept);
+    }
+
+    #[test]
+    fn the_app_is_found_by_its_bundle_through_a_linked_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let real = dir.path().join("real");
+        std::fs::create_dir_all(real.join(APP_NAME).join("Contents/MacOS")).expect("bundle");
+        let linked = dir.path().join("linked");
+        std::os::unix::fs::symlink(&real, &linked).expect("link");
+        let running = std::fs::canonicalize(&real).expect("real path").join(APP_NAME).join("Contents/MacOS/stage-manager");
+        let app = vec![running.to_string_lossy().into_owned()];
+        assert!(app_runs_from(&running, &app, &linked.join(APP_NAME)), "opened by the linked path");
+        assert!(app_runs_from(&running, &app, &real.join(APP_NAME)));
+        let mut guardian = app.clone();
+        guardian.extend(["--guardian".to_string(), "42".to_string()]);
+        assert!(!app_runs_from(&running, &guardian, &linked.join(APP_NAME)), "never a helper of the app");
+        assert!(!app_runs_from(&running, &app, &dir.path().join("elsewhere").join(APP_NAME)), "another copy");
+        // A bundle that is gone (moved since) is named as it was.
+        assert_eq!(bundle_exe(Path::new("/nowhere/Stage Manager.app")), PathBuf::from("/nowhere/Stage Manager.app/Contents/MacOS/stage-manager"));
+    }
+
     #[test]
     fn a_reused_pid_is_not_the_app() {
         assert!(same_start(Some((100, 5)), Some((100, 5))));

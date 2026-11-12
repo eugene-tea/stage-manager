@@ -776,15 +776,19 @@ fn fill_check(id: u32, image: &CGImage, extent: Extent, overlaps: &[Rect], size_
     let win = extent.window_in(whole);
     let (kx, ky) = (win.w / size_pt.0.max(1.0), win.h / size_pt.1.max(1.0));
     let mut boxes = capture_pixels::corner_boxes(w, h).to_vec();
-    boxes.extend(overlaps.iter().map(|o| PixelRect {
-        x: (win.x + o.x * kx).max(0.0) as usize,
-        y: (win.y + o.y * ky).max(0.0) as usize,
-        w: (o.w * kx).round().max(1.0) as usize,
-        h: (o.h * ky).round().max(1.0) as usize,
+    // Each overlap's numbers are for the log only: its middle is read ([`capture_pixels::middle`]).
+    boxes.extend(overlaps.iter().map(|o| {
+        capture_pixels::middle(PixelRect {
+            x: (win.x + o.x * kx).max(0.0) as usize,
+            y: (win.y + o.y * ky).max(0.0) as usize,
+            w: (o.w * kx).round().max(1.0) as usize,
+            h: (o.h * ky).round().max(1.0) as usize,
+        })
     }));
     // Only these boxes' pixels are read, never the whole picture (the review's U2).
     let read = capture_pixels::box_stats(image, &boxes);
-    let corners: [Stats; 4] = std::array::from_fn(|i| read.get(i).copied().flatten().unwrap_or_default());
+    // A corner that cannot be read tells nothing: the picture is used.
+    let Some(corners) = capture_pixels::corners_read(&read) else { return false };
     let over: Vec<Stats> = read.iter().skip(4).filter_map(|s| *s).collect();
     let flat = capture_pixels::holds_fill(&corners, extent.is_none());
     let line = format!(
@@ -1052,7 +1056,8 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
-    // Windows SCK does not know are marked handled too, so they wait for the next interval.
+    // Every window asked for and not answered (one SCK does not know, a capture that failed)
+    // is marked handled too, so it waits for the next interval.
     let missing = batch.iter().map(|t| t.id).filter(|id| !handled.contains(id));
     let mut all = handled.clone();
     if expected.is_some() {

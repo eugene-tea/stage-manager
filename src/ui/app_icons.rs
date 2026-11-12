@@ -84,6 +84,15 @@ impl<T> IconCache<T> {
         entry.as_ref()
     }
 
+    /// Past `cap` icons, forgets those of the apps `keep` does not name (the apps on no
+    /// card now): an icon was kept for every app that ever had a card, until an appearance
+    /// change.
+    pub fn trim(&mut self, cap: usize, keep: impl Fn(i32) -> bool) {
+        if self.entries.len() > cap {
+            self.entries.retain(|(pid, _), _| keep(*pid));
+        }
+    }
+
     /// Forgets every icon (a new size, or an appearance change that may have redrawn them).
     pub fn clear(&mut self) {
         self.entries.clear();
@@ -266,6 +275,19 @@ mod tests {
         cache.clear();
         assert_eq!(get(&mut cache, 7, LIGHT).as_deref(), Some("7 light"));
         assert_eq!(fetched.borrow().len(), 5, "cleared: fetched again");
+    }
+
+    #[test]
+    fn past_its_cap_the_cache_keeps_the_apps_on_cards_only() {
+        let mut cache: IconCache<u8> = IconCache::default();
+        for pid in 0..5 {
+            cache.get_or_fetch(pid, LIGHT, || Some(1));
+        }
+        cache.trim(8, |pid| pid == 2);
+        assert_eq!(cache.get_or_fetch(0, LIGHT, || Some(9)), Some(&1), "under the cap: all kept");
+        cache.trim(4, |pid| pid == 2);
+        assert_eq!(cache.get_or_fetch(2, LIGHT, || Some(9)), Some(&1), "on a card: kept");
+        assert_eq!(cache.get_or_fetch(0, LIGHT, || Some(9)), Some(&9), "on no card: fetched again");
     }
 
     #[test]

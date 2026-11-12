@@ -1823,6 +1823,78 @@ fn a_hidden_apps_window_leaves_a_shared_card_which_stays() {
     assert_eq!(e.members(1), [2, 1]);
 }
 
+/// Hide Others hides several apps together, each with a notice of its own: taken one at a
+/// time, the stage brought in front was the next app's, hidden too, and its focus brought
+/// that app straight back.
+#[test]
+fn apps_hidden_together_never_bring_a_hidden_apps_stage_in_front() {
+    let mut e = stages(4, 6);
+    e.switch(2);
+    e.switch(4);
+    let obs = e.d.obs();
+    let a = e.m.apps_hidden(&[14, 12], &obs, |_| true);
+    assert!(!a.contains(&Action::Focus { id: w(2) }), "a hidden app's window is never focused: {a:?}");
+    e.run(a);
+    assert!(![2, 4].contains(&e.active_number()), "a stage of an app not hidden comes in front, not {}", e.active_number());
+    assert!(e.slot_numbers().iter().all(|n| ![2, 4].contains(n)), "no card for either: {:?}", e.slot_numbers());
+    assert!(e.m.apps_hidden(&[14, 12], &e.d.obs(), |_| true).is_empty(), "their own notices after: nothing more");
+}
+
+/// A screen that takes no input now (a full-screen app's Space, a Space change settling, the
+/// lock) gets no stage brought in front at a hide: the Desktop the model has there is not
+/// the one in view, and the switch's focus would make macOS go back to it.
+#[test]
+fn a_hide_switches_nothing_on_a_screen_that_takes_no_input() {
+    let mut e = stages(3, 6);
+    let a = e.m.apps_hidden(&[13], &e.d.obs(), |_| false);
+    assert!(a.iter().all(|x| *x == Action::StateChanged), "nothing moves, nothing is focused: {a:?}");
+    e.run(a);
+    assert_eq!(e.active_number(), 3, "the hidden stage stays in front");
+    assert!(e.m.app_is_hidden(13));
+    assert_eq!(e.slot_numbers(), [1, 2]);
+}
+
+/// A stage shared with a hidden app shows by its other windows (its card draws only them):
+/// its focus goes to one of those, never to the hidden app's window, which would unhide it.
+#[test]
+fn showing_a_stage_never_focuses_a_hidden_apps_window() {
+    let mut e = stages(3, 6);
+    e.send(3, Target::Number(2));
+    e.switch(1);
+    assert_eq!(e.m.stages()[1].key, Some(w(3)), "the hidden app's window is the stage's key");
+    let a = e.m.app_hidden(13, &e.d.obs());
+    e.run(a);
+    let a = e.switch(2);
+    assert_eq!(a.iter().rev().find(|x| matches!(x, Action::Focus { .. })), Some(&Action::Focus { id: w(2) }), "{a:?}");
+    // Dragged out of the strip instead: the same.
+    let mut e = stages(3, 6);
+    e.send(3, Target::Number(2));
+    e.switch(1);
+    let a = e.m.app_hidden(13, &e.d.obs());
+    e.run(a);
+    let stage = e.m.stages()[1].id;
+    let a = e.m.merge_into_active(stage, &e.d.obs());
+    assert_eq!(a.iter().rev().find(|x| matches!(x, Action::Focus { .. })), Some(&Action::Focus { id: w(2) }), "{a:?}");
+}
+
+/// An activation that reaches us before the unhide's notice (either order comes) shows the
+/// stage first: the slot noted when it hid is then no slot it left, and is not kept for a
+/// later unhide.
+#[test]
+fn a_hidden_stage_shown_by_its_activation_keeps_no_slot_to_come_back_to() {
+    let mut e = stages(3, 6);
+    let hidden = e.m.main_active_stage().expect("active");
+    let a = e.m.app_hidden(13, &e.d.obs());
+    e.run(a);
+    assert!(e.m.hidden_slots.contains_key(&hidden));
+    let a = e.m.app_activated(13, &e.d.obs());
+    e.run(a);
+    assert_eq!(e.active_number(), 3, "the activation shows its stage");
+    let a = e.m.app_unhidden(13);
+    e.run(a);
+    assert!(e.m.hidden_slots.is_empty(), "{:?}", e.m.hidden_slots);
+}
+
 // ----- merge by dropping a card on a card -------------------------------------------------
 
 /// The stage holding window `id`.

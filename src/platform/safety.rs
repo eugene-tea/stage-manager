@@ -43,6 +43,12 @@
 //! ([`super::handoff::TakenWatch`]) until each is back, gone, or in the model. A quit is clean
 //! only once none is left ([`taken_len`]).
 //!
+//! **A child its app ordered out while parked** ([`crate::engine::not_ours::ordered_out_child`]):
+//! the window server keeps listing it in the corner, off screen, and nothing can move it.
+//! It stays registered and the guardian waits for it as for any other, but a quit whose only
+//! windows left are such children is not unclean for them
+//! ([`crate::engine::leftovers::QuitEnd::Waits`], [`ordered_out`]).
+//!
 //! No app is hidden by this app: `[windows] hide_parked_apps` and its list of hidden apps in
 //! the parked file were retired on 11-09.
 
@@ -165,6 +171,72 @@ pub fn passed_on() -> bool {
     PASSED_ON.load(Ordering::SeqCst)
 }
 
+/// The windows the latest leftovers check left in the park zone and judged children their
+/// apps ordered out while parked ([`judge_ordered_out`]). Locked last, after [`REGISTRY`] and
+/// [`TAKEN`]; never held across either.
+static ORDERED_OUT: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+/// The windows the latest leftovers check judged children their apps ordered out while
+/// parked: still registered, still waited for by the guardian, not counted against a quit.
+pub fn ordered_out() -> BTreeSet<u32> {
+    ORDERED_OUT.lock().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+/// Notes the latest leftovers check's ordered-out children; the parked file says so for
+/// each (a later copy that takes the guardian's watch then knows).
+fn set_ordered_out(ids: BTreeSet<u32>) {
+    {
+        let mut now = ORDERED_OUT.lock().unwrap_or_else(|p| p.into_inner());
+        if *now == ids {
+            return;
+        }
+        *now = ids;
+    }
+    let listed = registered(&lock_registry());
+    write_parked_file(&listed);
+}
+
+/// Set by a quit whose only windows not back are children their apps ordered out while
+/// parked: the guardian keeps waiting for each, and the quit is clean in the user's eyes.
+static ONLY_ORDERED_OUT: AtomicBool = AtomicBool::new(false);
+
+/// Notes whether this quit leaves only ordered-out children behind.
+pub fn set_only_ordered_out(on: bool) {
+    ONLY_ORDERED_OUT.store(on, Ordering::SeqCst);
+}
+
+/// True when this quit leaves only ordered-out children behind
+/// ([`crate::engine::leftovers::QuitEnd::Waits`]).
+pub fn only_ordered_out() -> bool {
+    ONLY_ORDERED_OUT.load(Ordering::SeqCst)
+}
+
+/// Those of `left` (windows still listed in a park zone after a quit's unpark and its tries)
+/// that are children their apps ordered out while parked
+/// ([`crate::engine::not_ours::ordered_out_child`]). A registry window's handle is asked
+/// now; a taken window has none, and counts only when an earlier quit found its handle dead
+/// ([`Registered::ordered_out`]). Each app is asked for its window list once, and only for a
+/// window nothing else rules out.
+fn judge_ordered_out(left: &[windows::CgWindow]) -> BTreeSet<u32> {
+    let mut lists: std::collections::HashMap<i32, Option<Vec<u32>>> = std::collections::HashMap::new();
+    left.iter()
+        .filter(|w| {
+            let (child, dead) = match (registry_entry(w.id), taken_entry(w.id)) {
+                (Some(e), _) => (e.child, e.child && e.element.role() == Err(AxError::INVALID_ELEMENT)),
+                (None, Some(r)) => (r.child, r.ordered_out),
+                (None, None) => return false,
+            };
+            let listed = hidden_tabs::tab_listed(w);
+            if !crate::engine::not_ours::ordered_out_child(&listed, child, dead, Some(&[])) {
+                return false;
+            }
+            let ax = lists.entry(w.pid).or_insert_with(|| hidden_tabs::ax_window_ids(w.pid));
+            crate::engine::not_ours::ordered_out_child(&listed, child, dead, ax.as_deref())
+        })
+        .map(|w| w.id)
+        .collect()
+}
+
 /// Lets go of taken windows (back, gone, or in the model now).
 pub fn taken_forget(ids: &[u32]) {
     if ids.is_empty() {
@@ -262,6 +334,15 @@ pub fn held_len() -> usize {
     lock_held().len()
 }
 
+/// The windows the controller parks itself now: the registry's, the held ones aside (those
+/// belong to no controller, [`HELD`]). None while nothing is arranged (standing down, a
+/// logout's hold: the registry holds only held windows then). A later look for windows a
+/// stand-down left leaves these where they are ([`Ours::leaving`]).
+pub fn parked_on_purpose() -> BTreeSet<u32> {
+    let held: BTreeSet<u32> = lock_held().keys().copied().collect();
+    registry_ids().into_iter().filter(|id| !held.contains(id)).collect()
+}
+
 /// Tries every held window again (its Space may show now); those back leave the hold and
 /// the registry. True when none is left.
 pub fn retry_held() -> bool {
@@ -295,6 +376,7 @@ pub fn retry_held() -> bool {
 /// The registry as the guardian needs it: ids, pids and restore frames; then the windows
 /// taken from an old guardian that the registry does not hold (round 8N).
 fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
+    let ordered_out = ordered_out();
     let mut listed: Vec<Registered> = map
         .iter()
         .map(|(&id, e)| Registered {
@@ -305,6 +387,7 @@ fn registered(map: &BTreeMap<u32, ParkedEntry>) -> Vec<Registered> {
             fitted: e.fitted.is_some(),
             fitted_at: e.fitted,
             unvouched: false,
+            ordered_out: ordered_out.contains(&id),
         })
         .collect();
     listed.extend(lock_taken().values().filter(|r| !map.contains_key(&r.id)).copied());
@@ -638,6 +721,12 @@ pub struct Ours {
     /// in the park zone at the check goes back there before any `state.json` frame (its
     /// registry entry left as done with the batch).
     pub unparked: BTreeMap<u32, Rect>,
+    /// Windows parked on purpose as the check runs ([`parked_on_purpose`]): left where they
+    /// are ([`Self::left_alone`]). Empty for a check right after an unpark (nothing is parked
+    /// on purpose then); a later look for a stand-down's leftovers, made while the app
+    /// arranges windows again, names the stages' parked windows here, or it would bring every
+    /// one of them back on screen.
+    pub parked_now: BTreeSet<u32>,
 }
 
 impl Ours {
@@ -652,7 +741,19 @@ impl Ours {
 
     /// What is known from the registry's ids, the model's windows and `state.json`.
     pub fn from_parts(registered: BTreeSet<u32>, managed: BTreeSet<u32>, state: Option<StateFile>) -> Self {
-        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new() }
+        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new(), parked_now: BTreeSet::new() }
+    }
+
+    /// `self`, leaving the windows `parked_now` where they are ([`Self::parked_now`]).
+    pub fn leaving(mut self, parked_now: BTreeSet<u32>) -> Self {
+        self.parked_now = parked_now;
+        self
+    }
+
+    /// True when window `id` is parked on purpose now: no check brings it back, whatever
+    /// else is known of it ([`Self::parked_now`]).
+    pub fn left_alone(&self, id: u32) -> bool {
+        self.parked_now.contains(&id)
     }
 
     /// `self`, with the frames the controller's latest unpark restored windows to
@@ -705,6 +806,8 @@ impl Ours {
         self.shown_managed = now.shown_managed;
         // A later unpark's frame is the fresher one.
         self.unparked.extend(now.unparked);
+        // What is parked on purpose is `now`'s alone.
+        self.parked_now = now.parked_now;
         if self.state.is_none() {
             self.state = now.state;
         }
@@ -756,8 +859,9 @@ pub fn stranded_allowed(ours: &Ours) -> Vec<windows::CgWindow> {
     let mut registered_tabs = Vec::new();
     let left = list
         .into_iter()
-        // A transparent window is no window we parked (helpers keep such windows anywhere).
-        .filter(|w| w.layer == 0 && w.alpha > 0.0 && displays.parks(w.bounds))
+        // A transparent window is no window we parked (helpers keep such windows anywhere);
+        // one parked on purpose now stays where it is.
+        .filter(|w| w.layer == 0 && w.alpha > 0.0 && !ours.left_alone(w.id) && displays.parks(w.bounds))
         .filter(|w| {
             let bundle = bundles.entry(w.pid).or_insert_with(|| bundle_id_of(w.pid));
             observe::app_allowed(only.as_ref(), own, w.pid, bundle.as_deref())
@@ -1235,34 +1339,63 @@ pub fn leftovers_back(reason: &str, managed: BTreeSet<u32>) -> bool {
 /// check knew, the windows left judged ours ([`Ours::kept_for_retry`]), for the next try:
 /// a stand-down's retries pass it until each window is back (the review of 6X2, 2).
 pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
+    leftovers_check(reason, ours, true)
+}
+
+/// A later look for the windows an earlier check left ([`leftovers_back_knowing`]'s answer,
+/// merged with what is known now), with no unpark before it (a Desktop showed while a
+/// stand-down's window is still away). `moved`: the list may still be changing (windows
+/// moved a moment ago), and gets its settle as after an unpark. Else the caller has let it
+/// settle already: it is read as it stands, and read again without a wait when no window
+/// could be asked to move ([`leftovers::settle_before`], [`leftovers::settle_after`]).
+/// While the app arranges windows again, `ours` names the windows parked on purpose
+/// ([`Ours::leaving`]).
+pub fn leftovers_retry(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
+    leftovers_check(reason, ours, moved)
+}
+
+/// The leftovers check ([`leftovers_back_knowing`], [`leftovers_retry`]); `moved`: windows
+/// were moved a moment before it (the list needs its settle).
+fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     let start = Instant::now();
     let end = start + LEFTOVERS_MAX;
     let read = |max: Duration| {
         let began = Instant::now();
         leftovers::settle(|| stranded_allowed(&ours), max, UNPARK_POLL, || began.elapsed(), std::thread::sleep)
     };
-    let left = read(UNPARK_SETTLE);
+    let left = read(leftovers::settle_before(moved));
     if left.is_empty() {
         LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
+        set_ordered_out(BTreeSet::new());
         return None;
     }
     let seen: Vec<(u32, bool)> = left.iter().map(|w| (w.id, w.onscreen)).collect();
     tracing::warn!(reason, windows = ?seen, "windows still parked after unparking (id, on screen); bringing each back");
     // The second read keeps its full settle unless the first ran long.
     let budget_end = (Instant::now() + LEFTOVER_BUDGET).min(end.checked_sub(UNPARK_SETTLE).unwrap_or(end));
-    let unreached = bring_back_leftovers(reason, &left, budget_end, &ours);
-    let after = read(UNPARK_SETTLE.min(end.saturating_duration_since(Instant::now())));
+    let (unreached, tried) = bring_back(reason, &left, budget_end, &ours);
+    let after = read(leftovers::settle_after(moved, tried).min(end.saturating_duration_since(Instant::now())));
     let took_ms = start.elapsed().as_millis() as u64;
     if after.is_empty() {
         tracing::info!(reason, back = left.len(), took_ms, "every window still parked after unparking is back");
         LEFT_NOT_TAKEN.store(0, Ordering::SeqCst);
+        set_ordered_out(BTreeSet::new());
         return None;
     }
     let ids: Vec<u32> = after.iter().map(|w| w.id).collect();
+    // A child its app ordered out while parked: nothing can move it. It stays registered and
+    // waited for; it is only not counted against the quit.
+    let ordered_out = judge_ordered_out(&after);
+    set_ordered_out(ordered_out.clone());
+    if !ordered_out.is_empty() {
+        tracing::info!(reason, windows = ?ordered_out, "a child window its app closed while parked is still listed in the corner, off screen (its handle is dead, its app answers and no longer lists it): it stays registered and the guardian waits for it; a quit is not unclean for it");
+    }
     let taken = taken_ids();
-    let mine: Vec<u32> = ids.iter().copied().filter(|id| !taken.contains(id)).collect();
+    let mine: Vec<u32> = ids.iter().copied().filter(|id| !taken.contains(id) && !ordered_out.contains(id)).collect();
     LEFT_NOT_TAKEN.store(mine.len(), Ordering::SeqCst);
-    if mine.is_empty() {
+    if ordered_out.len() == ids.len() {
+        tracing::info!(reason, windows = ?ids, took_ms, "only windows their apps closed while parked are left in the corner");
+    } else if mine.is_empty() {
         // Only windows handed over by an old guardian (round 8N): passed on, never an error.
         tracing::info!(reason, windows = ?ids, took_ms, "handed-over windows still parked: passed on to the guardian");
     } else {
@@ -1280,12 +1413,19 @@ pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
 /// Desktop's, an app that does not answer, no time left).
 pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> Vec<u32> {
+    bring_back(reason, left, deadline, ours).0
+}
+
+/// [`bring_back_leftovers`], with how many windows it asked to move (reached, whether the
+/// move went through or not).
+fn bring_back(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> (Vec<u32>, usize) {
     // Each app's enhanced UI off once for all its windows here, not once per window.
     let _quiet = enhanced_ui::Batch::open();
     let displays = scan_displays();
     let state = ours.state.as_ref();
     let mut back = Vec::new();
     let mut unreached = Vec::new();
+    let mut tried = 0;
     for w in left {
         let bundle = bundle_id_of(w.pid);
         let entry = registry_entry(w.id);
@@ -1316,6 +1456,7 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
         let live = LiveWindow { id: Some(w.id), bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };
         let (frame, source) = leftovers::leftover_frame(remembered, &live, state, &displays);
         let known = ours.known(w.id);
+        tried += 1;
         let mut result = set_frame_retrying(&element, w.id, frame, deadline.saturating_duration_since(Instant::now()));
         // The registry's element went stale (the window was reported destroyed while ordered
         // out, its app relaunched it): the app's own list may have it, when that and a try
@@ -1347,7 +1488,7 @@ pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: 
         counters::bump(Count::Recovery);
     }
     registry_forget(&back);
-    unreached
+    (unreached, tried)
 }
 
 #[cfg(test)]

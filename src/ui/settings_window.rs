@@ -718,7 +718,7 @@ fn advanced(f: &mut Form, m: &Maker, v: &SettingsValues) -> Retained<NSButton> {
         r.detail_color = Some(NSColor::systemRedColor());
         rows.push(r);
     }
-    let copy = m.button("Copy Instructions for Agents", tag::COPY);
+    let copy = m.button(COPY_TITLE, tag::COPY);
     rows.push(
         Row::new("Ask an AI agent", Some(view(&copy)))
             .detail("The easiest way to change anything else is to ask an AI assistant to do it."),
@@ -880,17 +880,41 @@ fn install_pane(pane: Pane, animate: bool) {
     tracing::debug!(pane = pane.id(), "settings: pane shown");
 }
 
+/// What fresh values ask of the open window ([`refresh_for`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refresh {
+    /// The controls take the values in place.
+    Controls,
+    /// The controls take them, then the panes are rebuilt (a row's text changed).
+    ControlsThenRebuild,
+    /// The panes are rebuilt (their rows changed).
+    Rebuild,
+}
+
+/// What `values` ask of a window that last took `shown`: its rows rebuilt when their shape
+/// changed (login item state, Apple's Stage Manager, a config error, animations off), else
+/// its controls set in place, and rebuilt after when a row's own text changed. Values equal
+/// to the ones shown still set the controls: a click whose change could not be saved (the
+/// config file has an error, macOS refused the write) moved a control away from them, and
+/// `shown` is what was applied last, never what the controls say.
+fn refresh_for(shown: &SettingsValues, values: &SettingsValues) -> Refresh {
+    if shown.shape() != values.shape() || shown.version != values.version || shown.config_path != values.config_path {
+        Refresh::Rebuild
+    } else if shown.wallpaper_only_in_stage_manager != values.wallpaper_only_in_stage_manager || shown.config_error != values.config_error {
+        Refresh::ControlsThenRebuild
+    } else {
+        Refresh::Controls
+    }
+}
+
 /// Shows fresh values on every pane, the hidden ones too: the controls change in place, or
-/// the panes are rebuilt when their rows change (login item state, Apple's Stage Manager, a
-/// config error, animations off).
+/// the panes are rebuilt when their rows change ([`refresh_for`]).
 pub fn apply(values: SettingsValues) {
     let rebuild = OPEN.with(|o| {
         let mut o = o.borrow_mut();
         let Some(open) = o.as_mut() else { return false };
-        if open.shown == values {
-            return false;
-        }
-        if open.shown.shape() != values.shape() || open.shown.version != values.version || open.shown.config_path != values.config_path {
+        let refresh = refresh_for(&open.shown, &values);
+        if refresh == Refresh::Rebuild {
             open.shown = values.clone();
             return true;
         }
@@ -911,10 +935,8 @@ pub fn apply(values: SettingsValues) {
         set_switch(&c.hotkeys, values.hotkeys);
         c.speed.setDoubleValue(speed_stop(values.speed) as f64);
         describe_speed(&c.speed);
-        let wallpaper_changed = open.shown.wallpaper_only_in_stage_manager != values.wallpaper_only_in_stage_manager
-            || open.shown.config_error != values.config_error;
         open.shown = values;
-        wallpaper_changed
+        refresh == Refresh::ControlsThenRebuild
     });
     if rebuild {
         // After the current event: the control that sent it is still on the stack.
@@ -961,12 +983,15 @@ pub fn is_front(mtm: MainThreadMarker) -> bool {
         && (window.isKeyWindow() || window.attachedSheet().is_some_and(|s| s.isKeyWindow()))
 }
 
-/// "Copied" on the copy button for a moment.
+/// The copy button's title.
+const COPY_TITLE: &str = "Copy Instructions for Agents";
+
+/// "Copied" on the copy button for a moment, then its own title again (never the title it
+/// had when clicked: a second click within the moment would keep "Copied" for good).
 pub fn confirm_copied() {
     let Some(button) = OPEN.with(|o| o.borrow().as_ref().map(|o| o.controls.copy.clone())) else { return };
-    let title = button.title();
     button.setTitle(&NSString::from_str("Copied"));
-    let restore = RcBlock::new(move |_t: NonNull<NSTimer>| button.setTitle(&title));
+    let restore = RcBlock::new(move |_t: NonNull<NSTimer>| button.setTitle(&NSString::from_str(COPY_TITLE)));
     // SAFETY: the block runs once on the main run loop, which keeps the timer.
     let _ = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.5, false, &restore) };
 }
@@ -1005,6 +1030,26 @@ mod tests {
         assert!(wallpaper_detail(false).starts_with("Always. macOS moves every window aside"));
         assert!(wallpaper_detail(false).contains("with Only in Stage Manager, the stage goes into the strip"));
         assert!(wallpaper_detail(true).starts_with("Only in Stage Manager. The stage goes into the strip"));
+    }
+
+    /// A switch flipped while the config file has an error is not saved, and the values that
+    /// come back are the ones shown before: the controls take them all the same.
+    #[test]
+    fn values_equal_to_the_ones_shown_still_set_the_controls() {
+        let values = |text: &str, raw: &RawSettings, error: Option<&str>| {
+            let config = Config::parse(text).expect("parses").config;
+            SettingsValues::new(&config, raw, LoginStatus::Off, "~/x".into(), error.map(str::to_string), "1.0.0".into())
+        };
+        let none = RawSettings::new();
+        let shown = values("", &none, None);
+        assert_eq!(refresh_for(&shown, &shown.clone()), Refresh::Controls, "a change that was not saved: the switch goes back");
+        assert_eq!(refresh_for(&shown, &values("[strip]\nmerge_on_drop = false", &none, None)), Refresh::Controls);
+        let only: RawSettings = [("EnableStandardClickToShowDesktop".to_string(), 0)].into_iter().collect();
+        assert_eq!(refresh_for(&shown, &values("", &only, None)), Refresh::ControlsThenRebuild, "the wallpaper row's text");
+        assert_eq!(refresh_for(&shown, &values("", &none, Some("line 3: bad"))), Refresh::Rebuild, "the error row appears");
+        let broken = values("", &none, Some("line 3: bad"));
+        assert_eq!(refresh_for(&broken, &values("", &none, Some("line 4: worse"))), Refresh::ControlsThenRebuild, "the error's text");
+        assert_eq!(refresh_for(&shown, &values("[animation]\nspeed = 0", &none, None)), Refresh::Rebuild, "the speed row's note");
     }
 
     #[test]

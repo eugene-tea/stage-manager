@@ -169,6 +169,31 @@ impl Model {
         &self.last_arrival
     }
 
+    /// The Desktops no screen shows now that `held` (a focus or an activation that could not
+    /// act yet, [`crate::engine::focus_replay`]) may be for: its window's Desktop, or for an
+    /// activation every Desktop holding a standard window of the app (windows on every
+    /// Desktop left out). Empty when it can act on a Desktop shown, or names nothing known.
+    /// With several screens the arrivals come in turn: one of these Desktops showing after a
+    /// later screen's arrival is where the user went.
+    pub fn spaces_awaited(&self, held: crate::engine::focus_replay::Wanted) -> Vec<SpaceId> {
+        use crate::engine::focus_replay::Wanted;
+        let waits = |w: &&super::WindowState| !w.sticky && !self.is_shown_space(w.space);
+        let mut spaces: Vec<SpaceId> = match held {
+            Wanted::Window { id, .. } => self.resolve_standard(id).and_then(|w| self.windows.get(&w)).filter(waits).map(|w| w.space).into_iter().collect(),
+            Wanted::App(pid) => {
+                let of_app = |w: &&super::WindowState| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !w.sticky;
+                if self.windows.values().filter(of_app).any(|w| self.is_shown_space(w.space)) {
+                    Vec::new()
+                } else {
+                    self.windows.values().filter(of_app).map(|w| w.space).collect()
+                }
+            }
+        };
+        spaces.sort();
+        spaces.dedup();
+        spaces
+    }
+
     /// True when the windows on screen look like two Desktops at once: two or more known
     /// Spaces with more of their windows on screen than missing, or saved Spaces whose
     /// windows show among the first-seen ones, together (the window list read while a
@@ -302,6 +327,12 @@ impl Model {
         for from in self.moved_from.values_mut() {
             if *from == old {
                 *from = new;
+            }
+        }
+        // The entries of apps that quit there follow it, or the file leaves them out.
+        for q in &mut self.quit {
+            if q.space == old {
+                q.space = new;
             }
         }
     }
@@ -726,8 +757,12 @@ impl Model {
         }
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
-        // A window not on screen here broke its run of hops: it is not on every Space.
-        self.hops.retain(|id, _| known.contains(id));
+        // A window not on screen here broke its run of hops: it is not on every Space. One of
+        // another screen's Desktop is not this arrival's to judge (every screen arrives in
+        // turn at a Space change: the other screen's arrival ended every run on this one).
+        let (windows, spaces) = (&self.windows, &self.spaces);
+        let elsewhere = |id: &WindowId| windows.get(id).is_some_and(|w| spaces.iter().any(|s| s.id == w.space && s.display != display));
+        self.hops.retain(|id, _| known.contains(id) || elsewhere(id));
         if self.restore.after_restart_window() && bare && carried == 0 && !self.leftovers.is_empty() && !self.space_has_pending(target) {
             // Made from a screen no saved Desktop matched while the restore window is open:
             // its confident windows say which saved Desktop it is. A Desktop made after the
@@ -825,10 +860,15 @@ impl Model {
 
     /// Known Spaces other than `target` with a positive score in `all` (more of their windows
     /// on screen than missing) whose windows stay where they are at this arrival: seen so at
-    /// fewer than [`BESIDE_ARRIVALS`] arrivals in a row.
+    /// fewer than [`BESIDE_ARRIVALS`] arrivals in a row on `target`'s screen.
     fn hold_beside(&mut self, target: SpaceId, all: &BTreeMap<SpaceId, (i64, bool, u64)>) -> BTreeSet<SpaceId> {
         let seen: Vec<SpaceId> = all.iter().filter(|(id, (n, _, _))| **id != target && *n > 0).map(|(id, _)| *id).collect();
-        self.beside.retain(|s, _| seen.contains(s));
+        // Only this screen's Desktops are counted here (`all` holds no other): a count kept
+        // for another screen's Desktop is its own arrivals' to end, or two screens arriving
+        // in turn would never reach two in a row.
+        let display = self.space_display(target);
+        let spaces = &self.spaces;
+        self.beside.retain(|s, _| seen.contains(s) || spaces.iter().any(|sp| sp.id == *s && sp.display != display));
         let mut held = BTreeSet::new();
         for s in seen {
             let n = self.beside.entry(s).or_insert(0);

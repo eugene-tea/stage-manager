@@ -401,8 +401,9 @@ mod app {
     }
 
     /// Quits cleanly (main thread): every parked window back onscreen through the WM thread
-    /// (the registry and a recovery scan as fallbacks), the clean-exit marker for the
-    /// guardian, the socket removed, then exit.
+    /// (the registry and a recovery scan as fallbacks when it does not answer,
+    /// [`leftovers::quit_falls_back`]), the clean-exit marker for the guardian, the socket
+    /// removed, then exit.
     ///
     /// The WM thread is told first ([`safety::request_quit`]) so a long batch of window moves
     /// stops between two actions and Quit is answered next.
@@ -415,18 +416,13 @@ mod app {
         capture::begin_shutdown();
         let timeout = shutdown_timeout(safety::registry_len().max(wm_thread::logout_windows()));
         tracing::info!(timeout_ms = timeout.as_millis() as u64, "quitting: unparking every window");
-        let ok = match WM.get().map(|wm| wm.shutdown(timeout)) {
-            Some(Some(true)) => true,
-            Some(Some(false)) => {
-                tracing::warn!("some windows did not come back through the WM thread; retrying from the registry");
-                registry_then_leftovers("quit")
-            }
-            Some(None) => {
-                tracing::warn!("WM thread did not answer; unparking from the registry");
-                registry_then_leftovers("quit")
-            }
-            None => {
-                tracing::warn!("no WM thread; unparking from the registry");
+        let answer = WM.get().map(|wm| wm.shutdown(timeout));
+        // The WM thread's answer is final, clean or not; only without one does this thread
+        // unpark from the registry.
+        let ok = match answer.flatten() {
+            Some(ok) if !leftovers::quit_falls_back(Some(ok)) => ok,
+            _ => {
+                tracing::warn!(wm_thread = answer.is_some(), "no answer from the WM thread; unparking from the registry");
                 registry_then_leftovers("quit")
             }
         };
@@ -470,6 +466,10 @@ mod app {
             if safety::passed_on() {
                 // Only handed-over windows still away (round 8N): this app's guardian takes them over.
                 tracing::info!("handed-over windows still away: this app's guardian takes them over");
+            } else if safety::only_ordered_out() {
+                // Only children their apps closed while parked: nothing can bring one back.
+                // No clean-exit marker (the guardian waits for each), and no error.
+                tracing::info!("only windows their apps closed while parked are left in the corner: the guardian keeps waiting for them; the quit counts as clean");
             } else {
                 tracing::error!("not every window could be restored; the guardian will scan after exit");
             }
@@ -479,7 +479,7 @@ mod app {
         stage_manager::platform::enhanced_ui::restore_all("quit");
         // A ready update installs at the user's own Quit, not reopened (the owner's go 11-09); main
         // thread only (the signal watcher's exit installs nothing).
-        stage_manager::ui::shell::install_on_quit(user_quit, ok, head_start || logout_reason);
+        stage_manager::ui::shell::install_on_quit(user_quit, ok || safety::only_ordered_out(), head_start || logout_reason);
         // An update ready to install: its helper waits for this process to exit (8C).
         stage_manager::platform::updater::launch_pending_helper();
         // A capture still in flight at exit makes macOS alert about screen access. Before the

@@ -322,6 +322,12 @@ pub struct Registered {
     /// window server lists it on screen in the park zone. False in files of earlier versions.
     #[serde(default)]
     pub unvouched: bool,
+    /// A child window judged ordered out by its app while parked, at a quit's leftovers check
+    /// ([`super::not_ours::ordered_out_child`]: its handle dead, its answering app no longer
+    /// listing it). It is waited for like any registered window; a later quit that finds it
+    /// the same way is not unclean for it. False in files of earlier versions.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub ordered_out: bool,
 }
 
 /// The parked file the app keeps for its guardian: the registered windows and the main
@@ -681,7 +687,7 @@ mod tests {
     fn the_parked_file_round_trips_and_reads_the_older_list() {
         let f = ParkedFile {
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
-            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false }],
+            windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false, ordered_out: false }],
             corners: vec![Corner::BottomLeft],
             zones: vec![ParkZone { frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0), visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0), corners: vec![Corner::BottomLeft] }],
             logout: false,

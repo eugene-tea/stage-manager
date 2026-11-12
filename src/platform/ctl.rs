@@ -47,8 +47,9 @@
 //! script or app without Accessibility from borrowing the app's; it is no wall against a
 //! process of the same user, which can run this binary as a client itself (so `adopted`'s
 //! window ids and `settings` stay open to such a process: review S11 found nothing they give
-//! that the binary would not). Lines longer than [`MAX_LINE`] end the connection; at most
-//! [`MAX_CONNECTIONS`] are served at once.
+//! that the binary would not). Lines longer than [`MAX_LINE`] end the connection, as does one
+//! that sends no line or takes no reply for 30 s; at most [`MAX_CONNECTIONS`] are served at
+//! once.
 
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -628,8 +629,20 @@ pub fn serve(listener: UnixListener, handler: Handler) -> std::io::Result<()> {
     Ok(())
 }
 
+/// How long a connection may sit without sending its next line, or without taking a reply.
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn serve_connection(stream: UnixStream, handler: &Handler) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    serve_connection_within(stream, handler, IDLE_TIMEOUT);
+}
+
+/// Serves one connection until it ends, errs, or sits `idle` without sending its next line
+/// or taking a reply.
+fn serve_connection_within(stream: UnixStream, handler: &Handler, idle: Duration) {
+    let _ = stream.set_read_timeout(Some(idle));
+    // The reply's side too (the clone below shares the socket): a client that stopped
+    // reading would hold its thread and its place among MAX_CONNECTIONS for good.
+    let _ = stream.set_write_timeout(Some(idle));
     let (peer, pid, exe) = peer_of(&stream);
     if peer == Peer::Stranger {
         tracing::warn!(?pid, "ctl: a connection from another account (or one that cannot be read) refused");
@@ -796,6 +809,28 @@ pub fn run_mark(words: &[String]) -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client that asks and never reads fills the socket; the reply then waits. It must
+    /// not wait for good: sixteen such connections would be every place there is, and the
+    /// guardian's question, a second launch's ping and the updater's would get no answer.
+    #[test]
+    fn a_client_that_never_reads_its_replies_gives_its_place_back() {
+        let (mut client, server) = UnixStream::pair().expect("a socket pair");
+        let handler: Handler = Arc::new(|_, _| json!({ "ok": true, "pad": "x".repeat(4096) }));
+        let (done, ended) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            serve_connection_within(server, &handler, Duration::from_millis(200));
+            let _ = done.send(());
+        });
+        let _ = client.set_write_timeout(Some(Duration::from_millis(100)));
+        for _ in 0..2000 {
+            if writeln!(client, "ping").is_err() {
+                break;
+            }
+        }
+        assert!(ended.recv_timeout(Duration::from_secs(10)).is_ok(), "the connection is still served");
+        drop(client);
+    }
 
     #[test]
     fn parses_known_commands() {

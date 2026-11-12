@@ -978,6 +978,37 @@ fn stamps_say_when_each_desktop_was_last_shown() {
 }
 
 #[test]
+fn a_desktop_no_save_ever_saw_shown_still_ages() {
+    // Desktop 2 was never shown at a save (a file from before the time was kept): it has no
+    // `last_seen`. Not visited again, session after session, its windows must still be given
+    // up a month on, counted from the first save that found it without a time.
+    const DAY: u64 = 86_400;
+    let shown = SavedSpace { current: true, ..state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0)) };
+    let waiting = SavedWindow { pending: Some(Pending { since: "A".into() }), ..saved("com.example.chat", "Team", 0) };
+    let never = SavedSpace { id: 2, current: false, unvisited: true, ..state(vec![(None, vec![waiting])], Some(0)) };
+    let mut file = StateFile { session: Some("B".into()), ..StateFile::single(shown) };
+    file.spaces.push(never);
+    let mut seen = HashMap::new();
+    file.stamp(1_000, &mut seen);
+    assert_eq!(file.spaces[1].last_seen, Some(1_000), "its clock starts at the first save");
+    // Later saves of the same run, and of later runs seeded from the file, keep that time.
+    file.stamp(1_000 + DAY, &mut seen);
+    assert_eq!(file.spaces[1].last_seen, Some(1_000));
+    let mut seeded = file.seen_times();
+    file.stamp(1_000 + 2 * DAY, &mut seeded);
+    assert_eq!(file.spaces[1].last_seen, Some(1_000));
+    // The next login within the month keeps its windows (nothing looked for them)...
+    let mut soon = file.clone();
+    assert_eq!(soon.start_new_session(), 0);
+    assert_eq!(soon.spaces.len(), 2);
+    // ...and one past it gives them up, with the Desktop.
+    let mut late = file.clone();
+    late.stamp(1_000 + 31 * DAY, &mut seeded);
+    assert_eq!(late.start_new_session(), 1, "a month unseen");
+    assert_eq!(late.spaces.iter().map(|s| s.id).collect::<Vec<_>>(), [1]);
+}
+
+#[test]
 fn a_same_session_load_marks_nothing_and_another_session_marks_everything_pending() {
     let s = state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0));
     let file = StateFile { session: Some("A".into()), ..StateFile::single(s) };

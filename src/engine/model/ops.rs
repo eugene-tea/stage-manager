@@ -561,9 +561,7 @@ impl Model {
                 w.meta.display = display;
             }
         }
-        let key = src_key
-            .filter(|k| members.contains(k))
-            .or(members.first().copied());
+        let key = self.focus_key(src_key, &members);
         let t = self.tick();
         if let Some(a) = self.stage_mut(active) {
             let mut windows = members.clone();
@@ -1792,8 +1790,6 @@ impl Model {
         if self.options.main_only {
             displays.truncate(1);
         }
-        // Windows adopted at an earlier change are not that any more (the lid opened).
-        self.adopted.clear();
         let mut before = std::mem::take(&mut self.displays);
         // The same display under a new id: by its identity, else the main display when
         // neither id survives.
@@ -1838,9 +1834,17 @@ impl Model {
                 w.original = w.original.map(|f| f.translate(dx, dy));
             }
             self.move_pending_frames(d.id, dx, dy);
+            self.move_owed_frames(d.id, dx, dy);
         }
         let gone: Vec<Display> = before.iter().filter(|o| !displays.iter().any(|d| d.id == o.id)).copied().collect();
         let removed = !gone.is_empty();
+        // Windows adopted at an earlier change are not that any more once a screen comes (the
+        // lid opened) or another goes. The same screens reported again (the Dock moved onto
+        // the remaining one a moment after the lid closed, a resolution) keep them: macOS's
+        // slide to another Desktop with the closed screen's windows may still come.
+        if removed || displays.iter().any(|d| !before.iter().any(|o| o.id == d.id)) {
+            self.adopted.clear();
+        }
         self.displays = displays;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
         self.capacity.retain(|d, _| live.contains(d));
@@ -2325,6 +2329,7 @@ impl Model {
         if let Some(space) = self.current.remove(&old) {
             self.current.insert(new, space);
         }
+        self.relabel_owed(old, new);
     }
 
     /// Replaces the declared stage names (config reload). New names get a stage; stages whose

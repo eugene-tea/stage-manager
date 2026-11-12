@@ -53,8 +53,8 @@ use std::time::{Duration, Instant};
 
 use super::ax::AxElement;
 use super::safety::{self, guarded};
-use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, windows};
-use crate::engine::guard_watch::{Event, Look, Release, Watch, Waiting};
+use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, session, windows};
+use crate::engine::guard_watch::{Event, LockSeen, Look, Release, Watch, Waiting};
 use crate::engine::handoff::{Answer, Offering};
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::logout_watch;
@@ -352,6 +352,7 @@ fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope, paus
     let mut asked: Option<Instant> = None;
     let mut busy = BusyStreak::default();
     let mut handoff = Handoff { parent, offering: Offering::default() };
+    let mut lock = LockSeen::default();
     loop {
         let sig = STOP_SIGNAL.load(Ordering::SeqCst);
         if sig != 0 {
@@ -361,6 +362,12 @@ fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope, paus
             return;
         }
         let pass = guarded("the guardian's watch", || {
+            // Behind a locked screen every try failed and the tries slowed down: at the
+            // unlock each waiting window on screen is tried again at once.
+            if lock.unlocked(session::screen_locked()) {
+                tracing::info!(waiting = w.waiting().count(), "guardian: the screen unlocked; every waiting window on screen is tried again now");
+                attempts.clear();
+            }
             watch_pass(&mut w, &mut reported, &mut attempts, &mut asked, &mut busy, &mut handoff)
         });
         // A flag a restore could not put back (round enhanced-ui): tried again.
