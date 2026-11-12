@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.8.5 — 2026-11-12
 
 - Quit (the menu's, or ⌘Q) chosen at a moment the app is busy is tried again for a few
   seconds; the click was dropped and the app stayed open.
@@ -25,7 +25,7 @@
   fetched the same update each time it started.
 - With "Install updates automatically" on, an update no longer installs in the middle of a
   film or a video call. Two minutes with no input counted as being away, so every window
-  came back from the strip and the app reopened while you watched. It now waits while
+  came back from the strip and the app reopened mid-film. It now waits while
   anything keeps the display awake, and two more minutes after that ends.
 - After a restart, a window waiting in its card for its saved size still gets it in the right
   place when the screens were rearranged, or another screen made the main one, before its card
@@ -79,9 +79,10 @@
   goes back to the setting in force.
 - Clicking Copy Instructions for Agents twice in a row no longer leaves the button reading
   "Copied".
-- The update check and download no longer tell GitHub your preferred languages: macOS added
-  them to each request by itself. The request now names only Stage Manager and its version.
-- An update that installs when you quit Stage Manager no longer goes in under a copy opened
+- The update check and download no longer send the Mac's preferred languages to GitHub:
+  macOS added them to each request by itself. The request now names only Stage Manager and
+  its version.
+- An update that installs at the Quit of Stage Manager no longer goes in under a copy opened
   again at that very moment: that copy keeps running, and the update waits for the next
   check.
 - `stage-manager log summary` no longer shows a day's counts as near zero when two lines
