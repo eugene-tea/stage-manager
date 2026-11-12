@@ -48,6 +48,12 @@ UX-SPEC, "Known gaps".
   Accessibility stops moving windows (every window back first, as at a logout's head
   start), or shorten the idle rule; decide which, and what a lock cancelled mid-install
   leaves on screen.
+- **A Dock launch opens on the Dock's screen**, an option, off. A launched app places its first
+  window itself, at its remembered frame or on the key window's screen, so an app opened from
+  the Dock on the second screen can open on the main one (Reminders and Weather, 11-12; the
+  arrival is placed as-is). With the option on, a window that arrives right after a Dock
+  click on another screen moves there, sized to fit, before it is shown. Check Apple's first;
+  never move a window whose app restores it to a screen the user chose.
 - **One stage across all screens** (R8, second half), an option, off. One strip, on the main screen. A
   switch brings a stage's windows back on every screen. Still open: what it means when "Displays have
   separate Spaces" is on, and the lid and restart rules once a window moved to another screen keeps its
