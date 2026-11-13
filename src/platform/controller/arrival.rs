@@ -999,6 +999,7 @@ impl Controller {
             || self.slide_held()
             || self.patch_replans(now)
             || self.reveal_fast(now)
+            || self.fresh_waiting()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -1009,6 +1010,8 @@ impl Controller {
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
         let now = Instant::now();
+        // A newly opened app's window seen by AX before its first frame: placed as it shows.
+        self.offer_fresh(ob, now);
         // The corner patch after a focus or an activation (round park-reconcile, L2), else
         // through Show Desktop (round show-desktop-patch): one plan a fast tick at most.
         if !self.patch_fast_step(now) && self.reveal_fast(now) {

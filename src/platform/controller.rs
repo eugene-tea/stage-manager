@@ -175,6 +175,12 @@ fn unix_now() -> u64 {
 /// How often config.toml's modification time is checked.
 const CONFIG_POLL: Duration = Duration::from_secs(1);
 
+/// A window found before the window server lists it on screen (an app's new window, its AX
+/// notice ahead of its first frame) is looked at on every fast tick for this long, then left
+/// to the once-a-second check: waiting for that check left a newly opened app's window over
+/// the stage shown for up to a second before its own stage came (11-13: 925 ms).
+const FRESH_LOOK: Duration = Duration::from_millis(1500);
+
 /// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::refresh_dock_bar`]).
 const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
 /// A window un-minimized on its way to the strip is parked again when its un-minimize ends
@@ -1191,6 +1197,9 @@ pub struct Controller {
     /// Tracked windows not given to the engine yet: not on screen when found (another
     /// Space, minimized, app hidden). Offered once they show.
     unplaced: BTreeSet<u32>,
+    /// Windows of `unplaced` that were just found, not yet listed on screen, and until when
+    /// the fast tick looks at them ([`FRESH_LOOK`]).
+    fresh_unplaced: BTreeMap<u32, Instant>,
     /// The launch's stages wait: the app could not see the Desktop ([`session::blindness`])
     /// when observation started; why and since when. Nothing is built or saved meanwhile.
     build_wait: Option<(session::Blind, Instant)>,
@@ -1458,6 +1467,7 @@ impl Controller {
             patch_items: PatchItems::default(),
             patch_widgets_logged: false,
             unplaced: BTreeSet::new(),
+            fresh_unplaced: BTreeMap::new(),
             build_wait: None,
             screens_wait: None,
             build_tried: None,
@@ -5906,6 +5916,30 @@ impl Controller {
         }
     }
 
+    /// Window `id`, just found and not listed on screen yet, is looked at on every fast tick
+    /// for [`FRESH_LOOK`] from its first wait (a later offer never lengthens it).
+    fn look_soon(&mut self, id: u32) {
+        self.fresh_unplaced.entry(id).or_insert_with(|| Instant::now() + FRESH_LOOK);
+    }
+
+    /// The fast tick's look at windows of [`Self::look_soon`]: those listed on a managed
+    /// screen now are offered to [`Self::on_found`]; one past its time, gone, or placed by
+    /// another path is dropped (the once-a-second check still offers it).
+    pub(super) fn offer_fresh(&mut self, ob: &mut Observer, now: Instant) {
+        if self.fresh_unplaced.is_empty() {
+            return;
+        }
+        let unplaced = &self.unplaced;
+        self.fresh_unplaced.retain(|id, until| now < *until && unplaced.contains(id) && ob.window(*id).is_some());
+        let ids: Vec<u32> = self.fresh_unplaced.keys().copied().collect();
+        self.offer_waiting(ob, ids);
+    }
+
+    /// Whether a just-found window waits for its first frame ([`Self::offer_fresh`]).
+    pub(super) fn fresh_waiting(&self) -> bool {
+        !self.fresh_unplaced.is_empty()
+    }
+
     /// A window appeared after launch: the rules decide where it goes. One that is not on
     /// screen (another Space, minimized, app hidden; or any window while a full-screen app's
     /// Space shows) waits in `unplaced` until it shows, and a switch's windows held behind
@@ -5940,6 +5974,7 @@ impl Controller {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
             }
+            self.look_soon(id);
             return;
         };
         let is_main = screen.id == self.main_display_id();
@@ -5947,6 +5982,9 @@ impl Controller {
         if frozen || !shown.contains(&id) {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
+            }
+            if !frozen {
+                self.look_soon(id);
             }
             return;
         }
@@ -6006,6 +6044,10 @@ impl Controller {
             return;
         }
         let waited = self.unplaced.remove(&id);
+        if let Some(until) = self.fresh_unplaced.remove(&id) {
+            let ms = FRESH_LOOK.saturating_sub(until.saturating_duration_since(Instant::now())).as_millis() as u64;
+            tracing::debug!(id, ms, "a new window shows: placed on the fast tick's look");
+        }
         if waited {
             // It waited off screen: one read then as a dialog is read again (a window minimized
             // then or now is standard: taken for a child, it would follow Apple's rule for a

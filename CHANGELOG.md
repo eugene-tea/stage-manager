@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- A newly opened app whose window shows a moment after macOS announces it gets its own
+  stage as the window shows. The window sat over the stage shown for up to a second first.
+
 ## 1.8.5 — 2026-11-12
 
 - Quit (the menu's, or ⌘Q) chosen at a moment the app is busy is tried again for a few
