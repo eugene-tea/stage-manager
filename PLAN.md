@@ -22,6 +22,30 @@ UX-SPEC, "Known gaps".
   any are listed, our quit fixed it: the menu line then says "Quit and reopen Stage Manager", and the bug
   is ours. If none are listed, lock and unlock the screen and count again.
 
+## 1.9: closer to Apple's feel
+
+- **A newly opened app's stage comes as its window shows.** After 1.8.5's fixes (the AX ask
+  of a just-opened app every 40 ms, a new window looked at every fast tick), the old stage
+  still starts to leave 60 to 170 ms after the window is found, and the window sits over it
+  meanwhile (Grok Bot, 11-13 09:54); Apple's swaps cleanly (its Stage Manager is in the
+  window server, so the window can wait for the swap). Three trims, about 30 to 50 ms left:
+  - the outgoing windows' pictures ready ahead (09:54:24: 106 ms building them before the
+    motion could start);
+  - no park-zone rescan or other AX pass while a new window waits for its stage (09:54:38:
+    a rescan of two apps that did not answer held the decision 54 ms);
+  - for a switch a new window starts, the outgoing pictures drawn under that window, not in
+    the layer above every window: the window stays in front while the old stage shrinks
+    away behind it, instead of the old window's picture covering it for a moment. Check
+    Apple's order first (a recording at 120 fps).
+- **Stages kept through Apple's Stage Manager on and off.** Turning Apple's on drops
+  `state.json` (so a quit, crash or logout meanwhile leaves no stale file, 10-13), and
+  turning it off starts fresh, one stage per app: VS Code and Terminal, one stage before,
+  came back as two (11-13 09:54:55 to 09:55:21). Keep the stages in memory through the
+  stand-down and put each window still open back in its stage at the resume, matched by
+  window id (stable until the logout); a window opened meanwhile gets a stage per app, one
+  closed drops out. A quit, crash or logout while standing down still starts the next launch
+  fresh. A live-suite case for the on, off, on round trip.
+
 ## 2.0: new features
 
 - **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
