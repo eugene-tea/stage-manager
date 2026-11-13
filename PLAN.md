@@ -90,8 +90,10 @@ UX-SPEC, "Known gaps".
   - **Tests:** the general suite (engine, scenarios, the live suite's behaviour cases) runs
     against both implementations; a smaller set covers each one's own nuances (the corner
     park and its pictures; Space cleanup and crash recovery).
-  - Private calls change with macOS releases: each new macOS is checked before a release
-    claims it, and the probe keeps an unknown macOS on Accessibility until checked.
+  - Private calls change with macOS releases, so no list of checked macOS versions: the
+    probe and the checks while running decide on every Mac, every launch. A call missing or
+    misbehaving (a window not where the Space operation put it) falls back to Accessibility
+    by itself, logged; nobody has to check each macOS update before users get it.
 
 - **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
   Window, Quit App. A named stage shows its name on hover (R7).
