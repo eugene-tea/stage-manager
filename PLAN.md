@@ -68,6 +68,31 @@ UX-SPEC, "Known gaps".
 
 ## 2.0: new features
 
+- **First: the window server's own Spaces where they work, ours where not.** Emcee (1.1.1)
+  loads SkyLight and WindowManagement and calls their bridged Space operations: create,
+  destroy, hide, show, add windows, set a Space's transform and absolute level
+  (`SLSBridgedSpace…Operation`), plus `SLSCopySpacesForWindows` and
+  `SLSRegisterConnectionNotifyProc`; no SIP change, and a fallback when SkyLight is missing.
+  A stage as a hidden Space would swap stages in one window-server step (Apple's clean swap),
+  place a new window in its stage in one call, and, if the transform scales live windows,
+  animate without full-size pictures (less CPU, maybe no call stutter).
+  - **Spike first (a day or two, a branch):** on the current macOS, a Space made, a window
+    moved in, hidden and shown; the transform on a live window; every window back after a
+    forced quit (the guardian); Mission Control, Desktops and full screen beside it; switch
+    time, a new app's stage and CPU against ours. Decide from the numbers.
+  - **Shape if it holds:** one strategy interface for what differs (park and unpark a
+    stage's windows, place a new window in a stage, bring everything back, animate a
+    switch), with exactly two implementations: the Spaces one and today's Accessibility
+    one. Everything else (the engine, the strip, rules, saved stages, restore) is shared
+    and never asks which one runs. Chosen at launch by a probe (symbols present, a trial
+    Space works), the reason logged; a failure later falls back to Accessibility for the
+    run, every window brought back first.
+  - **Tests:** the general suite (engine, scenarios, the live suite's behaviour cases) runs
+    against both implementations; a smaller set covers each one's own nuances (the corner
+    park and its pictures; Space cleanup and crash recovery).
+  - Private calls change with macOS releases: each new macOS is checked before a release
+    claims it, and the probe keeps an unknown macOS on Accessibility until checked.
+
 - **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
   Window, Quit App. A named stage shows its name on hover (R7).
 - **Stages in the menu bar menu**, click one to switch (R2).
