@@ -2,8 +2,10 @@
 
 ## Unreleased
 
-- A newly opened app whose window shows a moment after macOS announces it gets its own
-  stage as the window shows. The window sat over the stage shown for up to a second first.
+- A newly opened app gets its own stage as its first window shows. The window sat over
+  the stage shown for up to a second first: an app just launched from the Dock is not ready
+  to be watched at its first ask and was asked again a second later, and a window that
+  shows a moment after macOS announces it waited for the next once-a-second look.
 
 ## 1.8.5 — 2026-11-12
 

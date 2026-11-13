@@ -14,6 +14,12 @@
 //!   a miss. 150 ms keeps the time from "it answers" to "its windows are in their stages"
 //!   under the ~250 ms it takes to see a window and click it; 100 ms would ask half as often
 //!   again to gain 50 ms at most, and a miss that waits out the timeout takes 250 ms anyway.
+//! - **A just-opened app** (the first [`LAUNCH_FOR`] after its first try): asked again
+//!   [`LAUNCH_EVERY`] after a miss, whatever the login. An app launched from the Dock fails
+//!   its first ask at once (AX error -25204) and shows its first window a few hundred ms
+//!   later; asked again a second after, its window sat over the stage shown for that second
+//!   before its own stage came (11-13: Grok Bot observed 1020 and 1042 ms after its first
+//!   try). The asks run on the probe's own thread, so the WM thread pays nothing for them.
 //! - **Otherwise** (the restore window ended, or none): [`SLOW_EVERY`], as before.
 //! - **Given up** [`GIVE_UP_AFTER`] after the first try (it was ten tries about a second
 //!   apart; at the 11-06 login Fork answered after 29 s). An activation tries again.
@@ -28,6 +34,12 @@ pub const FAST_EVERY: Duration = Duration::from_millis(150);
 
 /// After a miss otherwise.
 pub const SLOW_EVERY: Duration = Duration::from_secs(1);
+
+/// After a miss within [`LAUNCH_FOR`] of the first try: an app just opened.
+pub const LAUNCH_EVERY: Duration = Duration::from_millis(40);
+
+/// How long after its first try an app counts as just opened.
+pub const LAUNCH_FOR: Duration = Duration::from_secs(3);
 
 /// An app that has not answered this long after its first try is given up.
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(60);
@@ -70,7 +82,14 @@ impl Retry {
         if now.saturating_duration_since(self.first) >= GIVE_UP_AFTER {
             return Next::GiveUp;
         }
-        Next::At(now + if fast { FAST_EVERY } else { SLOW_EVERY })
+        let every = if now.saturating_duration_since(self.first) < LAUNCH_FOR {
+            LAUNCH_EVERY
+        } else if fast {
+            FAST_EVERY
+        } else {
+            SLOW_EVERY
+        };
+        Next::At(now + every)
     }
 }
 
@@ -82,20 +101,36 @@ mod tests {
     fn a_miss_while_the_login_settles_is_asked_again_soon() {
         let t0 = Instant::now();
         let mut r = Retry::new(t0);
-        assert_eq!(r.missed(t0, true), Next::At(t0 + FAST_EVERY));
+        let t = t0 + LAUNCH_FOR;
+        assert_eq!(r.missed(t, true), Next::At(t + FAST_EVERY));
         // A miss that waited out the timeout counts from its end.
-        let late = t0 + Duration::from_millis(400);
+        let late = t + Duration::from_millis(400);
         assert_eq!(r.missed(late, true), Next::At(late + FAST_EVERY));
         assert_eq!(r.misses(), 2);
         assert_eq!(r.first(), t0);
     }
 
     #[test]
+    fn a_just_opened_app_is_asked_again_at_once_whatever_the_login() {
+        // Grok Bot from the Dock, 11-13: its first ask failed at once; a second later its
+        // window had sat over the stage shown that long.
+        let t0 = Instant::now();
+        let mut r = Retry::new(t0);
+        let t = t0 + Duration::from_millis(8);
+        assert_eq!(r.missed(t, false), Next::At(t + LAUNCH_EVERY));
+        let t = t0 + LAUNCH_FOR - Duration::from_millis(1);
+        assert_eq!(r.missed(t, false), Next::At(t + LAUNCH_EVERY));
+        let t = t0 + LAUNCH_FOR;
+        assert_eq!(r.missed(t, false), Next::At(t + SLOW_EVERY));
+    }
+
+    #[test]
     fn once_the_restore_window_ends_the_cadence_is_a_second() {
         let t0 = Instant::now();
         let mut r = Retry::new(t0);
-        assert_eq!(r.missed(t0, true), Next::At(t0 + FAST_EVERY));
-        let t1 = t0 + Duration::from_secs(3);
+        let t = t0 + LAUNCH_FOR;
+        assert_eq!(r.missed(t, true), Next::At(t + FAST_EVERY));
+        let t1 = t0 + Duration::from_secs(4);
         assert_eq!(r.missed(t1, false), Next::At(t1 + SLOW_EVERY));
     }
 
