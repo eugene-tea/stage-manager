@@ -45,6 +45,26 @@ UX-SPEC, "Known gaps".
   window id (stable until the logout); a window opened meanwhile gets a stage per app, one
   closed drops out. A quit, crash or logout while standing down still starts the next launch
   fresh. A live-suite case for the on, off, on round trip.
+- **Less work while nobody looks: CPU and battery.** At rest the app takes 4 to 5 % CPU (11-13:
+  1 min 51 s of CPU in 37 min, 4.5 % over 30 s), about half of it macOS's screen capture on
+  short-lived threads (card thumbnails every 1.5 s, full-size switch pictures every 2 s),
+  a third the WM thread (notices, the once-a-second checks, the Dock's order read again).
+  On a laptop screen windows cover the strip most of the time. Aim: 1 to 2 %, with no card
+  shown stale and no switch slower.
+  - No thumbnail captures for a screen whose strip is hidden or covered; one round as it
+    starts to show (the edge reveal, a window moved off it, a switch), so its cards are
+    fresh by the time they are seen.
+  - The Dock's order read when an app opens or quits, or the Dock's file changes, not on a
+    timer.
+  - Full-size switch pictures: keep them (a Dock click or ⌘Tab switch has no pointer near
+    the strip to warn), but skip a window that has not changed since its last picture if
+    that can be told cheaply; measure before deciding.
+  - Video calls: check whether our captures make a call's video stutter (it lags at times
+    with ours where Apple's is smooth). Record a call with and without captures, count
+    dropped frames at each capture round; if they show, capture a window that plays video
+    or a call less often, or never at full size.
+  - Measure on battery (Activity Monitor's Energy Impact, before and after) and write the
+    numbers in UX-SPEC.
 
 ## 2.0: new features
 
