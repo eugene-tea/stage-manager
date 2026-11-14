@@ -117,12 +117,12 @@ impl Controller {
 
     /// Where this one hide of window `id` goes in place of what the engine answers
     /// ([`WindowEngine::hidden_at`](crate::platform::window_engine::WindowEngine::hidden_at)),
-    /// when one was set ([`Self::hide_once_at`]). The Corner engine: a minimized window's
-    /// dive frame.
+    /// when one was set ([`Self::hide_once_at`]). Both engines: a minimized window's dive
+    /// frame (the Spaces engine moves the window there and hides it).
     pub(super) fn hide_place_once(&self, id: u32) -> Option<Rect> {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.dive.filter(|(w, _)| *w == id).map(|(_, frame)| frame),
-            EngineKind::Spaces => None,
+            EngineKind::Spaces => self.spaces.dive.filter(|(w, _)| *w == id).map(|(_, frame)| frame),
         }
     }
 
@@ -131,7 +131,7 @@ impl Controller {
     pub(super) fn hide_once_at(&mut self, place: Option<(u32, Rect)>) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.dive = place,
-            EngineKind::Spaces => {},
+            EngineKind::Spaces => self.spaces.dive = place,
         }
     }
 

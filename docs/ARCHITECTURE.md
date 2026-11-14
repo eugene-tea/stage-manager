@@ -62,8 +62,9 @@ How a stage's windows are hidden, shown and animated is one strategy with two
 implementations. The **Corner engine** is today's: Accessibility moves to the park corner,
 pictures for the motion. The **Spaces engine** puts each inactive stage in a hidden Space of
 the window server's own. Everything else is written once and never asks which engine runs.
-The seam lands first with the Corner engine only and no change in behaviour; the Spaces
-engine follows a spike (PLAN, 1.9).
+The Corner engine is the default. The Spaces engine is built and runs only by a test
+switch (`STAGE_MANAGER_ENGINE=spaces` in a fixture run) until the launch probe, the checks
+while running and the measurements are in (PLAN, 1.9).
 
 ```mermaid
 flowchart TD
@@ -96,9 +97,18 @@ sequenceDiagram
         SM->>WS: AX set frame (unpark)
     end
     SM->>SM: pictures fade over the windows
-    Note over SM,WS: Spaces engine
-    SM->>WS: hide the outgoing stage's Space, show the incoming one
-    SM->>WS: Space transform for the motion (live windows)
+    Note over SM,WS: Spaces engine (as built: pictures still play the motion)
+    loop each outgoing window
+        SM->>WS: add into its stage's Space (off its Desktop, same frame)
+        WS-->>SM: its Spaces, read back
+    end
+    SM->>SM: pictures animate above every window
+    loop each incoming window
+        SM->>WS: add onto its Desktop, out of every other Space
+        WS-->>SM: its Spaces, read back
+        SM->>WS: AX set frame
+    end
+    Note over SM,WS: Spaces engine (planned: the Space transform moves the live windows)
 ```
 
 Which engine runs is decided on every Mac at every launch, never by a list of macOS
@@ -151,6 +161,35 @@ one struct of state, `CornerUpkeep`; no other file of the controller touches it.
 engine's files: `engine/corner/` (pure), `platform/corner/` (the engine, the slivers tap),
 `platform/controller/corner/` (its upkeep). Not behind the seam yet: a new window's
 placement before it shows (`place_new`) and the checks while running (`health`).
+
+The Spaces engine as built (`platform/spaces/`: `ffi.rs`, SkyLight's calls loaded at run
+time, nothing linked; `engine.rs`; its pure half `engine/spaces.rs`; its upkeep
+`platform/controller/spaces.rs`). One window-server Space per stage per Desktop, made by the
+classic call when the stage's first window hides there, so it belongs to this process: the
+window server ends it with the process and its windows show again by themselves, after a
+crash or a kill. A hide is the bridged add of the window into its stage's Space; a show is
+the same add into the window's own Desktop (read from the window server when it hid) with
+the mask that takes it out of every kind of Space, then the frame through Accessibility
+when the window is not already at it (a hide does not move a window, so most shows ask the
+app nothing, and a frozen app's window hides and shows all the same). The stage Space is
+never shown. A hidden window keeps its frame and is listed off screen, so
+no frame says "hidden" (`is_hidden` and `stranded` answer false) and the trait has one more
+question, `present_off_screen`: the windows hidden on a Desktop that shows, which every count
+of a Desktop's windows adds to the on-screen list (a window gone from the screen left its
+Desktop; a hidden one did not). No return code is trusted: after every hide and show the
+window's Spaces are read back, a miss is logged and counted (`ctl state`, `engine`), a show
+that left a window hidden is owed and tried again by the tick, and about once a second the
+upkeep checks that the windows the model counts hidden are the ones in stage Spaces, and
+every few seconds lets out any window found in a stage Space that the engine does not hold.
+Two things the window server does not say for a window in a stage Space, so the shared code
+asks otherwise: a window its app closed without a notice is listed exactly as before, so the
+dead-handle look takes in the hidden windows too; and macOS shows a window it un-minimizes
+on the Desktop, out of any Space, so a minimized window on its way to the strip is put
+beyond the Dock's edge first, as under the Corner engine, and hidden again once it is down. The
+bring-backs (quit, a stand-down, a panic, an abort) ask the window server which windows are
+in the engine's Spaces and move each onto its Desktop, from any thread, then end the Spaces;
+the registry still gives fitted windows their frames back. The motion is still the
+pictures (`Motion::Pictures`).
 
 ## macOS settings drive behavior
 

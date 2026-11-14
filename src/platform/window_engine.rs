@@ -78,6 +78,14 @@ pub trait WindowEngine: Send + Sync {
     /// engine keeps hidden windows.
     fn is_hidden(&self, d: &Display, listed: Rect) -> bool;
 
+    /// True when window `id`, listed at `listed` on display `d`, is hidden by this engine
+    /// now: what a check of a hide or a show the engine was asked for reads (an arrival's).
+    /// By the frame unless the engine knows better ([`Self::is_hidden`]); the Spaces engine:
+    /// by what it holds, as last read back from the window server.
+    fn hides_now(&self, _id: WindowId, d: &Display, listed: Rect) -> bool {
+        self.is_hidden(d, listed)
+    }
+
     /// True when a window at `frame` is still where this engine hid it, out of anyone's
     /// reach, as far as what is `known` of the window allows; `displays`: the screens as the
     /// safety paths see them now. What the guardian's watch (and the app's watch of the

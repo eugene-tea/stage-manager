@@ -84,8 +84,9 @@ struct State {
     stages: BTreeMap<(u64, u64), u64>,
     /// The windows hidden, as last read back.
     held: BTreeMap<u32, Held>,
-    /// The stage the model last named for a window ([`WindowEngine::hidden_at`]).
-    plans: BTreeMap<u32, u64>,
+    /// The stage the model last named for a window, and the frame it had then
+    /// ([`WindowEngine::hidden_at`]).
+    plans: BTreeMap<u32, (u64, Rect)>,
     /// Windows whose show left them in a stage Space.
     owed: BTreeSet<u32>,
     counts: Counts,
@@ -132,9 +133,15 @@ pub fn staged(ids: &[u32]) -> HashSet<u32> {
         .copied()
         .filter(|id| {
             let now = sky.spaces_of(&[*id]);
-            !now.is_empty() && desktop_among(&now, &desktops).is_none()
+            !now.is_empty() && desktop_among(&now, &desktops, &[]).is_none()
         })
         .collect()
+}
+
+/// True when the window server lists window `id` at `frame` (within half a point).
+fn listed_at(id: u32, frame: Rect) -> bool {
+    let near = |a: f64, b: f64| (a - b).abs() <= 0.5;
+    windows::describe(&[id]).first().is_some_and(|w| near(w.bounds.x, frame.x) && near(w.bounds.y, frame.y) && near(w.bounds.w, frame.w) && near(w.bounds.h, frame.h))
 }
 
 /// True when `now` (a window's Spaces) says it is hidden in `space` and nowhere else.
@@ -149,9 +156,10 @@ fn out_of(now: &[u64], ours: &BTreeSet<u64>) -> bool {
 }
 
 /// The Desktop among `now` (a window's Spaces), `desktops` being every Desktop of every
-/// display.
-fn desktop_among(now: &[u64], desktops: &BTreeSet<u64>) -> Option<u64> {
-    now.iter().copied().find(|s| desktops.contains(s))
+/// display and `shown` the ones that show: a window on several (assigned to all Desktops)
+/// counts on one that shows.
+fn desktop_among(now: &[u64], desktops: &BTreeSet<u64>, shown: &[u64]) -> Option<u64> {
+    now.iter().copied().find(|s| shown.contains(s)).or_else(|| now.iter().copied().find(|s| desktops.contains(s)))
 }
 
 impl SpacesEngine {
@@ -233,12 +241,12 @@ impl SpacesEngine {
     /// Window `id` into its stage's Space; true when the window server lists it there.
     pub(crate) fn hide_window(&self, id: u32) -> bool {
         let Some(sky) = self.sky() else { return false };
-        let stage = self.state().plans.get(&id).copied().unwrap_or(NO_STAGE);
+        let stage = self.state().plans.get(&id).map_or(NO_STAGE, |(stage, _)| *stage);
         let was = self.state().held.get(&id).copied();
         let now = sky.spaces_of(&[id]);
         let (desktops, shown) = Self::desktops(sky);
         // Where it is now, else where it was when hidden before, else the Desktop shown.
-        let home = desktop_among(&now, &desktops).or(was.map(|h| h.home)).or(shown.first().copied());
+        let home = desktop_among(&now, &desktops, &shown).or(was.map(|h| h.home)).or(shown.first().copied());
         let Some(home) = home else {
             tracing::warn!(id, spaces = ?now, "spaces engine: no Desktop known for a window to hide");
             self.state().counts.hide_misses += 1;
@@ -451,15 +459,47 @@ impl SpacesEngine {
     }
 
     /// The windows hidden on a Desktop that shows now: present there, though the window
-    /// server lists them off screen ([`WindowEngine::present_off_screen`]).
+    /// server lists them off screen ([`WindowEngine::present_off_screen`]). Each one's Space
+    /// is read from the window server: a window its app ordered out (closed, with or without
+    /// a notice) is in no Space any more, and is not present.
     pub(crate) fn present_now(&self) -> HashSet<u32> {
-        let held: Vec<(u32, u64)> = self.state().held.iter().map(|(id, h)| (*id, h.home)).collect();
+        let held: Vec<(u32, Held)> = self.state().held.iter().map(|(id, h)| (*id, *h)).collect();
         if held.is_empty() {
             return HashSet::new();
         }
         let Some(sky) = self.sky() else { return HashSet::new() };
         let (_, shown) = Self::desktops(sky);
-        held.into_iter().filter(|(_, home)| shown.contains(home)).map(|(id, _)| id).collect()
+        held.into_iter().filter(|(id, h)| shown.contains(&h.home) && sky.spaces_of(&[*id]).contains(&h.space)).map(|(id, _)| id).collect()
+    }
+
+    /// Lets out every window the window server lists in one of this engine's Spaces that
+    /// the engine does not hold (a window its app ordered out while hidden, forgotten, and
+    /// ordered in again comes back in the Space it was in): onto that Space's Desktop. No
+    /// window stays in a stage Space with nothing answering for it. How many came out.
+    pub fn let_strangers_out(&self) -> usize {
+        let (spaces, held): (BTreeMap<u64, u64>, BTreeSet<u32>) = {
+            let st = self.state();
+            (st.stages.iter().map(|((desktop, _), space)| (*space, *desktop)).collect(), st.held.keys().copied().collect())
+        };
+        if spaces.is_empty() {
+            return 0;
+        }
+        let Some(sky) = self.sky() else { return 0 };
+        let own = std::process::id() as i32;
+        let ours: BTreeSet<u64> = spaces.keys().copied().collect();
+        let (desktops, shown) = Self::desktops(sky);
+        let mut out = 0;
+        for w in windows::every_window().iter().filter(|w| w.pid != own && !w.onscreen && w.layer == 0 && !held.contains(&w.id)) {
+            let now = sky.spaces_of(&[w.id]);
+            let Some(space) = now.iter().find(|s| ours.contains(s)) else { continue };
+            let home = spaces.get(space).copied().filter(|d| desktops.contains(d)).or(shown.first().copied());
+            let Some(home) = home else { continue };
+            let _ = sky.add_remove_from(Route::Bridged, home, &[w.id], ALL_SPACES_MASK);
+            let (ok, after) = self.read_back(sky, w.id, |s| out_of(s, &ours));
+            tracing::info!(id = w.id, pid = w.pid, space, desktop = home, ok, listed = ?after, "spaces engine: a window nothing answered for was in a stage's Space: let out");
+            out += usize::from(ok);
+        }
+        out
     }
 
     /// The engine's state for `ctl state`.
@@ -488,31 +528,53 @@ impl WindowEngine for SpacesEngine {
     fn hidden_at(&self, m: &Model, id: WindowId) -> Option<Rect> {
         let w = m.window(id)?;
         let stage = m.stage_of(id).or_else(|| m.group_of(id).first().and_then(|top| m.stage_of(WindowId(*top)))).map_or(NO_STAGE, |s| s.0);
-        self.state().plans.insert(id.0, stage);
+        self.state().plans.insert(id.0, (stage, w.meta.frame));
         Some(w.meta.frame)
     }
 
     /// Into the stage's Space, read back. Nothing is asked of the app, so a busy app's
-    /// window hides too.
-    fn hide(&self, id: WindowId, _at: Rect, _window: &AxElement) -> AxResult<()> {
+    /// window hides too. With a place of its own for this one hide (`at` is not the frame
+    /// [`Self::hidden_at`] answered: a minimized window's dive), the window is also moved
+    /// there first, through `window`: it is about to be brought out of the Space by macOS
+    /// (an un-minimize shows the window on the Desktop) and must come out off the screen.
+    fn hide(&self, id: WindowId, at: Rect, window: &AxElement) -> AxResult<()> {
+        let own = self.state().plans.get(&id.0).map(|(_, frame)| *frame);
+        if own.is_some_and(|own| own != at)
+            && let Err(e) = window.set_position(at.origin())
+        {
+            tracing::debug!(id = id.0, "spaces engine: a hide's own place was not taken: {e}");
+        }
         if self.hide_window(id.0) { Ok(()) } else { Err(AxError::FAILURE) }
     }
 
     /// Out of its stage's Space first (a window in a Space that is not shown is not asked
-    /// to move), then the frame as the Corner engine sets it. A window never hidden only
-    /// takes the frame.
+    /// to move), then the frame as the Corner engine sets it. A window that comes out of its
+    /// Space already at the frame (the usual case: a hide does not move it) is asked
+    /// nothing, so a busy app's window shows too; one never hidden only takes the frame.
     fn show(&self, id: WindowId, frame: Rect, window: &AxElement, how: ShowHow) -> AxResult<()> {
+        let was_held = self.holds(id.0);
         let out = self.show_window(id.0);
+        if out && was_held && listed_at(id.0, frame) {
+            return Ok(());
+        }
         let framed = match how {
             ShowHow::Once => window.set_frame(frame),
             ShowHow::Retrying => safety::set_frame_retrying(window, id.0, frame, leftovers::RESTORE_RETRY.budget),
         };
-        if out { framed } else { Err(AxError::FAILURE) }
+        if !out {
+            return Err(AxError::FAILURE);
+        }
+        framed
     }
 
     /// Never by its frame: a hidden window is listed at its own.
     fn is_hidden(&self, _d: &Display, _listed: Rect) -> bool {
         false
+    }
+
+    /// By what the engine holds: the frame says nothing.
+    fn hides_now(&self, id: WindowId, _d: &Display, _listed: Rect) -> bool {
+        self.holds(id.0)
     }
 
     /// Never: no frame says a window is in a stage Space, and the Spaces end with the app.
@@ -600,9 +662,10 @@ mod tests {
     #[test]
     fn a_windows_desktop_is_the_one_it_is_on() {
         let desktops: BTreeSet<u64> = [1, 3].into();
-        assert_eq!(desktop_among(&[3], &desktops), Some(3));
-        assert_eq!(desktop_among(&[836], &desktops), None, "already in a stage Space: its Desktop is the one kept");
-        assert_eq!(desktop_among(&[], &desktops), None);
+        assert_eq!(desktop_among(&[3], &desktops, &[1]), Some(3), "its own, shown or not");
+        assert_eq!(desktop_among(&[1, 3], &desktops, &[3]), Some(3), "on every Desktop: the one that shows");
+        assert_eq!(desktop_among(&[836], &desktops, &[3]), None, "already in a stage Space: its Desktop is the one kept");
+        assert_eq!(desktop_among(&[], &desktops, &[3]), None);
     }
 
     #[test]

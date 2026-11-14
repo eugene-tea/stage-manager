@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Controller;
+use crate::engine::geometry::Rect;
 use crate::engine::model::{Home, SpaceId, WindowId};
 use crate::platform::input;
 use crate::platform::spaces::engine;
@@ -19,7 +20,8 @@ use crate::platform::windows;
 /// once and leaves it.
 const HIDE_TRIES: u8 = 3;
 
-/// How often what the engine keeps for windows and stages that are gone is dropped.
+/// How often what the engine keeps for windows and stages that are gone is dropped, and a
+/// window in a stage Space that the engine does not hold is let out.
 const TIDY_EVERY: Duration = Duration::from_secs(10);
 
 /// What the Spaces engine's upkeep keeps between ticks, on the WM thread.
@@ -29,12 +31,17 @@ pub(super) struct SpacesUpkeep {
     pub(super) strays: BTreeMap<u32, u8>,
     /// When the engine's map was last tidied.
     tidied: Instant,
+    /// A window minimized in the Dock on its way to the strip, and where its hide puts it
+    /// this once ([`crate::engine::minimize::dive_frame`]): macOS shows a window it
+    /// un-minimizes on the Desktop, out of any stage Space, so it is put beyond the Dock's
+    /// edge while minimized, comes up off the screen, and is hidden again once it is down.
+    pub(super) dive: Option<(u32, Rect)>,
 }
 
 impl SpacesUpkeep {
     /// Nothing kept.
     pub(super) fn new() -> Self {
-        Self { strays: BTreeMap::new(), tidied: Instant::now() }
+        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None }
     }
 }
 
@@ -42,7 +49,8 @@ impl Controller {
     /// The tick's last step under the Spaces engine: a show the window server did not carry
     /// out is tried again; a window the model counts hidden on a Desktop shown that is not
     /// in a stage Space is hidden again (a few times, then said once); a window the model
-    /// shows that a stage Space still holds is let out. Not while the two may differ for a
+    /// shows that a stage Space still holds is let out; every few seconds the engine's map is
+    /// tidied ([`TIDY_EVERY`]). Not while the two may differ for a
     /// reason: a switch's windows waiting behind their pictures, a Space change settling, an
     /// overview, an arrangement made ahead, a drag.
     pub(super) fn spaces_tick(&mut self) {
@@ -94,6 +102,7 @@ impl Controller {
             self.spaces.tidied = now;
             let alive: HashSet<u32> = windows::every_window().iter().map(|w| w.id).collect();
             spaces.tidy(&alive, |stage| m.stages().iter().any(|s| s.id.0 == stage));
+            spaces.let_strangers_out();
         }
     }
 

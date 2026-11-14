@@ -31,6 +31,9 @@
 # SM_SCREENSHOTS=<dir> turns on the visible phase's strip screenshots; SM_SHOTS=<dir> turns on
 # `spaces --auto`'s by-eye screenshots and the Mission Control pixel checks (never the repo).
 # SM_DOCK_REPEATS=<n> sets how many Dock arrivals `spaces --auto` makes (default 3).
+# SM_ENGINE=spaces runs the app with the Spaces window engine (STAGE_MANAGER_ENGINE, a test
+# switch; default the Corner engine): every behaviour check runs on both, the park corner's
+# own checks skip with a reason line.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -68,4 +71,5 @@ fi
 # The app runs from the fixed dev copy (one screen-access approval for every worktree);
 # dev-app.sh refuses to replace a copy running from there, whichever home it uses.
 scripts/dev-app.sh >/dev/null || exit 1
+if [ -n "${SM_ENGINE:-}" ]; then export STAGE_MANAGER_ENGINE="$SM_ENGINE"; fi
 exec python3 scripts/test_stages.py "$@"

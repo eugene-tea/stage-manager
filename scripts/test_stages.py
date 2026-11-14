@@ -165,6 +165,13 @@ HOME = os.environ.get("TEST_HOME") or tempfile.mkdtemp(prefix="sm-test.", dir="/
 os.makedirs(HOME, exist_ok=True)
 ONLY = ",".join(ALL_IDS)
 ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME, STAGE_MANAGER_ONLY=ONLY)
+# The window engine under test (SM_ENGINE=spaces; default the Corner engine): passed to
+# every app run and probe as STAGE_MANAGER_ENGINE. Every behaviour check runs on both;
+# what is the park corner's own (its zone, slivers, patch, still, cover) skips under Spaces.
+ENGINE = (os.environ.get("SM_ENGINE") or "corner").strip().lower()
+SPACES = ENGINE == "spaces"
+if ENGINE != "corner":
+    ENV["STAGE_MANAGER_ENGINE"] = ENGINE
 
 
 def log_path():
@@ -321,6 +328,36 @@ def is_parked_on(b, d):
     return sx <= PARK_MARGIN and sy <= PARK_MARGIN
 
 
+def tucked(w, d):
+    """True when the window server lists window `w` (a probe-windows entry) where the engine
+    under test keeps hidden windows: in the park zone of `d` (Corner), or in a stage Space
+    (Spaces: the probe's `staged`, the window server's own word; its frame is its own)."""
+    if SPACES:
+        return bool(w.get("staged"))
+    return is_parked(w["bounds"], d)
+
+
+def tucked_at(b, d):
+    """`tucked` for a sampled window's bounds (`sample_bounds`: the probe's `staged` rides
+    with them): in the park zone (Corner), in a stage Space (Spaces)."""
+    if SPACES:
+        return bool(b.get("staged"))
+    return is_parked(b, d)
+
+
+def sample_bounds(w):
+    """A sampled probe window's bounds, with its `staged` flag under the Spaces engine."""
+    return dict(w["bounds"], staged=bool(w.get("staged"))) if SPACES else w["bounds"]
+
+
+def corner_only(what):
+    """True (and a skip line) under an engine that has no park corner: the caller's checks
+    are the Corner engine's own."""
+    if SPACES:
+        skip(what, "the park corner's own: the Spaces engine hides windows in no place on screen")
+    return SPACES
+
+
 def close(a, b, tol=1.0):
     return all(abs(a[k] - b[k]) <= tol for k in ("x", "y", "w", "h"))
 
@@ -350,7 +387,7 @@ def consistent(what):
             if w.get("bundle_id") in ALL_IDS:
                 bad.append(f"{w['title']} managed but not listed by the window server")
             continue
-        parked_now = is_parked(c["bounds"], d)
+        parked_now = tucked(c, d)
         if w["parked"] and not parked_now:
             bad.append(f"{w['title']} should be parked, is at {fmt(c['bounds'])}")
         if not w["parked"]:
@@ -368,7 +405,14 @@ def z_titles(titles):
     wins, _ = fixture_windows()
     z = {w["id"]: w["z"] for w in wins}
     present = [t for t in titles if z.get(ids.get(t)) is not None]
-    return sorted(present, key=lambda t: z[ids[t]])
+    out = sorted(present, key=lambda t: z[ids[t]])
+    if SPACES:
+        # A window in a stage Space is off screen: the window server gives it no place in
+        # the order. Those follow in the order the model keeps for their stage.
+        by_id = {w["id"]: w["title"] for w in s["windows"]}
+        kept = [by_id.get(i) for st in s["stages"] for i in st["windows"]]
+        out += [t for t in kept if t in titles and t not in out]
+    return out
 
 
 def frames_of(titles):
@@ -455,6 +499,8 @@ def start_app(expect_windows, extra_env=None, fresh_log=True, capture=False):
     }
     if not capture:
         env["STAGE_MANAGER_NO_CAPTURE"] = "1"
+    if ENGINE != "corner":
+        env["STAGE_MANAGER_ENGINE"] = ENGINE
     env.update(extra_env or {})
     for k, v in env.items():
         args += ["--env", f"{k}={v}"]
@@ -521,7 +567,7 @@ def all_onscreen(what, never_ours=()):
     if not wins:
         # A fixture that crashed, or a probe that failed, must not pass as "nothing parked".
         return check(False, f"{what}: every fixture window onscreen (the window server lists no fixture window)")
-    stuck = [fmt(w["bounds"]) for w in wins if is_parked(w["bounds"], d)]
+    stuck = [fmt(w["bounds"]) for w in wins if tucked(w, d)]
     return check(not stuck, f"{what}: every fixture window onscreen" + (f" (parked: {stuck})" if stuck else ""))
 
 
@@ -650,7 +696,13 @@ def phase_safety():
     drill("SIGTERM", lambda pid: os.kill(pid, signal.SIGTERM), ["signal received", *clean])
     drill("SIGINT", lambda pid: os.kill(pid, signal.SIGINT), ["signal received", *clean])
     drill("debug-panic", lambda pid: ctl("debug-panic"), ["debug-panic requested over ctl", "safety: registry unparked"])
-    drill("kill -9 (the guardian restores)", lambda pid: os.kill(pid, signal.SIGKILL), ["guardian: recovery scan done", "recovery: window brought back reason=\"guardian\""])
+    if SPACES:
+        # The stage Spaces end with the process: the window server shows the windows again
+        # itself; the guardian's scan finds nothing to bring back and it ends.
+        drill("kill -9 (the window server restores)", lambda pid: os.kill(pid, signal.SIGKILL), ["guardian: recovery scan done", "guardian: no window is left waiting; done"])
+        check("recovery: window brought back" not in log_text(), "kill -9: no window needed the guardian's scan")
+    else:
+        drill("kill -9 (the guardian restores)", lambda pid: os.kill(pid, signal.SIGKILL), ["guardian: recovery scan done", "recovery: window brought back reason=\"guardian\""])
 
     drill_away()
     drill_handoff()
@@ -666,9 +718,14 @@ def phase_safety():
     wait_gone(pid)
     time.sleep(0.5)
     wins, d = fixture_windows()
-    check(any(is_parked(w["bounds"], d) for w in wins), "windows were left parked")
-    start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
-    check("recovery: window brought back reason=\"launch\"" in log_text(), "the launch scan brought them back")
+    if SPACES:
+        check(bool(wins) and all(w["onscreen"] and not tucked(w, d) for w in wins), "no window was left hidden: the window server showed them again when the app died")
+        start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+        check("recovery: window brought back" not in log_text(), "the launch had nothing to bring back")
+    else:
+        check(any(tucked(w, d) for w in wins), "windows were left parked")
+        start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+        check("recovery: window brought back reason=\"launch\"" in log_text(), "the launch scan brought them back")
     consistent("after the relaunch")
     stop_app()
     all_onscreen("quit after the relaunch")
@@ -866,7 +923,7 @@ def drill_not_ours():
 
     def stray():
         wins, d = fixture_windows([FIX_ID])
-        return next((w for w in wins if w["id"] not in managed and not w["onscreen"] and is_parked(w["bounds"], d)), None)
+        return next((w for w in wins if w["id"] not in managed and not w["onscreen"] and tucked(w, d)), None)
 
     found = wait_until(stray, 5, "the stray window listed in the park zone")
     if s is None or found is None:
@@ -973,6 +1030,8 @@ def drill_hidden_tab():
     Nothing can move it, nor needs to: the quit reports every window back and the guardian
     waits for nothing (10-16: Terminal's hidden tabs kept the owner's guardian waiting)."""
     say("-- drill: a hidden tab left in the park zone: the quit is clean, the guardian waits for nothing")
+    if corner_only("the hidden tab left in the park zone"):
+        return
     stop_app()
     start_fixture(3, "--tabbed", "1")
     fixture = pids_of(FIX_EXE)
@@ -994,7 +1053,7 @@ def drill_hidden_tab():
     def hidden_in_zone():
         wins, d = fixture_windows([FIX_ID])
         w = [w for w in wins if w["id"] == first["id"]]
-        return w if w and not w[0]["onscreen"] and is_parked(w[0]["bounds"], d) else None
+        return w if w and not w[0]["onscreen"] and tucked(w[0], d) else None
 
     os.kill(fixture[0], signal.SIGIO)
     hidden = wait_until(hidden_in_zone, 5, "Fixture 1 to become a hidden tab in the park zone")
@@ -1022,7 +1081,7 @@ def drill_hidden_tab():
     # the hidden tab is on screen out of the zone; the hidden tab alone stays, off screen.
     wins, d = fixture_windows([FIX_ID])
     rest = [w for w in wins if w["id"] != first["id"]]
-    stuck = [w["id"] for w in rest if is_parked(w["bounds"], d) or not w["onscreen"]]
+    stuck = [w["id"] for w in rest if tucked(w, d) or not w["onscreen"]]
     check(bool(rest) and not stuck, f"hidden tab: after the quit every other fixture window is on screen out of the zone (stuck: {stuck})")
     if not followed:
         check(hidden_in_zone() is not None, "hidden tab: after the quit only the hidden tab stays in the zone, off screen")
@@ -1030,7 +1089,7 @@ def drill_hidden_tab():
     # Selected again, the hidden tab takes its group's frame: every fixture window out of the zone.
     def none_in_zone():
         wins, d = fixture_windows([FIX_ID])
-        return wins if wins and not any(is_parked(w["bounds"], d) for w in wins) else None
+        return wins if wins and not any(tucked(w, d) for w in wins) else None
 
     os.kill(fixture[0], signal.SIGIO)
     check(wait_until(none_in_zone, 5, "the tab selected again to leave the zone") is not None,
@@ -1047,6 +1106,8 @@ def drill_away():
     SIGWINCH it orders its parked windows out (the window server lists them off screen,
     Accessibility no longer does), on SIGINFO back in (their Desktop shows)."""
     say("-- drill: kill -9 with a window parked on a Desktop not shown (emulated): the guardian waits")
+    if corner_only("the guardian's wait for a window parked out of reach (after a kill no window stays in a stage Space)"):
+        return
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
     ensure_something_parked()
     time.sleep(1.0)
@@ -1076,11 +1137,11 @@ def drill_away():
     _, d = fixture_windows([FIX_ID])
     check(bool(guards) and bool(pids_of(f"stage-manager --guardian {pid}$")),
           "the guardian keeps waiting while a registered window is parked out of reach")
-    check(all(is_parked(w["bounds"], d) for w in listed(parked_ids)), "the window is still parked (nothing could reach it)")
+    check(all(tucked(w, d) for w in listed(parked_ids)), "the window is still parked (nothing could reach it)")
     check("guardian: waiting for" in log_text() and "registered)\"] shown_now=[]" in log_text(),
           "the guardian's log says what it waits for (the registered window, its Desktop not shown)")
     os.kill(fixture[0], signal.SIGINFO)
-    back = wait_until(lambda: (lambda ws: ws if ws and not any(is_parked(w["bounds"], d) for w in ws) else None)(listed(parked_ids)), 5,
+    back = wait_until(lambda: (lambda ws: ws if ws and not any(tucked(w, d) for w in ws) else None)(listed(parked_ids)), 5,
                       "the window to come back")
     check(back is not None, "the window comes back as soon as its Desktop shows")
     check("guardian: its Desktop shows; window brought back" in log_text(), "the log says the guardian brought it back")
@@ -1112,6 +1173,8 @@ def drill_handoff():
     quits: the window is back, C's quit clean, no guardian left. (A handed-over window whose app
     quit, or that the window server no longer lists, is dropped: unit tests, engine::handoff.)"""
     say("-- drill: an old guardian hands its watch to the next app and exits (8N)")
+    if corner_only("the guardian's handoff of a window parked out of reach (after a kill no window stays in a stage Space)"):
+        return
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
     ensure_something_parked()
     time.sleep(1.0)
@@ -1151,7 +1214,7 @@ def drill_handoff():
     check(set(parked_ids) <= taken, f"handoff: B's registry holds the window as taken ({sorted(taken)} ⊇ {parked_ids})")
     check(set(parked_ids) <= parked_file_ids(b), "handoff: B's parked file names it (B's guardian would wait for it)")
     _, d = fixture_windows([FIX_ID])
-    check(all(is_parked(w["bounds"], d) for w in listed(parked_ids)), "handoff: the window is still parked (nothing could reach it)")
+    check(all(tucked(w, d) for w in listed(parked_ids)), "handoff: the window is still parked (nothing could reach it)")
 
     # B quits with the window away: unclean, and B's own guardian waits for it.
     guards_b = guardian_pids(b)
@@ -1181,7 +1244,7 @@ def drill_handoff():
         wait_gone(g, 15)
     _, d = fixture_windows([FIX_ID])
     back = listed(parked_ids)
-    check(bool(back) and not any(is_parked(w["bounds"], d) for w in back), "handoff: after C's quit the window is back")
+    check(bool(back) and not any(tucked(w, d) for w in back), "handoff: after C's quit the window is back")
     after_c = log_text().rsplit("took a crashed copy's guardian's watch", 1)[-1]
     check("guardian: clean exit" in after_c and "not every window could be restored" not in after_c,
           "handoff: C's quit is clean (its guardian has nothing to do)")
@@ -1718,7 +1781,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     def exposed(x, w):
         """Window `w` (listed in sample `x`) seen in the park zone: on screen there and not
         covered, neither by the overlay's corner nor by the patch in front of it."""
-        if not w["onscreen"] or not is_parked(w["bounds"], display):
+        if not w["onscreen"] or not tucked(w, display):
             return False
         sliver = intersect(w["bounds"], display)
         if sliver is None:
@@ -1732,7 +1795,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     t_ov = next((x["t"] for x in samples if overlay_up(x)), None)
     seen = [x["t"] for x in samples for w in x["windows"] if w["id"] in arrived and exposed(x, w)]
     out_t = [(x["t"], overlay_up(x)) for x in samples for w in x["windows"]
-             if w["id"] in arrived and w["onscreen"] and not is_parked(w["bounds"], display)]
+             if w["id"] in arrived and w["onscreen"] and not tucked(w, display)]
     patch_before = any(p["pid"] == ours_pid and p["onscreen"] and p.get("alpha", 1.0) > 0 and p["layer"] == 0 and not close(p["bounds"], display, 2.0)
                        for x in samples[:5] for p in x["windows"])
     rel = lambda v: "-" if v is None or t_ov is None else f"{(v - t_ov) * 1000:+.0f} ms"  # noqa: E731
@@ -2227,7 +2290,7 @@ def finder_parked():
     """Every Finder standard window sits in the park zone (and there is one)."""
     p = probe(FINDER)
     wins = [w for w in p["windows"] if w["layer"] == 0]
-    return bool(wins) and all(is_parked(w["bounds"], p["display"]) for w in wins)
+    return bool(wins) and all(tucked(w, p["display"]) for w in wins)
 
 
 def shown(s, title):
@@ -3186,7 +3249,7 @@ def phase_motion():
             p = probe()
             mine = [w for w in p["windows"] if w["layer"] == 0 and w["onscreen"] and w["z"] is not None]
             front = min(mine, key=lambda w: w["z"]) if mine else None
-            if front and front["id"] == key and is_parked(front["bounds"], p["display"]):
+            if front and front["id"] == key and tucked(front, p["display"]):
                 early.append(front["id"])
                 break
         check(seen is not None, f"snapshots move in the overlay (layer {seen})")
@@ -4585,7 +4648,7 @@ def phase_capture():
     say("-- an activation grows over a still of the desktop (8L4: only desktop-level windows in it)")
     start_extra("a", 1)
     shown = wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's own stage, shown")
-    if check(shown is not None, "Alpha 1 opened a stage of its own, shown"):
+    if check(shown is not None, "Alpha 1 opened a stage of its own, shown") and not corner_only("the desktop's still for a switch's cover of the corner"):
         kept = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("age_ms") is not None else None)(state()),
                           15, "a still of the desktop")
         still = state().get("desktop_still") or {}
@@ -5200,7 +5263,7 @@ def phase_visible():
     args = ["open", "-n", APP]
     for k, v in {"STAGE_MANAGER_HOME": HOME, "STAGE_MANAGER_ONLY": ONLY, "STAGE_MANAGER_NO_PROMPT": "1",
                  "STAGE_MANAGER_NO_CAPTURE": "1", "STAGE_MANAGER_TEST": "1",
-                 "RUST_LOG": "info,stage_manager=debug"}.items():
+                 "RUST_LOG": "info,stage_manager=debug", **({} if ENGINE == "corner" else {"STAGE_MANAGER_ENGINE": ENGINE})}.items():
         args += ["--env", f"{k}={v}"]
     subprocess.run(args, check=True)
     pid = wait_until(app_pid, 15, "the app")
@@ -5390,7 +5453,7 @@ def direct_minimize_check(p, wid, frame, log, what):
     for smp in p.get("samples", []):
         w = next((w for w in smp["windows"] if w["id"] == wid), None)
         if w:
-            seen.append((smp["t"], w["onscreen"], w["bounds"]))
+            seen.append((smp["t"], w["onscreen"], sample_bounds(w)))
     if not check(len(seen) > 10, f"{what}: the window sampled ({len(seen)} samples)"):
         return
     last = None
@@ -5400,10 +5463,11 @@ def direct_minimize_check(p, wid, frame, log, what):
         if place != last:
             say(f"    +{(t - t0) * 1000:4.0f} ms  {place}")
             last = place
-    check(all(on for _, on, _ in seen), f"{what}: never in the Dock (listed on screen in every sample)")
-    elsewhere = [b for _, _, b in seen if not close(b, frame, 2.0) and not is_parked(b, d)]
+    # Off screen in a stage Space is hidden by us, not in the Dock (the Spaces engine).
+    check(all(on or tucked_at(b, d) for _, on, b in seen), f"{what}: never in the Dock (listed on screen, or hidden by the engine, in every sample)")
+    elsewhere = [b for _, _, b in seen if not close(b, frame, 2.0) and not tucked_at(b, d)]
     check(not elsewhere, f"{what}: only at its frame or parked ({len(elsewhere)} samples elsewhere{', first ' + fmt(elsewhere[0]) if elsewhere else ''})")
-    check(is_parked(seen[-1][2], d), f"{what}: it ends parked ({fmt(seen[-1][2])})")
+    check(tucked_at(seen[-1][2], d), f"{what}: it ends parked ({fmt(seen[-1][2])})")
     caught = [ln for ln in log.splitlines() if "straight to the strip, no genie" in ln]
     check(bool(caught), f"{what}: caught before macOS ({caught[-1][caught[-1].find('window minimized'):] if caught else 'no line'})")
     genie = [ln for ln in log.splitlines() if "window minimized: it goes to the strip instead of the Dock" in ln]
@@ -5432,7 +5496,7 @@ def minimize_path_check(p, wid, log):
     for smp in p.get("samples", []):
         w = next((w for w in smp["windows"] if w["id"] == wid), None)
         if w:
-            seen.append((smp["t"], w["onscreen"], w["bounds"]))
+            seen.append((smp["t"], w["onscreen"], sample_bounds(w)))
     if not check(len(seen) > 10, f"own minimize: the window sampled ({len(seen)} samples)"):
         return
     # The genie into the Dock: until the window is first listed off screen.
@@ -5448,9 +5512,9 @@ def minimize_path_check(p, wid, log):
             last = place
         shows = on and min(b["x"] + b["w"], d["x"] + d["w"]) > max(b["x"], d["x"]) and min(b["y"] + b["h"], d["y"] + d["h"]) > max(b["y"], d["y"])
         in_band = b["y"] >= d["y"] + d["h"] - DOCK_BAND
-        if shows and in_band and not is_parked(b, d):
+        if shows and in_band and not tucked_at(b, d):
             band_ms += 8.0
-        if shows and not in_band and not is_parked(b, d):
+        if shows and not in_band and not tucked_at(b, d):
             run.append(t)
         elif run:
             runs.append(run)
@@ -5461,7 +5525,7 @@ def minimize_path_check(p, wid, log):
     check(worst <= 40.0, f"own minimize: after the genie the window never shows outside the corner past two frames (longest {worst:.0f} ms, {len(runs)} times)")
     check(band_ms <= 400.0, f"own minimize: its un-minimize sinks out of the Dock tile quickly ({band_ms:.0f} ms in the bottom band)")
     end = seen[-1]
-    check(end[1] and is_parked(end[2], d), f"own minimize: it ends parked ({end[2]})")
+    check((end[1] or SPACES) and tucked_at(end[2], d), f"own minimize: it ends parked ({end[2]})")
     ghost = [ln for ln in log.splitlines() if "transition ghost" in ln and f"window={wid} " in ln]
     tile = [ln for ln in log.splitlines() if "a minimized window's picture comes out of its Dock tile" in ln or "a minimized window's card fades in" in ln]
     check(bool(tile), f"own minimize: the strip's picture starts at the Dock tile, or the card fades in ({tile[-1:] or 'no line'})")
@@ -6870,6 +6934,31 @@ def logout_unclean_quit(note, env):
     pid = app_pid()
     guards = guardian_pids(pid)
     before = len(log_text())
+    if SPACES:
+        # The Spaces engine asks a hidden window's app nothing: the window server moves the
+        # window back, frozen app or not, so nothing stays away and the quit is clean.
+        os.kill(b, signal.SIGSTOP)
+        try:
+            check(post_note(note), "the logout note is posted in session H")
+            def bravo_back():
+                wins, d = fixture_windows([EXTRA["b"][0]])
+                return bool(wins) and all(w["onscreen"] and not tucked(w, d) for w in wins)
+            check(wait_until(bravo_back, 20, "Bravo's window back") is not None,
+                  "the head start brings Bravo's window back though its app is frozen (the window server moves it)")
+            check("not every window came back at the logout's head start" not in log_text()[before:], "the head start reports every window back")
+        finally:
+            os.kill(b, signal.SIGCONT)
+        skip("the unclean quit at a logout and the guardian's wait for a frozen app's window", "the park corner's own: under the Spaces engine no window stays away for an app that does not answer")
+        stop_app()
+        all_onscreen("session H's quit")
+        # The quit was for a logout: its guardian listens for the cancel, as after any clean one.
+        check(post_note(note + ".cancelled"), "the cancel note is posted after the quit")
+        check(wait_until(lambda: "guardian: a test run: would open the bundle again" in log_text()[before:], 10, "the relaunch") is not None,
+              "a cancel after the quit at a logout opens the app again (a test run only says so)")
+        for g in guards:
+            wait_gone(g, 5)
+        check(not guardian_pids(pid), "session H's guardian ends after the cancel")
+        return
     os.kill(b, signal.SIGSTOP)
     try:
         check(post_note(note), "the logout note is posted in session H")
@@ -6885,7 +6974,7 @@ def logout_unclean_quit(note, env):
         check(wait_until(lambda: "with windows still away; listening for a cancel while they are brought back" in after(), 10,
                          "the guardian's listening") is not None, "the parked file says logout: the guardian listens for a cancel during its watch")
         wins, d = fixture_windows([EXTRA["b"][0]])
-        check(any(is_parked(w["bounds"], d) for w in wins), "Bravo's window waits in the park zone while its app is frozen")
+        check(any(tucked(w, d) for w in wins), "Bravo's window waits in the park zone while its app is frozen")
         check("would open the bundle again" not in after(), "nothing is opened without a cancel")
     finally:
         os.kill(b, signal.SIGCONT)
@@ -7022,6 +7111,8 @@ def phase_park():
     agree throughout (`consistent`). Round fixes-151: once parked, the corner patch is its
     sliver grown by the reach per side ([`check_patch_rect`])."""
     say("\n== park reconcile: a parked window its app moved out of the corner is parked again ==")
+    if corner_only("the park reconcile (a window its app moves while hidden stays in its stage Space: only its frame changes)"):
+        return
     stop_app()
     stop_fixture()
     for k in EXTRA:
@@ -7055,11 +7146,11 @@ def phase_park():
 
     before = log_text().count("parked again")
     os.kill(fixture[0], signal.SIGALRM)
-    moved = wait_until(lambda: (lambda w, d: w is not None and not is_parked(w["bounds"], d))(*listed()), 3, "the fixture to move its parked window out")
+    moved = wait_until(lambda: (lambda w, d: w is not None and not tucked(w, d))(*listed()), 3, "the fixture to move its parked window out")
     if not check(moved, "the fixture moved its parked window to the middle of the screen (the app's own move)"):
         return
     t0 = time.time()
-    back = wait_until(lambda: (lambda w, d: w is not None and is_parked(w["bounds"], d))(*listed()), 3, "the window parked again")
+    back = wait_until(lambda: (lambda w, d: w is not None and tucked(w, d))(*listed()), 3, "the window parked again")
     took = time.time() - t0
     check(back is not None and took <= 1.5, f"the app parked it again within a second or so ({took:.2f} s after the move showed)")
     lines = [ln for ln in log_text().splitlines() if "parked again" in ln][before:]
@@ -7107,7 +7198,7 @@ def dialog_born_parked():
     parked = wait_state(lambda x: by_title(x)["Alpha Dialog"]["parked"], "the dialog parked", timeout=4)
     wins, d = fixture_windows([EXTRA["a"][0]])
     listed = next((w for w in wins if w["id"] == dialog["id"]), None)
-    check(parked is not None and listed is not None and is_parked(listed["bounds"], d),
+    check(parked is not None and listed is not None and tucked(listed, d),
           f"dialog born parked: parked in the corner with its window (listed at {fmt(listed['bounds']) if listed else None})")
     time.sleep(1.5)
     s = state()
@@ -7297,7 +7388,7 @@ def between_looks(samples, frames, display):
             f = frames.get(w["id"])
             if f is None or w["layer"] != 0 or not w["onscreen"]:
                 continue
-            if not is_parked(w["bounds"], display) and not close(w["bounds"], f, 2.0):
+            if not tucked(w, display) and not close(w["bounds"], f, 2.0):
                 out.append((x["t"], w["id"], fmt(w["bounds"])))
     return out
 
@@ -7550,11 +7641,11 @@ def phase_handles():
 
     def parked():
         w, d = listed()
-        return w if w and is_parked(w["bounds"], d) else None
+        return w if w and tucked(w, d) else None
 
     def shown():
         w, d = listed()
-        return w if w and w["onscreen"] and not is_parked(w["bounds"], d) else None
+        return w if w and w["onscreen"] and not tucked(w, d) else None
 
     say("-- 1. its handle dead, a switch away parks it and back brings it")
     before = len(log_text())
@@ -7710,8 +7801,8 @@ def phase_displays():
     wins, _ = fixture_windows([FIX_ID])
     c3 = next((w for w in wins if w["id"] == ids[3]), None)
     if check(c3 is not None, "the window server lists Fixture 3"):
-        check(is_parked(c3["bounds"], zone(other)), f"Fixture 3 waits in the other screen's park zone (corner {other['corner']}): {fmt(c3['bounds'])}")
-        check(not is_parked(c3["bounds"], zone(main)), "not in the main screen's")
+        check(tucked(c3, zone(other)), f"Fixture 3 waits in the other screen's park zone (corner {other['corner']}): {fmt(c3['bounds'])}")
+        check(not tucked(c3, zone(main)), "not in the main screen's")
     check(not by_title(s)["Fixture 1"]["parked"] or not by_title(s)["Fixture 2"]["parked"], "the main screen still shows a stage")
     # Round displays-2: the second screen looks as the main one.
     def on_screen_of(r, d):
@@ -7776,7 +7867,7 @@ def phase_displays():
     check(stage4 in screen(s, other)["strip"] or screen(s, other)["active"] == stage4, "Fixture 4's stage is still the other screen's")
     stop_app()
     wins, _ = fixture_windows([FIX_ID])
-    stuck = [fmt(w["bounds"]) for w in wins if is_parked(w["bounds"], zone(main)) or is_parked(w["bounds"], zone(other))]
+    stuck = [fmt(w["bounds"]) for w in wins if tucked(w, zone(main)) or tucked(w, zone(other))]
     check(bool(wins) and not stuck, f"displays quit: every fixture window on screen, on both screens (parked: {stuck})")
 
 
@@ -7800,7 +7891,7 @@ def screens_consistent(what):
         c, z = cg.get(w["id"]), zones.get(w.get("display"))
         if c is None or z is None or w.get("role") != "standard":
             continue
-        if w["parked"] != is_parked(c["bounds"], z):
+        if w["parked"] != tucked(c, z):
             bad.append(f"{w['title']} {'parked' if w['parked'] else 'shown'} in the model, at {fmt(c['bounds'])}")
     return check(not bad, f"{what}: every fixture window where the model has it, on both screens" + (f" ({'; '.join(bad)})" if bad else ""))
 
@@ -8039,7 +8130,7 @@ def phase_screens():
     stop_app()
     s_wins, _ = fixture_windows()
     zones = [screens_zone(d) for d in screens]
-    stuck = [fmt(w["bounds"]) for w in s_wins if any(is_parked(w["bounds"], z) for z in zones)]
+    stuck = [fmt(w["bounds"]) for w in s_wins if any(tucked(w, z) for z in zones)]
     check(bool(s_wins) and not stuck, f"screens quit: every fixture window on screen, on both screens (parked: {stuck})")
     for k in EXTRA:
         stop_extra(k)

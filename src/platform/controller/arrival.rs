@@ -1119,7 +1119,7 @@ impl Controller {
         let Some(v) = self.verify.as_mut() else { return };
         let list = windows::list_windows();
         let listed = |id: u32| list.iter().find(|w| w.id == id);
-        let seen: Vec<Seen> = v.moves.iter().map(|e| judge(e, listed(e.id), screens[&e.id].frame, |r| engine.is_hidden(&screens[&e.id], r))).collect();
+        let seen: Vec<Seen> = v.moves.iter().map(|e| judge(e, listed(e.id), screens[&e.id].frame, |r| engine.hides_now(WindowId(e.id), &screens[&e.id], r))).collect();
         let elapsed = ms(v.sent, now);
         let over = now.saturating_duration_since(v.sent) >= VERIFY_FOR;
         if seen.contains(&Seen::Sliding) {
@@ -1226,7 +1226,7 @@ impl Controller {
         let ceiling = over && tail_past_ceiling(v.over_ticks, now.saturating_duration_since(*v.over_since.get_or_insert(now)));
         let listed = |id: u32| list.iter().find(|w| w.id == id);
         let seen: Vec<Option<Seen>> =
-            v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), screens[&e.id].frame, |r| engine.is_hidden(&screens[&e.id], r)))).collect();
+            v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), screens[&e.id].frame, |r| engine.hides_now(WindowId(e.id), &screens[&e.id], r)))).collect();
         v.rounds += 1;
         v.next = now + VERIFY_EVERY;
         let due = match tail_step(&v.moves, &seen, over) {

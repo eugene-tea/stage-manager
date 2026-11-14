@@ -92,7 +92,8 @@
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
 // SIGHUP un-minimizes the first minimized standard window (by title), as a Dock click would.
 // SIGWINCH stands in for "its Desktop is not shown": every visible standard window parked
-// in the screen's bottom-right corner is ordered out (the window server still lists it, off
+// in the screen's bottom-right corner (when there is none: every one in a Space that is not
+// shown, where the Spaces engine hides windows) is ordered out (the window server still lists it, off
 // screen, with its frame; Accessibility no longer does). SIGINFO orders them in again
 // behind the other windows at the same frames (their Desktop shows), without activating.
 // SIGIO selects the next tab of every tab group (as ⌘⇧] would), without activating: the tab
@@ -743,8 +744,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// SIGWINCH: windows parked in the bottom-right corner go "to another Desktop".
     func sendParkedAway() {
         guard let screen = NSScreen.screens.first?.frame else { return }
-        let parked = NSApp.windows.filter { w in
+        var parked = NSApp.windows.filter { w in
             w.isVisible && !(w is NSPanel) && w.frame.minX >= screen.maxX - 64 && w.frame.maxY <= screen.minY + 64
+        }
+        if parked.isEmpty {
+            // No window in the corner: the windows hidden in a Space that is not shown (the
+            // Spaces engine keeps a hidden window at its frame, off the Desktop) go instead.
+            parked = NSApp.windows.filter { w in w.isVisible && !(w is NSPanel) && !w.isOnActiveSpace }
         }
         for w in parked { w.orderOut(nil) }
         away += parked.map { ($0, $0.frame) }
