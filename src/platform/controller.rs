@@ -152,6 +152,7 @@ mod corner_still;
 mod dock_order;
 mod raise_order;
 mod stale;
+mod upkeep;
 
 /// A focus this soon after a click or key press is the user's: the window is touched
 /// ([`Model::touch_window`]).
@@ -1409,8 +1410,8 @@ impl Controller {
                 entries.entry(*id).or_insert_with(|| e.clone());
             }
         }
-        for (id, u) in &self.corner.unrestored {
-            entries.entry(*id).or_insert_with(|| u.entry.clone());
+        for (id, e) in self.kept_entries() {
+            entries.entry(id).or_insert(e);
         }
         entries
     }
@@ -1435,7 +1436,7 @@ impl Controller {
         self.dock_bar = Some((Instant::now(), bar));
         if changed {
             tracing::debug!(bar = ?self.dock_bar.as_ref().map(|(_, b)| b), "inert slivers: the Dock's bar");
-            self.publish_shield();
+            self.hidden_changed();
         }
     }
 
@@ -1558,10 +1559,7 @@ impl Controller {
     /// model knows the window ([`WindowEngine::hidden_at`]), or this once a minimized
     /// window's dive frame ([`Self::dive`]). `None` for a window the model does not manage.
     fn hide_frame(&self, id: u32) -> Option<Rect> {
-        match self.corner.dive {
-            Some((w, frame)) if w == id => Some(frame),
-            _ => self.model.as_ref().and_then(|m| self.engine.hidden_at(m, WindowId(id))),
-        }
+        self.hide_place_once(id).or_else(|| self.model.as_ref().and_then(|m| self.engine.hidden_at(m, WindowId(id))))
     }
 
     /// Executes actions in order; returns how many AX calls failed. Once Quit is requested
@@ -1637,9 +1635,9 @@ impl Controller {
                         failed += 1;
                         tracing::warn!(id, ?action, "action through the registry's element failed: {e}");
                         if let (Action::SetFrame { frame, .. }, Some(kept)) = (action, kept) {
-                            self.restore_failed(id, ParkedEntry { restore: frame, fitted: None, ..kept });
+                            self.show_failed(id, ParkedEntry { restore: frame, fitted: None, ..kept });
                         } else if matches!(action, Action::Hide { .. }) {
-                            self.park_failed(id, now);
+                            self.hide_failed(id, now);
                         }
                     }
                     None if matches!(action, Action::SetFrame { .. }) => {
@@ -1679,9 +1677,9 @@ impl Controller {
                 if let Action::SetFrame { frame, .. } = action {
                     let child = w.kind == WindowKind::Child;
                     let element = ob.element(id).unwrap_or_else(|| w.element.clone());
-                    self.restore_failed(id, ParkedEntry { element, restore: frame, child, fitted: None });
+                    self.show_failed(id, ParkedEntry { element, restore: frame, child, fitted: None });
                 } else if matches!(action, Action::Hide { .. }) {
-                    self.park_failed(id, now);
+                    self.hide_failed(id, now);
                 }
             } else {
                 tracing::trace!(id, ?action, "done");
@@ -1697,9 +1695,9 @@ impl Controller {
         if !interrupted && batch == Batch::User {
             self.settle_raise_order(ob, &raises, focus, now);
         }
-        self.publish_shield();
+        self.hidden_changed();
         self.publish_minimizable(ob);
-        self.update_patch();
+        self.look_at_screen();
         self.remember();
         if changed {
             self.mark_dirty();
@@ -1760,7 +1758,7 @@ impl Controller {
     /// as reported destroyed, and the model's windows not parked.
     pub fn safety_ours(&self) -> safety::Ours {
         safety::Ours::now(self.model_window_ids())
-            .with_tab_signs(self.destroyed_ids(), self.model_shown_ids())
+            .with_tab_signs(self.let_go_destroyed(), self.model_shown_ids())
             .with_unparked(self.unparked.clone())
     }
 
@@ -1840,9 +1838,9 @@ impl Controller {
             // The activated app's windows are raised by macOS wherever it put them (8L6).
             let activated: HashSet<u32> = run.fallback.intersection(&arriving).copied().collect();
             let found =
-                self.switch_corner(&arriving, &outgoing, &activated, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
+                self.switch_cover(&arriving, &outgoing, &activated, &list);
             match found {
-                Ok(c) => early_corner = Some((Some(c), list)),
+                Ok(c) => early_corner = Some((c, list)),
                 Err(r) => {
                     note_fallback(&mut self.fallback_said, r.why);
                     run.arrive_now(r.why);
@@ -1982,14 +1980,13 @@ impl Controller {
             None => {
                 let list = windows::on_screen();
                 let activated: HashSet<u32> = run.fallback.intersection(&arriving).copied().collect();
-                let corner =
-                    self.switch_corner(&arriving, &outgoing, &activated, &list).and_then(|c| self.cover_ready(c).map_err(Refused::from));
+                let corner = self.switch_cover(&arriving, &outgoing, &activated, &list);
                 if let Err(r) = &corner
                     && !arriving.is_empty()
                 {
                     tracing::debug!(id, why = r.why, windows = ?r.windows, "transition: the park corner is not covered");
                 }
-                (corner.ok(), list)
+                (corner.ok().flatten(), list)
             }
         };
         t.under = self.window_in_place(&arriving, &outgoing, &actions, &list);
@@ -2441,7 +2438,7 @@ impl Controller {
         // macOS raises an activated app's windows, parked ones too, above the corner patch:
         // the patch is ordered again now, not at the next 250 ms tick (L2).
         if matches!(event, WinEvent::Focused(_) | WinEvent::AppActivated(..)) {
-            self.replan_patch(now);
+            self.raised_by_macos(now);
         }
         // Any other event brings windows held behind a transition's snapshots in at once;
         // moves, retitles and the echoes of our own focus (sent before the windows arrive,
@@ -2479,7 +2476,7 @@ impl Controller {
                 }
                 // Destroyed while the window server still lists it (`watch_forgotten` keeps
                 // only those): the tab's signature, the one let-go a hidden tab may have.
-                self.watch_forgotten(ob, kept, LetGo::Destroyed);
+                self.let_go_hidden(ob, kept, LetGo::Destroyed);
             }
             WinEvent::Moved(id) => {
                 self.maybe_start_drag(ob, id, now);
@@ -2497,7 +2494,7 @@ impl Controller {
                     // Dragged while parked (its sliver grabbed without a focus, ⌘ held): the
                     // user's; the tick adopts it where they leave it rather than parking it
                     // again under them ([`Self::reconcile_parked`]).
-                    self.corner.strays.entry(id).or_default().user_moved = true;
+                    self.hidden_moved_by_user(id);
                 }
                 // Show Desktop pushing the windows aside (or sliding them back) is macOS's move,
                 // never the window's own frame (11-09).
@@ -2914,9 +2911,9 @@ impl Controller {
         );
         self.minimizing = Some(Minimized { window: id, tile });
         // Its hide in this batch goes to the dive frame, no later one.
-        self.corner.dive = dive.map(|d| (id, d));
+        self.hide_once_at(dive.map(|d| (id, d)));
         self.execute_animated(ob, actions);
-        self.corner.dive = None;
+        self.hide_once_at(None);
         self.minimizing = None;
         if let Some(w) = ob.window(id) {
             let now = Instant::now();
@@ -3141,11 +3138,11 @@ impl Controller {
         if event.kind == InputKind::MouseUp {
             // A desktop icon may have been dropped: Finder's icons are read again shortly.
             self.patch_items.due = Some(now + PATCH_ITEMS_RETRY);
-            self.corner_touched(event.at, now);
+            self.pointer_released(event.at, now);
         }
         if matches!(event.kind, InputKind::MouseDown | InputKind::MouseUp) {
             // A press may start a window drag: the corner patch's fallback hides at once.
-            self.update_patch();
+            self.look_at_screen();
         }
         match event.kind {
             InputKind::MouseDown => {
@@ -3670,7 +3667,7 @@ impl Controller {
             let Some(m) = self.model.as_mut() else { return };
             let (actions, forgotten) = m.window_left_space(WindowId(id));
             self.execute(ob, actions);
-            self.watch_forgotten(ob, kept, LetGo::Other);
+            self.let_go_hidden(ob, kept, LetGo::Other);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
         }
     }
@@ -3687,11 +3684,11 @@ impl Controller {
             overview::Change::None => {}
             overview::Change::Began(kind) => {
                 tracing::info!("{} shows: no Space is inferred from the window list until it closes", kind.name());
-                self.publish_shield();
+                self.hidden_changed();
             }
             overview::Change::Ended(kind) => {
                 tracing::info!("{} closed: Space inference resumes after a settle", kind.name());
-                self.publish_shield();
+                self.hidden_changed();
             }
             overview::Change::Stuck(kind) => {
                 tracing::warn!(
@@ -3699,7 +3696,7 @@ impl Controller {
                     kind.name(),
                     overview::OVERVIEW_STUCK.as_secs()
                 );
-                self.publish_shield();
+                self.hidden_changed();
             }
         }
         let frozen = self.overview.freezes(now);
@@ -4463,7 +4460,7 @@ impl Controller {
             let Some(m) = self.model.as_mut() else { return };
             let (actions, forgotten) = m.window_left_space(WindowId(id));
             self.execute(ob, actions);
-            self.watch_forgotten(ob, kept, LetGo::Other);
+            self.let_go_hidden(ob, kept, LetGo::Other);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
         }
     }
@@ -4501,7 +4498,7 @@ impl Controller {
             let Some(m) = self.model.as_mut() else { return };
             let (actions, forgotten) = m.window_left_space(WindowId(id));
             self.execute(ob, actions);
-            self.watch_forgotten(ob, kept, LetGo::Other);
+            self.let_go_hidden(ob, kept, LetGo::Other);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
         }
     }
@@ -4645,7 +4642,7 @@ impl Controller {
             let Some(m) = self.model.as_mut() else { return };
             let (actions, forgotten) = m.window_went_off_screen(WindowId(id));
             self.execute(ob, actions);
-            self.watch_forgotten(ob, kept, LetGo::Other);
+            self.let_go_hidden(ob, kept, LetGo::Other);
             self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
         }
     }
@@ -4927,7 +4924,7 @@ impl Controller {
             self.sync_fit();
             self.execute(ob, actions);
         }
-        self.publish_shield();
+        self.hidden_changed();
     }
 
     /// Fresh `com.apple.WindowManager` values.
@@ -4996,7 +4993,7 @@ impl Controller {
                 self.macos_reveal_at = Some(Instant::now());
                 // Opening Show Desktop (not closing it): the patch goes at once.
                 if self.overview.expect_show_desktop(Instant::now()) {
-                    self.update_patch();
+                    self.look_at_screen();
                 }
                 tracing::info!(
                     x = p.x,
@@ -5412,16 +5409,16 @@ impl Controller {
         self.flush_pending(ob);
         // Windows whose restore failed earlier: the model counts them shown, so its unpark
         // has nothing for them (S1).
-        self.retry_unrestored(ob, true);
-        let Some(m) = self.model.as_mut() else { return self.corner.unrestored.len() };
+        self.retry_shows(ob, true);
+        let Some(m) = self.model.as_mut() else { return self.shows_owed() };
         let actions = m.unpark_all();
         self.unparked = unparked_frames(&actions);
         let n = actions.len();
         let failed = self.execute_batch(ob, actions, Batch::Unpark);
         safety::registry_replace(self.parked_entries(ob));
         self.save_now();
-        tracing::info!(windows = n, failed, unrestored = self.corner.unrestored.len(), "unparked every window");
-        failed + self.corner.unrestored.len()
+        tracing::info!(windows = n, failed, unrestored = self.shows_owed(), "unparked every window");
+        failed + self.shows_owed()
     }
 
     /// Re-reads config.toml and applies it; a bad file keeps the last good config.
@@ -5451,7 +5448,7 @@ impl Controller {
                     );
                 }
                 self.sync_fit();
-                self.publish_shield();
+                self.hidden_changed();
                 if let Some(m) = self.model.as_mut() {
                     let capacity = strip_capacity(m.main_display().visible, &config);
                     m.set_strip_options(config.strip_options(capacity));
@@ -5489,7 +5486,7 @@ impl Controller {
         }
         self.echoes.prune(now);
         if !safety::quit_requested() {
-            self.retry_unrestored(ob, false);
+            self.retry_shows(ob, false);
         }
         if self.focus_after_press.is_some() && !input::left_button_down() {
             // The button came up without a mouse-up the monitor saw.
@@ -5536,7 +5533,7 @@ impl Controller {
             // A wallpaper click's hold over: the patch is planned again (it stays hidden while
             // Show Desktop is listed; back if macOS showed none).
             if self.overview.expectation_over(now) {
-                self.update_patch();
+                self.look_at_screen();
             }
             self.expire_ahead(ob, now);
             self.slide_hold_step(ob);
@@ -5599,12 +5596,8 @@ impl Controller {
             } else {
                 self.check_spaces(ob);
             }
-            // One read of the window server's list a tick: the patch's, or the tap's own when
-            // the patch is off. The inert-slivers tap judges presses on it, never reading it
-            // itself.
-            let list = self.update_patch().or_else(|| super::sliver_tap::wants_list().then(windows::on_screen));
-            super::sliver_tap::refresh(list.as_deref());
-            self.reconcile_parked(ob, list.as_deref());
+            // What the model counts hidden against the screen, the engine's way.
+            self.upkeep_tick(ob);
         }
         if self.strip_dirty {
             self.present();
@@ -6001,10 +5994,9 @@ impl Controller {
         desktop_still["icons"] = json!(self.patch_items.known);
         // The parked windows the screen contradicts, being parked again or adopted
         // ([`Self::reconcile_parked`]), and the corner patch's mode (L3).
-        let strays: Vec<Value> =
-            self.corner.strays.iter().map(|(id, s)| json!({ "id": id, "tries": s.tries, "gave_up": s.gave_up, "user_moved": s.user_moved })).collect();
-        let corner_patch = self.patch_status(main_screen);
-        desktop_still["patch_plan"] = self.patch_plan_status(main_screen);
+        let strays: Vec<Value> = self.status_strays();
+        let corner_patch = self.status_patch(main_screen);
+        desktop_still["patch_plan"] = self.status_patch_plan(main_screen);
         // The reach its rectangle grows each sliver by (round fixes-151: per side).
         let reach = self.store.config().windows.patch_reach();
         desktop_still["patch_reach"] = json!({ "left": reach.left, "top": reach.top, "right": reach.right, "bottom": reach.bottom });
@@ -6016,7 +6008,7 @@ impl Controller {
                 let space = m.current_space(d.id);
                 let strip_key = if d.id == m.main_display().id { strip_model::MAIN_STRIP } else { d.id.0 };
                 let mut still = desktop_shot::status(d.id.0);
-                still["patch_plan"] = self.patch_plan_status(d.id.0);
+                still["patch_plan"] = self.status_patch_plan(d.id.0);
                 json!({
                     "id": d.id.0,
                     "key": d.key.text(),
@@ -6043,7 +6035,7 @@ impl Controller {
                     "strip_panels": strip_model::pane_statuses_of(strip_key),
                     // The windows its strip holds a thumbnail of (drawn on its cards).
                     "pictures": strip_model::pictures_of(strip_key),
-                    "corner_patch": self.patch_status(d.id.0),
+                    "corner_patch": self.status_patch(d.id.0),
                     "desktop_still": still,
                 })
             })

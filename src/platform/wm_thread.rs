@@ -564,7 +564,7 @@ impl WmState {
                 let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
                 let back = window_engine::current().bring_back_rest("quit", ours, true).is_none();
                 // A restore that failed but went through late is seen back now.
-                let unrestored = self.controller.account_unrestored(&self.observer);
+                let unrestored = self.controller.account_shows_owed(&self.observer);
                 if failed > 0 {
                     tracing::info!(failed, unrestored, "restores that failed at quit, after the leftovers check");
                 }
@@ -578,7 +578,7 @@ impl WmState {
                 let end = leftovers::quit_end(leftovers::quit_left(
                     back,
                     safety::left_not_taken(),
-                    &self.controller.unrestored_ids(),
+                    &self.controller.shows_owed_ids(),
                     &safety::registry_ids(),
                     &safety::taken_ids(),
                     &safety::ordered_out(),
@@ -695,7 +695,7 @@ impl WmState {
                     let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
                     let left = window_engine::current().bring_back_rest("stand-down", ours, true);
                     let back = left.is_none();
-                    let unrestored = self.controller.account_unrestored(&self.observer);
+                    let unrestored = self.controller.account_shows_owed(&self.observer);
                     if failed > 0 || !back {
                         tracing::info!(failed, unrestored, back, "restores that failed at the stand-down, after the leftovers check");
                     }
@@ -762,7 +762,7 @@ impl WmState {
                     let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
                     let left = window_engine::current().bring_back_rest("logout", ours, true);
                     let back = left.is_none();
-                    let unrestored = self.controller.account_unrestored(&self.observer);
+                    let unrestored = self.controller.account_shows_owed(&self.observer);
                     all_back = back && unrestored == 0 && safety::registry_len() == 0;
                     if !all_back {
                         tracing::warn!(failed, unrestored, back, "not every window came back at the logout's head start; held and tried again at each Space change and at the quit");

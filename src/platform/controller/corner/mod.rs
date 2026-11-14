@@ -9,10 +9,16 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use serde_json::{Value, json};
+
 use self::patch::PatchTrack;
 use self::unrestored::Unrestored;
+use super::Controller;
 use crate::engine::geometry::Rect;
 use crate::engine::park_reconcile::Stray;
+use crate::platform::observe::Observer;
+use crate::platform::safety::ParkedEntry;
+use crate::platform::{sliver_tap, windows};
 
 pub(super) mod cover;
 pub(super) mod patch;
@@ -56,5 +62,39 @@ impl CornerUpkeep {
             unrestored_checked: Instant::now(),
             strays: BTreeMap::new(),
         }
+    }
+}
+
+impl Controller {
+    /// The tick's last step under the Corner engine: one read of the window server's list a
+    /// tick, the patch's, or the tap's own when the patch is off (the inert-slivers tap
+    /// judges presses on it, never reading it itself), then the park reconcile on the same
+    /// list.
+    pub(super) fn corner_tick(&mut self, ob: &mut Observer) {
+        let list = self.update_patch().or_else(|| sliver_tap::wants_list().then(windows::on_screen));
+        sliver_tap::refresh(list.as_deref());
+        self.reconcile_parked(ob, list.as_deref());
+    }
+
+    /// The fast tick's share of the corner patch: after a focus or an activation (round
+    /// park-reconcile, L2), else through Show Desktop (round show-desktop-patch); one plan a
+    /// fast tick at most.
+    pub(super) fn corner_fast_tick(&mut self, now: Instant) {
+        if !self.patch_fast_step(now) && self.reveal_fast(now) {
+            self.update_patch();
+        }
+    }
+
+    /// `ctl state`'s `strays`: the parked windows the screen contradicts, being parked again
+    /// or adopted ([`Self::reconcile_parked`]).
+    pub(super) fn strays_status(&self) -> Vec<Value> {
+        self.corner.strays.iter().map(|(id, s)| json!({ "id": id, "tries": s.tries, "gave_up": s.gave_up, "user_moved": s.user_moved })).collect()
+    }
+
+    /// Keeps window `id` registered (`entry`: its element and the frame it was brought to)
+    /// until it is seen back out of the park zone, as a failed restore is
+    /// ([`Self::restore_failed`], without its warning: nothing failed).
+    pub(super) fn keep_unrestored(&mut self, id: u32, entry: ParkedEntry) {
+        self.corner.unrestored.insert(id, Unrestored::failed(entry));
     }
 }

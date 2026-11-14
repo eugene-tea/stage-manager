@@ -42,7 +42,6 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use super::corner::unrestored::Unrestored;
 use super::{Controller, cards_in};
 use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
@@ -1005,8 +1004,7 @@ impl Controller {
         let now = Instant::now();
         self.verify.as_ref().is_some_and(|v| v.polling)
             || self.slide_held()
-            || self.patch_replans(now)
-            || self.reveal_fast(now)
+            || self.upkeep_wants_fast_tick(now)
             || self.fresh_waiting()
     }
 
@@ -1020,11 +1018,8 @@ impl Controller {
         let now = Instant::now();
         // A newly opened app's window seen by AX before its first frame: placed as it shows.
         self.offer_fresh(ob, now);
-        // The corner patch after a focus or an activation (round park-reconcile, L2), else
-        // through Show Desktop (round show-desktop-patch): one plan a fast tick at most.
-        if !self.patch_fast_step(now) && self.reveal_fast(now) {
-            self.update_patch();
-        }
+        // The engine's share (the Corner engine: its patch after a focus, through Show Desktop).
+        self.upkeep_fast_tick(now);
         if self.model.is_none() {
             self.verify = None;
         } else if let Some(v) = self.verify.as_ref().filter(|v| v.polling && now >= v.next) {
@@ -1678,7 +1673,7 @@ impl Controller {
             let Some(w) = ob.window(id.0) else { continue };
             let entry = ParkedEntry { element: w.element.clone(), restore: frame, child: w.kind == WindowKind::Child, fitted: None };
             tracing::debug!(id = id.0, restore = %frame, "brought back for an arrival: registered until seen out of the park zone");
-            self.corner.unrestored.insert(id.0, Unrestored::failed(entry));
+            self.keep_until_seen(id.0, entry);
         }
     }
 
