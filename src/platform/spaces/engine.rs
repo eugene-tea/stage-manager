@@ -473,7 +473,10 @@ impl SpacesEngine {
             let mut st = self.state();
             st.held.remove(&id);
             st.owed.remove(&id);
-            st.new.remove(&id);
+            if st.new.remove(&id) {
+                // A new window's show from the model's batch: placed.
+                st.counts.new_placed += 1;
+            }
         } else {
             tracing::warn!(id, desktop = home, "spaces engine: a shown window is still in a stage's Space after a retry");
             self.missed_show(id);
@@ -554,7 +557,13 @@ impl SpacesEngine {
             st.owed.retain(|id| alive.contains(id));
             st.new.retain(|id| alive.contains(id));
             let used: BTreeSet<u64> = st.held.values().map(|h| h.space).collect();
-            st.stages.iter().filter(|((_, stage), space)| !used.contains(space) && !stage_lives(*stage)).map(|(k, s)| (*k, *s)).collect()
+            // The Space where new windows wait stays (a launch's watch may be putting a window
+            // into it now); it ends with the others at a bring-back.
+            st.stages
+                .iter()
+                .filter(|((_, stage), space)| *stage != NEW_STAGE && !used.contains(space) && !stage_lives(*stage))
+                .map(|(k, s)| (*k, *s))
+                .collect()
         };
         let Some(sky) = self.sky() else { return };
         for (key, space) in empty {
@@ -772,21 +781,19 @@ impl SpacesEngine {
         let home = self.sky().and_then(Self::desktop_for_new);
         {
             let mut st = self.state();
-            if !st.new.contains(&id) {
+            if !st.new.remove(&id) {
                 return true;
             }
             if let (Some(home), Some(h)) = (home, st.held.get_mut(&id)) {
                 h.home = home;
             }
+            if placed {
+                st.counts.new_placed += 1;
+            } else {
+                st.counts.new_unplaced += 1;
+            }
         }
         let ok = self.show_window(id);
-        let mut st = self.state();
-        if placed {
-            st.counts.new_placed += 1;
-        } else {
-            st.counts.new_unplaced += 1;
-        }
-        drop(st);
         tracing::debug!(id, placed, ok, why, "spaces engine: a new window let out where it shows");
         ok
     }

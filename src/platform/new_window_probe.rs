@@ -412,8 +412,8 @@ fn one_round(sky: &Sky, target: &str, bundle: &str, extra: &[String], hold: Opti
 /// check of round sm-placenew. Opens the app (`open -n`, activated, as a person opens one)
 /// while OLD-BUNDLE's windows show, and reads the on-screen window list every millisecond
 /// for MS (default 2500): a sample with one of OLD-BUNDLE's windows (those on screen at the
-/// start) and a window of the new app (layer 0, taller than 50 pt) both on screen is an
-/// overlap. Reads only; leaves the app running. One JSON line.
+/// start, listed on screen at the frame they had then) and a window of the new app (layer 0,
+/// taller than 50 pt) both on screen is an overlap. Reads only; leaves the app running. One JSON line.
 pub fn overlap(args: &[String]) -> ExitCode {
     let Some(mtm) = MainThreadMarker::new() else { return ExitCode::from(4) };
     let _ = NSApplication::sharedApplication(mtm);
@@ -432,8 +432,16 @@ pub fn overlap(args: &[String]) -> ExitCode {
     }
     let old_pids = pids_of(&old_bundle);
     let before_pids: HashSet<i32> = pids_of(&bundle).into_iter().collect();
-    let old: HashSet<u32> =
-        windows::on_screen().iter().filter(|w| old_pids.contains(&w.pid) && w.layer == 0 && w.bounds.h > 50.0).map(|w| w.id).collect();
+    // The old app's windows where they show now: one still listed on screen at that frame
+    // shows (the Corner engine's hidden window is listed on screen too, in the park corner).
+    let old: HashMap<u32, crate::engine::geometry::Rect> = windows::on_screen()
+        .iter()
+        .filter(|w| old_pids.contains(&w.pid) && w.layer == 0 && w.bounds.h > 50.0)
+        .map(|w| (w.id, w.bounds))
+        .collect();
+    let at_frame = |a: crate::engine::geometry::Rect, b: crate::engine::geometry::Rect| {
+        (a.x - b.x).abs() <= 2.0 && (a.y - b.y).abs() <= 2.0 && (a.w - b.w).abs() <= 2.0 && (a.h - b.h).abs() <= 2.0
+    };
     if old.is_empty() {
         println!("{}", json!({ "ok": false, "error": "no window of the old app on screen" }));
         return ExitCode::from(1);
@@ -467,7 +475,7 @@ pub fn overlap(args: &[String]) -> ExitCode {
         samples += 1;
         max_gap = max_gap.max(at.duration_since(prev));
         prev = at;
-        let old_on = list.iter().any(|w| old.contains(&w.id));
+        let old_on = list.iter().any(|w| old.get(&w.id).is_some_and(|f| at_frame(*f, w.bounds)));
         let new_on: Vec<u32> =
             list.iter().filter(|w| pid.is_some_and(|p| w.pid == p) && w.layer == 0 && w.bounds.h > 50.0).map(|w| w.id).collect();
         if old_on {

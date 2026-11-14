@@ -188,9 +188,11 @@ shape as the model's door. The Corner engine's answers are methods of the contro
 shield, the park reconcile, the windows whose restore failed, the switch's corner cover) on
 one struct of state, `CornerUpkeep`; no other file of the controller touches it. The Corner
 engine's files: `engine/corner/` (pure), `platform/corner/` (the engine, the slivers tap),
-`platform/controller/corner/` (its upkeep). Not behind the seam yet: a new window's
-placement before it shows (`place_new`). The checks while running are the trait's `health`
-(the Corner engine: never failed).
+`platform/controller/corner/` (its upkeep). A new window's placement before it shows is
+three questions on the trait: `app_launched` (a launch notice), `about_to_show` (the window
+is held on its way in, so the controller places it now) and `let_new_out` (placed: let it
+show); the Corner engine answers nothing, never and nothing. The checks while running are the
+trait's `health` (the Corner engine: never failed).
 
 The Spaces engine as built (`platform/spaces/`: `ffi.rs`, SkyLight's calls loaded at run
 time, nothing linked; `engine.rs`; its pure half `engine/spaces.rs`; its upkeep
@@ -220,6 +222,30 @@ bring-backs (quit, a stand-down, a panic, an abort) ask the window server which 
 in the engine's Spaces and move each onto its Desktop, from any thread, then end the Spaces;
 the registry still gives fitted windows their frames back. The motion is still the
 pictures (`Motion::Pictures`).
+
+A newly opened app's window under the Spaces engine (`platform/spaces/launch_watch.rs`): the
+window server lists it, off screen and on no Space, tens to hundreds of ms before it first
+shows, and Accessibility answers the app only as it shows. So from the app's launch notice
+a thread reads the window ids every 4 ms for 3 s and puts each new window of the app still
+on no Space into a Space where new windows wait, never shown. The app orders it in there;
+the controller finds it through Accessibility and places it at once, the switch to its
+stage hides the stage left behind, and only then is it let onto the Desktop (or into its
+stage's Space). A window not placed within a second of its app ordering it in, or never
+ordered in (helper windows), is let out as it would have shown.
+
+```mermaid
+sequenceDiagram
+    participant App as New app
+    participant W as Launch watch
+    participant WS as Window server
+    participant C as Controller
+    App->>WS: window created (listed off screen, no Space)
+    W->>WS: ids every 4 ms; add it into the waiting Space
+    App->>WS: ordered in (shows nowhere: its Space is hidden)
+    C->>App: AX: the app answers, the window is found
+    C->>WS: switch: the old stage's windows into their Space
+    C->>WS: the new window onto the Desktop: it shows
+```
 
 ## macOS settings drive behavior
 

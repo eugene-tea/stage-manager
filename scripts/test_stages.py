@@ -436,7 +436,9 @@ def phase_launch():
                 f"mean {o['mean_interval_ms']} ms, max gap {o['max_gap_ms']} ms; Charlie's stage "
                 f"{'in front' if o['staged'] else 'NOT in front'}")
         stop_extra("c")
-        wait_state(lambda x: len(x["stages"]) == 1, "Charlie's stage to go")
+        # Its window gone from the model (under the Spaces engine its emptied stage stays in
+        # front until Alpha is activated: macOS activates no app with no window shown).
+        wait_state(lambda x: "Charlie 1" not in by_title(x), "Charlie's window to go")
     ok = [o for o in results if o.get("ok")]
     over = [o for o in ok if o["overlaps"]]
     shown = sorted(o["first_new_ms"] for o in ok if o["first_new_ms"] is not None)
