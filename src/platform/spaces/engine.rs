@@ -933,6 +933,13 @@ impl WindowEngine for SpacesEngine {
         Motion::Pictures
     }
 
+    /// True: a hide is one window-server call (~2 ms a window), so the outgoing windows wait
+    /// on screen for pictures taken at the switch; a window in a stage Space still draws and
+    /// is captured with its current content there (`probe-spaces capture`, 11-14).
+    fn pictures_at_switch(&self) -> bool {
+        true
+    }
+
     /// Every window out of the stage Spaces by the window server's own list, then the
     /// registry's frames (a fitted window's frame from before, a show that did not take its
     /// frame).

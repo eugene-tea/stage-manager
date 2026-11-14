@@ -65,6 +65,10 @@ pub struct StripSnapshot {
     /// keeps full-size snapshots of them ready for the next switch (`[animation]`). Empty
     /// while the user has hidden the strip: no switch animates then, nothing is captured.
     pub active_windows: Vec<CardWindow>,
+    /// A switch's outgoing pictures are taken at the switch, the windows waiting on screen for
+    /// them (the engine hides in one step: [`crate::platform::window_engine::WindowEngine::pictures_at_switch`]):
+    /// the strip keeps no full-size picture fresh on a timer, only as the pointer nears a card.
+    pub pictures_at_switch: bool,
     /// The pinned windows shown on this Space, at their live frames: they stay shown through
     /// a switch, and a snapshot of each kept ready lets the switch's cover of the park corner
     /// draw one that reaches it (round 8L5). Empty while the user has hidden the strip.
@@ -495,6 +499,33 @@ pub fn publish_snapshots(display: u32, ids: impl IntoIterator<Item = u32>) {
 /// can draw a window that stays shown into the park corner from it (round 8L5).
 pub fn has_snapshot(id: u32) -> bool {
     snapshot_ids().lock().is_ok_and(|s| s.values().any(|ids| ids.contains(&id)))
+}
+
+/// When a full-size picture of each window last reached a strip.
+fn snapshot_times() -> &'static Mutex<BTreeMap<u32, Instant>> {
+    static S: OnceLock<Mutex<BTreeMap<u32, Instant>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Entries kept in [`snapshot_times`] before the old ones go.
+const SNAPSHOT_TIMES_CAP: usize = 256;
+
+/// A full-size picture of window `id` reached the strips now (main thread).
+pub fn note_snapshot(id: u32) {
+    if let Ok(mut t) = snapshot_times().lock() {
+        let now = Instant::now();
+        if t.len() >= SNAPSHOT_TIMES_CAP {
+            t.retain(|_, at| now.duration_since(*at) < Duration::from_secs(10));
+        }
+        t.insert(id, now);
+    }
+}
+
+/// How long ago a full-size picture of window `id` last reached the strips (any thread):
+/// a switch's pictures taken at the switch skip one this fresh (the pointer's press on a
+/// card took it).
+pub fn snapshot_age(id: u32) -> Option<Duration> {
+    snapshot_times().lock().ok().and_then(|t| t.get(&id).map(Instant::elapsed))
 }
 
 fn picture_ids() -> &'static Mutex<SnapshotIds> {

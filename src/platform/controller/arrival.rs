@@ -1589,6 +1589,7 @@ impl Controller {
             space: space.0,
             display: display.0,
             away: true,
+            pictures_at_switch: self.engine.pictures_at_switch(),
             ..StripSnapshot::default()
         });
     }

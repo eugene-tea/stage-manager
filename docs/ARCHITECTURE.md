@@ -99,6 +99,8 @@ sequenceDiagram
     end
     SM->>SM: pictures fade over the windows
     Note over SM,WS: Spaces engine (as built: pictures still play the motion)
+    SM->>WS: pictures of the outgoing windows, captured now (none kept on a timer)
+    WS-->>SM: the pictures (the windows wait on screen for them)
     loop each outgoing window
         SM->>WS: add into its stage's Space (off its Desktop, same frame)
         WS-->>SM: its Spaces, read back
@@ -221,7 +223,15 @@ beyond the Dock's edge first, as under the Corner engine, and hidden again once 
 bring-backs (quit, a stand-down, a panic, an abort) ask the window server which windows are
 in the engine's Spaces and move each onto its Desktop, from any thread, then end the Spaces;
 the registry still gives fitted windows their frames back. The motion is still the
-pictures (`Motion::Pictures`).
+pictures (`Motion::Pictures`), but none is kept fresh on a timer: the trait's
+`pictures_at_switch` answers true, so the strip captures full-size pictures only as the
+pointer nears a card, and the controller, before it sends a switch to the strip, captures
+every outgoing window whose picture is not fresh (`platform/controller/switch_pictures.rs`,
+through `platform/switch_shots.rs`: all in parallel, from the last listing of the shareable
+content when its windows are still where it says) and waits for them, 160 ms at most. The
+windows stay on screen meanwhile and hide behind their pictures in one step each. A window
+in a stage Space still draws and is captured with its current content, so an incoming
+window's picture taken while it is hidden (the pointer on its card) is current too.
 
 A newly opened app's window under the Spaces engine (`platform/spaces/launch_watch.rs`): the
 window server lists it, off screen and on no Space, tens to hundreds of ms before it first

@@ -6,7 +6,11 @@
 //!   `[animation] snapshot_interval_ms`, and at once when the pointer reaches a card or presses
 //!   one, so they are fresh when a switch starts), plus the hovered card's windows. A window's
 //!   last snapshot before it parks stays in the cache (`snapshot_cache_mb`) and is what grows
-//!   back when its stage returns; a card's thumbnail stands in when there is none. With
+//!   back when its stage returns; a card's thumbnail stands in when there is none. Under an
+//!   engine that hides in one step ([`strip_model::StripSnapshot::pictures_at_switch`]: the Spaces
+//!   engine) nothing is captured on the interval: the controller captures the outgoing
+//!   windows at the switch, before it sends the transition, and they reach the cache as any
+//!   other snapshot ([`crate::platform::switch_shots`]). With
 //!   captures off (`[strip] capture = false`, `STAGE_MANAGER_NO_CAPTURE`) or refused by
 //!   macOS, plain ghosts (a light card) move instead.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
@@ -1509,7 +1513,8 @@ impl Strip {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
         let a = self.style.animation.clone();
-        let interval = (a.snapshot_interval_ms > 0).then_some(a.snapshot_interval_ms);
+        // Pictures taken at the switch (the Spaces engine): none on a timer.
+        let interval = (a.snapshot_interval_ms > 0 && !self.snapshot.pictures_at_switch).then_some(a.snapshot_interval_ms);
         if self.motion.interval_ms != Some(interval.unwrap_or(0)) {
             self.motion.interval_ms = Some(interval.unwrap_or(0));
             self.motion.capturer.set_interval(interval.map_or(ON_DEMAND, Duration::from_millis));
@@ -1618,6 +1623,7 @@ impl Strip {
         }
         self.motion.cache.insert(id, picture, bytes);
         strip_model::publish_snapshots(self.display, self.motion.cache.ids());
+        strip_model::note_snapshot(id);
         if dragged == Some((true, false)) {
             tracing::debug!(window = id, "card drag: the window's full-size snapshot arrived; the ghost turns into the window");
             self.mouse_dragged();

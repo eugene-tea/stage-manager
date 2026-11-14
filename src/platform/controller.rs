@@ -153,6 +153,7 @@ mod fallback;
 mod raise_order;
 mod spaces;
 mod stale;
+mod switch_pictures;
 mod upkeep;
 
 /// A focus this soon after a click or key press is the user's: the window is touched
@@ -2064,7 +2065,14 @@ impl Controller {
     fn send_transition(&mut self, ob: &Observer, t: Transition, actions: &[Action], run: &ActivationRun, cover_ms: u64) -> strip_model::Cover {
         let id = t.id;
         let started = Instant::now();
-        self.present_with(Some(Transition { sent: Some(started), ..t }));
+        // An engine that hides in one step: the outgoing windows wait on screen for pictures
+        // taken now, none being kept fresh on a timer; the keyboard goes first.
+        let waiting = if self.engine.pictures_at_switch() && !t.outgoing.is_empty() {
+            Some(t)
+        } else {
+            self.present_with(Some(Transition { sent: Some(started), ..t }));
+            None
+        };
         // An activation's keyboard goes at once, while the strip draws: macOS has activated
         // the app and raised its windows in the corner already, and typing right after ⌘Tab
         // must reach the window the switch focuses (8L). One bounded step (8L2); the whole
@@ -2073,6 +2081,10 @@ impl Controller {
             Some(key) => self.focus_now(ob, key, id),
             None => None,
         };
+        if let Some(t) = waiting {
+            switch_pictures::take(&t);
+            self.present_with(Some(Transition { sent: Some(Instant::now()), ..t }));
+        }
         let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
         let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
         let unveil_latest_ms = (motion_math::unveil_latest(&self.store.config().style) * 1000.0).round() as u64;
@@ -2308,6 +2320,7 @@ impl Controller {
             window_drag_grab: dragged.map(|d| d.grab),
             announce: main && notes.announce,
             active_windows: kept_ready(self.strip_visible, active_windows),
+            pictures_at_switch: self.engine.pictures_at_switch(),
             pinned_windows: kept_ready(self.strip_visible, pinned_windows),
             transition,
             parked: notes.parked,

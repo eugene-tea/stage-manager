@@ -133,7 +133,7 @@ static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 /// When the last call was answered, in milliseconds since [`EPOCH`] (0: never).
 static LAST_DONE_MS: AtomicU64 = AtomicU64::new(0);
 /// Images delivered since launch.
-static IMAGES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static IMAGES: AtomicU64 = AtomicU64::new(0);
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// The one gate of the process: every capturer asks it before a round.
 static GATE: LazyLock<Mutex<Gate>> = LazyLock::new(|| Mutex::new(Gate::default()));
@@ -295,10 +295,10 @@ fn wake_all() {
 }
 
 /// Counts one ScreenCaptureKit call from issue to answer (dropped in its completion).
-struct InFlight;
+pub(crate) struct InFlight;
 
 impl InFlight {
-    fn issue() -> Self {
+    pub(crate) fn issue() -> Self {
         IN_FLIGHT.fetch_add(1, Ordering::SeqCst);
         InFlight
     }
@@ -766,7 +766,7 @@ static LAST_FILL: LazyLock<Mutex<HashMap<u32, String>>> = LazyLock::new(|| Mutex
 /// points; the window `size_pt`): the four corner boxes' and each overlap's mean alpha,
 /// brightness and spread (numbers only), logged at debug when they change. True when the
 /// picture holds a fill ([`capture_pixels::holds_fill`]): it is not used.
-fn fill_check(id: u32, image: &CGImage, extent: Extent, overlaps: &[Rect], size_pt: (f64, f64), left_out: bool) -> bool {
+pub(crate) fn fill_check(id: u32, image: &CGImage, extent: Extent, overlaps: &[Rect], size_pt: (f64, f64), left_out: bool) -> bool {
     let (w, h) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
     if w == 0 || h == 0 {
         return false;
@@ -811,7 +811,7 @@ fn fill_check(id: u32, image: &CGImage, extent: Extent, overlaps: &[Rect], size_
 /// 32-bit BGRA with alpha ('BGRA'), ScreenCaptureKit's default, set so it stays so.
 const PIXEL_BGRA: u32 = u32::from_be_bytes(*b"BGRA");
 
-fn to_rect(r: CGRect) -> Rect {
+pub(crate) fn to_rect(r: CGRect) -> Rect {
     Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height)
 }
 
@@ -940,6 +940,8 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
             let _ = content_tx.send(Msg::Issued { round, n: 0 });
             return;
         }
+        // A switch's pictures may start from this listing (the Spaces engine).
+        super::switch_shots::remember(content);
         // SAFETY: plain getters on a live SCShareableContent.
         let windows = unsafe { content.windows() };
         let displays = display_frames(content);

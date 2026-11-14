@@ -64,6 +64,9 @@
 //!   command (a switch) while these windows' descriptions are read every ms: when each
 //!   incoming window is at its frame for good, each outgoing one gone from its own
 //!   ([`super::settle_probe`], round sm-measure); reads only.
+//! - `capture BUNDLE [--rounds N] [hidden file=PATH]` (S4b): a switch's pictures taken at the
+//!   switch, through the app's path, timed on screen and in a stage Space not shown
+//!   ([`capture`]'s docs).
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
 
@@ -80,6 +83,9 @@ use serde_json::{Value, json};
 use super::park_probe::FIXTURE_PREFIX;
 use super::spaces::ffi::{ALL_SPACES_MASK, Route, Sky};
 use super::windows::{self, CgWindow};
+
+#[path = "spaces_probe_capture.rs"]
+mod capture;
 
 /// Where the probe keeps its record of the Spaces it made, and screenshots.
 pub const PROBE_DIR: &str = "/tmp/sm-spaces-probe";
@@ -188,7 +194,7 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|launch-probe|key|dock-click|cleanup|sources|overlap|settle …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle …");
     };
     // Read only (no window moves): any app, their own arguments.
     if cmd == "sources" {
@@ -229,6 +235,10 @@ pub fn run(args: &[String]) -> ExitCode {
         "space-op" => space_op(&sky, &o),
         "engine" => need_bundle().and_then(|b| engine_rounds(&sky, &b, &o)),
         "launch-probe" => Ok(launch_probe(mtm, &o)),
+        "capture" => {
+            let scale = objc2_app_kit::NSScreen::mainScreen(mtm).map_or(2.0, |s| s.backingScaleFactor());
+            need_bundle().and_then(|b| capture::run(&sky, &b, &o, scale))
+        }
         _ => Err(format!("unknown subcommand {cmd}")),
     };
     match result {

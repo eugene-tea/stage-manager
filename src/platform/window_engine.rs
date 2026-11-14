@@ -130,6 +130,15 @@ pub trait WindowEngine: Send + Sync {
     /// thread, after the plan and before anything is sent to the strip or moved.
     fn animate(&self, t: &Transition) -> Motion;
 
+    /// True when a window leaves the screen in one step as soon as it is told (no move an
+    /// app carries out): a switch's outgoing windows can stay where they are until their
+    /// pictures are taken at the switch, so no full-size picture is kept fresh on a timer
+    /// for a switch nobody announced (a Dock click, ⌘Tab). False: the strip keeps the shown
+    /// windows' pictures fresh every `[animation] snapshot_interval_ms`. Any thread.
+    fn pictures_at_switch(&self) -> bool {
+        false
+    }
+
     /// The last line of defence in this process: every hidden window brought back, whatever
     /// state the model and the WM thread are in. Any thread. True when nothing failed.
     fn bring_all_back(&self, why: &str) -> bool;

@@ -50,6 +50,7 @@ pub mod space_keys;
 pub mod spaces;
 pub mod new_window_probe;
 pub mod spaces_probe;
+pub mod switch_shots;
 pub mod update_check;
 pub mod updater;
 pub mod wallpaper;
