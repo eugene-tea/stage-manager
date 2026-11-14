@@ -5006,13 +5006,14 @@ impl Controller {
             // window joining a stage not shown went into that stage's Space instead).
             let shown_by_model = self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_none_or(|w| !w.parked);
             self.engine.let_new_out(WindowId(id), shown_by_model);
-            if shown_by_model && self.next_transition != transitions_before {
-                // Its stage's switch is moving behind pictures above every window (the
-                // window waited off screen, so the transition could not name it to pass
-                // under): the strip's overlay goes under it now.
-                self.under_note = Some((self.next_transition, id));
-                self.present();
-            }
+        }
+        if about_to_show && self.next_transition != transitions_before && self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| !w.parked) {
+            // Out where it shows now (let out above, or shown by its stage's switch in the
+            // batch), while that switch still moves behind pictures above every window: the
+            // transition could not name it to pass under while it waited off screen, so the
+            // strip's overlay goes under it now.
+            self.under_note = Some((self.next_transition, id));
+            self.present();
         }
         // The measure of round login-observe: from found (tracked) to placed.
         if let Some(w) = ob.window(id) {
