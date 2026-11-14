@@ -609,6 +609,9 @@ planned steps (hands-free):
   owner's     the fixture app with windows on both Desktops, its focused one (Fixture 1) parked on Desktop 1
   case        behind Alpha's stage, Bravo active on Desktop 2: its Dock item $SM_DOCK_REPEATS (3) times, each
               predicted at the press (Fixture 1) and clean (strict, as above)
+  elsewhere   Fixture 1-2 in Desktop 1's front stage, Bravo's stage in front on Desktop 2 (Fixture 3 hidden):
+              open the fixture app (as Command-Tab activates it): stays on Desktop 2 with Fixture 3's stage
+              in front (Apple's, the park corner's), or macOS goes to Desktop 1 (said)
   back        (already on Desktop 1 after the activation, else ctl debug-space <back>); checks as guided
               (Desktop 2's pane stays there)
   edge tab    on Desktop 1: [reveal] edge_tab on (a live reload); ctl debug-frame <a shown Desktop 1 window> to
@@ -822,6 +825,9 @@ def run():
     say("\n== an activation that lands on a window of Desktop 1 shows that window's stage ==")
     activation_to_desktop_1(d1, d2)
 
+    say("\n== an activation on Desktop 2 of an app whose windows there are all hidden, with one shown on Desktop 1 ==")
+    activation_with_a_window_elsewhere(d1, d2)
+
     say("\n== back on Desktop 1 ==")
     if current_space() != d1:
         go("d1", "Switch back to Desktop 1 (Control-Left Arrow)")
@@ -998,6 +1004,57 @@ def kill_with_a_stage_space_elsewhere(app, hidden, d2_ids):
         appless_switch("d2", "Switch to Desktop 2", rest)
     else:
         switch_to_windows("Switch to Desktop 2", rest)
+
+
+def activation_with_a_window_elsewhere(d1, d2):
+    """Round sm-gaps (S3c's open question): on Desktop 2 the fixture app's one window there,
+    Fixture 3, waits hidden behind Bravo's stage, while Fixture 1-2 show in Desktop 1's front
+    stage. The fixture app is activated (`open`, as Command-Tab activates an app): Apple's
+    Stage Manager and the Corner engine stay on Desktop 2 (the app has a window here, parked
+    in the corner) and bring Fixture 3's stage in front. Under the Spaces engine Fixture 3 is
+    in a stage Space, on no Desktop, so macOS may count the app's windows on Desktop 1 only
+    and go there: the check says which. Hands-free only. Ends on Desktop 1."""
+    if not AUTO:
+        ts.skip("an activation with the app's windows hidden here and shown on Desktop 1", "hands-free only (--auto)")
+        return
+    if current_space() != d1:
+        go("d1", "Switch to Desktop 1")
+    x = state()
+    fixture = stage_holding(x, "Fixture 1")
+    if not check(x.get("space") == d1 and fixture is not None, f"on Desktop 1 with the Fixture stage (Space {x.get('space')})"):
+        return
+    ctl("switch", fixture)
+    if not check(ts.wait_state(lambda y: y["active"] == fixture, "the Fixture stage in front", timeout=4) is not None,
+                 "Fixture 1-2 show in Desktop 1's front stage"):
+        return
+    go("d2", "Switch to Desktop 2")
+    x = state()
+    bravo = stage_holding(x, "Bravo 1")
+    if not check(x.get("space") == d2 and bravo is not None, f"on Desktop 2 with Bravo's stage (Space {x.get('space')})"):
+        return
+    ctl("switch", bravo)
+    x = ts.wait_state(lambda y: y["active"] == bravo and any(w["title"] == "Fixture 3" and w["parked"] for w in y["windows"]),
+                      "Bravo's stage in front, Fixture 3 hidden", timeout=4)
+    if not check(x is not None, "Desktop 2: Bravo's stage in front, the fixture app's window here hidden"):
+        return
+    time.sleep(1.0)  # past the echo window of the switch's own activation
+    before = space_now()
+    WATCH.pause()
+    subprocess.run(["open", ts.FIX_APP], capture_output=True)
+    time.sleep(2.5)
+    now = space_now()
+    stayed = bool(now) and not moved(before, now) and now["space"] == d2
+    x = state()
+    say(f"    after the activation: Space {now and now['space']} (Desktop 1 {d1}, Desktop 2 {d2}), "
+        f"front stage {x['active']} on Space {x['space']}")
+    check(stayed, "the activation stays on Desktop 2, as Apple's Stage Manager and the park corner do "
+                  f"({'stayed' if stayed else 'macOS went to Desktop 1'})")
+    if stayed:
+        check(x["active"] == stage_holding(x, "Fixture 3"), f"Fixture 3's stage in front on Desktop 2 ({ts.stage_titles(x)})")
+        WATCH.desk("d2")
+        go("d1", "Switch to Desktop 1")
+    else:
+        WATCH.desk("d1")
 
 
 def stage_holding(s, title):
