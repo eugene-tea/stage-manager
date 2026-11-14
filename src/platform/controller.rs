@@ -150,6 +150,7 @@ mod ax_blind;
 mod corner;
 mod dock_order;
 mod raise_order;
+mod spaces;
 mod stale;
 mod upkeep;
 
@@ -948,6 +949,9 @@ pub struct Controller {
     /// What the Corner engine keeps on this thread between its calls ([`CornerUpkeep`]: the
     /// corner patch, the windows whose restore failed, the strays, a minimize's dive).
     corner: CornerUpkeep,
+    /// What the Spaces engine keeps on this thread between its calls ([`spaces::SpacesUpkeep`]);
+    /// empty under the Corner engine.
+    spaces: spaces::SpacesUpkeep,
     /// A minimized window on its way to the strip, while its batch runs: its transition's
     /// picture starts at its Dock tile ([`Self::on_minimized`]).
     minimizing: Option<Minimized>,
@@ -1153,6 +1157,7 @@ impl Controller {
             dock_order: dock_order::DockOrderWatch::default(),
             engine: window_engine::current(),
             corner: CornerUpkeep::new(),
+            spaces: spaces::SpacesUpkeep::new(),
             minimizing: None,
             unminimizing: HashMap::new(),
             verify: None,
@@ -3431,11 +3436,16 @@ impl Controller {
         self.mark_dirty();
     }
 
-    /// [`on_managed_screens`] with the model's windows as the managed ones.
+    /// [`on_managed_screens`] with the model's windows as the managed ones, and the managed
+    /// windows the engine hides off the list on a Desktop that shows
+    /// ([`WindowEngine::present_off_screen`]).
     pub(super) fn shown_managed(&self, list: &[windows::CgWindow]) -> HashSet<u32> {
         let frames: Vec<Rect> = self.managed_displays().iter().map(|d| d.frame).collect();
         let m = self.model.as_ref();
-        on_managed_screens(list, &frames, |id| m.is_some_and(|m| m.window(WindowId(id)).is_some()))
+        let mut shown = on_managed_screens(list, &frames, |id| m.is_some_and(|m| m.window(WindowId(id)).is_some()));
+        // Hidden where the list shows them off screen: on their Desktop all the same.
+        shown.extend(self.engine.present_off_screen().into_iter().filter(|id| m.is_some_and(|m| m.window(WindowId(*id)).is_some())));
+        shown
     }
 
     /// True unless a rule says to ignore the window (children always count).
@@ -3595,7 +3605,7 @@ impl Controller {
             return;
         }
         self.screens.retain(|screen, _| others.iter().any(|d| d.id.0 == *screen));
-        let shown = on_screen(list);
+        let shown = self.present_in(list);
         let mut arrive = false;
         let mut left: Vec<u32> = Vec::new();
         for d in others {
@@ -3997,7 +4007,7 @@ impl Controller {
             .filter(|meta| meta.display == display.id)
             .filter(|meta| self.allowed_by_rules(meta))
             .collect();
-        (live, self.absent_windows(ob, &on_screen(list), display.id))
+        (live, self.absent_windows(ob, &self.present_in(list), display.id))
     }
 
     /// What is held now (a window's focus, an app's activation) for a Desktop no screen
@@ -4347,7 +4357,7 @@ impl Controller {
         if self.phase.fullscreen() {
             return;
         }
-        let shown = on_screen(&list);
+        let shown = self.present_in(&list);
         let shown_main = self.shown_managed(&list);
         if self.active_shown_changed(&shown) {
             tracing::debug!("a shown window was hidden or came back: the strip looks again");
@@ -4778,7 +4788,7 @@ impl Controller {
             }
             return;
         }
-        if self.space_in_doubt(ob, &on_screen(&list), screen.id) {
+        if self.space_in_doubt(ob, &self.present_in(&list), screen.id) {
             // Its notification came before the Space change's: placing it now would put it
             // (and maybe a stage switch, a focus) on the Space being left.
             if self.unplaced.insert(id) {
@@ -6092,6 +6102,8 @@ impl Controller {
             "windows": windows,
         });
         state["corner_patch"] = corner_patch;
+        // Which window engine runs, and what it keeps and counts.
+        state["engine"] = self.status_engine();
         // Accessibility lists no window for the session (round ax-blind), since (Unix s).
         (state["accessibility_blind"], state["accessibility_blind_since"]) = self.ax_blind_json();
         state["displays"] = Value::Array(displays_json);

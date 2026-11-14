@@ -197,7 +197,9 @@ impl Controller {
     pub(super) fn check_stale_handles(&mut self, ob: &Observer, list: &[CgWindow]) {
         let Some(m) = &self.model else { return };
         let now = Instant::now();
-        let onscreen: HashSet<u32> = list.iter().filter(|w| w.onscreen).map(|w| w.id).collect();
+        let mut onscreen: HashSet<u32> = list.iter().filter(|w| w.onscreen).map(|w| w.id).collect();
+        // Off the list because the engine hides them there: not gone from the screen.
+        onscreen.extend(self.engine.present_off_screen());
         let candidates: Vec<(u32, i32)> = m
             .windows()
             .filter(|w| (w.sticky || m.is_shown_space(w.space)) && !onscreen.contains(&w.meta.id.0))

@@ -90,6 +90,9 @@ pub enum AxError {
 }
 
 impl AxError {
+    /// `kAXErrorFailure`: also what a window engine answers when its own call, not an
+    /// Accessibility one, did not do what was asked.
+    pub const FAILURE: Self = Self::Api(-25200);
     /// `kAXErrorAPIDisabled`: the process is not trusted for Accessibility.
     pub const API_DISABLED: Self = Self::Api(-25211);
     /// `kAXErrorNoValue`: the attribute has no value.

@@ -46,6 +46,7 @@ pub mod session;
 pub mod shadow_probe;
 pub mod shadow_profile;
 pub mod space_keys;
+pub mod spaces;
 pub mod spaces_probe;
 pub mod update_check;
 pub mod updater;

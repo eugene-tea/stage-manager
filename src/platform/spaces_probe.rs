@@ -42,444 +42,30 @@
 //! - `space-op show|hide|destroy SPACE`: one call on a recorded Space (an orphan).
 //! - `key mission-control|app-windows|escape|cmd-tab|left|right`: posts that shortcut.
 //! - `dock-click BUNDLE`: presses the fixture's Dock item through Accessibility.
+//! - `engine BUNDLE [--rounds N] [--hold-ms MS]`: the Spaces engine itself
+//!   ([`super::spaces::engine`]) hides and shows the fixture's windows N times from a thread
+//!   that is not the main one (as the app's WM thread does), each step read back and checked
+//!   against the window list, then its bring-back; the engine's counts.
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
 
-use std::ffi::{CStr, c_void};
+
 use std::io::Write as _;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use objc2::rc::{Retained, autoreleasepool};
-use objc2::runtime::{AnyClass, AnyObject, Sel};
-use objc2::sel;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication};
 use objc2_core_foundation::{CFRunLoop, CGAffineTransform, kCFRunLoopDefaultMode};
-use objc2_foundation::{MainThreadMarker, NSArray, NSDictionary, NSNumber, NSString};
+use objc2_foundation::{MainThreadMarker, NSString};
 use serde_json::{Value, json};
 
 use super::park_probe::FIXTURE_PREFIX;
+use super::spaces::ffi::{ALL_SPACES_MASK, Route, Sky};
 use super::windows::{self, CgWindow};
 
 /// Where the probe keeps its record of the Spaces it made, and screenshots.
 pub const PROBE_DIR: &str = "/tmp/sm-spaces-probe";
 
-/// The SkyLight framework's binary.
-const SKYLIGHT: &CStr = c"/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight";
-
-/// `SLSCopySpaces`/`SLSCopySpacesForWindows` mask: every kind of Space (synara lists
-/// orphans with 0xf; yabai and sunlight pass 0x7, which leaves the probe's Spaces out).
-const ALL_SPACES_MASK: i32 = 0xf;
-
-/// `SLSSpaceAddWindowsAndRemoveFromSpaces` options as SketchyBar and sunlight pass them.
-const ADD_REMOVE_OPTIONS: i32 = 7;
-
-type FnMain = unsafe extern "C" fn() -> i32;
-type FnCopyByCid = unsafe extern "C" fn(i32) -> *mut c_void;
-type FnCopySpaces = unsafe extern "C" fn(i32, i32) -> *mut c_void;
-type FnCopySpacesForWindows = unsafe extern "C" fn(i32, i32, *const c_void) -> *mut c_void;
-type FnSpaceCreate = unsafe extern "C" fn(i32, i32, i32) -> u64;
-type FnSpaceDestroy = unsafe extern "C" fn(i32, u64) -> i32;
-type FnSpaceLevel = unsafe extern "C" fn(i32, u64, i32) -> i32;
-type FnSpaceList = unsafe extern "C" fn(i32, *const c_void) -> i32;
-type FnAddRemove = unsafe extern "C" fn(i32, u64, *const c_void, i32) -> i32;
-type FnMoveManaged = unsafe extern "C" fn(i32, *const c_void, u64) -> i32;
-type FnSetTransform = unsafe extern "C" fn(i32, u64, *const CGAffineTransform, i32) -> i32;
-type FnGetTransform = unsafe extern "C" fn(i32, u64, *mut i32) -> CGAffineTransform;
-type FnSpaceType = unsafe extern "C" fn(i32, u64) -> i32;
-type FnActiveSpace = unsafe extern "C" fn(i32) -> u64;
-
-/// One display's Desktops: its uuid, the Space it shows, and each Space with its type.
-type DisplaySpaces = (String, u64, Vec<(u64, i64)>);
-
-/// The C functions, each `None` when SkyLight does not export it.
-struct Sky {
-    cid: i32,
-    copy_managed: Option<FnCopyByCid>,
-    copy_spaces: Option<FnCopySpaces>,
-    spaces_for_windows: Option<FnCopySpacesForWindows>,
-    create: Option<FnSpaceCreate>,
-    destroy: Option<FnSpaceDestroy>,
-    level: Option<FnSpaceLevel>,
-    show: Option<FnSpaceList>,
-    hide: Option<FnSpaceList>,
-    add_remove: Option<FnAddRemove>,
-    move_managed: Option<FnMoveManaged>,
-    set_transform: Option<FnSetTransform>,
-    get_transform: Option<FnGetTransform>,
-    space_type: Option<FnSpaceType>,
-    active: Option<FnActiveSpace>,
-    msg_send: *const c_void,
-    names: Vec<(&'static str, bool)>,
-}
-
-/// The function `name` from `handle`, as the type the caller names.
-///
-/// # Safety
-/// `F` must be an `extern "C"` function pointer type matching the symbol's real signature.
-unsafe fn load<F: Copy>(handle: *mut c_void, name: &'static CStr, names: &mut Vec<(&'static str, bool)>) -> Option<F> {
-    // SAFETY: `handle` is a live dlopen handle (or RTLD_DEFAULT) and `name` a C string.
-    let p = unsafe { libc::dlsym(handle, name.as_ptr()) };
-    names.push((name.to_str().unwrap_or("?"), !p.is_null()));
-    if p.is_null() {
-        return None;
-    }
-    // SAFETY: a non-null symbol address, read as the function pointer type the caller states
-    // (same size as a data pointer on Apple platforms).
-    Some(unsafe { std::mem::transmute_copy::<*mut c_void, F>(&p) })
-}
-
-impl Sky {
-    fn open() -> Result<Self, String> {
-        // SAFETY: a system framework path; RTLD_NOW resolves everything at load.
-        let h = unsafe { libc::dlopen(SKYLIGHT.as_ptr(), libc::RTLD_NOW) };
-        if h.is_null() {
-            return Err("SkyLight did not load".into());
-        }
-        let mut names = Vec::new();
-        // SAFETY (every `load` below): the types follow the public signatures listed in the
-        // module docs and the spike notes.
-        let main: Option<FnMain> = unsafe { load(h, c"SLSMainConnectionID", &mut names) };
-        let Some(main) = main else { return Err("SLSMainConnectionID is missing".into()) };
-        // SAFETY: no arguments; returns this process's connection id.
-        let cid = unsafe { main() };
-        // SAFETY: as above.
-        let msg_send = unsafe { libc::dlsym(libc::RTLD_DEFAULT, c"objc_msgSend".as_ptr()) };
-        Ok(Self {
-            cid,
-            copy_managed: unsafe { load(h, c"SLSCopyManagedDisplaySpaces", &mut names) },
-            copy_spaces: unsafe { load(h, c"SLSCopySpaces", &mut names) },
-            spaces_for_windows: unsafe { load(h, c"SLSCopySpacesForWindows", &mut names) },
-            create: unsafe { load(h, c"SLSSpaceCreate", &mut names) },
-            destroy: unsafe { load(h, c"SLSSpaceDestroy", &mut names) },
-            level: unsafe { load(h, c"SLSSpaceSetAbsoluteLevel", &mut names) },
-            show: unsafe { load(h, c"SLSShowSpaces", &mut names) },
-            hide: unsafe { load(h, c"SLSHideSpaces", &mut names) },
-            add_remove: unsafe { load(h, c"SLSSpaceAddWindowsAndRemoveFromSpaces", &mut names) },
-            move_managed: unsafe { load(h, c"SLSMoveWindowsToManagedSpace", &mut names) },
-            set_transform: unsafe { load(h, c"SLSSpaceSetTransform", &mut names) },
-            get_transform: unsafe { load(h, c"SLSSpaceGetTransform", &mut names) },
-            space_type: unsafe { load(h, c"SLSSpaceGetType", &mut names) },
-            active: unsafe { load(h, c"SLSGetActiveSpace", &mut names) },
-            msg_send,
-            names,
-        })
-    }
-
-    /// The Desktops per display: (display uuid, current Space, [(Space, type)]).
-    fn displays(&self) -> Vec<DisplaySpaces> {
-        let Some(f) = self.copy_managed else { return Vec::new() };
-        // SAFETY: returns a +1 CFArray of CFDictionary (or null).
-        let Some(list) = (unsafe { take_array(f(self.cid)) }) else { return Vec::new() };
-        let mut out = Vec::new();
-        for d in list.iter() {
-            let Ok(d) = d.downcast::<NSDictionary>() else { continue };
-            let uuid = get(&d, "Display Identifier").and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string()).unwrap_or_default();
-            let current = get(&d, "Current Space")
-                .and_then(|v| v.downcast::<NSDictionary>().ok())
-                .and_then(|c| number(&c, "id64"))
-                .unwrap_or(0);
-            let mut spaces = Vec::new();
-            if let Some(list) = get(&d, "Spaces").and_then(|v| v.downcast::<NSArray>().ok()) {
-                for s in list.iter() {
-                    if let Ok(s) = s.downcast::<NSDictionary>() {
-                        spaces.push((number(&s, "id64").unwrap_or(0), number(&s, "type").map_or(-1, |t| t as i64)));
-                    }
-                }
-            }
-            out.push((uuid, current, spaces));
-        }
-        out
-    }
-
-    /// The main display's Desktop shown and its uuid.
-    fn current(&self) -> (u64, String) {
-        self.displays().into_iter().next().map(|(u, c, _)| (c, u)).unwrap_or((0, String::new()))
-    }
-
-    /// Every Space the window server lists for this mask.
-    fn all_spaces(&self, mask: i32) -> Vec<u64> {
-        let Some(f) = self.copy_spaces else { return Vec::new() };
-        // SAFETY: returns a +1 CFArray of CFNumber (or null).
-        unsafe { take_array(f(self.cid, mask)) }.map(|a| numbers(&a)).unwrap_or_default()
-    }
-
-    /// The Spaces each window is on.
-    fn spaces_of(&self, ids: &[u32]) -> Vec<u64> {
-        let Some(f) = self.spaces_for_windows else { return Vec::new() };
-        let arr = wid_array(ids);
-        // SAFETY: a CFArray of window numbers; returns a +1 CFArray of CFNumber (or null).
-        unsafe { take_array(f(self.cid, ALL_SPACES_MASK, Retained::as_ptr(&arr).cast())) }.map(|a| numbers(&a)).unwrap_or_default()
-    }
-
-    fn space_type(&self, sid: u64) -> Option<i32> {
-        // SAFETY: plain query.
-        self.space_type.map(|f| unsafe { f(self.cid, sid) })
-    }
-
-    fn get_transform(&self, sid: u64) -> Option<[f64; 6]> {
-        let f = self.get_transform?;
-        let mut options = 0i32;
-        // SAFETY: returns the transform by value (indirect result); `options` is writable.
-        let t = unsafe { f(self.cid, sid, &mut options) };
-        Some([t.a, t.b, t.c, t.d, t.tx, t.ty])
-    }
-
-    /// The class `name`, when the runtime has it.
-    fn class(name: &CStr) -> Option<&'static AnyClass> {
-        AnyClass::get(name)
-    }
-
-    /// `[[cls alloc] <sel>]` with one object argument, performed and released; the result of
-    /// `-performWithWMBridgeDelegate` (null for an asynchronous operation).
-    fn bridged(&self, class: &CStr, build: impl FnOnce(*mut AnyObject) -> *mut AnyObject) -> Result<*mut AnyObject, String> {
-        let Some(cls) = Self::class(class) else { return Err(format!("{} is missing", class.to_str().unwrap_or("?"))) };
-        if self.msg_send.is_null() {
-            return Err("objc_msgSend is missing".into());
-        }
-        // SAFETY: `+alloc` on a class: (Class, SEL) -> id.
-        let alloc: unsafe extern "C" fn(*const AnyClass, Sel) -> *mut AnyObject = unsafe { std::mem::transmute(self.msg_send) };
-        // SAFETY: as typed above.
-        let raw = unsafe { alloc(cls, sel!(alloc)) };
-        let op = build(raw);
-        if op.is_null() {
-            return Err("the operation's initializer returned nil".into());
-        }
-        // SAFETY: `-performWithWMBridgeDelegate`: (id, SEL) -> id (void for the asynchronous
-        // ones, read as a null-or-garbage pointer we only use for the synchronous ones).
-        let perform: unsafe extern "C" fn(*mut AnyObject, Sel) -> *mut AnyObject = unsafe { std::mem::transmute(self.msg_send) };
-        // SAFETY: `op` is a live, initialized operation.
-        let result = unsafe { perform(op, sel!(performWithWMBridgeDelegate)) };
-        // SAFETY: `op` came from alloc/init (+1); this balances it.
-        drop(unsafe { Retained::from_raw(op) });
-        Ok(result)
-    }
-
-    fn send_obj(&self) -> unsafe extern "C" fn(*mut AnyObject, Sel, *const c_void) -> *mut AnyObject {
-        // SAFETY: (id, SEL, id) -> id.
-        unsafe { std::mem::transmute(self.msg_send) }
-    }
-
-    fn create(&self, route: Route, managed: bool) -> Result<u64, String> {
-        match route {
-            Route::Classic => {
-                let f = self.create.ok_or("SLSSpaceCreate is missing")?;
-                // SAFETY: (cid, 1, 0) as SketchyBar and sunlight call it.
-                Ok(unsafe { f(self.cid, 1, 0) })
-            }
-            Route::Bridged => autoreleasepool(|_| {
-                let (options, values): (u32, Retained<NSDictionary<NSString, AnyObject>>) = if managed {
-                    let uuid = NSString::from_str(&self.current().1);
-                    let zero = NSNumber::new_i32(0);
-                    let keys = [&*NSString::from_str("type"), &*NSString::from_str("Display Identifier")];
-                    let vals: [&AnyObject; 2] = [&zero, &uuid];
-                    (0, NSDictionary::from_slices(&keys, &vals))
-                } else {
-                    (1, NSDictionary::new())
-                };
-                let ms = self.msg_send;
-                let result = self.bridged(c"SLSBridgedSpaceCreateOperation", |raw| {
-                    // SAFETY: `-initWithOptions:values:` (id, SEL, uint32, id) -> id.
-                    let init: unsafe extern "C" fn(*mut AnyObject, Sel, u32, *const c_void) -> *mut AnyObject =
-                        unsafe { std::mem::transmute(ms) };
-                    // SAFETY: as typed; `values` lives across the call.
-                    unsafe { init(raw, sel!(initWithOptions:values:), options, Retained::as_ptr(&values).cast()) }
-                })?;
-                if result.is_null() {
-                    return Err("the create operation returned nil".into());
-                }
-                // SAFETY: `-spaceID` (id, SEL) -> uint64 on SLSBridgedWindowManagementOperationSpaceIDResult.
-                let space_id: unsafe extern "C" fn(*mut AnyObject, Sel) -> u64 = unsafe { std::mem::transmute(ms) };
-                // SAFETY: `result` is the live result object (autoreleased, inside this pool).
-                let responds = unsafe { (*result).class().responds_to(sel!(spaceID)) };
-                if !responds {
-                    return Err(format!("the create operation returned a {}", unsafe { (*result).class().name().to_string_lossy() }));
-                }
-                // SAFETY: checked above that it answers -spaceID.
-                Ok(unsafe { space_id(result, sel!(spaceID)) })
-            }),
-        }
-    }
-
-    fn destroy(&self, route: Route, sid: u64) -> Result<i32, String> {
-        match route {
-            Route::Classic => {
-                let f = self.destroy.ok_or("SLSSpaceDestroy is missing")?;
-                // SAFETY: (cid, sid).
-                Ok(unsafe { f(self.cid, sid) })
-            }
-            Route::Bridged => autoreleasepool(|_| {
-                let ms = self.msg_send;
-                self.bridged(c"SLSBridgedSpaceDestroyOperation", |raw| {
-                    // SAFETY: `-initWithSpaceID:` (id, SEL, uint64) -> id.
-                    let init: unsafe extern "C" fn(*mut AnyObject, Sel, u64) -> *mut AnyObject = unsafe { std::mem::transmute(ms) };
-                    // SAFETY: as typed.
-                    unsafe { init(raw, sel!(initWithSpaceID:), sid) }
-                })
-                .map(|_| 0)
-            }),
-        }
-    }
-
-    fn set_level(&self, route: Route, sid: u64, level: i32) -> Result<i32, String> {
-        match route {
-            Route::Classic => {
-                let f = self.level.ok_or("SLSSpaceSetAbsoluteLevel is missing")?;
-                // SAFETY: (cid, sid, level).
-                Ok(unsafe { f(self.cid, sid, level) })
-            }
-            Route::Bridged => autoreleasepool(|_| {
-                let ms = self.msg_send;
-                self.bridged(c"SLSBridgedSpaceSetAbsoluteLevelOperation", |raw| {
-                    // SAFETY: `-initWithSpaceID:level:` (id, SEL, uint64, int) -> id.
-                    let init: unsafe extern "C" fn(*mut AnyObject, Sel, u64, i32) -> *mut AnyObject = unsafe { std::mem::transmute(ms) };
-                    // SAFETY: as typed.
-                    unsafe { init(raw, sel!(initWithSpaceID:level:), sid, level) }
-                })
-                .map(|_| 0)
-            }),
-        }
-    }
-
-    fn show_hide(&self, route: Route, sids: &[u64], show: bool) -> Result<i32, String> {
-        let arr = sid_array(sids);
-        match route {
-            Route::Classic => {
-                let f = if show { self.show } else { self.hide }.ok_or("SLSShowSpaces/SLSHideSpaces is missing")?;
-                // SAFETY: (cid, CFArray of Space ids).
-                Ok(unsafe { f(self.cid, Retained::as_ptr(&arr).cast()) })
-            }
-            Route::Bridged => autoreleasepool(|_| {
-                let class = if show { c"SLSBridgedShowSpacesOperation" } else { c"SLSBridgedHideSpacesOperation" };
-                let send = self.send_obj();
-                self.bridged(class, |raw| {
-                    // SAFETY: `-initWithSpaces:` (id, SEL, NSArray) -> id; `arr` outlives it.
-                    unsafe { send(raw, sel!(initWithSpaces:), Retained::as_ptr(&arr).cast()) }
-                })
-                .map(|_| 0)
-            }),
-        }
-    }
-
-    /// The windows into Space `sid`, out of every other Space.
-    fn add_remove(&self, route: Route, sid: u64, ids: &[u32]) -> Result<i32, String> {
-        let arr = wid_array(ids);
-        match route {
-            Route::Classic => {
-                let f = self.add_remove.ok_or("SLSSpaceAddWindowsAndRemoveFromSpaces is missing")?;
-                // SAFETY: (cid, sid, CFArray of window ids, 7).
-                Ok(unsafe { f(self.cid, sid, Retained::as_ptr(&arr).cast(), ADD_REMOVE_OPTIONS) })
-            }
-            Route::Bridged => autoreleasepool(|_| {
-                let ms = self.msg_send;
-                self.bridged(c"SLSBridgedSpaceAddWindowsAndRemoveFromSpacesOperation", |raw| {
-                    // SAFETY: `-initWithSpaceID:windows:options:` (id, SEL, uint64, NSArray, uint32) -> id.
-                    let init: unsafe extern "C" fn(*mut AnyObject, Sel, u64, *const c_void, u32) -> *mut AnyObject =
-                        unsafe { std::mem::transmute(ms) };
-                    // SAFETY: as typed; `arr` outlives the call.
-                    unsafe { init(raw, sel!(initWithSpaceID:windows:options:), sid, Retained::as_ptr(&arr).cast(), ADD_REMOVE_OPTIONS as u32) }
-                })
-                .map(|_| 0)
-            }),
-        }
-    }
-
-    /// The windows onto the managed Space (a Desktop) `sid`.
-    fn move_managed(&self, route: Route, ids: &[u32], sid: u64) -> Result<i32, String> {
-        let arr = wid_array(ids);
-        match route {
-            Route::Classic => {
-                let f = self.move_managed.ok_or("SLSMoveWindowsToManagedSpace is missing")?;
-                // SAFETY: (cid, CFArray of window ids, sid).
-                Ok(unsafe { f(self.cid, Retained::as_ptr(&arr).cast(), sid) })
-            }
-            Route::Bridged => autoreleasepool(|_| {
-                let ms = self.msg_send;
-                self.bridged(c"SLSBridgedMoveWindowsToManagedSpaceOperation", |raw| {
-                    // SAFETY: `-initWithWindows:spaceID:` (id, SEL, NSArray, uint64) -> id.
-                    let init: unsafe extern "C" fn(*mut AnyObject, Sel, *const c_void, u64) -> *mut AnyObject =
-                        unsafe { std::mem::transmute(ms) };
-                    // SAFETY: as typed; `arr` outlives the call.
-                    unsafe { init(raw, sel!(initWithWindows:spaceID:), Retained::as_ptr(&arr).cast(), sid) }
-                })
-                .map(|_| 0)
-            }),
-        }
-    }
-
-    fn set_transform(&self, route: Route, sid: u64, t: CGAffineTransform) -> Result<i32, String> {
-        match route {
-            Route::Classic => {
-                let f = self.set_transform.ok_or("SLSSpaceSetTransform is missing")?;
-                // SAFETY: (cid, sid, &transform, options 0); on arm64 a 48-byte struct passes by
-                // reference either way.
-                Ok(unsafe { f(self.cid, sid, &t, 0) })
-            }
-            Route::Bridged => autoreleasepool(|_| {
-                let ms = self.msg_send;
-                self.bridged(c"SLSBridgedSpaceSetTransformOperation", |raw| {
-                    // SAFETY: `-initWithSpaceID:transform:options:` (id, SEL, uint64,
-                    // CGAffineTransform, uint32) -> id.
-                    let init: unsafe extern "C" fn(*mut AnyObject, Sel, u64, CGAffineTransform, u32) -> *mut AnyObject =
-                        unsafe { std::mem::transmute(ms) };
-                    // SAFETY: as typed.
-                    unsafe { init(raw, sel!(initWithSpaceID:transform:options:), sid, t, 0) }
-                })
-                .map(|_| 0)
-            }),
-        }
-    }
-}
-
-/// `dict[key]`.
-fn get(dict: &NSDictionary, key: &str) -> Option<Retained<AnyObject>> {
-    let k = NSString::from_str(key);
-    dict.objectForKey(&k)
-}
-
-/// `dict[key]` as an unsigned number.
-fn number(dict: &NSDictionary, key: &str) -> Option<u64> {
-    get(dict, key).and_then(|v| v.downcast::<NSNumber>().ok()).map(|n| n.as_u64())
-}
-
-/// Takes a +1 CFArray as an `NSArray` (toll-free bridged).
-///
-/// # Safety
-/// `p` must be null or a +1 reference to a CFArray.
-unsafe fn take_array(p: *mut c_void) -> Option<Retained<NSArray>> {
-    // SAFETY: the caller's contract; CFArray and NSArray are toll-free bridged.
-    unsafe { Retained::from_raw(p.cast::<NSArray>()) }
-}
-
-fn numbers(a: &NSArray) -> Vec<u64> {
-    a.iter().filter_map(|v| v.downcast::<NSNumber>().ok()).map(|n| n.as_u64()).collect()
-}
-
-fn wid_array(ids: &[u32]) -> Retained<NSArray<NSNumber>> {
-    NSArray::from_retained_slice(&ids.iter().map(|&i| NSNumber::new_i32(i as i32)).collect::<Vec<_>>())
-}
-
-fn sid_array(ids: &[u64]) -> Retained<NSArray<NSNumber>> {
-    NSArray::from_retained_slice(&ids.iter().map(|&i| NSNumber::new_u64(i)).collect::<Vec<_>>())
-}
-
-/// Which family of calls.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Route {
-    /// `SLSSpaceCreate`, `SLSShowSpaces`, … (C functions).
-    Classic,
-    /// `SLSBridged…Operation` classes through `-performWithWMBridgeDelegate`.
-    Bridged,
-}
-
-impl Route {
-    fn name(self) -> &'static str {
-        match self {
-            Self::Classic => "classic",
-            Self::Bridged => "bridged",
-        }
-    }
-}
 
 /// Parsed options shared by the subcommands.
 struct Opts {
@@ -584,7 +170,7 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|place-new|watch|key|dock-click|cleanup …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|place-new|watch|engine|key|dock-click|cleanup …");
     };
     let o = match parse(rest) {
         Ok(o) => o,
@@ -612,6 +198,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "dock-click" => need_bundle().and_then(|b| dock_click(&b)),
         "cleanup" => Ok(cleanup(&sky, o.bundle.as_deref())),
         "space-op" => space_op(&sky, &o),
+        "engine" => need_bundle().and_then(|b| engine_rounds(&sky, &b, &o)),
         _ => Err(format!("unknown subcommand {cmd}")),
     };
     match result {
@@ -626,6 +213,52 @@ pub fn run(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The Spaces engine driven as the app drives it, off the main thread (see the module docs).
+fn engine_rounds(sky: &Sky, bundle: &str, o: &Opts) -> Result<Value, String> {
+    let pids = fixture_pids(bundle);
+    let ids = ids_of(&fixture_windows(sky, &pids));
+    if ids.is_empty() {
+        return Err("the fixture has no window".into());
+    }
+    let (rounds, hold) = (o.rounds, Duration::from_millis(o.hold_ms));
+    let worker = std::thread::spawn(move || {
+        let engine = super::spaces::engine::shared();
+        let mut out = Vec::new();
+        for round in 0..rounds {
+            let t0 = Instant::now();
+            let hidden: Vec<bool> = ids.iter().map(|id| engine.hide_window(*id)).collect();
+            let hide_ms = ms(t0);
+            let (off_ms, _) = wait_onscreen(&ids, false, Duration::from_millis(500));
+            let here = engine.present_now().len();
+            std::thread::sleep(hold);
+            let t1 = Instant::now();
+            let shown: Vec<bool> = ids.iter().map(|id| engine.show_window(*id)).collect();
+            let show_ms = ms(t1);
+            let (on_ms, _) = wait_onscreen(&ids, true, Duration::from_millis(500));
+            let spaces: Vec<Vec<u64>> = ids.iter().map(|id| engine.spaces_of(*id)).collect();
+            std::thread::sleep(hold);
+            let later: Vec<Vec<u64>> = ids.iter().map(|id| engine.spaces_of(*id)).collect();
+            out.push(json!({ "round": round, "spaces_shown": spaces, "spaces_later": later, "hidden": hidden, "hide_ms": hide_ms, "off_screen_ms": off_ms, "present": here, "shown": shown, "show_ms": show_ms, "on_screen_ms": on_ms }));
+        }
+        // Left hidden once more, for the bring-back to find by the window server's list.
+        let left: Vec<bool> = ids.iter().map(|id| engine.hide_window(*id)).collect();
+        let swept = engine.sweep("probe", true);
+        let (back_ms, list) = wait_onscreen(&ids, true, Duration::from_millis(500));
+        json!({
+            "rounds": out,
+            "left_hidden": left,
+            "sweep": { "checked": swept.checked, "restored": swept.restored, "failed": swept.failed, "on_screen_ms": back_ms },
+            "windows": frames(&list),
+            "engine": engine.status(),
+        })
+    });
+    // The main run loop turns meanwhile, as the app's does.
+    while !worker.is_finished() {
+        pump(Duration::from_millis(5));
+    }
+    worker.join().map_err(|_| "the engine's thread panicked".to_string())
 }
 
 /// The fixture's processes.

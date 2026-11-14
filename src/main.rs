@@ -1050,13 +1050,18 @@ mod app {
             .flat_map(|bundle| NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle)))
             .map(|a| a.processIdentifier())
             .collect();
+        // Under the Spaces engine's test switch each window also says whether the window
+        // server lists it in a stage Space (`staged`); the Corner engine's output is as ever.
+        let spaces = stage_manager::platform::spaces::engine::from_env() == Some(stage_manager::platform::window_engine::EngineKind::Spaces);
         let look = || {
             let list = windows::list_windows();
             let z = windows::z_order(&list);
-            list.iter()
-                .filter(|w| all || pids.contains(&w.pid))
+            let wanted: Vec<&windows::CgWindow> = list.iter().filter(|w| all || pids.contains(&w.pid)).collect();
+            let staged = if spaces { stage_manager::platform::spaces::engine::staged(&wanted.iter().map(|w| w.id).collect::<Vec<_>>()) } else { Default::default() };
+            wanted
+                .iter()
                 .map(|w| {
-                    json!({
+                    let mut out = json!({
                         "id": w.id,
                         "pid": w.pid,
                         "layer": w.layer,
@@ -1064,7 +1069,11 @@ mod app {
                         "alpha": w.alpha,
                         "bounds": w.bounds,
                         "z": z.get(&w.id),
-                    })
+                    });
+                    if spaces {
+                        out["staged"] = json!(staged.contains(&w.id));
+                    }
+                    out
                 })
                 .collect::<Vec<_>>()
         };

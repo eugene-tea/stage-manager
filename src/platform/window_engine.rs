@@ -4,7 +4,7 @@
 //!
 //! One strategy, [`WindowEngine`], with exactly two implementations planned: the Corner
 //! engine ([`super::corner::engine::CornerEngine`], today's Accessibility park corner) and the
-//! Spaces engine (1.9, after its spike). Shared code asks the engine and never which one
+//! Spaces engine ([`super::spaces::engine::SpacesEngine`], 1.9: a test switch only for now). Shared code asks the engine and never which one
 //! runs; what only one engine needs stays inside it.
 //!
 //! **Threads.** The engine is one value for the whole process ([`current`]): the WM thread
@@ -18,6 +18,7 @@
 //! only, inside the controller's write (the stale-handle retry, the echo and failure
 //! bookkeeping are the controller's, the same for every engine).
 
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::ax::{AxElement, AxResult};
@@ -114,12 +115,31 @@ pub trait WindowEngine: Send + Sync {
     /// registered frame, else its saved frame, else centered. Also the apps that did not
     /// answer, to be scanned again.
     fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>);
+
+    /// The windows this engine keeps hidden on a Desktop that shows now where the window
+    /// server lists them off screen: present on their Desktop all the same, for whoever
+    /// reads presence off the list (a window gone from the screen left its Desktop, a
+    /// Desktop is recognized by its windows). The Corner engine: none, its hidden windows
+    /// are listed on screen, in the corner.
+    fn present_off_screen(&self) -> HashSet<u32>;
 }
 
 static ENGINE: OnceLock<RwLock<Arc<dyn WindowEngine>>> = OnceLock::new();
 
 fn slot() -> &'static RwLock<Arc<dyn WindowEngine>> {
-    ENGINE.get_or_init(|| RwLock::new(Arc::new(super::corner::engine::CornerEngine)))
+    ENGINE.get_or_init(|| RwLock::new(first()))
+}
+
+/// The engine a process starts with: the Corner engine, unless a test run asks for another
+/// ([`super::spaces::engine::from_env`]; said in the log, the default is not).
+fn first() -> Arc<dyn WindowEngine> {
+    match super::spaces::engine::from_env() {
+        Some(kind) => {
+            tracing::info!(engine = kind.name(), "window engine: chosen by STAGE_MANAGER_ENGINE (a test run)");
+            of(kind)
+        }
+        None => Arc::new(super::corner::engine::CornerEngine),
+    }
 }
 
 /// The engine this process runs: the Corner engine until another is installed.
@@ -135,12 +155,7 @@ pub fn current() -> Arc<dyn WindowEngine> {
 pub fn of(kind: EngineKind) -> Arc<dyn WindowEngine> {
     match kind {
         EngineKind::Corner => Arc::new(super::corner::engine::CornerEngine),
-        // The Spaces engine's platform half is not built yet; only its pure half and the
-        // tests' fake desk run it. Nothing writes a parked file naming it.
-        EngineKind::Spaces => {
-            tracing::warn!("window engine: the Spaces engine is not built yet; the Corner engine runs");
-            Arc::new(super::corner::engine::CornerEngine)
-        }
+        EngineKind::Spaces => super::spaces::engine::shared(),
     }
 }
 

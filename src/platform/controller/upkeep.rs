@@ -28,6 +28,17 @@ use crate::platform::window_engine::EngineKind;
 use crate::platform::windows;
 
 impl Controller {
+    /// The windows present on a Desktop that shows, as `list` (the window server's) and the
+    /// engine say: those listed on screen, and those the engine hides where the list shows
+    /// them off screen ([`WindowEngine::present_off_screen`](crate::platform::window_engine::WindowEngine::present_off_screen)).
+    /// What every count of a Desktop's windows reads: a window gone from it left its
+    /// Desktop, a hidden one did not.
+    pub(super) fn present_in(&self, list: &[windows::CgWindow]) -> HashSet<u32> {
+        let mut present = super::on_screen(list);
+        present.extend(self.engine.present_off_screen());
+        present
+    }
+
     // ── What is hidden, for whoever watches it ──────────────────────────────────────────
 
     /// The hidden windows, where they wait, or what a press there may reach changed: after
@@ -95,7 +106,10 @@ impl Controller {
     pub(super) fn upkeep_tick(&mut self, ob: &mut Observer) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_tick(ob),
-            EngineKind::Spaces => {},
+            EngineKind::Spaces => {
+                let _ = ob;
+                self.spaces_tick();
+            }
         }
     }
 
@@ -128,11 +142,13 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.restore_failed(id, entry),
             EngineKind::Spaces => {
-                // The engine's show brings the window out of its stage Space before it asks
-                // the app for the frame, so a show that failed left it on screen, where it
-                // was: nothing is owed for safety, and nothing is kept registered.
+                // The engine brings the window out of its stage Space before it asks the app
+                // for the frame. Still in the Space: the engine owes the show and the tick
+                // tries it again ([`Self::retry_shows`]). Out of it: the window shows where
+                // it was, the frame not taken; nothing is owed and nothing kept registered.
                 let _ = entry;
-                tracing::warn!(id, "a shown window did not take its frame: it shows where it was");
+                let owed = crate::platform::spaces::engine::shared().owed().contains(&id);
+                tracing::warn!(id, owed, "a show failed: still hidden and tried again when owed, else shown where it was");
             }
         }
     }
@@ -143,10 +159,10 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.park_failed(id, now),
             EngineKind::Spaces => {
-                // The window is still on its Desktop. The tick's look puts it into its
-                // stage's Space again ([`Self::upkeep_tick`]).
+                // The window is still on its Desktop, the model counts it hidden: the
+                // tick's look hides it again ([`Self::spaces_tick`]).
                 let _ = now;
-                tracing::warn!(id, "a window did not go into its stage's Space: tried again by the tick");
+                tracing::info!(id, "hide failed: the window is hidden again by the tick");
             }
         }
     }
@@ -181,9 +197,10 @@ impl Controller {
             EngineKind::Corner => self.watch_forgotten(ob, kept, why),
             EngineKind::Spaces => {
                 // Nothing but the engine brings a window out of a stage Space, so a window
-                // the model no longer counts must not stay in one: the engine's platform
-                // half lets them out here.
-                let _ = (ob, kept, why);
+                // the model no longer counts must not stay in one: let out, where it was.
+                let _ = (ob, why);
+                let ids: Vec<u32> = kept.into_iter().map(|(id, _)| id).collect();
+                crate::platform::spaces::engine::shared().release(&ids, "the model let them go");
             }
         }
     }
@@ -205,7 +222,10 @@ impl Controller {
     pub(super) fn retry_shows(&mut self, ob: &Observer, force: bool) {
         match self.engine.kind() {
             EngineKind::Corner => self.retry_unrestored(ob, force),
-            EngineKind::Spaces => {},
+            EngineKind::Spaces => {
+                let _ = (ob, force);
+                crate::platform::spaces::engine::shared().retry_owed();
+            }
         }
     }
 
@@ -213,7 +233,7 @@ impl Controller {
     pub(super) fn shows_owed(&self) -> usize {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.unrestored.len(),
-            EngineKind::Spaces => 0,
+            EngineKind::Spaces => crate::platform::spaces::engine::shared().owed().len(),
         }
     }
 
@@ -221,7 +241,7 @@ impl Controller {
     pub fn shows_owed_ids(&self) -> BTreeSet<u32> {
         match self.engine.kind() {
             EngineKind::Corner => self.unrestored_ids(),
-            EngineKind::Spaces => BTreeSet::new(),
+            EngineKind::Spaces => crate::platform::spaces::engine::shared().owed(),
         }
     }
 
@@ -231,7 +251,10 @@ impl Controller {
     pub fn account_shows_owed(&mut self, ob: &Observer) -> usize {
         match self.engine.kind() {
             EngineKind::Corner => self.account_unrestored(ob),
-            EngineKind::Spaces => 0,
+            EngineKind::Spaces => {
+                let _ = ob;
+                crate::platform::spaces::engine::shared().retry_owed().len()
+            }
         }
     }
 
@@ -270,12 +293,24 @@ impl Controller {
 
     // ── `ctl state` ─────────────────────────────────────────────────────────────────────
 
+    /// `ctl state`'s `engine`: which engine runs (`kind`), and what it keeps and counts.
+    pub(super) fn status_engine(&self) -> Value {
+        match self.engine.kind() {
+            EngineKind::Corner => json!({ "kind": EngineKind::Corner.name() }),
+            EngineKind::Spaces => {
+                let mut status = crate::platform::spaces::engine::shared().status();
+                status["kind"] = json!(EngineKind::Spaces.name());
+                status
+            }
+        }
+    }
+
     /// `ctl state`'s `strays`: the hidden windows the screen contradicts. The Corner engine:
     /// the park reconcile's ([`Self::strays_status`]).
     pub(super) fn status_strays(&self) -> Vec<Value> {
         match self.engine.kind() {
             EngineKind::Corner => self.strays_status(),
-            EngineKind::Spaces => Vec::new(),
+            EngineKind::Spaces => self.spaces_strays_status(),
         }
     }
 

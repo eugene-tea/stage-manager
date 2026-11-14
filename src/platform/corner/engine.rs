@@ -95,6 +95,11 @@ impl WindowEngine for CornerEngine {
     fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
         safety::recovery_scan_with(why, scope)
     }
+
+    /// None: a parked window is listed on screen, in the corner.
+    fn present_off_screen(&self) -> std::collections::HashSet<u32> {
+        std::collections::HashSet::new()
+    }
 }
 
 #[cfg(test)]
