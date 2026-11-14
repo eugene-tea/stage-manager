@@ -47,6 +47,7 @@ pub mod shadow_probe;
 pub mod shadow_profile;
 pub mod sliver_tap;
 pub mod space_keys;
+pub mod spaces_probe;
 pub mod update_check;
 pub mod updater;
 pub mod wallpaper;

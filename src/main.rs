@@ -44,6 +44,10 @@
 //!   overlay draws it (`platform::shadow_profile`); `--appearance dark|light|system` draws
 //!   the probe's windows in that appearance, `--background GREY` fills them with a grey,
 //!   `--corner PT` draws the comparison at that corner radius.
+//! - `stage-manager probe-spaces <read|cycle|hide|transform|place-new|watch|key|dock-click|cleanup>
+//!   [fixture bundle id] [--route bridged|classic]` runs the Spaces spike on a fixture's
+//!   windows (`platform::spaces_probe`): a window-server Space made, the windows hidden in it
+//!   and shown, its transform stepped, timed to the window list.
 //! - `stage-manager debug-post-space left|right [numpad]` (test only, `STAGE_MANAGER_TEST=1`,
 //!   launched through LaunchServices so it has the app's Accessibility) types the Desktop
 //!   switch shortcut once and exits: the Spaces check's way to switch while the app is down.
@@ -85,6 +89,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-shadow") => stage_manager::platform::shadow_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
+        Some("probe-spaces") => stage_manager::platform::spaces_probe::run(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("probe-icons") => stage_manager::ui::app_icons::probe(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
@@ -96,7 +102,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>...|--all | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | probe-icons [--for S] | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>...|--all | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | probe-icons [--for S] | probe-spaces <read|cycle|hide|transform|place-new|watch|key|dock-click|cleanup> [fixture-bundle-id] [--route bridged|classic] | --version]"
             );
             ExitCode::from(2)
         }

@@ -65,6 +65,12 @@ pub fn list_windows() -> Vec<CgWindow> {
     out
 }
 
+/// Every window, on screen or not, on any Space (desktop elements excluded), in the window
+/// server's order: one query (the Spaces probe's watch for windows that are not shown yet).
+pub fn every_window() -> Vec<CgWindow> {
+    query(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements)
+}
+
 /// The on-screen windows only (desktop elements excluded), front to back: one query.
 pub fn on_screen() -> Vec<CgWindow> {
     query(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements)
