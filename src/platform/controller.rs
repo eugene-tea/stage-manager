@@ -492,8 +492,17 @@ pub fn wallpaper_click(s: &NativeSettings, clicks: i64) -> WallpaperClick {
 /// focus noted a focused-window change in Mail, no activation), and the batch raises the key
 /// window and its children last ([`crate::engine::model::Model::show_stage`]), right before
 /// the focus, which raises the key again: the activated window ends in front.
-fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>) -> (Vec<Action>, Vec<Action>) {
-    let focus: Vec<Action> = actions.iter().copied().filter(|a| matches!(a, Action::Focus { .. })).collect();
+///
+/// A focus on an arriving window the engine says must be shown first (`waits`,
+/// [`WindowEngine::focus_waits_for_show`]: under the Spaces engine it is on no Desktop until
+/// shown, and its app activated now could take macOS to another Desktop) runs only with the
+/// arrivals.
+fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>, waits: impl Fn(WindowId) -> bool) -> (Vec<Action>, Vec<Action>) {
+    let focus: Vec<Action> = actions
+        .iter()
+        .copied()
+        .filter(|a| matches!(a, Action::Focus { id } if !(arriving.contains(&id.0) && waits(*id))))
+        .collect();
     let (later, mut now): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| match a {
         Action::SetFrame { id, .. } => arriving.contains(&id.0),
         Action::Raise { .. } | Action::Focus { .. } => true,
@@ -2006,9 +2015,12 @@ impl Controller {
             self.note_parked();
             return failed;
         }
-        let (now, later) = split_covered(actions, &arriving);
+        let engine = self.engine.clone();
+        let (now, later) = split_covered(actions, &arriving, |w| engine.focus_waits_for_show(w));
         if let Some(Action::Focus { id: key }) = now.iter().rev().find(|a| matches!(a, Action::Focus { .. })) {
             tracing::debug!(id, key = key.0, "the keyboard goes to the new stage now; its windows arrive behind their snapshots");
+        } else if let Some(Action::Focus { id: key }) = later.iter().rev().find(|a| matches!(a, Action::Focus { .. })) {
+            tracing::debug!(id, key = key.0, "the keyboard goes to the new stage with its windows: hidden off its Desktop, the window's app would take macOS elsewhere");
         }
         let entries = later
             .iter()
@@ -6890,7 +6902,7 @@ mod tests {
             Action::StateChanged,
         ];
         let arriving: HashSet<u32> = [3, 4].into();
-        let (now, later) = split_covered(batch, &arriving);
+        let (now, later) = split_covered(batch, &arriving, |_| false);
         assert_eq!(ids(&now), ["park 1", "park 2", "state", "focus 3"], "the keyboard goes to the new stage with the parks");
         assert_eq!(
             ids(&later),
@@ -6898,9 +6910,32 @@ mod tests {
             "the windows arrive behind their snapshots, the key window in front last"
         );
         // A batch without a focus focuses nothing early.
-        let (now, later) = split_covered(vec![Action::SetFrame { id: WindowId(3), frame: r }], &arriving);
+        let (now, later) = split_covered(vec![Action::SetFrame { id: WindowId(3), frame: r }], &arriving, |_| false);
         assert!(now.is_empty());
         assert_eq!(ids(&later), ["frame 3"]);
+    }
+
+    /// Live 11-14 (the Spaces engine, two Desktops): a card click on Desktop 2 for the stage of
+    /// an app with windows on Desktop 1 focused its window while it was still in its stage
+    /// Space; macOS took the activation to Desktop 1 and back. A focus the engine says must
+    /// wait goes with the arrivals only; one on a window already shown still goes at once.
+    #[test]
+    fn a_focus_on_a_window_hidden_off_its_desktop_waits_for_its_show() {
+        let r = Rect::new(100.0, 100.0, 400.0, 300.0);
+        let batch = vec![
+            Action::Hide { id: WindowId(1) },
+            Action::SetFrame { id: WindowId(3), frame: r },
+            Action::Raise { id: WindowId(3) },
+            Action::Focus { id: WindowId(3) },
+            Action::StateChanged,
+        ];
+        let arriving: HashSet<u32> = [3].into();
+        let (now, later) = split_covered(batch.clone(), &arriving, |w| w == WindowId(3));
+        assert_eq!(ids(&now), ["park 1", "state"], "nothing activates the app before its window is on the Desktop");
+        assert_eq!(ids(&later), ["frame 3", "raise 3", "focus 3"], "the focus comes once the window is shown");
+        // A focus on a window that does not arrive (shown already) is not held.
+        let (now, _) = split_covered(batch, &HashSet::new(), |_| true);
+        assert_eq!(ids(&now).last().map(String::as_str), Some("focus 3"));
     }
 
     /// A switch to stage {3, 4} from {1, 2}, as `Model::switch_to` gives it.
@@ -6959,7 +6994,7 @@ mod tests {
         let run = activation_run(true, 10, &batch, pid_of);
         assert_eq!(run.focus, Some(WindowId(1)), "the keyboard goes to the clicked app's window before the motion");
         let arriving: HashSet<u32> = [1, 2, 4].into();
-        let (now, later) = split_covered(batch, &arriving);
+        let (now, later) = split_covered(batch, &arriving, |_| false);
         assert_eq!(ids(&now).last().map(String::as_str), Some("focus 1"));
         let tail: Vec<String> = ids(&later).into_iter().filter(|a| a.starts_with("raise") || a.starts_with("focus")).collect();
         assert_eq!(tail, ["raise 2", "raise 1", "raise 4", "focus 1"], "the other app's window raised first, the key and its sheet last");

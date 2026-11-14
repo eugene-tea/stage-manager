@@ -266,6 +266,17 @@ def guard():
         raise Interrupted(WATCH.reason)
 
 
+def desktop_markers(s, desk):
+    """The windows that tell Desktop `desk` is shown: the fixture windows on screen now and
+    every managed window the app places on that Desktop. Under the Spaces engine a window of
+    an inactive stage is off screen (in its stage Space) yet the Desktop's all the same, and
+    shows when its stage does (an arrival for it): left out, Desktop 1 with Alpha's stage in
+    front showed "none of Desktop 1's windows" (11-14). Under Corner a parked window is on
+    screen in the corner, so the two lists agree."""
+    on = {w["id"] for w in probe_all() if w["onscreen"]}
+    return sorted(on | {w["id"] for w in s["windows"] if w.get("space") == desk})
+
+
 def probe_all():
     """Every fixture window as the window server lists it, in one probe."""
     r = ts.run([ts.BIN, "probe-windows", *ts.ALL_IDS], timeout=10)
@@ -730,7 +741,7 @@ def run():
         sp = space_now()
         if not sp or sp["fullscreen"]:
             raise Abort(f"the app does not see a Desktop at the start ({sp})")
-        WATCH.markers("d1", [w["id"] for w in probe_all() if w["onscreen"]])
+        WATCH.markers("d1", desktop_markers(s, d1))
         WATCH.desk("d1")
     check(len(s["stages"]) == 2, f"two stages on Desktop 1 ({ts.stage_titles(s)})")
     # The Fixture stage active, so Alpha 1 waits parked in its own stage (for the activation
@@ -754,7 +765,7 @@ def run():
     d2 = s["space"]
     if AUTO:
         IDS["d2"] = d2
-        WATCH.markers("d2", [w["id"] for w in probe_all() if w["onscreen"] and w["id"] not in WATCH.ids["d1"]])
+        WATCH.markers("d2", [i for i in desktop_markers(s, d2) if i not in WATCH.ids["d1"]])
     check(d2 != d1, f"Desktop 2 is its own Space ({d1} then {d2})")
     check(titles_on_space(s, d2) == ["Bravo 1", "Fixture 3"], f"Desktop 2's stages hold only its windows: {titles_on_space(s, d2)}")
     check(set(titles_on_space(s, d1)) == {"Alpha 1", "Fixture 1", "Fixture 2"}, "Desktop 1's stages are untouched")

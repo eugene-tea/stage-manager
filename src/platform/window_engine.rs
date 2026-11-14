@@ -95,6 +95,17 @@ pub trait WindowEngine: Send + Sync {
         self.is_hidden(d, listed)
     }
 
+    /// True when window `id`'s focus must wait until it is shown: focused (made main, its
+    /// app frontmost) while this engine hides it, its app could take macOS to another
+    /// Desktop. macOS activates an app on a Desktop where it has a window; a window kept off
+    /// its Desktop is none, so an app whose other windows live on another Desktop is followed
+    /// there (live 11-14, the Spaces engine: a card click on Desktop 2 for a stage of an app
+    /// with windows on Desktop 1 showed Desktop 1 for 300 ms). The Corner engine: never, a
+    /// parked window stays on its Desktop, in the corner.
+    fn focus_waits_for_show(&self, _id: WindowId) -> bool {
+        false
+    }
+
     /// True when a window at `frame` is still where this engine hid it, out of anyone's
     /// reach, as far as what is `known` of the window allows; `displays`: the screens as the
     /// safety paths see them now. What the guardian's watch (and the app's watch of the

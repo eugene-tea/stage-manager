@@ -881,6 +881,11 @@ impl WindowEngine for SpacesEngine {
         self.holds(id.0)
     }
 
+    /// While the engine holds it: a window in a stage Space is on no Desktop for macOS.
+    fn focus_waits_for_show(&self, id: WindowId) -> bool {
+        self.holds(id.0)
+    }
+
     /// Never: no frame says a window is in a stage Space, and the Spaces end with the app.
     fn stranded(&self, frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
         EngineKind::Spaces.stranded(frame, displays, known)
