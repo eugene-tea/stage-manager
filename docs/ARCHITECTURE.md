@@ -62,9 +62,10 @@ How a stage's windows are hidden, shown and animated is one strategy with two
 implementations. The **Corner engine** is today's: Accessibility moves to the park corner,
 pictures for the motion. The **Spaces engine** puts each inactive stage in a hidden Space of
 the window server's own. Everything else is written once and never asks which engine runs.
-The Corner engine is the default. The Spaces engine is built and runs only by a test
-switch (`STAGE_MANAGER_ENGINE=spaces` in a fixture run) until the launch probe, the checks
-while running and the measurements are in (PLAN, 1.9).
+The Corner engine is the default. The Spaces engine is built; a launch runs it only when
+the launch probe passes and either the hidden opt-in (`STAGE_MANAGER_SPACES=1`) or the
+live suite's test switch (`STAGE_MANAGER_ENGINE=spaces` in a fixture run) asks for it, until
+the measurements are in (PLAN, 1.9).
 
 ```mermaid
 flowchart TD
@@ -116,16 +117,44 @@ versions:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Probe
-    Probe --> Spaces: symbols resolve and a trial Space with an own window works
-    Probe --> Corner: probe fails, or the config says accessibility
-    Spaces --> Spaces: checked every second
-    Spaces --> BringAllBack: a window not where the Space call put it
-    BringAllBack --> Corner: for the rest of the run
+    [*] --> Corner: [windows] engine = "accessibility" (no probe)
+    [*] --> Probe: "auto"
+    Probe --> Spaces: the calls resolve, a trial Space with an own panel reads back, and opted in
+    Probe --> Corner: a step fails, or not opted in (the verdict logged either way)
+    Spaces --> Spaces: every hide and show read back; a miss sent once more
+    Spaces --> BringAllBack: still missed after the retry, or 3 misses set right within 60 s
+    BringAllBack --> Corner: for the rest of the run; the hidden windows parked
 ```
 
+The choice is pure (`engine/engine_choice.rs`: `choose` from the config, the opt-in, the
+test switch and the probe's verdict; `Health`, the strikes in their window of time) and is
+made in `main` once AppKit is up and before the WM thread starts
+(`window_engine::choose_at_launch`). The probe (`platform/spaces/probe.rs`) looks up the
+calls, orders in a 4-point transparent panel of the app's own far off every screen (its
+order-in flushed: AppKit sends it with the run loop's transaction otherwise, and the run
+loop has not run yet), makes a classic Space, adds the panel into it and reads it back
+hidden, adds it back onto its Desktop with the show's mask and reads it back, ends the
+Space and closes the panel; each step bounded at 40 ms, the first that does not read back
+is the reason. `ctl state` `engine` says `kind`, `why`, `probe` (ok, reason, ms, each step's
+ms) and `fallback`. The fallback runs on the WM thread at the tick after the engine failed
+(never while a switch's windows wait behind their pictures, never during a quit,
+`controller/fallback.rs`): the failed engine's `bring_all_back` (the Spaces engine's sweep;
+windows a refusing window server leaves in a stage Space come out by ending that Space with
+the classic call, which needs no bridge), `window_engine::fall_back` installs the Corner
+engine and records why, the controller takes the new engine, the model's answers follow
+(`Model::set_engine`), the parked file is written again, and the windows the model counts
+hidden on a Desktop shown are parked (those on another Desktop when it shows, as always).
+`ctl debug-engine-fail next|hide|show|all` (test only) drives it in the live suite's
+`engine` phase.
+
 Quit, a crash (the guardian), a logout and a stand-down use the same `bring_all_back`
-whichever engine runs. Each choice and fallback is logged with its reason.
+whichever engine runs. Each choice and fallback is logged with its reason. The parked file
+of a Spaces run names its stage Spaces with their Desktops (`ParkedFile::spaces`): the
+guardian's engine takes them as its own (`assume`) and its sweep moves windows out of them
+if the app still holds them; after a crash they are gone already. A Spaces run's recovery
+scan also runs the Corner scan when an earlier copy left registered windows, so a Corner
+run that crashed with windows in the park corner is brought back the Corner way under
+Spaces (the launch scan is the Corner one under either engine).
 
 In the code so far (the seam, Corner only): the model emits `Action::Hide { id }` and never a
 park frame, and asks every question about where hidden windows are through one door
@@ -160,7 +189,8 @@ shield, the park reconcile, the windows whose restore failed, the switch's corne
 one struct of state, `CornerUpkeep`; no other file of the controller touches it. The Corner
 engine's files: `engine/corner/` (pure), `platform/corner/` (the engine, the slivers tap),
 `platform/controller/corner/` (its upkeep). Not behind the seam yet: a new window's
-placement before it shows (`place_new`) and the checks while running (`health`).
+placement before it shows (`place_new`). The checks while running are the trait's `health`
+(the Corner engine: never failed).
 
 The Spaces engine as built (`platform/spaces/`: `ffi.rs`, SkyLight's calls loaded at run
 time, nothing linked; `engine.rs`; its pure half `engine/spaces.rs`; its upkeep
