@@ -5,7 +5,7 @@
 //! zones).
 
 use super::ax::{AxElement, AxResult};
-use super::safety;
+use super::safety::{self, Ours, Report, ScanScope};
 use super::window_engine::{EngineKind, ShowHow, WindowEngine};
 use crate::engine::corner;
 use crate::engine::geometry::Rect;
@@ -50,6 +50,23 @@ impl WindowEngine for CornerEngine {
     /// The registry's unpark, else the recovery scan ([`safety::emergency_unpark`]).
     fn bring_all_back(&self, why: &str) -> bool {
         safety::emergency_unpark(why)
+    }
+
+    /// The registry's unpark, 100 ms for its lock and one try a window
+    /// ([`safety::unpark_registry`]).
+    fn bring_back_briefly(&self) -> Option<Report> {
+        safety::unpark_registry(std::time::Duration::from_millis(100), std::time::Duration::ZERO)
+    }
+
+    /// The leftovers check: the windows the window server still lists in a park zone
+    /// ([`safety::leftovers_back_knowing`], [`safety::leftovers_retry`]).
+    fn bring_back_rest(&self, why: &str, ours: Ours, moved: bool) -> Option<Ours> {
+        safety::leftovers_retry(why, ours, moved)
+    }
+
+    /// The scan of the park zones ([`safety::recovery_scan_with`]).
+    fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
+        safety::recovery_scan_with(why, scope)
     }
 }
 

@@ -435,8 +435,9 @@ mod app {
     /// registry's quick retries share one budget ([`leftovers::REGISTRY_RETRY_BUDGET`], then
     /// one try a window), the leftovers check at most [`leftovers::LEFTOVERS_MAX`].
     fn registry_then_leftovers(reason: &str) -> bool {
-        let registry = window_engine::current().bring_all_back(reason);
-        let leftovers = safety::leftovers_back(reason, Default::default());
+        let engine = window_engine::current();
+        let registry = engine.bring_all_back(reason);
+        let leftovers = engine.bring_back_rest(reason, safety::Ours::now(Default::default()), true).is_none();
         // Windows taken from an old guardian (round 8N) not seen to yet: the guardian waits;
         // when they are all that is left, passed on with a warning (no error).
         let rest_back = registry && (leftovers || safety::left_not_taken() == 0) && safety::registry_len() == 0;

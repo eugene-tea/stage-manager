@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 
 use super::ax::AxElement;
 use super::safety::{self, guarded};
-use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, session, windows};
+use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, session, window_engine, windows};
 use crate::engine::guard_watch::{Event, LockSeen, Look, Release, Watch, Waiting};
 use crate::engine::handoff::{Answer, Offering};
 use crate::engine::hidden_tab::Candidate;
@@ -253,6 +253,9 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let file = safety::read_parked_file(parent as u32);
+    // Its windows come back the way the app hid them: the engine the file names is this
+    // process's from here on (the watch and its scans ask `window_engine::current`).
+    window_engine::install(window_engine::of(file.engine));
     // An unclean quit at a logout (round logout-cancel): the cancel is listened for from the
     // exit on, through the recovery watch, then waited for as after a clean quit.
     let listen = logout_watch::after_exit(None, file.logout).listen;
@@ -276,7 +279,7 @@ pub fn run(args: &[String]) -> ExitCode {
     let registered = file.windows;
     tracing::warn!(parent, registered = registered.len(), visible = ?file.visible, corners = ?file.corners, "guardian: {UNCLEAN_EXIT}; running the recovery scan");
     let scope = scan_scope(&registered);
-    let (r, _) = safety::recovery_scan_with("guardian", &scope);
+    let (r, _) = window_engine::current().recover("guardian", &scope);
     tracing::warn!(checked = r.checked, restored = r.restored, failed = r.failed, "guardian: recovery scan done");
     install_stop_handlers();
     // The window server lists moved windows at their new frames a moment later.
@@ -357,7 +360,7 @@ fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope, paus
         let sig = STOP_SIGNAL.load(Ordering::SeqCst);
         if sig != 0 {
             tracing::warn!(signal = sig, "guardian: told to stop; one last scan");
-            let (r, _) = safety::recovery_scan_with("guardian: stopping", scope);
+            let (r, _) = window_engine::current().recover("guardian: stopping", scope);
             tracing::warn!(restored = r.restored, failed = r.failed, "guardian: stopped");
             return;
         }
@@ -671,7 +674,7 @@ pub(crate) fn reach(
     if scanned.is_empty() {
         return;
     }
-    let r = safety::recovery_scan(&format!("{who}: a Desktop with parked windows shows"));
+    let (r, _) = window_engine::current().recover(&format!("{who}: a Desktop with parked windows shows"), &safety::ScanScope::default());
     tracing::info!(restored = r.restored, failed = r.failed, "{who}: scanned the shown Desktop");
     for x in scanned {
         match safety::ax_window(x.pid, x.id).and_then(|e| e.frame().map_err(|e| format!("its frame cannot be read ({e})"))) {

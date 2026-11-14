@@ -918,7 +918,7 @@ pub fn install_panic_hook() {
         if GUARDED.try_with(Cell::get).unwrap_or(false) {
             return;
         }
-        emergency_unpark("panic");
+        window_engine::current().bring_all_back("panic");
         // A capture in flight at exit makes macOS alert about screen access.
         super::capture::quiesce(std::time::Duration::from_secs(1));
         logging::write_counts("panic");
@@ -996,7 +996,7 @@ fn nanosleep(d: Duration) {
 /// registry's best-effort unpark, a short one; then the handler may finish the abort. A lock
 /// held by the aborting thread only makes this wait out the handler's bound.
 fn unpark_for_abort() {
-    let r = unpark_registry(Duration::from_millis(100), Duration::ZERO);
+    let r = window_engine::current().bring_back_briefly();
     enhanced_ui::restore_all("SIGABRT");
     ABORT_UNPARKED.store(true, Ordering::SeqCst);
     tracing::error!(restored = r.map(|r| r.restored), failed = r.map(|r| r.failed), "SIGABRT: the registry unparked from the signal watcher; the guardian covers the rest");

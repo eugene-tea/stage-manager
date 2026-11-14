@@ -9,8 +9,10 @@
 //!
 //! **Threads.** The engine is one value for the whole process ([`current`]): the WM thread
 //! hides and shows through it inside the controller's batches, and the safety paths (quit, a
-//! stand-down, the menu's last resort; the panic hook and the signal watcher run on threads
-//! of their own) bring everything back through the same value. Its methods therefore take
+//! stand-down, a logout, the menu's last resort, the launch's and a display change's scan;
+//! the panic hook and the signal watcher run on threads of their own) bring everything back
+//! through the same value. The guardian, a process of its own, runs the engine the app it
+//! watched ran ([`of`] the parked file's [`EngineKind`], [`install`]ed before its first scan). Its methods therefore take
 //! `&self` and the engine is `Send + Sync`; state an engine keeps is behind its own locks.
 //! The window calls ([`WindowEngine::hide`], [`WindowEngine::show`]) run on the WM thread
 //! only, inside the controller's write (the stale-handle retry, the echo and failure
@@ -19,6 +21,7 @@
 use std::sync::{Arc, OnceLock, RwLock};
 
 use super::ax::{AxElement, AxResult};
+use super::safety::{Ours, Report, ScanScope};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Display, Model, WindowId};
 pub use crate::engine::recovery::EngineKind;
@@ -62,6 +65,25 @@ pub trait WindowEngine: Send + Sync {
     /// The last line of defence in this process: every hidden window brought back, whatever
     /// state the model and the WM thread are in. Any thread. True when nothing failed.
     fn bring_all_back(&self, why: &str) -> bool;
+
+    /// An abort's bring-back (SIGABRT, from the signal watcher's thread while the handler
+    /// waits a bounded moment): what can be brought back at once, no scan, no retries; the
+    /// guardian covers the rest. `None` when the engine's own state was busy throughout.
+    fn bring_back_briefly(&self) -> Option<Report>;
+
+    /// Every bring-back's last look: the window server's word on it, since a move that
+    /// "succeeded" is no proof. Each window of an allowed app still hidden is brought back;
+    /// `None` when none is left, else what this look knew of the windows left (`ours`: what
+    /// the caller knows of whose they are), for the next try. `moved`: windows moved a moment
+    /// ago, so the list is given its settle first. Bounded
+    /// ([`crate::engine::leftovers::LEFTOVERS_MAX`]). Any thread.
+    fn bring_back_rest(&self, why: &str, ours: Ours, moved: bool) -> Option<Ours>;
+
+    /// The recovery scan (a launch, a display change, the guardian): every window in `scope`
+    /// found hidden with no running copy to answer for it goes back to a crashed copy's
+    /// registered frame, else its saved frame, else centered. Also the apps that did not
+    /// answer, to be scanned again.
+    fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>);
 }
 
 static ENGINE: OnceLock<RwLock<Arc<dyn WindowEngine>>> = OnceLock::new();
@@ -78,6 +100,23 @@ pub fn current() -> Arc<dyn WindowEngine> {
     }
 }
 
+/// The engine of kind `kind`: how the guardian gets the engine the app it watched ran
+/// ([`crate::engine::recovery::ParkedFile::engine`]).
+pub fn of(kind: EngineKind) -> Arc<dyn WindowEngine> {
+    match kind {
+        EngineKind::Corner => Arc::new(super::corner_engine::CornerEngine),
+    }
+}
+
+/// Makes `engine` the one this process runs from now on ([`current`]). The swap itself
+/// cannot panic, so the lock is never left held (the panic hook reads it).
+pub fn install(engine: Arc<dyn WindowEngine>) {
+    match slot().write() {
+        Ok(mut e) => *e = engine,
+        Err(poisoned) => *poisoned.into_inner() = engine,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +125,14 @@ mod tests {
     fn the_process_runs_the_corner_engine() {
         assert_eq!(current().kind(), EngineKind::Corner);
         assert_eq!(current().kind().name(), "corner");
+    }
+
+    #[test]
+    fn a_parked_file_names_its_engine_and_an_older_one_is_the_corner_engines() {
+        use crate::engine::recovery::ParkedFile;
+        let older = ParkedFile::from_json(br#"{"visible":null,"windows":[]}"#).expect("an older file");
+        assert_eq!(of(older.engine).kind(), EngineKind::Corner);
+        install(of(older.engine));
+        assert_eq!(current().kind(), EngineKind::Corner, "the guardian runs the engine the file names");
     }
 }

@@ -51,7 +51,7 @@ use super::launch_scan;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
 use super::observe_probe;
-use super::{enhanced_ui, safety};
+use super::{enhanced_ui, safety, window_engine};
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
@@ -461,7 +461,7 @@ impl WmState {
                 let back = if self.stand_down.stranded() {
                     let held_back = safety::retry_held();
                     let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
-                    let left_back = safety::leftovers_back_knowing("quit", ours).is_none();
+                    let left_back = window_engine::current().bring_back_rest("quit", ours, true).is_none();
                     tracing::info!(held_back, left_back, "quitting after the logout's head start: windows it left were tried again");
                     held_back && left_back
                 } else {
@@ -562,7 +562,7 @@ impl WmState {
                 // A quit while stood down still knows whose windows the stand-down left
                 // (its model and state.json are gone by then; the review of 6X3, 2).
                 let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
-                let back = safety::leftovers_back_knowing("quit", ours).is_none();
+                let back = window_engine::current().bring_back_rest("quit", ours, true).is_none();
                 // A restore that failed but went through late is seen back now.
                 let unrestored = self.controller.account_unrestored(&self.observer);
                 if failed > 0 {
@@ -686,14 +686,14 @@ impl WmState {
                 Task::UnparkAll => {
                     let failed = self.controller.unpark_all(&self.observer);
                     if failed > 0 || safety::registry_len() > 0 {
-                        super::window_engine::current().bring_all_back("stand-down");
+                        window_engine::current().bring_all_back("stand-down");
                     }
                     // The window server's word, as at quit (the review of 6X): every allowed
                     // app's window still in a park zone comes back now, known to this run or
                     // not; one that cannot is looked for again whenever a Desktop shows.
                     // An earlier stand-down's or logout's leftovers not yet back stay known.
                     let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
-                    let left = safety::leftovers_back_knowing("stand-down", ours);
+                    let left = window_engine::current().bring_back_rest("stand-down", ours, true);
                     let back = left.is_none();
                     let unrestored = self.controller.account_unrestored(&self.observer);
                     if failed > 0 || !back {
@@ -760,7 +760,7 @@ impl WmState {
                     // every allowed app's window still in a park zone (6X).
                     let failed = self.controller.unpark_all(&self.observer);
                     let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
-                    let left = safety::leftovers_back_knowing("logout", ours);
+                    let left = window_engine::current().bring_back_rest("logout", ours, true);
                     let back = left.is_none();
                     let unrestored = self.controller.account_unrestored(&self.observer);
                     all_back = back && unrestored == 0 && safety::registry_len() == 0;
@@ -879,7 +879,7 @@ impl WmState {
         self.stand_down_leftovers = retry_leftovers(
             kept,
             || leftovers_now(safety::Ours::now(Default::default()), safety::parked_on_purpose()),
-            |ours| safety::leftovers_retry("stand-down, a Desktop shows", ours, at_once),
+            |ours| window_engine::current().bring_back_rest("stand-down, a Desktop shows", ours, at_once),
         );
         self.stand_down.released(safety::held_len() == 0 && self.stand_down_leftovers.is_none());
     }
@@ -953,7 +953,7 @@ impl WmState {
             quiet: true,
             registered: safety::crashed_registered(),
         };
-        let (r, unanswered) = safety::recovery_scan_with(reason, &scope);
+        let (r, unanswered) = window_engine::current().recover(reason, &scope);
         if r.restored > 0 {
             tracing::warn!(reason, restored = r.restored, "windows left in the park zone were brought back");
         }
