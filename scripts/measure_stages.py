@@ -33,7 +33,7 @@ Scenarios (all by default, in this order):
   `probe-spaces overlap` reads the on-screen list every ms (the live suite's launch phase):
   how long Charlie's window shows over Alpha's stage. Not with `off`.
 
-The app runs from the dev copy with captures on (as installed), STAGE_MANAGER_ONLY the
+The app runs from the dev copy with captures on (as installed; SM_CAPTURE=0 turns them off), STAGE_MANAGER_ONLY the
 fixtures, in a scratch home; fixture windows only, at frames clear of the strip.
 """
 
@@ -86,6 +86,9 @@ REST_S = float(os.environ.get("SM_REST_S") or 60)
 SWITCHES = int(os.environ.get("SM_SWITCHES") or 20)
 SWITCH_CPU_S = float(os.environ.get("SM_SWITCH_CPU_S") or 1.5)
 LAUNCHES = int(os.environ.get("SM_LAUNCHES") or 10)
+# SM_CAPTURE=0 runs the app with window captures off (STAGE_MANAGER_NO_CAPTURE): what is left
+# once nothing is captured between switches. Use another OUT for it.
+CAPTURE = (os.environ.get("SM_CAPTURE") or "1") != "0"
 # Frames from the visible frame's top-left, clear of the strip's column (its cards stay
 # clickable, never covered).
 FRAMES = "330,60,1000,640;560,220,1000,640"
@@ -239,7 +242,7 @@ def say(msg):
 
 
 def record(scenario, data):
-    row = {"scenario": scenario, "engine": ENGINE, "run": RUN, "at": time.strftime("%Y-%m-%d %H:%M:%S"), **data}
+    row = {"scenario": scenario, "engine": ENGINE, "run": RUN, "capture": CAPTURE, "at": time.strftime("%Y-%m-%d %H:%M:%S"), **data}
     with open(JSONL, "a") as f:
         f.write(json.dumps(row) + "\n")
     say(json.dumps(row))
@@ -293,6 +296,15 @@ def front_first_app():
     time.sleep(1.0)
 
 
+def one_app_per_stage(s):
+    by_stage = {}
+    for w in s["windows"]:
+        if w["role"] == "standard":
+            by_stage.setdefault(w["home"], set()).add(w.get("bundle_id"))
+    sizes = sorted(len(v) for v in T.stage_titles(s).values())
+    return len(s["stages"]) == STAGES and sizes == [2] * STAGES and all(len(b) == 1 for b in by_stage.values())
+
+
 def stages_up():
     """The fixtures, and (unless `off`) the app with one stage per fixture app, the first in
     front. Returns the app's state (None with `off`)."""
@@ -302,22 +314,33 @@ def stages_up():
     if ENGINE == "off":
         front_first_app()
         return None
-    s = T.start_app(2 * STAGES, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=True)
+    s = T.start_app(2 * STAGES, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=CAPTURE)
     if s is None:
         raise RuntimeError("the app did not come up")
     kind = (s.get("engine") or {}).get("kind")
     if kind != ENGINE:
         raise RuntimeError(f"the app runs the {kind} engine, not {ENGINE} ({s.get('engine')})")
-    # One stage per app: the second app's windows to stage 2, and so on.
-    for n, (_, _, bundle, _) in list(enumerate(apps(), start=1))[1:]:
-        for w in [w for w in s["windows"] if w.get("bundle_id") == bundle and w["role"] == "standard"]:
-            T.do("send", n, w["id"])
-    T.do("switch", 1)
+    # One stage per app: each app not alone in its stage sends its windows to a new stage
+    # (the next number), read again each time (11-14: a launch still settling put the first
+    # app's windows in the stage numbered 2, so a fixed `send 2` merged two apps).
+    for _ in range(3):
+        s = T.state()
+        if one_app_per_stage(s):
+            break
+        for _, _, bundle, _ in apps()[1:]:
+            s = T.state()
+            mine = [w for w in s["windows"] if w.get("bundle_id") == bundle and w["role"] == "standard"]
+            homes = {w["home"] for w in mine}
+            shared = any(w["home"] in homes and w.get("bundle_id") != bundle for w in s["windows"] if w["role"] == "standard")
+            if len(homes) == 1 and not shared:
+                continue
+            n = 1 + max((st["number"] for st in s["stages"]), default=0)
+            for w in mine:
+                T.do("send", n, w["id"])
     front_first_app()
     s = T.state()
-    sizes = sorted(len(v) for v in T.stage_titles(s).values())
-    if len(s["stages"]) != STAGES or sizes != [2] * STAGES:
-        raise RuntimeError(f"wanted {STAGES} stages of 2 windows, got {T.stage_titles(s)}")
+    if not one_app_per_stage(s):
+        raise RuntimeError(f"wanted {STAGES} stages of 2 windows, one app each, got {T.stage_titles(s)}")
     T.pointer_off_strip(s, "the measurements")
     return s
 
@@ -353,7 +376,7 @@ def demangle(sym):
     its crate root and the plain identifiers after it; anything else as it is."""
     m = _V0_HEAD.match(sym)
     if not m:
-        return sym
+        return _v0_tokens(sym) if sym.startswith("_R") else sym
     i, parts = m.end(), []
     while i < len(sym):
         n = _V0_IDENT.match(sym, i)
@@ -366,6 +389,34 @@ def demangle(sym):
         parts.append(ident or "{closure}")
         i = start + length
     return "::".join(parts) if parts else sym
+
+
+_TOKEN = re.compile(r"(?<![0-9])(\d+)")
+_NAME = re.compile(r"^(?:[a-z_][a-z0-9_]*|[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)*)$")
+
+
+def _v0_tokens(sym):
+    """A v0 symbol whose path starts with an impl or a generic (a method, `<T as Trait>`):
+    its identifiers in order, each `<length><name>` whose name reads as Rust names do
+    (snake_case or CamelCase, so the hashes' letters are left out), from the first crate
+    name on. Rough, for reading which function the time is in."""
+    out, i = [], 0
+    while i < len(sym):
+        m = _TOKEN.search(sym, i)
+        if not m:
+            break
+        n, start = int(m.group(1)), m.end()
+        if sym.startswith("_", start) and n > 0:
+            start += 1
+        ident = sym[start:start + n]
+        if n >= 2 and len(ident) == n and _NAME.match(ident):
+            out.append(ident)
+            i = start + n
+        else:
+            i = m.end()
+    if "stage_manager" in out:
+        out = out[out.index("stage_manager"):]
+    return "::".join(out) if out else sym
 
 
 _LINE = re.compile(r"^(?P<lead>[ +!:|]*)(?P<count>\d+) (?P<rest>.+)$")
@@ -692,7 +743,7 @@ def scenario_launch():
     stop_everything()
     fresh_home()
     T.start_extra("a", 1)
-    s = T.start_app(1, capture=True)
+    s = T.start_app(1, capture=CAPTURE)
     if s is None:
         return record("launch", {"ok": False, "error": "the app did not come up"})
     results = []
@@ -808,6 +859,8 @@ def main():
             except Exception as e:  # noqa: BLE001 - one scenario failing leaves the others
                 code = 1
                 record(sc, {"ok": False, "error": repr(e)})
+                # The next scenario sets its stages up again rather than measure a half set-up.
+                T.stop_app()
     finally:
         T.stop_app()
         if T.pids_of(T.FIX_EXE) or any(T.pids_of(e[2]) for e in T.EXTRA.values()):

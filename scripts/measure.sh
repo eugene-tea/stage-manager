@@ -9,6 +9,7 @@
 #   scripts/measure.sh rest sample             # some scenarios: rest sample switch call launch
 #   RUNS=1 ENGINES="corner spaces" scripts/measure.sh switch
 #   OUT=/tmp/sm-measure.x scripts/measure.sh   # where measure.jsonl, samples and clocks go
+#   SM_CAPTURE=0 OUT=/tmp/sm-nocap scripts/measure.sh rest sample   # captures off: no capture work
 #   scripts/measure.sh --summary DIR           # the table again, from DIR/measure.jsonl
 #
 # `off` is the app not running: the same fixture windows, the floor. Fixture windows only
