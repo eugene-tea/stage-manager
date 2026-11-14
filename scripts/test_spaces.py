@@ -985,7 +985,7 @@ def kill_with_a_stage_space_elsewhere(app, hidden, d2_ids):
     check(not staged, f"after kill -9 no fixture window is left in a stage Space (they ended with the app): {staged}")
     landed = onscreen_ids(hidden)
     check(sorted(landed) == sorted(hidden), f"Desktop 2's hidden windows {hidden} are back on screen at once, by the window server ({landed})")
-    skip("Desktop 2's hidden windows back on their own Desktop after kill -9",
+    ts.skip("Desktop 2's hidden windows back on their own Desktop after kill -9",
          "the window server brings a crashed app's stage-Space windows to the Desktop shown; the guardian "
          "knows no Desktop ids (the parked file's Desktops and a bridged move back: S5)")
     ended = wait_for("the guardian to end", lambda: not ts.pids_of(f"stage-manager --guardian {app}$"), 6)
