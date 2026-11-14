@@ -121,11 +121,13 @@ In the code so far (the seam, Corner only): the model emits `Action::Hide { id }
 park frame, and asks every question about where hidden windows are through one door
 (`engine/model/hiding.rs`), which asks the pure half of the engine that runs
 (`ModelOptions::engine`; the Corner engine's is `engine::corner`, its geometry
-`engine::corner::park`). The questions are of two kinds: is this listed window hidden now, and may a
-window be brought back here. `platform::window_engine::WindowEngine` has `hidden_at`, `hide`,
-`show`, `is_hidden`, `animate`, and for safety `bring_all_back`, `bring_back_briefly` (an
-abort), `bring_back_rest` (the last look at the window server's list) and `recover` (the
-recovery scan), with `platform::corner::engine::CornerEngine` behind it. A `SetFrame` is the
+`engine::corner::park`). The questions are of two kinds: is this listed window hidden now,
+and may a window be brought back here. `platform::window_engine::WindowEngine` has
+`hidden_at`, `hide`, `show`, `is_hidden`, `animate`, and for safety `bring_all_back`,
+`bring_back_briefly` (an abort), `bring_back_rest` (the last look at the window server's
+list), `recover` (the recovery scan), `stranded` (is a window read at this frame still
+hidden away) and `assume` (the guardian takes the app's parked file as its own knowledge),
+with `platform::corner::engine::CornerEngine` behind it. A `SetFrame` is the
 engine's `show`: the model counts the window shown either way, and the engine knows what it
 has hidden. `animate` answers a `Motion` on the WM thread; the controller plans the
 transition, sends it to the strip and waits for its answer the same way for every motion,
@@ -133,10 +135,22 @@ and runs the choreography the motion names (`Motion::Pictures`: hides behind the
 pictures, arrivals held until the unveil). The engine is one value for the process
 (`window_engine::current`), so the WM thread's batches and the safety paths on other threads
 ask the same one. The parked file names the engine (left out for Corner), and the guardian
-installs that engine before its first scan. Still the controller's own, to move behind the
-seam: the Corner engine's state and upkeep (corner patch, slivers, park reconcile, the
-switch's corner cover), a new window's placement before it shows (`place_new`) and the
-checks while running (`health`).
+installs that engine before its first scan; its watch asks that engine whether a window is
+still away.
+
+What an engine keeps up on the WM thread around those calls is not behind the trait: it
+reads and changes the controller's own state (the model, the phase, the observer). It goes
+through a second door, `platform/controller/upkeep.rs`: every moment the shared code has
+engine work at (a batch ended, the tick and the fast tick, a press released, a show or a
+hide that failed, a window let go while hidden, a switch's cover, the shows still owed at
+quit, `ctl state`) is one method there with one `match` on the engine that runs, the same
+shape as the model's door. The Corner engine's answers are methods of the controller in
+`platform/controller/corner/` (the corner patch and the desktop's still, the inert-slivers
+shield, the park reconcile, the windows whose restore failed, the switch's corner cover) on
+one struct of state, `CornerUpkeep`; no other file of the controller touches it. The Corner
+engine's files: `engine/corner/` (pure), `platform/corner/` (the engine, the slivers tap),
+`platform/controller/corner/` (its upkeep). Not behind the seam yet: a new window's
+placement before it shows (`place_new`) and the checks while running (`health`).
 
 ## macOS settings drive behavior
 
