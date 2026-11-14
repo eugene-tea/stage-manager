@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- New setting `[windows] engine` (`"auto"` or `"accessibility"`, read at launch). It
+  chooses how hidden windows are kept: `"accessibility"` always uses the park corner and
+  never tries macOS's own Spaces, a way out if windows misbehave on a stage change. In this
+  version `"auto"` also uses the park corner; each launch checks whether Spaces would work
+  and writes the result to the log.
 - A newly opened app gets its own stage as its first window shows. The window sat over
   the stage shown for up to a second first: an app just launched from the Dock is not ready
   to be watched at its first ask and was asked again a second later, and a window that

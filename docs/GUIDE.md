@@ -437,6 +437,10 @@ past every edge.
 If the app crashed, a small helper process brings the windows back by itself, each where it
 was, and the next launch checks the corner again.
 
+**Windows flicker or go missing when the stage changes.** With `[windows] engine =
+"accessibility"`, hidden windows always wait in the park corner and macOS's own Spaces are
+never tried. Read at launch: quit Stage Manager and open it again after changing it.
+
 Some limits to know about:
 
 - Windows an app keeps wholly off every screen, as headless browsers and test tools do, are

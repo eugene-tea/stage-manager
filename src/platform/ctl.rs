@@ -7,7 +7,9 @@
 //! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`, `mark [NOTE…]` (a problem mark
 //! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
-//! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
+//! environment, `debug-panic` panics on the main thread (a safety drill), `debug-engine-fail
+//! [next|hide|show|all|off]` makes the Spaces engine's next hide or show (or every bridged
+//! call) fail as a refusing window server would (the fallback drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
@@ -114,6 +116,9 @@ pub enum Command {
     Mark(String),
     /// Panic on the main thread (safety drill; needs `STAGE_MANAGER_TEST=1`).
     DebugPanic,
+    /// Test only: the Spaces engine's calls fail as named (`next`, `hide`, `show`, `all`,
+    /// `off`; the fallback drill).
+    DebugEngineFail(String),
     /// Test only: quit the way the menu's Quit item does (from inside a menu action).
     DebugMenuQuit,
     /// Test builds with the `update-test` feature: check for an update and install it as
@@ -294,6 +299,10 @@ impl Command {
             ["settings"] => Ok(Self::Settings),
             ["mark", note @ ..] => Ok(Self::Mark(note.join(" "))),
             ["debug-panic"] => Ok(Self::DebugPanic),
+            ["debug-engine-fail", rest @ ..] if rest.len() <= 1 => match rest.first().copied().unwrap_or("next") {
+                w @ ("next" | "hide" | "show" | "all" | "off") => Ok(Self::DebugEngineFail(w.to_string())),
+                _ => Err("debug-engine-fail takes next, hide, show, all or off".into()),
+            },
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
             ["debug-update"] => Ok(Self::DebugUpdate),
             ["debug-drag", rest @ ..] => {
@@ -860,6 +869,9 @@ mod tests {
         assert_eq!(Command::parse("mark"), Ok(Command::Mark(String::new())));
         assert_eq!(Command::parse("mark  strip  gone "), Ok(Command::Mark("strip gone".into())));
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));
+        assert_eq!(Command::parse("debug-engine-fail"), Ok(Command::DebugEngineFail("next".into())));
+        assert_eq!(Command::parse("debug-engine-fail all"), Ok(Command::DebugEngineFail("all".into())));
+        assert!(Command::parse("debug-engine-fail sometimes").is_err());
         assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
         assert_eq!(
             Command::parse("debug-click 60 700.5 shift"),

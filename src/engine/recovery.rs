@@ -359,6 +359,21 @@ pub struct ParkedFile {
     /// app runs.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub logout: bool,
+    /// The Spaces engine's stage Spaces, each with the Desktop its windows go back to: what
+    /// another process (the guardian) needs to bring the windows out of them while the app
+    /// still holds them (the window server ends them only with the app). Left out when
+    /// empty, so the Corner engine's file reads as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<StageSpace>,
+}
+
+/// A stage Space of the Spaces engine, as the parked file names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageSpace {
+    /// The window server's Space id.
+    pub space: u64,
+    /// The Desktop (a Space id too) its windows were on when hidden.
+    pub desktop: u64,
 }
 
 /// Which window engine hides a stage's windows (docs/ARCHITECTURE.md, "Window engines").
@@ -738,11 +753,17 @@ mod tests {
             corners: vec![Corner::BottomLeft],
             zones: vec![ParkZone { frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0), visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0), corners: vec![Corner::BottomLeft] }],
             logout: false,
+            spaces: vec![],
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
         assert!(!String::from_utf8_lossy(&json).contains("logout"), "written only at an unclean quit for a logout");
         assert!(!String::from_utf8_lossy(&json).contains("engine"), "the Corner engine's file reads as before the engines");
+        assert!(!String::from_utf8_lossy(&json).contains("spaces"), "no stage Space: no key");
+        let spaces = ParkedFile { engine: EngineKind::Spaces, spaces: vec![StageSpace { space: 836, desktop: 3 }], ..f.clone() };
+        let json = serde_json::to_vec(&spaces).unwrap_or_default();
+        assert!(String::from_utf8_lossy(&json).contains(r#""spaces":[{"space":836,"desktop":3}]"#));
+        assert_eq!(ParkedFile::from_json(&json).ok(), Some(spaces));
         // An unclean quit at a logout says so (round logout-cancel).
         let at_logout = ParkedFile { logout: true, windows: vec![], ..f.clone() };
         let json = serde_json::to_vec(&at_logout).unwrap_or_default();

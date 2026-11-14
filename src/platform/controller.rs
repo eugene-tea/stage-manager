@@ -149,6 +149,7 @@ mod arrival;
 mod ax_blind;
 mod corner;
 mod dock_order;
+mod fallback;
 mod raise_order;
 mod spaces;
 mod stale;
@@ -5605,6 +5606,8 @@ impl Controller {
             } else {
                 self.check_spaces(ob);
             }
+            // The running engine's checks: a failed one hands over to the Corner engine.
+            self.check_engine(ob);
             // What the model counts hidden against the screen, the engine's way.
             self.upkeep_tick(ob);
         }
@@ -5916,7 +5919,7 @@ impl Controller {
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }
-            Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
+            Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugEngineFail(_) | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugPointerBack
             | Command::DebugDrag { .. }

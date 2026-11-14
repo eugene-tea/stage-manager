@@ -463,6 +463,23 @@ gives a place for Settings, About, updates and Quit. It can be hidden, and openi
 again then shows Settings. Its glyph is original art, as tall as the SF Symbols beside it at
 the menu bar's default size (12 pt of ink, their median).
 
+**How windows are hidden: two engines (1.9, in progress).** Apple's Stage Manager hides an
+inactive stage's windows inside the window server. Ours has two ways: the park corner
+(Accessibility moves, slivers covered by the corner patch, pictures for the motion) and a
+hidden window-server Space per stage (the window keeps its frame, nothing shows). Which one
+runs is decided at every launch by a probe, never by a list of macOS versions: the calls
+are looked up, then a tiny panel of the app's own (off every screen) goes into a trial Space
+and back, each step read back from the window server (measured on macOS 27.2: see the S5
+notes; the verdict and its time are logged and in `ctl state` `engine.probe`). While the
+Spaces way runs, every hide and show is read back; a window not where the call put it is
+sent once more, and one still not there, or three set right by that retry within a minute,
+ends the Spaces way for the rest of the run: every window it hid comes back onto its
+Desktop, the park corner takes over and hides again the windows that were hidden, and the
+next launch probes again. `[windows] engine = "accessibility"` keeps the park corner and
+never probes (GUIDE, Troubleshooting). Until the Spaces way is measured against the corner
+(CPU, switch time), `"auto"` also keeps the park corner unless `STAGE_MANAGER_SPACES=1` is
+set; the probe still runs and logs its verdict at every launch.
+
 **Updates.** Apple's Stage Manager updates with macOS; ours updates itself (GUIDE, Updates).
 A downloaded update also installs when you quit Stage Manager: the menu's Quit, or ⌘Q in
 Settings and About. It then stays closed (no relaunch: the user asked it to stop). Never at a

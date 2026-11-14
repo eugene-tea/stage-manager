@@ -10,6 +10,7 @@ pub mod desktop_click;
 pub mod desktop_echo;
 pub mod displays;
 pub mod early_start;
+pub mod engine_choice;
 pub mod enhanced_ui;
 pub mod focus_replay;
 pub mod fullscreen;

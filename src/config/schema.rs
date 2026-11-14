@@ -376,6 +376,11 @@ pub const KEYS: &[KeyDef] = &[
         "How far past a sliver the corner patch reaches, in points, to cover its shadow: \"auto\" is a parked (inactive) window's shadow, side by side; a number is used on every side."),
     k("windows", "inert_slivers", Kind::Bool, "true",
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
+    KeyDef {
+        applies: Applies::Restart,
+        ..k("windows", "engine", Kind::Choice(&["auto", "accessibility"]), "\"auto\"",
+            "How a stage's windows are hidden: \"auto\" lets each launch try the window server's own Spaces and keep them only where a trial with a window of the app's own works, with the Accessibility park corner otherwise and for the rest of a run in which a Space call fails; \"accessibility\" always uses the park corner and never tries Spaces (a way out if windows go missing or flicker on a switch). In this version \"auto\" still uses the park corner. Read at launch.")
+    },
     // [displays]
     KeyDef {
         applies: Applies::Restart,
@@ -596,6 +601,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-40.toml"),
     include_str!("legacy/default-41.toml"),
     include_str!("legacy/default-42.toml"),
+    include_str!("legacy/default-43.toml"),
 ];
 
 #[cfg(test)]

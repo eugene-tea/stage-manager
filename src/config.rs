@@ -396,6 +396,9 @@ pub struct WindowsConfig {
     /// The desktop picture, drawn from its file, over the parked windows' slivers (a
     /// prototype).
     pub corner_patch: bool,
+    /// `[windows] engine`: which window engines a launch may choose from (read at launch,
+    /// [`crate::engine::engine_choice`]).
+    pub engine: crate::engine::engine_choice::ConfigEngine,
     /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
     /// shadow side by side ([`crate::engine::corner::corner_patch::DEFAULT_REACH`]), or one number for
     /// every side ([`WindowsConfig::patch_reach`]).
@@ -1078,6 +1081,10 @@ impl Config {
                 park_drop: v.num("windows.park_drop"),
                 corner_patch: v.flag("windows.corner_patch"),
                 corner_patch_reach: v.auto("windows.corner_patch_reach"),
+                engine: match v.text("windows.engine") {
+                    "accessibility" => crate::engine::engine_choice::ConfigEngine::Accessibility,
+                    _ => crate::engine::engine_choice::ConfigEngine::Auto,
+                },
             },
             displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
             rules: RuleSet::new(rules, defaults),

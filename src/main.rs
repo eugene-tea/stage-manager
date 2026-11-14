@@ -586,6 +586,15 @@ mod app {
                 DispatchQueue::main().exec_async(|| panic!("debug-panic requested over ctl"));
                 json!({ "ok": true, "panicking": true })
             }
+            Command::DebugEngineFail(word) => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-engine-fail needs STAGE_MANAGER_TEST=1");
+                }
+                use stage_manager::platform::spaces::engine::{self as spaces_engine, FailMode};
+                let Some(mode) = FailMode::parse(&word) else { return ctl::error_reply("debug-engine-fail takes next, hide, show, all or off") };
+                spaces_engine::shared().fail_calls(mode);
+                json!({ "ok": true, "engine": window_engine::current().kind().name(), "mode": word })
+            }
             Command::DebugClick { x, y, shift } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-click needs STAGE_MANAGER_TEST=1");
@@ -855,6 +864,12 @@ mod app {
 
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+        // Which window engine runs (1.9): the launch probe (a trial Space with a panel of
+        // our own) and `[windows] engine`, decided here at every launch, before any window
+        // is managed; logged with the reason, in `ctl state`.
+        let engine_config = stage_manager::config::last_good::read_in_force(&paths::config_file()).windows.engine;
+        window_engine::choose_at_launch(mtm, engine_config);
 
         controller::set_ui_sink(|update| {
             DispatchQueue::main().exec_async(move || with_app(|app| app.on_ui(update)));

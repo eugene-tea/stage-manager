@@ -424,7 +424,10 @@ fn write_parked_file(listed: &[Registered]) {
     let logout = LOGOUT_QUIT.load(Ordering::SeqCst);
     let empty = listed.is_empty() && !logout;
     let file =
-        ParkedFile { engine: window_engine::current().kind(), visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout };
+        {
+            let engine = window_engine::current();
+            ParkedFile { engine: engine.kind(), visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout, spaces: engine.parked_spaces() }
+        };
     let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
@@ -444,6 +447,13 @@ fn write_parked_file(listed: &[Registered]) {
         Ok(()) => *written = Some(file),
         Err(e) => tracing::warn!("cannot write {}: {e}", path.display()),
     }
+}
+
+/// Writes the parked file again from the registry as it is: the engine that runs changed
+/// (a fallback mid-run), so the guardian brings the windows back that engine's way.
+pub fn rewrite_parked_file() {
+    let listed = registered(&lock_registry());
+    write_parked_file(&listed);
 }
 
 /// What the app process `pid` left in its parked file: its registered windows and the main

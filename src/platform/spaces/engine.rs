@@ -27,7 +27,14 @@
 //! asks the window server which windows are in this engine's Spaces and needs the state only
 //! for their Desktops.
 //!
-//! Chosen only by a test switch for now ([`from_env`]); the Corner engine is the default.
+//! **Health.** A window not where a hide or a show put it is sent once more; one the retry
+//! sets right is a strike, one it does not fails the engine ([`Health`]: also
+//! [`crate::engine::engine_choice::STRIKES`] strikes close together). A window gone, or on
+//! no Space before the call (minimized, ordered out), says nothing of the engine. Once failed,
+//! [`WindowEngine::health`] says why and the controller falls back to the Corner engine.
+//!
+//! Chosen at launch ([`crate::platform::window_engine::choose_at_launch`]: the launch probe,
+//! the config, and for now an opt-in); the Corner engine is the default.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -36,10 +43,11 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::ffi::{ALL_SPACES_MASK, Route, Sky};
+use crate::engine::engine_choice::Health;
 use crate::engine::geometry::Rect;
 use crate::engine::leftovers;
 use crate::engine::model::{Display, Model, WindowId};
-use crate::engine::recovery::{Known, ParkedFile, ScanDisplays};
+use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
 use crate::platform::ax::{AxElement, AxError, AxResult};
 use crate::platform::safety::{self, Ours, Report, ScanScope};
 use crate::platform::window_engine::{EngineKind, Motion, ShowHow, WindowEngine};
@@ -78,6 +86,45 @@ struct Counts {
     read_back_max_us: u64,
 }
 
+/// Which calls a test run makes fail (`ctl debug-engine-fail`): nothing is sent for them,
+/// so their read back finds the window where it was, as when the window server refuses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FailMode {
+    /// Every call is sent.
+    #[default]
+    Off,
+    /// The next hide (with its retry).
+    NextHide,
+    /// The next show (with its retry).
+    NextShow,
+    /// The next hide or show, whichever comes first (with its retry).
+    Next,
+    /// Every bridged call from now on, the bring-backs' too (a window server that blocked
+    /// the bridge mid-run); the Space calls of the classic route still go.
+    All,
+}
+
+impl FailMode {
+    /// The mode `word` names (`hide`, `show`, `next`, `all`, `off`).
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word {
+            "next" | "" => Self::Next,
+            "hide" => Self::NextHide,
+            "show" => Self::NextShow,
+            "all" => Self::All,
+            "off" => Self::Off,
+            _ => return None,
+        })
+    }
+}
+
+/// A hide or a show, for [`FailMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Call {
+    Hide,
+    Show,
+}
+
 #[derive(Default)]
 struct State {
     /// (Desktop, stage) to the Space made for it.
@@ -90,6 +137,13 @@ struct State {
     /// Windows whose show left them in a stage Space.
     owed: BTreeSet<u32>,
     counts: Counts,
+    /// The checks while running.
+    health: Health,
+    /// The calls a test run makes fail.
+    fail: FailMode,
+    /// Stage Spaces of another process, as its parked file names them, each with its
+    /// Desktop (the guardian's: [`WindowEngine::assume`]); swept with this engine's own.
+    foreign: BTreeMap<u64, u64>,
 }
 
 /// The Spaces engine (see the module docs).
@@ -184,9 +238,65 @@ impl SpacesEngine {
             .as_ref()
     }
 
-    /// Every stage Space this engine made.
+    /// Every stage Space this engine made, and those another process's file named.
     fn ours(&self) -> BTreeSet<u64> {
-        self.state().stages.values().copied().collect()
+        let st = self.state();
+        st.stages.values().copied().chain(st.foreign.keys().copied()).collect()
+    }
+
+    /// Each stage Space (this engine's and another process's) with its Desktop.
+    fn homes(&self) -> BTreeMap<u64, u64> {
+        let st = self.state();
+        st.stages.iter().map(|((desktop, _), space)| (*space, *desktop)).chain(st.foreign.iter().map(|(s, d)| (*s, *d))).collect()
+    }
+
+    /// True when the test run makes this `call` fail; a one-call mode is used up by it.
+    fn failing(&self, call: Call) -> bool {
+        let mut st = self.state();
+        let hit = match st.fail {
+            FailMode::Off => false,
+            FailMode::All | FailMode::Next => true,
+            FailMode::NextHide => call == Call::Hide,
+            FailMode::NextShow => call == Call::Show,
+        };
+        if hit && st.fail != FailMode::All {
+            st.fail = FailMode::Off;
+        }
+        if hit {
+            tracing::warn!(call = ?call, "spaces engine: a test run makes this call fail (nothing is sent)");
+        }
+        hit
+    }
+
+    /// True while every bridged call fails ([`FailMode::All`]).
+    fn blocked(&self) -> bool {
+        self.state().fail == FailMode::All
+    }
+
+    /// The calls a test run makes fail from now on (`ctl debug-engine-fail`).
+    pub fn fail_calls(&self, mode: FailMode) {
+        tracing::warn!(mode = ?mode, "spaces engine: a test run makes calls fail");
+        self.state().fail = mode;
+    }
+
+    /// A window not where a call put it, sent once more by `retry` (true when the read back
+    /// then found it there): a strike when the retry set it right, the engine failed when it
+    /// did not, nothing when the window is gone or was on no Space (`before`). True when the
+    /// window ended where the call put it.
+    fn missed(&self, id: u32, what: &str, before: &[u64], retry: impl FnOnce() -> bool) -> bool {
+        if before.is_empty() || windows::describe(&[id]).is_empty() {
+            tracing::debug!(id, what, spaces = ?before, "spaces engine: a miss of a window gone or on no Space: no strike");
+            return false;
+        }
+        if retry() {
+            let failed = self.state().health.strike(Instant::now(), what);
+            tracing::warn!(id, what, failed, "spaces engine: a window not where a call put it was set right by a retry (a strike)");
+            return true;
+        }
+        let why = format!("a window not where a Space call put it after a retry ({what}, window {id})");
+        tracing::error!(id, what, "spaces engine: {why}; the engine has failed");
+        self.state().health.fail(why);
+        false
     }
 
     /// Every Desktop of every display, and the ones shown.
@@ -210,10 +320,12 @@ impl SpacesEngine {
             }
             Ok(_) => {
                 tracing::warn!(desktop = home, stage, "spaces engine: the window server made no Space");
+                self.state().health.fail("the window server made no Space for a stage".into());
                 None
             }
             Err(e) => {
                 tracing::warn!(desktop = home, stage, "spaces engine: no Space made: {e}");
+                self.state().health.fail(format!("no Space made for a stage: {e}"));
                 None
             }
         }
@@ -264,19 +376,30 @@ impl SpacesEngine {
         // Off its Desktop; a window already in another stage's Space (moved between two
         // hidden stages) out of that one too.
         let ours = self.ours();
-        let sent = if out_of(&now, &ours) { sky.add_remove(Route::Bridged, space, &[id]) } else { sky.add_remove_from(Route::Bridged, space, &[id], ALL_SPACES_MASK) };
-        if let Err(e) = sent {
-            tracing::warn!(id, space, "spaces engine: the hide could not be sent: {e}");
+        let failing = self.failing(Call::Hide);
+        let send = || {
+            if failing {
+                return;
+            }
+            let sent = if out_of(&now, &ours) { sky.add_remove(Route::Bridged, space, &[id]) } else { sky.add_remove_from(Route::Bridged, space, &[id], ALL_SPACES_MASK) };
+            if let Err(e) = sent {
+                tracing::warn!(id, space, "spaces engine: the hide could not be sent: {e}");
+            }
+        };
+        send();
+        let (mut ok, after) = self.read_back(sky, id, |s| hidden_in(s, space));
+        if !ok {
+            self.state().counts.hide_misses += 1;
+            tracing::warn!(id, space, desktop = home, listed = ?after, "spaces engine: a hidden window is not in its stage's Space");
+            ok = self.missed(id, "a hide", &now, || {
+                send();
+                self.read_back(sky, id, |s| hidden_in(s, space)).0
+            });
         }
-        let (ok, after) = self.read_back(sky, id, |s| hidden_in(s, space));
-        let mut st = self.state();
         if ok {
+            let mut st = self.state();
             st.held.insert(id, Held { space, home });
             st.owed.remove(&id);
-        } else {
-            st.counts.hide_misses += 1;
-            drop(st);
-            tracing::warn!(id, space, desktop = home, listed = ?after, "spaces engine: a hidden window is not in its stage's Space");
         }
         ok
     }
@@ -306,16 +429,30 @@ impl SpacesEngine {
             return false;
         };
         self.state().counts.shows += 1;
-        if let Err(e) = sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK) {
-            tracing::warn!(id, desktop = home, "spaces engine: the show could not be sent: {e}");
+        let failing = self.failing(Call::Show);
+        let send = || {
+            if failing {
+                return;
+            }
+            if let Err(e) = sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK) {
+                tracing::warn!(id, desktop = home, "spaces engine: the show could not be sent: {e}");
+            }
+        };
+        send();
+        let (mut ok, after) = self.read_back(sky, id, |s| out_of(s, &ours));
+        if !ok {
+            tracing::warn!(id, desktop = home, listed = ?after, "spaces engine: a shown window is still in a stage's Space; sent again");
+            ok = self.missed(id, "a show", &now, || {
+                send();
+                self.read_back(sky, id, |s| out_of(s, &ours)).0
+            });
         }
-        let (ok, after) = self.read_back(sky, id, |s| out_of(s, &ours));
         if ok {
             let mut st = self.state();
             st.held.remove(&id);
             st.owed.remove(&id);
         } else {
-            tracing::warn!(id, desktop = home, listed = ?after, "spaces engine: a shown window is still in a stage's Space");
+            tracing::warn!(id, desktop = home, "spaces engine: a shown window is still in a stage's Space after a retry");
             self.missed_show(id);
         }
         ok
@@ -416,19 +553,33 @@ impl SpacesEngine {
         let Some(sky) = self.sky() else { return report };
         let own = std::process::id() as i32;
         let (desktops, shown) = Self::desktops(sky);
+        let homes = self.homes();
+        let blocked = self.blocked();
         let mut by_home: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
+        let mut in_space: BTreeMap<u32, u64> = BTreeMap::new();
         for w in windows::every_window().iter().filter(|w| w.pid != own) {
-            if out_of(&sky.spaces_of(&[w.id]), &ours) {
-                continue;
-            }
+            let now = sky.spaces_of(&[w.id]);
+            let Some(space) = now.iter().copied().find(|s| ours.contains(s)) else { continue };
+            in_space.insert(w.id, space);
             report.checked += 1;
-            let home = self.state().held.get(&w.id).map(|h| h.home).filter(|h| desktops.contains(h)).or(shown.first().copied());
+            let home = self
+                .state()
+                .held
+                .get(&w.id)
+                .map(|h| h.home)
+                .or_else(|| homes.get(&space).copied())
+                .filter(|h| desktops.contains(h))
+                .or(shown.first().copied());
             match home {
                 Some(home) => by_home.entry(home).or_default().push(w.id),
                 None => report.failed += 1,
             }
         }
         for (home, ids) in &by_home {
+            if blocked {
+                tracing::warn!(why, desktop = home, "spaces engine: a test run makes the bring-back's call fail (nothing is sent)");
+                continue;
+            }
             if let Err(e) = sky.add_remove_from(Route::Bridged, *home, ids, ALL_SPACES_MASK) {
                 tracing::warn!(why, desktop = home, "spaces engine: the bring-back could not be sent: {e}");
             }
@@ -450,7 +601,14 @@ impl SpacesEngine {
         if report.checked > 0 || end {
             tracing::info!(why, hidden = report.checked, back = report.restored, left = ?left, "spaces engine: hidden windows brought back");
         }
+        if end && !left.is_empty() {
+            let rescued = self.end_spaces_holding(sky, why, &left, &in_space, &ours);
+            report.restored += rescued.len();
+            report.failed -= rescued.len();
+            left.retain(|id| !rescued.contains(id));
+        }
         if end && left.is_empty() {
+            self.state().foreign.clear();
             let spaces: Vec<u64> = std::mem::take(&mut self.state().stages).into_values().collect();
             for space in &spaces {
                 let _ = sky.destroy(Route::Classic, *space);
@@ -460,6 +618,31 @@ impl SpacesEngine {
             }
         }
         report
+    }
+
+    /// The bring-back's last resort, for windows `left` in a stage Space after the moves
+    /// (a window server that refuses the bridged move): the Spaces holding them (`in_space`)
+    /// are ended with the classic call, which needs no bridge (this process made them), and
+    /// each window is read back out of every stage Space. The windows that came out.
+    fn end_spaces_holding(&self, sky: &Sky, why: &str, left: &[u32], in_space: &BTreeMap<u32, u64>, ours: &BTreeSet<u64>) -> Vec<u32> {
+        let spaces: BTreeSet<u64> = left.iter().filter_map(|id| in_space.get(id).copied()).collect();
+        for space in &spaces {
+            let r = sky.destroy(Route::Classic, *space);
+            tracing::warn!(why, space, result = ?r, "spaces engine: windows still in a stage Space after the bring-back: the Space ended");
+            self.state().stages.retain(|_, s| s != space);
+        }
+        let mut out = Vec::new();
+        for id in left.iter().copied() {
+            let (ok, after) = self.read_back(sky, id, |s| out_of(s, ours));
+            tracing::warn!(why, id, ok, listed = ?after, "spaces engine: a window after its Space ended");
+            if ok {
+                let mut st = self.state();
+                st.held.remove(&id);
+                st.owed.remove(&id);
+                out.push(id);
+            }
+        }
+        out
     }
 
     /// The windows hidden on a Desktop that shows now: present there, though the window
@@ -518,6 +701,9 @@ impl SpacesEngine {
             "hide_misses": st.counts.hide_misses,
             "show_misses": st.counts.show_misses,
             "read_back_max_us": st.counts.read_back_max_us,
+            "strikes": st.health.strikes(Instant::now()),
+            "failed": st.health.failed(),
+            "fail_mode": format!("{:?}", st.fail),
         })
     }
 }
@@ -586,8 +772,14 @@ impl WindowEngine for SpacesEngine {
         EngineKind::Spaces.stranded(frame, displays, known)
     }
 
-    /// Nothing: the app's stage Spaces ended with it, there is no place to know.
-    fn assume(&self, _file: &ParkedFile) {}
+    /// The app's stage Spaces as its file names them: swept with this engine's own. They
+    /// end with the app, so after a crash or a kill they are gone and the sweep finds
+    /// nothing; while the app still holds them (it hangs) the windows come out of them all
+    /// the same (another process can move windows out of a Space, not end it).
+    fn assume(&self, file: &ParkedFile) {
+        let mut st = self.state();
+        st.foreign = file.spaces.iter().map(|s| (s.space, s.desktop)).collect();
+    }
 
     /// Pictures, as the Corner engine: the windows hide and show in one step behind them.
     fn animate(&self, _t: &Transition) -> Motion {
@@ -621,14 +813,33 @@ impl WindowEngine for SpacesEngine {
         Some(ours.kept_for_retry(&left))
     }
 
-    /// The sweep: a window left in a stage Space with nothing answering for it. At a launch
-    /// there is none (an earlier run's Spaces ended with it).
-    fn recover(&self, why: &str, _scope: &ScanScope) -> (Report, Vec<i32>) {
-        (self.sweep(why, false), Vec::new())
+    /// The sweep: a window left in a stage Space with nothing answering for it (at a launch
+    /// there is none: an earlier run's Spaces ended with it). Then, when an earlier copy
+    /// left windows registered (`scope.registered`: it crashed with a parked file, likely a
+    /// Corner engine's) or the launch's scan asks again for apps that did not answer, the
+    /// Corner engine's scan: such a copy's windows wait in its park corner, and a Spaces run
+    /// must bring them back the Corner way (this engine leaves nothing there itself, and the
+    /// windows it registers are skipped).
+    fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
+        let swept = self.sweep(why, false);
+        if scope.registered.is_empty() && !why.starts_with("launch") {
+            return (swept, Vec::new());
+        }
+        let (corner, unanswered) = safety::recovery_scan_with(why, scope);
+        (Report { checked: swept.checked + corner.checked, restored: swept.restored + corner.restored, failed: swept.failed + corner.failed }, unanswered)
     }
 
     fn present_off_screen(&self) -> HashSet<u32> {
         self.present_now()
+    }
+
+    fn health(&self) -> Option<String> {
+        self.state().health.failed().map(str::to_string)
+    }
+
+    /// This engine's stage Spaces with their Desktops.
+    fn parked_spaces(&self) -> Vec<StageSpace> {
+        self.state().stages.iter().map(|((desktop, _), space)| StageSpace { space: *space, desktop: *desktop }).collect()
     }
 }
 

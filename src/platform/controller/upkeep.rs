@@ -293,16 +293,24 @@ impl Controller {
 
     // ── `ctl state` ─────────────────────────────────────────────────────────────────────
 
-    /// `ctl state`'s `engine`: which engine runs (`kind`), and what it keeps and counts.
+    /// `ctl state`'s `engine`: which engine runs (`kind`), why (`why`, `probe`, `fallback`),
+    /// and what it keeps and counts.
     pub(super) fn status_engine(&self) -> Value {
-        match self.engine.kind() {
+        let mut status = match self.engine.kind() {
             EngineKind::Corner => json!({ "kind": EngineKind::Corner.name() }),
             EngineKind::Spaces => {
                 let mut status = crate::platform::spaces::engine::shared().status();
                 status["kind"] = json!(EngineKind::Spaces.name());
                 status
             }
+        };
+        // Why it runs (the launch's choice, the probe's verdict, a fallback), every engine.
+        if let Some(c) = crate::platform::window_engine::choice() {
+            status["why"] = json!(c.why);
+            status["probe"] = json!(c.probe);
+            status["fallback"] = json!(c.fallback);
         }
+        status
     }
 
     /// `ctl state`'s `strays`: the hidden windows the screen contradicts. The Corner engine:

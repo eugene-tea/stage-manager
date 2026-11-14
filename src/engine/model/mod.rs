@@ -719,6 +719,13 @@ impl Model {
         self.options.park = req;
     }
 
+    /// Which window engine's answers the model asks from now on ([`ModelOptions::engine`]):
+    /// the controller's fallback mid-run to the Corner engine. Windows hidden stay counted
+    /// hidden; the controller hides them again the new engine's way.
+    pub fn set_engine(&mut self, engine: crate::engine::recovery::EngineKind) {
+        self.options.engine = engine;
+    }
+
     /// Every parked window with its restore frame.
     pub fn parked_windows(&self) -> Vec<(WindowId, Rect)> {
         self.windows

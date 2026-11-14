@@ -4,8 +4,14 @@
 //!
 //! One strategy, [`WindowEngine`], with exactly two implementations planned: the Corner
 //! engine ([`super::corner::engine::CornerEngine`], today's Accessibility park corner) and the
-//! Spaces engine ([`super::spaces::engine::SpacesEngine`], 1.9: a test switch only for now). Shared code asks the engine and never which one
+//! Spaces engine ([`super::spaces::engine::SpacesEngine`], 1.9). Shared code asks the engine and never which one
 //! runs; what only one engine needs stays inside it.
+//!
+//! **Which one runs** is decided at every launch ([`choose_at_launch`]: the config, the
+//! launch probe, the switches; [`crate::engine::engine_choice`]) and can change once while
+//! running: a Spaces engine whose checks fail ([`WindowEngine::health`]) hands over to the
+//! Corner engine for the rest of the run ([`fall_back`], called by the controller once every
+//! window is back).
 //!
 //! **Threads.** The engine is one value for the whole process ([`current`]): the WM thread
 //! hides and shows through it inside the controller's batches, and the safety paths (quit, a
@@ -19,15 +25,18 @@
 //! bookkeeping are the controller's, the same for every engine).
 
 use std::collections::HashSet;
-use std::sync::{Arc, OnceLock, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+
+use objc2_foundation::MainThreadMarker;
 
 use super::ax::{AxElement, AxResult};
 use super::safety::{Ours, Report, ScanScope};
+use crate::engine::engine_choice::{self, Asked, Choice, ConfigEngine};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Display, Model, WindowId};
 use crate::ui::strip_model::Transition;
 pub use crate::engine::recovery::EngineKind;
-use crate::engine::recovery::{Known, ParkedFile, ScanDisplays};
+use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
 
 /// How a window is brought to its frame ([`WindowEngine::show`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,6 +139,20 @@ pub trait WindowEngine: Send + Sync {
     /// Desktop is recognized by its windows). The Corner engine: none, its hidden windows
     /// are listed on screen, in the corner.
     fn present_off_screen(&self) -> HashSet<u32>;
+
+    /// The checks while running: `Some(why)` once this engine should not hide another window
+    /// (a window not where a call put it after a retry, or misses set right too often:
+    /// [`crate::engine::engine_choice::Health`]). The Corner engine never fails this way.
+    fn health(&self) -> Option<String> {
+        None
+    }
+
+    /// The places this engine keeps hidden windows that another process could not find by
+    /// itself, for the parked file ([`ParkedFile::spaces`]): the Spaces engine's stage
+    /// Spaces. The Corner engine: none (its park zones are in the file already).
+    fn parked_spaces(&self) -> Vec<StageSpace> {
+        Vec::new()
+    }
 }
 
 static ENGINE: OnceLock<RwLock<Arc<dyn WindowEngine>>> = OnceLock::new();
@@ -138,16 +161,62 @@ fn slot() -> &'static RwLock<Arc<dyn WindowEngine>> {
     ENGINE.get_or_init(|| RwLock::new(first()))
 }
 
-/// The engine a process starts with: the Corner engine, unless a test run asks for another
-/// ([`super::spaces::engine::from_env`]; said in the log, the default is not).
+/// The engine a process starts with: the Corner engine, until the launch chooses
+/// ([`choose_at_launch`]) or the guardian installs its app's ([`install`]).
 fn first() -> Arc<dyn WindowEngine> {
-    match super::spaces::engine::from_env() {
-        Some(kind) => {
-            tracing::info!(engine = kind.name(), "window engine: chosen by STAGE_MANAGER_ENGINE (a test run)");
-            of(kind)
-        }
-        None => Arc::new(super::corner::engine::CornerEngine),
+    Arc::new(super::corner::engine::CornerEngine)
+}
+
+/// The launch's choice and what happened to it since, for `ctl state` (`None` in a process
+/// that did not choose: the guardian, the tools).
+static CHOICE: Mutex<Option<Choice>> = Mutex::new(None);
+
+fn lock_choice() -> std::sync::MutexGuard<'static, Option<Choice>> {
+    CHOICE.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The app's launch: runs the launch probe unless `config` or the test switch asks for the
+/// Corner engine, chooses ([`engine_choice::choose`]), installs the engine and logs the
+/// choice with its reason. Main thread, once AppKit is up, before the WM thread starts.
+pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
+    let asked = Asked { config, opted_in: opted_in(), test: super::spaces::engine::from_env() };
+    let probe = asked.probes().then(|| super::spaces::probe::run(mtm));
+    match &probe {
+        Some(p) if p.ok => tracing::info!(ms = format!("{:.1}", p.ms), "window engine: launch probe passed: {}", p.reason),
+        Some(p) => tracing::warn!(ms = format!("{:.1}", p.ms), "window engine: launch probe failed: {}", p.reason),
+        None => tracing::info!(config = config.name(), "window engine: launch probe not run"),
     }
+    let choice = engine_choice::choose(asked, probe);
+    tracing::info!(engine = choice.kind.name(), "window engine: {}", choice.why);
+    install(of(choice.kind));
+    *lock_choice() = Some(choice.clone());
+    choice
+}
+
+/// The hidden opt-in for the Spaces engine under `[windows] engine = "auto"`, until it is
+/// measured: `STAGE_MANAGER_SPACES=1`.
+fn opted_in() -> bool {
+    std::env::var("STAGE_MANAGER_SPACES").is_ok_and(|v| v.trim() == "1")
+}
+
+/// The Corner engine from now on, for the rest of the run: a running engine's checks failed
+/// (`why`) and every window it hid is back (the controller's part). The choice records it
+/// for `ctl state`; the parked file names the engine from its next write.
+pub fn fall_back(why: &str) {
+    install(of(EngineKind::Corner));
+    let mut c = lock_choice();
+    match c.as_mut() {
+        Some(choice) => {
+            choice.kind = EngineKind::Corner;
+            choice.fallback = Some(why.to_string());
+        }
+        None => *c = Some(Choice { kind: EngineKind::Corner, why: "fell back".into(), probe: None, fallback: Some(why.to_string()) }),
+    }
+}
+
+/// The launch's choice as it stands ([`choose_at_launch`], [`fall_back`]).
+pub fn choice() -> Option<Choice> {
+    lock_choice().clone()
 }
 
 /// The engine this process runs: the Corner engine until another is installed.
