@@ -214,16 +214,8 @@ pub fn is_excluded_bundle(bundle_id: &str) -> bool {
 
 /// Z index of every onscreen layer-0 window: 0 is frontmost.
 pub fn z_order(list: &[CgWindow]) -> HashMap<u32, usize> {
-    z_order_with(list, |_| false)
-}
-
-/// [`z_order`] with the off-screen windows `also` names counted too, where the list has
-/// them (after every on-screen window in [`list_windows`]; among themselves in the window
-/// server's order, front to back: a just-opened app's windows held in a Space of their own
-/// before they show keep the order their app gave them there).
-pub fn z_order_with(list: &[CgWindow], also: impl Fn(u32) -> bool) -> HashMap<u32, usize> {
     list.iter()
-        .filter(|w| w.layer == 0 && (w.onscreen || also(w.id)))
+        .filter(|w| w.onscreen && w.layer == 0)
         .enumerate()
         .map(|(z, w)| (w.id, z))
         .collect()
@@ -245,19 +237,6 @@ mod tests {
         assert_eq!(z.get(&13), Some(&1));
         assert!(!z.contains_key(&10));
         assert!(!z.contains_key(&12));
-    }
-
-    #[test]
-    fn z_order_with_counts_the_off_screen_windows_asked_for_after_the_shown_ones() {
-        // As `list_windows` lists them: on screen first, then the rest in the server's order.
-        let list = [w(11, 1, 0, true), w(13, 2, 0, true), w(21, 3, 0, false), w(12, 2, 0, false), w(20, 3, 0, false)];
-        let z = z_order_with(&list, |id| id == 20 || id == 21);
-        assert_eq!(z.get(&11), Some(&0));
-        assert_eq!(z.get(&13), Some(&1));
-        assert_eq!(z.get(&21), Some(&2), "held, front of its app's others");
-        assert_eq!(z.get(&20), Some(&3));
-        assert!(!z.contains_key(&12), "off screen and not asked for");
-        assert_eq!(z_order_with(&list, |_| false), z_order(&list));
     }
 
     #[test]

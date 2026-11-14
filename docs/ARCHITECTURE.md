@@ -232,8 +232,9 @@ the controller finds it through Accessibility and places it at once, the switch 
 stage hides the stage left behind, and only then is it let onto the Desktop (or into its
 stage's Space). A window not placed within a second of its app ordering it in, or never
 ordered in (helper windows), is let out as it would have shown. Windows found together are
-taken front to back counting the held ones where they wait (`windows::z_order_with`), so an
-app opening two windows ends with the one it opened last in front; one let out while its
+taken front to back, the held ones in their app's own order (its `AXWindows`: the window
+server's list of a Space never shown does not keep it), so an app opening two windows ends
+with the one it opened last in front; one let out while its
 stage's switch still moves tells the strip (`StripSnapshot::under_now`), whose overlay goes
 under it, so the stage left behind shrinks behind it.
 

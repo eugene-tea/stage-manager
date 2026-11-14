@@ -662,6 +662,18 @@ fn found_order(mut run: Vec<u32>, pid: impl Fn(u32) -> Option<i32>, z: impl Fn(u
     out
 }
 
+/// How long each Accessibility question of [`Controller::found_z`] may take.
+const HELD_ORDER_BUDGET: f32 = 0.1;
+
+/// Each of `held` (one app's windows held on their way in) with its rank front to back:
+/// its place in `listed` (the app's `AXWindows`, front to back), the ones it does not list
+/// after those, by id (creation order).
+fn held_ranks(held: &[u32], listed: &[u32]) -> Vec<(u32, usize)> {
+    let mut ranked: Vec<u32> = held.to_vec();
+    ranked.sort_by_key(|id| (listed.iter().position(|l| l == id).unwrap_or(usize::MAX), *id));
+    ranked.into_iter().enumerate().map(|(rank, id)| (id, rank)).collect()
+}
+
 /// Whether an app's activation is held, nothing switching for it now. `frozen`: no stage
 /// change on the main screen ([`Controller::frozen`]: a full-screen app's Space there, a
 /// Space change settling, the lock); `screens_frozen`: for each screen holding a window of
@@ -2432,8 +2444,7 @@ impl Controller {
     // ----- events ------------------------------------------------------------------------
 
     /// Handles a batch of observer events. Runs of `Found` are taken in window-id order
-    /// (creation order), each app's windows front to back ([`found_order`]; a window the
-    /// engine holds on its way in counts where it waits, [`windows::z_order_with`]).
+    /// (creation order), each app's windows front to back ([`found_order`], [`Self::found_z`]).
     pub fn on_events(&mut self, ob: &mut Observer, events: Vec<WinEvent>) {
         let mut i = 0;
         while i < events.len() {
@@ -2443,11 +2454,7 @@ impl Controller {
                     run.push(*id);
                     i += 1;
                 }
-                // A window the engine holds on its way in is off screen, in its app's order
-                // there (the Spaces engine: an app opening two windows at once, the one it
-                // opened last in front, live 11-14).
-                let engine = self.engine.clone();
-                let z = if run.len() > 1 { windows::z_order_with(&windows::list_windows(), |id| engine.about_to_show(WindowId(id))) } else { HashMap::new() };
+                let z = if run.len() > 1 { self.found_z(ob, &run) } else { HashMap::new() };
                 let run = found_order(run, |id| ob.window(id).map(|w| w.pid), |id| z.get(&id).copied());
                 for id in run {
                     self.on_found(ob, id);
@@ -2457,6 +2464,36 @@ impl Controller {
             self.on_event(ob, events[i]);
             i += 1;
         }
+    }
+
+    /// The front-to-back order of a run of found windows ([`found_order`]): the window
+    /// server's on-screen order, and for windows the engine holds on their way in (off
+    /// screen: the Spaces engine, a just-opened app's) their app's own order, as its
+    /// `AXWindows` lists them, after every on-screen one ([`held_ranks`]). The window
+    /// server's list of a Space never shown does not keep the app's order (live 11-14: an app
+    /// opening two windows at once listed the one it opened first in front, 2 runs of 3).
+    fn found_z(&self, ob: &Observer, run: &[u32]) -> HashMap<u32, usize> {
+        let mut z = windows::z_order(&windows::list_windows());
+        let held: Vec<(u32, i32)> =
+            run.iter().filter(|&&id| self.engine.about_to_show(WindowId(id))).filter_map(|&id| ob.window(id).map(|w| (id, w.pid))).collect();
+        let pids: BTreeSet<i32> = held.iter().map(|h| h.1).collect();
+        for pid in pids {
+            let mine: Vec<u32> = held.iter().filter(|h| h.1 == pid).map(|h| h.0).collect();
+            if mine.len() < 2 {
+                continue;
+            }
+            let listed: Vec<u32> = AxElement::application(pid)
+                .bounded(HELD_ORDER_BUDGET, |app| app.windows())
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|w| w.window_id_within(HELD_ORDER_BUDGET).ok())
+                .collect();
+            let base = z.len();
+            for (id, rank) in held_ranks(&mine, &listed) {
+                z.insert(id, base + rank);
+            }
+        }
+        z
     }
 
     fn on_event(&mut self, ob: &mut Observer, event: WinEvent) {
@@ -6689,6 +6726,18 @@ mod tests {
         assert_eq!(found_order(vec![5, 4, 12], |_| Some(1), |id| (id == 12).then_some(0)), vec![12, 4, 5]);
         // One window per app: creation order, as before.
         assert_eq!(found_order(vec![3, 1, 2], |id| Some(id as i32), |_| None), vec![1, 2, 3]);
+    }
+
+    /// An app opening two windows at once under the Spaces engine: both held off screen,
+    /// ranked by the app's own `AXWindows` (Fixture 2, opened last, listed first), so the
+    /// one opened last is placed first and its stage's key (live 11-14).
+    #[test]
+    fn held_windows_rank_by_their_apps_own_order() {
+        assert_eq!(held_ranks(&[21, 22], &[22, 21, 30]), vec![(22, 0), (21, 1)]);
+        assert_eq!(held_ranks(&[23, 21, 22], &[22]), vec![(22, 0), (21, 1), (23, 2)], "unlisted: after, by id");
+        assert_eq!(held_ranks(&[21, 22], &[]), vec![(21, 0), (22, 1)], "the app did not answer: creation order");
+        let z: HashMap<u32, usize> = held_ranks(&[21, 22], &[22, 21]).into_iter().map(|(id, r)| (id, 5 + r)).collect();
+        assert_eq!(found_order(vec![21, 22], |_| Some(7), |id| z.get(&id).copied()), vec![22, 21]);
     }
 
     /// The review's S1: a full-screen app on the main screen froze every strip's
