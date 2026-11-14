@@ -6,7 +6,7 @@ use std::ffi::c_void;
 
 use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFIndex, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
-    CGWindowListCopyWindowInfo, CGWindowListCreateDescriptionFromArray, CGWindowListOption, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds,
+    CGWindowListCopyWindowInfo, CGWindowListCreate, CGWindowListCreateDescriptionFromArray, CGWindowListOption, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds,
     kCGWindowIsOnscreen, kCGWindowLayer, kCGWindowName, kCGWindowNumber, kCGWindowOwnerName,
     kCGWindowOwnerPID,
 };
@@ -69,6 +69,24 @@ pub fn list_windows() -> Vec<CgWindow> {
 /// server's order: one query (the Spaces probe's watch for windows that are not shown yet).
 pub fn every_window() -> Vec<CgWindow> {
     query(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements)
+}
+
+/// The ids of every window, on screen or not, on any Space (desktop elements excluded):
+/// `CGWindowListCreate`, no description built, a fraction of [`every_window`]'s cost (a
+/// launch's watch for a new window reads it every few ms,
+/// [`super::spaces::launch_watch`]).
+pub fn every_window_id() -> Vec<u32> {
+    let Some(array) = CGWindowListCreate(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements, kCGNullWindowID) else {
+        return Vec::new();
+    };
+    (0..array.count())
+        .filter_map(|i| {
+            // SAFETY: `i` is within the array; its values are the CGWindowIDs themselves
+            // (no callbacks), as the call documents.
+            let v = unsafe { array.value_at_index(i) };
+            u32::try_from(v as usize).ok()
+        })
+        .collect()
 }
 
 /// The on-screen windows only (desktop elements excluded), front to back: one query.

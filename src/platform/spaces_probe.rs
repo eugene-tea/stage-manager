@@ -55,6 +55,11 @@
 //!   that is not the main one (as the app's WM thread does), each step read back and checked
 //!   against the window list, then its bring-back; the engine's counts.
 //! - `launch-probe [--rounds N]`: the app's launch probe, N times, each verdict and its time.
+//! - `sources APP-PATH BUNDLE [--rounds N] [--events A-B] [--args …]`: how early each source
+//!   tells of a newly opened app's first window ([`super::new_window_probe`]); reads only.
+//! - `overlap OLD-BUNDLE APP-PATH NEW-BUNDLE [--for MS] [--args …]`: opens the app while the
+//!   old app's windows show and samples the on-screen list every ms: any sample with both
+//!   ([`super::new_window_probe::overlap`]); reads only.
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
 
@@ -179,8 +184,15 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|key|dock-click|cleanup …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|launch-probe|key|dock-click|cleanup|sources|overlap …");
     };
+    // Read only (no window moves): any app, their own arguments.
+    if cmd == "sources" {
+        return super::new_window_probe::run(rest);
+    }
+    if cmd == "overlap" {
+        return super::new_window_probe::overlap(rest);
+    }
     let o = match parse(rest) {
         Ok(o) => o,
         Err(e) => return fail(2, &e),
