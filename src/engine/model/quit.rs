@@ -108,7 +108,7 @@ impl Model {
         };
         let st = self.stage(stage)?;
         let d = self.display(w.meta.display);
-        let frame = if d.parks(w.restore) || w.restore.is_degenerate() { clamp_to_visible(w.restore, d.visible) } else { w.restore };
+        let frame = if self.no_restore(w.meta.display, w.restore) || w.restore.is_degenerate() { clamp_to_visible(w.restore, d.visible) } else { w.restore };
         let z = st.windows.iter().position(|&x| x == id).unwrap_or(st.windows.len());
         let fp = fingerprint(&w.meta.title);
         Some(Closing {

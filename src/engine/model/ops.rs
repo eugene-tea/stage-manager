@@ -197,7 +197,7 @@ impl Model {
         let visible = self.display(display).visible;
         // Born in the park zone: an app that saved its own frame while the window was parked
         // at its quit; the frame it had then, kept a day, else centered below (W2).
-        let born = if self.display(display).parks(meta.frame) {
+        let born = if self.listed_hidden(display, meta.frame) {
             self.take_quit_frame(&meta.bundle_id, &meta.title).unwrap_or(meta.frame)
         } else {
             meta.frame
@@ -306,13 +306,12 @@ impl Model {
     /// window lands beside it in the corner, and came back centered on the screen, away from
     /// its window); with no parent known, centered ([`Model::safe_restore`]).
     fn child_restore(&self, meta: &WindowMeta, parent: Option<WindowId>) -> Rect {
-        let d = *self.display(meta.display);
         let f = meta.frame;
-        let usable = !f.is_degenerate() && !d.parks(f);
+        let usable = !f.is_degenerate() && !self.listed_hidden(meta.display, f);
         match parent.and_then(|p| self.windows.get(&p)) {
             Some(p) if !usable && !f.is_degenerate() => {
                 let r = p.restore;
-                d.reach(Rect::new((r.x + (r.w - f.w) / 2.0).round(), r.y + TITLE_BAR_HEIGHT.min(r.h), f.w, f.h))
+                self.within_reach(meta.display, Rect::new((r.x + (r.w - f.w) / 2.0).round(), r.y + TITLE_BAR_HEIGHT.min(r.h), f.w, f.h))
             }
             _ => self.safe_restore(f, meta.display),
         }
@@ -934,12 +933,12 @@ impl Model {
         // A fresh placement, not a frame the user left: the whole width on screen when it
         // fits, as before.
         let x = if old.w <= v.w { top_left.x.min(v.max_x() - old.w).max(v.x) } else { top_left.x };
-        let placed = d.reach(Rect::new(x, top_left.y, old.w, old.h));
+        let placed = self.within_reach(d.id, Rect::new(x, top_left.y, old.w, old.h));
         let (dx, dy) = (placed.x - old.x, placed.y - old.y);
         self.move_restore(id, placed);
         for c in self.children_of(id) {
             let Some(cw) = self.windows.get(&c) else { continue };
-            let moved = self.display(cw.meta.display).reach(cw.restore.translate(dx, dy));
+            let moved = self.within_reach(cw.meta.display, cw.restore.translate(dx, dy));
             self.move_restore(c, moved);
         }
     }
@@ -1583,7 +1582,7 @@ impl Model {
         if let Some(standard) = self.resolve_standard(id)
             && self.windows.get(&standard).is_some_and(|w| w.parked)
         {
-            if standard == id && !self.display(self.windows[&id].meta.display).parks(frame) {
+            if standard == id && !self.listed_hidden(self.windows[&id].meta.display, frame) {
                 self.record_frame(id, frame);
             }
             if let Some(stage) = self.stage_of(standard) {
@@ -1879,8 +1878,8 @@ impl Model {
         let stale: Vec<(WindowId, Rect)> = self
             .windows
             .values()
-            .filter(|w| moved_frames.contains(&w.meta.display) && self.display(w.meta.display).parks(w.restore))
-            .map(|w| (w.meta.id, self.display(w.meta.display).reach(w.restore)))
+            .filter(|w| moved_frames.contains(&w.meta.display) && self.no_restore(w.meta.display, w.restore))
+            .map(|w| (w.meta.id, self.within_reach(w.meta.display, w.restore)))
             .collect();
         for (id, restore) in stale {
             if let Some(w) = self.windows.get_mut(&id) {
@@ -2108,7 +2107,7 @@ impl Model {
             let display = *self.display(to);
             for &id in &ids {
                 let from = *self.display(self.windows[&id].meta.display);
-                let at_corner = frames.get(&id).is_some_and(|f| display.hides(*f));
+                let at_corner = frames.get(&id).is_some_and(|f| self.listed_out_of_sight(to, *f));
                 let mut group = vec![id];
                 group.extend(self.children_of(id));
                 for g in group {
@@ -2350,19 +2349,13 @@ impl Model {
         actions
     }
 
-    /// True when `frame` would count as parked on the window's display. Exposed for the
-    /// platform's recovery scan of windows it observes.
-    pub fn frame_is_parked(&self, display: DisplayId, frame: Rect) -> bool {
-        self.display(display).parks(frame)
-    }
-
     /// The display other than `except` whose park zone holds `frame`: where macOS put a
     /// parked window back when a screen came back (the lid opened, 11-05 20:26:05: the
     /// laptop's two cards, counted on the 5K, listed at the laptop's bottom-left corner,
     /// where they were before the close). Such a window is that display's card
     /// ([`Model::windows_moved_to_display`]), never parked again on the other.
     pub fn park_zone_display(&self, frame: Rect, except: DisplayId) -> Option<DisplayId> {
-        self.displays.iter().find(|d| d.id != except && d.parks(frame)).map(|d| d.id)
+        self.displays.iter().find(|d| d.id != except && self.listed_hidden(d.id, frame)).map(|d| d.id)
     }
 
     /// The display other than `except` (the one the model has a parked window on) that macOS
@@ -2377,7 +2370,7 @@ impl Model {
         if let Some(d) = self.park_zone_display(frame, except) {
             return Some(d);
         }
-        if returned.is_empty() || self.display(except).parks(frame) {
+        if returned.is_empty() || self.listed_hidden(except, frame) {
             return None;
         }
         let rects: Vec<(DisplayId, Rect)> = self.displays.iter().map(|d| (d.id, d.frame)).collect();

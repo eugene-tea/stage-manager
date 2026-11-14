@@ -2048,7 +2048,7 @@ fn check_invariants(e: &Env, step: &str) {
     // S3), and a restore never brings a window into the park zone.
     for w in m.windows() {
         assert!(
-            !(parked_at(w.restore) && m.lands_parked(w, w.restore)),
+            !(parked_at(w.restore) && m.lands_hidden(w, w.restore)),
             "{step}: restore frame of {:?} is a park",
             w.meta.id
         );

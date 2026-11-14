@@ -4612,6 +4612,7 @@ impl Controller {
         let config = self.store.config().clone();
         let capacity = strip_capacity(displays[0].visible, &config);
         let mut options = config.model_options(self.settings, capacity);
+        options.engine = self.engine.kind();
         options.fit = fit_options(displays[0].visible, self.strip_visible, &self.settings, &config);
         let main = displays[0];
         let mut model = Model::new(displays, options);

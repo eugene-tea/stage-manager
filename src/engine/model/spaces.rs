@@ -574,7 +574,7 @@ impl Model {
         let all = self.scores(display, &known, absent);
         let mut scores = all.clone();
         scores.retain(|_, (n, _, _)| *n > 0);
-        let parks = |m: &WindowMeta| self.display(m.display).parks(m.frame);
+        let parks = |m: &WindowMeta| self.seen_hidden(m);
         for saved in self.leftovers.iter().filter(|l| self.saved_fits_display(l, display)) {
             let n = if self.restore.new_session { confident_matches(saved, &arrivals, parks) } else { exact_matches(saved, &arrivals) } as i64;
             if n > 0 {
@@ -655,7 +655,7 @@ impl Model {
         }
         if !arrivals.is_empty() || saved.is_some() {
             let empty = SavedSpace::default();
-            let mut assignment = rematch_on(saved.as_ref().unwrap_or(&empty), &arrivals, |m| self.display(m.display).parks(m.frame));
+            let mut assignment = rematch_on(saved.as_ref().unwrap_or(&empty), &arrivals, |m| self.seen_hidden(m));
             if let Some(s) = &saved {
                 // Its stages whose windows all came back on another Desktop are not built.
                 self.skip_pooled_out(s.id, &mut assignment);
@@ -826,11 +826,10 @@ impl Model {
             }
             self.carry_stage_to(sid, target, display);
             moving.retain(|w| !members.contains(w));
-            let zone = *self.display(display);
             let mut cornered = members.clone();
             cornered.extend(self.children_in(Home::Stage(sid)));
             for id in cornered {
-                if live.iter().any(|m| m.id == id && zone.parks(m.frame))
+                if live.iter().any(|m| m.id == id && self.listed_hidden(display, m.frame))
                     && let Some(w) = self.windows.get_mut(&id)
                 {
                     w.parked = true;
@@ -983,7 +982,7 @@ impl Model {
             if w.space != target && !w.sticky {
                 continue;
             }
-            let in_zone = self.display(w.meta.display).parks(m.frame);
+            let in_zone = self.listed_hidden(w.meta.display, m.frame);
             if w.parked && !in_zone {
                 repark.push(m.id);
             } else if !w.parked && in_zone {

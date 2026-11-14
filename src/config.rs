@@ -1119,6 +1119,7 @@ impl Config {
             dock_ignore: self.strip.dock_ignore.clone(),
             named_stages: self.stages.names.clone(),
             fit: crate::engine::stage_area::FitOptions::default(),
+            engine: crate::engine::recovery::EngineKind::default(),
             park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
             main_only: self.displays.main_only,
             keep_app_frames: !self.restore.saved_size,
