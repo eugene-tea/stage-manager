@@ -118,16 +118,25 @@ Quit, a crash (the guardian), a logout and a stand-down use the same `bring_all_
 whichever engine runs. Each choice and fallback is logged with its reason.
 
 In the code so far (the seam, Corner only): the model emits `Action::Hide { id }` and never a
-park frame; `platform::window_engine::WindowEngine` has `hidden_at`, `hide`, `show`,
-`is_hidden` and `bring_all_back`, with `platform::corner_engine::CornerEngine` behind it and
-its geometry in `engine::corner` and `engine::park`. A `SetFrame` is the engine's `show`: the
-model counts the window shown either way, and the engine knows what it has hidden. The
-engine is one value for the process (`window_engine::current`), so the WM thread's batches
-and the safety paths on other threads ask the same one. The parked file names the engine
-for the guardian (left out for Corner). Still the controller's own, to move behind the
-seam: the switch's motion (`animate`), a new window's placement before it shows
-(`place_new`), the checks while running (`health`), and the model's own park-zone tests
-(`Display::parks`).
+park frame, and asks every question about where hidden windows are through one door
+(`engine/model/hiding.rs`), which asks the pure half of the engine that runs
+(`ModelOptions::engine`; the Corner engine's is `engine::corner`, its geometry
+`engine::park`). The questions are of two kinds: is this listed window hidden now, and may a
+window be brought back here. `platform::window_engine::WindowEngine` has `hidden_at`, `hide`,
+`show`, `is_hidden`, `animate`, and for safety `bring_all_back`, `bring_back_briefly` (an
+abort), `bring_back_rest` (the last look at the window server's list) and `recover` (the
+recovery scan), with `platform::corner_engine::CornerEngine` behind it. A `SetFrame` is the
+engine's `show`: the model counts the window shown either way, and the engine knows what it
+has hidden. `animate` answers a `Motion` on the WM thread; the controller plans the
+transition, sends it to the strip and waits for its answer the same way for every motion,
+and runs the choreography the motion names (`Motion::Pictures`: hides behind the outgoing
+pictures, arrivals held until the unveil). The engine is one value for the process
+(`window_engine::current`), so the WM thread's batches and the safety paths on other threads
+ask the same one. The parked file names the engine (left out for Corner), and the guardian
+installs that engine before its first scan. Still the controller's own, to move behind the
+seam: the Corner engine's state and upkeep (corner patch, slivers, park reconcile, the
+switch's corner cover), a new window's placement before it shows (`place_new`) and the
+checks while running (`health`).
 
 ## macOS settings drive behavior
 

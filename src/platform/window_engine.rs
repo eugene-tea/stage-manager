@@ -24,6 +24,7 @@ use super::ax::{AxElement, AxResult};
 use super::safety::{Ours, Report, ScanScope};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Display, Model, WindowId};
+use crate::ui::strip_model::Transition;
 pub use crate::engine::recovery::EngineKind;
 
 /// How a window is brought to its frame ([`WindowEngine::show`]).
@@ -36,7 +37,20 @@ pub enum ShowHow {
     Retrying,
 }
 
-/// How a stage's windows are hidden, shown and brought back.
+/// How a switch moves, as the engine describes it on the WM thread
+/// ([`WindowEngine::animate`]). The controller runs the choreography it names around the
+/// shared steps (the plan, the note to the strip, the wait for its answer and for its
+/// unveil); the strip plays it on the main thread. The engine never calls UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// Pictures of the windows, full size, move between the stage and the cards above every
+    /// window (the strip's snapshots), and the windows move behind them: the outgoing ones
+    /// hide once their pictures cover them, the incoming ones stay hidden until the strip
+    /// unveils them.
+    Pictures,
+}
+
+/// How a stage's windows are hidden, shown, moved in a switch and brought back.
 pub trait WindowEngine: Send + Sync {
     /// Which engine this is (the parked file says it to the guardian, logs name it).
     fn kind(&self) -> EngineKind;
@@ -61,6 +75,10 @@ pub trait WindowEngine: Send + Sync {
     /// True when a window the window server lists at `listed` on display `d` is where this
     /// engine keeps hidden windows.
     fn is_hidden(&self, d: &Display, listed: Rect) -> bool;
+
+    /// How the switch planned as `t` moves ([`Motion`]): asked once a switch, on the WM
+    /// thread, after the plan and before anything is sent to the strip or moved.
+    fn animate(&self, t: &Transition) -> Motion;
 
     /// The last line of defence in this process: every hidden window brought back, whatever
     /// state the model and the WM thread are in. Any thread. True when nothing failed.

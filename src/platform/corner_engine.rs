@@ -6,7 +6,8 @@
 
 use super::ax::{AxElement, AxResult};
 use super::safety::{self, Ours, Report, ScanScope};
-use super::window_engine::{EngineKind, ShowHow, WindowEngine};
+use super::window_engine::{EngineKind, Motion, ShowHow, WindowEngine};
+use crate::ui::strip_model::Transition;
 use crate::engine::corner;
 use crate::engine::geometry::Rect;
 use crate::engine::leftovers;
@@ -45,6 +46,12 @@ impl WindowEngine for CornerEngine {
     /// In the display's park zone ([`Display::parks`]).
     fn is_hidden(&self, d: &Display, listed: Rect) -> bool {
         d.parks(listed)
+    }
+
+    /// Pictures: a window in the corner cannot be shown moving, so the strip's snapshots
+    /// play the motion and the windows park and unpark behind them.
+    fn animate(&self, _t: &Transition) -> Motion {
+        Motion::Pictures
     }
 
     /// The registry's unpark, else the recovery scan ([`safety::emergency_unpark`]).

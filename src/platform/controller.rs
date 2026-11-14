@@ -104,7 +104,7 @@ use super::minimize_tap::MinimizeAsk;
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
-use super::window_engine::{self, ShowHow, WindowEngine};
+use super::window_engine::{self, Motion, ShowHow, WindowEngine};
 use super::{capture_pace, desktop, desktop_shot, enhanced_ui, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply};
@@ -3248,11 +3248,11 @@ impl Controller {
         switch_cover(&facts).map(|c| if forced { SwitchCover { picture: CoverPicture::Desktop, ..c } } else { c })
     }
 
-    /// The animated batch after its early windows (`first`): planned as a transition, sent to
-    /// the strip, an activation's focus (`run`, [`ActivationRun::focus`]) routed at once, then
-    /// the parks behind the strip's snapshots and the arrivals held until it unveils them.
-    /// `early_corner`: the corner's cover as the activation found it, and the window list it
-    /// read (none read, or moved since: both read here).
+    /// The animated batch after its early windows (`first`): planned as a transition (shared,
+    /// [`Self::transition_for`]), then moved the way the engine says ([`WindowEngine::animate`]).
+    /// An activation's focus is `run`'s ([`ActivationRun::focus`]). `early_corner`: the
+    /// corner's cover as the activation found it, and the window list it read (none read, or
+    /// moved since: both read again).
     fn execute_animated_rest(
         &mut self,
         ob: &Observer,
@@ -3268,6 +3268,25 @@ impl Controller {
         // The windows already in place stay out of the transition: no snapshot grows over them.
         let Some(mut t) = self.transition_for(ob, &actions) else { return self.execute(ob, actions) };
         t.incoming.retain(|w| !first.contains(&w.window.id));
+        match self.engine.animate(&t) {
+            Motion::Pictures => self.switch_behind_pictures(ob, actions, t, run, early_corner, anim.cover_ms),
+        }
+    }
+
+    /// A switch played with pictures ([`Motion::Pictures`]), the Corner engine's choreography:
+    /// the park corner covered where the arriving windows wait ([`Self::switch_corner`]), the
+    /// transition sent to the strip and its pictures waited for (shared,
+    /// [`Self::send_transition`]), then the hides behind the outgoing pictures and the
+    /// arrivals held hidden until the strip unveils them ([`Self::flush_pending_as`]).
+    fn switch_behind_pictures(
+        &mut self,
+        ob: &Observer,
+        actions: Vec<Action>,
+        mut t: Transition,
+        run: ActivationRun,
+        early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)>,
+        cover_ms: u64,
+    ) -> usize {
         let id = t.id;
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
         let outgoing: HashSet<u32> = t.outgoing.iter().map(|w| w.window.id).collect();
@@ -3289,33 +3308,7 @@ impl Controller {
         t.under = self.window_in_place(&arriving, &outgoing, &actions, &list);
         t.corner = corner;
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
-        let started = Instant::now();
-        self.present_with(Some(Transition { sent: Some(started), ..t }));
-        // An activation's keyboard goes at once, while the strip draws: macOS has activated
-        // the app and raised its windows in the corner already, and typing right after ⌘Tab
-        // must reach the window the switch focuses (8L). One bounded step (8L2); the whole
-        // focus runs with the parks as for a card click.
-        let early_focus_ms = match run.focus.filter(|key| actions.contains(&Action::Focus { id: *key })) {
-            Some(key) => self.focus_now(ob, key, id),
-            None => None,
-        };
-        let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
-        let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
-        let unveil_latest_ms = (motion_math::unveil_latest(&self.store.config().style) * 1000.0).round() as u64;
-        tracing::debug!(
-            id,
-            ?cover,
-            waited_ms = started.elapsed().as_millis() as u64,
-            early_focus_ms,
-            focus_since_activation_ms,
-            unveil_latest_ms,
-            at_once = run.at_once,
-            at_once_windows = ?run.at_once_windows,
-            "transition covered"
-        );
-        if cover.outgoing || cover.incoming {
-            std::thread::sleep(Duration::from_millis(anim.cover_ms));
-        }
+        let cover = self.send_transition(ob, t, &actions, &run, cover_ms);
         if cover.outgoing {
             self.parked_note = Some(id);
         }
@@ -3345,6 +3338,42 @@ impl Controller {
         let failed = self.execute(ob, now);
         self.note_parked();
         failed
+    }
+
+    /// The part of an animated switch every engine shares: transition `t` sent to the strip,
+    /// an activation's keyboard routed at once, and the strip's answer waited for (what it
+    /// drew over the windows, [`strip_model::wait_cover`]), with `cover_ms` for the pictures
+    /// to reach the screen. No window has moved when this returns.
+    fn send_transition(&mut self, ob: &Observer, t: Transition, actions: &[Action], run: &ActivationRun, cover_ms: u64) -> strip_model::Cover {
+        let id = t.id;
+        let started = Instant::now();
+        self.present_with(Some(Transition { sent: Some(started), ..t }));
+        // An activation's keyboard goes at once, while the strip draws: macOS has activated
+        // the app and raised its windows in the corner already, and typing right after ⌘Tab
+        // must reach the window the switch focuses (8L). One bounded step (8L2); the whole
+        // focus runs with the parks as for a card click.
+        let early_focus_ms = match run.focus.filter(|key| actions.contains(&Action::Focus { id: *key })) {
+            Some(key) => self.focus_now(ob, key, id),
+            None => None,
+        };
+        let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
+        let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
+        let unveil_latest_ms = (motion_math::unveil_latest(&self.store.config().style) * 1000.0).round() as u64;
+        tracing::debug!(
+            id,
+            ?cover,
+            waited_ms = started.elapsed().as_millis() as u64,
+            early_focus_ms,
+            focus_since_activation_ms,
+            unveil_latest_ms,
+            at_once = run.at_once,
+            at_once_windows = ?run.at_once_windows,
+            "transition covered"
+        );
+        if cover.outgoing || cover.incoming {
+            std::thread::sleep(Duration::from_millis(cover_ms));
+        }
+        cover
     }
 
     /// Tells the strip a transition's outgoing windows have parked, if no snapshot did yet: its
