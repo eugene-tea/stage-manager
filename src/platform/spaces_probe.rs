@@ -35,6 +35,14 @@
 //!   [no-shots]`: the windows in a new Space, its transform stepped from identity to a scale
 //!   K, each step timed, read back and checked in the window list; screenshots of the halfway
 //!   step and the last.
+//! - `affine BUNDLE [--m "a,b,c,d,tx,ty;…"] [--fly N] [--per-window] [--only I]
+//!   [--pace-ms MS] [--hold-ms MS] [--rest-ms MS] [no-shots]` (S4): the windows in one shown Space (or one each), then
+//!   either each matrix of `--m` set, held, read back, listed and photographed (the exact
+//!   mapping), or `--fly N` steps of a shrink toward the screen's left edge and back, paced,
+//!   each step's calls timed (what a motion through the transform costs). What it found
+//!   (macOS 27.2, 11-14): the matrix is each window's own, about that window's top-left
+//!   corner: a point `q` of the window (from its corner `o`) is drawn at `o + M⁻¹(q − t)`,
+//!   wherever the window is; scales, shears and moves all apply, there is no perspective.
 //! - `place-new BUNDLE [--for S]`: a hidden Space waits; every fixture window that appears in
 //!   the next S seconds goes into it as soon as it is listed, on screen or not yet.
 //! - `watch BUNDLE [--for S] [--every MS]`: prints each change of the fixture windows'
@@ -170,7 +178,7 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|place-new|watch|engine|key|dock-click|cleanup …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|key|dock-click|cleanup …");
     };
     let o = match parse(rest) {
         Ok(o) => o,
@@ -192,6 +200,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "cycle" => need_bundle().and_then(|b| cycle(&sky, &b, &o)),
         "hide" => need_bundle().and_then(|b| hide_hold(&sky, &b, &o)),
         "transform" => need_bundle().and_then(|b| transform(&sky, &b, &o)),
+        "affine" => need_bundle().and_then(|b| affine(&sky, &b, &o)),
         "place-new" => need_bundle().and_then(|b| place_new(&sky, &b, &o)),
         "watch" => need_bundle().map(|b| watch(&sky, &b, &o)),
         "key" => key(&o),
@@ -625,6 +634,114 @@ fn transform(sky: &Sky, bundle: &str, o: &Opts) -> Result<Value, String> {
         "steps": o.steps, "readback_matched": readback_ok, "listed_matched": listed_ok, "total_ms": total, "cpu_ms": cpu,
         "steps_per_s": (o.steps as f64 / (total / 1e3)).round(), "call_ms_p50": pct(0.5), "call_ms_p95": pct(0.95), "call_ms_max": pct(1.0),
         "listed_while_transformed": listed, "shots": [before_shot, half_shot, end_shot], "teardown": down,
+    }))
+}
+
+/// S4: matrices set on shown Spaces holding the live windows (see the module docs).
+fn affine(sky: &Sky, bundle: &str, o: &Opts) -> Result<Value, String> {
+    let list = fixture_windows(sky, &fixture_pids(bundle));
+    let ids = ids_of(&list);
+    if ids.is_empty() {
+        return Err("the fixture has no windows".into());
+    }
+    let word = |name: &str| o.words.iter().position(|w| w == name).and_then(|i| o.words.get(i + 1));
+    let per_window = o.words.iter().any(|w| w == "--per-window");
+    let no_shots = o.words.iter().any(|w| w == "no-shots");
+    let fly: usize = word("--fly").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let matrices: Vec<[f64; 6]> = word("--m")
+        .map(|text| {
+            text.split(';')
+                .filter_map(|m| {
+                    let v: Vec<f64> = m.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    <[f64; 6]>::try_from(v).ok()
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // `--only I`: just the I-th listed window goes into a Space (the others stay on the Desktop).
+    let ids = match word("--only").and_then(|v| v.parse::<usize>().ok()).and_then(|i| ids.get(i).copied()) {
+        Some(one) => vec![one],
+        None => ids,
+    };
+    let groups: Vec<Vec<u32>> = if per_window { ids.iter().map(|id| vec![*id]).collect() } else { vec![ids.clone()] };
+    let add_route = o.add_route.unwrap_or(o.route);
+    // Set up: a Space per group, the windows in, the Space shown.
+    let t0 = Instant::now();
+    let mut spaces = Vec::new();
+    for g in &groups {
+        let (sid, _) = new_space(sky, o)?;
+        let _ = sky.add_remove(add_route, sid, g);
+        let _ = sky.show_hide(o.route, &[sid], true);
+        spaces.push(sid);
+    }
+    let setup_call_ms = ms(t0);
+    let (setup_onscreen_ms, _) = wait_onscreen(&ids, true, Duration::from_secs(1));
+    let setup_ms = ms(t0);
+    let set_all = |m: [f64; 6]| {
+        for sid in &spaces {
+            let _ = sky.set_transform(o.route, *sid, CGAffineTransform { a: m[0], b: m[1], c: m[2], d: m[3], tx: m[4], ty: m[5] });
+        }
+    };
+    let mut stills = Vec::new();
+    for (i, m) in matrices.iter().enumerate() {
+        set_all(*m);
+        pump(Duration::from_millis(o.hold_ms));
+        let path = format!("{PROBE_DIR}/affine-{i}.png");
+        let shot = !no_shots && std::process::Command::new("/usr/sbin/screencapture").args(["-x", &path]).status().is_ok_and(|s| s.success());
+        stills.push(json!({
+            "m": m, "readback": sky.get_transform(spaces[0]), "listed": frames(&windows::describe(&ids)),
+            "shot": shot.then_some(path),
+        }));
+    }
+    // The flight: each window's Space shrunk to a fifth toward the left edge, then back.
+    let mut step_ms = Vec::new();
+    let mut late = 0usize;
+    let c0 = cpu_ms();
+    let f0 = Instant::now();
+    for i in 1..=fly {
+        let u = i as f64 / fly as f64;
+        let p = if u < 0.5 { u * 2.0 } else { 2.0 - u * 2.0 };
+        let s = Instant::now();
+        for (n, sid) in spaces.iter().enumerate() {
+            // Drawn at 1/k about the window's own corner, moved left: screen = (space - t) / k.
+            let k = 1.0 + 4.0 * p;
+            let b = list.iter().find(|w| groups[n].contains(&w.id)).map(|w| w.bounds).unwrap_or_default();
+            let (to_x, to_y) = (b.x + (40.0 - b.x) * p, b.y + (300.0 + 120.0 * n as f64 - b.y) * p);
+            let _ = sky.set_transform(o.route, *sid, CGAffineTransform { a: k, b: 0.0, c: 0.0, d: k, tx: b.x - k * to_x, ty: b.y - k * to_y });
+        }
+        step_ms.push(ms(s));
+        if o.pace_ms > 0.0 {
+            let due = Duration::from_secs_f64(o.pace_ms * i as f64 / 1e3);
+            if f0.elapsed() > due {
+                late += 1;
+            }
+            while f0.elapsed() < due {
+                pump(Duration::from_micros(200));
+            }
+        }
+    }
+    let fly_ms = ms(f0);
+    let fly_cpu = cpu_ms() - c0;
+    // Identity at rest, then everything back.
+    set_all([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+    let hold = word("--rest-ms").and_then(|v| v.parse().ok()).unwrap_or(0u64);
+    pump(Duration::from_millis(hold));
+    let t1 = Instant::now();
+    let (current, _) = sky.current();
+    let _ = sky.add_remove_from(add_route, current, &ids, ALL_SPACES_MASK);
+    let back_call_ms = ms(t1);
+    let (back_ms, _) = wait_onscreen(&ids, true, Duration::from_secs(1));
+    let after_spaces: Vec<Vec<u64>> = ids.iter().map(|id| sky.spaces_of(&[*id])).collect();
+    let down: Vec<Value> = spaces.iter().zip(&groups).map(|(sid, g)| tear_down(sky, *sid, g, o.route)).collect();
+    step_ms.sort_by(f64::total_cmp);
+    let pct = |p: f64| step_ms.get(((step_ms.len() as f64 - 1.0) * p).round() as usize).copied();
+    Ok(json!({
+        "ok": true, "windows": ids.len(), "spaces": spaces.len(), "before": frames(&list),
+        "setup_call_ms": setup_call_ms, "setup_ms": setup_ms, "setup_onscreen_ms": setup_onscreen_ms,
+        "stills": stills,
+        "fly": { "steps": fly, "total_ms": fly_ms, "cpu_ms": fly_cpu, "late_steps": late, "step_ms_p50": pct(0.5), "step_ms_p95": pct(0.95), "step_ms_max": pct(1.0) },
+        "back_call_ms": back_call_ms, "back_onscreen_ms": back_ms, "spaces_after": after_spaces,
+        "current": current, "teardown": down,
     }))
 }
 

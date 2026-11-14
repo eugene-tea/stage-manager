@@ -1014,6 +1014,33 @@ mod tests {
         assert!((0.38..0.40).contains(&time_to_progress(s, 0.99)));
     }
 
+    /// What a flat (2D affine) transform of the live window could draw of the path, measured
+    /// for the Spaces engine's motion (S4, 11-14): a window server Space's transform takes
+    /// two scales, a shear and a move, no perspective, so the nearest it comes to a turned
+    /// picture is the upright parallelogram with both sides at their mean height. The turn's
+    /// depth is what it loses: the 1800 pt window's sides differ by up to 140 pt in flight
+    /// (17 % of its height), and against Apple's corners the flat drawing misses by about
+    /// three times the path's own miss growing and twice shrinking.
+    #[test]
+    fn a_flat_transform_loses_the_turn_of_a_large_window() {
+        let s = Spring::APPLE;
+        let flat = |d: [f64; 6]| {
+            let h = ((d[2] - d[1]) + (d[5] - d[4])) / 2.0;
+            let (l, r) = ((d[1] + d[2]) / 2.0, (d[4] + d[5]) / 2.0);
+            [d[0], l - h / 2.0, l + h / 2.0, d[3], r - h / 2.0, r + h / 2.0]
+        };
+        let grown = |t: f64| flown_drawn(GROWN_1800_FROM, WINDOW_1800, Toward::Window, s, t);
+        let shrunk = |t: f64| flown_drawn(WINDOW_1800, SHRUNK_1800_TO, Toward::Card, s, t);
+        let (turned, _) = best_misses(&GROWN_1800, grown);
+        let (rms, worst) = best_misses(&GROWN_1800, |t| flat(grown(t)));
+        assert!((16.0..18.0).contains(&rms) && worst > 35.0 && rms > 3.0 * turned, "growing flat: {rms:.1} rms, {worst:.1} at worst, turned {turned:.1}");
+        let (turned, _) = best_misses(&SHRUNK_1800, shrunk);
+        let (rms, worst) = best_misses(&SHRUNK_1800, |t| flat(shrunk(t)));
+        assert!((12.5..14.5).contains(&rms) && worst > 35.0 && rms > 2.0 * turned, "shrinking flat: {rms:.1} rms, {worst:.1} at worst, turned {turned:.1}");
+        let sides = (0..72).map(|i| grown(i as f64 / 120.0)).map(|d| ((d[2] - d[1]) - (d[5] - d[4]), d[2] - d[1])).fold((0.0, 1.0), |a, b| if b.0 > a.0 { b } else { a });
+        assert!((135.0..147.0).contains(&sides.0) && (0.16..0.18).contains(&(sides.0 / sides.1)), "{sides:?}");
+    }
+
     /// Each fit's bound (rms, worst; points).
     const NEW_GROWN: (f64, f64) = (5.5, 23.0);
     const NEW_SHRUNK: (f64, f64) = (6.2, 17.5);
