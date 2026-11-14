@@ -143,6 +143,7 @@ fn login_on_desktop_2() -> Model {
     m
 }
 
+both_engines! {
 #[test]
 fn strays_of_another_saved_desktop_go_back_to_their_saved_stages() {
     let mut m = login_on_desktop_2();
@@ -316,6 +317,7 @@ fn a_quiet_apps_windows_of_a_desktop_not_shown_wait_for_that_desktop_alone() {
     assert_eq!(apps, [MAIL, MUSIC, TERM].map(String::from).to_vec());
     assert!(m.take_shown_apps().is_empty());
 }
+}
 
 /// Desktops 1 and 2 saved in session "A" with their windows' ids (100 on): a relaunch in the
 /// same session finds each window by its id.
@@ -381,6 +383,7 @@ fn relaunched_on_desktop_2_an_hour_ago() -> Model {
     m
 }
 
+both_engines! {
 #[test]
 fn a_desktop_first_shown_an_hour_after_a_relaunch_gets_its_saved_stages_back() {
     // The 11-06 regression report: relaunched on Desktop 2 at 11:34 (the same login
@@ -486,6 +489,7 @@ fn strays_listed_at_an_arrival_go_to_their_saved_stages_with_their_children() {
     assert_eq!(m.restore_summary(0).by_apple, 0);
     assert!(titles(&m).iter().filter(|(t, _)| t == "General").all(|(_, n)| *n == 1));
 }
+}
 
 // ----- the review of 8I (8I2) -----------------------------------------------------------
 
@@ -518,6 +522,7 @@ fn login_with(d1: SavedSpace) -> Model {
     m
 }
 
+both_engines! {
 #[test]
 fn a_visit_to_a_desktop_whose_active_stage_all_strayed_shows_its_most_recent_stage() {
     // M1: Desktop 1's saved active stage (the IDE's) came back whole on Desktop 2. At Desktop
@@ -661,6 +666,7 @@ fn a_native_on_its_own_desktop_keeps_its_confidence_against_a_same_title_elsewhe
     assert!(titles(&m).iter().all(|(t, n)| *n == if t == "zsh" { 2 } else { 1 }), "{:?}", titles(&m));
     assert!(!m.to_state().spaces.iter().filter(|s| s.id == 4).flat_map(|s| &s.stages).flat_map(|s| &s.windows).any(|x| x.title == "zsh"));
 }
+}
 
 
 /// The login on a Desktop that adopts nothing: a window of no saved Desktop first (in front),
@@ -680,6 +686,7 @@ fn lone_voter_behind(m: &mut Model, third: bool) -> (SpaceId, StageId) {
     (here, y)
 }
 
+both_engines! {
 #[test]
 fn the_card_click_that_ends_the_restore_window_keeps_its_stage() {
     // The review of 8I2 (Medium): the user presses the card of the voter's stage; the press
@@ -847,6 +854,7 @@ fn a_voter_placed_at_its_own_frame_keeps_the_frame_it_had_before_fitting() {
     assert_eq!(x.restore.x, 216.0, "at its own (fitted) frame");
     assert_eq!(x.original, Some(under_strip), "its frame before fitting kept");
 }
+}
 
 // ----- the windows back on another Desktop, as the restore's line names them ------------------
 
@@ -854,6 +862,7 @@ fn listed(m: &Model) -> Vec<u32> {
     m.away_now().map(|(id, _)| id.0).collect()
 }
 
+both_engines! {
 #[test]
 fn the_restores_line_names_the_strays_with_the_desktop_they_belong_on_and_the_one_they_are_on() {
     let m = login_on_desktop_2();
@@ -886,6 +895,7 @@ fn a_stray_leaves_the_line_once_its_window_shows_on_its_saved_desktop_or_closes(
     let m = launched(vec![desktop_1(), desktop_2()], Restore::same_session("A"));
     assert!(m.away_line(|t| t.to_string()).is_empty());
 }
+}
 
 /// One Desktop (saved 4, shown when saved): the IDE's two workspaces as two stages, "alpha"
 /// in front with a terminal, "beta" a card; the IDE's titles are its workspaces' names with
@@ -906,6 +916,7 @@ fn two_workspaces() -> SavedSpace {
     }
 }
 
+both_engines! {
 #[test]
 fn an_editor_reopened_with_a_file_in_front_of_its_workspace_goes_to_its_own_stage() {
     // The title gained the file shown, in front of the workspace's name: the fingerprint
@@ -950,6 +961,7 @@ fn an_editor_titled_late_goes_to_its_own_stage_when_its_title_comes() {
     assert!(m.window_title_changed(w(42), "lib.rs — beta (Workspace)"));
     assert!(m.window_retitled(w(42)).is_empty());
 }
+}
 
 /// The second workspace's window joined the first's stage by Apple's rule, titled late.
 fn joined_by_a_late_title() -> Model {
@@ -961,6 +973,7 @@ fn joined_by_a_late_title() -> Model {
     m
 }
 
+both_engines! {
 #[test]
 fn a_click_on_another_window_early_leaves_a_late_title_its_rematch() {
     // He clicks the terminal before the editor's title comes: the restore window ends, and
@@ -1020,6 +1033,7 @@ fn a_late_title_after_the_two_minutes_moves_nothing() {
     assert!(m.window_retitled(w(42)).is_empty());
     assert_eq!(m.stage_of(w(41)), m.stage_of(w(42)));
 }
+}
 
 /// The 11-06 restart, Fork's two windows (made-up titles): the git client's "proj" saved as a
 /// stage of its own on Desktop 2 (saved 8), its "site" as a stage of its own on Desktop 1
@@ -1070,6 +1084,7 @@ fn add_git(m: &mut Model, id: u32, title: &str, frame: Rect) -> Vec<Action> {
     m.add_window(win(id, 30, GIT, title, frame), &joins, &Observation::default())
 }
 
+both_engines! {
 #[test]
 fn an_app_reopening_two_windows_saved_as_two_stages_on_two_desktops_makes_two_stages() {
     let mut m = login_for_git();
@@ -1152,4 +1167,5 @@ fn a_renamed_window_saved_with_its_sibling_goes_back_to_their_stage() {
     add_git(&mut m, 62, "notes", r(6.0));
     assert_eq!(m.stage_of(w(61)), m.stage_of(w(62)));
     assert_eq!(m.restored_grade(w(62)), Some(Grade::Medium));
+}
 }

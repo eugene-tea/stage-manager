@@ -10,7 +10,7 @@ use crate::engine::geometry::Point;
 use crate::engine::corner::park::{Corner, choose_corner, park_frame_at};
 use crate::engine::persist::LaunchHints;
 use crate::engine::rules::{Decision, RuleAction};
-use crate::engine::testkit::Desk;
+use crate::engine::testkit::{Desk, both_engines, corner_nuance, model_on};
 
 mod arrivals;
 mod corner_frame;
@@ -51,7 +51,7 @@ struct Env {
 
 impl Env {
     fn both() -> Self {
-        Self { m: Model::new(vec![studio(), laptop()], ModelOptions::default()), d: Desk::default() }
+        Self { m: model_on(vec![studio(), laptop()], ModelOptions::default()), d: Desk::default() }
     }
 
     fn run(&mut self, actions: Vec<Action>) -> Vec<Action> {
@@ -147,6 +147,7 @@ fn measured_desk(e: &mut Env) -> [StageId; 5] {
     [code, e.stage_of(3), e.stage_of(4), e.stage_of(5), e.stage_of(6)]
 }
 
+both_engines! {
 #[test]
 fn every_screen_has_its_own_space_front_stage_and_strip() {
     let mut e = Env::both();
@@ -386,7 +387,9 @@ fn the_lid_opened_gives_the_screen_back_the_stages_macos_moves_there() {
     assert!(e.m.strip_slots(STUDIO).contains(&music));
     assert!(e.m.stages().iter().filter(|s| s.display == DisplayId(9)).count() == 2);
 }
+}
 
+corner_nuance! {
 #[test]
 fn the_lid_opened_puts_back_a_card_as_a_card_and_a_shown_window_where_macos_put_it() {
     // 11-05 16:27:31: Finder (parked on the 5K by then) came back shown at the frame it had
@@ -443,7 +446,9 @@ fn the_lid_opened_puts_back_a_card_as_a_card_and_a_shown_window_where_macos_put_
     assert_eq!(e.m.strip_slots(DisplayId(9)), vec![chrome]);
     assert_eq!(e.m.active_stage(STUDIO), Some(finder), "the 5K untouched");
 }
+}
 
+both_engines! {
 #[test]
 fn the_lid_closed_with_macos_showing_another_desktop_keeps_the_laptops_stages_whole() {
     // 11-05 16:27:07: the lid closed and macOS slid the 5K to its second Desktop (nine
@@ -570,6 +575,7 @@ fn a_screen_plugged_in_again_under_a_new_id_is_the_same_screen() {
     assert_eq!(e.m.window(WindowId(5)).map(|w| w.meta.display), Some(DisplayId(9)));
     assert_eq!(e.m.active_stage(STUDIO), Some(code));
 }
+}
 
 /// The menu bar moved to the laptop (Displays: the laptop made the main display): global
 /// coordinates start at its top-left now, so both screens' frames move by (1800, -271), and
@@ -582,6 +588,7 @@ fn main_moved_to_laptop() -> (Display, Display) {
     (laptop, studio)
 }
 
+both_engines! {
 #[test]
 fn the_main_display_changing_moves_every_cards_frames_with_its_screen() {
     // The review's two-screens 1: the restore and pre-fit frames of parked windows stayed in
@@ -621,7 +628,7 @@ fn the_lid_closed_with_the_laptop_main_moves_the_studios_cards_with_it() {
     // main, its top-left the origin now. Its own cards move by its origin's change; the
     // laptop's are carried onto it as before.
     let (laptop_main, studio_beside) = main_moved_to_laptop();
-    let mut e = Env { m: Model::new(vec![laptop_main, studio_beside], ModelOptions::default()), d: Desk::default() };
+    let mut e = Env { m: model_on(vec![laptop_main, studio_beside], ModelOptions::default()), d: Desk::default() };
     e.open(1, 10, &studio_beside, (200.0, 100.0), RuleAction::Current);
     e.open(3, 12, &studio_beside, (900.0, 300.0), RuleAction::New);
     let front = e.stage_of(1);
@@ -642,7 +649,7 @@ fn the_lid_closed_with_the_laptop_main_moves_the_studios_cards_with_it() {
 #[test]
 fn main_only_keeps_the_main_screen_alone_and_lets_a_moved_window_go() {
     let options = ModelOptions { main_only: true, ..ModelOptions::default() };
-    let m = Model::new(vec![studio(), laptop()], options);
+    let m = model_on(vec![studio(), laptop()], options);
     assert_eq!(m.displays().len(), 1);
     let mut e = Env { m, d: Desk::default() };
     e.open(1, 10, &studio(), (200.0, 100.0), RuleAction::Current);
@@ -680,6 +687,7 @@ fn per_screen_capacity_keeps_each_strip_its_own_size() {
     assert_eq!(e.m.strip_slots(LAPTOP).len(), 1);
     assert_eq!(e.m.strip_slots(STUDIO).len(), 1);
 }
+}
 
 /// The measured desk saved, then a new model (a restart) with the screens under new ids.
 fn saved_desk() -> (crate::engine::persist::StateFile, Vec<WindowMeta>) {
@@ -690,6 +698,7 @@ fn saved_desk() -> (crate::engine::persist::StateFile, Vec<WindowMeta>) {
     (state, live)
 }
 
+both_engines! {
 #[test]
 fn state_json_names_each_spaces_screen() {
     let (state, _) = saved_desk();
@@ -699,6 +708,7 @@ fn state_json_names_each_spaces_screen() {
     let laptop_space = state.spaces.iter().find(|s| s.screen.as_ref().is_some_and(|sc| sc.key == LAPTOP_KEY.text())).expect("saved");
     assert_eq!((laptop_space.w(), laptop_space.h()), (1800.0, 1169.0));
     assert!(laptop_space.current, "shown on its screen when saved");
+}
 }
 
 trait ScreenSize {
@@ -715,11 +725,12 @@ impl ScreenSize for crate::engine::persist::SavedSpace {
     }
 }
 
+both_engines! {
 #[test]
 fn a_restart_restores_each_screens_stages_on_that_screen_whatever_its_id() {
     let (state, live) = saved_desk();
     let (studio_now, laptop_now) = (Display { id: DisplayId(7), ..studio() }, Display { id: DisplayId(9), ..laptop() });
-    let mut m = Model::new(vec![studio_now, laptop_now], ModelOptions::default());
+    let mut m = model_on(vec![studio_now, laptop_now], ModelOptions::default());
     m.restore_spaces(state.spaces.clone());
     let with_display = |d: DisplayId| -> Vec<WindowMeta> {
         live.iter().filter(|w| w.display == if d == DisplayId(7) { STUDIO } else { LAPTOP }).cloned().map(|mut w| {
@@ -746,7 +757,7 @@ fn a_saved_desktop_of_a_connected_screen_never_forms_on_another() {
     // The laptop's windows shown on the Studio while the laptop is connected: not the
     // laptop's Desktop (it waits for its own screen); a new Desktop on the Studio.
     let (state, live) = saved_desk();
-    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    let mut m = model_on(vec![studio(), laptop()], ModelOptions::default());
     m.restore_spaces(state.spaces.clone());
     let chrome: Vec<WindowMeta> = live.iter().filter(|w| w.pid == 20 || w.pid == 21).cloned().map(|mut w| {
         w.display = STUDIO;
@@ -761,7 +772,7 @@ fn a_saved_desktop_of_a_connected_screen_never_forms_on_another() {
 fn a_saved_desktop_of_a_screen_not_connected_forms_where_its_windows_are() {
     // 10-23: a login on the laptop's screen alone; the Studio's saved stages form there.
     let (state, live) = saved_desk();
-    let mut m = Model::new(vec![laptop()], ModelOptions::default());
+    let mut m = model_on(vec![laptop()], ModelOptions::default());
     m.restore_spaces(state.spaces.clone());
     let studio_apps: Vec<WindowMeta> = live.iter().filter(|w| w.display == STUDIO).cloned().map(|mut w| {
         w.display = LAPTOP;
@@ -780,7 +791,7 @@ fn a_saved_desktop_of_a_screen_not_connected_forms_where_its_windows_are() {
 #[test]
 fn a_saved_desktop_on_its_own_screen_is_not_counted_as_moved() {
     let (state, live) = saved_desk();
-    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    let mut m = model_on(vec![studio(), laptop()], ModelOptions::default());
     m.restore_spaces(state.spaces.clone());
     let laptop_apps: Vec<WindowMeta> = live.iter().filter(|w| w.display == LAPTOP).cloned().collect();
     m.arrive(LAPTOP, &laptop_apps, &[], &LaunchHints::default());
@@ -811,7 +822,7 @@ fn fit_keeps_a_window_clear_of_its_own_screens_strip() {
 #[test]
 fn saved_frames_apply_only_on_the_screen_of_the_saved_size() {
     let (state, _) = saved_desk();
-    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    let mut m = model_on(vec![studio(), laptop()], ModelOptions::default());
     m.restore_spaces(state.spaces.clone());
     let laptop_saved = state.spaces.iter().find(|s| s.screen.as_ref().is_some_and(|sc| sc.key == LAPTOP_KEY.text())).expect("saved").id;
     let studio_saved = state.spaces.iter().find(|s| s.screen.as_ref().is_some_and(|sc| sc.key == STUDIO_KEY.text())).expect("saved").id;
@@ -821,9 +832,10 @@ fn saved_frames_apply_only_on_the_screen_of_the_saved_size() {
     assert!(!m.saved_frames_fit_for(LAPTOP, Some(studio_saved)));
     // The same screen at another size: no.
     let smaller = Display { frame: Rect::new(-1440.0, 271.0, 1440.0, 900.0), visible: Rect::new(-1440.0, 310.0, 1440.0, 861.0), ..laptop() };
-    let mut m = Model::new(vec![studio(), smaller], ModelOptions::default());
+    let mut m = model_on(vec![studio(), smaller], ModelOptions::default());
     m.restore_spaces(state.spaces);
     assert!(!m.saved_frames_fit_for(LAPTOP, Some(laptop_saved)));
+}
 }
 
 
@@ -909,6 +921,7 @@ fn groups(m: &Model) -> Vec<Vec<WindowId>> {
     g
 }
 
+corner_nuance! {
 #[test]
 fn the_lid_closed_on_the_first_desktop_then_macos_sliding_to_the_second_joins_nothing() {
     // 11-05 20:01:38: the lid closed with the 5K on its first Desktop; macOS put the
@@ -998,6 +1011,7 @@ fn the_lid_closed_on_the_first_desktop_then_macos_sliding_to_the_second_joins_no
     assert!(e.m.window(WindowId(1)).is_some_and(|w| !w.parked) && !e.parked_on(1, &studio_d), "and shows");
     assert!(!cards.contains(&first_front));
 }
+}
 
 /// The lid closed on the 5K's first Desktop and macOS slid to its second with the laptop's
 /// windows there ([`evening_desk`]): returns the second Desktop, Chrome's stage (the
@@ -1021,6 +1035,7 @@ fn closed_on_the_second(e: &mut Env) -> (SpaceId, StageId, StageId, StageId) {
     (second, chrome, reminders, finder)
 }
 
+both_engines! {
 #[test]
 fn a_notice_of_the_same_desktop_before_macos_slides_keeps_the_laptops_stages_whole() {
     // The review's two-screens 5: macOS's Space notice for the Desktop still shown, heard
@@ -1057,7 +1072,9 @@ fn a_notice_of_the_same_desktop_before_macos_slides_keeps_the_laptops_stages_who
     // Carried: forgotten now, so going back to the first Desktop carries nothing back.
     assert!(e.m.adopted.is_empty());
 }
+}
 
+corner_nuance! {
 #[test]
 fn the_lid_opened_gives_the_laptop_its_cards_back_from_the_other_desktop() {
     // 11-05 20:26:04 (round displays-lid-3): the lid opened with the laptop's stages on the
@@ -1123,7 +1140,9 @@ fn the_lid_opened_gives_the_laptop_its_cards_back_from_the_other_desktop() {
     assert!(!e.m.strip_for(STUDIO).iter().any(|c| [chrome, reminders, finder].contains(&c.stage)));
     assert_eq!(e.m.active_stage(STUDIO).and_then(|s| e.m.stage(s)).map(|s| s.space), Some(second), "the 5K keeps its Desktop");
 }
+}
 
+both_engines! {
 #[test]
 fn a_window_listed_for_a_moment_as_the_lid_closes_leaves_nothing_behind() {
     // 11-05 20:59:04 (round displays-lid-4): the lid closed, the laptop's front in front on
@@ -1189,6 +1208,7 @@ fn a_card_click_on_a_stage_of_another_desktop_says_why_and_does_nothing() {
     let card = e.m.strip_slots(STUDIO)[0];
     assert_eq!(e.m.switch_refused(card), None, "a card on the Desktop shown switches");
 }
+}
 
 /// The measured desk saved in session "A", then a launch in session "B" (a restart) with
 /// both screens on, the restore window open. Returns the model, the saved windows (their old
@@ -1200,7 +1220,7 @@ fn restarted_with_both() -> (Model, Vec<WindowMeta>, u64) {
     state.start_new_session();
     let (state, _) = state.for_session(Some("B"));
     let laptop_saved = state.spaces.iter().find(|s| s.screen.as_ref().is_some_and(|sc| sc.key == LAPTOP_KEY.text())).expect("saved").id;
-    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    let mut m = model_on(vec![studio(), laptop()], ModelOptions::default());
     m.set_restore(Restore::after_restart("B"));
     m.restore_spaces(state.spaces);
     (m, live, laptop_saved)
@@ -1213,6 +1233,7 @@ fn reopened(live: &[WindowMeta], old: u32, display: DisplayId, frame: Option<Rec
     WindowMeta { id: WindowId(old + 100), display, frame: frame.unwrap_or(saved.frame), ..saved }
 }
 
+both_engines! {
 #[test]
 fn a_restart_sends_a_window_its_app_reopened_on_the_5k_back_to_the_laptop() {
     // 11-06 04:25: the laptop's front window (Finder here; Deep House there) reopened by its
@@ -1283,6 +1304,7 @@ fn a_window_reopened_on_its_own_screen_stays_where_its_app_put_it() {
     assert_eq!(m.window(WindowId(106)).map(|w| (w.meta.display, w.restore)), Some((LAPTOP, elsewhere)));
     assert_eq!(m.restore_summary(0).screen_moves, 0);
 }
+}
 
 // ----- Desktop ids across a restart (round desktop-ids) ----------------------------------
 //
@@ -1351,7 +1373,7 @@ fn restarted_on_three(counts: bool) -> Model {
     file.spaces = three_desktops();
     file.start_new_session();
     let (file, _) = file.for_session(Some("B"));
-    let mut m = Model::new(vec![Display { id: DisplayId(5), ..studio() }, laptop()], ModelOptions::default());
+    let mut m = model_on(vec![Display { id: DisplayId(5), ..studio() }, laptop()], ModelOptions::default());
     m.set_restore(Restore::after_restart("B"));
     if counts {
         m.set_desktop_counts([(STUDIO_KEY, 2), (LAPTOP_KEY, 1)]);
@@ -1364,6 +1386,7 @@ fn reopen(id: u32, pid: Pid, bundle: &str, title: &str, display: DisplayId, fram
     WindowMeta { id: WindowId(id), pid, bundle_id: bundle.into(), title: title.into(), role: WindowRole::Standard, frame, display }
 }
 
+both_engines! {
 #[test]
 fn a_screen_with_one_desktop_is_its_saved_desktop_though_it_lists_nothing_at_the_launch() {
     let (s, l) = (studio(), laptop());
@@ -1419,7 +1442,7 @@ fn a_screen_with_one_desktop_and_two_saved_for_it_lets_its_windows_decide() {
     let mut spaces = three_desktops();
     let l = laptop();
     spaces.push(saved_on(&l, 18, false, vec![saved_stage(vec![saved_win(WEB, "Other — Web", on(&l, (60.0, 40.0)), 0)], 10)]));
-    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    let mut m = model_on(vec![studio(), laptop()], ModelOptions::default());
     m.set_restore(crate::engine::restore::Restore::after_restart("B"));
     m.set_desktop_counts([(STUDIO_KEY, 2), (LAPTOP_KEY, 1)]);
     m.restore_spaces(spaces);
@@ -1468,11 +1491,13 @@ fn a_provisional_desktop_on_the_second_screen_adopts_its_saved_one() {
     add_plain(&mut m, reopen(322, 35, MAILER, "Inbox", LAPTOP, on(&l, (600.0, 200.0))));
     assert_ne!(m.current_space(LAPTOP).0, 1, "saved 1 waits for the 5K");
 }
+}
 
 fn add_plain(m: &mut Model, meta: WindowMeta) -> Vec<Action> {
     m.add_window(meta, &Decision::default(), &Observation::default())
 }
 
+both_engines! {
 /// Apple's (11-09, recorded on the laptop): a card dragged from the Studio's strip onto the
 /// laptop opens its window there. Ours: it joins the laptop's current stage at the drop, as a
 /// drop does on its own screen; the Studio keeps its front, the card leaves its strip.
@@ -1531,4 +1556,5 @@ fn a_card_dropped_on_its_own_screen_joins_its_current_stage() {
     e.run(a);
     assert_eq!(e.stage_of(3), code);
     assert_eq!(e.m.window(WindowId(3)).map(|w| w.meta.display), Some(STUDIO));
+}
 }

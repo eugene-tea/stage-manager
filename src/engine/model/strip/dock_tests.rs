@@ -91,6 +91,7 @@ impl Env {
     }
 }
 
+both_engines! {
 #[test]
 fn stages_sit_in_the_docks_order_and_their_numbers_follow() {
     for mode in MODES {
@@ -281,6 +282,7 @@ fn a_window_dropped_on_the_strip_takes_its_dock_place_not_the_drop_position() {
     let dropped = e.s(9);
     assert!(e.m.strip().iter().any(|c| c.stage == dropped), "the dropped window's stage shows: {:?}", e.m.strip());
 }
+}
 
 /// The Finder's bundle id, the default of `[strip] dock_ignore`.
 const FINDER: &str = "com.apple.finder";
@@ -299,6 +301,7 @@ fn dock_with_finder(pids: &[i32]) -> Vec<DockApp> {
     d
 }
 
+both_engines! {
 #[test]
 fn a_finder_window_joining_a_stage_leaves_it_at_its_other_apps_place() {
     for mode in MODES {
@@ -378,4 +381,5 @@ fn a_stage_of_listed_apps_alone_sits_at_the_leftmost_of_them() {
     // 103 moves to the Dock's front: A sits at 103's place now, the leftmost of its listed apps.
     e.m.set_dock_order(vec![DockApp::new(&bundle(103), Some(103)), DockApp::new(FINDER, Some(50)), DockApp::new(&bundle(101), Some(101)), DockApp::new(&bundle(102), Some(102))]);
     assert_eq!(e.ids(), [1, 5, 3, 4], "A and D both at 103's place, in creation order");
+}
 }

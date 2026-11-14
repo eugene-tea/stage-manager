@@ -46,7 +46,7 @@ fn launch_with_front_at(display: &Display, at: Rect) -> (Model, Vec<Action>) {
         .iter()
         .map(|&id| WindowMeta { frame: e.d.frames[&WindowId(id)], ..e.m.window(WindowId(id)).expect("managed").meta.clone() })
         .collect();
-    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    let mut m = model_on(vec![studio(), laptop()], ModelOptions::default());
     m.restore_spaces(state.spaces);
     let a = m.arrive(display.id, &live, &[], &LaunchHints::default());
     (m, a)
@@ -72,6 +72,7 @@ fn assert_a_card(m: &Model, a: &[Action], display: &Display) {
     assert_eq!(slots, want, "its card in the strip");
 }
 
+corner_nuance! {
 #[test]
 fn a_launch_with_the_laptops_front_saved_at_its_corner_makes_it_a_card() {
     // The owner's numbers: the laptop -1800,271 1800x1169, its corner bottom-left; the window
@@ -92,7 +93,9 @@ fn a_launch_with_the_5ks_front_saved_at_its_corner_makes_it_a_card() {
     let (m, a) = launch_with_front_at(&studio(), at);
     assert_a_card(&m, &a, &studio());
 }
+}
 
+both_engines! {
 #[test]
 fn a_window_hung_off_the_laptops_left_edge_in_the_upper_half_is_shown_where_it_is() {
     // S2 at the corner's own side: a grab's width showing at the left edge, but high up.
@@ -145,4 +148,5 @@ fn a_restore_never_lands_at_the_screens_corner() {
             assert_eq!((out.w, out.h), (w, h));
         }
     }
+}
 }

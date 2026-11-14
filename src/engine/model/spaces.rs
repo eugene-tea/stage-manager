@@ -829,7 +829,7 @@ impl Model {
             let mut cornered = members.clone();
             cornered.extend(self.children_in(Home::Stage(sid)));
             for id in cornered {
-                if live.iter().any(|m| m.id == id && self.listed_hidden(display, m.frame))
+                if live.iter().any(|m| m.id == id && self.listed_hidden_window(id, display, m.frame))
                     && let Some(w) = self.windows.get_mut(&id)
                 {
                     w.parked = true;
@@ -982,7 +982,7 @@ impl Model {
             if w.space != target && !w.sticky {
                 continue;
             }
-            let in_zone = self.listed_hidden(w.meta.display, m.frame);
+            let in_zone = self.listed_hidden_window(m.id, w.meta.display, m.frame);
             if w.parked && !in_zone {
                 repark.push(m.id);
             } else if !w.parked && in_zone {

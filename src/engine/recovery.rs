@@ -368,6 +368,9 @@ pub enum EngineKind {
     /// The Accessibility park corner.
     #[default]
     Corner,
+    /// A hidden window-server Space per stage per screen: a hidden window keeps its frame,
+    /// off screen. Its pure half is [`super::spaces`]; its platform half is S3's.
+    Spaces,
 }
 
 impl EngineKind {
@@ -375,16 +378,21 @@ impl EngineKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Corner => "corner",
+            Self::Spaces => "spaces",
         }
     }
 
     /// True when a window at `frame` is still where this engine hid it, out of anyone's
     /// reach, as far as what is `known` of the window allows: what the guardian's watch and
     /// every bring-back's last look wait for. The Corner engine: in a park zone of `displays`
-    /// and not meaningfully on another display ([`is_stranded`]).
+    /// and not meaningfully on another display ([`is_stranded`]). The Spaces engine: never by
+    /// its frame.
     pub fn stranded(self, frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
         match self {
             Self::Corner => is_stranded(frame, displays, known),
+            // No frame says a window is in a stage Space, and none is left in one once its
+            // app is gone: the window server ends the Spaces with the process that made them.
+            Self::Spaces => false,
         }
     }
 

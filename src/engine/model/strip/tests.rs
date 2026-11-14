@@ -128,6 +128,7 @@ fn in_order(e: &Env, mode: ActiveCard) -> Vec<(u32, char)> {
         .collect()
 }
 
+both_engines! {
 #[test]
 fn clicks_on_slots_1_3_and_6_leave_every_stage_in_its_place_in_each_mode() {
     for mode in MODES {
@@ -447,4 +448,5 @@ fn a_card_dragged_in_place_without_overflow_moves_as_before() {
         assert_eq!(e.m.stage_number(four), Some(1), "{mode:?}");
         assert_eq!(e.places(), in_order(&e, mode), "{mode:?}: the strip is the creation order");
     }
+}
 }

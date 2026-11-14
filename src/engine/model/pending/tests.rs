@@ -96,6 +96,7 @@ fn number_of(m: &Model, id: u32) -> Option<usize> {
     m.stage_of(w(id)).and_then(|s| m.stage_number(s))
 }
 
+both_engines! {
 #[test]
 fn a_launch_on_an_empty_screen_keeps_every_saved_stage_waiting() {
     let mut m = restoring(vec![desktop_5()]);
@@ -454,6 +455,7 @@ fn saved_recency_survives_a_restart() {
     let saved: Vec<Option<u64>> = m.to_state().spaces[0].stages.iter().map(|s| s.last_active).collect();
     assert!(saved.iter().all(Option::is_some));
 }
+}
 
 // ----- the 8E review (8E2): the restore window, the frame against names, adoption ----------
 
@@ -475,6 +477,7 @@ fn adopted() -> Model {
     m
 }
 
+both_engines! {
 #[test]
 fn after_the_restore_window_a_pending_match_brings_its_stage_forward() {
     // H1: Chat opened hours later (the restore window long over): its window goes back to
@@ -952,6 +955,7 @@ fn voters_go_back_at_their_saved_frames() {
     assert!(parks(&a, 41), "{a:?}");
     assert_eq!(m.window(w(41)).map(|x| (x.parked, x.restore)), Some((true, F_TEAM)));
 }
+}
 
 // ----- 8F: settling, the end's focus, the restore's line, the frame gate, the setting -----
 
@@ -968,6 +972,7 @@ fn restoring_after(spaces: Vec<SavedSpace>, restore: Restore) -> Model {
 
 const MAIL: &str = "com.example.mail";
 
+both_engines! {
 #[test]
 fn while_the_login_settles_nothing_switches_stages() {
     let mut m = adopted();
@@ -1035,7 +1040,9 @@ fn the_restore_line_counts_windows_stages_and_desktops() {
     add(&mut m, win(32, 61, "com.example.other", "Other", DEFAULT));
     assert_eq!(m.restore_summary(41).by_apple, 1);
 }
+}
 
+corner_nuance! {
 #[test]
 fn saved_frames_come_back_only_on_a_display_of_the_saved_size() {
     // Saved on a 2560×1440 main display; the test display is 1440×900.
@@ -1081,7 +1088,9 @@ fn a_window_at_the_park_corner_at_the_launch_takes_no_frame_saved_on_another_scr
     assert_eq!(m.window(w(24)).map(|x| x.restore), Some(F_NOTES));
     assert_eq!(set_frame(&a, 24), Some(F_NOTES), "{a:?}");
 }
+}
 
+both_engines! {
 #[test]
 fn restore_after_restart_off_keeps_nothing_waiting_as_before() {
     // The setting off: a launch after a restart behaves as 1.2.0 did.
@@ -1138,6 +1147,7 @@ fn an_empty_saved_active_stage_given_up_still_gives_way() {
     assert!(m.front_after_restore(&Observation::default()).is_empty());
     assert_eq!(m.main_active_stage(), editor);
 }
+}
 
 /// The restore phase's layout (made-up titles): Mail (declared) holds two editor windows, the
 /// active stage the editor's third window and Chat's, the browser a stage of its own.
@@ -1168,6 +1178,7 @@ fn mail_desktop() -> (Model, StageId) {
     (m, mail)
 }
 
+both_engines! {
 #[test]
 fn an_app_s_window_unminimized_during_the_restore_window_goes_to_its_saved_stage_not_its_app_s() {
     // The 10-15 live run: the editor (Alpha) has a window shown in the active stage; its
@@ -1211,9 +1222,11 @@ fn an_app_s_window_unminimized_after_the_restore_window_brings_its_saved_stage_f
     assert!(own != mail && m.main_active_stage() == Some(own));
     assert_eq!(m.stage(mail).map(|s| s.windows.clone()), Some(vec![w(21), w(22)]), "Mail untouched");
 }
+}
 
 // ----- the review of 8F (8F2) ---------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn a_new_stage_takes_the_front_from_an_empty_saved_active_stage_while_the_login_settles() {
     // M4: the editor (the saved active stage) is slow to open; Chat came back into its
@@ -1279,6 +1292,7 @@ fn the_restore_line_is_logged_after_a_restart_only() {
     m.arrive(MAIN, &[win(23, 50, EDITOR, "Plan.txt", F_PLAN)], &[], &LaunchHints::default());
     assert!(m.restoring() && m.restore_line(12).is_none(), "a relaunch in the same session");
 }
+}
 
 // ----- frames after a restart (round 8H) ------------------------------------------------------
 
@@ -1289,6 +1303,7 @@ fn clamped(size: Rect) -> Rect {
     Rect::new(v.max_x() - size.w, v.max_y() - size.h, size.w, size.h)
 }
 
+both_engines! {
 #[test]
 fn a_window_clamped_against_the_corner_is_matched_by_title_and_app_and_takes_its_saved_frame() {
     let mut m = adopted();
@@ -1308,7 +1323,9 @@ fn a_window_clamped_against_the_corner_is_matched_by_title_and_app_and_takes_its
     assert_eq!(m.window(w(22)).map(|s| s.restore), Some(F_RECIPES));
     assert_eq!(m.restore_summary(0).corner, 0, "matched: not counted at the corner");
 }
+}
 
+corner_nuance! {
 #[test]
 fn an_unmatched_window_at_the_corner_is_left_alone_and_counted_one_at_the_park_spot_comes_back() {
     let mut m = adopted();
@@ -1327,12 +1344,14 @@ fn an_unmatched_window_at_the_corner_is_left_alone_and_counted_one_at_the_park_s
     assert_eq!((s.by_apple, s.corner), (2, 1), "only the clamped one counts at the corner");
     assert!(s.to_string().ends_with("2 by Apple's rule; 1 at the corner; 0 from other Desktops"), "{s}");
 }
+}
 
 /// Apple's rule with `[stages] new_apps_join_current` on (`Decision::for_new_window`).
 fn joins() -> Decision {
     Decision { new_app_joins_current: true, ..Decision::default() }
 }
 
+both_engines! {
 #[test]
 fn new_apps_join_current_never_takes_a_window_from_its_saved_stage() {
     // The restore window over, the key on: Chat opened hours later still goes back to its
@@ -1378,6 +1397,7 @@ fn new_apps_join_current_waits_for_the_restore_window_to_close() {
     let front = m.main_active_stage();
     m.add_window(win(62, 71, "com.example.memo", "Memo", DEFAULT), &joins(), &focused(62));
     assert_eq!(m.stage_of(w(62)), front);
+}
 }
 
 /// The review of 10-21, R5: Desktop 7 as saved, the editor's stage active, Mail, and
@@ -1429,6 +1449,7 @@ fn maps() -> WindowMeta {
     win(5, 40, BROWSER, "Maps", Rect::new(360.0, 200.0, 760.0, 480.0))
 }
 
+both_engines! {
 /// R5, into the active stage (the review's demo, fixed): the merged stage's pending windows
 /// move with it, so a late one lands in the merge's stage, in front of its windows in saved
 /// order, and the old stage neither comes back nor takes the front.
@@ -1519,6 +1540,7 @@ fn a_stray_of_a_merged_part_joins_the_merge() {
     assert!(m.is_pooled(w(42)));
     assert_eq!(m.stage_of(w(42)), Some(chat), "the merge stands for its saved stage's other windows");
 }
+}
 
 // ----- Accessibility blind (round ax-blind, the owner's Mac 11-06) ---------------------------------
 
@@ -1545,6 +1567,7 @@ fn blind_screen() -> crate::engine::ax_blind::Facts {
     }
 }
 
+both_engines! {
 /// 15:40:07: the stages built from nothing after the launch's 10 s wait, the restore window
 /// open, a click 0.2 s later. It ended the restore window on nothing, and a minute later the
 /// two windows waiting on the Desktop shown were given up (their apps "quiet"). Now the click
@@ -1649,4 +1672,5 @@ fn nothing_waiting_opens_no_restore_window_again() {
     m.give_up_absent(|_| false);
     assert_eq!(m.pending_count() + m.pending_unvisited(), 0);
     assert!(!m.reopen_restore([]) && !m.restoring());
+}
 }

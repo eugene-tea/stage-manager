@@ -17,6 +17,7 @@ fn chrome_everywhere(e: &mut Env) -> [StageId; 5] {
     [code, chrome, finder, e.stage_of(7), e.stage_of(8)]
 }
 
+both_engines! {
 #[test]
 fn the_laptops_front_stage_is_in_front_though_the_main_screen_shows_another() {
     // Switching 1: a window of the laptop's front stage is shown (a drag of it can start, its
@@ -82,4 +83,5 @@ fn a_stage_hotkey_counts_the_strip_of_the_screen_with_the_keyboard() {
     assert_eq!(e.m.keyboard_display(Some(WindowId(99)), Some(LAPTOP)), LAPTOP);
     assert_eq!(e.m.keyboard_display(None, None), STUDIO);
     assert_eq!(e.m.keyboard_display(None, Some(DisplayId(77))), STUDIO, "a screen the model does not know: the main one");
+}
 }

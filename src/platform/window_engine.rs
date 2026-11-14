@@ -135,6 +135,12 @@ pub fn current() -> Arc<dyn WindowEngine> {
 pub fn of(kind: EngineKind) -> Arc<dyn WindowEngine> {
     match kind {
         EngineKind::Corner => Arc::new(super::corner::engine::CornerEngine),
+        // The Spaces engine's platform half is not built yet; only its pure half and the
+        // tests' fake desk run it. Nothing writes a parked file naming it.
+        EngineKind::Spaces => {
+            tracing::warn!("window engine: the Spaces engine is not built yet; the Corner engine runs");
+            Arc::new(super::corner::engine::CornerEngine)
+        }
     }
 }
 

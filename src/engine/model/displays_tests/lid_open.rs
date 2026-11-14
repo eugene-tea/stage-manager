@@ -40,6 +40,7 @@ fn put_back(e: &mut Env, id: u32, frame: Rect, z: &[WindowId]) -> Vec<Action> {
     e.run(a)
 }
 
+corner_nuance! {
 #[test]
 fn the_lid_opened_after_a_switch_on_the_5k_gives_the_laptop_its_front_and_cards_back() {
     let mut e = Env::both();
@@ -92,7 +93,9 @@ fn the_lid_opened_after_a_switch_on_the_5k_gives_the_laptop_its_front_and_cards_
     assert!(e.m.window(WindowId(1)).is_some_and(|w| !w.parked) && !e.parked_on(1, &studio()));
     assert!(e.m.stages().iter().filter(|s| s.display == STUDIO).all(|s| s.windows.iter().all(|w| [1, 3].contains(&w.0))));
 }
+}
 
+both_engines! {
 #[test]
 fn the_lid_opened_with_nothing_touched_on_the_5k_stays_as_before() {
     let mut e = Env::both();
@@ -120,7 +123,9 @@ fn the_lid_opened_with_nothing_touched_on_the_5k_stays_as_before() {
     assert_eq!(slots, want);
     assert_eq!(e.m.active_stage(STUDIO), Some(code), "the 5K's own front again");
 }
+}
 
+corner_nuance! {
 #[test]
 fn only_a_screen_that_came_back_takes_a_parked_window_listed_at_a_normal_frame() {
     let e = Env::both();
@@ -133,4 +138,5 @@ fn only_a_screen_that_came_back_takes_a_parked_window_listed_at_a_normal_frame()
     assert_eq!(e.m.returned_display(on_studio, STUDIO, &[LAPTOP]), None, "on its own screen: parked again");
     assert_eq!(e.m.returned_display(studio_corner, STUDIO, &[LAPTOP]), None, "in its own zone: a card still");
     assert_eq!(e.m.returned_display(laptop_corner, STUDIO, &[]), Some(LAPTOP), "another screen's zone, as before");
+}
 }

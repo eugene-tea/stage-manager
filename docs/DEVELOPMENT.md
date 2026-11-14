@@ -64,6 +64,12 @@ running from anywhere else: `make run` stops only the dev copy's own process.
 `make check` runs the unit tests and clippy; both must be clean. The engine (`src/engine`,
 `src/config.rs`) is pure Rust with no Objective-C types, so most logic is tested there.
 
+The model's tests run once per window engine: a test inside `both_engines! { .. }`
+(`src/engine/testkit.rs`) becomes `<name>::corner` and `<name>::spaces`, and the test model
+and the fake desk (`Desk`) hide windows the way that engine does. A test of the park
+corner's own geometry goes in `corner_nuance! { .. }` and runs on the Corner engine only;
+the Spaces engine's own tests are in `src/engine/spaces.rs`.
+
 `scripts/test-stages.sh` runs the scripted checks against the real app, driving it through
 its ctl socket and reading the window server's view of the windows:
 

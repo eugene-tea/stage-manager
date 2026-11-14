@@ -1,15 +1,20 @@
 //! The model's one door to the window engine: every question the model asks about where
 //! hidden windows are goes through here, to the pure half of the engine that runs
 //! ([`ModelOptions::engine`](super::ModelOptions::engine); the Corner engine's is
-//! [`crate::engine::corner`]). No other file of the model tests a park zone.
+//! [`crate::engine::corner`], the Spaces engine's [`crate::engine::spaces`]). No other file
+//! of the model tests a park zone.
 //!
 //! The questions are of two kinds, kept apart because the engines answer them differently:
 //!
 //! - **Is this observed window hidden now?** ([`Model::listed_hidden`],
-//!   [`Model::seen_hidden`], [`Model::listed_out_of_sight`], [`Model::shows_a_piece`],
-//!   [`Model::clamped_at_hiding`]): asked of a frame the window server listed, at a launch, a
-//!   restore, a Desktop change, a display change. The Corner engine reads it off the frame
-//!   (its park zone).
+//!   [`Model::listed_hidden_window`], [`Model::seen_hidden`], [`Model::listed_out_of_sight`],
+//!   [`Model::shows_a_piece`], [`Model::clamped_at_hiding`]): asked of a frame the window
+//!   server listed, at a launch, a restore, a Desktop change, a display change. The Corner
+//!   engine reads it off the frame (its park zone); the Spaces engine cannot (a hidden
+//!   window is listed at its own frame), so where the window is known
+//!   ([`Model::listed_hidden_window`]) it answers from the model's record, and from a bare
+//!   frame never "hidden". Under Corner "hidden now" and "listed at a hiding frame" are one
+//!   test; under Spaces they part: a match ([`Model::seen_hidden`]) asks only the second.
 //! - **May a window be brought back here?** ([`Model::no_restore`],
 //!   [`Model::within_reach`], [`Model::carried`], [`Model::lands_hidden`]): asked of a frame the model would
 //!   record or restore. The Corner engine keeps restore frames out of its park zone; an
@@ -19,7 +24,7 @@
 //! ([`Model::frame_left`]).
 
 use super::{Display, DisplayId, Model, WindowId, WindowMeta, WindowState};
-use crate::engine::corner;
+use crate::engine::{corner, spaces};
 use crate::engine::geometry::Rect;
 use crate::engine::recovery::EngineKind;
 
@@ -29,11 +34,26 @@ impl Model {
     pub fn listed_hidden(&self, display: DisplayId, listed: Rect) -> bool {
         match self.options.engine {
             EngineKind::Corner => corner::is_hidden(self.display(display), listed),
+            EngineKind::Spaces => spaces::is_hidden(self.display(display), listed),
         }
     }
 
-    /// True when the observed window `m` is hidden now ([`Model::listed_hidden`] of its
-    /// frame on its display).
+    /// True when window `id`, listed at `listed` and counted on `display`, is hidden now.
+    /// The Corner engine reads it off the frame ([`Model::listed_hidden`]). The Spaces
+    /// engine's hidden window is listed at its own frame, so the frame says nothing: the
+    /// window is hidden when the model hid it ([`spaces::hidden_by_record`]).
+    pub(crate) fn listed_hidden_window(&self, id: WindowId, display: DisplayId, listed: Rect) -> bool {
+        match self.options.engine {
+            EngineKind::Corner => self.listed_hidden(display, listed),
+            EngineKind::Spaces => spaces::hidden_by_record(self.windows.get(&id)),
+        }
+    }
+
+    /// True when the observed window `m` is listed where the engine keeps hidden windows
+    /// ([`Model::listed_hidden`] of its frame on its display): its frame is a hiding place,
+    /// not the user's, so a match leaves it out. Asked of frames only: a Spaces hidden
+    /// window's frame is its own, and counts ([`Model::listed_hidden_window`] asks whether
+    /// a window is hidden).
     pub(crate) fn seen_hidden(&self, m: &WindowMeta) -> bool {
         self.listed_hidden(m.display, m.frame)
     }
@@ -44,6 +64,7 @@ impl Model {
     pub(crate) fn listed_out_of_sight(&self, display: DisplayId, listed: Rect) -> bool {
         match self.options.engine {
             EngineKind::Corner => corner::out_of_sight(self.display(display), listed),
+            EngineKind::Spaces => spaces::out_of_sight(self.display(display), listed),
         }
     }
 
@@ -52,6 +73,7 @@ impl Model {
     pub(crate) fn shows_a_piece(&self, display: DisplayId, frame: Rect) -> bool {
         match self.options.engine {
             EngineKind::Corner => corner::shows_a_piece(self.display(display), frame),
+            EngineKind::Spaces => spaces::shows_a_piece(self.display(display), frame),
         }
     }
 
@@ -60,6 +82,7 @@ impl Model {
     pub(crate) fn clamped_at_hiding(&self, display: DisplayId, listed: Rect) -> bool {
         match self.options.engine {
             EngineKind::Corner => corner::clamped_at_hiding(self.display(display), listed),
+            EngineKind::Spaces => spaces::clamped_at_hiding(self.display(display), listed),
         }
     }
 
@@ -68,6 +91,7 @@ impl Model {
     pub(crate) fn no_restore(&self, display: DisplayId, frame: Rect) -> bool {
         match self.options.engine {
             EngineKind::Corner => corner::no_restore(self.display(display), frame),
+            EngineKind::Spaces => spaces::no_restore(self.display(display), frame),
         }
     }
 
@@ -77,6 +101,7 @@ impl Model {
     pub(crate) fn within_reach(&self, display: DisplayId, frame: Rect) -> Rect {
         match self.options.engine {
             EngineKind::Corner => corner::within_reach(self.display(display), frame),
+            EngineKind::Spaces => spaces::within_reach(self.display(display), frame),
         }
     }
 
@@ -89,6 +114,7 @@ impl Model {
         let moved = to.carry(frame, from);
         match engine {
             EngineKind::Corner => corner::within_reach(to, moved),
+            EngineKind::Spaces => spaces::within_reach(to, moved),
         }
     }
 
@@ -97,6 +123,7 @@ impl Model {
     pub(crate) fn lands_hidden(&self, w: &WindowState, frame: Rect) -> bool {
         match self.options.engine {
             EngineKind::Corner => corner::lands_hidden(w.restore, self.display(w.meta.display), self.options.park, frame),
+            EngineKind::Spaces => spaces::lands_hidden(frame),
         }
     }
 
@@ -111,6 +138,7 @@ impl Model {
         }
         Some(match self.options.engine {
             EngineKind::Corner => corner::park_frame_of(w.restore, self.display(w.meta.display), self.options.park),
+            EngineKind::Spaces => spaces::hidden_frame(w),
         })
     }
 }

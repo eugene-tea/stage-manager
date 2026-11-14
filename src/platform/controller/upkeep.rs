@@ -16,7 +16,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::time::Instant;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use super::Controller;
 use super::corner::unrestored::LetGo;
@@ -37,6 +37,7 @@ impl Controller {
     pub(super) fn hidden_changed(&self) {
         match self.engine.kind() {
             EngineKind::Corner => self.publish_shield(),
+            EngineKind::Spaces => {},
         }
     }
 
@@ -47,6 +48,7 @@ impl Controller {
     pub(super) fn look_at_screen(&mut self) -> Option<Vec<windows::CgWindow>> {
         match self.engine.kind() {
             EngineKind::Corner => self.update_patch(),
+            EngineKind::Spaces => None,
         }
     }
 
@@ -56,6 +58,7 @@ impl Controller {
     pub(super) fn raised_by_macos(&mut self, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.replan_patch(now),
+            EngineKind::Spaces => {},
         }
     }
 
@@ -64,6 +67,7 @@ impl Controller {
     pub(super) fn pointer_released(&self, at: Point, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_touched(at, now),
+            EngineKind::Spaces => {},
         }
     }
 
@@ -72,6 +76,7 @@ impl Controller {
     pub(super) fn upkeep_wants_fast_tick(&self, now: Instant) -> bool {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_replans(now) || self.reveal_fast(now),
+            EngineKind::Spaces => false,
         }
     }
 
@@ -80,6 +85,7 @@ impl Controller {
     pub(super) fn upkeep_fast_tick(&mut self, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_fast_tick(now),
+            EngineKind::Spaces => {},
         }
     }
 
@@ -89,6 +95,7 @@ impl Controller {
     pub(super) fn upkeep_tick(&mut self, ob: &mut Observer) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_tick(ob),
+            EngineKind::Spaces => {},
         }
     }
 
@@ -101,6 +108,7 @@ impl Controller {
     pub(super) fn hide_place_once(&self, id: u32) -> Option<Rect> {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.dive.filter(|(w, _)| *w == id).map(|(_, frame)| frame),
+            EngineKind::Spaces => None,
         }
     }
 
@@ -109,6 +117,7 @@ impl Controller {
     pub(super) fn hide_once_at(&mut self, place: Option<(u32, Rect)>) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.dive = place,
+            EngineKind::Spaces => {},
         }
     }
 
@@ -118,6 +127,13 @@ impl Controller {
     pub(super) fn show_failed(&mut self, id: u32, entry: ParkedEntry) {
         match self.engine.kind() {
             EngineKind::Corner => self.restore_failed(id, entry),
+            EngineKind::Spaces => {
+                // The engine's show brings the window out of its stage Space before it asks
+                // the app for the frame, so a show that failed left it on screen, where it
+                // was: nothing is owed for safety, and nothing is kept registered.
+                let _ = entry;
+                tracing::warn!(id, "a shown window did not take its frame: it shows where it was");
+            }
         }
     }
 
@@ -126,6 +142,12 @@ impl Controller {
     pub(super) fn hide_failed(&mut self, id: u32, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.park_failed(id, now),
+            EngineKind::Spaces => {
+                // The window is still on its Desktop. The tick's look puts it into its
+                // stage's Space again ([`Self::upkeep_tick`]).
+                let _ = now;
+                tracing::warn!(id, "a window did not go into its stage's Space: tried again by the tick");
+            }
         }
     }
 
@@ -136,6 +158,7 @@ impl Controller {
     pub(super) fn keep_until_seen(&mut self, id: u32, entry: ParkedEntry) {
         match self.engine.kind() {
             EngineKind::Corner => self.keep_unrestored(id, entry),
+            EngineKind::Spaces => {},
         }
     }
 
@@ -145,6 +168,7 @@ impl Controller {
     pub(super) fn kept_entries(&self) -> Vec<(u32, ParkedEntry)> {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.unrestored.iter().map(|(id, u)| (*id, u.entry.clone())).collect(),
+            EngineKind::Spaces => Vec::new(),
         }
     }
 
@@ -155,6 +179,12 @@ impl Controller {
     pub(super) fn let_go_hidden(&mut self, ob: &Observer, kept: Vec<(u32, ParkedEntry)>, why: LetGo) {
         match self.engine.kind() {
             EngineKind::Corner => self.watch_forgotten(ob, kept, why),
+            EngineKind::Spaces => {
+                // Nothing but the engine brings a window out of a stage Space, so a window
+                // the model no longer counts must not stay in one: the engine's platform
+                // half lets them out here.
+                let _ = (ob, kept, why);
+            }
         }
     }
 
@@ -164,6 +194,7 @@ impl Controller {
     pub(super) fn hidden_moved_by_user(&mut self, id: u32) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.strays.entry(id).or_default().user_moved = true,
+            EngineKind::Spaces => {},
         }
     }
 
@@ -174,6 +205,7 @@ impl Controller {
     pub(super) fn retry_shows(&mut self, ob: &Observer, force: bool) {
         match self.engine.kind() {
             EngineKind::Corner => self.retry_unrestored(ob, force),
+            EngineKind::Spaces => {},
         }
     }
 
@@ -181,6 +213,7 @@ impl Controller {
     pub(super) fn shows_owed(&self) -> usize {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.unrestored.len(),
+            EngineKind::Spaces => 0,
         }
     }
 
@@ -188,6 +221,7 @@ impl Controller {
     pub fn shows_owed_ids(&self) -> BTreeSet<u32> {
         match self.engine.kind() {
             EngineKind::Corner => self.unrestored_ids(),
+            EngineKind::Spaces => BTreeSet::new(),
         }
     }
 
@@ -197,6 +231,7 @@ impl Controller {
     pub fn account_shows_owed(&mut self, ob: &Observer) -> usize {
         match self.engine.kind() {
             EngineKind::Corner => self.account_unrestored(ob),
+            EngineKind::Spaces => 0,
         }
     }
 
@@ -206,6 +241,7 @@ impl Controller {
     pub(super) fn let_go_destroyed(&self) -> BTreeSet<u32> {
         match self.engine.kind() {
             EngineKind::Corner => self.destroyed_ids(),
+            EngineKind::Spaces => BTreeSet::new(),
         }
     }
 
@@ -228,6 +264,7 @@ impl Controller {
             EngineKind::Corner => {
                 self.switch_corner(arriving, outgoing, activated, list).and_then(|c| self.cover_ready(c).map_err(Refused::from)).map(Some)
             }
+            EngineKind::Spaces => Ok(None),
         }
     }
 
@@ -238,6 +275,7 @@ impl Controller {
     pub(super) fn status_strays(&self) -> Vec<Value> {
         match self.engine.kind() {
             EngineKind::Corner => self.strays_status(),
+            EngineKind::Spaces => Vec::new(),
         }
     }
 
@@ -245,6 +283,7 @@ impl Controller {
     pub(super) fn status_patch(&self, screen: u32) -> Value {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_status(screen),
+            EngineKind::Spaces => json!({ "on": false, "mode": "off", "shown": false, "rect": null, "refused_against": null, "hidden_why": null }),
         }
     }
 
@@ -252,6 +291,7 @@ impl Controller {
     pub(super) fn status_patch_plan(&self, screen: u32) -> Value {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_plan_status(screen),
+            EngineKind::Spaces => Value::Null,
         }
     }
 }

@@ -30,7 +30,7 @@ fn restarted_moved(legacy: bool) -> (Model, Display) {
     file.start_new_session();
     let (file, _) = file.for_session(Some("B"));
     let (s, l) = laptop_right();
-    let mut m = Model::new(vec![s, l], ModelOptions::default());
+    let mut m = model_on(vec![s, l], ModelOptions::default());
     m.set_restore(Restore::after_restart("B"));
     m.set_desktop_counts([(STUDIO_KEY, 2), (LAPTOP_KEY, 1)]);
     m.restore_spaces(file.spaces);
@@ -50,6 +50,7 @@ fn player_back(m: &mut Model, live: Rect) -> Vec<Action> {
     add_plain(m, reopen(313, 33, PLAYER, "Player", LAPTOP, live))
 }
 
+both_engines! {
 #[test]
 fn a_screen_moved_in_the_arrangement_takes_its_saved_frames_along() {
     let (mut m, l) = restarted_moved(false);
@@ -106,11 +107,12 @@ fn a_file_without_the_origins_keeps_frames_still_on_their_screen() {
     file.spaces = spaces;
     file.start_new_session();
     let (file, _) = file.for_session(Some("B"));
-    let mut m = Model::new(vec![studio(), laptop()], ModelOptions::default());
+    let mut m = model_on(vec![studio(), laptop()], ModelOptions::default());
     m.set_restore(Restore::after_restart("B"));
     m.set_desktop_counts([(STUDIO_KEY, 2), (LAPTOP_KEY, 1)]);
     m.restore_spaces(file.spaces);
     let l = laptop();
     let a = player_back(&mut m, on(&l, (10.0, 10.0)));
     assert!(a.contains(&Action::SetFrame { id: WindowId(313), frame: on(&l, (300.0, 150.0)) }), "{a:?}");
+}
 }

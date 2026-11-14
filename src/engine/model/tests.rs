@@ -104,6 +104,7 @@ fn first_index(actions: &[Action], pred: impl Fn(&Action) -> bool) -> Option<usi
 
 // ----- construction ----------------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn new_model_has_one_empty_active_stage() {
     let m = model();
@@ -164,9 +165,11 @@ fn frames_that_are_not_finite_never_enter_the_model() {
     assert!(e.m.window(w(2)).is_some_and(|x| x.restore.is_finite() && !x.restore.is_degenerate()));
     assert!(e.m.to_state().to_json().is_ok(), "the save goes through");
 }
+}
 
 // ----- adding windows ---------------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn current_joins_the_active_stage_at_the_front() {
     let mut e = Env::new();
@@ -289,7 +292,9 @@ fn as_is_placement_emits_no_frame_change() {
     let a = e.add(meta(1, 10, "com.example.a"), RuleAction::Current);
     assert_eq!(a, [Action::StateChanged]);
 }
+}
 
+corner_nuance! {
 #[test]
 fn a_new_window_born_in_the_park_zone_gets_a_safe_restore_frame() {
     let mut e = Env::new();
@@ -300,7 +305,9 @@ fn a_new_window_born_in_the_park_zone_gets_a_safe_restore_frame() {
     assert!(!parked_at(r));
     assert!(!e.d.parked(w(1)), "it is brought out of the corner");
 }
+}
 
+both_engines! {
 #[test]
 fn a_switch_brings_a_window_hung_off_an_edge_back_at_exactly_its_frame() {
     // W1: the restore clamp forced the whole width on screen and shrank what was larger, so
@@ -338,7 +345,9 @@ fn a_window_hung_off_the_left_edge_in_the_upper_half_is_not_centered() {
     e.switch(2);
     assert_eq!(e.d.frames[&w(2)], Rect::new(GRAB_WIDTH - 400.0, 100.0, 400.0, 300.0));
 }
+}
 
+corner_nuance! {
 #[test]
 fn a_dock_that_grows_keeps_a_window_tucked_by_the_corner_by_it() {
     // W5: a restore frame the new visible frame puts in the park zone was centered.
@@ -358,9 +367,11 @@ fn a_dock_that_grows_keeps_a_window_tucked_by_the_corner_by_it() {
     assert_eq!(restore, Rect::new(1300.0, 760.0 - TITLE_BAR_HEIGHT, 600.0, 400.0), "moved only as far as reach needs");
     assert!(!grown.parks(restore));
 }
+}
 
 // ----- children ---------------------------------------------------------------------------
 
+corner_nuance! {
 #[test]
 fn a_dialog_born_beside_a_parked_window_comes_back_on_it() {
     // E8: a dialog an app opens on a parked window lands in the corner beside it; its
@@ -377,7 +388,9 @@ fn a_dialog_born_beside_a_parked_window_comes_back_on_it() {
     let back = e.d.frames[&w(2)];
     assert_eq!(back, Rect::new(parent.x + 150.0, parent.y + TITLE_BAR_HEIGHT, 300.0, 150.0), "across its window, under its title bar");
 }
+}
 
+both_engines! {
 #[test]
 fn children_follow_their_parent_and_are_not_members() {
     let mut e = Env::new();
@@ -519,9 +532,11 @@ fn sending_a_child_sends_its_parent() {
     assert_eq!(e.m.stage_of(w(2)), e.m.stage_of(w(1)));
     assert!(e.d.parked(w(1)) && e.d.parked(w(2)));
 }
+}
 
 // ----- switching --------------------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn switch_parks_restores_raises_and_focuses_in_order() {
     let mut e = Env::new();
@@ -601,7 +616,9 @@ fn switch_to_the_active_or_an_unknown_stage_is_a_no_op() {
     let obs = e.d.obs();
     assert!(e.m.switch_to(StageId(999), &obs).is_empty());
 }
+}
 
+corner_nuance! {
 #[test]
 fn switch_never_records_a_parked_frame_as_restore() {
     let mut e = Env::new();
@@ -639,7 +656,9 @@ fn a_window_the_user_pushed_into_the_corner_comes_back_by_it() {
     assert!(!parked_at(back), "{back:?}");
     assert_eq!(back, Rect::new(1440.0 - 600.0, 825.0 - 400.0, 600.0, 400.0), "by the corner, not centered");
 }
+}
 
+both_engines! {
 #[test]
 fn leaving_an_empty_active_stage_drops_it() {
     let mut e = Env::new();
@@ -665,9 +684,11 @@ fn pinned_windows_are_untouched_by_switches() {
     assert!(e.m.pinned().contains(&w(1)));
     assert!(e.m.strip().iter().all(|c| !c.windows.contains(&w(1))));
 }
+}
 
 // ----- removal ----------------------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn closing_the_last_window_of_an_inactive_stage_removes_it() {
     let mut e = Env::new();
@@ -713,9 +734,11 @@ fn declared_stages_survive_being_empty() {
     e.close(1);
     assert_eq!(e.m.stages().len(), 2);
 }
+}
 
 // ----- sending ----------------------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn send_to_an_existing_stage_parks_and_refocuses_the_source() {
     let mut e = Env::new();
@@ -787,9 +810,11 @@ fn send_unpins_a_pinned_window() {
     assert!(e.m.pinned().is_empty());
     assert!(e.d.parked(w(1)));
 }
+}
 
 // ----- pinning ----------------------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn toggle_pin_round_trip() {
     let mut e = Env::new();
@@ -825,9 +850,11 @@ fn pinning_a_parked_window_brings_it_back_and_drops_its_empty_stage() {
     let obs = e.d.obs();
     assert!(e.m.toggle_pin(w(77), &obs).is_empty());
 }
+}
 
 // ----- activation and focus -----------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn activating_an_app_in_the_active_stage_does_nothing() {
     let mut e = Env::new();
@@ -891,6 +918,7 @@ fn one_at_a_time_follows_the_focused_window_even_when_present() {
     let a = e.m.app_activated(10, &obs);
     assert!(a.iter().all(|x| *x == Action::StateChanged) || a.is_empty());
 }
+}
 
 /// The stage an activation of `pid` switches to with `focused` (None: no switch).
 fn activation_answer(e: &Env, pid: Pid, focused: Option<WindowId>) -> Option<StageId> {
@@ -900,6 +928,7 @@ fn activation_answer(e: &Env, pid: Pid, focused: Option<WindowId>) -> Option<Sta
     (!a.is_empty()).then(|| m.main_active_stage()).flatten()
 }
 
+both_engines! {
 #[test]
 fn an_activation_asks_the_focus_only_when_the_answer_depends_on_it() {
     // (setup, pid, whether the focus can change the answer)
@@ -1007,6 +1036,7 @@ fn focusing_a_parked_window_switches_to_its_stage() {
     let obs = e.d.obs();
     assert!(e.m.window_focused(w(1), &obs).is_empty());
 }
+}
 
 /// The raises of a batch, in order.
 fn raises(actions: &[Action]) -> Vec<u32> {
@@ -1048,6 +1078,7 @@ fn shared_stage() -> Env {
     e
 }
 
+both_engines! {
 #[test]
 fn activating_the_other_app_of_a_shared_stage_brings_its_window_in_front() {
     // The owner's 10-27 Dock click: Calendar (A) clicked, its stage's key Mail's (B). Apple's comes
@@ -1115,7 +1146,9 @@ fn a_shown_stage_raises_its_key_last_whatever_its_place() {
     let a = e.switch(1);
     ends_with_key(&a, 1, &[2, 1, 4]);
 }
+}
 
+corner_nuance! {
 #[test]
 fn a_parked_window_dragged_out_by_its_sliver_stays_where_it_was_dropped() {
     // Stage 1: A's windows 1 and 3 (3 key); stage 2: B's window 2, active. The user grabs
@@ -1149,7 +1182,9 @@ fn a_parked_window_dragged_out_by_its_sliver_stays_where_it_was_dropped() {
     assert_eq!(e.m.window(w(1)).map(|x| x.restore), before, "a frame in the park zone never becomes a restore frame");
     assert!(!e.d.parked(w(1)));
 }
+}
 
+both_engines! {
 /// The review's E7: while the login settles (no stage switch for a focus), a parked
 /// window dragged out of the corner joined nothing and stayed counted parked, so the next
 /// `match_screen` parked it again. Now it joins the active stage where it was dropped.
@@ -1206,9 +1241,11 @@ fn a_parked_window_the_user_has_out_of_the_corner_is_adopted_into_the_active_sta
     e.add(meta(4, 12, "com.example.c"), RuleAction::Float);
     assert!(e.m.adopt_shown(w(4), at, &obs).is_empty());
 }
+}
 
 // ----- reveal desktop ---------------------------------------------------------------------
 
+both_engines! {
 #[test]
 fn reveal_desktop_parks_and_a_second_reveal_brings_it_back() {
     let mut e = Env::new();
@@ -1258,9 +1295,11 @@ fn reveal_then_switch_elsewhere_forgets_the_toggle() {
     e.reveal(); // back to stage 1, the one just revealed
     assert!(!e.d.parked(w(1)) && e.d.parked(w(2)));
 }
+}
 
 // ----- frames and safety ------------------------------------------------------------------
 
+corner_nuance! {
 #[test]
 fn frame_changes_update_restore_frames_but_not_from_the_park_zone() {
     let mut e = Env::new();
@@ -1274,7 +1313,9 @@ fn frame_changes_update_restore_frames_but_not_from_the_park_zone() {
     assert!(e.m.window_title_changed(w(1), "Notes 2"));
     assert!(!e.m.window_title_changed(w(5), "x"));
 }
+}
 
+both_engines! {
 #[test]
 fn unpark_all_restores_every_parked_window_clamped() {
     let mut e = Env::new();
@@ -1328,6 +1369,7 @@ fn a_removed_displays_front_stage_comes_to_main_in_front() {
     let restore = e.m.window(w(5)).expect("w5").restore;
     assert!(VISIBLE.contains_rect(&Rect { h: 28.0, ..restore }) && !display().parks(restore), "{restore:?}");
 }
+}
 
 /// The 5K the owner docks to (menu bar on it).
 const BIG: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
@@ -1356,6 +1398,7 @@ fn three_stages() -> Env {
     e
 }
 
+both_engines! {
 #[test]
 fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
     // V1-A: same id, a bigger frame (scaling changed, or the panel became main).
@@ -1380,7 +1423,9 @@ fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
     let a = e.m.set_displays(vec![docked]);
     assert!(parks_in(&e.m, &a).is_empty());
 }
+}
 
+corner_nuance! {
 #[test]
 fn a_new_park_corner_parks_the_parked_windows_again_there_and_nothing_else() {
     // V1: a display placed beyond the bottom-right corner; the platform picks bottom-left.
@@ -1406,7 +1451,9 @@ fn a_new_park_corner_parks_the_parked_windows_again_there_and_nothing_else() {
     assert!(!e.d.parked(w(1)) && e.d.frames[&w(1)].x >= 0.0, "{:?}", e.d.frames[&w(1)]);
     check_invariants(&e, "after a switch at the bottom-left corner");
 }
+}
 
+both_engines! {
 #[test]
 fn the_main_display_under_a_new_id_keeps_the_desk_and_the_active_stage_shown() {
     // V1-B: docking moves the menu bar to the 5K (a new main display id), undocking back.
@@ -1450,6 +1497,7 @@ fn renamed_declarations_release_empty_stages() {
     let names: Vec<_> = m.stages().iter().filter_map(|s| s.name.clone()).collect();
     assert_eq!(names, ["Work", "Music"]);
 }
+}
 
 // ----- strip ------------------------------------------------------------------------------
 
@@ -1465,6 +1513,7 @@ fn stages(n: u32, capacity: usize) -> Env {
     e
 }
 
+both_engines! {
 #[test]
 fn strip_lists_other_stages_never_the_active_one() {
     let e = stages(3, 6);
@@ -1628,9 +1677,11 @@ fn moves_reported_for_a_parked_window_never_change_its_restore_frame() {
     e.switch(1);
     assert_eq!(e.d.frames[&w(1)], saved);
 }
+}
 
 // ----- merge (shift-click on a card) ---------------------------------------------------------
 
+both_engines! {
 #[test]
 fn merge_brings_a_stage_into_the_active_one_in_front() {
     let mut e = Env::new();
@@ -1708,6 +1759,7 @@ fn merge_leaves_pinned_windows_alone() {
     assert_eq!(e.m.window(w(1)).map(|x| x.home), Some(Home::Pinned));
     assert_eq!(e.members(1), [2, 3]);
 }
+}
 
 // ----- Shift-click: the card's front window joins the current stage (Apple's, 11-09) -------
 
@@ -1716,6 +1768,7 @@ fn windows_of(e: &Env, id: StageId) -> Vec<u32> {
     e.m.stage(id).map(|s| s.windows.iter().map(|x| x.0).collect()).unwrap_or_default()
 }
 
+both_engines! {
 #[test]
 fn a_shift_click_on_a_card_of_two_apps_adds_only_its_front_window() {
     let mut e = stages(4, 6);
@@ -1765,9 +1818,11 @@ fn a_shift_click_on_a_card_of_one_window_brings_its_stage_in() {
     assert!(e.m.stage(s1).is_none(), "the emptied stage is gone");
     assert!(e.m.add_card_front_to_active(s3, &e.d.obs()).is_empty(), "the stage in front: nothing");
 }
+}
 
 // ----- hidden apps (⌘H; Apple's, 11-09) --------------------------------------------------------
 
+both_engines! {
 #[test]
 fn hiding_the_app_in_front_brings_the_most_recent_stage_and_its_card_leaves_the_strip() {
     // Seven stages, five slots: stage 7 in front, 1-5 in the strip, 6 out of view.
@@ -1896,6 +1951,7 @@ fn a_hidden_stage_shown_by_its_activation_keeps_no_slot_to_come_back_to() {
     e.run(a);
     assert!(e.m.hidden_slots.is_empty(), "{:?}", e.m.hidden_slots);
 }
+}
 
 // ----- merge by dropping a card on a card -------------------------------------------------
 
@@ -1904,6 +1960,7 @@ fn stage_holding(e: &Env, id: u32) -> StageId {
     e.m.stage_of(w(id)).expect("in a stage")
 }
 
+both_engines! {
 #[test]
 fn a_card_dropped_on_a_card_keeps_every_window_parked_and_moves_nothing() {
     let mut e = stages(4, 6);
@@ -2003,6 +2060,7 @@ fn merging_into_the_active_stage_restores_and_the_active_card_never_moves() {
     assert_eq!(e.m.stage(s3).expect("active").windows, [w(2), w(3)]);
     assert!(!e.d.parked(w(2)));
 }
+}
 
 // ----- property test ----------------------------------------------------------------------
 
@@ -2035,9 +2093,10 @@ fn check_invariants(e: &Env, step: &str) {
     let m = &e.m;
     // The display may have changed (the property test changes it): its own park zone.
     let parked_at = |f: Rect| m.main_display().parks(f);
-    // Every live window the desk shows parked is known to the model as parked.
-    for (&id, &f) in &e.d.frames {
-        if parked_at(f) {
+    // Every live window the desk shows hidden (by the engine that runs) is known to the
+    // model as parked.
+    for &id in e.d.frames.keys() {
+        if e.d.parked(id) {
             assert!(
                 m.window(id).is_some_and(|w| w.parked),
                 "{step}: {id:?} parked on the desk but not in the model"
@@ -2101,13 +2160,13 @@ fn check_invariants(e: &Env, step: &str) {
         };
         if shown {
             assert!(
-                !parked_at(f),
+                !e.d.parked(w.meta.id),
                 "{step}: {:?} should be visible",
                 w.meta.id
             );
         } else {
             assert!(
-                parked_at(f) && w.parked,
+                e.d.parked(w.meta.id) && w.parked,
                 "{step}: {:?} should be parked (at {f:?}, model parked {}, display {:?})",
                 w.meta.id,
                 w.parked,
@@ -2141,6 +2200,7 @@ fn check_invariants(e: &Env, step: &str) {
     );
 }
 
+both_engines! {
 #[test]
 fn property_no_sequence_of_operations_loses_a_window() {
     let names = ["Work", "Chat", "Music"];
@@ -2439,18 +2499,20 @@ fn property_no_sequence_of_operations_loses_a_window() {
             }
             check_invariants(&e, &step);
         }
-        // The final guarantee: unpark_all brings back every parked window.
+        // The final guarantee: unpark_all brings back every parked window (out of the park
+        // zone, out of the stage Space).
         let a = e.m.unpark_all();
         e.run(a);
         for (&id, &f) in &e.d.frames {
             assert!(
-                !e.m.main_display().parks(f),
+                !e.d.parked(id),
                 "seed {seed}: {id:?} still parked after unpark_all at {f} ({:?}, display {:?})",
                 e.m.window(id).map(|w| (w.parked, w.restore, w.home)),
                 e.m.main_display()
             );
         }
     }
+}
 }
 
 // ----- Apple's defaults: native new windows, bring here, drag and drop ---------------------
@@ -2459,6 +2521,7 @@ fn titles(e: &Env, n: usize) -> Vec<u32> {
     e.members(n)
 }
 
+both_engines! {
 #[test]
 fn native_a_window_of_an_app_in_the_active_stage_joins_it() {
     let mut e = Env::new();
@@ -2536,6 +2599,7 @@ fn native_with_one_at_a_time_gives_a_parked_apps_new_window_its_own_stage() {
     e.add(meta(4, 10, "com.example.a"), RuleAction::Native);
     assert_eq!(e.number_of(4), 3);
 }
+}
 
 // ----- [stages] new_apps_join_current ---------------------------------------------------------
 
@@ -2552,6 +2616,7 @@ impl Env {
     }
 }
 
+both_engines! {
 #[test]
 fn new_apps_join_current_off_is_apples_rule() {
     let mut e = Env::new();
@@ -2720,6 +2785,7 @@ fn a_dropped_card_lands_its_front_window_at_the_drop_point() {
     let f = e.d.frames[&w(4)];
     assert!(VISIBLE.contains_rect(&f), "{f:?} on screen");
 }
+}
 
 /// A card of three windows (5 and 2 of app 11, 3 of app 12) beside the active stage (1) and a
 /// fourth stage (4): the stage numbers are 1, 2 (the combined card) and 3 (window 4's).
@@ -2744,6 +2810,7 @@ fn combined_card() -> (Env, StageId) {
     (e, card)
 }
 
+both_engines! {
 #[test]
 fn one_window_dragged_out_of_a_combined_card_joins_the_current_stage_alone() {
     let (mut e, card) = combined_card();
@@ -2802,12 +2869,14 @@ fn a_window_drag_out_of_the_current_stage_or_of_no_window_does_nothing() {
     assert!(e.m.move_window_into_active_at(card, w(1), Point::new(500.0, 300.0), &obs).is_empty());
     assert!(e.m.move_window_into_active_at(card, w(99), Point::new(500.0, 300.0), &obs).is_empty());
 }
+}
 
 /// Each stage's windows by stage id, for "the others stay in their stage".
 fn stage_windows(e: &Env) -> Vec<(StageId, Vec<u32>)> {
     e.m.stages().iter().map(|s| (s.id, s.windows.iter().map(|x| x.0).collect())).collect()
 }
 
+both_engines! {
 #[test]
 fn one_window_dropped_in_a_gap_of_the_strip_gets_a_stage_of_its_own_there() {
     let (mut e, card) = combined_card();
@@ -2991,6 +3060,7 @@ fn a_window_dropped_on_the_strip_gets_its_own_stage_and_keeps_its_pre_drag_frame
     e.switch(2);
     assert_eq!(e.d.frames[&w(2)], pre, "comes back where it was before the drag");
 }
+}
 
 /// Four apps, four stages; stage 1 active, stages 2, 3, 4 in the strip.
 fn four_stages() -> Env {
@@ -3006,6 +3076,7 @@ fn stage_id(e: &Env, n: usize) -> StageId {
     e.m.stages()[n - 1].id
 }
 
+both_engines! {
 #[test]
 fn a_window_dropped_between_two_cards_takes_that_slot() {
     let mut e = four_stages();
@@ -3079,6 +3150,7 @@ fn in_place_a_dragged_card_moves_in_creation_order() {
     assert_eq!(e.number_of(4), 2, "the moved stage is now number 2");
     assert_eq!(e.number_of(2), 3);
 }
+}
 
 // ----- keeping windows clear of the strip ------------------------------------------------
 
@@ -3101,6 +3173,7 @@ mod fitting {
         e.d.frames[&w(id)]
     }
 
+    both_engines! {
     #[test]
     fn a_new_window_over_the_strip_moves_right_without_resizing() {
         let mut e = env(true);
@@ -3226,10 +3299,12 @@ mod fitting {
         e.add(at(1, Rect::new(10.0, 60.0, 1400.0, 700.0)), RuleAction::Native);
         assert_eq!(live(&e, 1).x, 10.0);
     }
+    }
 }
 
 // ----- parity: the card's app icon, Cmd-M, One at a Time ----------------------------------
 
+both_engines! {
 #[test]
 fn an_icon_click_switches_and_brings_every_window_of_the_app() {
     let mut e = Env::new();
@@ -3459,4 +3534,5 @@ fn a_switch_with_no_frame_read_keeps_the_windows_own_frame() {
     b.d.frames.insert(w(1), pushed);
     b.switch(2);
     assert_eq!(b.m.window(w(1)).map(|x| x.restore), Some(pushed));
+}
 }
