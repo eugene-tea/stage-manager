@@ -686,7 +686,7 @@ impl WmState {
                 Task::UnparkAll => {
                     let failed = self.controller.unpark_all(&self.observer);
                     if failed > 0 || safety::registry_len() > 0 {
-                        safety::emergency_unpark("stand-down");
+                        super::window_engine::current().bring_all_back("stand-down");
                     }
                     // The window server's word, as at quit (the review of 6X): every allowed
                     // app's window still in a park zone comes back now, known to this run or

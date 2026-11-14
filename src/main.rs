@@ -136,7 +136,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::{fullscreen, leftovers, logout_watch};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, window_engine, windows};
     use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -435,7 +435,7 @@ mod app {
     /// registry's quick retries share one budget ([`leftovers::REGISTRY_RETRY_BUDGET`], then
     /// one try a window), the leftovers check at most [`leftovers::LEFTOVERS_MAX`].
     fn registry_then_leftovers(reason: &str) -> bool {
-        let registry = safety::emergency_unpark(reason);
+        let registry = window_engine::current().bring_all_back(reason);
         let leftovers = safety::leftovers_back(reason, Default::default());
         // Windows taken from an old guardian (round 8N) not seen to yet: the guardian waits;
         // when they are all that is left, passed on with a warning (no error).

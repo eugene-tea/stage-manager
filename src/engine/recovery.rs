@@ -336,6 +336,11 @@ pub struct Registered {
 /// windows).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParkedFile {
+    /// The window engine the app ran ([`EngineKind`]): how the guardian brings its windows
+    /// back. Left out for the Corner engine, so its files read as they always did and a file
+    /// of an earlier version is the Corner engine's.
+    #[serde(default, skip_serializing_if = "EngineKind::is_corner")]
+    pub engine: EngineKind,
     /// The main display's visible frame when written.
     pub visible: Option<Rect>,
     /// The registered windows.
@@ -356,6 +361,29 @@ pub struct ParkedFile {
     pub logout: bool,
 }
 
+/// Which window engine hides a stage's windows (docs/ARCHITECTURE.md, "Window engines").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineKind {
+    /// The Accessibility park corner.
+    #[default]
+    Corner,
+}
+
+impl EngineKind {
+    /// Its name in logs and files.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Corner => "corner",
+        }
+    }
+
+    /// True for the Corner engine (the parked file leaves it out).
+    pub fn is_corner(&self) -> bool {
+        *self == Self::Corner
+    }
+}
+
 impl ParkedFile {
     /// Reads the file's JSON; also the older form, a bare list of windows.
     pub fn from_json(bytes: &[u8]) -> Result<Self, serde_json::Error> {
@@ -367,7 +395,7 @@ impl ParkedFile {
         }
         Ok(match serde_json::from_slice(bytes)? {
             Any::File(f) => f,
-            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new(), logout: false },
+            Any::List(windows) => Self { windows, ..Self::default() },
         })
     }
 }
@@ -686,6 +714,7 @@ mod tests {
     #[test]
     fn the_parked_file_round_trips_and_reads_the_older_list() {
         let f = ParkedFile {
+            engine: EngineKind::Corner,
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
             windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false, ordered_out: false }],
             corners: vec![Corner::BottomLeft],
@@ -695,6 +724,7 @@ mod tests {
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
         assert!(!String::from_utf8_lossy(&json).contains("logout"), "written only at an unclean quit for a logout");
+        assert!(!String::from_utf8_lossy(&json).contains("engine"), "the Corner engine's file reads as before the engines");
         // An unclean quit at a logout says so (round logout-cancel).
         let at_logout = ParkedFile { logout: true, windows: vec![], ..f.clone() };
         let json = serde_json::to_vec(&at_logout).unwrap_or_default();

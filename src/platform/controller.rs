@@ -5,7 +5,7 @@
 //!   shows, z-order from `CGWindowListCopyWindowInfo`, the focused window from the frontmost
 //!   app's `AXFocusedWindow`.
 //! - **Actions**: `SetFrame` = size, position, size; `Hide` = position into the park zone
-//!   (the Corner engine's park frame, [`corner::park_frame`]);
+//!   (the window engine's hide, [`WindowEngine::hide`]: the Corner engine's park frame);
 //!   `Raise` = `AXRaise`; `Focus` = raise, `AXMain`, then the app's `AXFrontmost`.
 //! - **Echoes**: focus and activation events for windows and apps we just touched are our
 //!   own actions coming back late; they are dropped for [`ECHO_WINDOW`] so a stale focus
@@ -104,10 +104,10 @@ use super::minimize_tap::MinimizeAsk;
 use super::native_settings::RawSettings;
 use super::observe::{Observer, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
+use super::window_engine::{self, ShowHow, WindowEngine};
 use super::{capture_pace, desktop, desktop_shot, enhanced_ui, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply};
-use crate::engine::corner;
 use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_click;
@@ -1282,6 +1282,8 @@ pub struct Controller {
     dock_order: dock_order::DockOrderWatch,
     /// A minimized window on its way to the strip, while its batch runs: its transition's
     /// picture starts at its Dock tile ([`Self::on_minimized`]).
+    /// How windows are hidden, shown and brought back ([`window_engine::current`]).
+    engine: Arc<dyn WindowEngine>,
     minimizing: Option<Minimized>,
     /// A window minimized in the Dock on its way to the strip, and where its hide puts it
     /// this once in place of its park frame ([`minimize::dive_frame`]; [`Self::on_minimized`]).
@@ -1499,6 +1501,7 @@ impl Controller {
             dock_pid: None,
             dock_bar: None,
             dock_order: dock_order::DockOrderWatch::default(),
+            engine: window_engine::current(),
             minimizing: None,
             dive: None,
             unminimizing: HashMap::new(),
@@ -2303,13 +2306,13 @@ impl Controller {
         }
     }
 
-    /// Where a hide of window `id` puts it now: its park frame as the model knows the window
-    /// ([`corner::park_frame`]), or this once a minimized window's dive frame
-    /// ([`Self::dive`]). `None` for a window the model does not manage.
+    /// Where a hide of window `id` leaves it now: where the window engine hides it as the
+    /// model knows the window ([`WindowEngine::hidden_at`]), or this once a minimized
+    /// window's dive frame ([`Self::dive`]). `None` for a window the model does not manage.
     fn hide_frame(&self, id: u32) -> Option<Rect> {
         match self.dive {
             Some((w, frame)) if w == id => Some(frame),
-            _ => self.model.as_ref().and_then(|m| corner::park_frame(m, WindowId(id))),
+            _ => self.model.as_ref().and_then(|m| self.engine.hidden_at(m, WindowId(id))),
         }
     }
 
@@ -2322,7 +2325,10 @@ impl Controller {
     }
 
     fn execute_batch(&mut self, ob: &Observer, actions: Vec<Action>, batch: Batch) -> usize {
-        let (interruptible, retrying) = (batch.interruptible(), batch.retries());
+        let interruptible = batch.interruptible();
+        // An unpark (quit, stand-down) tries a busy app again quickly (6X).
+        let show_how = if batch.retries() { ShowHow::Retrying } else { ShowHow::Once };
+        let engine = self.engine.clone();
         if actions.is_empty() {
             return 0;
         }
@@ -2373,11 +2379,8 @@ impl Controller {
                     .then(|| safety::registry_entry(id))
                     .flatten();
                 let result = match (action, &kept, park) {
-                    (Action::SetFrame { frame, .. }, Some(e), _) if retrying => {
-                        Some(safety::set_frame_retrying(&e.element, id, frame, leftovers::RESTORE_RETRY.budget))
-                    }
-                    (Action::SetFrame { frame, .. }, Some(e), _) => Some(e.element.set_frame(frame)),
-                    (Action::Hide { .. }, Some(e), Some(frame)) => Some(e.element.set_position(frame.origin())),
+                    (Action::SetFrame { frame, .. }, Some(e), _) => Some(engine.show(WindowId(id), frame, &e.element, show_how)),
+                    (Action::Hide { .. }, Some(e), Some(at)) => Some(engine.hide(WindowId(id), at, &e.element)),
                     _ => None,
                 };
                 match result {
@@ -2411,11 +2414,9 @@ impl Controller {
             // A dead handle is looked up afresh and the move tried once more (stale-handles).
             let element = ob.element(id).unwrap_or_else(|| w.element.clone());
             let result = self.write_window(ob, id, pid, &element, |e| match action {
-                // An unpark (quit, stand-down) tries a busy app again quickly (6X).
-                Action::SetFrame { frame, .. } if retrying => safety::set_frame_retrying(e, id, frame, leftovers::RESTORE_RETRY.budget),
-                Action::SetFrame { frame, .. } => e.set_frame(frame),
+                Action::SetFrame { frame, .. } => engine.show(WindowId(id), frame, e, show_how),
                 Action::Hide { .. } => match park {
-                    Some(frame) => e.set_position(frame.origin()),
+                    Some(at) => engine.hide(WindowId(id), at, e),
                     None => Ok(()),
                 },
                 Action::Raise { .. } => e.raise(),
@@ -2606,7 +2607,7 @@ impl Controller {
             }
             let seen = match listed {
                 None => Seen::NotListed,
-                Some(w) if zone_of(id).is_some_and(|d| d.parks(w.bounds)) => Seen::InZone,
+                Some(w) if zone_of(id).is_some_and(|d| self.engine.is_hidden(&d, w.bounds)) => Seen::InZone,
                 Some(_) => Seen::OutOfZone,
             };
             if seen != Seen::OutOfZone {
@@ -4185,7 +4186,7 @@ impl Controller {
         let mut dive = None;
         if let (Some(screen), Some(edge)) = (screen, edge)
             && actions.contains(&Action::Hide { id: WindowId(id) })
-            && let Some(park) = corner::park_frame(m, WindowId(id))
+            && let Some(park) = self.engine.hidden_at(m, WindowId(id))
         {
             dive = minimize::dive_frame(park, edge, screen, &desktop::cg_display_bounds());
         }

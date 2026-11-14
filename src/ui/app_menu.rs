@@ -208,7 +208,7 @@ fn retry_quit(attempt: u32) {
             return;
         }
         tracing::error!("the quit never ran; unparking from the registry and letting the system quit");
-        crate::platform::safety::emergency_unpark("terminate");
+        crate::platform::window_engine::current().bring_all_back("terminate");
         if let Some(mtm) = MainThreadMarker::new() {
             NSApplication::sharedApplication(mtm).replyToApplicationShouldTerminate(true);
         }

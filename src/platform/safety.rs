@@ -62,7 +62,7 @@ use std::time::{Duration, Instant};
 use objc2_app_kit::NSRunningApplication;
 
 use super::ax::{AxElement, AxError, AxResult, names};
-use super::{desktop, enhanced_ui, hidden_tabs, logging, observe, paths, windows};
+use super::{desktop, enhanced_ui, hidden_tabs, logging, observe, paths, window_engine, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, Remembered, UNPARK_POLL, UNPARK_SETTLE};
@@ -424,7 +424,7 @@ fn write_parked_file(listed: &[Registered]) {
     let logout = LOGOUT_QUIT.load(Ordering::SeqCst);
     let empty = listed.is_empty() && !logout;
     let file =
-        ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout };
+        ParkedFile { engine: window_engine::current().kind(), visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout };
     let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
