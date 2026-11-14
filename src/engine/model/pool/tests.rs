@@ -99,7 +99,7 @@ fn add(m: &mut Model, x: WindowMeta) -> Vec<Action> {
 }
 
 fn parks(actions: &[Action], id: u32) -> bool {
-    actions.iter().any(|a| matches!(a, Action::Park { id: x, .. } if x.0 == id))
+    actions.iter().any(|a| matches!(a, Action::Hide { id: x } if x.0 == id))
 }
 
 fn kin(m: &Model, id: u32) -> Option<Kin> {

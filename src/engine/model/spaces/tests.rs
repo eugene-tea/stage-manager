@@ -62,7 +62,7 @@ impl Mac {
     fn run(&mut self, actions: Vec<Action>) -> Vec<Action> {
         for a in &actions {
             let id = match *a {
-                Action::SetFrame { id, .. } | Action::Park { id, .. } | Action::Raise { id } | Action::Focus { id } => id,
+                Action::SetFrame { id, .. } | Action::Hide { id } | Action::Raise { id } | Action::Focus { id } => id,
                 Action::StateChanged => continue,
             };
             if !self.on_screen(id.0) {
@@ -71,9 +71,16 @@ impl Mac {
                     continue;
                 }
             }
+            let asked = match *a {
+                Action::SetFrame { id, frame } => Some((id, frame)),
+                Action::Hide { id } => park_frame(&self.m, id).map(|frame| (id, frame)),
+                _ => None,
+            };
             match *a {
-                Action::SetFrame { id, frame } | Action::Park { id, frame } => {
-                    if let Some(w) = self.wins.get_mut(&id.0) {
+                Action::SetFrame { .. } | Action::Hide { .. } => {
+                    if let Some((id, frame)) = asked
+                        && let Some(w) = self.wins.get_mut(&id.0)
+                    {
                         w.1 = macos_places(frame);
                     }
                 }
@@ -551,7 +558,7 @@ fn a_parked_window_found_outside_the_park_zone_on_arrival_is_parked_again() {
     mac.go(1);
     mac.wins.get_mut(&2).expect("window").1 = Rect::new(700.0, 300.0, 600.0, 400.0);
     let a = mac.go(0);
-    assert!(a.iter().any(|x| matches!(x, Action::Park { id, .. } if *id == w(2))), "{a:?}");
+    assert!(a.iter().any(|x| matches!(x, Action::Hide { id } if *id == w(2))), "{a:?}");
     assert!(mac.parked(2));
     assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
 }
@@ -1189,7 +1196,7 @@ mod arranged_ahead {
     }
 
     fn moves(actions: &[Action]) -> Vec<Action> {
-        actions.iter().copied().filter(|a| matches!(a, Action::SetFrame { .. } | Action::Park { .. })).collect()
+        actions.iter().copied().filter(|a| matches!(a, Action::SetFrame { .. } | Action::Hide { .. })).collect()
     }
 
     fn raises_or_focus(actions: &[Action]) -> bool {
@@ -1249,7 +1256,7 @@ mod arranged_ahead {
             .elsewhere
             .iter()
             .filter_map(|a| match *a {
-                Action::SetFrame { id, .. } | Action::Park { id, .. } => Some(id),
+                Action::SetFrame { id, .. } | Action::Hide { id } => Some(id),
                 _ => None,
             })
             .collect();
@@ -1344,7 +1351,7 @@ mod arranged_ahead {
 
     fn id_of(a: &Action) -> u32 {
         match *a {
-            Action::SetFrame { id, .. } | Action::Park { id, .. } | Action::Raise { id } | Action::Focus { id } => id.0,
+            Action::SetFrame { id, .. } | Action::Hide { id } | Action::Raise { id } | Action::Focus { id } => id.0,
             Action::StateChanged => 0,
         }
     }

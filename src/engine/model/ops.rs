@@ -1867,7 +1867,7 @@ impl Model {
         let parked_again: Vec<WindowId> = actions
             .iter()
             .filter_map(|a| match a {
-                Action::Park { id, .. } => Some(*id),
+                Action::Hide { id } => Some(*id),
                 _ => None,
             })
             .collect();

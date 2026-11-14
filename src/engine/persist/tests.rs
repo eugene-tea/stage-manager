@@ -385,7 +385,7 @@ fn save_rematch_and_apply_rebuilds_the_same_stages() {
         assert!(
             actions
                 .iter()
-                .any(|x| matches!(x, Action::Park { id: i, .. } if i.0 == id)),
+                .any(|x| matches!(x, Action::Hide { id: i } if i.0 == id)),
             "park {id}"
         );
     }
@@ -558,11 +558,11 @@ fn first_start_gives_every_app_its_own_stage_frontmost_active_recent_first() {
     assert_eq!(cards, [vec![2, 1], vec![4]], "most recently used first");
     for id in [1, 2, 4] {
         assert!(
-            acts.iter().any(|x| matches!(x, Action::Park { id: i, .. } if i.0 == id)),
+            acts.iter().any(|x| matches!(x, Action::Hide { id: i } if i.0 == id)),
             "park {id}"
         );
     }
-    assert!(!acts.iter().any(|x| matches!(x, Action::Park { id: i, .. } if i.0 == 3)));
+    assert!(!acts.iter().any(|x| matches!(x, Action::Hide { id: i } if i.0 == 3)));
 }
 
 #[test]

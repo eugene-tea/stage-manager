@@ -52,7 +52,7 @@ impl Env {
         self.d.open(&mt);
         let obs = self.d.obs();
         let a = self.m.add_window(mt, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &obs);
-        self.d.apply(&a);
+        self.d.apply(&self.m, &a);
     }
 
     fn obs(&self) -> Observation {
@@ -70,7 +70,7 @@ impl Env {
     fn switch(&mut self, stage: StageId) {
         let obs = self.obs();
         let a = self.m.switch_to(stage, &obs);
-        self.d.apply(&a);
+        self.d.apply(&self.m, &a);
     }
 
     /// The strip as the first window of each card's stage (the gap and the active card
@@ -138,7 +138,7 @@ fn a_stage_of_several_apps_sits_at_its_leftmost_app() {
     e.switch(a_stage);
     let obs = e.obs();
     let a = e.m.merge_stages(c, b, &obs);
-    e.d.apply(&a);
+    e.d.apply(&e.m, &a);
     e.m.set_dock_order(dock(&[103, 101, 102, 105]));
     assert_eq!(e.ids(), [3, 1], "the stage of 102 and 103 at 103's place");
 }
@@ -248,7 +248,7 @@ fn a_card_drag_is_refused_and_switches_nothing() {
     // A drop onto a card still merges.
     let obs = e.obs();
     let a = e.m.merge_stages(one, three, &obs);
-    e.d.apply(&a);
+    e.d.apply(&e.m, &a);
     assert_eq!(e.m.stage_of(w(1)), Some(three));
 }
 
@@ -264,7 +264,7 @@ fn a_window_dropped_on_the_strip_takes_its_dock_place_not_the_drop_position() {
         let obs = e.obs();
         let frame = obs.frames[&w(4)];
         let a = e.m.drop_window_on_strip(w(4), frame, Some(top), &obs);
-        e.d.apply(&a);
+        e.d.apply(&e.m, &a);
         let dropped = e.s(4);
         assert_ne!(dropped, e.s(3), "{mode:?}: a stage of its own");
         assert_eq!(e.ids(), e.want(&[1, 2, 4, 3], mode), "{mode:?}: at 104's Dock place");
@@ -277,7 +277,7 @@ fn a_window_dropped_on_the_strip_takes_its_dock_place_not_the_drop_position() {
     let obs = e.obs();
     let frame = obs.frames[&w(9)];
     let a = e.m.drop_window_on_strip(w(9), frame, None, &obs);
-    e.d.apply(&a);
+    e.d.apply(&e.m, &a);
     let dropped = e.s(9);
     assert!(e.m.strip().iter().any(|c| c.stage == dropped), "the dropped window's stage shows: {:?}", e.m.strip());
 }

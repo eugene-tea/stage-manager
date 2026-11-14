@@ -65,7 +65,7 @@ fn the_lid_opened_after_a_switch_on_the_5k_gives_the_laptop_its_front_and_cards_
     assert!(!studio().parks(chrome_frame));
     assert_eq!(e.m.returned_display(chrome_frame, STUDIO, &[]), None, "outside a settle after an add: the old rule");
     let a = put_back(&mut e, 5, chrome_frame, &z);
-    assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } | Action::Park { id, .. } if *id == WindowId(5))), "Chrome stays where macOS put it: {a:?}");
+    assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } | Action::Hide { id } if *id == WindowId(5))), "Chrome stays where macOS put it: {a:?}");
     assert_eq!(e.m.active_stage(LAPTOP), Some(chrome), "Chrome in front on the laptop");
     assert_eq!(e.m.window(WindowId(5)).map(|w| (w.parked, w.restore)), Some((false, chrome_frame)));
     assert_eq!(e.m.active_stage(STUDIO), Some(notes), "the 5K's front untouched so far");

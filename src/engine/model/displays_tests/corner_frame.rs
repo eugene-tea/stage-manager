@@ -59,7 +59,7 @@ fn assert_a_card(m: &Model, a: &[Action], display: &Display) {
     assert!(w.parked && w.meta.display == display.id, "a card of its screen: {w:?}");
     assert!(display.visible.contains_rect(&w.restore) && !display.parks(w.restore), "comes back on screen: {:?}", w.restore);
     assert_eq!((w.restore.w, w.restore.h), SIZE, "never resized");
-    assert!(a.iter().any(|x| matches!(x, Action::Park { id, frame } if *id == WindowId(5) && display.parks(*frame))), "parked at the corner: {a:?}");
+    assert!(a.iter().any(|x| matches!(x, Action::Hide { id } if *id == WindowId(5) && park_frame(m, *id).is_some_and(|f| display.parks(f)))), "parked at the corner: {a:?}");
     let (front, card) = (m.stage_of(WindowId(5)).expect("staged"), m.stage_of(WindowId(7)).expect("staged"));
     let active = m.active_stage(display.id).expect("a front");
     assert_ne!(active, front, "not the front");
@@ -103,7 +103,7 @@ fn a_window_hung_off_the_laptops_left_edge_in_the_upper_half_is_shown_where_it_i
         let front = m.stage_of(WindowId(5)).expect("staged");
         assert_eq!(m.active_stage(LAPTOP), Some(front), "still the front");
         assert_eq!(m.window(WindowId(5)).map(|w| (w.parked, w.restore)), Some((false, at)));
-        assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } | Action::Park { id, .. } if *id == WindowId(5))), "not moved: {a:?}");
+        assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } | Action::Hide { id } if *id == WindowId(5))), "not moved: {a:?}");
     }
 }
 

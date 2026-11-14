@@ -37,7 +37,7 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   A window reaches the engine only once it shows on a display. A once-a-second check
   catches Space moves and missed notices. No SkyLight/CGS calls.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`), unit tested: observations
-  in, `Action`s out (`Park`, `SetFrame`, `Raise`, `Focus`).
+  in, `Action`s out (`Hide`, `SetFrame`, `Raise`, `Focus`).
 - **Platform layer** (`src/platform`): AX, CGWindowList, ScreenCaptureKit, Carbon hotkeys,
   NSWorkspace events, safety. Public APIs only, plus `_AXUIElementGetWindow`.
 - **UI** (`src/ui`): status item and menu, Settings, a strip panel per screen (CALayer

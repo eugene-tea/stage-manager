@@ -155,7 +155,7 @@ fn a_desktop_arranged_ahead_on_another_screen_is_settled_by_that_screens_arrival
     assert_ne!(e.space_of(STUDIO), ahead.space);
     let mut settled_early = e.m.clone();
     let undone = settled_early.undo_ahead(&ahead);
-    assert!(undone.iter().any(|a| matches!(a, Action::Park { id, .. } if *id == WindowId(9))), "settled at the Studio's arrival, mail was parked again: {undone:?}");
+    assert!(undone.iter().any(|a| matches!(a, Action::Hide { id } if *id == WindowId(9))), "settled at the Studio's arrival, mail was parked again: {undone:?}");
     let listed = second_listed(&e);
     let a = e.m.arrive(LAPTOP, &listed, &[WindowId(5)], &LaunchHints::default());
     e.run(a);

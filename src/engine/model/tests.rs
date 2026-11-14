@@ -31,7 +31,7 @@ impl Env {
     }
 
     fn run(&mut self, actions: Vec<Action>) -> Vec<Action> {
-        self.d.apply(&actions);
+        self.d.apply(&self.m, &actions);
         actions
     }
 
@@ -440,7 +440,7 @@ fn a_window_gone_off_screen_is_let_go_where_it_is() {
     let moved: Vec<u32> = a
         .iter()
         .filter_map(|a| match a {
-            Action::SetFrame { id, .. } | Action::Park { id, .. } => Some(id.0),
+            Action::SetFrame { id, .. } | Action::Hide { id } => Some(id.0),
             _ => None,
         })
         .collect();
@@ -531,7 +531,7 @@ fn switch_parks_restores_raises_and_focuses_in_order() {
     let a = e.switch(1);
     let last_park = a
         .iter()
-        .rposition(|x| matches!(x, Action::Park { .. }))
+        .rposition(|x| matches!(x, Action::Hide { .. }))
         .expect("parks");
     let first_set = first_index(&a, |x| matches!(x, Action::SetFrame { .. })).expect("sets");
     let first_raise = first_index(&a, |x| matches!(x, Action::Raise { .. })).expect("raises");
@@ -659,7 +659,7 @@ fn pinned_windows_are_untouched_by_switches() {
     e.add(meta(2, 11, "com.example.b"), RuleAction::Current);
     let a = e.add(meta(3, 12, "com.example.c"), RuleAction::New);
     assert!(!a.iter().any(
-        |x| matches!(x, Action::Park { id, .. } | Action::SetFrame { id, .. } if *id == w(1))
+        |x| matches!(x, Action::Hide { id } | Action::SetFrame { id, .. } if *id == w(1))
     ));
     assert!(!e.d.parked(w(1)));
     assert!(e.m.pinned().contains(&w(1)));
@@ -1333,11 +1333,13 @@ fn a_removed_displays_front_stage_comes_to_main_in_front() {
 const BIG: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
 const BIG_VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1334.0);
 
-fn parks_in(actions: &[Action]) -> Vec<(WindowId, Rect)> {
+/// The windows `actions` hide, each with the frame the Corner engine parks it at
+/// ([`park_frame`], as model `m` knows the window after the operation).
+fn parks_in(m: &Model, actions: &[Action]) -> Vec<(WindowId, Rect)> {
     actions
         .iter()
         .filter_map(|a| match *a {
-            Action::Park { id, frame } => Some((id, frame)),
+            Action::Hide { id } => Some((id, park_frame(m, id).expect("a hidden window is managed"))),
             _ => None,
         })
         .collect()
@@ -1361,7 +1363,7 @@ fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
     let active = e.m.main_active_stage();
     let big = Display { id: MAIN, key: ScreenKey::NONE, frame: BIG, visible: BIG_VISIBLE, corner: Default::default() };
     let a = e.m.set_displays(vec![big]);
-    let mut parks = parks_in(&a);
+    let mut parks = parks_in(&e.m, &a);
     parks.sort_by_key(|p| p.0);
     assert_eq!(parks.iter().map(|p| p.0).collect::<Vec<_>>(), [w(1), w(3)], "{a:?}");
     for (id, f) in parks {
@@ -1373,10 +1375,10 @@ fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
     // A Dock moved (only the visible frame changes): parked again too, nothing else.
     let docked = Display { visible: Rect::new(0.0, 30.0, 2480.0, 1410.0), ..big };
     let a = e.m.set_displays(vec![docked]);
-    assert_eq!(parks_in(&a).len(), 2);
+    assert_eq!(parks_in(&e.m, &a).len(), 2);
     // Nothing changed: nothing to do.
     let a = e.m.set_displays(vec![docked]);
-    assert!(parks_in(&a).is_empty());
+    assert!(parks_in(&e.m, &a).is_empty());
 }
 
 #[test]
@@ -1389,7 +1391,7 @@ fn a_new_park_corner_parks_the_parked_windows_again_there_and_nothing_else() {
     let a = e.m.set_displays(vec![left]);
     e.d.display = Some(left);
     e.run(a.clone());
-    let mut parks = parks_in(&a);
+    let mut parks = parks_in(&e.m, &a);
     parks.sort_by_key(|p| p.0);
     assert_eq!(parks.iter().map(|p| p.0).collect::<Vec<_>>(), [w(1), w(3)], "{a:?}");
     for (id, f) in parks {
@@ -1422,14 +1424,14 @@ fn the_main_display_under_a_new_id_keeps_the_desk_and_the_active_stage_shown() {
     assert!(e.m.stages().iter().all(|s| s.display == DisplayId(7)));
     assert!(e.m.windows().all(|x| x.meta.display == DisplayId(7)));
     assert!(!e.m.window(w(2)).expect("w2").parked, "the active stage's window stays shown");
-    let parks = parks_in(&a);
+    let parks = parks_in(&e.m, &a);
     assert_eq!(parks.len(), 2, "{a:?}");
     assert!(parks.iter().all(|(id, f)| *id != w(2) && ext.parks(*f)));
     // Undocking: back to the built-in display under its own id.
     let a = e.m.set_displays(vec![display()]);
     assert_eq!(e.m.main_active_stage(), active);
     assert_eq!(e.m.current_space(MAIN), space);
-    assert!(parks_in(&a).iter().all(|(_, f)| display().parks(*f)));
+    assert!(parks_in(&e.m, &a).iter().all(|(_, f)| display().parks(*f)));
     e.run(a);
     let a = e.m.unpark_all();
     e.run(a);

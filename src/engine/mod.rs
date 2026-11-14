@@ -5,6 +5,7 @@
 
 pub mod ax_blind;
 pub mod busy_apps;
+pub mod corner;
 pub mod corner_patch;
 pub mod desktop_click;
 pub mod desktop_echo;

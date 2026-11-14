@@ -52,7 +52,8 @@ use serde::{Deserialize, Serialize};
 
 use super::displays::ScreenKey;
 use super::geometry::Rect;
-use super::park::{Corner, ParkRequest, clamp_to_visible, is_corner_piece_in, is_parked_in_at, onto_visible, park_frame_asked, reach_in};
+use super::corner::park_frame_of;
+use super::park::{Corner, ParkRequest, clamp_to_visible, is_corner_piece_in, is_parked_in_at, onto_visible, reach_in};
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
@@ -259,12 +260,12 @@ pub enum Action {
         /// The target frame.
         frame: Rect,
     },
-    /// Move a window into its display's park zone (macOS clamps it; that is expected).
-    Park {
+    /// Hide a window of a stage not shown. How is the window engine's: the Corner engine
+    /// moves it into its display's park zone ([`crate::engine::corner::park_frame`]; macOS
+    /// clamps it, that is expected). The model only counts it parked.
+    Hide {
         /// The window.
         id: WindowId,
-        /// The park frame.
-        frame: Rect,
     },
     /// Raise a window (`kAXRaiseAction`).
     Raise {
@@ -1012,17 +1013,18 @@ impl Model {
         if w.home == Home::Pinned {
             return;
         }
-        let frame = self.park_frame_for(w);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = true;
         }
-        actions.push(Action::Park { id, frame });
+        actions.push(Action::Hide { id });
     }
 
-    /// The frame that parks window `w`: its restore size in its display's park corner.
+    /// The frame that parks window `w` under the Corner engine
+    /// ([`crate::engine::corner::park_frame_of`]): what tells a park of ours from the user's
+    /// own frame in the park zone ([`Model::lands_parked`]) and where a parked window was
+    /// left ([`Model::frame_left`]).
     fn park_frame_for(&self, w: &WindowState) -> Rect {
-        let d = self.display(w.meta.display);
-        park_frame_asked(w.restore.size(), d.frame, d.corner, self.options.park)
+        park_frame_of(w.restore, self.display(w.meta.display), self.options.park)
     }
 
     /// True when `frame` (in the park zone) is where a park of window `w` lands: its side at

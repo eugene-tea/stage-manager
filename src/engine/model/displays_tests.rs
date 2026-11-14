@@ -4,6 +4,7 @@
 //! keyed by the screens' identities. Made-up titles only.
 
 use super::*;
+use crate::engine::corner::park_frame;
 use crate::engine::displays::ScreenKey;
 use crate::engine::geometry::Point;
 use crate::engine::park::{Corner, choose_corner, park_frame_at};
@@ -54,7 +55,7 @@ impl Env {
     }
 
     fn run(&mut self, actions: Vec<Action>) -> Vec<Action> {
-        apply_plain(&mut self.d, &actions);
+        apply_plain(&mut self.d, &self.m, &actions);
         actions
     }
 
@@ -101,18 +102,23 @@ impl Env {
         }
         let z = self.d.z.clone();
         let (a, forgotten) = self.m.windows_moved_to_display(&list, &z);
-        apply_plain(&mut self.d, &a);
+        apply_plain(&mut self.d, &self.m, &a);
         (a, forgotten)
     }
 }
 
 /// Executes actions on the desk with every frame taken as asked: the desk's own `apply`
 /// clamps against the one test display, and here windows park at two screens' corners.
-fn apply_plain(d: &mut Desk, actions: &[Action]) {
+fn apply_plain(d: &mut Desk, m: &Model, actions: &[Action]) {
     for a in actions {
         match *a {
-            Action::SetFrame { id, frame } | Action::Park { id, frame } => {
+            Action::SetFrame { id, frame } => {
                 if let Some(f) = d.frames.get_mut(&id) {
+                    *f = frame;
+                }
+            }
+            Action::Hide { id } => {
+                if let (Some(f), Some(frame)) = (d.frames.get_mut(&id), park_frame(m, id)) {
                     *f = frame;
                 }
             }
@@ -648,7 +654,7 @@ fn main_only_keeps_the_main_screen_alone_and_lets_a_moved_window_go() {
     let (a, forgotten) = e.moved(&[(2, &laptop(), (100.0, 100.0))]);
     assert_eq!(forgotten, vec![WindowId(2)]);
     assert!(e.m.window(WindowId(2)).is_none());
-    assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { .. } | Action::Park { .. })), "nothing moved: {a:?}");
+    assert!(!a.iter().any(|x| matches!(x, Action::SetFrame { .. } | Action::Hide { .. })), "nothing moved: {a:?}");
     assert!(e.m.stages().iter().all(|s| s.display == STUDIO));
     // Exactly today's behaviour: its emptied stage stays the front, empty.
     assert_ne!(e.m.active_stage(STUDIO), Some(e.stage_of(1)));
@@ -1085,9 +1091,14 @@ fn the_lid_opened_gives_the_laptop_its_cards_back_from_the_other_desktop() {
     let (a, _) = e.m.windows_moved_to_display(&moves, &z);
     e.run(a.clone());
     for x in &a {
-        if let Action::Park { id, frame } | Action::SetFrame { id, frame } = x {
-            assert!(!studio_d.parks(*frame), "nothing parked again at the 5K's corner: {x:?} in {a:?}");
-            assert!(!cards.contains(&id.0) || back.parks(*frame), "a card stays at the laptop's corner: {x:?} in {a:?}");
+        let asked = match *x {
+            Action::Hide { id } => Some((id, park_frame(&e.m, id).expect("a hidden window is managed"))),
+            Action::SetFrame { id, frame } => Some((id, frame)),
+            _ => None,
+        };
+        if let Some((id, frame)) = asked {
+            assert!(!studio_d.parks(frame), "nothing parked again at the 5K's corner: {x:?} in {a:?}");
+            assert!(!cards.contains(&id.0) || back.parks(frame), "a card stays at the laptop's corner: {x:?} in {a:?}");
         }
     }
     let chrome_frame = on(&back, (100.0, 100.0));
@@ -1227,7 +1238,7 @@ fn a_restart_sends_a_window_its_app_reopened_on_the_5k_back_to_the_laptop() {
     assert_eq!(m.stage(finder).map(|s| s.space.0), Some(laptop_saved));
     assert_eq!(m.active_stage(LAPTOP), Some(finder), "in front, as saved");
     assert_eq!(m.window(WindowId(106)).map(|w| (w.meta.display, w.restore, w.parked)), Some((LAPTOP, saved_finder, false)));
-    assert!(second.iter().any(|a| matches!(a, Action::Park { id, frame } if *id == WindowId(105) && laptop().parks(*frame))), "Chrome a card at the laptop's corner");
+    assert!(second.iter().any(|a| matches!(a, Action::Hide { id } if *id == WindowId(105) && park_frame(&m, *id).is_some_and(|f| laptop().parks(f)))), "Chrome a card at the laptop's corner");
     assert!(!m.awaits_travellers(LAPTOP) && m.take_travellers().is_empty());
     // Not a stray: on its own Desktop, not named as one; the line says it.
     let line = m.restore_summary(0);

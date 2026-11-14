@@ -43,6 +43,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use super::{Controller, Unrestored, cards_in};
+use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
 use crate::engine::geometry::Rect;
@@ -444,7 +445,7 @@ fn moved_ids(actions: &[Action]) -> Vec<u32> {
     actions
         .iter()
         .filter_map(|a| match *a {
-            Action::Park { id, .. } | Action::SetFrame { id, .. } => Some(id.0),
+            Action::Hide { id } | Action::SetFrame { id, .. } => Some(id.0),
             _ => None,
         })
         .collect()
@@ -464,12 +465,18 @@ fn resend_due(e: &Expect, bounds: Option<Rect>, now: Instant) -> bool {
 }
 
 /// The moves among `actions` to check against the window server, with each window's frame
-/// before them (`before`) and its stage after them (`stage`).
-fn expects(actions: &[Action], before: impl Fn(u32) -> Option<Rect>, stage: impl Fn(u32) -> Option<StageId>) -> Vec<Expect> {
+/// before them (`before`) and its stage after them (`stage`). A hide is checked against the
+/// frame it parks its window at (`park`, [`crate::engine::corner::park_frame`]).
+fn expects(
+    actions: &[Action],
+    park: impl Fn(u32) -> Option<Rect>,
+    before: impl Fn(u32) -> Option<Rect>,
+    stage: impl Fn(u32) -> Option<StageId>,
+) -> Vec<Expect> {
     actions
         .iter()
         .filter_map(|a| match *a {
-            Action::Park { id, frame } => Some(Expect { stage: stage(id.0), ..Expect::new(id.0, frame, before(id.0), true) }),
+            Action::Hide { id } => Some(Expect { stage: stage(id.0), ..Expect::new(id.0, park(id.0)?, before(id.0), true) }),
             Action::SetFrame { id, frame } => Some(Expect { stage: stage(id.0), ..Expect::new(id.0, frame, before(id.0), false) }),
             _ => None,
         })
@@ -946,7 +953,7 @@ impl Controller {
             let listed = windows::describe(&moved_ids(&actions));
             let before_us = asked.elapsed().as_micros() as u64;
             let before = frames_before(&left, &listed);
-            (expects(&actions, |w| before.get(&w).copied(), |w| m.stage_of(WindowId(w))), Some(before_us))
+            (expects(&actions, |w| park_frame(m, WindowId(w)), |w| before.get(&w).copied(), |w| m.stage_of(WindowId(w))), Some(before_us))
         } else {
             (Vec::new(), None)
         };
@@ -1980,7 +1987,7 @@ mod tests {
         let stage = m.stage_of(WindowId(1)).expect("staged");
         let actions = m.switch_to(stage, &obs);
         assert_eq!(unlisted.get(&1), Some(&park), "not listed: the model's park frame");
-        let expected = expects(&actions, |w| before.get(&w).copied(), |_| None);
+        let expected = expects(&actions, |w| park_frame(&m, WindowId(w)), |w| before.get(&w).copied(), |_| None);
         let restore = *expected.iter().find(|e| e.id == 1 && !e.park).expect("window 1 brought back");
         assert_eq!(restore.before, Some(placed), "listed: the window server's bounds at send time");
         let judge_at = |e: &Expect, r: Rect, onscreen| judge(e, Some(&win(1, 10, 0, onscreen, r)), d.frame, |r| d.parks(r));
@@ -2081,13 +2088,13 @@ mod tests {
         let park = Rect::new(1785.0, 1155.0, 600.0, 400.0);
         let back = Rect::new(80.0, 78.0, 520.0, 392.0);
         let actions = [
-            Action::Park { id: WindowId(1), frame: park },
+            Action::Hide { id: WindowId(1) },
             Action::SetFrame { id: WindowId(2), frame: back },
             Action::Raise { id: WindowId(2) },
             Action::StateChanged,
         ];
         let before = |id: u32| (id == 1).then_some(back);
-        assert_eq!(expects(&actions, before, |_| None), vec![Expect::new(1, park, Some(back), true), Expect::new(2, back, None, false)], "moves only");
+        assert_eq!(expects(&actions, |id| (id == 1).then_some(park), before, |_| None), vec![Expect::new(1, park, Some(back), true), Expect::new(2, back, None, false)], "moves only");
         assert_eq!(moved_ids(&actions), vec![1, 2], "the windows asked of the window server before the moves (R13 3)");
     }
 
@@ -2159,7 +2166,7 @@ mod tests {
         m.arrive(MAIN, &d2, &[WindowId(1), WindowId(2)], &hints(&[3, 4], 10));
         assert!(m.waits_on_another_space(WindowId(1)));
         let (ahead, actions) = m.arrange_ahead(WindowId(1), None).expect("arranged");
-        let moves = expects(&actions, |_| None, |w| m.stage_of(WindowId(w)));
+        let moves = expects(&actions, |w| park_frame(&m, WindowId(w)), |_| None, |w| m.stage_of(WindowId(w)));
         let mark = m.ahead_mark(&ahead);
         assert_eq!(moves.iter().map(|e| (e.id, e.park)).collect::<Vec<_>>(), vec![(2, true), (1, false)]);
         (m, ahead, moves, mark)

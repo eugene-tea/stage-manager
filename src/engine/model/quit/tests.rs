@@ -165,7 +165,7 @@ fn the_kept_stages_come_back_after_the_restart_even_clamped_against_the_corner()
         assert_eq!(st.restore, frame, "window {id}: its saved frame");
         assert!(m.restored_grade(w(id)).is_some_and(|g| g.confident()), "window {id}: matched by title and app");
     }
-    assert!(a_chat.iter().any(|a| matches!(a, Action::Park { id, .. } if *id == w(61))), "Chat's stage is inactive: parked there, never left in the corner");
+    assert!(a_chat.iter().any(|a| matches!(a, Action::Hide { id } if *id == w(61))), "Chat's stage is inactive: parked there, never left in the corner");
     let after = layout(&m.to_state());
     assert_eq!(after.0, before.0, "the stages as before the restart");
     assert_eq!(after.1, before.1, "the editor's stage in front");

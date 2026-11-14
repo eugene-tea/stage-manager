@@ -46,7 +46,7 @@ impl Env {
         self.d.open(&mt);
         let obs = self.d.obs();
         let a = self.m.add_window(mt, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &obs);
-        self.d.apply(&a);
+        self.d.apply(&self.m, &a);
         if let Some(s) = self.m.stage_of(w(id))
             && !self.names.iter().any(|n| n.0 == s)
         {
@@ -78,14 +78,14 @@ impl Env {
         assert!(!card.gap && !card.active, "slot {slot} is a card to click");
         let obs = self.obs();
         let a = self.m.switch_to(card.stage, &obs);
-        self.d.apply(&a);
+        self.d.apply(&self.m, &a);
         card.stage
     }
 
     fn switch(&mut self, stage: StageId) {
         let obs = self.obs();
         let a = self.m.switch_to(stage, &obs);
-        self.d.apply(&a);
+        self.d.apply(&self.m, &a);
     }
 
     /// The strip as (the window that opened its stage, kind): `'c'` a card, `'g'` the gap,
@@ -172,7 +172,7 @@ fn in_gap_mode_the_gap_is_the_active_stages_slot_and_its_card_fills_it_when_left
     // A desktop reveal: the stage left gets its card back; the empty desktop stage has no place.
     let obs = e.obs();
     let a = e.m.reveal_desktop(&obs);
-    e.d.apply(&a);
+    e.d.apply(&e.m, &a);
     assert_eq!(e.places(), [(1, 'c'), (2, 'c'), (3, 'c'), (4, 'c'), (5, 'c')]);
 }
 
@@ -189,7 +189,7 @@ fn a_new_stage_goes_last_and_a_closed_one_leaves_no_gap() {
         // A stage that empties goes, and the places close up behind it.
         let a = e.m.remove_window(w(3));
         e.d.close(w(3));
-        e.d.apply(&a);
+        e.d.apply(&e.m, &a);
         assert!(!e.ids().contains(&3), "{mode:?}: stage 3 is gone");
         assert_eq!(e.places(), in_order(&e, mode), "{mode:?}: no gap where it was");
         assert_eq!(e.m.stage_number(e.s(4)), Some(3), "{mode:?}: the next stage takes its number");
@@ -203,7 +203,7 @@ fn a_merge_keeps_the_targets_place_and_a_drag_moves_a_stage_in_creation_order() 
         let (two, five, one) = (e.s(2), e.s(5), e.s(1));
         let obs = e.obs();
         let a = e.m.merge_stages(two, five, &obs);
-        e.d.apply(&a);
+        e.d.apply(&e.m, &a);
         assert_eq!(e.m.stage_of(w(2)), Some(five), "{mode:?}: merged");
         assert_eq!(e.places(), in_order(&e, mode), "{mode:?}: the target keeps its place");
         assert_eq!(e.ids()[..3], [1, 3, 4], "{mode:?}: the dropped card's place closed up");
@@ -363,7 +363,7 @@ fn past_the_capacity_a_window_dropped_on_the_strip_and_a_card_dragged_down_keep_
         let obs = e.obs();
         let frame = obs.frames[&w(8)];
         let a = e.m.drop_window_on_strip(w(8), frame, None, &obs);
-        e.d.apply(&a);
+        e.d.apply(&e.m, &a);
         let dropped = e.s(8);
         assert!(e.m.strip().iter().any(|c| c.stage == dropped), "{mode:?}: the dropped window's stage shows: {:?}", e.m.strip());
         // Dropped between two cards: it shows there too.
@@ -371,7 +371,7 @@ fn past_the_capacity_a_window_dropped_on_the_strip_and_a_card_dragged_down_keep_
         let obs = e.obs();
         let before = e.m.strip().last().expect("a card").stage;
         let a = e.m.drop_window_on_strip(w(9), obs.frames[&w(9)], Some(before), &obs);
-        e.d.apply(&a);
+        e.d.apply(&e.m, &a);
         let dropped = e.s(9);
         assert!(e.m.strip().iter().any(|c| c.stage == dropped), "{mode:?}: dropped above a card, it shows: {:?}", e.m.strip());
         // A head card dragged to the bottom keeps its card.

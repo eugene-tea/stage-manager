@@ -74,7 +74,7 @@ fn add(m: &mut Model, w: WindowMeta) -> Vec<Action> {
 }
 
 fn parks(actions: &[Action], id: u32) -> bool {
-    actions.iter().any(|a| matches!(a, Action::Park { id: x, .. } if x.0 == id))
+    actions.iter().any(|a| matches!(a, Action::Hide { id: x } if x.0 == id))
 }
 
 fn set_frame(actions: &[Action], id: u32) -> Option<Rect> {
@@ -286,7 +286,7 @@ fn adoption_keeps_windows_already_shown_in_front() {
     assert_ne!(m.current_space(MAIN).0, 5, "nothing to adopt yet");
     let a = add(&mut m, win(21, 30, CHAT, "Team", F_TEAM));
     assert_eq!(m.current_space(MAIN).0, 5);
-    assert!(!a.iter().any(|x| matches!(x, Action::Park { id, .. } if id.0 == 51)), "{a:?}");
+    assert!(!a.iter().any(|x| matches!(x, Action::Hide { id } if id.0 == 51)), "{a:?}");
     assert_eq!(m.main_active_stage(), m.stage_of(w(51)));
     assert!(m.window(w(51)).is_some_and(|x| !x.parked));
 }

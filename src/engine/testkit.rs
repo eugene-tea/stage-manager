@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+pub use super::corner::park_frame;
 use super::displays::ScreenKey;
 use super::geometry::Rect;
 use super::park::MACOS_KEEPS_TITLE;
@@ -114,12 +115,15 @@ impl Desk {
         }
     }
 
-    pub fn apply(&mut self, actions: &[Action]) {
+    /// Executes `actions` as the Corner engine does: a window hidden goes to its park frame
+    /// as model `m` knows it now ([`park_frame`]), where macOS leaves it.
+    pub fn apply(&mut self, m: &Model, actions: &[Action]) {
         for a in actions {
             match *a {
-                Action::SetFrame { id, frame } | Action::Park { id, frame } => {
-                    if let Some(f) = self.frames.get_mut(&id) {
-                        *f = macos_places_in(frame, self.display.unwrap_or_else(display).visible);
+                Action::SetFrame { id, frame } => self.place(id, frame),
+                Action::Hide { id } => {
+                    if let Some(frame) = park_frame(m, id) {
+                        self.place(id, frame);
                     }
                 }
                 Action::Raise { id } => self.raise(id),
@@ -131,6 +135,13 @@ impl Desk {
                 }
                 Action::StateChanged => {}
             }
+        }
+    }
+
+    /// Window `id` asked to sit at `frame`: where macOS leaves it on the desk's display.
+    fn place(&mut self, id: WindowId, frame: Rect) {
+        if let Some(f) = self.frames.get_mut(&id) {
+            *f = macos_places_in(frame, self.display.unwrap_or_else(display).visible);
         }
     }
 

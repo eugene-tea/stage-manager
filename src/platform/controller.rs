@@ -4,7 +4,8 @@
 //! - **Observations** for the engine: live frames through AX for every window the model
 //!   shows, z-order from `CGWindowListCopyWindowInfo`, the focused window from the frontmost
 //!   app's `AXFocusedWindow`.
-//! - **Actions**: `SetFrame` = size, position, size; `Park` = position into the park zone;
+//! - **Actions**: `SetFrame` = size, position, size; `Hide` = position into the park zone
+//!   (the Corner engine's park frame, [`corner::park_frame`]);
 //!   `Raise` = `AXRaise`; `Focus` = raise, `AXMain`, then the app's `AXFrontmost`.
 //! - **Echoes**: focus and activation events for windows and apps we just touched are our
 //!   own actions coming back late; they are dropped for [`ECHO_WINDOW`] so a stale focus
@@ -106,6 +107,7 @@ use super::safety::{self, ParkedEntry};
 use super::{capture_pace, desktop, desktop_shot, enhanced_ui, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply};
+use crate::engine::corner;
 use crate::engine::park_reconcile::{self, Stray};
 use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_click;
@@ -521,7 +523,7 @@ fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>) -> (Vec<Action>,
     let (later, mut now): (Vec<Action>, Vec<Action>) = actions.into_iter().partition(|a| match a {
         Action::SetFrame { id, .. } => arriving.contains(&id.0),
         Action::Raise { .. } | Action::Focus { .. } => true,
-        Action::Park { .. } | Action::StateChanged => false,
+        Action::Hide { .. } | Action::StateChanged => false,
     });
     now.extend(focus);
     (now, later)
@@ -1281,6 +1283,9 @@ pub struct Controller {
     /// A minimized window on its way to the strip, while its batch runs: its transition's
     /// picture starts at its Dock tile ([`Self::on_minimized`]).
     minimizing: Option<Minimized>,
+    /// A window minimized in the Dock on its way to the strip, and where its hide puts it
+    /// this once in place of its park frame ([`minimize::dive_frame`]; [`Self::on_minimized`]).
+    dive: Option<(u32, Rect)>,
     /// Minimized windows un-minimized on their way to the strip, and when: each is parked
     /// again as soon as its un-minimize is over ([`Self::on_deminiaturized`]).
     unminimizing: HashMap<u32, Instant>,
@@ -1495,6 +1500,7 @@ impl Controller {
             dock_bar: None,
             dock_order: dock_order::DockOrderWatch::default(),
             minimizing: None,
+            dive: None,
             unminimizing: HashMap::new(),
             verify: None,
             dock_seen: None,
@@ -2297,6 +2303,16 @@ impl Controller {
         }
     }
 
+    /// Where a hide of window `id` puts it now: its park frame as the model knows the window
+    /// ([`corner::park_frame`]), or this once a minimized window's dive frame
+    /// ([`Self::dive`]). `None` for a window the model does not manage.
+    fn hide_frame(&self, id: u32) -> Option<Rect> {
+        match self.dive {
+            Some((w, frame)) if w == id => Some(frame),
+            _ => self.model.as_ref().and_then(|m| corner::park_frame(m, WindowId(id))),
+        }
+    }
+
     /// Executes actions in order; returns how many AX calls failed. Once Quit is requested
     /// the rest of the batch runs only its `SetFrame`s: unpark-all covers every window the
     /// model counts as parked, whether or not its park was carried out, but a window the
@@ -2333,24 +2349,35 @@ impl Controller {
                 continue;
             }
             let id = match action {
-                Action::SetFrame { id, .. } | Action::Park { id, .. } | Action::Raise { id } | Action::Focus { id } => id.0,
+                Action::SetFrame { id, .. } | Action::Hide { id } | Action::Raise { id } | Action::Focus { id } => id.0,
                 Action::StateChanged => {
                     changed = true;
                     continue;
                 }
             };
+            // Where a hide puts the window (asked once: a write tried again asks the same).
+            let park = match action {
+                Action::Hide { .. } => match self.hide_frame(id) {
+                    Some(frame) => Some(frame),
+                    None => {
+                        tracing::debug!(id, ?action, "action for a window the model let go skipped");
+                        continue;
+                    }
+                },
+                _ => None,
+            };
             let Some(w) = ob.window(id) else {
                 // Lost by the observer (Accessibility revoked, say): a move still goes through
                 // the registry's element; a restore that cannot is a failure.
-                let kept = matches!(action, Action::SetFrame { .. } | Action::Park { .. })
+                let kept = matches!(action, Action::SetFrame { .. } | Action::Hide { .. })
                     .then(|| safety::registry_entry(id))
                     .flatten();
-                let result = match (action, &kept) {
-                    (Action::SetFrame { frame, .. }, Some(e)) if retrying => {
+                let result = match (action, &kept, park) {
+                    (Action::SetFrame { frame, .. }, Some(e), _) if retrying => {
                         Some(safety::set_frame_retrying(&e.element, id, frame, leftovers::RESTORE_RETRY.budget))
                     }
-                    (Action::SetFrame { frame, .. }, Some(e)) => Some(e.element.set_frame(frame)),
-                    (Action::Park { frame, .. }, Some(e)) => Some(e.element.set_position(frame.origin())),
+                    (Action::SetFrame { frame, .. }, Some(e), _) => Some(e.element.set_frame(frame)),
+                    (Action::Hide { .. }, Some(e), Some(frame)) => Some(e.element.set_position(frame.origin())),
                     _ => None,
                 };
                 match result {
@@ -2360,7 +2387,7 @@ impl Controller {
                         tracing::warn!(id, ?action, "action through the registry's element failed: {e}");
                         if let (Action::SetFrame { frame, .. }, Some(kept)) = (action, kept) {
                             self.restore_failed(id, ParkedEntry { restore: frame, fitted: None, ..kept });
-                        } else if matches!(action, Action::Park { .. }) {
+                        } else if matches!(action, Action::Hide { .. }) {
                             self.park_failed(id, now);
                         }
                     }
@@ -2373,7 +2400,7 @@ impl Controller {
                 continue;
             };
             self.echoes.touch_window(id, now);
-            if matches!(action, Action::Park { .. }) {
+            if matches!(action, Action::Hide { .. }) {
                 // A focus before this park is not the user's choice about where it is now.
                 self.user_focus.remove(&id);
             }
@@ -2387,7 +2414,10 @@ impl Controller {
                 // An unpark (quit, stand-down) tries a busy app again quickly (6X).
                 Action::SetFrame { frame, .. } if retrying => safety::set_frame_retrying(e, id, frame, leftovers::RESTORE_RETRY.budget),
                 Action::SetFrame { frame, .. } => e.set_frame(frame),
-                Action::Park { frame, .. } => e.set_position(frame.origin()),
+                Action::Hide { .. } => match park {
+                    Some(frame) => e.set_position(frame.origin()),
+                    None => Ok(()),
+                },
                 Action::Raise { .. } => e.raise(),
                 Action::Focus { .. } => ax_focus(e, pid),
                 Action::StateChanged => Ok(()),
@@ -2401,7 +2431,7 @@ impl Controller {
                     let child = w.kind == WindowKind::Child;
                     let element = ob.element(id).unwrap_or_else(|| w.element.clone());
                     self.restore_failed(id, ParkedEntry { element, restore: frame, child, fitted: None });
-                } else if matches!(action, Action::Park { .. }) {
+                } else if matches!(action, Action::Hide { .. }) {
                     self.park_failed(id, now);
                 }
             } else {
@@ -2633,9 +2663,11 @@ impl Controller {
                     self.execute(ob, actions);
                 }
                 Verdict::Park => {
-                    let Some(frame) = self.model.as_ref().and_then(|m| m.frame_left(WindowId(id))) else { continue };
+                    if !self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some_and(|w| w.parked)) {
+                        continue;
+                    }
                     tracing::info!(id, listed, tries = stray.tries, "a parked window is listed out of the park zone: parked again");
-                    self.execute(ob, vec![Action::Park { id: WindowId(id), frame }]);
+                    self.execute(ob, vec![Action::Hide { id: WindowId(id) }]);
                 }
                 Verdict::GiveUp => tracing::info!(
                     id,
@@ -3037,7 +3069,7 @@ impl Controller {
             let outgoing: HashSet<u32> = actions
                 .iter()
                 .filter_map(|a| match a {
-                    Action::Park { id, .. } => Some(id.0),
+                    Action::Hide { id } => Some(id.0),
                     _ => None,
                 })
                 .collect();
@@ -4138,7 +4170,7 @@ impl Controller {
         }
         let obs = self.observe(ob);
         let Some(m) = self.model.as_mut() else { return };
-        let mut actions = m.minimize_to_strip(WindowId(id), &obs);
+        let actions = m.minimize_to_strip(WindowId(id), &obs);
         if actions.is_empty() {
             return;
         }
@@ -4151,16 +4183,11 @@ impl Controller {
         let edge = tile.or_else(|| dock.and_then(super::dock::bar_frame));
         let read_ms = read_at.elapsed().as_millis() as u64;
         let mut dive = None;
-        if let (Some(screen), Some(edge)) = (screen, edge) {
-            for a in &mut actions {
-                if let Action::Park { id: w, frame } = a
-                    && w.0 == id
-                    && let Some(d) = minimize::dive_frame(*frame, edge, screen, &desktop::cg_display_bounds())
-                {
-                    *frame = d;
-                    dive = Some(d);
-                }
-            }
+        if let (Some(screen), Some(edge)) = (screen, edge)
+            && actions.contains(&Action::Hide { id: WindowId(id) })
+            && let Some(park) = corner::park_frame(m, WindowId(id))
+        {
+            dive = minimize::dive_frame(park, edge, screen, &desktop::cg_display_bounds());
         }
         tracing::info!(
             id,
@@ -4170,7 +4197,10 @@ impl Controller {
             "window minimized: it goes to the strip instead of the Dock"
         );
         self.minimizing = Some(Minimized { window: id, tile });
+        // Its hide in this batch goes to the dive frame, no later one.
+        self.dive = dive.map(|d| (id, d));
         self.execute_animated(ob, actions);
+        self.dive = None;
         self.minimizing = None;
         if let Some(w) = ob.window(id) {
             let now = Instant::now();
@@ -4270,7 +4300,7 @@ impl Controller {
         };
         let listed = ob.window(id).and_then(|w| w.element.frame().ok());
         tracing::debug!(id, listed = ?listed, park = %frame, after_ms = at.elapsed().as_millis() as u64, "a window un-minimized on its way to the strip is down: parked again at once");
-        self.execute(ob, vec![Action::Park { id: WindowId(id), frame }]);
+        self.execute(ob, vec![Action::Hide { id: WindowId(id) }]);
     }
 
     /// True when window `id` sits in a stage that is not in front on its screen.
@@ -4318,7 +4348,7 @@ impl Controller {
         tracing::info!(pid, also = ?&pids[1..], switched, "app hidden: its windows leave the strip; the most recent stage comes in front if it was in front");
         let hidden = |id: WindowId| m.window(id).is_some_and(|w| m.app_is_hidden(w.meta.pid));
         let (quiet, rest): (Vec<Action>, Vec<Action>) =
-            actions.into_iter().partition(|a| matches!(a, Action::Park { id, .. } if hidden(*id)));
+            actions.into_iter().partition(|a| matches!(a, Action::Hide { id } if hidden(*id)));
         self.execute(ob, quiet);
         self.execute_animated(ob, rest);
     }
@@ -7538,7 +7568,7 @@ fn on_managed_screens(list: &[windows::CgWindow], managed: &[Rect], is_managed: 
 /// on its way is superseded ([`Controller::flush_superseded`]). A batch that only brings a
 /// window to its frame (a new window in the stage shown) leaves it landing as it was.
 fn supersedes(actions: &[Action]) -> bool {
-    actions.iter().any(|a| matches!(a, Action::Park { .. } | Action::Focus { .. }))
+    actions.iter().any(|a| matches!(a, Action::Hide { .. } | Action::Focus { .. }))
 }
 
 /// A superseded switch's held batch without its focuses: the windows still come to their
@@ -7904,7 +7934,7 @@ mod tests {
         let id = WindowId(3);
         let frame = Rect::new(10.0, 40.0, 300.0, 200.0);
         assert!(runs_after_quit(&Action::SetFrame { id, frame }));
-        assert!(!runs_after_quit(&Action::Park { id, frame }));
+        assert!(!runs_after_quit(&Action::Hide { id }));
         assert!(!runs_after_quit(&Action::Raise { id }));
         assert!(!runs_after_quit(&Action::Focus { id }));
         assert!(!runs_after_quit(&Action::StateChanged));
@@ -8059,7 +8089,7 @@ mod tests {
         let (kept, dropped) = without_focus(held);
         assert_eq!(kept, vec![Action::SetFrame { id: WindowId(7), frame }, Action::Raise { id: WindowId(7) }, Action::StateChanged]);
         assert_eq!(dropped, vec![7]);
-        assert!(supersedes(&[Action::Park { id: WindowId(1), frame }, Action::SetFrame { id: WindowId(2), frame }]));
+        assert!(supersedes(&[Action::Hide { id: WindowId(1) }, Action::SetFrame { id: WindowId(2), frame }]));
         assert!(supersedes(&[Action::Focus { id: WindowId(2) }]));
         assert!(!supersedes(&[Action::SetFrame { id: WindowId(2), frame }, Action::StateChanged]));
         assert!(!supersedes(&[]));
@@ -8226,7 +8256,7 @@ mod tests {
             .iter()
             .map(|a| match a {
                 Action::SetFrame { id, .. } => format!("frame {}", id.0),
-                Action::Park { id, .. } => format!("park {}", id.0),
+                Action::Hide { id } => format!("park {}", id.0),
                 Action::Raise { id } => format!("raise {}", id.0),
                 Action::Focus { id } => format!("focus {}", id.0),
                 Action::StateChanged => "state".to_string(),
@@ -8238,8 +8268,8 @@ mod tests {
     fn a_covered_switch_focuses_the_new_stage_at_once() {
         let r = Rect::new(100.0, 100.0, 400.0, 300.0);
         let batch = vec![
-            Action::Park { id: WindowId(1), frame: r },
-            Action::Park { id: WindowId(2), frame: r },
+            Action::Hide { id: WindowId(1) },
+            Action::Hide { id: WindowId(2) },
             Action::SetFrame { id: WindowId(4), frame: r },
             Action::SetFrame { id: WindowId(3), frame: r },
             Action::Raise { id: WindowId(4) },
@@ -8265,8 +8295,8 @@ mod tests {
     fn activation_batch() -> Vec<Action> {
         let r = Rect::new(100.0, 100.0, 400.0, 300.0);
         vec![
-            Action::Park { id: WindowId(1), frame: r },
-            Action::Park { id: WindowId(2), frame: r },
+            Action::Hide { id: WindowId(1) },
+            Action::Hide { id: WindowId(2) },
             Action::SetFrame { id: WindowId(4), frame: r },
             Action::SetFrame { id: WindowId(3), frame: r },
             Action::Raise { id: WindowId(4) },
@@ -8309,7 +8339,7 @@ mod tests {
         for (w, action) in [(a, RuleAction::Current), (sheet, RuleAction::Current), (b, RuleAction::Current), (c, RuleAction::New)] {
             d.open(&w);
             let batch = m.add_window(w, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &d.obs());
-            d.apply(&batch);
+            d.apply(&m, &batch);
         }
         let pid_of = |id: u32| m.window(WindowId(id)).map(|w| w.meta.pid);
         let mut m2 = m.clone();
