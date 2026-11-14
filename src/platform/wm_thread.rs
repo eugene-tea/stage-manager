@@ -482,7 +482,17 @@ impl WmState {
                 if matches!(event, AppEvent::Terminated(_)) {
                     self.logout.app_quit(Instant::now());
                 }
-                self.observer.on_app_event(event, ax_callback)
+                let launched = match &event {
+                    AppEvent::Launched(app) => Some(app.pid),
+                    _ => None,
+                };
+                self.observer.on_app_event(event, ax_callback);
+                // A just-opened app: the engine may hold its new windows until placed.
+                if let Some(pid) = launched
+                    && self.arranging()
+                {
+                    self.controller.app_launched(&self.observer, pid);
+                }
             }
             WmCommand::Probe(note) => self.observer.on_probe(note, ax_callback),
             WmCommand::LaunchScan(done) => self.launch_scanned(done),

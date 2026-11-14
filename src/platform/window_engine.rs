@@ -153,6 +153,25 @@ pub trait WindowEngine: Send + Sync {
     fn parked_spaces(&self) -> Vec<StageSpace> {
         Vec::new()
     }
+
+    /// App `pid` was just opened (its launch notice; an app the arrangement takes in): an
+    /// engine that can keep the app's first windows from showing before they are placed
+    /// starts doing so. The Corner engine: nothing (a window shows when its app orders it
+    /// in, and is placed after). WM thread.
+    fn app_launched(&self, _pid: i32) {}
+
+    /// True when window `id`, not on screen yet, is held by this engine on its way in: it
+    /// shows as soon as it is placed ([`Self::let_new_out`], or a hide into its stage), so
+    /// the controller places it now instead of waiting for it to show. The Corner engine:
+    /// never.
+    fn about_to_show(&self, _id: WindowId) -> bool {
+        false
+    }
+
+    /// Window `id`, held on its way in ([`Self::about_to_show`]), is let onto the Desktop
+    /// shown, where it shows at once: `placed` (after the stage it leaves behind has
+    /// hidden), or not to be placed now. Nothing for a window not held so. WM thread.
+    fn let_new_out(&self, _id: WindowId, _placed: bool) {}
 }
 
 static ENGINE: OnceLock<RwLock<Arc<dyn WindowEngine>>> = OnceLock::new();

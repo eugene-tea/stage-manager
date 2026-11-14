@@ -4694,14 +4694,39 @@ impl Controller {
         !self.fresh_unplaced.is_empty()
     }
 
+    /// App `pid` was just opened (its launch notice, WM thread): the engine may hold its
+    /// new windows on their way in, so that each is placed before it first shows
+    /// ([`WindowEngine::app_launched`]; the Spaces engine). Only for an app the arrangement
+    /// takes in, while windows are arranged.
+    pub fn app_launched(&self, ob: &Observer, pid: i32) {
+        if self.model.is_some() && !self.locked && ob.wants(pid) {
+            self.engine.app_launched(pid);
+        }
+    }
+
+    /// Window `id`, held by the engine on its way in, waits instead to show as it would
+    /// have (`on_found` does not place it now): it is let out unplaced, and placed once it
+    /// shows, as any window is.
+    fn new_window_waits(&self, id: u32) {
+        if self.engine.about_to_show(WindowId(id)) {
+            self.engine.let_new_out(WindowId(id), false);
+        }
+    }
+
     /// A window appeared after launch: the rules decide where it goes. One that is not on
     /// screen (another Space, minimized, app hidden; or any window while a full-screen app's
     /// Space shows) waits in `unplaced` until it shows, and a switch's windows held behind
     /// their snapshots stay held: only a window placed now brings them in first.
+    ///
+    /// A window the engine holds on its way in ([`WindowEngine::about_to_show`]: the Spaces
+    /// engine, a just-opened app's) counts as shown: it is placed now, its stage's switch
+    /// hides the stage left behind, and then it is let out where it shows
+    /// ([`WindowEngine::let_new_out`]), so it is never on screen over the stage being left.
     fn on_found(&mut self, ob: &mut Observer, id: u32) {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
             return;
         }
+        let about_to_show = self.engine.about_to_show(WindowId(id));
         self.ax_window_found(ob, Instant::now());
         let displays = desktop::cg_display_bounds();
         if let Some(w) = windows::describe(&[id]).into_iter().find(|w| w.onscreen && w.layer == 0)
@@ -4728,19 +4753,24 @@ impl Controller {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
             }
+            self.new_window_waits(id);
             self.look_soon(id);
             return;
         };
         let is_main = screen.id == self.main_display_id();
         let frozen = self.locked || self.phase.changing() || (is_main && self.phase.fullscreen());
-        if frozen || !shown.contains(&id) {
+        if frozen || !(shown.contains(&id) || about_to_show) {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
             }
+            self.new_window_waits(id);
             if !frozen {
                 self.look_soon(id);
             }
             return;
+        }
+        if about_to_show {
+            tracing::debug!(id, "a just-opened app's window, held on its way in: placed before it shows");
         }
         // It shows: a switch's windows still held behind their snapshots come to their frames
         // first, and the window server is read again after them.
@@ -4758,6 +4788,7 @@ impl Controller {
                 if self.unplaced.insert(id) {
                     tracing::debug!(id, "Mission Control, App Exposé or Show Desktop shows; the window is placed once it has closed");
                 }
+                self.new_window_waits(id);
                 return;
             }
             if self.settle.step(self.screen_seen(ob, &list, screen.frame), now) != Verdict::Desktop {
@@ -4766,6 +4797,7 @@ impl Controller {
                 if self.unplaced.insert(id) {
                     tracing::debug!(id, "a full-screen animation or Space shows; the window is placed once a Desktop shows");
                 }
+                self.new_window_waits(id);
                 return;
             }
         } else {
@@ -4775,6 +4807,7 @@ impl Controller {
                     if self.unplaced.insert(id) {
                         tracing::debug!(id, screen = screen.id.0, ?seen, "the window's screen shows no Desktop now; the window is placed once it does");
                     }
+                    self.new_window_waits(id);
                     return;
                 }
             }
@@ -4787,6 +4820,7 @@ impl Controller {
             if self.unplaced.insert(id) {
                 tracing::info!(id, "a window found after a display change (no click or key since): placed once the change settles, if it still shows");
             }
+            self.new_window_waits(id);
             return;
         }
         if self.space_in_doubt(ob, &self.present_in(&list), screen.id) {
@@ -4795,6 +4829,7 @@ impl Controller {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "the window list disagrees with the Space shown; the window is placed on arrival");
             }
+            self.new_window_waits(id);
             return;
         }
         let waited = self.unplaced.remove(&id);
@@ -4809,7 +4844,10 @@ impl Controller {
             ob.recheck_kind(id);
         }
         let z = windows::z_order(&list);
-        let Some(mut meta) = self.meta(ob, id, &z) else { return };
+        let Some(mut meta) = self.meta(ob, id, &z) else {
+            self.new_window_waits(id);
+            return;
+        };
         if let Some(title) = ob.window(id).and_then(|w| w.element.title().ok()) {
             meta.title = title;
         }
@@ -4848,6 +4886,7 @@ impl Controller {
         }
         if decision.action == RuleAction::Ignore {
             tracing::debug!(id, "rule: ignore");
+            self.new_window_waits(id);
             return;
         }
         counters::bump(Count::NewWindow);
@@ -4870,6 +4909,12 @@ impl Controller {
             } else {
                 self.execute_animated(ob, actions);
             }
+        }
+        if about_to_show && self.engine.about_to_show(WindowId(id)) {
+            // Still held on its way in: the batch has hidden the stage it leaves behind (a
+            // window joining a stage not shown went into that stage's Space instead).
+            let shown_by_model = self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_none_or(|w| !w.parked);
+            self.engine.let_new_out(WindowId(id), shown_by_model);
         }
         // The measure of round login-observe: from found (tracked) to placed.
         if let Some(w) = ob.window(id) {

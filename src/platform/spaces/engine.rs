@@ -64,6 +64,10 @@ const READ_BACK_STEP: Duration = Duration::from_micros(300);
 /// The stage key of a window the model names no stage for (a child read before its parent).
 const NO_STAGE: u64 = 0;
 
+/// The stage key of the Space where a just-opened app's new windows wait, never shown, until
+/// they are placed ([`SpacesEngine::hold_new`]).
+const NEW_STAGE: u64 = u64::MAX;
+
 /// A window this engine hid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Held {
@@ -84,6 +88,13 @@ struct Counts {
     show_misses: u64,
     /// The slowest read back, in microseconds.
     read_back_max_us: u64,
+    /// A just-opened app's new windows held before they showed, let out once placed, let
+    /// out unplaced (not placed in time, or never shown by their app), and seen on screen
+    /// before they could be held.
+    new_held: u64,
+    new_placed: u64,
+    new_unplaced: u64,
+    new_missed: u64,
 }
 
 /// Which calls a test run makes fail (`ctl debug-engine-fail`): nothing is sent for them,
@@ -136,6 +147,9 @@ struct State {
     plans: BTreeMap<u32, (u64, Rect)>,
     /// Windows whose show left them in a stage Space.
     owed: BTreeSet<u32>,
+    /// Windows of a just-opened app waiting in the Space for new windows, never shown yet
+    /// ([`SpacesEngine::hold_new`]); each also in `held`.
+    new: BTreeSet<u32>,
     counts: Counts,
     /// The checks while running.
     health: Health,
@@ -405,6 +419,9 @@ impl SpacesEngine {
             let mut st = self.state();
             st.held.insert(id, Held { space, home });
             st.owed.remove(&id);
+            if st.new.remove(&id) {
+                st.counts.new_placed += 1;
+            }
         }
         ok
     }
@@ -456,6 +473,7 @@ impl SpacesEngine {
             let mut st = self.state();
             st.held.remove(&id);
             st.owed.remove(&id);
+            st.new.remove(&id);
         } else {
             tracing::warn!(id, desktop = home, "spaces engine: a shown window is still in a stage's Space after a retry");
             self.missed_show(id);
@@ -534,6 +552,7 @@ impl SpacesEngine {
             st.held.retain(|id, _| alive.contains(id));
             st.plans.retain(|id, _| alive.contains(id));
             st.owed.retain(|id| alive.contains(id));
+            st.new.retain(|id| alive.contains(id));
             let used: BTreeSet<u64> = st.held.values().map(|h| h.space).collect();
             st.stages.iter().filter(|((_, stage), space)| !used.contains(space) && !stage_lives(*stage)).map(|(k, s)| (*k, *s)).collect()
         };
@@ -597,6 +616,7 @@ impl SpacesEngine {
                 report.restored += 1;
                 st.held.remove(&id);
                 st.owed.remove(&id);
+                st.new.remove(&id);
             } else {
                 report.failed += 1;
                 st.owed.insert(id);
@@ -694,6 +714,83 @@ impl SpacesEngine {
         out
     }
 
+    /// The Desktop a just-opened app's window shows on: the one of the screen with the
+    /// keyboard, else the first screen's.
+    fn desktop_for_new(sky: &Sky) -> Option<u64> {
+        let (_, shown) = Self::desktops(sky);
+        sky.active_space().filter(|s| shown.contains(s)).or(shown.first().copied())
+    }
+
+    /// The Space where a just-opened app's new windows wait, made now when there is none (a
+    /// launch's watch makes it at the launch notice, ahead of the first window).
+    pub(crate) fn prepare_new(&self) -> Option<u64> {
+        let sky = self.sky()?;
+        let home = Self::desktop_for_new(sky)?;
+        self.stage_space(sky, home, NEW_STAGE)
+    }
+
+    /// Window `id` of a just-opened app, listed by the window server on no Space and off
+    /// screen (created, not ordered in yet), into the Space where new windows wait, before
+    /// its app orders it in: it never shows over the stage shown until it is placed
+    /// ([`Self::let_new`], or a hide into its stage's Space). True when the window server
+    /// lists it there.
+    pub(crate) fn hold_new(&self, id: u32) -> bool {
+        let Some(sky) = self.sky() else { return false };
+        let Some(home) = Self::desktop_for_new(sky) else { return false };
+        let Some(space) = self.stage_space(sky, home, NEW_STAGE) else { return false };
+        if let Err(e) = sky.add_remove_from(Route::Bridged, space, &[id], ALL_SPACES_MASK) {
+            tracing::debug!(id, space, "spaces engine: a new window's hold could not be sent: {e}");
+        }
+        let (ok, after) = self.read_back(sky, id, |s| hidden_in(s, space));
+        let mut st = self.state();
+        if ok {
+            st.held.insert(id, Held { space, home });
+            st.new.insert(id);
+            st.counts.new_held += 1;
+        } else {
+            drop(st);
+            tracing::debug!(id, space, listed = ?after, "spaces engine: a new window did not go where new windows wait");
+        }
+        ok
+    }
+
+    /// True when window `id` waits where new windows wait ([`Self::hold_new`]).
+    pub(crate) fn waits_new(&self, id: u32) -> bool {
+        self.state().new.contains(&id)
+    }
+
+    /// A launch's window seen on screen before it could be held: counted.
+    pub(crate) fn missed_new(&self) {
+        self.state().counts.new_missed += 1;
+    }
+
+    /// Window `id`, waiting where new windows wait, onto the Desktop shown now (where its
+    /// app ordered it in), where it shows; `placed`: the controller placed it (its stage in
+    /// front), else it goes unplaced (not placed in time, never shown by its app, or not
+    /// one to place). True when it came out (also when it was not waiting).
+    pub(crate) fn let_new(&self, id: u32, placed: bool, why: &str) -> bool {
+        let home = self.sky().and_then(Self::desktop_for_new);
+        {
+            let mut st = self.state();
+            if !st.new.contains(&id) {
+                return true;
+            }
+            if let (Some(home), Some(h)) = (home, st.held.get_mut(&id)) {
+                h.home = home;
+            }
+        }
+        let ok = self.show_window(id);
+        let mut st = self.state();
+        if placed {
+            st.counts.new_placed += 1;
+        } else {
+            st.counts.new_unplaced += 1;
+        }
+        drop(st);
+        tracing::debug!(id, placed, ok, why, "spaces engine: a new window let out where it shows");
+        ok
+    }
+
     /// The engine's state for `ctl state`.
     pub fn status(&self) -> Value {
         let st = self.state();
@@ -709,6 +806,11 @@ impl SpacesEngine {
             "strikes": st.health.strikes(Instant::now()),
             "failed": st.health.failed(),
             "fail_mode": format!("{:?}", st.fail),
+            "new_waiting": st.new,
+            "new_held": st.counts.new_held,
+            "new_placed": st.counts.new_placed,
+            "new_unplaced": st.counts.new_unplaced,
+            "new_missed": st.counts.new_missed,
         })
     }
 }
@@ -845,6 +947,20 @@ impl WindowEngine for SpacesEngine {
     /// This engine's stage Spaces with their Desktops.
     fn parked_spaces(&self) -> Vec<StageSpace> {
         self.state().stages.iter().map(|((desktop, _), space)| StageSpace { space: *space, desktop: *desktop }).collect()
+    }
+
+    /// The launch's watch: the app's new windows held before they show
+    /// ([`super::launch_watch`]).
+    fn app_launched(&self, pid: i32) {
+        super::launch_watch::start(shared(), pid);
+    }
+
+    fn about_to_show(&self, id: WindowId) -> bool {
+        self.waits_new(id.0)
+    }
+
+    fn let_new_out(&self, id: WindowId, placed: bool) {
+        let _ = self.let_new(id.0, placed, if placed { "placed" } else { "not placed now" });
     }
 }
 

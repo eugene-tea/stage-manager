@@ -159,6 +159,12 @@ impl Sky {
         self.displays().into_iter().next().map(|(u, c, _)| (c, u)).unwrap_or((0, String::new()))
     }
 
+    /// The Space of the screen with the keyboard (`SLSGetActiveSpace`), when exported.
+    pub(crate) fn active_space(&self) -> Option<u64> {
+        // SAFETY: plain query on this process's connection.
+        self.active.map(|f| unsafe { f(self.cid) }).filter(|s| *s != 0)
+    }
+
     /// Every Space the window server lists for this mask.
     pub(crate) fn all_spaces(&self, mask: i32) -> Vec<u64> {
         let Some(f) = self.copy_spaces else { return Vec::new() };

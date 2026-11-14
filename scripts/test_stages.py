@@ -398,6 +398,66 @@ def consistent(what):
     return check(not bad, f"{what}: windows match the model" + (f" ({'; '.join(bad)})" if bad else ""))
 
 
+def phase_launch():
+    """Round sm-placenew: a newly opened app's first window never shows over the stage being
+    left. Alpha's stage shows; Charlie is opened (activated, as a person opens an app)
+    SM_LAUNCHES times (default 20) while `probe-spaces overlap` reads the on-screen window
+    list every millisecond: a sample with Alpha's window and Charlie's both on screen is an
+    overlap. Under the Spaces engine no launch may overlap (the engine holds Charlie's window
+    on its way in until Alpha's stage has hidden); under the Corner engine the counts are
+    reported, not checked (the window shows where its app puts it, then its stage comes)."""
+    say("\n== launch: a newly opened app's window never shows over the stage being left ==")
+    stop_app()
+    stop_all_fixtures()
+    start_extra("a", 1)
+    s = start_app(1)
+    if not check(s is not None, "app up with Alpha"):
+        return
+    n = int(os.environ.get("SM_LAUNCHES") or 20)
+    results = []
+    for i in range(n):
+        activate("a")
+        if not wait_state(lambda x: active_titles(x) == {"Alpha 1"}, "Alpha's stage in front"):
+            break
+        time.sleep(0.8)
+        r = run([BIN, "probe-spaces", "overlap", EXTRA["a"][0], EXTRA["c"][1], EXTRA["c"][0], "--for", "2500",
+                 "--args", "--windows", "1", "--title", "Charlie"], timeout=30)
+        try:
+            o = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            o = {"ok": False, "error": (r.stdout[-300:] + r.stderr[-300:]).strip()}
+        o["staged"] = wait_state(lambda x: active_titles(x) == {"Charlie 1"}, "Charlie's stage in front") is not None
+        results.append(o)
+        if not o.get("ok"):
+            say(f"  launch {i + 1}: not sampled ({o.get('error')})")
+        else:
+            say(f"  launch {i + 1}: {o['overlaps']} overlapping samples ({o['overlap_ms']} ms), Charlie on screen at "
+                f"{o['first_new_ms']} ms, Alpha last on screen at {o['last_old_ms']} ms; {o['samples']} samples, "
+                f"mean {o['mean_interval_ms']} ms, max gap {o['max_gap_ms']} ms; Charlie's stage "
+                f"{'in front' if o['staged'] else 'NOT in front'}")
+        stop_extra("c")
+        wait_state(lambda x: len(x["stages"]) == 1, "Charlie's stage to go")
+    ok = [o for o in results if o.get("ok")]
+    over = [o for o in ok if o["overlaps"]]
+    shown = sorted(o["first_new_ms"] for o in ok if o["first_new_ms"] is not None)
+    med = shown[len(shown) // 2] if shown else None
+    say(f"  {ENGINE}: {len(over)} of {len(ok)} launches showed Charlie over Alpha's stage"
+        f" (overlap ms: {[o['overlap_ms'] for o in over]}); Charlie first on screen, median {med} ms after the open")
+    check(len(ok) == n, f"{len(ok)} of {n} launches sampled")
+    check(all(o["staged"] for o in ok), "every launch: Charlie's own stage in front")
+    check(all(o["first_new_ms"] is not None for o in ok), "every launch: Charlie's window shows")
+    if SPACES:
+        check(not over, f"Spaces: no launch shows Charlie's window over Alpha's stage ({len(over)} of {len(ok)} did)")
+        e = (ctl("state").get("engine") or {})
+        say(f"  engine: new windows held {e.get('new_held')}, placed {e.get('new_placed')}, let out unplaced "
+            f"{e.get('new_unplaced')}, on screen before they could be held {e.get('new_missed')}")
+        watched = log_text().count("launch watch: a just-opened app")
+        check(watched >= len(ok), f"Spaces: a launch watch for each launch ({watched})")
+    else:
+        skip("no launch overlaps", f"the Corner engine places a window once it shows ({len(over)} of {len(ok)} overlapped)")
+    consistent("launch")
+
+
 def z_titles(titles):
     """The given titles ordered front to back by the window server."""
     s = state()
@@ -8376,7 +8436,8 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine}[p]()
+             "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
+             "launch": phase_launch}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
