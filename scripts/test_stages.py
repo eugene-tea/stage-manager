@@ -8148,6 +8148,214 @@ def phase_screens():
         stop_extra(k)
 
 
+def engine_windows():
+    """The fixture's layer-0 windows as the window server lists them, each with `staged` (in a
+    stage Space, the window server's word, whichever engine runs now), and the display."""
+    r = subprocess.run([BIN, "probe-windows", FIX_ID], env=dict(ENV, STAGE_MANAGER_ENGINE="spaces"),
+                       capture_output=True, text=True, timeout=10)
+    p = json.loads(r.stdout)
+    return [w for w in p["windows"] if w["layer"] == 0], p["display"]
+
+
+def phase_engine():
+    """Round sm-probe (1.9, S5): which window engine runs. Each launch's probe and choice
+    (`ctl state` `engine`: kind, why, probe, fallback):
+    1. `auto` without the opt-in: the Corner engine; the probe ran and passed, its time said.
+    2. `[windows] engine = "accessibility"` (with the opt-in): the Corner engine, no probe.
+    3. `auto` with the opt-in (STAGE_MANAGER_SPACES=1): the Spaces engine.
+    4. The probe made to fail at its hide, then at its show (STAGE_MANAGER_PROBE_FAIL): the
+       Corner engine, the failed step named.
+    5. The fallback drill, Fixture 1 and 2 each in a stage, Fixture 2's hidden in its Space:
+       `ctl debug-engine-fail hide|show|all`, then a switch to Fixture 2: the engine falls
+       back to Corner within seconds, Fixture 2 shown at its frame, Fixture 1 in the park
+       corner, no window in a stage Space; a switch back works the Corner way; the parked
+       file names no engine. `all` blocks the bring-back's own move too (a window server
+       that refuses the bridge): the Space is ended with the classic call instead.
+    6. A Corner run killed with its guardian, Fixture 2 parked, then a Spaces launch: the
+       launch scan brings Fixture 2 out of the corner."""
+    say("\n== engine: the launch probe, the choice, the fallback mid-run ==")
+    if SPACES:
+        skip("engine", "runs its own engines per launch: run it without SM_ENGINE")
+        return
+    stop_app()
+    stop_all_fixtures()
+    config = os.path.join(HOME, "config.toml")
+
+    def fresh():
+        # The last good copy too: a missing config.toml runs on it (config::last_good).
+        for f in ("state.json", "config.toml", ".config-last-good.toml"):
+            path = os.path.join(HOME, f)
+            if os.path.exists(path):
+                os.remove(path)
+
+    def launch(env, what):
+        fresh_env = {"STAGE_MANAGER_ENGINE": ""}
+        fresh_env.update(env)
+        s = start_app(2, extra_env=fresh_env)
+        if not check(s is not None, f"engine: {what}: app up with two fixture windows"):
+            return None
+        return s["engine"]
+
+    start_fixture(2, "--frames", "80,80,640,420;260,160,560,380")
+    fresh()
+    e = launch({}, "auto")
+    if e is None:
+        return
+    probe_v = e.get("probe") or {}
+    check(e["kind"] == "corner" and "STAGE_MANAGER_SPACES" in (e.get("why") or ""), f"engine: auto without the opt-in runs the Corner engine ({e.get('why')})")
+    check(probe_v.get("ok") is True, f"engine: the launch probe passed ({probe_v})")
+    say(f"  probe: {probe_v.get('ms', 0):.1f} ms")
+    check(probe_v.get("ms", 999) < 50, f"engine: the probe took under 50 ms ({probe_v.get('ms', 0):.1f} ms)")
+    check("window engine: launch probe passed" in log_text(), "engine: the probe's verdict is logged")
+    stop_app()
+
+    fresh()
+    with open(config, "w") as f:
+        f.write('[windows]\nengine = "accessibility"\n')
+    e = launch({"STAGE_MANAGER_SPACES": "1"}, "accessibility")
+    if e is not None:
+        check(e["kind"] == "corner" and e.get("probe") is None and "accessibility" in (e.get("why") or ""),
+              f"engine: accessibility runs the Corner engine with no probe ({e.get('why')}, probe {e.get('probe')})")
+    stop_app()
+
+    fresh()
+    e = launch({"STAGE_MANAGER_SPACES": "1"}, "auto with the opt-in")
+    if e is not None:
+        check(e["kind"] == "spaces", f"engine: auto with the opt-in runs the Spaces engine ({e.get('why')})")
+    stop_app()
+    all_onscreen("engine: after the opt-in run")
+
+    for step, words in (("hide", "did not go into the trial Space"), ("show", "did not come back onto its Desktop")):
+        fresh()
+        e = launch({"STAGE_MANAGER_ENGINE": "spaces", "STAGE_MANAGER_PROBE_FAIL": step}, f"the probe failing at its {step}")
+        if e is not None:
+            p = e.get("probe") or {}
+            check(e["kind"] == "corner" and p.get("ok") is False and words in (p.get("reason") or ""),
+                  f"engine: a probe failing at its {step} runs the Corner engine and says why ({p.get('reason')}, {p.get('ms', 0):.1f} ms)")
+        stop_app()
+
+    for mode in ("hide", "show", "all"):
+        say(f"-- the fallback drill: debug-engine-fail {mode}")
+        fresh()
+        s = start_app(2, extra_env={"STAGE_MANAGER_ENGINE": "spaces", "STAGE_MANAGER_TEST": "1"})
+        if not check(s is not None and s["engine"]["kind"] == "spaces", f"engine {mode}: the Spaces engine runs"):
+            stop_app()
+            continue
+        two = by_title(s).get("Fixture 2")
+        one = by_title(s).get("Fixture 1")
+        if [t for t in stage_titles(s).get(two["home"], []) if t != "Fixture 2"]:
+            do("new", two["id"])
+        s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2"]], "two stages")
+        if not check(s is not None, f"engine {mode}: Fixture 1 and 2 each in a stage"):
+            stop_app()
+            continue
+        one_n, two_n = number_of(s, "Fixture 1"), number_of(s, "Fixture 2")
+        do("switch", one_n)
+
+        def staged_now(wid):
+            return next((w for w in engine_windows()[0] if w["id"] == wid and w.get("staged")), None)
+
+        if not check(wait_until(lambda: staged_now(two["id"]), 4, "Fixture 2 in its stage Space") is not None,
+                     f"engine {mode}: Fixture 2 hidden in its stage Space"):
+            stop_app()
+            continue
+        if mode == "hide":
+            pid = app_pid()
+            try:
+                with open(os.path.join(HOME, f".parked-{pid}.json"), encoding="utf-8") as f:
+                    parked = json.load(f)
+            except (OSError, ValueError):
+                parked = {}
+            spaces = parked.get("spaces") or []
+            check(parked.get("engine") == "spaces" and len(spaces) >= 1 and all(sp.get("space") and sp.get("desktop") for sp in spaces),
+                  f"engine {mode}: the parked file names the engine and its stage Spaces with their Desktops ({parked.get('engine')}, {spaces})")
+        mark = len(log_text())
+        r = do("debug-engine-fail", mode)
+        check(r.get("ok"), f"engine {mode}: the next calls made to fail ({r})")
+        t0 = time.time()
+        do("switch", two_n)
+        x = wait_until(lambda: (lambda y: y if y["engine"]["kind"] == "corner" else None)(state()), 6, "the fallback")
+        took = time.time() - t0
+        if not check(x is not None, f"engine {mode}: fell back to the Corner engine ({took:.1f} s after the switch)"):
+            stop_app()
+            all_onscreen(f"engine {mode}: quit")
+            continue
+        check(bool(x["engine"].get("fallback")), f"engine {mode}: ctl state says why ({x['engine'].get('fallback')})")
+        text = log_text()[mark:]
+        check("falling back to the Corner engine" in text, f"engine {mode}: the fallback is logged")
+        if mode == "all":
+            ended = [ln for ln in text.splitlines() if "a window after its Space ended" in ln]
+            say(f"  the bridge blocked: {len(ended)} window(s) brought out by ending their Space: {[ln.split('spaces engine:')[0][-60:] for ln in ended]}")
+
+        def settled():
+            wins, d = engine_windows()
+            w1 = next((w for w in wins if w["id"] == one["id"]), None)
+            w2 = next((w for w in wins if w["id"] == two["id"]), None)
+            ok = w1 and w2 and not w1.get("staged") and not w2.get("staged") and is_parked(w1["bounds"], d) and w2["onscreen"] and not is_parked(w2["bounds"], d)
+            return (w1, w2, d) if ok else None
+
+        got = wait_until(settled, 4, "Fixture 1 parked, Fixture 2 shown")
+        wins, d = engine_windows()
+        staged = [w["id"] for w in wins if w.get("staged")]
+        check(not staged, f"engine {mode}: no fixture window left in a stage Space ({staged})")
+        if check(got is not None, f"engine {mode}: Fixture 1 in the park corner, Fixture 2 shown"):
+            restore = by_title(state())["Fixture 2"]["restore"]
+            check(close(got[1]["bounds"], restore), f"engine {mode}: Fixture 2 at its frame ({fmt(got[1]['bounds'])}, saved {fmt(restore)})")
+        pid = app_pid()
+        try:
+            with open(os.path.join(HOME, f".parked-{pid}.json"), encoding="utf-8") as f:
+                parked = json.load(f)
+            check("engine" not in parked and "spaces" not in parked, f"engine {mode}: the parked file is the Corner engine's ({sorted(parked)})")
+        except (OSError, ValueError) as err:
+            check(False, f"engine {mode}: the parked file read ({err})")
+        do("switch", one_n)
+        back = wait_until(lambda: (lambda ws_d: ws_d if any(w["id"] == two["id"] and is_parked(w["bounds"], ws_d[1]) for w in ws_d[0])
+                                   and any(w["id"] == one["id"] and w["onscreen"] and not is_parked(w["bounds"], ws_d[1]) for w in ws_d[0]) else None)(engine_windows()), 4, "the Corner switch back")
+        check(back is not None, f"engine {mode}: a switch back after the fallback parks Fixture 2 and shows Fixture 1 (the Corner way)")
+        stop_app()
+        all_onscreen(f"engine {mode}: quit after the fallback")
+
+    say("-- a Corner run killed with its guardian, then a Spaces launch")
+    fresh()
+    s = start_app(2, extra_env={"STAGE_MANAGER_ENGINE": ""})
+    if not check(s is not None and s["engine"]["kind"] == "corner", "engine crash: the Corner engine runs"):
+        stop_app()
+        return
+    two = by_title(s).get("Fixture 2")
+    if [t for t in stage_titles(s).get(two["home"], []) if t != "Fixture 2"]:
+        do("new", two["id"])
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2"]], "two stages")
+    do("switch", number_of(s, "Fixture 1"))
+
+    def two_parked():
+        wins, d = engine_windows()
+        return next((w for w in wins if w["id"] == two["id"] and is_parked(w["bounds"], d)), None)
+
+    if not check(wait_until(two_parked, 4, "Fixture 2 parked") is not None, "engine crash: Fixture 2 in the park corner"):
+        stop_app()
+        return
+    app = app_pid()
+    for g in guardian_pids(app):
+        os.kill(g, signal.SIGKILL)
+    os.kill(app, signal.SIGKILL)
+    wait_gone(app)
+    time.sleep(1.0)
+    check(two_parked() is not None, "engine crash: app and guardian killed, Fixture 2 still in the corner")
+    s = start_app(2, extra_env={"STAGE_MANAGER_ENGINE": "spaces"}, fresh_log=False)
+    check(s is not None and s["engine"]["kind"] == "spaces", "engine crash: the next launch runs the Spaces engine")
+
+    def out_of_corner():
+        wins, d = engine_windows()
+        return next((w for w in wins if w["id"] == two["id"] and not is_parked(w["bounds"], d)), None)
+
+    w = wait_until(out_of_corner, 6, "Fixture 2 out of the corner")
+    check(w is not None, f"engine crash: the Spaces launch brings Fixture 2 out of the park corner ({fmt(w['bounds']) if w else None}, staged {w.get('staged') if w else None})")
+    back = [ln for ln in log_text().splitlines() if "recovery: window brought back" in ln and 'reason="launch"' in ln]
+    check(bool(back), f"engine crash: the launch scan says so ({len(back)} lines)")
+    stop_app()
+    all_onscreen("engine: quit")
+
+
 def main():
     phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays", "screens"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
@@ -8168,7 +8376,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave}[p]()
+             "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

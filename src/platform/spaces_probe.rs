@@ -54,6 +54,7 @@
 //!   ([`super::spaces::engine`]) hides and shows the fixture's windows N times from a thread
 //!   that is not the main one (as the app's WM thread does), each step read back and checked
 //!   against the window list, then its bring-back; the engine's counts.
+//! - `launch-probe [--rounds N]`: the app's launch probe, N times, each verdict and its time.
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
 
@@ -208,6 +209,7 @@ pub fn run(args: &[String]) -> ExitCode {
         "cleanup" => Ok(cleanup(&sky, o.bundle.as_deref())),
         "space-op" => space_op(&sky, &o),
         "engine" => need_bundle().and_then(|b| engine_rounds(&sky, &b, &o)),
+        "launch-probe" => Ok(launch_probe(mtm, &o)),
         _ => Err(format!("unknown subcommand {cmd}")),
     };
     match result {
@@ -222,6 +224,13 @@ pub fn run(args: &[String]) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// The app's launch probe ([`super::spaces::probe`]) run `--rounds N` times in this process,
+/// each verdict with its time: what every launch decides by, without launching the app.
+fn launch_probe(mtm: MainThreadMarker, o: &Opts) -> Value {
+    let runs: Vec<Value> = (0..o.rounds).map(|_| json!(super::spaces::probe::run(mtm))).collect();
+    json!({ "ok": true, "runs": runs })
 }
 
 /// The Spaces engine driven as the app drives it, off the main thread (see the module docs).

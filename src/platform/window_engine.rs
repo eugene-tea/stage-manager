@@ -182,8 +182,8 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     let asked = Asked { config, opted_in: opted_in(), test: super::spaces::engine::from_env() };
     let probe = asked.probes().then(|| super::spaces::probe::run(mtm));
     match &probe {
-        Some(p) if p.ok => tracing::info!(ms = format!("{:.1}", p.ms), "window engine: launch probe passed: {}", p.reason),
-        Some(p) => tracing::warn!(ms = format!("{:.1}", p.ms), "window engine: launch probe failed: {}", p.reason),
+        Some(p) if p.ok => tracing::info!(ms = format!("{:.1}", p.ms), steps = p.steps, "window engine: launch probe passed: {}", p.reason),
+        Some(p) => tracing::warn!(ms = format!("{:.1}", p.ms), steps = p.steps, "window engine: launch probe failed: {}", p.reason),
         None => tracing::info!(config = config.name(), "window engine: launch probe not run"),
     }
     let choice = engine_choice::choose(asked, probe);

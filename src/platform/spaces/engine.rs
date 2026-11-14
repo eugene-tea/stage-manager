@@ -294,7 +294,12 @@ impl SpacesEngine {
             return true;
         }
         let why = format!("a window not where a Space call put it after a retry ({what}, window {id})");
-        tracing::error!(id, what, "spaces engine: {why}; the engine has failed");
+        let first = self.state().health.failed().is_none();
+        if first {
+            tracing::error!(id, what, "spaces engine: {why}; the engine has failed");
+        } else {
+            tracing::warn!(id, what, "spaces engine: {why} (the engine has failed already)");
+        }
         self.state().health.fail(why);
         false
     }

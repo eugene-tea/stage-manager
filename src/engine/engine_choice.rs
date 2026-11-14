@@ -42,6 +42,8 @@ pub struct ProbeVerdict {
     pub reason: String,
     /// The probe's time, start to end, in milliseconds.
     pub ms: f64,
+    /// Each step's milliseconds ("calls 2.1, desktops 0.3, panel 12.0, ..."), for the log.
+    pub steps: String,
 }
 
 /// What was asked of the launch, besides the probe.
@@ -157,11 +159,11 @@ mod tests {
     use super::*;
 
     fn passed() -> Option<ProbeVerdict> {
-        Some(ProbeVerdict { ok: true, reason: "a trial Space with an own window works".into(), ms: 12.0 })
+        Some(ProbeVerdict { ok: true, reason: "a trial Space with an own window works".into(), ms: 12.0, steps: String::new() })
     }
 
     fn failed() -> Option<ProbeVerdict> {
-        Some(ProbeVerdict { ok: false, reason: "the trial window stayed on its Desktop".into(), ms: 60.0 })
+        Some(ProbeVerdict { ok: false, reason: "the trial window stayed on its Desktop".into(), ms: 60.0, steps: String::new() })
     }
 
     #[test]

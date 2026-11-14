@@ -44,14 +44,30 @@ fn failing_step() -> Option<String> {
     std::env::var("STAGE_MANAGER_PROBE_FAIL").ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
+/// Each step's time, for the verdict ([`ProbeVerdict::steps`]).
+struct Clock {
+    last: Instant,
+    steps: Vec<String>,
+}
+
+impl Clock {
+    fn lap(&mut self, step: &str) {
+        let now = Instant::now();
+        self.steps.push(format!("{step} {:.1}", now.duration_since(self.last).as_secs_f64() * 1000.0));
+        self.last = now;
+    }
+}
+
 /// Runs the probe; the verdict says why not when it fails.
 pub fn run(mtm: MainThreadMarker) -> ProbeVerdict {
     let began = Instant::now();
-    let result = trial(mtm, failing_step().as_deref());
+    let mut clock = Clock { last: began, steps: Vec::new() };
+    let result = trial(mtm, failing_step().as_deref(), &mut clock);
     let ms = began.elapsed().as_secs_f64() * 1000.0;
+    let steps = clock.steps.join(", ");
     match result {
-        Ok(()) => ProbeVerdict { ok: true, reason: WORKS.into(), ms },
-        Err(reason) => ProbeVerdict { ok: false, reason, ms },
+        Ok(()) => ProbeVerdict { ok: true, reason: WORKS.into(), ms, steps },
+        Err(reason) => ProbeVerdict { ok: false, reason, ms, steps },
     }
 }
 
@@ -110,48 +126,62 @@ fn panel(mtm: MainThreadMarker) -> Retained<NSPanel> {
     panel
 }
 
-fn trial(mtm: MainThreadMarker, fail: Option<&str>) -> Result<(), String> {
+fn trial(mtm: MainThreadMarker, fail: Option<&str>, clock: &mut Clock) -> Result<(), String> {
     let sky = Sky::open()?;
     if let Some(why) = missing(&sky) {
         return Err(why);
     }
+    clock.lap("calls");
     let desktops: Vec<u64> = sky.displays().iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
     if desktops.is_empty() {
         return Err("the window server listed no Desktop".into());
     }
+    clock.lap("desktops");
     let panel = panel(mtm);
+    clock.lap("panel");
     panel.orderFrontRegardless();
+    // AppKit hands the order-in to the window server with its next transaction, at the run
+    // loop, which has not run yet at the launch: flushed now, or the window is on no Space
+    // (measured 11-14: on none after 40 ms unflushed; on its Desktop at once flushed).
+    objc2_quartz_core::CATransaction::flush();
     let id = u32::try_from(panel.windowNumber()).unwrap_or(0);
-    let outcome = if id == 0 { Err("the trial window has no window number".to_string()) } else { steps(&sky, id, &desktops, fail) };
+    clock.lap("order-in");
+    let outcome = if id == 0 { Err("the trial window has no window number".to_string()) } else { steps(&sky, id, &desktops, fail, clock) };
     panel.orderOut(None);
     panel.close();
+    clock.lap("close");
     outcome
 }
 
 /// The trial's steps on window `id`, the Space ended whatever happened after it was made.
-fn steps(sky: &Sky, id: u32, desktops: &[u64], fail: Option<&str>) -> Result<(), String> {
+fn steps(sky: &Sky, id: u32, desktops: &[u64], fail: Option<&str>, clock: &mut Clock) -> Result<(), String> {
     let on_desktop = |s: &[u64]| s.iter().any(|x| desktops.contains(x));
     let home = match wait_for(sky, id, on_desktop) {
         Ok(now) => now.into_iter().find(|x| desktops.contains(x)).unwrap_or(0),
         Err(now) => return Err(format!("the trial window is on no Desktop (listed on {now:?})")),
     };
+    clock.lap("listed");
     let space = match sky.create(Route::Classic, false) {
         Ok(0) => return Err("the window server made no trial Space".into()),
         Ok(space) => space,
         Err(e) => return Err(format!("no trial Space: {e}")),
     };
+    clock.lap("space");
     let result = (|| {
         if fail != Some("hide") {
             sky.add_remove(Route::Bridged, space, &[id]).map_err(|e| format!("the hide could not be sent: {e}"))?;
         }
         wait_for(sky, id, |s| s == [space]).map_err(|now| format!("the trial window did not go into the trial Space (listed on {now:?})"))?;
+        clock.lap("hide");
         if fail != Some("show") {
             sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK).map_err(|e| format!("the show could not be sent: {e}"))?;
         }
         wait_for(sky, id, |s| s.contains(&home) && !s.contains(&space))
             .map_err(|now| format!("the trial window did not come back onto its Desktop (listed on {now:?})"))?;
+        clock.lap("show");
         Ok(())
     })();
     let _ = sky.destroy(Route::Classic, space);
+    clock.lap("end");
     result
 }
