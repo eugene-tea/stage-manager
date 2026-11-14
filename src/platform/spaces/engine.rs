@@ -261,7 +261,11 @@ impl SpacesEngine {
             self.state().held.insert(id, Held { space, home });
             return true;
         }
-        if let Err(e) = sky.add_remove(Route::Bridged, space, &[id]) {
+        // Off its Desktop; a window already in another stage's Space (moved between two
+        // hidden stages) out of that one too.
+        let ours = self.ours();
+        let sent = if out_of(&now, &ours) { sky.add_remove(Route::Bridged, space, &[id]) } else { sky.add_remove_from(Route::Bridged, space, &[id], ALL_SPACES_MASK) };
+        if let Err(e) = sent {
             tracing::warn!(id, space, "spaces engine: the hide could not be sent: {e}");
         }
         let (ok, after) = self.read_back(sky, id, |s| hidden_in(s, space));

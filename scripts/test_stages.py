@@ -719,7 +719,8 @@ def phase_safety():
     time.sleep(0.5)
     wins, d = fixture_windows()
     if SPACES:
-        check(bool(wins) and all(w["onscreen"] and not tucked(w, d) for w in wins), "no window was left hidden: the window server showed them again when the app died")
+        # (A fixture's own never-shown windows are listed off screen: only a stage Space counts.)
+        check(bool(wins) and not any(tucked(w, d) for w in wins), "no window was left hidden: the window server showed them again when the app died")
         start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
         check("recovery: window brought back" not in log_text(), "the launch had nothing to bring back")
     else:
@@ -7478,6 +7479,14 @@ def phase_enhanced():
         between = between_looks(out.get("samples", []), frames, out["display"])
         check(not between, f"switch to stage {n}: no fixture window listed between the park corner and its frame ({between[:3]})")
         # The switch's batch ends at its landing: the flag is on again by then.
+        if SPACES:
+            # A hide asks the app nothing and a show finds the window at its frame: no move
+            # is made through Accessibility, so the flag is never touched.
+            time.sleep(0.5)
+            new = enhanced_lines(flag)[before:]
+            check(new == [], f"switch to stage {n}: no move asked of the app, its flag untouched ({new})")
+            consistent(f"after the switch to stage {n}")
+            continue
         wait_until(lambda: enhanced_lines(flag)[before:][-1:] == ["on"], 4, "the fixture's flag on again")
         new = enhanced_lines(flag)[before:]
         check(new == ["off", "on"], f"switch to stage {n}: the flag went off and on once, around both windows' moves ({new})")
@@ -7485,7 +7494,10 @@ def phase_enhanced():
     lines = enhanced_lines(flag)
     check(lines[-1:] == ["on"], f"the fixture's flag is on after the switches ({lines[-3:]})")
     said = log_text().count("enhanced UI on: moves done with it off for a moment")
-    check(said == 1, f"the log says it once ({said})")
+    if SPACES:
+        check(said == 0, f"the log never says the flag was turned off ({said})")
+    else:
+        check(said == 1, f"the log says it once ({said})")
     stop_app()
     all_onscreen("enhanced quit")
     lines = enhanced_lines(flag)
