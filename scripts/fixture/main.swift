@@ -78,6 +78,15 @@
 //   --color-file F | FIXTURE_COLOR_FILE=F  every window takes the colour "rrggbb" written in F,
 //                                      read again every 200 ms (scripts/measure-apple-card-glass.py
 //                                      turns one card white, black and grey in place)
+//   --frame-clock F | FIXTURE_FRAME_CLOCK=F  also open "<title> Clock", a 480x270 window at the
+//                                      visible frame's top right, floating (always in front),
+//                                      that draws a new colour on every display refresh (a
+//                                      CADisplayLink, as a video call draws) and counts the
+//                                      refreshes it missed: every 0.25 s a line "<unix time>
+//                                      <frames> <missed> <longest gap ms since the last line>
+//                                      <frame ms>" is appended to F (scripts/measure_stages.py's
+//                                      call stand-in, round sm-measure). Give it its own bundle
+//                                      ID, off STAGE_MANAGER_ONLY, so it is never managed
 //   --enhanced-ui | FIXTURE_ENHANCED_UI=1  the app's AXEnhancedUserInterface starts on (as an
 //                                      assistive client leaves Chrome's: the owner's 11-03); it is
 //                                      readable and settable through Accessibility, and while
@@ -138,6 +147,7 @@ struct Options {
     var colorFile: String? = nil
     var enhancedUI = false
     var enhancedUIFile: String? = nil
+    var frameClock: String? = nil
 
     static func parseColors(_ text: String) -> [NSColor] {
         text.split(separator: ",").compactMap { part in
@@ -189,6 +199,7 @@ struct Options {
         if let f = env["FIXTURE_COLOR_FILE"], !f.isEmpty { o.colorFile = f }
         if env["FIXTURE_ENHANCED_UI"] == "1" { o.enhancedUI = true }
         if let f = env["FIXTURE_ENHANCED_UI_FILE"], !f.isEmpty { o.enhancedUIFile = f }
+        if let f = env["FIXTURE_FRAME_CLOCK"], !f.isEmpty { o.frameClock = f }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -216,6 +227,7 @@ struct Options {
             case "--color-file": if let f = args.next() { o.colorFile = f }
             case "--enhanced-ui": o.enhancedUI = true
             case "--enhanced-ui-file": if let f = args.next() { o.enhancedUIFile = f }
+            case "--frame-clock": if let f = args.next() { o.frameClock = f }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -262,6 +274,63 @@ final class LateRaiseWindow: NSWindow {
 /// A panel Accessibility reports as a dialog (`AXDialog`), as an app's alert or prompt is.
 final class DialogPanel: NSPanel {
     override func accessibilitySubrole() -> NSAccessibility.Subrole? { .dialog }
+}
+
+/// `--frame-clock`: a view that draws a new colour on every display refresh and counts the
+/// refreshes its callback missed (a gap of more than one frame since the last callback, in
+/// whole frames), appending its counts to a file every 0.25 s.
+final class FrameClockView: NSView {
+    let path: String
+    var link: CADisplayLink?
+    var frames = 0
+    var missed = 0
+    var last: CFTimeInterval = 0
+    var longest: CFTimeInterval = 0
+    var written: CFTimeInterval = 0
+    var step = 0
+
+    init(frame: NSRect, path: String) {
+        self.path = path
+        super.init(frame: frame)
+        wantsLayer = true
+        FileManager.default.createFile(atPath: path, contents: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, link == nil else { return }
+        let l = displayLink(target: self, selector: #selector(tick(_:)))
+        l.add(to: .main, forMode: .common)
+        link = l
+    }
+
+    @objc func tick(_ l: CADisplayLink) {
+        let frame = l.duration
+        if last > 0 {
+            let gap = l.timestamp - last
+            longest = max(longest, gap)
+            if frame > 0 {
+                let lost = Int((gap / frame).rounded()) - 1
+                if lost > 0 { missed += lost }
+            }
+        }
+        last = l.timestamp
+        frames += 1
+        step += 1
+        layer?.backgroundColor = NSColor(hue: CGFloat(step % 240) / 240, saturation: 0.6, brightness: 0.8, alpha: 1).cgColor
+        if l.timestamp - written >= 0.25 {
+            written = l.timestamp
+            let line = String(format: "%.3f %d %d %.2f %.2f\n", Date().timeIntervalSince1970, frames, missed, longest * 1000, frame * 1000)
+            longest = 0
+            if let h = FileHandle(forWritingAtPath: path) {
+                h.seekToEndOfFile()
+                h.write(line.data(using: .utf8)!)
+                try? h.close()
+            }
+        }
+    }
 }
 
 final class LabelView: NSView {
@@ -467,6 +536,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if options.stray { makeStray() }
         if let path = options.colorFile { watchColor(path) }
+        if let path = options.frameClock { openFrameClock(path, area: area) }
         if let fixture = NSApp as? FixtureApplication {
             fixture.enhancedUIFile = options.enhancedUIFile
             fixture.enhancedUI = options.enhancedUI
@@ -485,6 +555,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !options.background {
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// `--frame-clock`: the call stand-in's window (see [`FrameClockView`]).
+    func openFrameClock(_ path: String, area: NSRect) {
+        let w = NSWindow(
+            contentRect: NSRect(x: area.maxX - 500, y: area.maxY - 290, width: 480, height: 270),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        w.title = "\(options.title) Clock"
+        w.isReleasedWhenClosed = false
+        w.level = .floating
+        w.contentView = FrameClockView(frame: .zero, path: path)
+        w.orderFrontRegardless()
+        windows.append(w)
     }
 
     /// `--color-file`: every window takes the colour written in `path` ("rrggbb"), read every

@@ -111,6 +111,36 @@ menu's Quit (`ctl debug-menu-quit`) installs 99.0.0 without reopening it. It man
 and refuses to run beside a running Stage Manager; run it while at the Mac (an automatic
 install goes by itself after 120 s with no input).
 
+### Measuring cost
+
+`scripts/measure.sh` measures what the app costs, the same way each time, under each window
+engine and with the app not running (the floor), three runs each by default, and prints the
+median and spread of every number (`scripts/measure_stages.py` says what each scenario reads):
+
+```sh
+scripts/measure.sh                        # rest sample switch call launch; off, corner, spaces
+scripts/measure.sh rest sample            # CPU, wakeups and POWER at rest; where the time goes
+RUNS=1 ENGINES="corner spaces" scripts/measure.sh switch
+scripts/measure.sh --summary /tmp/sm-measure.XXXXXX   # the table again
+```
+
+- **rest**: four stages of two fixture windows, a minute untouched: the app's CPU time over
+  wall time and wakeups (`proc_pid_rusage`), `top`'s POWER, the window server's and replayd's
+  CPU. **sample**: the next minute under `sample`, split by what started the work (a timer
+  and the function it calls, an Accessibility notice, Core Animation's commit, a capture
+  reply) and by its kind.
+- **switch**: card clicks and Dock clicks timed from the command to the last incoming window
+  at its frame (`probe-spaces settle` reads the windows every ms), then again unsampled for
+  the CPU of each switch.
+- **call**: a call stand-in (the fixture's `--frame-clock`: a floating window that draws on
+  every display refresh and counts the refreshes it missed) at rest and while other stages
+  are activated.
+- **launch**: how long a newly opened app's window shows over the stage being left.
+
+Captures are on in every run, as installed; sign with a Developer ID (`CERT_NAME`) so the dev
+copy keeps its Screen Recording grant. The numbers go to `measure.jsonl` in `OUT` (a new
+`/tmp/sm-measure.*` by default), with each `sample` file; neither belongs in the repo.
+
 ### The fixture app
 
 `make fixture` builds `target/SM Fixture.app` (`dev.eugene.stagemanager.fixture`): numbered
