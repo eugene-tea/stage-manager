@@ -1062,7 +1062,7 @@ impl Model {
     /// window of a card of several, [`Model::move_window_into_active_at`]), on that screen. The
     /// windows join the active stage of the Desktop `to` shows, in front, the first focused,
     /// the front one with its top-left corner at `top_left`; the others keep their places
-    /// relative to the visible frame ([`Display::adopt`]). They are that screen's from now on;
+    /// relative to the visible frame ([`Model::carried`]). They are that screen's from now on;
     /// the stage they leave goes when emptied, its card with it, and nothing else changes on
     /// the screen they left (Apple's, 11-09: a card dragged from the 5K's strip onto the
     /// laptop opened its window there). Windows of the card still awaited after a restart stay
@@ -1105,13 +1105,14 @@ impl Model {
         }
         let target = self.current_space(to);
         let (there, here) = (*self.display(to), *self.display(from));
+        let engine = self.options.engine;
         for &id in &moving {
             let mut group = vec![id];
             group.extend(self.children_of(id));
             for g in &group {
                 if let Some(w) = self.windows.get_mut(g) {
-                    w.restore = there.adopt(w.restore, &here);
-                    w.original = w.original.map(|o| there.adopt(o, &here));
+                    w.restore = Self::carried(engine, w.restore, &there, &here);
+                    w.original = w.original.map(|o| Self::carried(engine, o, &there, &here));
                     w.meta.display = to;
                 }
             }
@@ -1914,7 +1915,7 @@ impl Model {
     /// the main display's own cards (past the capacity they are hidden). An empty front stage
     /// on the main display gives way instead of taking a card. Its other Desktops stay
     /// Desktops, of the main display now, recognized by their windows when they show. Every
-    /// restore frame of its windows is carried onto the main display ([`Display::adopt`]).
+    /// restore frame of its windows is carried onto the main display ([`Model::carried`]).
     /// The windows of the Desktop it showed are noted as adopted (`adopted`): macOS may put
     /// them on another Desktop of the main display and show that one (11-05 16:27: the 5K
     /// slid to its second Desktop), where their stages come whole, by the same rule
@@ -1933,11 +1934,12 @@ impl Model {
                 s.display = main.id;
             }
         }
+        let engine = self.options.engine;
         for w in self.windows.values_mut() {
             if w.meta.display == gone.id {
                 w.meta.display = main.id;
-                w.restore = main.adopt(w.restore, &gone);
-                w.original = w.original.map(|o| main.adopt(o, &gone));
+                w.restore = Self::carried(engine, w.restore, &main, &gone);
+                w.original = w.original.map(|o| Self::carried(engine, o, &main, &gone));
             }
         }
         let Some(shown) = shown.filter(|s| *s != main_space) else { return };
@@ -2063,7 +2065,7 @@ impl Model {
     /// it had there, and a parked one at the laptop's old park corner): listed in that
     /// display's park zone, or as a piece at its corner ([`Display::hides`]), it is a card,
     /// parked there with its restore frame carried over
-    /// ([`Display::adopt`]), whether the model had it parked or shown (a card of that screen
+    /// ([`Model::carried`]), whether the model had it parked or shown (a card of that screen
     /// before the close, shown on the other since); listed outside, it shows at that frame, the user's (its
     /// restore frame), whether the model had it parked or not, and is never moved. Only a
     /// shown window's stage comes in front: a card put back brings nothing forward, and
@@ -2105,6 +2107,7 @@ impl Model {
         for (to, ids) in by_target {
             let target = self.current_space(to);
             let display = *self.display(to);
+            let engine = self.options.engine;
             for &id in &ids {
                 let from = *self.display(self.windows[&id].meta.display);
                 let at_corner = frames.get(&id).is_some_and(|f| self.listed_out_of_sight(to, *f));
@@ -2116,9 +2119,9 @@ impl Model {
                         // A shown one put back at the corner is a card from now on: its
                         // restore frame is carried over as a parked one's.
                         if w.parked || at_corner {
-                            w.restore = display.adopt(w.restore, &from);
+                            w.restore = Self::carried(engine, w.restore, &display, &from);
                         }
-                        w.original = w.original.map(|o| display.adopt(o, &from));
+                        w.original = w.original.map(|o| Self::carried(engine, o, &display, &from));
                     }
                 }
                 let Some(&f) = frames.get(&id) else { continue };

@@ -11,14 +11,14 @@
 //!   restore, a Desktop change, a display change. The Corner engine reads it off the frame
 //!   (its park zone).
 //! - **May a window be brought back here?** ([`Model::no_restore`],
-//!   [`Model::within_reach`], [`Model::lands_hidden`]): asked of a frame the model would
+//!   [`Model::within_reach`], [`Model::carried`], [`Model::lands_hidden`]): asked of a frame the model would
 //!   record or restore. The Corner engine keeps restore frames out of its park zone; an
 //!   engine that hides without moving has no such place.
 //!
 //! And one answer the engine gives about a window the model hid: where it left it
 //! ([`Model::frame_left`]).
 
-use super::{DisplayId, Model, WindowId, WindowMeta, WindowState};
+use super::{Display, DisplayId, Model, WindowId, WindowMeta, WindowState};
 use crate::engine::corner;
 use crate::engine::geometry::Rect;
 use crate::engine::recovery::EngineKind;
@@ -77,6 +77,18 @@ impl Model {
     pub(crate) fn within_reach(&self, display: DisplayId, frame: Rect) -> Rect {
         match self.options.engine {
             EngineKind::Corner => corner::within_reach(self.display(display), frame),
+        }
+    }
+
+    /// `frame`, a window's frame on display `from`, carried onto display `to`
+    /// ([`Display::carry`]) and brought within reach there as `engine` has it
+    /// ([`Model::within_reach`]). Where a window of a display removed (the lid closed), or
+    /// moved to another display, is remembered until it is seen there. Not a method: asked
+    /// while a window is being changed, with the engine and the displays copied out first.
+    pub(crate) fn carried(engine: EngineKind, frame: Rect, to: &Display, from: &Display) -> Rect {
+        let moved = to.carry(frame, from);
+        match engine {
+            EngineKind::Corner => corner::within_reach(to, moved),
         }
     }
 

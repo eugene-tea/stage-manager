@@ -176,12 +176,10 @@ impl Display {
     }
 
     /// `frame`, a window's frame on display `from`, carried onto this display: at the same
-    /// place relative to the visible frame's top-left corner, then within reach
-    /// ([`Display::reach`]). Where a window of a display removed (the lid closed) is
-    /// remembered until it is seen on this display.
-    pub fn adopt(&self, frame: Rect, from: &Display) -> Rect {
-        let moved = frame.translate(self.visible.x - from.visible.x, self.visible.y - from.visible.y);
-        self.reach(moved)
+    /// place relative to the visible frame's top-left corner. Geometry only; the model brings
+    /// it within reach the engine's way ([`Model::carried`]).
+    pub fn carry(&self, frame: Rect, from: &Display) -> Rect {
+        frame.translate(self.visible.x - from.visible.x, self.visible.y - from.visible.y)
     }
 
     /// True when `key` is this display's known identity.
