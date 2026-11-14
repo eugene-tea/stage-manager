@@ -56,6 +56,67 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   (`engine::stale_handle`). Commands go main → WM by channel plus `CFRunLoopPerformBlock`;
   snapshots WM → main via GCD.
 
+## Window engines (1.9, in progress)
+
+How a stage's windows are hidden, shown and animated is one strategy with two
+implementations. The **Corner engine** is today's: Accessibility moves to the park corner,
+pictures for the motion. The **Spaces engine** puts each inactive stage in a hidden Space of
+the window server's own. Everything else is written once and never asks which engine runs.
+The seam lands first with the Corner engine only and no change in behaviour; the Spaces
+engine follows a spike (PLAN, 1.9).
+
+```mermaid
+flowchart TD
+    M["engine::Model (pure)<br/>which stage, which windows hide or show"]
+    C["Controller (shared)<br/>observer · rules · strip · thumbnails · state.json · guardian protocol"]
+    T{{"trait WindowEngine<br/>hide · show · place_new · is_hidden · animate · bring_all_back · health"}}
+    K["Corner engine<br/>AX moves to the park corner, slivers, corner patch,<br/>full-size pictures for the motion"]
+    S["Spaces engine<br/>a hidden Space per stage per Desktop,<br/>the Space transform for the motion"]
+    M -- "Actions: Hide, Show, SetFrame, Raise, Focus" --> C
+    C -- "asks, never which one runs" --> T
+    T --> K
+    T --> S
+    S -. "falls back" .-> K
+```
+
+A switch in each engine:
+
+```mermaid
+sequenceDiagram
+    participant SM as Stage Manager
+    participant WS as Window server
+    Note over SM,WS: Corner engine
+    SM->>SM: pictures of the shown windows, captured ahead (every 2 s)
+    loop each outgoing window
+        SM->>WS: AX set position (park corner)
+        WS-->>WS: clamps it, a sliver stays (corner patch over it)
+    end
+    SM->>SM: pictures animate above every window
+    loop each incoming window
+        SM->>WS: AX set frame (unpark)
+    end
+    SM->>SM: pictures fade over the windows
+    Note over SM,WS: Spaces engine
+    SM->>WS: hide the outgoing stage's Space, show the incoming one
+    SM->>WS: Space transform for the motion (live windows)
+```
+
+Which engine runs is decided on every Mac at every launch, never by a list of macOS
+versions:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Probe
+    Probe --> Spaces: symbols resolve and a trial Space with an own window works
+    Probe --> Corner: probe fails, or the config says accessibility
+    Spaces --> Spaces: checked every second
+    Spaces --> BringAllBack: a window not where the Space call put it
+    BringAllBack --> Corner: for the rest of the run
+```
+
+Quit, a crash (the guardian), a logout and a stand-down use the same `bring_all_back`
+whichever engine runs. Each choice and fallback is logged with its reason.
+
 ## macOS settings drive behavior
 
 Apple's settings (`com.apple.WindowManager`, re-read on change, never written) are the
