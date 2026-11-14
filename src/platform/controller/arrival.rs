@@ -1119,11 +1119,11 @@ impl Controller {
         if !self.verify_stands() {
             return;
         }
-        let screens = self.screens_of_moves();
+        let (screens, engine) = (self.screens_of_moves(), self.engine.clone());
         let Some(v) = self.verify.as_mut() else { return };
         let list = windows::list_windows();
         let listed = |id: u32| list.iter().find(|w| w.id == id);
-        let seen: Vec<Seen> = v.moves.iter().map(|e| judge(e, listed(e.id), screens[&e.id].frame, |r| screens[&e.id].parks(r))).collect();
+        let seen: Vec<Seen> = v.moves.iter().map(|e| judge(e, listed(e.id), screens[&e.id].frame, |r| engine.is_hidden(&screens[&e.id], r))).collect();
         let elapsed = ms(v.sent, now);
         let over = now.saturating_duration_since(v.sent) >= VERIFY_FOR;
         if seen.contains(&Seen::Sliding) {
@@ -1220,7 +1220,7 @@ impl Controller {
         if !self.verify_stands() {
             return;
         }
-        let screens = self.screens_of_moves();
+        let (screens, engine) = (self.screens_of_moves(), self.engine.clone());
         let Some(v) = self.verify.as_mut() else { return };
         let Some((arrived, until)) = v.tail else { return };
         let over = now >= until;
@@ -1230,7 +1230,7 @@ impl Controller {
         let ceiling = over && tail_past_ceiling(v.over_ticks, now.saturating_duration_since(*v.over_since.get_or_insert(now)));
         let listed = |id: u32| list.iter().find(|w| w.id == id);
         let seen: Vec<Option<Seen>> =
-            v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), screens[&e.id].frame, |r| screens[&e.id].parks(r)))).collect();
+            v.moves.iter().map(|e| listed(e.id).map(|w| judge(e, Some(w), screens[&e.id].frame, |r| engine.is_hidden(&screens[&e.id], r)))).collect();
         v.rounds += 1;
         v.next = now + VERIFY_EVERY;
         let due = match tail_step(&v.moves, &seen, over) {
@@ -1464,7 +1464,7 @@ impl Controller {
         };
         m.dock_gates(pid)?;
         let displays = m.displays().to_vec();
-        let visible_here = dock::visible_window_of(list, pid, |r| displays.iter().any(|d| d.parks(r)));
+        let visible_here = dock::visible_window_of(list, pid, |r| displays.iter().any(|d| self.engine.is_hidden(d, r)));
         let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
         // One bounded round with the app (`press_round`): hidden, active, its focused (else
         // main) window; it stops at the first failure and within PRESS_ROUND_CAP.

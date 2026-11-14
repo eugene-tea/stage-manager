@@ -564,17 +564,17 @@ fn resolve_cover(
 }
 
 /// The windows of `parked` (the model's parked windows) that window server list `list` shows
-/// in the park zone of the display `frame` (visible frame `visible`, park `corner`): parked in
-/// fact. One the model has parked but the window server lists elsewhere (a park that did not
+/// hidden (`hidden`: the engine's test of a listed frame on the display,
+/// [`WindowEngine::is_hidden`]): parked in fact. One the model has parked but the window server lists elsewhere (a park that did not
 /// hold, an app that put its window back) shows there: never a sliver of the corner patch nor
 /// of a switch's cover (round 8L6: on the owner's Mac one listed at 533,184 1741x1173 grew both
 /// to 473,124 2087x1316 for minutes), and a window that stays shown through a switch.
-fn parked_in_zone(list: &[windows::CgWindow], parked: impl IntoIterator<Item = u32>, frame: Rect, visible: Rect, corner: Corner) -> HashSet<u32> {
+fn parked_in_zone(list: &[windows::CgWindow], parked: impl IntoIterator<Item = u32>, hidden: impl Fn(Rect) -> bool) -> HashSet<u32> {
     let parked: HashSet<u32> = parked.into_iter().collect();
     let (inside, elsewhere): (Vec<_>, Vec<_>) = list
         .iter()
         .filter(|w| parked.contains(&w.id))
-        .partition(|w| crate::engine::park::is_parked_in_at(w.bounds, frame, visible, corner));
+        .partition(|w| hidden(w.bounds));
     note_parked_elsewhere(&elsewhere);
     inside.iter().map(|w| w.id).collect()
 }
@@ -2077,7 +2077,7 @@ impl Controller {
             self.unrestored.iter().map(|(id, u)| (*id, u.in_zone)),
         );
         let parked_elsewhere = parked_on_other_desktops(m.windows().filter(|w| w.parked).map(|w| (w.meta.id.0, w.space, m.display_of_space(w.space))), here, d.id);
-        let parked = parked_in_zone(list, model_parked.iter().copied(), d.frame, d.visible, d.corner);
+        let parked = parked_in_zone(list, model_parked.iter().copied(), |b| self.engine.is_hidden(&d, b));
         // Show Desktop pushes the parked windows partly into view (round
         // show-desktop-patch, part 2): the patch covers what of them shows, until they
         // are back at their park frames.
@@ -2777,7 +2777,7 @@ impl Controller {
             let model_parked = self.model.as_ref().and_then(|m| m.window(WindowId(id))).map(|w| w.parked);
             let listed = list.iter().find(|w| w.id == id).map(|w| {
                 let zone = match model_parked {
-                    Some(_) => self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some_and(|x| m.display(x.meta.display).parks(w.bounds))),
+                    Some(_) => self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some_and(|x| m.listed_hidden(x.meta.display, w.bounds))),
                     // A window the model forgot: the safety paths' test, which honours the
                     // other displays (it may sit on one now) and knows it is ours (L2).
                     None => recovery::is_stranded(w.bounds, scan.get_or_insert_with(safety::scan_displays), Known::Registered),
@@ -2988,7 +2988,7 @@ impl Controller {
             let at = listed.iter().find(|w| w.id == id);
             let in_zone = at.map(|w| {
                 displays.parks(w.bounds)
-                    || self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some_and(|x| m.display(x.meta.display).parks(w.bounds)))
+                    || self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some_and(|x| m.listed_hidden(x.meta.display, w.bounds)))
             });
             if left_after_unpark(in_zone) {
                 continue;
@@ -3206,7 +3206,6 @@ impl Controller {
         list: &[windows::CgWindow],
     ) -> Result<SwitchCover, Refused> {
         use crate::engine::corner_patch::{CoverFacts, switch_cover};
-        use crate::engine::park::is_parked_in_at;
         if arriving.is_empty() {
             return Err("nothing arrives".into());
         }
@@ -3217,9 +3216,9 @@ impl Controller {
         let own = std::process::id() as i32;
         // Parked where the window server lists them in the park zone; one the model has parked
         // listed elsewhere shows there and stays shown through the switch (8L6).
-        let parked = parked_in_zone(list, m.windows().filter(|w| w.parked).map(|w| w.meta.id.0), display.frame, display.visible, display.corner);
+        let in_zone = |b: Rect| self.engine.is_hidden(display, b);
+        let parked = parked_in_zone(list, m.windows().filter(|w| w.parked).map(|w| w.meta.id.0), in_zone);
         let normal = |w: &&windows::CgWindow| w.layer == 0 && w.alpha > 0.0 && w.pid != own;
-        let in_zone = |b: Rect| is_parked_in_at(b, display.frame, display.visible, display.corner);
         let zone: Vec<&windows::CgWindow> = list
             .iter()
             .filter(normal)
@@ -5816,7 +5815,7 @@ impl Controller {
             if ws.meta.role != WindowRole::Standard {
                 continue;
             }
-            if ws.parked && m.display(ws.meta.display).parks(w.bounds) {
+            if ws.parked && m.listed_hidden(ws.meta.display, w.bounds) {
                 continue;
             }
             // A parked one in another screen's park zone is that screen's (macOS put it
@@ -8473,7 +8472,7 @@ mod tests {
             listed(101, 784, Rect::new(533.0, 184.0, 1741.0, 1173.0)),  // parked in the model's eyes
             listed(109, 746, Rect::new(263.0, 43.0, 2208.0, 1271.0)),   // shown, not parked
         ];
-        let parked = parked_in_zone(&list, [96, 115, 101], display, visible, Corner::BottomRight);
+        let parked = parked_in_zone(&list, [96, 115, 101], |b| crate::engine::park::is_parked_in_at(b, display, visible, Corner::BottomRight));
         assert_eq!(parked, [96, 115].into());
         // The patch's rectangle from those: the corner's, never the screen's.
         let slivers: Vec<Rect> = list.iter().filter(|w| parked.contains(&w.id)).map(|w| w.bounds).collect();
