@@ -24,7 +24,47 @@ UX-SPEC, "Known gaps".
 
 ## 1.9: closer to Apple's feel
 
-- **A newly opened app's stage comes as its window shows.** After 1.8.5's fixes (the AX ask
+- **First: two window engines behind one seam.** Internal: users see the same app. A stage
+  switch goes through the window server's own Spaces where they work (the Spaces engine) and
+  through today's Accessibility corner park where they don't (the Corner engine). Emcee
+  (1.1.1) loads SkyLight and WindowManagement and calls their bridged Space operations
+  (create, destroy, hide, show, add windows, transform, absolute level:
+  `SLSBridgedSpace…Operation`), plus `SLSCopySpacesForWindows` and
+  `SLSRegisterConnectionNotifyProc`, with no SIP change. A stage as a hidden Space swaps in
+  one window-server step (Apple's clean swap), places a new window in its stage in one call,
+  and, if the transform scales live windows, animates without full-size pictures. About a
+  quarter of the source (27k of 113k lines: the corner patch, picture motion, park and
+  slivers, the park side of safety) moves into the Corner engine and stops running under
+  Spaces.
+  - **The seam (S1, Corner only, no behaviour change; can ride along in 1.8.x):** one
+    `WindowEngine` trait (hide, show, place a new window, is it hidden, animate, bring
+    everything back, health) with exactly two implementations. `Action::Park { frame }`
+    becomes `Hide`, unparks `Show`; the model's park-zone tests go through `is_hidden`.
+    The model, controller, strip, rules, thumbnails, `state.json` and the guardian protocol
+    are shared and never ask which engine runs. Done when `make check`, the scenario runner
+    and the live suite give today's results and logs.
+  - **Spike (S0, a branch, beside S1):** `stage-manager probe-spaces`, fixture windows only.
+    Another app's window into our Space, hidden and shown, no SIP change (no: Corner only);
+    hidden windows after a kill -9; the transform on a live window at 120 Hz; a new window
+    placed before it first shows; Mission Control, Desktops, full screen, ⌘Tab, a Dock click
+    on a hidden window; Apple's Stage Manager turned on meanwhile; switch time and CPU
+    against Corner. Go or no-go from the numbers.
+  - **Then:** tests on both (a fake of each engine in `testkit`, the scenario runner over
+    both, `test-stages.sh --engine`; nuance cases per engine: the park zone, slivers,
+    patch and pictures; Space cleanup, a kill -9, the probe, a fallback mid-run); the Spaces
+    engine (calls loaded at run time, a Space per stage per screen and Desktop, the
+    guardian's bring-back); live motion through the transform if the spike holds, else the
+    pictures through the same `animate`; probe and fallback; measure (CPU at rest, switch
+    time, a new app's overlap, Energy Impact, a call's dropped frames) into UX-SPEC.
+  - **Which engine runs:** a probe at every launch (symbols resolve, a trial Space with our
+    own window works), the reason logged and in `ctl state`. A check that fails while running
+    (a window not where the Space call put it) brings every window back and runs Corner for
+    the rest of the run; the next launch probes again. No list of checked macOS versions,
+    so nobody has to check each macOS update before users get it. `[windows] engine =
+    "auto"` (or `"accessibility"`) as a way out, listed under troubleshooting.
+  - Quit, a crash, a logout and a stand-down use the same bring-back, whichever engine runs.
+- **A newly opened app's stage comes as its window shows** (Corner engine; worth doing only
+  if the Spaces engine does not ship or S6 shows it still matters). After 1.8.5's fixes (the AX ask
   of a just-opened app every 40 ms, a new window looked at every fast tick), the old stage
   still starts to leave 60 to 170 ms after the window is found, and the window sits over it
   meanwhile (Grok Bot, 11-13 09:54); Apple's swaps cleanly (its Stage Manager is in the
@@ -67,33 +107,6 @@ UX-SPEC, "Known gaps".
     numbers in UX-SPEC.
 
 ## 2.0: new features
-
-- **First: the window server's own Spaces where they work, ours where not.** Emcee (1.1.1)
-  loads SkyLight and WindowManagement and calls their bridged Space operations: create,
-  destroy, hide, show, add windows, set a Space's transform and absolute level
-  (`SLSBridgedSpace…Operation`), plus `SLSCopySpacesForWindows` and
-  `SLSRegisterConnectionNotifyProc`; no SIP change, and a fallback when SkyLight is missing.
-  A stage as a hidden Space would swap stages in one window-server step (Apple's clean swap),
-  place a new window in its stage in one call, and, if the transform scales live windows,
-  animate without full-size pictures (less CPU, maybe no call stutter).
-  - **Spike first (a day or two, a branch):** on the current macOS, a Space made, a window
-    moved in, hidden and shown; the transform on a live window; every window back after a
-    forced quit (the guardian); Mission Control, Desktops and full screen beside it; switch
-    time, a new app's stage and CPU against ours. Decide from the numbers.
-  - **Shape if it holds:** one strategy interface for what differs (park and unpark a
-    stage's windows, place a new window in a stage, bring everything back, animate a
-    switch), with exactly two implementations: the Spaces one and today's Accessibility
-    one. Everything else (the engine, the strip, rules, saved stages, restore) is shared
-    and never asks which one runs. Chosen at launch by a probe (symbols present, a trial
-    Space works), the reason logged; a failure later falls back to Accessibility for the
-    run, every window brought back first.
-  - **Tests:** the general suite (engine, scenarios, the live suite's behaviour cases) runs
-    against both implementations; a smaller set covers each one's own nuances (the corner
-    park and its pictures; Space cleanup and crash recovery).
-  - Private calls change with macOS releases, so no list of checked macOS versions: the
-    probe and the checks while running decide on every Mac, every launch. A call missing or
-    misbehaving (a window not where the Space operation put it) falls back to Accessibility
-    by itself, logged; nobody has to check each macOS update before users get it.
 
 - **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
   Window, Quit App. A named stage shows its name on hover (R7).
