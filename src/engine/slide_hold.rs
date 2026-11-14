@@ -15,7 +15,7 @@
 //! - the window server's list read for it shows a slide ([`slide_listed`]): a known window of
 //!   another Desktop of the main display listed on screen (the Desktop sliding in), or this
 //!   Desktop's parked windows listed out of the park zone, all moved sideways by the same
-//!   distance ([`crate::engine::corner_patch::desktop_slides`]); or
+//!   distance ([`crate::engine::corner::corner_patch::desktop_slides`]); or
 //! - the activated app's focused window (asked of the app only when it has a window on a
 //!   Desktop not shown, [`asks_focus`]) is a window of another Desktop: the activation belongs
 //!   to that Desktop (12:00:29: no slide listed yet at the activation).
@@ -62,7 +62,7 @@ impl Wait {
 /// Whether the on-screen windows `listed` (window server id and bounds, layer 0 only) show a
 /// Desktop of the main display sliding: a known standard window of another of its Desktops
 /// on screen there (sticky ones are on every Desktop), or this Desktop's parked windows listed
-/// slid aside together ([`crate::engine::corner_patch::desktop_slides`]; parked windows not
+/// slid aside together ([`crate::engine::corner::corner_patch::desktop_slides`]; parked windows not
 /// listed at all are not counted: a hidden app's are not listed either).
 pub fn slide_listed(m: &Model, listed: &[(u32, Rect)]) -> bool {
     let main = *m.main_display();
@@ -82,7 +82,7 @@ pub fn slide_listed(m: &Model, listed: &[(u32, Rect)]) -> bool {
         .filter(|(id, _)| m.window(WindowId(*id)).is_some_and(|w| w.parked && w.space == here && !w.sticky))
         .map(|(_, b)| *b)
         .collect();
-    super::corner_patch::desktop_slides(0, &parked_here, false, main.frame, main.visible, main.corner)
+    super::corner::corner_patch::desktop_slides(0, &parked_here, false, main.frame, main.visible, main.corner)
 }
 
 /// Whether an activation of app `pid` asks the app for its focused window: only when the

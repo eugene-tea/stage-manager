@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use super::displays::ScreenKey;
 use super::geometry::Rect;
-use super::park::{Corner, ParkRequest, clamp_to_visible, is_corner_piece_in, is_parked_in_at, onto_visible, reach_in};
+use super::corner::park::{Corner, ParkRequest, clamp_to_visible, is_corner_piece_in, is_parked_in_at, onto_visible, reach_in};
 use super::recovery::EngineKind;
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
@@ -128,7 +128,7 @@ pub struct Display {
     /// The usable frame (no menu bar, no Dock).
     pub visible: Rect,
     /// Where its inactive stages park: the corner with no other display beyond it
-    /// ([`crate::engine::park::choose_corner`], chosen by the platform from the arrangement).
+    /// ([`crate::engine::corner::park::choose_corner`], chosen by the platform from the arrangement).
     pub corner: Corner,
 }
 

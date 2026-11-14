@@ -3,7 +3,7 @@
 //! hidden, shown and brought back (docs/ARCHITECTURE.md, "Window engines").
 //!
 //! One strategy, [`WindowEngine`], with exactly two implementations planned: the Corner
-//! engine ([`super::corner_engine::CornerEngine`], today's Accessibility park corner) and the
+//! engine ([`super::corner::engine::CornerEngine`], today's Accessibility park corner) and the
 //! Spaces engine (1.9, after its spike). Shared code asks the engine and never which one
 //! runs; what only one engine needs stays inside it.
 //!
@@ -119,7 +119,7 @@ pub trait WindowEngine: Send + Sync {
 static ENGINE: OnceLock<RwLock<Arc<dyn WindowEngine>>> = OnceLock::new();
 
 fn slot() -> &'static RwLock<Arc<dyn WindowEngine>> {
-    ENGINE.get_or_init(|| RwLock::new(Arc::new(super::corner_engine::CornerEngine)))
+    ENGINE.get_or_init(|| RwLock::new(Arc::new(super::corner::engine::CornerEngine)))
 }
 
 /// The engine this process runs: the Corner engine until another is installed.
@@ -134,7 +134,7 @@ pub fn current() -> Arc<dyn WindowEngine> {
 /// ([`crate::engine::recovery::ParkedFile::engine`]).
 pub fn of(kind: EngineKind) -> Arc<dyn WindowEngine> {
     match kind {
-        EngineKind::Corner => Arc::new(super::corner_engine::CornerEngine),
+        EngineKind::Corner => Arc::new(super::corner::engine::CornerEngine),
     }
 }
 

@@ -589,7 +589,7 @@ fn a_shown_window_found_parked_on_arrival_is_brought_back() {
     assert!(!mac.parked(1) && !mac.m.window(w(1)).expect("w1").parked);
     let size = mac.wins[&1].1.size();
     mac.wins.get_mut(&1).expect("window").1 =
-        macos_places(crate::engine::park::park_frame(size, FRAME));
+        macos_places(crate::engine::corner::park::park_frame(size, FRAME));
     assert!(mac.parked(1));
     let a = mac.arrive();
     assert!(a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } if *id == w(1))), "{a:?}");

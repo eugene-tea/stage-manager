@@ -40,11 +40,11 @@
 //! on screen (Desktops are recognized by the windows on screen, parked ones included) and in
 //! the park zone.
 //!
-//! [`Display`]: super::model::Display
+//! [`Display`]: crate::engine::model::Display
 
 use serde::{Deserialize, Serialize};
 
-use super::geometry::{Rect, Size};
+use crate::engine::geometry::{Rect, Size};
 
 /// How close (in points) a window's origin must be to the display's bottom-right corner to
 /// count as parked.
@@ -250,7 +250,7 @@ pub fn choose_corner(main: Rect, visible: Rect, others: &[Rect]) -> CornerChoice
 /// after a display change; it would also see a user's window pushed almost wholly off the
 /// right or bottom edge. So it is for windows we manage (the model's, which are all of
 /// managed apps, and the corner patch's) and for windows we registered or whose app has a
-/// window in `state.json` ([`super::recovery::Known`]); a scan of any other app's windows
+/// window in `state.json` ([`crate::engine::recovery::Known`]); a scan of any other app's windows
 /// leaves it out (the review of 6X, L3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slivers {

@@ -76,7 +76,7 @@ use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTime
 
 use super::{Ghost as CardGhost, Strip, with_strip_of};
 use crate::config::SnapshotShadow;
-use crate::engine::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
+use crate::engine::corner::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::{self, Capturer, Picture, Target};
 use crate::platform::windows;

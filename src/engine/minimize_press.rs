@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::sliver::{DockBar, Listed};
+use crate::engine::corner::sliver::{DockBar, Listed};
 
 /// The part of a window's frame, from its top-left corner, where its title-bar buttons may
 /// be (points): the standard title bar's at about 8–62 × 4–18, a unified toolbar's lower

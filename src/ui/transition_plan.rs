@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::engine::displays::ScreenKey;
     use crate::engine::model::{ActiveCard, Display, ModelOptions, Observation, StageId, StripOrder, WindowId};
-    use crate::engine::park::Corner;
+    use crate::engine::corner::park::Corner;
     use crate::engine::rules::{Decision, Placement, RuleAction};
     use crate::engine::testkit::{Desk, meta, model_with, w};
 

@@ -1194,7 +1194,7 @@ mod tests {
     #[test]
     fn a_stand_downs_retries_remember_whose_windows_are_left() {
         use crate::engine::geometry::Rect;
-        use crate::engine::park::Corner;
+        use crate::engine::corner::park::Corner;
         use crate::engine::persist::{SavedRole, SavedSpace, SavedStage, SavedWindow, StateFile};
         use crate::engine::recovery::{Known, ScanDisplays, is_stranded};
         use std::collections::BTreeSet;

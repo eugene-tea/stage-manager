@@ -1,4 +1,4 @@
-//! The desktop picture under the corner patch, drawn from its file ([`super::corner_patch`]):
+//! The desktop picture under the corner patch, drawn from its file ([`super::corner::corner_patch`]):
 //! which picture and frame macOS shows, where it lands on the screen, and which part of it
 //! the patch covers. Pure: the platform layer ([`crate::platform::wallpaper`]) reads the
 //! facts (NSWorkspace, the picture's ImageIO metadata, macOS's wallpaper settings file, the
@@ -297,7 +297,7 @@ pub const BLOCK: Size = Size::new(480.0, 560.0);
 
 /// The screen-local region to render for a patch at `patch` (screen-local): the [`BLOCK`] at
 /// the screen's corner the patch lies at (the bottom-right one, Apple's, unless another screen
-/// is beyond it: [`crate::engine::park::choose_corner`]) grown to hold the patch, on the
+/// is beyond it: [`crate::engine::corner::park::choose_corner`]) grown to hold the patch, on the
 /// screen, in whole points. With the block always at the bottom-right, a patch at the left
 /// side had the screen's whole width rendered.
 pub fn region(screen: Size, patch: Rect) -> Rect {
@@ -1264,7 +1264,7 @@ pub fn decide(i: &Inputs) -> Result<Decision, &'static str> {
 
 /// When the frame macOS shows may next change by the clock (seconds from `i.clock`), whatever
 /// the placement and whether [`decide`] would draw it: a still of the desktop standing for the
-/// corner ([`super::patch_still`]) is taken again then. `None` for a picture with one frame,
+/// corner ([`super::corner::patch_still`]) is taken again then. `None` for a picture with one frame,
 /// one whose schedule or style is not known, or anything that is not a picture file.
 pub fn frame_due(i: &Inputs) -> Option<f64> {
     let path = i.path?;

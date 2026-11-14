@@ -1,12 +1,12 @@
 //! The Corner engine: a hidden window sits in its display's park corner, moved there and back
 //! through Accessibility (today's way, and the fallback wherever the Spaces engine cannot
-//! run). Where it parks is [`crate::engine::corner`] and [`crate::engine::park`]; bringing
-//! everything back is [`super::safety`] (the registry, else the recovery scan of the park
+//! run). Where it parks is [`crate::engine::corner`] and [`crate::engine::corner::park`]; bringing
+//! everything back is [`crate::platform::safety`] (the registry, else the recovery scan of the park
 //! zones).
 
-use super::ax::{AxElement, AxResult};
-use super::safety::{self, Ours, Report, ScanScope};
-use super::window_engine::{EngineKind, Motion, ShowHow, WindowEngine};
+use crate::platform::ax::{AxElement, AxResult};
+use crate::platform::safety::{self, Ours, Report, ScanScope};
+use crate::platform::window_engine::{EngineKind, Motion, ShowHow, WindowEngine};
 use crate::ui::strip_model::Transition;
 use crate::engine::corner;
 use crate::engine::geometry::Rect;

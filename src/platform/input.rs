@@ -297,7 +297,7 @@ pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), Str
     // click-through and its card's press was refused (round displays-live-1).
     let cards: Vec<Rect> = strip_model::every_published_card().into_iter().map(|(_, r)| r).collect();
     // The Dock draws its bar in one window as large as its display, clear and click-through
-    // away from the bar (engine::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
+    // away from the bar (engine::corner::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
     // it counts only on the bar's own frame, read through Accessibility, and wherever that
     // frame is unknown. macOS's click-through overlays (the screenshot tool's, Notification
     // Center's full-screen window off its own elements: desktop::seen_through, asked at each

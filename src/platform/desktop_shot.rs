@@ -1,5 +1,5 @@
 //! The desktop in the park corner, as a still: the corner patch's picture whenever one can be
-//! taken (round desktop-still-patch, [`crate::engine::patch_still`]: exact by construction,
+//! taken (round desktop-still-patch, [`crate::engine::corner::patch_still`]: exact by construction,
 //! icons, widgets and any wallpaper included), and a switch's cover where a Finder desktop icon
 //! lies under the corner (round 8L3), so an activation (⌘Tab, a Dock click) grows from its card
 //! on a desktop with icons there too.
@@ -12,7 +12,7 @@
 //! ([`set_frame_due`]), else every [`REFRESH_EVERY`].
 //!
 //! The corner patch draws the desktop picture from its file, so it cannot stand for a corner
-//! with icons on it ([`crate::engine::corner_patch`]), and 8L2 gave such a desktop the instant
+//! with icons on it ([`crate::engine::corner::corner_patch`]), and 8L2 gave such a desktop the instant
 //! arrival. This keeps a still of the corner block ([`block`]) taken through ScreenCaptureKit
 //! of the desktop-level windows only ([`super::capture::capture_desktop`]: the picture and what
 //! lies on it, nothing else), fresh while it is wanted ([`keep_fresh`], from the WM thread at every
@@ -37,15 +37,15 @@ use objc2_core_graphics::CGImage;
 use super::capture::{self, DesktopStill};
 use super::{pixels, wallpaper};
 use crate::engine::geometry::Rect;
-use crate::engine::park::Corner;
-use crate::engine::patch_still::{self as ps, AGAIN_AFTER_TOUCH, Block, FADE, Still};
+use crate::engine::corner::park::Corner;
+use crate::engine::corner::patch_still::{self as ps, AGAIN_AFTER_TOUCH, Block, FADE, Still};
 use crate::engine::wallpaper as wp;
 
 /// The side (points) of the square at the display's bottom-right corner always captured: the
-/// most a switch's cover paints there ([`crate::engine::corner_patch::COVER_CAP`], round 8L6),
+/// most a switch's cover paints there ([`crate::engine::corner::corner_patch::COVER_CAP`], round 8L6),
 /// so a still holds any cover; it grows to hold the patch's rectangle when that is bigger
 /// ([`block`]).
-pub const BLOCK: f64 = crate::engine::corner_patch::COVER_CAP;
+pub const BLOCK: f64 = crate::engine::corner::corner_patch::COVER_CAP;
 
 /// The side (points) of the square at the corner whose icons a still is keyed by ([`zone`]):
 /// any cover lies inside it with room to spare.
@@ -122,7 +122,7 @@ const NO_STILL: &str = "no still of the desktop yet";
 
 /// The square of side `side` at `display`'s park `corner`, on the display. A screen whose
 /// bottom-right corner has another screen beyond it parks at another corner
-/// ([`crate::engine::park::choose_corner`]): its still is of that corner (taken at the
+/// ([`crate::engine::corner::park::choose_corner`]): its still is of that corner (taken at the
 /// bottom-right one, the block grown to hold the patch was the display's whole width, and an
 /// icon moved under the real corner changed no key).
 fn corner_square(display: Rect, side: f64, corner: Corner) -> Rect {
@@ -731,14 +731,14 @@ mod tests {
         let m = meta(key.clone(), t0);
         let soon = t0 + Duration::from_secs(1);
         // A press on the desktop at t0 + 1 s: due once its moment came, not before.
-        let touch = soon + crate::engine::patch_still::AGAIN_AFTER_TOUCH;
+        let touch = soon + crate::engine::corner::patch_still::AGAIN_AFTER_TOUCH;
         assert!(!due(Some(&m), &key, region, &[touch], soon));
         assert!(due(Some(&m), &key, region, &[touch], touch));
         // Taken after the moment: not due again for it.
         let after = meta(key.clone(), touch + Duration::from_millis(1));
         assert!(!due(Some(&after), &key, region, &[touch], touch + Duration::from_secs(2)));
         // A predicted frame change in an hour, its fade after it.
-        let frame = t0 + Duration::from_secs(3600) + crate::engine::patch_still::FADE;
+        let frame = t0 + Duration::from_secs(3600) + crate::engine::corner::patch_still::FADE;
         assert!(!due(Some(&m), &key, region, &[frame], t0 + Duration::from_secs(5)));
         assert!(due(Some(&m), &key, region, &[frame], frame));
     }

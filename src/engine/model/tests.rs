@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::engine::geometry::Point;
-use crate::engine::park::{GRAB_WIDTH, TITLE_BAR_HEIGHT, clamp_to_visible};
+use crate::engine::corner::park::{GRAB_WIDTH, TITLE_BAR_HEIGHT, clamp_to_visible};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
 use crate::engine::displays::ScreenKey;
@@ -1384,7 +1384,7 @@ fn a_main_display_resized_parks_its_parked_windows_again_at_its_new_corner() {
 #[test]
 fn a_new_park_corner_parks_the_parked_windows_again_there_and_nothing_else() {
     // V1: a display placed beyond the bottom-right corner; the platform picks bottom-left.
-    use crate::engine::park::Corner;
+    use crate::engine::corner::park::Corner;
     let mut e = three_stages();
     let active = e.m.main_active_stage();
     let left = Display { corner: Corner::BottomLeft, ..display() };
@@ -2356,7 +2356,7 @@ fn property_no_sequence_of_operations_loses_a_window() {
                         },
                         // A display placed against the bottom-right corner: parking moves to
                         // the bottom-left.
-                        _ => Display { corner: crate::engine::park::Corner::BottomLeft, ..display() },
+                        _ => Display { corner: crate::engine::corner::park::Corner::BottomLeft, ..display() },
                     };
                     log.push(format!("display {} {}", d.id.0, d.frame));
                     // macOS keeps every window reachable when a display changes: one that was

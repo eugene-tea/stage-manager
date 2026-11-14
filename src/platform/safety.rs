@@ -66,7 +66,7 @@ use super::{desktop, enhanced_ui, hidden_tabs, logging, observe, paths, window_e
 use crate::engine::geometry::Rect;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, Remembered, UNPARK_POLL, UNPARK_SETTLE};
-use crate::engine::park::Corner;
+use crate::engine::corner::park::Corner;
 use crate::engine::persist::StateFile;
 use crate::engine::model::Display;
 use crate::engine::recovery::{self, Known, LiveWindow, ParkZone, ParkedFile, Registered, ScanDisplays};

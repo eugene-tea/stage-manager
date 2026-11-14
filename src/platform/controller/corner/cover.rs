@@ -1,4 +1,4 @@
-//! The park corner covered through a switch ([`crate::engine::corner_patch::switch_cover`],
+//! The park corner covered through a switch ([`crate::engine::corner::corner_patch::switch_cover`],
 //! round 8L): the arriving windows wait in the corner behind their pictures, where macOS has
 //! raised an activated app's windows above the corner patch, so the switch's overlay draws
 //! the desktop over the corner (the patch's picture, or a still of the desktop).
@@ -32,7 +32,7 @@ pub(in crate::platform::controller) fn resolve_cover(
 }
 
 /// The bounds, as listed in `list`, of a switch's `arriving` windows macOS has raised above the
-/// corner patch, which its cover must hide ([`crate::engine::corner_patch::CoverFacts::raised`]):
+/// corner patch, which its cover must hide ([`crate::engine::corner::corner_patch::CoverFacts::raised`]):
 /// those waiting in the park zone (`in_zone`), and the `activated` app's wherever macOS put
 /// them (one brought into view, outside the corner's square, means no cover: round 8L6).
 /// Normal, drawn, not ours (`own`).
@@ -98,7 +98,7 @@ impl Controller {
     }
 
     /// The park corner a switch's overlay covers while its incoming windows (`arriving`) wait
-    /// there behind their snapshots ([`crate::engine::corner_patch::switch_cover`], round
+    /// there behind their snapshots ([`crate::engine::corner::corner_patch::switch_cover`], round
     /// 8L): macOS has raised an activated app's windows above the corner patch, and the
     /// switch's focus raises its key window there too. `list` is the window server's list now;
     /// `outgoing` the windows about to park. A window that stays shown into the corner is drawn
@@ -111,7 +111,7 @@ impl Controller {
         activated: &HashSet<u32>,
         list: &[windows::CgWindow],
     ) -> Result<SwitchCover, Refused> {
-        use crate::engine::corner_patch::{CoverFacts, switch_cover};
+        use crate::engine::corner::corner_patch::{CoverFacts, switch_cover};
         if arriving.is_empty() {
             return Err("nothing arrives".into());
         }
@@ -229,12 +229,12 @@ mod tests {
             listed(101, 784, Rect::new(533.0, 184.0, 1741.0, 1173.0)),  // parked in the model's eyes
             listed(109, 746, Rect::new(263.0, 43.0, 2208.0, 1271.0)),   // shown, not parked
         ];
-        let parked = parked_in_zone(&list, [96, 115, 101], |b| crate::engine::park::is_parked_in_at(b, display, visible, Corner::BottomRight));
+        let parked = parked_in_zone(&list, [96, 115, 101], |b| crate::engine::corner::park::is_parked_in_at(b, display, visible, Corner::BottomRight));
         assert_eq!(parked, [96, 115].into());
         // The patch's rectangle from those: the corner's, never the screen's.
         let slivers: Vec<Rect> = list.iter().filter(|w| parked.contains(&w.id)).map(|w| w.bounds).collect();
-        let rect = crate::engine::corner_patch::patch_rect(&slivers, display, crate::engine::corner_patch::DEFAULT_REACH).expect("slivers");
-        assert!(crate::engine::corner_patch::cover_cap(display, Corner::BottomRight).contains_rect(&rect), "{rect:?}");
+        let rect = crate::engine::corner::corner_patch::patch_rect(&slivers, display, crate::engine::corner::corner_patch::DEFAULT_REACH).expect("slivers");
+        assert!(crate::engine::corner::corner_patch::cover_cap(display, Corner::BottomRight).contains_rect(&rect), "{rect:?}");
         // And 101 stays shown through a switch: the cover draws it or is not drawn.
         let staying = staying_windows(&list, 500, &[109].into(), &[96].into(), &parked, |_| false);
         assert_eq!(staying.iter().map(|w| w.id).collect::<Vec<_>>(), [101]);
@@ -246,7 +246,7 @@ mod tests {
         // view counts (and then cannot be hidden in the corner); a card click's arriving
         // window outside the zone is not raised by macOS.
         let (display, visible) = (Rect::new(0.0, 0.0, 2560.0, 1440.0), Rect::new(0.0, 33.0, 2560.0, 1407.0));
-        let in_zone = |b: Rect| crate::engine::park::is_parked_in_at(b, display, visible, Corner::BottomRight);
+        let in_zone = |b: Rect| crate::engine::corner::park::is_parked_in_at(b, display, visible, Corner::BottomRight);
         let corner = Rect::new(2559.0, 1408.0, 1794.0, 1251.0);
         let into_view = Rect::new(492.0, 71.0, 1794.0, 1251.0);
         let list = [listed(96, 760, corner), listed(97, 760, into_view), listed(98, 761, into_view), listed(99, 761, corner)];

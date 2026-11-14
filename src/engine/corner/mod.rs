@@ -7,11 +7,17 @@
 //! of a window as the model knows it now) and answers the model's questions about frames
 //! (`model/hiding.rs`, the model's one door to the engine): is a window listed here hidden,
 //! may a restore frame be here, where is it within reach. The geometry itself (zones,
-//! corners, how macOS clamps a request) is [`super::park`].
+//! corners, how macOS clamps a request) is [`self::park`].
+
+pub mod corner_patch;
+pub mod park;
+pub mod park_reconcile;
+pub mod patch_still;
+pub mod sliver;
 
 use super::geometry::Rect;
 use super::model::{Display, Model, WindowId};
-use super::park::{ParkRequest, park_frame_asked};
+use self::park::{ParkRequest, park_frame_asked};
 use super::restore::clamped_at_corner;
 
 /// How far (points) a frame's side at the park corner may be from where a park asks it and
@@ -96,7 +102,7 @@ pub fn park_frame(m: &Model, id: WindowId) -> Option<Rect> {
 mod tests {
     use super::*;
     use crate::engine::model::{Action, Observation};
-    use crate::engine::park::park_frame_at;
+    use crate::engine::corner::park::park_frame_at;
     use crate::engine::rules::{Decision, RuleAction};
     use crate::engine::testkit::{display, meta, model, w};
 

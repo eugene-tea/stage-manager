@@ -4,7 +4,7 @@
 use super::*;
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Model, Observation, WindowMeta};
-use crate::engine::park::park_frame;
+use crate::engine::corner::park::park_frame;
 use crate::engine::persist::{LaunchHints, StateFile};
 use crate::engine::restore::{QUIT_KEEP, Restore};
 use crate::engine::rules::Decision;

@@ -1,5 +1,5 @@
 //! The wallpaper corner patch's panel and picture (`[windows] corner_patch`, on by
-//! default; the geometry and the rules are [`crate::engine::corner_patch`]). One patch per
+//! default; the geometry and the rules are [`crate::engine::corner::corner_patch`]). One patch per
 //! screen (round displays-2), keyed by the screen's `CGDirectDisplayID`: each screen's plan
 //! names its screen ([`PatchPlan::screen`]), each patch reads that screen's own desktop
 //! picture and draws that screen's own still, and what the WM thread and the strip read of
@@ -18,7 +18,7 @@
 //!   is the shown Desktop's is read from the panels (`isOnActiveSpace`), never from the
 //!   engine's Space ids. Its sharing type is left at the default, so screenshots show it as
 //!   the wallpaper it shows.
-//! - **Picture from a still** (round desktop-still-patch, [`crate::engine::patch_still`]):
+//! - **Picture from a still** (round desktop-still-patch, [`crate::engine::corner::patch_still`]):
 //!   where Screen Recording is granted and window captures work, the WM thread's plan names a
 //!   still of the desktop ([`PatchPlan::still`], [`crate::platform::desktop_shot`]): the
 //!   desktop-level windows only, so icons, widgets and any wallpaper are exact. While the
@@ -26,7 +26,7 @@
 //!   picture changed) a panel a still drew keeps its picture, cropped anew for the plan's
 //!   rectangle; a panel left drawn from a still on another Desktop stays while its icons, the
 //!   appearance and the predicted frame are unchanged
-//!   ([`crate::engine::patch_still::away_still_holds`]). Every wallpaper read tells the still
+//!   ([`crate::engine::corner::patch_still::away_still_holds`]). Every wallpaper read tells the still
 //!   when the picture changed and when the next frame is due.
 //! - **Picture from the file** (no still: no Screen Recording, captures not working yet):
 //!   the desktop picture drawn from its file, never captured
@@ -69,7 +69,7 @@
 //!   that second read.
 //! - **A switch's end** ([`shown_for`]): a switch's cover of the corner, on the motion
 //!   overlay, stays past the switch until the patch has been on screen a moment
-//!   ([`crate::engine::corner_patch::cover_holds`]), so the corner is never bare between the
+//!   ([`crate::engine::corner::corner_patch::cover_holds`]), so the corner is never bare between the
 //!   two.
 //! - **Ordering**: just above the topmost parked window under it
 //!   (`orderWindow:relativeTo:` with that window's number); the WM thread checks the order
@@ -207,7 +207,7 @@ pub fn window_number(screen: u32) -> Option<u32> {
 
 /// How long `screen`'s patch has been on screen at its rectangle by `now` (any thread);
 /// `None` while hidden. A switch's cover of the corner waits on it
-/// ([`crate::engine::corner_patch::cover_holds`]).
+/// ([`crate::engine::corner::corner_patch::cover_holds`]).
 pub fn shown_for(screen: u32, now: Instant) -> Option<Duration> {
     published_of(screen).shown_at.map(|t| now.saturating_duration_since(t))
 }
@@ -251,7 +251,7 @@ struct Drawn {
 
 /// What a Desktop's panel drawn from a still of the desktop shows: the still (kept to hold
 /// while the next one comes), and what it was taken under, to tell while away whether it is
-/// still right ([`crate::engine::patch_still::away_still_holds`]).
+/// still right ([`crate::engine::corner::patch_still::away_still_holds`]).
 struct StillDrawn {
     serial: u64,
     /// The whole still, its block (global, top-left points) and scale.
@@ -708,7 +708,7 @@ pub fn cover_ready(screen: u32, rect: Rect) -> Result<(), &'static str> {
 
 /// `screen`'s patch's picture of `rect` (global, top-left, whole points) and its scale, for a
 /// switch's motion overlay to cover the park corner while incoming windows wait there (round
-/// 8L, [`crate::engine::corner_patch::switch_cover`]); main thread. Only the picture the patch
+/// 8L, [`crate::engine::corner::corner_patch::switch_cover`]); main thread. Only the picture the patch
 /// would show now ([`cover_ready`]). `None` otherwise: the corner is left as it is.
 pub fn cover_image(screen: u32, rect: Rect) -> Option<(CFRetained<CGImage>, f64)> {
     let (source, settle) = cover_slot_of(screen)?;
@@ -867,7 +867,7 @@ impl Patch {
                 // Drawn from a still: its Desktop as it was then, icons and all.
                 let icons_now = icons_at(items.as_deref(), rect);
                 let frame_due = d.frame_due.is_some_and(|t| now >= t);
-                if !crate::engine::patch_still::away_still_holds(d.icons.as_deref(), icons_now.as_deref(), d.dark != dark, frame_due) {
+                if !crate::engine::corner::patch_still::away_still_holds(d.icons.as_deref(), icons_now.as_deref(), d.dark != dark, frame_due) {
                     s.hide();
                     tracing::debug!(frame_due, "corner patch: another Desktop's panel (a still) hidden while away");
                 }

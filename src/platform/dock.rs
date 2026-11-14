@@ -28,7 +28,7 @@ use super::ax::{AxElement, AxError, AxResult, names};
 use super::windows::CgWindow;
 use crate::engine::DockApp;
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::sliver::DockBar;
+use crate::engine::corner::sliver::DockBar;
 
 /// The Dock's bundle id.
 pub const DOCK_BUNDLE: &str = "com.apple.dock";
@@ -179,7 +179,7 @@ fn walk_up<E, I>(start: E, steps: usize, item: impl Fn(&E) -> AxResult<Option<I>
 
 /// Where the Dock's bar is (`dock`: its pid): the frame around its lists (the Dock app's
 /// children), top-left origin; `None` when Accessibility gives none. The window list cannot
-/// tell it: the Dock's window spans its whole display ([`crate::engine::sliver::DockBar`]).
+/// tell it: the Dock's window spans its whole display ([`crate::engine::corner::sliver::DockBar`]).
 pub fn bar_frame(dock: i32) -> Option<Rect> {
     AxElement::application(dock).bounded(DOCK_AX_TIMEOUT_SECONDS, |app| {
         let t = DOCK_AX_TIMEOUT_SECONDS;

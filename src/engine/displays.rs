@@ -45,7 +45,7 @@ use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
 use super::model::DisplayId;
-use super::park::is_parked_anywhere;
+use super::corner::park::is_parked_anywhere;
 
 /// A display's identity that survives reconnects and restarts: its vendor, model and serial
 /// number as CoreGraphics reports them, and `nth`, its place among the connected displays

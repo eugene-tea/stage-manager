@@ -6,7 +6,7 @@
 //! window, say), the stage staying where it is. Ours took every press with no window under
 //! it for a wallpaper click (11-09: a file pressed to drag it onto a window sent the stage
 //! to the strip). The icons are the ones read for the corner patch, each grown by its label
-//! ([`super::corner_patch::item_reach`]), here a few points more for a press at its edge
+//! ([`super::corner::corner_patch::item_reach`]), here a few points more for a press at its edge
 //! ([`ICON_CLICK_SLOP`]).
 //!
 //! Nor is a press just outside a window: macOS gives every resizable window a band a few
@@ -124,7 +124,7 @@ pub fn desktop_press(p: Point, icons: Icons) -> DesktopPress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::corner_patch::item_reach;
+    use crate::engine::corner::corner_patch::item_reach;
 
     #[test]
     fn a_press_on_a_desktop_file_or_its_label_is_no_wallpaper_click() {

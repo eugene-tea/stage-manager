@@ -23,7 +23,7 @@ NSWorkspace notifications     persists state.json               ctl socket (test
 ```
 
 - **Stages per screen and Space**, as Apple's (UX-SPEC "Screens"). Each screen has its own
-  strip, Spaces, park corner (one with no screen beyond it, `engine::park::choose_corner`)
+  strip, Spaces, park corner (one with no screen beyond it, `engine::corner::park::choose_corner`)
   and capacity. A window belongs to the screen showing most of it (`engine::displays`);
   moved to another it starts a stage there (`Model::windows_moved_to_display`); a removed
   screen hands its stages to the main one (`Model::set_displays`). Screens are known by
@@ -121,11 +121,11 @@ In the code so far (the seam, Corner only): the model emits `Action::Hide { id }
 park frame, and asks every question about where hidden windows are through one door
 (`engine/model/hiding.rs`), which asks the pure half of the engine that runs
 (`ModelOptions::engine`; the Corner engine's is `engine::corner`, its geometry
-`engine::park`). The questions are of two kinds: is this listed window hidden now, and may a
+`engine::corner::park`). The questions are of two kinds: is this listed window hidden now, and may a
 window be brought back here. `platform::window_engine::WindowEngine` has `hidden_at`, `hide`,
 `show`, `is_hidden`, `animate`, and for safety `bring_all_back`, `bring_back_briefly` (an
 abort), `bring_back_rest` (the last look at the window server's list) and `recover` (the
-recovery scan), with `platform::corner_engine::CornerEngine` behind it. A `SetFrame` is the
+recovery scan), with `platform::corner::engine::CornerEngine` behind it. A `SetFrame` is the
 engine's `show`: the model counts the window shown either way, and the engine knows what it
 has hidden. `animate` answers a `Motion` on the WM thread; the controller plans the
 transition, sends it to the strip and waits for its answer the same way for every motion,

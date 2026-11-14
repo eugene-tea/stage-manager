@@ -24,7 +24,7 @@ use serde_json::{Value, json};
 use super::ax::{AxElement, names};
 use super::{desktop, permissions, windows};
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::park::{Corner, ParkRequest, ProbeSample, best_request, park_frame_asked, shown_area};
+use crate::engine::corner::park::{Corner, ParkRequest, ProbeSample, best_request, park_frame_asked, shown_area};
 
 /// The bundle id prefix of the fixture apps (scripts/bundle.sh, scripts/test-stages.sh).
 pub const FIXTURE_PREFIX: &str = "dev.eugene.stagemanager.fixture";

@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 
 use super::{Home, Model, Pid, SpaceId, StageId, WindowId, WindowRole};
-use crate::engine::park::clamp_to_visible;
+use crate::engine::corner::park::clamp_to_visible;
 use crate::engine::persist::{SavedRole, SavedStage, SavedWindow};
 use crate::engine::geometry::Rect;
 use crate::engine::restore::{QUIT_FRAMES_KEEP, QUIT_KEEP};

@@ -22,7 +22,7 @@
 //!   `AXMinimized` has its ⌘M swallowed and goes to the strip. Every other ⌘M is the app's.
 //!
 //! An active (filtering) `CGEventTap` at the session level, head-inserted, on a thread of its
-//! own with its own run loop, as the inert-slivers tap ([`super::sliver_tap`]). A press away
+//! own with its own run loop, as the inert-slivers tap ([`super::corner::sliver_tap`]). A press away
 //! from every published corner (nearly all) passes after a few rectangle tests; only a press
 //! in a corner, or ⌘M, asks Accessibility, each call at [`AX_SECONDS`]: an app that does not
 //! answer in time gets its event, and macOS's minimize (the genie, then the strip as before)
@@ -52,7 +52,7 @@ use crate::engine::minimize_press::{
     ButtonGate, ButtonHit, Focused, Gate, KeyGate, KeyPress, Minimizable, Pass, Pressed, Under, is_cmd_m, judge_key, judge_press,
     plain_click, under_press,
 };
-use crate::engine::sliver::Listed;
+use crate::engine::corner::sliver::Listed;
 use super::desktop::Through;
 
 /// The Accessibility budget of each call the callback makes (seconds): an app this slow to
@@ -269,7 +269,7 @@ fn note(n: Note) {
 pub fn refresh() {
     let now = Instant::now();
     let last = BACK_ON_AT.lock().map(|t| *t).unwrap_or(None);
-    if super::sliver_tap::back_on(OFF_BY_INPUT.load(Ordering::Relaxed), last, now, super::sliver_tap::secure_input_on) {
+    if super::corner::sliver_tap::back_on(OFF_BY_INPUT.load(Ordering::Relaxed), last, now, super::corner::sliver_tap::secure_input_on) {
         let port = PORT.load(Ordering::SeqCst);
         // SAFETY: the port is kept alive by the tap thread while its run loop runs (stored
         // before it starts, cleared after it ends; it runs for the life of the process).

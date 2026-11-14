@@ -1,4 +1,4 @@
-//! The wallpaper corner patch as the WM thread plans it ([`crate::engine::corner_patch`],
+//! The wallpaper corner patch as the WM thread plans it ([`crate::engine::corner::corner_patch`],
 //! `[windows] corner_patch`): one patch a screen over the slivers of its parked windows,
 //! planned after every batch, on the tick, and on the fast tick after a focus or through
 //! Show Desktop; the plan goes to the main thread, which draws it
@@ -23,13 +23,13 @@ pub(in crate::platform::controller) const PATCH_REPLAN: Duration = Duration::fro
 pub(in crate::platform::controller) struct PatchTrack {
     /// The last plan sent to the main thread.
     pub(in crate::platform::controller) sent: Option<crate::ui::corner_patch::PatchPlan>,
-    /// The rectangle in use ([`crate::engine::corner_patch::steady_rect`]).
+    /// The rectangle in use ([`crate::engine::corner::corner_patch::steady_rect`]).
     pub(in crate::platform::controller) rect: Option<Rect>,
     /// The rectangle in use on each of the screen's Desktops (the engine's Space ids): each
     /// Desktop has a panel of its own ([`crate::ui::corner_patch`]), steady on its own.
     pub(in crate::platform::controller) rects: HashMap<u64, Rect>,
-    /// The order as last checked ([`crate::engine::corner_patch::order_step`]).
-    pub(in crate::platform::controller) order: crate::engine::corner_patch::OrderState,
+    /// The order as last checked ([`crate::engine::corner::corner_patch::order_step`]).
+    pub(in crate::platform::controller) order: crate::engine::corner::corner_patch::OrderState,
     /// Why the last plan hid the patch (logged once a change).
     pub(in crate::platform::controller) why: Option<&'static str>,
     /// The patch was once found ordered right (logged once).
@@ -86,11 +86,11 @@ pub(in crate::platform::controller) fn note_parked_elsewhere(elsewhere: &[&windo
 
 /// What the corner patch may cover while Show Desktop pushes the parked windows into view
 /// ([`show_desktop::pushed_rect`]): the park corner's square a switch's cover keeps to
-/// ([`crate::engine::corner_patch::cover_cap`], the still's block at the bottom-right corner),
+/// ([`crate::engine::corner::corner_patch::cover_cap`], the still's block at the bottom-right corner),
 /// within the block of the desktop's still kept (`still`, when one is), which the patch's
 /// picture is cropped from: no still is taken while an overview shows.
 pub(in crate::platform::controller) fn reveal_cap(display: Rect, corner: Corner, still: Option<Rect>) -> Rect {
-    let cap = crate::engine::corner_patch::cover_cap(display, corner);
+    let cap = crate::engine::corner::corner_patch::cover_cap(display, corner);
     still.and_then(|s| s.intersect(&cap)).unwrap_or(cap)
 }
 
@@ -143,13 +143,13 @@ impl Controller {
         self.patch_items.known.clone()
     }
 
-    /// Works out the wallpaper corner patch's plan for every screen ([`crate::engine::corner_patch`];
+    /// Works out the wallpaper corner patch's plan for every screen ([`crate::engine::corner::corner_patch`];
     /// one patch per screen, round displays-2) and sends each to the main thread when it
     /// changed. Reads the window server's on-screen list only while `[windows] corner_patch`
     /// is on, once for every screen; checks each patch's order in it every time (an
     /// activation raising a parked window undoes it), and has it ordered again when it was
     /// right and is not any more. Returns the list when it read one, for the rest of the tick
-    /// ([`crate::platform::sliver_tap::refresh`]).
+    /// ([`crate::platform::corner::sliver_tap::refresh`]).
     pub(in crate::platform::controller) fn update_patch(&mut self) -> Option<Vec<windows::CgWindow>> {
         use crate::ui::corner_patch::PatchPlan;
         let config = self.store.config();
@@ -233,8 +233,8 @@ impl Controller {
     /// The corner patch's plan for one screen `d` from the window server's list `list`
     /// ([`Self::update_patch`]); `None` while that screen's Desktop slides (the plan stays as
     /// it was).
-    pub(in crate::platform::controller) fn plan_patch_on(&mut self, d: Display, list: &[windows::CgWindow], now: Instant, reach: crate::engine::corner_patch::Reach, space: u64) -> Option<crate::ui::corner_patch::PatchPlan> {
-        use crate::engine::corner_patch::{
+    pub(in crate::platform::controller) fn plan_patch_on(&mut self, d: Display, list: &[windows::CgWindow], now: Instant, reach: crate::engine::corner::corner_patch::Reach, space: u64) -> Option<crate::ui::corner_patch::PatchPlan> {
+        use crate::engine::corner::corner_patch::{
             Listed, PatchFacts, desktop_slides, order_step, ordered_right, patch_rect, slide_waits, steady_rect, visibility, would_be_right,
         };
         use crate::ui::corner_patch::{self as patch_ui, PatchPlan};
@@ -417,7 +417,7 @@ impl Controller {
             mission_control: self.overview.showing() == Some(Overview::MissionControl),
             show_desktop,
             closing: closing.is(),
-            still: matches!(corner.still, crate::engine::patch_still::Still::Ready(_)),
+            still: matches!(corner.still, crate::engine::corner::patch_still::Still::Ready(_)),
             panel,
         });
         let facts = PatchFacts {
@@ -449,8 +449,8 @@ impl Controller {
         // The test's forced still is compared with the patch's picture (`debug-overlay`).
         let wanted = desktop_shot::needs_wallpaper(screen) || cover_desktop_forced();
         let picture = if show.is_none() && corner.picture && wanted { rect } else { None };
-        let clear = rect.is_some_and(|r| crate::engine::corner_patch::icons_clear(facts.items.as_deref(), r).is_ok());
-        let source = crate::engine::patch_still::source(facts.still, clear);
+        let clear = rect.is_some_and(|r| crate::engine::corner::corner_patch::icons_clear(facts.items.as_deref(), r).is_ok());
+        let source = crate::engine::corner::patch_still::source(facts.still, clear);
         // The icons as last read well, whatever this plan's rectangle (none read for a
         // plan with no sliver): they are the same on every Desktop, and other Desktops'
         // panels are checked against them (10-23: `None` here hid them all).

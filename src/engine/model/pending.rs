@@ -32,7 +32,7 @@ use std::collections::HashSet;
 
 use super::pool::Scope;
 use super::{Action, DisplayId, Home, Kin, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
-use crate::engine::park::clamp_to_visible;
+use crate::engine::corner::park::clamp_to_visible;
 use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedSpace, SavedWindow, live_key, rematch_on};
 use crate::engine::restore::{Restore, Summary, slot_for};
 use crate::engine::stage_area::same_frame;

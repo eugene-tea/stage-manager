@@ -54,7 +54,7 @@ use super::pending::Placed;
 use super::{Action, DisplayId, Home, Model, Observation, SpaceId, Stage, StageId, WindowId, WindowMeta, WindowRole};
 use crate::engine::displays::ScreenKey;
 use crate::engine::geometry::Rect;
-use crate::engine::park::clamp_to_visible;
+use crate::engine::corner::park::clamp_to_visible;
 use crate::engine::persist::{Assignment, SavedRole, SavedSpace, SavedWindow, live_key};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, Live, LowRule, MEDIUM, Saved, assign, at_saved_frame};

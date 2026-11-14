@@ -400,7 +400,7 @@ mod tests {
         // Judged ordered out, then let go by every record (seen gone since): a clean quit.
         assert_eq!(quit_end(quit_left(true, 0, &none, &none, &none, &panel)), QuitEnd::Clean);
     }
-    use crate::engine::park::{Corner, is_parked};
+    use crate::engine::corner::park::{Corner, is_parked};
     use crate::engine::persist::{SavedRole, SavedSpace, SavedStage, SavedWindow};
     use crate::engine::recovery::{Known, is_stranded};
 

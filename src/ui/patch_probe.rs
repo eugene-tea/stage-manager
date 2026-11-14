@@ -14,7 +14,7 @@
 //! `ordered`, `fallback` or `unknown`), or why not known.
 //!
 //! The rectangle is `--rect` (global points, top-left), else the parked windows' slivers
-//! on screen now grown by the reach ([`crate::engine::corner_patch::patch_rect`]), else a
+//! on screen now grown by the reach ([`crate::engine::corner::corner_patch::patch_rect`]), else a
 //! default corner block. `--placement` draws the same picture as if that placement were
 //! picked (a what-if for checking the drawing; the patch never uses it). The PNG is in the display's color space at its backing scale;
 //! it defaults to `/tmp/stage-manager-patch.png` and is never written inside a git work
@@ -29,10 +29,10 @@ use objc2_foundation::MainThreadMarker;
 use serde_json::json;
 
 use super::corner_patch::{crop_for, picture_for};
-use crate::engine::corner_patch::{DEFAULT_REACH, DesktopIcons, Reach, item_reach, patch_rect};
+use crate::engine::corner::corner_patch::{DEFAULT_REACH, DesktopIcons, Reach, item_reach, patch_rect};
 use crate::engine::geometry::{Rect, Size};
 use crate::engine::solar_settle::{self, Thumb};
-use crate::engine::park::is_parked_in_at;
+use crate::engine::corner::park::is_parked_in_at;
 use crate::engine::wallpaper::Placement;
 use crate::platform::wallpaper::{self, Job, Reader};
 use crate::platform::{desktop, desktop_items, windows};

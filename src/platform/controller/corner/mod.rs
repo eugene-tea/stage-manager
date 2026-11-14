@@ -1,7 +1,7 @@
 //! The Corner engine's upkeep: what the controller keeps on the WM thread, and does around
 //! the engine's calls, only because hidden windows sit in a park corner where the window
 //! server still lists them and a sliver of each may show
-//! ([`crate::platform::corner_engine::CornerEngine`]).
+//! ([`crate::platform::corner::engine::CornerEngine`]).
 //!
 //! [`CornerUpkeep`] is that state, one value the controller owns ([`Controller::corner`]).
 //! Nothing here is asked by an engine that hides its windows elsewhere.
@@ -15,15 +15,17 @@ use self::patch::PatchTrack;
 use self::unrestored::Unrestored;
 use super::Controller;
 use crate::engine::geometry::Rect;
-use crate::engine::park_reconcile::Stray;
+use crate::engine::corner::park_reconcile::Stray;
 use crate::platform::observe::Observer;
 use crate::platform::safety::ParkedEntry;
-use crate::platform::{sliver_tap, windows};
+use crate::platform::corner::sliver_tap;
+use crate::platform::windows;
 
 pub(super) mod cover;
 pub(super) mod patch;
 pub(super) mod reconcile;
 pub(super) mod shield;
+pub(super) mod still;
 pub(super) mod unrestored;
 
 /// What the Corner engine keeps between its calls, on the WM thread.
@@ -46,7 +48,7 @@ pub(super) struct CornerUpkeep {
     pub(super) unrestored_checked: Instant,
     /// Model-parked windows of the shown Desktop the window server lists out of the park
     /// zone, or whose park failed: parked again or adopted every tick
-    /// ([`Controller::reconcile_parked`], [`crate::engine::park_reconcile`]).
+    /// ([`Controller::reconcile_parked`], [`crate::engine::corner::park_reconcile`]).
     pub(super) strays: BTreeMap<u32, Stray>,
 }
 

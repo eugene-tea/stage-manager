@@ -626,7 +626,7 @@ mod tests {
     use super::*;
     use crate::engine::recovery::is_stranded;
     use crate::engine::geometry::Size;
-    use crate::engine::park::park_frame;
+    use crate::engine::corner::park::park_frame;
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
     const VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1410.0);
@@ -941,7 +941,7 @@ mod tests {
     #[test]
     fn a_window_parked_above_a_bottom_dock_joins_and_waits() {
         let d = ScanDisplays::new(MAIN, Rect::new(0.0, 30.0, 2560.0, 1334.0), vec![], []);
-        let above_dock = Rect::new(2559.0, d.visible.max_y() - crate::engine::park::MACOS_KEEPS_TITLE, 600.0, 392.0);
+        let above_dock = Rect::new(2559.0, d.visible.max_y() - crate::engine::corner::park::MACOS_KEEPS_TITLE, 600.0, 392.0);
         let t0 = Instant::now();
         let mut w = Watch::new(&[]);
         let list = [Listed { allowed: true, ..at(2, above_dock, true) }, at(9, RESTORE, true)];

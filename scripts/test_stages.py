@@ -287,7 +287,7 @@ def wait_until(fn, timeout, what):
 
 
 def is_parked(b, d):
-    """engine::park::is_parked_in_at: the park zone at `d`'s corner (`d["corner"]` as
+    """engine::corner::park::is_parked_in_at: the park zone at `d`'s corner (`d["corner"]` as
     `ctl state`'s displays name it, bottom right when absent) of its full frame or, when `d`
     carries it, of its visible frame (macOS keeps a parked window above a bottom Dock)."""
     corner = d.get("corner") or "bottomright"
@@ -296,7 +296,7 @@ def is_parked(b, d):
 
 
 def is_parked_at(b, d, corner):
-    """engine::park::is_parked_at (no slivers): the bottom corners as is_parked_on, mirrored
+    """engine::corner::park::is_parked_at (no slivers): the bottom corners as is_parked_on, mirrored
     across the display for the left ones; the top ones by the origin at the side's edge in the
     display's top half (round displays-live-1: a bottom-left park read as not parked)."""
     if "left" in corner:
@@ -307,7 +307,7 @@ def is_parked_at(b, d, corner):
 
 
 def is_parked_on(b, d):
-    """engine::park::is_parked against one frame."""
+    """engine::corner::park::is_parked against one frame."""
     x, y, w, h = b["x"], b["y"], b["w"], b["h"]
     dx, dy, dw, dh = d["x"], d["y"], d["w"], d["h"]
     if x >= dx + dw - PARK_MARGIN and y >= dy + dh - PARK_MARGIN:
@@ -1469,14 +1469,14 @@ def intersect(a, b):
 AT_ONCE_CAPTURES_OFF = ("window captures are off",)
 
 # The app's reason when a window that stays shown through the switch reaches the park corner
-# and no snapshot of it is at hand to draw on the cover (engine::corner_patch::STAYING_UNPICTURED,
+# and no snapshot of it is at hand to draw on the cover (engine::corner::corner_patch::STAYING_UNPICTURED,
 # 8L5). Skipped, never failed, only when every window it names (`at_once_windows`) is the
 # owner's own (not a fixture's, not ours): the owner's Stage Manager quit for a run leaves the owner's windows
 # on screen, unmanaged, and the app takes no snapshot of a window it does not manage.
 STAYING_UNPICTURED = "a window that stays shown reaches the corner"
 
 
-# The most a switch's cover paints at the park corner (engine::corner_patch::COVER_CAP, 8L6): a
+# The most a switch's cover paints at the park corner (engine::corner::corner_patch::COVER_CAP, 8L6): a
 # square that side at a bottom corner (a column that wide down the side at a top one). 10-16 the
 # owner's covers were up to 2087x1316 pt: the owner's desktop painted over the owner's windows at every switch.
 COVER_CAP = 320.0
@@ -4701,7 +4701,7 @@ def patch_plan(s):
 
 
 def icon_image(grown):
-    """A desktop icon's picture from its rectangle as the app reads it (engine::corner_patch::
+    """A desktop icon's picture from its rectangle as the app reads it (engine::corner::corner_patch::
     item_reach: grown 36 pt each side, 6 above, 44 below for its label)."""
     return {"x": grown["x"] + 36, "y": grown["y"] + 6, "w": grown["w"] - 72, "h": grown["h"] - 50}
 
@@ -5936,7 +5936,7 @@ def show_desktop_close(label, still):
     for ln in lines:
         if "Show Desktop" in ln and ("panel is" in ln or "closes" in ln or "closed" in ln or "corner patch covers" in ln
                                      or "are back" in ln):
-            say("    log: " + ln.split("platform::controller: ", 1)[-1])
+            say("    log: " + re.split(r"platform::controller[\w:]*: ", ln, maxsplit=1)[-1])
     pushed = any(pl.startswith("pushed aside") for pl in places)
     # Part 2: settled under Show Desktop, the panel stays where it was put (Stationary), and
     # with a still it lies over every parked fixture's part on the display.
@@ -6970,7 +6970,7 @@ def phase_raise():
 
 
 def patch_reach_rect(slivers, display, reach):
-    """engine::corner_patch::patch_rect: every sliver on the display grown by the reach per
+    """engine::corner::corner_patch::patch_rect: every sliver on the display grown by the reach per
     side, together, rounded out to whole points, kept on the display. None when none shows."""
     dx, dy, dr, db = display["x"], display["y"], display["x"] + display["w"], display["y"] + display["h"]
     box = None
@@ -6992,7 +6992,7 @@ def check_patch_rect(parked_ids, what):
     """Round fixes-151: the corner patch covers the parked fixture windows' slivers grown by a
     parked (inactive) window's shadow reach, per side (`desktop_still.patch_reach`), not the
     60 pt on every side of before: exactly that rectangle, or one kept a little bigger (at
-    most the reach on each side, engine::corner_patch::steady_rect)."""
+    most the reach on each side, engine::corner::corner_patch::steady_rect)."""
     s = wait_until(lambda: (lambda x: x if patch_plan(x).get("show") else None)(state()), 5, "the corner patch shown")
     if s is None:
         skip(f"{what}: the corner patch's rectangle", f"the patch is not shown ({(state().get('desktop_still') or {}).get('patch_plan')})")
@@ -7123,13 +7123,13 @@ def dialog_born_parked():
     stop_all_fixtures()
 
 
-# engine::park::CORNER_PIECE_WIDTH and CORNER_PIECE_HEIGHT.
+# engine::corner::park::CORNER_PIECE_WIDTH and CORNER_PIECE_HEIGHT.
 CORNER_PIECE_WIDTH = 1.5 * (PARK_MARGIN + 16.0)
 CORNER_PIECE_HEIGHT = 64.0
 
 
 def is_corner_piece(b, d):
-    """engine::park::is_corner_piece_in at the bottom-right corner: past the right side, all
+    """engine::corner::park::is_corner_piece_in at the bottom-right corner: past the right side, all
     that shows within CORNER_PIECE_WIDTH of it and CORNER_PIECE_HEIGHT of the bottom, against
     `d`'s full frame or its visible frame."""
     def piece(a):

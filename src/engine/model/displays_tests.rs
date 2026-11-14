@@ -7,7 +7,7 @@ use super::*;
 use crate::engine::corner::park_frame;
 use crate::engine::displays::ScreenKey;
 use crate::engine::geometry::Point;
-use crate::engine::park::{Corner, choose_corner, park_frame_at};
+use crate::engine::corner::park::{Corner, choose_corner, park_frame_at};
 use crate::engine::persist::LaunchHints;
 use crate::engine::rules::{Decision, RuleAction};
 use crate::engine::testkit::Desk;

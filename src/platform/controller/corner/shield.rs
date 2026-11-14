@@ -1,4 +1,4 @@
-//! The inert-slivers tap's shield ([`crate::platform::sliver_tap`], `[windows]
+//! The inert-slivers tap's shield ([`crate::platform::corner::sliver_tap`], `[windows]
 //! inert_slivers`): which windows sit in the park corner and where the corner's zones are,
 //! told to the tap after every batch and whenever what a press there may reach changes.
 
@@ -18,7 +18,7 @@ pub(in crate::platform::controller) fn shield_parked(model: impl IntoIterator<It
 }
 
 impl Controller {
-    /// Tells the inert-slivers tap ([`crate::platform::sliver_tap`], `[windows] inert_slivers`) the park
+    /// Tells the inert-slivers tap ([`crate::platform::corner::sliver_tap`], `[windows] inert_slivers`) the park
     /// corner's zone of each display with a parked window (the main display's always) and
     /// which windows sit parked (with incoming windows still held in the corner behind a
     /// transition's snapshots).
@@ -56,7 +56,7 @@ impl Controller {
         } else {
             Vec::new()
         };
-        crate::platform::sliver_tap::publish(sliver::Shield { on, zones, parked, dock });
+        crate::platform::corner::sliver_tap::publish(sliver::Shield { on, zones, parked, dock });
     }
 }
 

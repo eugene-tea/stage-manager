@@ -1,4 +1,4 @@
-//! The park reconcile ([`crate::engine::park_reconcile`]): a window the model counts parked
+//! The park reconcile ([`crate::engine::corner::park_reconcile`]): a window the model counts parked
 //! that the window server lists out of the park zone, or whose park failed, is parked again
 //! or adopted as shown, every tick.
 
@@ -22,7 +22,7 @@ impl Controller {
 
     /// Every tick: a window the model has parked on the shown Desktop that the window server
     /// lists outside the park zone, or whose park failed, is parked again or adopted as shown
-    /// ([`crate::engine::park_reconcile`]; the review's L1, K2, S5: until now only a
+    /// ([`crate::engine::corner::park_reconcile`]; the review's L1, K2, S5: until now only a
     /// Space arrival's `match_screen` reconciled the two, and such a window sat mid-screen,
     /// counted parked, with no card, until the next Desktop change). A window the user
     /// focused since its park ([`Self::user_focus`]), or moved while parked, joins the active
@@ -40,8 +40,8 @@ impl Controller {
     /// snapshots, an arrangement made ahead being checked, a held activation, a drag or the
     /// button down (a sliver grabbed: [`Self::focus_after_press_done`] takes it).
     pub(in crate::platform::controller) fn reconcile_parked(&mut self, ob: &mut Observer, list: Option<&[windows::CgWindow]>) {
-        use crate::engine::corner_patch::desktop_slides;
-        use crate::engine::park_reconcile::{Facts, Seen, Verdict, step};
+        use crate::engine::corner::corner_patch::desktop_slides;
+        use crate::engine::corner::park_reconcile::{Facts, Seen, Verdict, step};
         let now = Instant::now();
         let Some(m) = self.model.as_ref() else {
             self.corner.strays.clear();

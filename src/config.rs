@@ -397,7 +397,7 @@ pub struct WindowsConfig {
     /// prototype).
     pub corner_patch: bool,
     /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
-    /// shadow side by side ([`crate::engine::corner_patch::DEFAULT_REACH`]), or one number for
+    /// shadow side by side ([`crate::engine::corner::corner_patch::DEFAULT_REACH`]), or one number for
     /// every side ([`WindowsConfig::patch_reach`]).
     pub corner_patch_reach: Auto,
 }
@@ -405,8 +405,8 @@ pub struct WindowsConfig {
 impl WindowsConfig {
     /// The corner patch's reach past each side of a sliver: the user's number on every side
     /// when `[windows] corner_patch_reach` is set, else an inactive window's shadow.
-    pub fn patch_reach(&self) -> crate::engine::corner_patch::Reach {
-        use crate::engine::corner_patch::{DEFAULT_REACH, Reach};
+    pub fn patch_reach(&self) -> crate::engine::corner::corner_patch::Reach {
+        use crate::engine::corner::corner_patch::{DEFAULT_REACH, Reach};
         match self.corner_patch_reach {
             Auto::Auto => DEFAULT_REACH,
             Auto::Value(v) => Reach::even(v).clean(),
@@ -1120,7 +1120,7 @@ impl Config {
             named_stages: self.stages.names.clone(),
             fit: crate::engine::stage_area::FitOptions::default(),
             engine: crate::engine::recovery::EngineKind::default(),
-            park: crate::engine::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
+            park: crate::engine::corner::park::ParkRequest { inside: self.windows.park_inside, drop: self.windows.park_drop },
             main_only: self.displays.main_only,
             keep_app_frames: !self.restore.saved_size,
         }
@@ -1346,7 +1346,7 @@ mod tests {
 
     #[test]
     fn the_corner_patch_reach_is_an_inactive_shadow_unless_set() {
-        use crate::engine::corner_patch::{DEFAULT_REACH, Reach};
+        use crate::engine::corner::corner_patch::{DEFAULT_REACH, Reach};
         assert_eq!(Config::default().windows.corner_patch_reach, Auto::Auto);
         assert_eq!(Config::default().windows.patch_reach(), DEFAULT_REACH, "not set: per side");
         assert_eq!(parse("[windows]\ncorner_patch_reach = \"auto\"\n").config.windows.patch_reach(), DEFAULT_REACH);

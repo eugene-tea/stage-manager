@@ -1,6 +1,6 @@
 //! The wallpaper corner patch (`[windows] corner_patch`, on by default: Apple's corner is clean): a
 //! small opaque panel over the park corner that shows the desktop picture under the parked
-//! windows' slivers, drawn from the picture's file ([`super::wallpaper`]; no screen
+//! windows' slivers, drawn from the picture's file ([`crate::engine::wallpaper`]; no screen
 //! capture), so the corner looks empty as Apple's does. This module is its geometry and
 //! when it may show.
 //!
@@ -54,7 +54,7 @@
 //!   lists the parked windows slid aside ([`desktop_slides`]); the plan then stays as it was
 //!   ([`slide_waits`]), so the panel slides away drawn and is there when its Desktop slides
 //!   back in. While the change is recognized no plan is made at all.
-//! - **Overviews** ([`super::show_desktop`]): Mission Control and App Exposé leave a shown
+//! - **Overviews** ([`crate::engine::show_desktop`]): Mission Control and App Exposé leave a shown
 //!   patch as it is (its panel is `Stationary`: drawn in place under their windows), else it
 //!   stays off. Through Show Desktop a patch drawn from a still of the desktop is planned as
 //!   at any time (round show-desktop-patch), its rectangle grown over what macOS pushes of the
@@ -66,7 +66,7 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use super::geometry::Rect;
+use crate::engine::geometry::Rect;
 use super::park::Corner;
 
 /// How far (points) a window's shadow reaches past each side of its frame.
@@ -285,7 +285,7 @@ pub struct PatchFacts {
     /// The patch's rectangle ([`patch_rect`]).
     pub rect: Option<Rect>,
     /// Why Mission Control, App Exposé or Show Desktop keeps the patch off now
-    /// ([`super::show_desktop::gate`]), or a Space change being recognized; `None` while
+    /// ([`crate::engine::show_desktop::gate`]), or a Space change being recognized; `None` while
     /// nothing does (with a still of the desktop the patch is planned through Show Desktop).
     pub overview: Option<&'static str>,
     /// The patch's order ([`order_step`]): right, found wrong, or `None` while not known
@@ -827,7 +827,7 @@ mod tests {
 
     #[test]
     fn a_desktop_sliding_away_is_told_from_windows_pushed_apart() {
-        use crate::engine::park::Corner;
+        use crate::engine::corner::park::Corner;
         let visible = Rect::new(0.0, 25.0, 2560.0, 1415.0);
         // 10-23: the parked windows listed at x=110 as the Desktop slid, before the notice.
         let slid = [Rect::new(110.0, 1388.0, 1621.0, 1183.0), Rect::new(110.0, 1408.0, 1497.0, 1030.0)];

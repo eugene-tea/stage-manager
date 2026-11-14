@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::StripStyle;
 
-use crate::engine::corner_patch::SwitchCover;
+use crate::engine::corner::corner_patch::SwitchCover;
 use crate::engine::geometry::{Point, Rect};
 
 /// Everything the strip needs to draw one frame of state.
@@ -108,7 +108,7 @@ pub struct Transition {
     /// an activated app's): the snapshots pass under it, not over it.
     pub under: Option<u32>,
     /// The park corner to cover while the incoming windows wait there behind their snapshots
-    /// (global, top-left; the controller's [`crate::engine::corner_patch::switch_cover`]),
+    /// (global, top-left; the controller's [`crate::engine::corner::corner_patch::switch_cover`]),
     /// with the corner patch's picture or a still of the desktop (round 8L3), whichever the
     /// controller found ready: macOS raises an activated app's windows above the patch.
     /// `None`: the corner is left as it is.

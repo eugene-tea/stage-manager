@@ -324,7 +324,7 @@ mod app {
             for (i, d) in displays.iter().enumerate() {
                 tracing::info!(id = d.id.0, key = %d.key.text(), frame = %d.frame, visible = %d.visible, corner = ?d.corner, main = i == 0, "display");
                 let others: Vec<_> = displays.iter().filter(|o| o.id != d.id).map(|o| o.frame).collect();
-                let choice = stage_manager::engine::park::choose_corner(d.frame, d.visible, &others);
+                let choice = stage_manager::engine::corner::park::choose_corner(d.frame, d.visible, &others);
                 if choice.overlap > 0.0 {
                     tracing::warn!(
                         id = d.id.0,

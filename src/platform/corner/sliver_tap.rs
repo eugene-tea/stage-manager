@@ -1,5 +1,5 @@
 //! The event tap that makes parked windows' slivers inert (`[windows] inert_slivers`,
-//! [`crate::engine::sliver`]).
+//! [`crate::engine::corner::sliver`]).
 //!
 //! An active (filtering) `CGEventTap` at the session level, head-inserted, for mouse presses,
 //! drags and releases of every button, on a thread of its own with its own run loop: the WM
@@ -34,9 +34,9 @@ use objc2_core_graphics::{
     CGEvent, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 
-use super::windows::CgWindow;
+use crate::platform::windows::CgWindow;
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::sliver::{Button, Listed, Press, PressGate, Seen, Shield, near_zones, zone_owner};
+use crate::engine::corner::sliver::{Button, Listed, Press, PressGate, Seen, Shield, near_zones, zone_owner};
 
 static SHIELD: Mutex<Option<Shield>> = Mutex::new(None);
 /// The on-screen windows near the zones, as the WM thread last read them ([`refresh`]).
@@ -154,11 +154,11 @@ fn listed(list: &[CgWindow]) -> Vec<Listed> {
     list.iter().map(|w| Listed { id: w.id, pid: w.pid, bounds: w.bounds, alpha: w.alpha, layer: w.layer }).collect()
 }
 
-/// `near` without the screenshot tool's window ([`super::desktop::overlay_of`]: seen through
+/// `near` without the screenshot tool's window ([`crate::platform::desktop::overlay_of`]: seen through
 /// everywhere, its owner read from the window): a press under it reaches the sliver below,
 /// so the tap judges it as if the window were not there. Asked only of the few windows near
 /// the zones, above layer 0. Notification Center's full-screen window
-/// ([`super::desktop::Through::OffItsElements`]) is kept: whether a point is its own (a
+/// ([`crate::platform::desktop::Through::OffItsElements`]) is kept: whether a point is its own (a
 /// banner drawn inside it) takes an Accessibility hit test at the press, and this list is
 /// read before any press, the callback never asking anything. So a press under it passes,
 /// as one under any window not parked: a parked window's edge pressable while it is up,
@@ -170,7 +170,7 @@ fn without_overlays(near: Vec<Listed>, list: &[CgWindow]) -> Vec<Listed> {
                 || !list
                     .iter()
                     .find(|w| w.id == n.id)
-                    .is_some_and(|w| super::desktop::overlay_of(w) == super::desktop::Through::Everywhere)
+                    .is_some_and(|w| crate::platform::desktop::overlay_of(w) == crate::platform::desktop::Through::Everywhere)
         })
         .collect()
 }
@@ -182,7 +182,7 @@ unsafe extern "C" {
 }
 
 /// Whether secure event input is on now.
-pub(super) fn secure_input_on() -> bool {
+pub(in crate::platform) fn secure_input_on() -> bool {
     // SAFETY: no arguments; callable from any thread.
     unsafe { IsSecureEventInputEnabled() != 0 }
 }
@@ -246,7 +246,7 @@ static BACK_ON_AT: Mutex<Option<Instant>> = Mutex::new(None);
 
 /// Whether a tap macOS switched off for user input goes on again: once secure input is off,
 /// and not sooner than [`BACK_ON_EVERY`] after the last time.
-pub(super) fn back_on(off_by_input: bool, last: Option<Instant>, now: Instant, secure_input: impl FnOnce() -> bool) -> bool {
+pub(in crate::platform) fn back_on(off_by_input: bool, last: Option<Instant>, now: Instant, secure_input: impl FnOnce() -> bool) -> bool {
     off_by_input && last.is_none_or(|t| now.saturating_duration_since(t) >= BACK_ON_EVERY) && !secure_input()
 }
 
@@ -393,8 +393,8 @@ unsafe extern "C-unwind" fn callback(
 mod tests {
     use super::*;
     use crate::engine::geometry::Rect;
-    use crate::engine::park::Corner;
-    use crate::engine::sliver::corner_zone;
+    use crate::engine::corner::park::Corner;
+    use crate::engine::corner::sliver::corner_zone;
 
     #[test]
     fn only_a_timeout_switches_the_tap_on_again() {
@@ -456,7 +456,7 @@ mod tests {
         let rounds = 50;
         let mut count = 0;
         for _ in 0..rounds {
-            count += listed(&super::super::windows::on_screen()).len();
+            count += listed(&crate::platform::windows::on_screen()).len();
         }
         let list_us = started.elapsed().as_micros() / rounds;
         println!("cheap test: {cheap_ns} ns a press ({hits} in zone); window list: {list_us} µs a read ({} windows)", count / rounds as usize);

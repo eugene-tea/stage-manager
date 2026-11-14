@@ -1,7 +1,7 @@
 //! `stage-manager probe-shadow [--settle MS] [--size W,H] [--only corner|middle]`: measures
 //! how far an inactive window's shadow reaches past its frame on each side, from a window of
 //! its own (round fixes-151; the corner patch's per-side reach,
-//! [`crate::engine::corner_patch::DEFAULT_REACH`]).
+//! [`crate::engine::corner::corner_patch::DEFAULT_REACH`]).
 //!
 //! The probe opens one window of its own at a time (an accessory app that never activates,
 //! the window ordered in without becoming key: inactive, as a parked window is), lets the

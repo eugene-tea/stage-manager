@@ -8,7 +8,7 @@ use super::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::park::TITLE_BAR_HEIGHT;
+use crate::engine::corner::park::TITLE_BAR_HEIGHT;
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;

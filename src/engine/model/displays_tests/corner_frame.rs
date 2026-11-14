@@ -7,7 +7,7 @@
 
 use super::*;
 use crate::engine::geometry::Size;
-use crate::engine::park::GRAB_WIDTH;
+use crate::engine::corner::park::GRAB_WIDTH;
 
 /// Deep House's window size on the owner's laptop.
 const SIZE: (f64, f64) = (1065.0, 915.0);

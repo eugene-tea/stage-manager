@@ -6,7 +6,7 @@
 //! Accessibility; this module decides, without touching anything:
 //!
 //! - a window is **stranded** when it sits in the main display's park zone at one of the
-//!   corners that count ([`ScanDisplays::corners`]; [`super::park::is_parked_in_at`]: the full frame's or
+//!   corners that count ([`ScanDisplays::corners`]; [`super::corner::park::is_parked_in_at`]: the full frame's or
 //!   the visible frame's, since macOS keeps a parked window above a bottom Dock) and does not
 //!   show on another display either (so a window on a second display to the bottom-right of
 //!   the main one is left alone);
@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{Corner, PARK_MARGIN, Slivers, choose_corner, clamp_to_visible, is_parked_in_at_with};
+use super::corner::park::{Corner, PARK_MARGIN, Slivers, choose_corner, clamp_to_visible, is_parked_in_at_with};
 use super::persist::{SavedRole, SavedWindow, StateFile};
 use super::stage_area::same_frame;
 use super::window_match::{Key, match_windows};
@@ -98,7 +98,7 @@ impl ScanDisplays {
     }
 
     /// True when `frame` is in a park zone at any corner that counts (the main display's,
-    /// [`super::park::is_parked_in_at`], slivers included, or another managed display's
+    /// [`super::corner::park::is_parked_in_at`], slivers included, or another managed display's
     /// own), whatever shows on other displays. For frames we put windows at (never a
     /// sliver) and windows we know.
     pub fn parks(&self, frame: Rect) -> bool {
@@ -441,7 +441,7 @@ pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
 mod tests {
     use super::*;
     use crate::engine::geometry::Size;
-    use crate::engine::park::{MACOS_KEEPS_TITLE, is_parked, park_frame, park_frame_at};
+    use crate::engine::corner::park::{MACOS_KEEPS_TITLE, is_parked, park_frame, park_frame_at};
     use crate::engine::persist::{SavedSpace, SavedStage, SavedWindow};
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);

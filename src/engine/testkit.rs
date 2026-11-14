@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 pub use super::corner::park_frame;
 use super::displays::ScreenKey;
 use super::geometry::Rect;
-use super::park::MACOS_KEEPS_TITLE;
+use super::corner::park::MACOS_KEEPS_TITLE;
 use super::model::{
     Action, Display, DisplayId, Model, ModelOptions, Observation, Pid, WindowId, WindowMeta,
     WindowRole,

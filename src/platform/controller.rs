@@ -110,8 +110,8 @@ use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, Hot
 use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply};
 use self::corner::CornerUpkeep;
 use self::corner::unrestored::LetGo;
-use crate::engine::park_reconcile::{self, Stray};
-use crate::engine::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
+use crate::engine::corner::park_reconcile::{self, Stray};
+use crate::engine::corner::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_click;
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::{display_kept, display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display, returned_screens};
@@ -123,9 +123,9 @@ use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::minimize;
 use crate::engine::minimize_press::Minimizable;
-use crate::engine::park::{Corner, ParkRequest, choose_corner};
+use crate::engine::corner::park::{Corner, ParkRequest, choose_corner};
 use crate::engine::recovery::{self, Known};
-use crate::engine::sliver;
+use crate::engine::corner::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
 use crate::engine::phase::{self, Hold};
@@ -148,7 +148,6 @@ use crate::ui::{assistive, motion_math, transition_plan};
 mod arrival;
 mod ax_blind;
 mod corner;
-mod corner_still;
 mod dock_order;
 mod raise_order;
 mod stale;
@@ -266,7 +265,7 @@ struct PatchItems {
     /// When the next read is due (`None`: at once).
     due: Option<Instant>,
     /// The read running.
-    reading: Option<std::sync::mpsc::Receiver<Option<crate::engine::corner_patch::DesktopIcons>>>,
+    reading: Option<std::sync::mpsc::Receiver<Option<crate::engine::corner::corner_patch::DesktopIcons>>>,
     /// Reads failed since the last good one (logged once a streak; spaces the retries,
     /// [`items_retry`]).
     fails: u32,
@@ -568,7 +567,7 @@ struct ActivationRun {
     /// made main and its app frontmost in one bounded step the moment the transition is sent,
     /// before the strip's answer and the parks: the keyboard is never left waiting for the
     /// motion. The windows grow from their card as a card click's do, waiting parked in the
-    /// corner, which the overlay covers ([`crate::engine::corner_patch::switch_cover`]).
+    /// corner, which the overlay covers ([`crate::engine::corner::corner_patch::switch_cover`]).
     focus: Option<WindowId>,
     /// On: the activated app's arriving windows, brought at once as with it off (6V) when the
     /// corner cannot be covered for this switch (round 8L2: the patch off, an icon under the
@@ -1449,8 +1448,8 @@ impl Controller {
     /// Takes a finished read of Finder's desktop icons ([`Self::patch_items`]): the icons it
     /// gave are known from now, a desktop not as expected or too crowded leaves them unknown,
     /// a failed read keeps the last ones; the next read is planned.
-    fn take_items_answer(&mut self, answer: Option<crate::engine::corner_patch::DesktopIcons>, now: Instant) {
-        use crate::engine::corner_patch::{DesktopIcons, MAX_ICONS, item_reach};
+    fn take_items_answer(&mut self, answer: Option<crate::engine::corner::corner_patch::DesktopIcons>, now: Instant) {
+        use crate::engine::corner::corner_patch::{DesktopIcons, MAX_ICONS, item_reach};
         let p = &mut self.patch_items;
         p.reading = None;
         let said = match answer {

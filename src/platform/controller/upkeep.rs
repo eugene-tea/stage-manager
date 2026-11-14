@@ -20,7 +20,7 @@ use serde_json::Value;
 
 use super::Controller;
 use super::corner::unrestored::LetGo;
-use crate::engine::corner_patch::{Refused, SwitchCover};
+use crate::engine::corner::corner_patch::{Refused, SwitchCover};
 use crate::engine::geometry::{Point, Rect};
 use crate::platform::observe::Observer;
 use crate::platform::safety::ParkedEntry;
