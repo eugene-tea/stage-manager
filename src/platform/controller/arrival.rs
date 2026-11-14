@@ -77,6 +77,11 @@ pub(super) enum Trigger {
     NoticeAx,
     /// While the Space change settles, for a focus held meanwhile.
     Settle,
+    /// At an activation of an app whose focused window the engine hides off its Desktop
+    /// ([`crate::platform::window_engine::WindowEngine::focus_waits_for_show`]): macOS does
+    /// not go to a Desktop for a window it does not count there, so the Desktop is arranged
+    /// and the window focused, and macOS goes ([`Controller::arrange_for_hidden_focus`]).
+    Hidden,
 }
 
 impl Trigger {
@@ -86,12 +91,14 @@ impl Trigger {
             Trigger::Notice => "notice",
             Trigger::NoticeAx => "notice-ax",
             Trigger::Settle => "settle",
+            Trigger::Hidden => "hidden-focus",
         }
     }
 
-    /// Arranged while its Desktop was not shown (its restores registered until seen).
+    /// Arranged while its Desktop was not shown (its restores registered until seen, its
+    /// moves checked while the Desktop slides in, undone when no Space change comes).
     fn away(self) -> bool {
-        self == Trigger::DockClick
+        matches!(self, Trigger::DockClick | Trigger::Hidden)
     }
 }
 
@@ -664,8 +671,8 @@ fn notice_step(overview: bool, ahead_listed: Option<bool>) -> NoticeStep {
 fn expire_step(trigger: Trigger, pending: bool, changed: bool, waited: Duration, contradicted: bool) -> Option<&'static str> {
     if pending {
         None
-    } else if trigger == Trigger::DockClick && !changed && waited >= DOCK_SWITCH_WAIT {
-        Some("no Space change came after the Dock click")
+    } else if trigger.away() && !changed && waited >= DOCK_SWITCH_WAIT {
+        Some("no Space change came after the Dock click (or the focus it was arranged for)")
     } else if contradicted {
         Some("its Desktop did not come")
     } else {
@@ -929,6 +936,35 @@ impl Controller {
         self.arrange_ahead(ob, standard, trigger, now, Some(obs))
     }
 
+    /// App `pid` activated with its focused window `id` on a Desktop not shown, held hidden
+    /// there by the engine ([`crate::platform::window_engine::WindowEngine::focus_waits_for_show`]): macOS goes to a Desktop
+    /// for an app's window only when it counts the window on that Desktop, and a window in a
+    /// stage Space is on none (live 11-14: `open` of an app whose one window waited in an
+    /// inactive stage of Desktop 1, from Desktop 2: no slide, nothing shown; the Corner
+    /// engine's parked window is on its Desktop and macOS goes). So the window's Desktop is
+    /// arranged as at a Dock click (its stage shown there, the one left hidden), then the
+    /// window is raised and focused, which takes macOS to it. The focus is held for the
+    /// arrival either way. True when arranged.
+    pub(super) fn arrange_for_hidden_focus(&mut self, ob: &Observer, id: WindowId, pid: i32, now: Instant) -> bool {
+        let Some(m) = self.model.as_ref() else { return false };
+        let Some(standard) = m.resolve_standard(id) else { return false };
+        if !m.waits_on_another_space(standard) || !self.engine.focus_waits_for_show(standard) || self.ahead.is_some() {
+            return false;
+        }
+        let list = windows::list_windows();
+        let obs = listed_order(&list, |w| m.window(w).is_some());
+        if !self.arrange_ahead(ob, standard, Trigger::Hidden, now, Some(obs)) {
+            return false;
+        }
+        if let Some(space) = self.ahead_space() {
+            self.present_away(space);
+        }
+        self.focus_replay.hold(Wanted::Window { id: standard, pid }, now);
+        self.execute(ob, vec![Action::Raise { id: standard }, Action::Focus { id: standard }]);
+        tracing::info!(window = standard.0, pid, "arrival: the activated app's window waits hidden on another Desktop; arranged there and focused, macOS goes");
+        true
+    }
+
     /// Arranges window `id`'s Desktop for it ([`crate::engine::model::Model::arrange_ahead`]);
     /// on a Desktop not shown the windows it brings back stay registered until seen out of
     /// the park zone. True when arranged.
@@ -1103,7 +1139,7 @@ impl Controller {
     fn check_arrangement(&mut self, ob: &Observer, now: Instant) {
         // Each app's enhanced UI off once for all these moves (round enhanced-ui).
         let _quiet = enhanced_ui::Batch::open();
-        let live = self.ahead.as_ref().is_some_and(|s| s.trigger == Trigger::DockClick);
+        let live = self.ahead.as_ref().is_some_and(|s| s.trigger.away());
         if !live {
             self.finish_verify("the arrangement is settled");
             return;
@@ -1609,7 +1645,7 @@ impl Controller {
         );
         if !hit {
             self.keep_registered(ob, &actions);
-            if sent.trigger == Trigger::DockClick {
+            if sent.trigger.away() {
                 // Its pane drew the prediction: it shows the Desktop as it is again.
                 self.present_away(sent.ahead.space);
             }
@@ -1633,7 +1669,7 @@ impl Controller {
         );
         self.keep_registered(ob, &actions);
         self.execute(ob, actions);
-        if sent.trigger == Trigger::DockClick {
+        if sent.trigger.away() {
             // The focus held for the click was the prediction's: it goes with it.
             if matches!(self.focus_replay.peek(Instant::now()), Some(Wanted::Window { id, .. }) if id == sent.ahead.window) {
                 self.focus_replay.clear();
@@ -1870,6 +1906,9 @@ mod tests {
         assert_eq!(expire_step(dock, true, false, ms(1500), true), None, "never while a change settles");
         assert!(expire_step(Trigger::Notice, false, true, ms(10), true).is_some(), "the hold is gone");
         assert_eq!(expire_step(Trigger::Notice, false, false, ms(5000), false), None);
+        // Arranged for a focus the engine hid off its Desktop: away as a Dock click's is.
+        assert!(Trigger::Hidden.away());
+        assert!(expire_step(Trigger::Hidden, false, false, DOCK_SWITCH_WAIT, false).is_some(), "no Space change came for the focus");
     }
 
     #[test]

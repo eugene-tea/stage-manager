@@ -884,29 +884,32 @@ def run():
     app = ts.app_pid()
     guardians = ts.guardian_pids(app)
     check(bool(guardians), "the guardian runs")
-    os.kill(app, signal.SIGKILL)
-    ts.wait_gone(app)
-    time.sleep(3)
-    still = bool(ts.pids_of(f"stage-manager --guardian {app}$"))
-    parked = [w["id"] for w in parked_anywhere()]
-    say(f"    guardian still watching: {still}; parked anywhere now: {parked}")
-    check(still and bool(parked), "the guardian waits while the window's Desktop is not shown")
-    check(any("waiting for" in line and "on_desktops_not_shown=[\"" in line for line in guardian_lines()),
-          "the guardian's log says it waits for a window on a Desktop not shown")
-    if AUTO:
-        appless_switch("d2", "Switch to Desktop 2", d2_ids)
+    if ts.SPACES:
+        kill_with_a_stage_space_elsewhere(app, [w["id"] for w in s["windows"] if w["space"] == d2 and w["parked"]], d2_ids)
     else:
-        switch_to_windows("Switch to Desktop 2", d2_ids)
-    v = watch_guardian_until_back(app, parked, 12)
-    check(v.back, f"Desktop 2's parked window {parked} is back: on screen outside the park zone for a second")
-    check(not v.early, "the guardian kept watching until the window was seen back (it never ended while it was parked)")
-    lines = guardian_lines()
-    told = [i for i in parked if any("window brought back" in line and re.search(rf"(?<![a-z])id={i}\b", line) for line in lines)]
-    check(told == parked, f"the guardian's log says it brought {parked} back (brought back: {told})")
-    ended = wait_for("the guardian to end", lambda: not ts.pids_of(f"stage-manager --guardian {app}$"), 6)
-    check(ended is True, "the guardian ended once nothing was left")
-    for line in guardian_lines()[-14:]:
-        say(f"    log: {line}")
+        os.kill(app, signal.SIGKILL)
+        ts.wait_gone(app)
+        time.sleep(3)
+        still = bool(ts.pids_of(f"stage-manager --guardian {app}$"))
+        parked = [w["id"] for w in parked_anywhere()]
+        say(f"    guardian still watching: {still}; parked anywhere now: {parked}")
+        check(still and bool(parked), "the guardian waits while the window's Desktop is not shown")
+        check(any("waiting for" in line and "on_desktops_not_shown=[\"" in line for line in guardian_lines()),
+              "the guardian's log says it waits for a window on a Desktop not shown")
+        if AUTO:
+            appless_switch("d2", "Switch to Desktop 2", d2_ids)
+        else:
+            switch_to_windows("Switch to Desktop 2", d2_ids)
+        v = watch_guardian_until_back(app, parked, 12)
+        check(v.back, f"Desktop 2's parked window {parked} is back: on screen outside the park zone for a second")
+        check(not v.early, "the guardian kept watching until the window was seen back (it never ended while it was parked)")
+        lines = guardian_lines()
+        told = [i for i in parked if any("window brought back" in line and re.search(rf"(?<![a-z])id={i}\b", line) for line in lines)]
+        check(told == parked, f"the guardian's log says it brought {parked} back (brought back: {told})")
+        ended = wait_for("the guardian to end", lambda: not ts.pids_of(f"stage-manager --guardian {app}$"), 6)
+        check(ended is True, "the guardian ended once nothing was left")
+        for line in guardian_lines()[-14:]:
+            say(f"    log: {line}")
 
     say("\n== a full-screen app's Space has no strip; the Desktop keeps its id ==")
     # Only the Desktop shown has its windows managed at launch (here Desktop 2's two); the
@@ -962,6 +965,39 @@ def run():
     ts.stop_app()
     left = parked_anywhere()
     check(not left, "the end: no fixture window parked on any Desktop")
+
+
+def kill_with_a_stage_space_elsewhere(app, hidden, d2_ids):
+    """The kill -9 drill under the Spaces engine, on Desktop 1 with `hidden` (windows of
+    Desktop 2's inactive stages) in their stage Spaces. The classic Spaces die with the app
+    and the window server puts their windows back by itself, onto the Desktop shown (spike
+    Q2; S3 finding 6): nothing is left hidden, the guardian has nothing to wait for and ends.
+    Where they land is Desktop 1, not their own: the guardian knows no Desktop ids, so the
+    return to Desktop 2 is skipped with its reason (live 11-14) until the parked file carries
+    each window's Desktop and the guardian moves it back. The watcher is told the landed
+    windows are Desktop 1's now, then the drill ends on Desktop 2 as the Corner one does."""
+    WATCH.pause()  # Desktop 2's windows come onto Desktop 1 at the kill
+    os.kill(app, signal.SIGKILL)
+    ts.wait_gone(app)
+    time.sleep(1.5)
+    wins, _ = ts.fixture_windows()
+    staged = [w["id"] for w in wins if w.get("staged")]
+    check(not staged, f"after kill -9 no fixture window is left in a stage Space (they ended with the app): {staged}")
+    landed = onscreen_ids(hidden)
+    check(sorted(landed) == sorted(hidden), f"Desktop 2's hidden windows {hidden} are back on screen at once, by the window server ({landed})")
+    skip("Desktop 2's hidden windows back on their own Desktop after kill -9",
+         "the window server brings a crashed app's stage-Space windows to the Desktop shown; the guardian "
+         "knows no Desktop ids (the parked file's Desktops and a bridged move back: S5)")
+    ended = wait_for("the guardian to end", lambda: not ts.pids_of(f"stage-manager --guardian {app}$"), 6)
+    check(ended is True, "the guardian ended: nothing was left hidden")
+    WATCH.markers("d1", WATCH.ids["d1"] | set(landed))
+    WATCH.markers("d2", WATCH.ids["d2"] - set(landed))
+    WATCH.desk("d1")
+    rest = [i for i in d2_ids if i not in landed]
+    if AUTO:
+        appless_switch("d2", "Switch to Desktop 2", rest)
+    else:
+        switch_to_windows("Switch to Desktop 2", rest)
 
 
 def stage_holding(s, title):

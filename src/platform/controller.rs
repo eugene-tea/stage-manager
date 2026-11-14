@@ -2792,6 +2792,11 @@ impl Controller {
                 "activation held: it belongs to the Desktop sliding in; decided once the Space is recognized"
             );
             self.hold_for_slide(ob, wanted, true, now);
+            if let slide_hold::Wait::FocusElsewhere(id) = why {
+                // A window the engine hides off its Desktop: macOS goes nowhere for it, so the
+                // arrival is made ours (the Spaces engine; never the Corner's).
+                self.arrange_for_hidden_focus(ob, id, pid, now);
+            }
             return;
         }
         let obs = self.observe_activation(ob, &list, focused.filter(|_| needs_focus));
