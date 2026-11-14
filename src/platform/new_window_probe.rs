@@ -17,7 +17,13 @@
 //!   `SLSRegisterNotifyProc`, every event type in `--events A-B`, default 700-1700) whose
 //!   payload names the window id, each with its type.
 //!
-//! `sources APP-PATH BUNDLE [--rounds N] [--events A-B] [--args …]`: APP-PATH is passed to
+//! `--hold-ms MS` (a fixture app only) holds each new window in a Space of its own from its
+//! first listing and lets it out MS after its app ordered it in, with every other one
+//! ordered in by then, one by one: front first as the complete list orders them, or back
+//! first (`--release-reverse`); the round reports that order (`held_order`), the order let
+//! out (`release_order`) and their order on screen after (`out_order`), front to back.
+//!
+//! `sources APP-PATH BUNDLE [--rounds N] [--events A-B] [--hold-ms MS] [--release-reverse] [--args …]`: APP-PATH is passed to
 //! `open -n` (an app bundle path, or `-a Name`); every round quits the app after (terminate,
 //! then force after 3 s). One JSON line per round, then a summary.
 
@@ -167,7 +173,7 @@ pub fn run(args: &[String]) -> ExitCode {
         println!("{}", json!({ "ok": false, "error": "usage: probe-spaces sources APP-PATH BUNDLE [--rounds N] [--events A-B] [--args …]" }));
         return ExitCode::from(2);
     };
-    let (mut rounds, mut range, mut extra, mut hold) = (5usize, 700u32..=1700u32, Vec::new(), None);
+    let (mut rounds, mut range, mut extra, mut hold, mut reverse) = (5usize, 700u32..=1700u32, Vec::new(), None, false);
     while let Some(a) = it.next() {
         match a.as_str() {
             "--rounds" => rounds = it.next().and_then(|s| s.parse().ok()).unwrap_or(5),
@@ -177,6 +183,7 @@ pub fn run(args: &[String]) -> ExitCode {
                 }
             }
             "--hold-ms" => hold = it.next().and_then(|s| s.parse().ok()).map(Duration::from_millis),
+            "--release-reverse" => reverse = true,
             "--args" => extra.extend(it.by_ref().cloned()),
             _ => {}
         }
@@ -189,7 +196,7 @@ pub fn run(args: &[String]) -> ExitCode {
     println!("{}", json!({ "event": "registered", "connection": registered.0, "plain": registered.1, "range": [range.start(), range.end()] }));
     let mut out = Vec::new();
     for round in 0..rounds {
-        let r = one_round(&sky, &target, &bundle, &extra, hold);
+        let r = one_round(&sky, &target, &bundle, &extra, hold, reverse);
         println!("{}", json!({ "event": "round", "round": round, "result": r }));
         out.push(r);
         pump(Duration::from_millis(800));
@@ -198,7 +205,7 @@ pub fn run(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn one_round(sky: &Sky, target: &str, bundle: &str, extra: &[String], hold: Option<Duration>) -> Value {
+fn one_round(sky: &Sky, target: &str, bundle: &str, extra: &[String], hold: Option<Duration>, reverse: bool) -> Value {
     // A classic Space (it ends with this process) where `--hold-ms` keeps new windows.
     let waiting = match hold {
         Some(_) => match sky.create(Route::Classic, false) {
@@ -236,6 +243,10 @@ fn one_round(sky: &Sky, target: &str, bundle: &str, extra: &[String], hold: Opti
     let mut seen: HashMap<u32, Seen> = HashMap::new();
     let mut first_onscreen: Option<Instant> = None;
     let mut samples = 0u64;
+    // `--hold-ms`: the held windows ordered in, in the complete list's order, at the last
+    // sample before any was let out; and the order they were let out in.
+    let mut held_order: Vec<u32> = Vec::new();
+    let mut release_order: Vec<u32> = Vec::new();
     let mut list_us = 0u128;
     let mut ids_us = 0u128;
     let limit = t0 + Duration::from_secs(10);
@@ -295,6 +306,17 @@ fn one_round(sky: &Sky, target: &str, bundle: &str, extra: &[String], hold: Opti
             let at = Instant::now();
             list_us += at.duration_since(q).as_micros();
             samples += 1;
+            let mut due: Vec<u32> = Vec::new();
+            if release_order.is_empty() {
+                let order: Vec<u32> = all
+                    .iter()
+                    .filter(|w| seen.get(&w.id).is_some_and(|s| s.held.is_some() && s.ordered.is_some() && s.released.is_none()))
+                    .map(|w| w.id)
+                    .collect();
+                if !order.is_empty() {
+                    held_order = order;
+                }
+            }
             for w in all.iter().filter(|w| w.pid == p && w.layer == 0 && !before.contains(&w.id)) {
                 let s = seen.entry(w.id).or_default();
                 if s.listed.is_none() {
@@ -325,8 +347,7 @@ fn one_round(sky: &Sky, target: &str, bundle: &str, extra: &[String], hold: Opti
                             s.ordered = Some(at);
                         }
                         if s.ordered.is_some_and(|o| at >= o + h) || at > t0 + Duration::from_secs(4) {
-                            let _ = sky.add_remove_from(Route::Bridged, desktop_space, &[w.id], ALL_SPACES_MASK);
-                            s.released = Some(Instant::now());
+                            due.push(w.id);
                         }
                     }
                 }
@@ -334,9 +355,31 @@ fn one_round(sky: &Sky, target: &str, bundle: &str, extra: &[String], hold: Opti
                     s.desktop = Some(Instant::now());
                 }
             }
+            // Let out together with every other one ordered in, one by one, in the list's
+            // order (front first) or, `--release-reverse`, back first: does the order they
+            // come out in change their order on screen?
+            if !due.is_empty() {
+                due = all
+                    .iter()
+                    .filter(|w| due.contains(&w.id) || seen.get(&w.id).is_some_and(|s| s.held.is_some() && s.ordered.is_some() && s.released.is_none()))
+                    .map(|w| w.id)
+                    .collect();
+            }
+            if reverse {
+                due.reverse();
+            }
+            for id in due {
+                let _ = sky.add_remove_from(Route::Bridged, desktop_space, &[id], ALL_SPACES_MASK);
+                if let Some(s) = seen.get_mut(&id) {
+                    s.released = Some(Instant::now());
+                }
+                release_order.push(id);
+            }
         }
         pump(Duration::from_micros(250));
     }
+    // The let-out windows' order on screen now, front to back.
+    let out_order: Vec<u32> = windows::on_screen().iter().filter(|w| release_order.contains(&w.id)).map(|w| w.id).collect();
     // Windows still held (never ordered in: helpers) let out; do they show then?
     let mut helpers_shown = 0;
     if let Some(sid) = waiting {
@@ -402,6 +445,7 @@ fn one_round(sky: &Sky, target: &str, bundle: &str, extra: &[String], hold: Opti
     drop(observer);
     json!({
         "pid": pid, "launch": ms(t0, launch), "ax_answer": ms(t0, ax_answer), "ax_tries": ax_tries,
+        "held_order": held_order, "release_order": release_order, "out_order": out_order,
         "first_onscreen": ms(t0, first_onscreen), "samples": samples, "list_us_mean": list_us / u128::from(samples.max(1)), "ids_us_mean": ids_us / u128::from(samples.max(1)), "helpers_shown": helpers_shown, "windows": wins,
         "ax_created_all": ax_created.iter().map(|(t, w)| json!([ms(t0, Some(*t)), w])).collect::<Vec<_>>(),
         "notice_kinds": kinds.iter().map(|(k, n)| json!([k & 0x7fff_ffff, k & 0x8000_0000 != 0, n])).collect::<Vec<_>>(),

@@ -495,7 +495,7 @@ pub fn wallpaper_click(s: &NativeSettings, clicks: i64) -> WallpaperClick {
 ///
 /// A focus on an arriving window the engine says must be shown first (`waits`,
 /// [`WindowEngine::focus_waits_for_show`]: under the Spaces engine it is on no Desktop until
-/// shown, and its app activated now could take macOS to another Desktop) runs only with the
+/// shown, and its app, with a window on another Desktop, activated now would take macOS there) runs only with the
 /// arrivals.
 fn split_covered(actions: Vec<Action>, arriving: &HashSet<u32>, waits: impl Fn(WindowId) -> bool) -> (Vec<Action>, Vec<Action>) {
     let focus: Vec<Action> = actions
@@ -859,6 +859,9 @@ pub struct Controller {
     next_transition: u64,
     /// The transition whose outgoing windows just parked, for the next snapshot.
     parked_note: Option<u64>,
+    /// A just-opened app's window of transition `.0`, let out where it shows mid-motion
+    /// (`.1`): the next snapshot tells the strip, whose overlay goes under it.
+    under_note: Option<(u64, u32)>,
     /// The transition whose incoming windows are in place, with their frames read back, for
     /// the next snapshot.
     arrived_note: Option<(u64, Vec<(u32, Rect)>)>,
@@ -1133,6 +1136,7 @@ impl Controller {
             pending: None,
             next_transition: 0,
             parked_note: None,
+            under_note: None,
             arrived_note: None,
             activation: ActivationRun::default(),
             fallback_said: HashSet::new(),
@@ -2231,6 +2235,7 @@ impl Controller {
             announce: std::mem::take(&mut self.announce),
             parked: self.parked_note.take(),
             arrived: self.arrived_note.take(),
+            under_now: self.under_note.take(),
         };
         for d in displays {
             let t = if d == plays_on { transition.clone() } else { None };
@@ -2295,6 +2300,7 @@ impl Controller {
             transition,
             parked: notes.parked,
             arrived: notes.arrived.clone(),
+            under_now: notes.under_now,
             late: None,
             space: space.0,
             display: display.0,
@@ -2426,7 +2432,8 @@ impl Controller {
     // ----- events ------------------------------------------------------------------------
 
     /// Handles a batch of observer events. Runs of `Found` are taken in window-id order
-    /// (creation order), each app's windows front to back ([`found_order`]).
+    /// (creation order), each app's windows front to back ([`found_order`]; a window the
+    /// engine holds on its way in counts where it waits, [`windows::z_order_with`]).
     pub fn on_events(&mut self, ob: &mut Observer, events: Vec<WinEvent>) {
         let mut i = 0;
         while i < events.len() {
@@ -2436,7 +2443,11 @@ impl Controller {
                     run.push(*id);
                     i += 1;
                 }
-                let z = if run.len() > 1 { windows::z_order(&windows::list_windows()) } else { HashMap::new() };
+                // A window the engine holds on its way in is off screen, in its app's order
+                // there (the Spaces engine: an app opening two windows at once, the one it
+                // opened last in front, live 11-14).
+                let engine = self.engine.clone();
+                let z = if run.len() > 1 { windows::z_order_with(&windows::list_windows(), |id| engine.about_to_show(WindowId(id))) } else { HashMap::new() };
                 let run = found_order(run, |id| ob.window(id).map(|w| w.pid), |id| z.get(&id).copied());
                 for id in run {
                     self.on_found(ob, id);
@@ -2693,8 +2704,15 @@ impl Controller {
                 }
                 // Its icon leaves the Dock unless pinned: the strip may follow.
                 self.dock_order.soon(now);
+                let left: BTreeSet<StageId> = self
+                    .closing
+                    .iter()
+                    .filter(|(t, c)| c.pid == pid && now.duration_since(*t) <= CLOSING_KEEP)
+                    .map(|(_, c)| c.stage)
+                    .collect();
                 self.keep_quit_windows(pid, now);
                 enhanced_ui::gone(pid);
+                self.front_after_quit(ob, &left);
             }
             WinEvent::AppActivated(pid, fired) => {
                 // Its enhanced UI is read again at its next move (round enhanced-ui).
@@ -3086,6 +3104,24 @@ impl Controller {
             actions.into_iter().partition(|a| matches!(a, Action::Hide { id } if hidden(*id)));
         self.execute(ob, quiet);
         self.execute_animated(ob, rest);
+    }
+
+    /// An app quit and `left` are the stages its windows were in: where one is left empty in
+    /// front, the most recent stage comes in front when macOS brings none
+    /// ([`Model::front_after_quit`]: the Spaces engine; under the Corner engine macOS
+    /// activates the next app, which switches). No stage comes in front on a screen that
+    /// takes no input now, as for any switch.
+    fn front_after_quit(&mut self, ob: &mut Observer, left: &BTreeSet<StageId>) {
+        if left.is_empty() {
+            return;
+        }
+        let obs = self.observe(ob);
+        let frozen: Vec<DisplayId> = self.managed_displays().into_iter().map(|d| d.id).filter(|d| self.frozen_on(*d)).collect();
+        let Some(m) = self.model.as_mut() else { return };
+        let actions = m.front_after_quit(left, &obs, |d| !frozen.contains(&d));
+        if !actions.is_empty() {
+            self.execute_animated(ob, actions);
+        }
     }
 
     /// An app was unhidden: a stage of its that left the strip comes back as a card in the
@@ -4909,6 +4945,7 @@ impl Controller {
         counters::bump(Count::NewWindow);
         tracing::info!(id, action = %decision.action, placement = %decision.placement, "new window");
         let obs = self.observe(ob);
+        let transitions_before = self.next_transition;
         if let Some(m) = self.model.as_mut() {
             let actions = m.add_window(meta, &decision, &obs);
             let back = m.last_pending().filter(|n| n.window.0 == id);
@@ -4932,6 +4969,13 @@ impl Controller {
             // window joining a stage not shown went into that stage's Space instead).
             let shown_by_model = self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_none_or(|w| !w.parked);
             self.engine.let_new_out(WindowId(id), shown_by_model);
+            if shown_by_model && self.next_transition != transitions_before {
+                // Its stage's switch is moving behind pictures above every window (the
+                // window waited off screen, so the transition could not name it to pass
+                // under): the strip's overlay goes under it now.
+                self.under_note = Some((self.next_transition, id));
+                self.present();
+            }
         }
         // The measure of round login-observe: from found (tracked) to placed.
         if let Some(w) = ob.window(id) {
@@ -6482,6 +6526,7 @@ struct PresentNotes {
     announce: bool,
     parked: Option<u64>,
     arrived: Option<(u64, Vec<(u32, Rect)>)>,
+    under_now: Option<(u64, u32)>,
 }
 
 /// One shown window's frame as [`Controller::observe_with`] read it through Accessibility.

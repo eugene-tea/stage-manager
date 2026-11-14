@@ -21,7 +21,8 @@
 //!   engine that hides without moving has no such place.
 //!
 //! And one answer the engine gives about a window the model hid: where it left it
-//! ([`Model::frame_left`]).
+//! ([`Model::frame_left`]); and one about macOS: whether it brings another app in front when
+//! the app in front quits ([`Model::macos_fronts_after_quit`]).
 
 use super::{Display, DisplayId, Model, WindowId, WindowMeta, WindowState};
 use crate::engine::{corner, spaces};
@@ -124,6 +125,18 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::lands_hidden(w.restore, self.display(w.meta.display), self.options.park, frame),
             EngineKind::Spaces => spaces::lands_hidden(frame),
+        }
+    }
+
+    /// True when macOS itself brings another app in front when the app in front quits: it
+    /// activates an app with a window on screen, and the Corner engine's hidden windows are
+    /// listed on screen (in the corner), so that app's activation switches as any does. The
+    /// Spaces engine's hidden windows are on no Desktop, so macOS activates none of their
+    /// apps and the emptied stage would stay in front ([`Model::front_after_quit`]).
+    pub(crate) fn macos_fronts_after_quit(&self) -> bool {
+        match self.options.engine {
+            EngineKind::Corner => corner::macos_fronts_after_quit(),
+            EngineKind::Spaces => spaces::macos_fronts_after_quit(),
         }
     }
 

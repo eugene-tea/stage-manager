@@ -37,6 +37,17 @@ impl Model {
         standard.peek().is_some() && standard.all(|w| self.hidden_apps.contains(&w.meta.pid))
     }
 
+    /// The most recent stage of `space` other than `active` whose card shows
+    /// ([`Model::strip_shows`]): the one a card click would bring in front when the stage in
+    /// front leaves (its app hidden, or quit, [`Model::front_after_quit`]).
+    pub(crate) fn most_recent_card(&self, space: super::SpaceId, active: StageId) -> Option<StageId> {
+        self.stages
+            .iter()
+            .filter(|s| s.space == space && s.id != active && self.strip_shows(s.id))
+            .max_by_key(|s| s.last_active)
+            .map(|s| s.id)
+    }
+
     /// App `pid` was hidden: its windows leave the cards, a stage of its alone leaves the
     /// strip (its slot to the most recent stage out of view), and where such a stage is in
     /// front on a Desktop shown, the most recent stage of that Desktop comes in front
@@ -73,13 +84,7 @@ impl Model {
             if !self.hidden_stage(active) || !switches(self.space_display(space)) {
                 continue;
             }
-            let recent = self
-                .stages
-                .iter()
-                .filter(|s| s.space == space && s.id != active && self.strip_shows(s.id))
-                .max_by_key(|s| s.last_active)
-                .map(|s| s.id);
-            if let Some(target) = recent {
+            if let Some(target) = self.most_recent_card(space, active) {
                 actions.extend(self.switch_to(target, obs));
             }
         }

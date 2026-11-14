@@ -436,9 +436,14 @@ def phase_launch():
                 f"mean {o['mean_interval_ms']} ms, max gap {o['max_gap_ms']} ms; Charlie's stage "
                 f"{'in front' if o['staged'] else 'NOT in front'}")
         stop_extra("c")
-        # Its window gone from the model (under the Spaces engine its emptied stage stays in
-        # front until Alpha is activated: macOS activates no app with no window shown).
-        wait_state(lambda x: "Charlie 1" not in by_title(x), "Charlie's window to go")
+        # Charlie quits from the front stage: Alpha's stage comes back in front with nobody
+        # activating it (round sm-gaps: under the Corner engine macOS activates Alpha; under
+        # the Spaces engine macOS activates no app with no window shown, so the app brings
+        # the most recent stage, as Apple's Stage Manager does).
+        o["back"] = wait_state(lambda x: "Charlie 1" not in by_title(x) and active_titles(x) == {"Alpha 1"},
+                               "Alpha's stage back in front after Charlie quit", timeout=5) is not None
+        if not o["back"]:
+            say(f"  launch {i + 1}: Alpha's stage NOT back in front after Charlie quit ({active_titles(state())})")
     ok = [o for o in results if o.get("ok")]
     over = [o for o in ok if o["overlaps"]]
     shown = sorted(o["first_new_ms"] for o in ok if o["first_new_ms"] is not None)
@@ -448,6 +453,8 @@ def phase_launch():
     check(len(ok) == n, f"{len(ok)} of {n} launches sampled")
     check(all(o["staged"] for o in ok), "every launch: Charlie's own stage in front")
     check(all(o["first_new_ms"] is not None for o in ok), "every launch: Charlie's window shows")
+    back = [o for o in results if o.get("back")]
+    check(len(back) == len(results), f"every quit from the front stage: Alpha's stage back in front by itself ({len(back)} of {len(results)})")
     if SPACES:
         check(not over, f"Spaces: no launch shows Charlie's window over Alpha's stage ({len(over)} of {len(ok)} did)")
         e = (ctl("state").get("engine") or {})
@@ -3294,6 +3301,8 @@ def phase_motion():
         c = cards[0]
         b = c["frame"]
         key = next((st["key"] for st in s["stages"] if st["number"] == c["number"]), None)
+        space_before = (ctl("space") or {}).get("space")
+        log_before = len(log_text())
         r = ctl("debug-click", b["x"] + b["w"] / 2, b["y"] + b["h"] / 2)
     if r and not blocked(r, "the animated card click (the click, the overlay, the switch, the focus)"):
         check(r.get("ok"), f"clicked a card ({r.get('error', 'ok')})")
@@ -3318,8 +3327,23 @@ def phase_motion():
         check(seen is not None, f"snapshots move in the overlay (layer {seen})")
         s = wait_state(lambda x: x["active"] == c["number"], "the click to switch")
         check(s is not None, "the click switched")
-        check("the keyboard goes to the new stage now" in log_text(),
-              "the new stage's key window is focused with the parks, before its window arrives")
+        said = log_text()[log_before:]
+        if SPACES:
+            # The Spaces engine focuses a window still in its stage Space early only when its
+            # app has no window on a Desktop not shown (activated, the app would take macOS
+            # there: S3c); else the focus goes as the window lands. Either way the key window
+            # ends focused and the Desktop never changes.
+            now = "the keyboard goes to the new stage now" in said
+            landed = "the keyboard goes to the new stage with its windows" in said
+            check(now or landed, f"Spaces: the new stage's key window is focused, with the parks or as its window lands "
+                                 f"({'with the parks' if now else 'as it lands' if landed else 'neither said'})")
+            time.sleep(0.8)
+            s2 = state()
+            check(s2.get("focused") == key or key is None, f"Spaces: the new stage's key window is focused ({s2.get('focused')} vs {key})")
+            check((ctl("space") or {}).get("space") == space_before, "Spaces: no Desktop change meanwhile")
+        else:
+            check("the keyboard goes to the new stage now" in said,
+                  "the new stage's key window is focused with the parks, before its window arrives")
         if not early:
             say("  note: no probe caught the key window raised while still parked (it may have arrived first)")
         time.sleep(1.0)

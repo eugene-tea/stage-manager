@@ -1953,6 +1953,68 @@ fn a_hidden_stage_shown_by_its_activation_keeps_no_slot_to_come_back_to() {
 }
 }
 
+// ----- an app in front quits ---------------------------------------------------------------
+
+/// The stages app `pid`'s windows `ids` are in, read as they leave (the platform's
+/// [`Model::closing`]), then the windows closed.
+fn quit_app(e: &mut Env, ids: &[u32]) -> std::collections::BTreeSet<StageId> {
+    let left = ids.iter().filter_map(|&id| e.m.closing(w(id)).map(|c| c.stage)).collect();
+    for &id in ids {
+        e.close(id);
+    }
+    left
+}
+
+both_engines! {
+/// The app of the stage in front quits. The Corner engine: macOS activates another app (a
+/// parked window is listed on screen), whose activation switches; the model adds nothing.
+/// The Spaces engine: macOS activates none (every other window is on no Desktop), so the
+/// most recent stage comes in front, as Apple's Stage Manager brings it (live 11-14).
+#[test]
+fn the_app_in_front_quits_the_most_recent_stage_comes_in_front_unless_macos_brings_one() {
+    let mut e = stages(4, 6);
+    e.switch(2);
+    e.switch(4);
+    let left = quit_app(&mut e, &[4]);
+    let a = e.m.front_after_quit(&left, &e.d.obs(), |_| true);
+    e.run(a.clone());
+    match engine() {
+        Some(EngineKind::Spaces) => {
+            assert_eq!(e.active_number(), 2, "the most recent stage in front");
+            assert!(!e.d.parked(w(2)), "its window shows");
+            assert!(a.contains(&Action::Focus { id: w(2) }), "and is focused: its app comes front");
+        }
+        _ => assert!(a.is_empty(), "macOS's activation of the next app switches: {a:?}"),
+    }
+}
+
+#[test]
+fn a_quit_that_leaves_the_stage_in_front_a_window_or_happens_behind_it_brings_nothing() {
+    let mut e = stages(3, 6);
+    // Another app's window shares the stage in front: it stays.
+    e.send(1, Target::Number(3));
+    let left = quit_app(&mut e, &[3]);
+    let active = e.active_number();
+    let a = e.m.front_after_quit(&left, &e.d.obs(), |_| true);
+    assert!(a.is_empty(), "the stage in front keeps a window: {a:?}");
+    assert_eq!(e.active_number(), active);
+    // An app of a card quits: its stage goes, the one in front stays.
+    let mut e = stages(3, 6);
+    let left = quit_app(&mut e, &[2]);
+    assert!(e.m.front_after_quit(&left, &e.d.obs(), |_| true).is_empty());
+    assert_eq!(e.m.stage_of(w(3)), e.m.main_active_stage());
+}
+
+#[test]
+fn a_quit_in_front_brings_no_stage_on_a_screen_that_takes_no_input_now() {
+    let mut e = stages(3, 6);
+    let left = quit_app(&mut e, &[3]);
+    let empty = e.m.main_active_stage();
+    assert!(e.m.front_after_quit(&left, &e.d.obs(), |_| false).is_empty(), "frozen: nothing switches");
+    assert_eq!(e.m.main_active_stage(), empty, "the emptied stage stays in front until a card is picked");
+}
+}
+
 // ----- merge by dropping a card on a card -------------------------------------------------
 
 /// The stage holding window `id`.

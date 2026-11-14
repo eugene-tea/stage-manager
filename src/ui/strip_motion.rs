@@ -1055,6 +1055,18 @@ impl Strip {
 
     /// The outgoing windows of transition `id` have parked (the controller's note): the motion
     /// starts.
+    /// Window `window` of transition `id`'s arriving stage shows in place only now
+    /// ([`super::strip_model::StripSnapshot::under_now`]): while that transition runs, the
+    /// overlay goes just under it, so the snapshots still moving pass behind it (S3b: the
+    /// stage left behind shrank over a just-opened app's window let out mid-motion).
+    pub(super) fn shown_in_place(&mut self, id: u64, window: u32) {
+        if self.motion.running.as_ref().is_none_or(|r| r.id != id) {
+            return;
+        }
+        tracing::debug!(id, window, "transition: a window shows in place mid-motion; the snapshots pass under it");
+        self.motion.overlay.show_under(Some(window));
+    }
+
     pub(super) fn outgoing_parked(&mut self, id: u64) {
         self.outgoing_parked_as(id, false);
     }

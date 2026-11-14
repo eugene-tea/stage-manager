@@ -100,9 +100,18 @@ pub trait WindowEngine: Send + Sync {
     /// Desktop. macOS activates an app on a Desktop where it has a window; a window kept off
     /// its Desktop is none, so an app whose other windows live on another Desktop is followed
     /// there (live 11-14, the Spaces engine: a card click on Desktop 2 for a stage of an app
-    /// with windows on Desktop 1 showed Desktop 1 for 300 ms). The Corner engine: never, a
-    /// parked window stays on its Desktop, in the corner.
+    /// with windows on Desktop 1 showed Desktop 1 for 300 ms); an app with no window on a
+    /// Desktop not shown is followed nowhere. The Corner engine: never, a parked window
+    /// stays on its Desktop, in the corner.
     fn focus_waits_for_show(&self, _id: WindowId) -> bool {
+        false
+    }
+
+    /// True when window `id` is on no Desktop for macOS while this engine hides it: macOS
+    /// goes to a Desktop for an app's window only when it counts the window there, so an
+    /// activation for such a window on another Desktop is this app's to carry out (an
+    /// arrival, S3c). The Corner engine: never, a parked window stays on its Desktop.
+    fn off_every_desktop(&self, _id: WindowId) -> bool {
         false
     }
 

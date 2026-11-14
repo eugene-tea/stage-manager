@@ -25,9 +25,9 @@
 //!   the app opens in the park zone takes it ([`Model::take_quit_frame`]: the same title,
 //!   else the app's only one left), once.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use super::{Home, Model, Pid, SpaceId, StageId, WindowId, WindowRole};
+use super::{Action, DisplayId, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowRole};
 use crate::engine::corner::park::clamp_to_visible;
 use crate::engine::persist::{SavedRole, SavedStage, SavedWindow};
 use crate::engine::geometry::Rect;
@@ -163,6 +163,36 @@ impl Model {
             self.quit.push(QuitWindow { space: c.space, stage: c.stage, name: c.name, last_active: c.last_active, slot: c.slot, window });
         }
         self.prune_quit(now);
+    }
+
+    /// An app quit, and its windows are gone from the model: `left` are the stages they were
+    /// in ([`Closing::stage`]). Where one of those is in front on a Desktop shown and has no
+    /// window left, the most recent stage there whose card shows comes in front
+    /// ([`Model::most_recent_card`], as a card click brings it), as Apple's Stage Manager
+    /// brings it, unless macOS's own activation of another app does that
+    /// ([`Model::macos_fronts_after_quit`]: the Corner engine). `switches(display)`: whether
+    /// a stage may come in front on that screen now ([`Model::apps_hidden`]'s rule). Nothing
+    /// when no such stage is in front.
+    pub fn front_after_quit(&mut self, left: &BTreeSet<StageId>, obs: &Observation, switches: impl Fn(DisplayId) -> bool) -> Vec<Action> {
+        if self.macos_fronts_after_quit() || left.is_empty() {
+            return Vec::new();
+        }
+        let mut shown: Vec<SpaceId> = self.current.values().copied().collect();
+        shown.sort_by_key(|s| s.0);
+        shown.dedup();
+        let mut actions = Vec::new();
+        for space in shown {
+            let Some(active) = self.active_stage_in(space) else { continue };
+            let emptied = left.contains(&active) && self.stage(active).is_some_and(|s| s.windows.is_empty());
+            if !emptied || !switches(self.space_display(space)) {
+                continue;
+            }
+            if let Some(target) = self.most_recent_card(space, active) {
+                tracing::info!(stage = target.0, left = active.0, "the app in front quit: the most recent stage comes in front");
+                actions.extend(self.switch_to(target, obs));
+            }
+        }
+        actions
     }
 
     /// Drops the entries of apps that quit longer than [`QUIT_KEEP`] before `now` (Unix

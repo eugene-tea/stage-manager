@@ -80,6 +80,11 @@ pub struct StripSnapshot {
     pub arrived: Option<(u64, Vec<(u32, Rect)>)>,
     /// Late incoming windows of a transition ([`Transition::late`]) that show now.
     pub late: Option<LateNote>,
+    /// A window of this transition's arriving stage that shows in place only now (a
+    /// just-opened app's window the Spaces engine held on its way in, let out once the stage
+    /// left behind hid): the snapshots pass under it from here on, as under
+    /// [`Transition::under`], which could not name it while it waited off screen.
+    pub under_now: Option<(u64, u32)>,
     /// These are the cards of a Desktop not shown, arranged ahead of its arrival (a Dock
     /// click): only its own pane, if it has one, is redrawn with them, at once, so it slides
     /// in arranged; the strip shown is untouched.

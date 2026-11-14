@@ -69,6 +69,14 @@ pub fn hidden_by_record(w: Option<&WindowState>) -> bool {
     w.is_some_and(|w| w.parked)
 }
 
+/// False: a window in a stage Space is on no Desktop, so when the app in front quits macOS
+/// activates none of the hidden stages' apps (live 11-14: 20 of 20 launches left the emptied
+/// stage in front); the model brings the most recent stage in front itself, as Apple's Stage
+/// Manager does ([`super::model::Model::front_after_quit`]).
+pub fn macos_fronts_after_quit() -> bool {
+    false
+}
+
 /// Where a hide leaves window `w`: its own frame, as last seen.
 pub fn hidden_frame(w: &WindowState) -> Rect {
     w.meta.frame

@@ -78,7 +78,7 @@ pub(super) enum Trigger {
     /// While the Space change settles, for a focus held meanwhile.
     Settle,
     /// At an activation of an app whose focused window the engine hides off its Desktop
-    /// ([`crate::platform::window_engine::WindowEngine::focus_waits_for_show`]): macOS does
+    /// ([`crate::platform::window_engine::WindowEngine::off_every_desktop`]): macOS does
     /// not go to a Desktop for a window it does not count there, so the Desktop is arranged
     /// and the window focused, and macOS goes ([`Controller::arrange_for_hidden_focus`]).
     Hidden,
@@ -937,7 +937,7 @@ impl Controller {
     }
 
     /// App `pid` activated with its focused window `id` on a Desktop not shown, held hidden
-    /// there by the engine ([`crate::platform::window_engine::WindowEngine::focus_waits_for_show`]): macOS goes to a Desktop
+    /// there by the engine ([`crate::platform::window_engine::WindowEngine::off_every_desktop`]): macOS goes to a Desktop
     /// for an app's window only when it counts the window on that Desktop, and a window in a
     /// stage Space is on none (live 11-14: `open` of an app whose one window waited in an
     /// inactive stage of Desktop 1, from Desktop 2: no slide, nothing shown; the Corner
@@ -948,7 +948,7 @@ impl Controller {
     pub(super) fn arrange_for_hidden_focus(&mut self, ob: &Observer, id: WindowId, pid: i32, now: Instant) -> bool {
         let Some(m) = self.model.as_ref() else { return false };
         let Some(standard) = m.resolve_standard(id) else { return false };
-        if !m.waits_on_another_space(standard) || !self.engine.focus_waits_for_show(standard) || self.ahead.is_some() {
+        if !m.waits_on_another_space(standard) || !self.engine.off_every_desktop(standard) || self.ahead.is_some() {
             return false;
         }
         let list = windows::list_windows();

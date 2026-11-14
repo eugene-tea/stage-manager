@@ -83,6 +83,13 @@ pub fn lands_hidden(restore: Rect, d: &Display, asked: ParkRequest, frame: Rect)
     }
 }
 
+/// True: when the app in front quits, macOS activates another app with a window on screen,
+/// and a parked window is listed on screen (in the corner), so that app's activation brings
+/// its stage in front as any activation does (live 11-14: 20 of 20 launches).
+pub fn macos_fronts_after_quit() -> bool {
+    true
+}
+
 /// The frame that parks a window whose restore frame is `restore` on display `d`: its
 /// restore size in the display's park corner, asked as `asked` (`[windows] park_inside`,
 /// `park_drop`).

@@ -230,7 +230,26 @@ fn desktop_among(now: &[u64], desktops: &BTreeSet<u64>, shown: &[u64]) -> Option
     now.iter().copied().find(|s| shown.contains(s)).or_else(|| now.iter().copied().find(|s| desktops.contains(s)))
 }
 
+/// True when `now` (the Spaces of an app's windows) names a Desktop that is not shown,
+/// `desktops` being every Desktop (and full-screen Space) of every display and `shown` the
+/// ones that show: macOS, activating the app, would go there.
+fn elsewhere(now: &[u64], desktops: &BTreeSet<u64>, shown: &[u64]) -> bool {
+    now.iter().any(|s| desktops.contains(s) && !shown.contains(s))
+}
+
 impl SpacesEngine {
+    /// True when window `id`'s app has a window macOS counts on a Desktop not shown now
+    /// ([`elsewhere`]): one in a stage Space is on none, so it does not count. Unknown (no
+    /// window server, the window gone): true, the safe answer for a focus.
+    fn app_elsewhere(&self, id: u32) -> bool {
+        let Some(sky) = self.sky() else { return true };
+        let all = windows::every_window();
+        let Some(pid) = all.iter().find(|w| w.id == id).map(|w| w.pid) else { return true };
+        let mine: Vec<u32> = all.iter().filter(|w| w.pid == pid && w.layer == 0).map(|w| w.id).collect();
+        let (desktops, shown) = Self::desktops(sky);
+        elsewhere(&sky.spaces_of(&mine), &desktops, &shown)
+    }
+
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -881,8 +900,17 @@ impl WindowEngine for SpacesEngine {
         self.holds(id.0)
     }
 
-    /// While the engine holds it: a window in a stage Space is on no Desktop for macOS.
+    /// While the engine holds it and its app has a window on a Desktop not shown: a window
+    /// in a stage Space is on no Desktop for macOS, which would follow the app to that
+    /// other Desktop (S3c). An app with no window elsewhere takes macOS nowhere, so the
+    /// keyboard goes to the new stage at once, as under the Corner engine (the full Spaces
+    /// pass on 0eaa56b, 11-14: a card click on one Desktop waited for the unveil).
     fn focus_waits_for_show(&self, id: WindowId) -> bool {
+        self.holds(id.0) && self.app_elsewhere(id.0)
+    }
+
+    /// While the engine holds it: a stage Space is no Desktop.
+    fn off_every_desktop(&self, id: WindowId) -> bool {
         self.holds(id.0)
     }
 
@@ -1014,6 +1042,17 @@ mod tests {
         assert_eq!(desktop_among(&[1, 3], &desktops, &[3]), Some(3), "on every Desktop: the one that shows");
         assert_eq!(desktop_among(&[836], &desktops, &[3]), None, "already in a stage Space: its Desktop is the one kept");
         assert_eq!(desktop_among(&[], &desktops, &[3]), None);
+    }
+
+    #[test]
+    fn an_app_is_elsewhere_only_with_a_window_on_a_desktop_not_shown() {
+        let desktops: BTreeSet<u64> = [1, 3, 5].into();
+        assert!(elsewhere(&[1, 3], &desktops, &[3]), "a window on Desktop 1 while 3 shows");
+        assert!(!elsewhere(&[3], &desktops, &[3]), "all on the Desktop shown");
+        assert!(!elsewhere(&[836, 3], &desktops, &[3]), "a stage Space is no Desktop");
+        assert!(!elsewhere(&[836], &desktops, &[3]), "every other window hidden: macOS goes nowhere");
+        assert!(!elsewhere(&[1, 3], &desktops, &[1, 3]), "two screens, both shown");
+        assert!(!elsewhere(&[], &desktops, &[3]));
     }
 
     #[test]
