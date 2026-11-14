@@ -26,6 +26,7 @@ use crate::engine::geometry::Rect;
 use crate::engine::model::{Display, Model, WindowId};
 use crate::ui::strip_model::Transition;
 pub use crate::engine::recovery::EngineKind;
+use crate::engine::recovery::{Known, ParkedFile, ScanDisplays};
 
 /// How a window is brought to its frame ([`WindowEngine::show`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,6 +76,17 @@ pub trait WindowEngine: Send + Sync {
     /// True when a window the window server lists at `listed` on display `d` is where this
     /// engine keeps hidden windows.
     fn is_hidden(&self, d: &Display, listed: Rect) -> bool;
+
+    /// True when a window at `frame` is still where this engine hid it, out of anyone's
+    /// reach, as far as what is `known` of the window allows; `displays`: the screens as the
+    /// safety paths see them now. What the guardian's watch (and the app's watch of the
+    /// windows it took from one) asks of every frame it reads. Any thread.
+    fn stranded(&self, frame: Rect, displays: &ScanDisplays, known: Known) -> bool;
+
+    /// The guardian, before its first scan: what the app's parked file says of where it hid
+    /// its windows is taken as this process's own knowledge (the guardian never saw the
+    /// app's screens or config).
+    fn assume(&self, file: &ParkedFile);
 
     /// How the switch planned as `t` moves ([`Motion`]): asked once a switch, on the WM
     /// thread, after the plan and before anything is sent to the strip or moved.

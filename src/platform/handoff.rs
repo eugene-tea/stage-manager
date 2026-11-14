@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::guardian::{self, Attempts};
-use super::{ctl, safety, session, windows};
+use super::{ctl, safety, session, window_engine, windows};
 use crate::engine::guard_watch::{Event, LockSeen, Release, Watch};
 use crate::engine::handoff::{Answer, Offer, TakenDrops, Trust, answer_from_reply, vet};
 use crate::engine::recovery::Registered;
@@ -132,7 +132,7 @@ impl TakenWatch {
             self.attempts.clear();
             return;
         }
-        let w = self.watch.get_or_insert_with(|| Watch::registered_only(&[]));
+        let w = self.watch.get_or_insert_with(|| Watch::registered_only(&[]).run_by(window_engine::current().kind()));
         let held: BTreeSet<u32> = taken.iter().map(|r| r.id).collect();
         // Another path saw to these (the quit's leftovers check, a hidden tab judged).
         let gone: Vec<u32> = w.waiting().map(|x| x.id).filter(|id| !held.contains(id)).collect();

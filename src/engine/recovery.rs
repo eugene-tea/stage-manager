@@ -378,6 +378,16 @@ impl EngineKind {
         }
     }
 
+    /// True when a window at `frame` is still where this engine hid it, out of anyone's
+    /// reach, as far as what is `known` of the window allows: what the guardian's watch and
+    /// every bring-back's last look wait for. The Corner engine: in a park zone of `displays`
+    /// and not meaningfully on another display ([`is_stranded`]).
+    pub fn stranded(self, frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
+        match self {
+            Self::Corner => is_stranded(frame, displays, known),
+        }
+    }
+
     /// True for the Corner engine (the parked file leaves it out).
     pub fn is_corner(&self) -> bool {
         *self == Self::Corner

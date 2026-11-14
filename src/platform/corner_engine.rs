@@ -12,6 +12,7 @@ use crate::engine::corner;
 use crate::engine::geometry::Rect;
 use crate::engine::leftovers;
 use crate::engine::model::{Display, Model, WindowId};
+use crate::engine::recovery::{Known, ParkedFile, ScanDisplays};
 
 /// The Corner engine. It keeps no state of its own: the model's parked flags, the safety
 /// registry and the window server's list say everything.
@@ -46,6 +47,25 @@ impl WindowEngine for CornerEngine {
     /// In the display's park zone ([`Display::parks`]).
     fn is_hidden(&self, d: &Display, listed: Rect) -> bool {
         d.parks(listed)
+    }
+
+    /// In a park zone and not meaningfully on another display ([`recovery::is_stranded`]).
+    fn stranded(&self, frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
+        EngineKind::Corner.stranded(frame, displays, known)
+    }
+
+    /// The park zones as the app had them: its main display's visible frame (the zone sits
+    /// above a bottom Dock), every corner it parked in this run, and its other screens'
+    /// zones.
+    fn assume(&self, file: &ParkedFile) {
+        // The park zone sits above a bottom Dock: the app's visible frame, not a guess.
+        match file.visible {
+            Some(v) => safety::assume_visible_frame(v),
+            None => tracing::warn!("guardian: the app left no visible frame; guessing one (a Dock at the bottom may hide parked windows from the scan)"),
+        }
+        // Windows may sit at any corner the app parked them in this run, on any of its screens.
+        safety::assume_corners(&file.corners);
+        safety::assume_zones(&file.zones);
     }
 
     /// Pictures: a window in the corner cannot be shown moving, so the strip's snapshots

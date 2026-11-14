@@ -49,7 +49,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use super::geometry::Rect;
-use super::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded, safe_restore};
+use super::recovery::{EngineKind, Known, Listed, Registered, ScanDisplays, safe_restore};
 use super::stage_area::same_frame;
 
 /// The window list counts as settled this long after the set of windows on screen changed.
@@ -286,6 +286,9 @@ pub struct Watch {
     /// The windows judged hidden tabs or not ours in the latest pass ([`Self::leave_alone`]),
     /// with why: none joins.
     tabs: BTreeMap<u32, Release>,
+    /// The engine whose hidden windows are watched ([`Self::run_by`]): it says whether a
+    /// listed window is still where it was hidden ([`EngineKind::stranded`]).
+    engine: EngineKind,
 }
 
 impl Watch {
@@ -302,6 +305,12 @@ impl Watch {
     /// guardian): no window found in the park zone ever joins.
     pub fn registered_only(registered: &[Registered]) -> Self {
         Self { successor: true, ..Self::new(registered) }
+    }
+
+    /// This watch over windows `engine` hid (the engine the parked file names, or the one
+    /// that runs); the Corner engine until said.
+    pub fn run_by(self, engine: EngineKind) -> Self {
+        Self { engine, ..self }
     }
 
     /// Adds a registered window (taken later); false when it is registered already.
@@ -433,7 +442,7 @@ impl Watch {
             let reg = self.registered.iter().find(|r| r.id == l.id);
             // A window the app registered is its own, however small, sliver or not (L4).
             let known = reg.map_or(Known::Unknown, |r| if r.unvouched { Known::Unknown } else { Known::Registered });
-            if !is_stranded(l.bounds, displays, known) {
+            if !self.engine.stranded(l.bounds, displays, known) {
                 continue;
             }
             // While Stage Manager runs again, a window in the park zone may be one it parked:
@@ -444,6 +453,7 @@ impl Watch {
             }
         }
         let mut done = Vec::new();
+        let engine = self.engine;
         for w in self.waiting.values_mut() {
             let look = match listed.iter().find(|l| l.id == w.id) {
                 None => {
@@ -457,7 +467,7 @@ impl Watch {
                 }
                 Some(l) => {
                     w.missing_since = None;
-                    if is_stranded(l.bounds, displays, w.known()) {
+                    if engine.stranded(l.bounds, displays, w.known()) {
                         w.out_since = None;
                         Look::Parked { shown: l.onscreen, frame: l.bounds }
                     } else if !l.onscreen {
@@ -499,7 +509,7 @@ impl Watch {
     /// elsewhere since is back where they put it (S7).
     pub fn read_through_ax(&mut self, id: u32, frame: Rect, moved: bool, displays: &ScanDisplays) -> Option<Event> {
         let known = self.waiting.get(&id).map_or(Known::Unknown, Waiting::known);
-        if is_stranded(frame, displays, known) {
+        if self.engine.stranded(frame, displays, known) {
             return None;
         }
         if !moved && self.waiting.get(&id).is_some_and(|w| still_fitted(w, frame, displays)) {
@@ -614,6 +624,7 @@ fn at_pre_fit(w: &Waiting, frame: Rect, displays: &ScanDisplays) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::recovery::is_stranded;
     use crate::engine::geometry::Size;
     use crate::engine::park::park_frame;
 
