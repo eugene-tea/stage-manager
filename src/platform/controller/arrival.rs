@@ -42,7 +42,8 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use super::{Controller, Unrestored, cards_in};
+use super::corner::unrestored::Unrestored;
+use super::{Controller, cards_in};
 use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
@@ -1677,7 +1678,7 @@ impl Controller {
             let Some(w) = ob.window(id.0) else { continue };
             let entry = ParkedEntry { element: w.element.clone(), restore: frame, child: w.kind == WindowKind::Child, fitted: None };
             tracing::debug!(id = id.0, restore = %frame, "brought back for an arrival: registered until seen out of the park zone");
-            self.unrestored.insert(id.0, Unrestored::failed(entry));
+            self.corner.unrestored.insert(id.0, Unrestored::failed(entry));
         }
     }
 

@@ -6,7 +6,8 @@
 
 use std::time::Instant;
 
-use super::{Controller, cover_desktop_forced, input};
+use super::corner::cover::cover_desktop_forced;
+use super::{Controller, input};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::Display;
 use crate::engine::patch_still::{self as ps, Still, TakeFacts};
@@ -85,7 +86,7 @@ impl Controller {
         // The screen pressed on: its own still (round displays-2).
         let Some(d) = self.model.as_ref().and_then(|m| m.displays().iter().find(|d| d.frame.contains(at)).copied()) else { return };
         let screen = d.id.0;
-        if !self.patches.get(&screen).and_then(|t| t.sent.as_ref()).is_some_and(|p| p.still.is_some() || p.hold) {
+        if !self.corner.patches.get(&screen).and_then(|t| t.sent.as_ref()).is_some_and(|p| p.still.is_some() || p.hold) {
             return;
         }
         let in_corner = desktop_shot::zone(d.frame, d.corner).contains(at);
