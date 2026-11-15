@@ -64,7 +64,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `strip.capacity_max` | `9` | whole number, 1 to 30 | With capacity = 0: never more cards than this. |
 | `strip.scale` | `1.0` | number, 0.25 to 4 | Multiplies every strip length (cards, gaps, icons, width). Apple: 1. |
 | `strip.scale_to_display` | `false` | true or false | Also shrink strip lengths on screens smaller than 2560 x 1410 pt (by area, at least half). Apple does not. |
-| `strip.thumbnail_interval_ms` | `1500` | whole number, 250 to 60000 | How often thumbnails are refreshed, in milliseconds. |
+| `strip.thumbnail_interval_ms` | `0` | whole number, 0 to 60000 | How often thumbnails are refreshed, in milliseconds (250 at least); 0 = only when a stage leaves for its card, the pointer reaches a card or the strip comes into view. |
 | `strip.thumbnail_resolution` | `2.0` | number, 0.5 to 4 | Thumbnails are captured at this multiple of their drawn size. |
 | `strip.capture` | `true` | true or false | Capture pictures of windows (Screen Recording) for card thumbnails and switch animations; false draws plain cards and ghosts and never uses screen capture. |
 | `cards.x` | `15.0` | number, -100 to 400 | Left edge of every card, from the screen's left edge. |

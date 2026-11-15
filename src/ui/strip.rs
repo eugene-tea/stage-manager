@@ -21,7 +21,9 @@
 //!   [`StripEvent::IconClicked`] on its app icon.
 //! - Cards glide to new slots on the spring; the strip **slides** out to the left when
 //!   hidden, the cards moving in 3D (they widen as they leave, as Apple's do).
-//! - Thumbnails come from [`capture`], refreshed every `thumbnail_interval_ms`.
+//! - Thumbnails come from [`capture`] at events (1.9): a window newly on a card (its stage
+//!   left), the strip coming into view, and the pointer on a card (its windows taken again);
+//!   also every `thumbnail_interval_ms` when that is set (0, the default: no timer).
 //! - **Glass** (`[cards] window_opacity`, on: Apple's let the wallpaper through): each
 //!   window's picture is drawn at that opacity over its plane, whose background is the
 //!   wallpaper's mean behind the thumbnail, toned ([`crate::ui::glass_math`], from the
@@ -337,7 +339,7 @@ fn present_waiting_others() {
             let strip = others.entry(screen).or_insert_with(|| {
                 let interval = THUMB_INTERVAL.with(Cell::get);
                 tracing::info!(screen, "strip: a strip for another display");
-                Strip::new(mtm, Duration::from_millis(interval.max(1)), screen)
+                Strip::new(mtm, crate::platform::capture::interval_of(interval), screen)
             });
             strip.present(snapshot);
         }
@@ -436,7 +438,7 @@ fn hand_over<S, T>(
 /// Main thread, once.
 pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     THUMB_INTERVAL.with(|i| i.set(thumbnail_interval_ms));
-    let strip = Strip::new(mtm, Duration::from_millis(thumbnail_interval_ms.max(1)), strip_model::MAIN_STRIP);
+    let strip = Strip::new(mtm, crate::platform::capture::interval_of(thumbnail_interval_ms), strip_model::MAIN_STRIP);
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
     // Reduce Motion and Reduce Transparency: read now, followed live; the glass repaints.
     display_options::install(|| with_strips(Strip::display_options_changed));
@@ -484,7 +486,7 @@ pub fn stand_down(why: &str) {
 /// Changes the thumbnail refresh interval (config reload). Main thread.
 pub fn set_thumbnail_interval(ms: u64) {
     THUMB_INTERVAL.with(|i| i.set(ms));
-    with_strips(|s| s.capturer.set_interval(Duration::from_millis(ms.max(1))));
+    with_strips(|s| s.capturer.set_interval(crate::platform::capture::interval_of(ms)));
 }
 
 /// Where a window released at `p` (global, top-left origin) goes: `None` when it is not over
@@ -3239,6 +3241,15 @@ impl Strip {
         self.capturer.set_targets(targets);
     }
 
+    /// Takes card `stage`'s thumbnails again now (the pointer reached it): with no timer
+    /// (`thumbnail_interval_ms = 0`), what keeps a card a while in the strip current.
+    fn refresh_thumbnails(&mut self, stage: u64) {
+        let ids: Vec<u32> = self.layouts.iter().filter(|l| l.stage == stage).flat_map(|l| l.thumbs.iter().map(|t| t.id)).collect();
+        if !ids.is_empty() {
+            self.capturer.recapture(&ids);
+        }
+    }
+
     // -- pointer ----------------------------------------------------------------------------
 
     /// The card under `p` (panel coordinates): its turned thumbnails and icons, where the
@@ -3913,9 +3924,11 @@ impl Strip {
         if card == self.hovered {
             return;
         }
-        if card.is_some() {
-            // The pointer is on a card: a switch may follow.
+        if let Some(stage) = card {
+            // The pointer is on a card: a switch may follow, and its thumbnails are taken
+            // again (cards at events, no timer).
             self.prefetch(card);
+            self.refresh_thumbnails(stage);
         }
         let previous = std::mem::replace(&mut self.hovered, card);
         if self.squeezed.is_some() && self.squeezed != card && self.pressed.is_none() {

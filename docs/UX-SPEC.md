@@ -520,7 +520,7 @@ stages were saved on that is not connected yet (10 s at most).
 
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
 so switches are animated with snapshots in a click-through layer above every normal window
-(always-on-top windows stay above it), while the real windows move behind them. Snapshots are refreshed every 2 seconds and as the pointer
+(always-on-top windows stay above it), while the real windows move behind them. Snapshots are refreshed every 2 seconds (taken at the switch under the Spaces engine) and as the pointer
 nears a card, so content that changed meanwhile can jump when the motion ends. A click
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
 already the new stage's). An arriving window takes its place under its picture once the
@@ -603,7 +603,11 @@ no picture ready yet, a staying window with no picture of it, such as another ap
 app does not manage, an activated window macOS put outside that square), an activated app's
 windows come to their places at once instead of growing.
 
-**Card pictures are stills**, refreshed every 1.5 seconds, not live surfaces. Until a
+**Card pictures are stills**, not live surfaces, taken when a stage leaves for its card, when
+the strip comes into view and when the pointer reaches the card (`[strip]
+thumbnail_interval_ms`, 0: no timer; a number of milliseconds refreshes them on a timer as
+well). Each is the window alone: a popover or sheet child window over it is not in the card's
+picture. Until a
 window's first picture arrives (at launch, a window first seen), its place on the card is
 faint glass: the card's wallpaper-toned under at `[cards] empty_opacity` (0.35), with the
 card's edge, or with no picture of the wallpaper a black as faint (the wallpaper darkened as

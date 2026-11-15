@@ -448,7 +448,9 @@ Some limits to know about:
 - Moving windows are pictures taken a moment earlier, so content that changed meanwhile can
   jump when the motion ends. Their shadow is drawn like macOS's own and hands over to the
   window's as it takes its place, which can still show as a faint flicker at the shadow's
-  edge. Card pictures refresh every 1.5 seconds rather than live.
+  edge. Card pictures are taken when a stage leaves for its card, when the strip comes into
+  view and when the pointer reaches a card, not live (`[strip] thumbnail_interval_ms` adds a
+  timer). A popover open over a window is not in its card's picture.
 - With ⌘M, macOS may show a short animation toward the corner.
 - When an accessibility tool has turned on an app's enhanced interface, Stage Manager turns
   it off for a moment around each switch and back on right after.

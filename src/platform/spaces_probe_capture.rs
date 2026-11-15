@@ -13,7 +13,13 @@
 //!   light again and a last capture, then the engine's bring-back.
 //!
 //! Each picture's middle (64 px a side at most) is read for its mean brightness.
+//!
+//! With `fast` (S6b) every capture goes through the window server's own call
+//! ([`crate::platform::capture_fast`], via [`switch_shots::shoot_fast`]: no listing), one window
+//! after another; a window it misses answers with no picture (counted as missing), never through
+//! ScreenCaptureKit. `cached` with `fast` captures the same way (there is no listing to keep).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -27,6 +33,9 @@ use crate::platform::windows;
 
 /// One window's answer: the window, ms from the call, the picture's size and middle mean.
 type Answer = (u32, f64, Option<(usize, usize, Option<u8>)>);
+
+/// `fast`: every capture through the window server's call (module docs).
+static FAST: AtomicBool = AtomicBool::new(false);
 
 /// How long one capture may take before the probe stops waiting for it.
 const SHOT_LIMIT: Duration = Duration::from_secs(3);
@@ -53,6 +62,8 @@ pub(super) fn run(sky: &Sky, bundle: &str, o: &Opts, scale: f64) -> Result<Value
         })
         .collect();
     let hidden = o.words.iter().any(|w| w == "hidden");
+    let fast = o.words.iter().any(|w| w == "fast");
+    FAST.store(fast, Ordering::SeqCst);
     let cached = o.words.iter().any(|w| w == "cached");
     let file = o.words.iter().find_map(|w| w.strip_prefix("file=").map(String::from));
     let rounds = o.rounds;
@@ -72,7 +83,7 @@ pub(super) fn run(sky: &Sky, bundle: &str, o: &Opts, scale: f64) -> Result<Value
         pump(Duration::from_millis(5));
     }
     let out: Result<Value, String> = worker.join().map_err(|_| "the probe's thread panicked".to_string())?;
-    out.map(|v| json!({ "ok": true, "scale": scale, "windows": windows_json, "result": v }))
+    out.map(|v| json!({ "ok": true, "scale": scale, "route": if fast { "window server" } else { "ScreenCaptureKit" }, "windows": windows_json, "result": v }))
 }
 
 /// Captures `targets` once through the app's path; every answer, in arrival order.
@@ -124,9 +135,17 @@ fn shoot_with(targets: &[Target], kept: Option<&Kept>) -> (f64, Vec<Answer>) {
                 let _ = tx.send((id, at, read));
             }
         });
-    match kept {
-        Some(k) => switch_shots::shoot_from(&k.0, targets, &done),
-        None => switch_shots::issue(targets.to_vec(), done),
+    if FAST.load(Ordering::SeqCst) {
+        let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+        let now: Vec<(u32, crate::engine::geometry::Rect)> = windows::describe(&ids).iter().map(|w| (w.id, w.bounds)).collect();
+        for t in switch_shots::shoot_fast(targets, &now, &done) {
+            done(t.id, None);
+        }
+    } else {
+        match kept {
+            Some(k) => switch_shots::shoot_from(&k.0, targets, &done),
+            None => switch_shots::issue(targets.to_vec(), done),
+        }
     }
     let mut got = Vec::new();
     while got.len() < targets.len() {

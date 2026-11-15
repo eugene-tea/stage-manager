@@ -677,6 +677,12 @@ impl Values {
     }
 }
 
+/// `[strip] thumbnail_interval_ms` as used: 0 (no timer, cards at events) as it is, any other
+/// value 250 at least (the floor before 0 was allowed).
+fn thumbnail_interval(ms: u64) -> u64 {
+    if ms == 0 { 0 } else { ms.max(250) }
+}
+
 /// Checks one value against its kind; numbers out of range are clamped with a warning.
 fn validate(d: &schema::KeyDef, v: &toml::Value, warnings: &mut Vec<String>) -> Result<toml::Value, String> {
     let path = d.path();
@@ -947,7 +953,7 @@ impl Config {
                     min: v.count("strip.capacity_min"),
                     max: v.count("strip.capacity_max"),
                 },
-                thumbnail_interval_ms: v.uint("strip.thumbnail_interval_ms"),
+                thumbnail_interval_ms: thumbnail_interval(v.uint("strip.thumbnail_interval_ms")),
                 capture: v.flag("strip.capture"),
             },
             style: StripStyle {
@@ -1718,10 +1724,20 @@ swipe = true
 
     #[test]
     fn out_of_range_numbers_are_clamped_with_a_warning() {
-        let p = parse("[strip]\nthumbnail_interval_ms = 10\n[cards]\nhover_scale = 9.0");
-        assert_eq!(p.config.strip.thumbnail_interval_ms, 250);
+        let p = parse("[strip]\nthumbnail_interval_ms = 70000\n[cards]\nhover_scale = 9.0");
+        assert_eq!(p.config.strip.thumbnail_interval_ms, 60_000);
         assert_eq!(p.config.style.cards.hover_scale, 2.0);
         assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+    }
+
+    /// Cards at events by default (1.9): no thumbnail timer unless the key is set, and a value
+    /// set keeps working as before (250 ms at least).
+    #[test]
+    fn thumbnails_have_no_timer_unless_one_is_set() {
+        assert_eq!(Config::default().strip.thumbnail_interval_ms, 0);
+        assert_eq!(parse("[strip]\nthumbnail_interval_ms = 1500").config.strip.thumbnail_interval_ms, 1500);
+        assert_eq!(parse("[strip]\nthumbnail_interval_ms = 10").config.strip.thumbnail_interval_ms, 250);
+        assert_eq!(parse("[strip]\nthumbnail_interval_ms = 0").config.strip.thumbnail_interval_ms, 0);
     }
 
     #[test]

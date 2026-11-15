@@ -10,12 +10,23 @@
 //! thread waits for them up to [`WAIT_MAX`]. The strip then draws them over their windows as
 //! before, and the windows hide behind them in one window-server step each.
 //!
-//! The bound (measured 11-14 on a 5K display, `probe-spaces capture`, a listing of the
-//! shareable content first): one window ~80-90 ms from the call to its picture, each more
-//! ~18 ms (they come one after another), whatever their size; 4 windows ~145 ms, at most
-//! 150 ms. [`WAIT_MAX`] lets 4 windows in at their slowest; a picture later than that still
-//! reaches the strip, and the moving one of its window cross-fades to it, the window having
-//! hidden behind the older picture (or none: the window just goes, as before).
+//! The bound: through the window server's own capture (S6b, [`crate::platform::capture_fast`])
+//! a window takes ~13 ms (S4c's probe, 12-14 ms; up to 22-34 ms when called rarely), so 4
+//! windows ~55 ms. Through ScreenCaptureKit, the fallback (measured 11-14 on a 5K display,
+//! `probe-spaces capture`, a listing of the shareable content first): one window ~80-90 ms
+//! from the call to its picture, each more ~18 ms, whatever their size; 4 windows ~145 ms, at
+//! most 150 ms. [`WAIT_MAX`] lets 4 windows in at their slowest on the fallback; a picture later
+//! than that still reaches the strip, and the moving one of its window cross-fades to it, the
+//! window having hidden behind the older picture (or none: the window just goes, as before).
+//!
+//! **With the focus rules of S3c/S3d.** The order under Spaces is: an activation's early focus
+//! (`Controller::focus_now`, the app already active: macOS decided any Desktop change
+//! at the activation), then these pictures, then the transition to the strip; a card click's
+//! focus is split after the strip's answer (`split_covered`), where
+//! `focus_waits_for_show` holds a held window's focus back for its show when its app has a
+//! window on a Desktop not shown. Neither path moves a window, and the pictures are taken by
+//! window id, whatever is in front, so the early focus coming before them changes no picture,
+//! and the wait for them only delays the strip's start, never a focus.
 
 use std::time::Duration;
 

@@ -232,7 +232,8 @@ pub const KEYS: &[KeyDef] = &[
     k("strip", "scale", f(0.25, 4.0), "1.0", "Multiplies every strip length (cards, gaps, icons, width). Apple: 1."),
     k("strip", "scale_to_display", Kind::Bool, "false",
         "Also shrink strip lengths on screens smaller than 2560 x 1410 pt (by area, at least half). Apple does not."),
-    k("strip", "thumbnail_interval_ms", i(250, 60_000), "1500", "How often thumbnails are refreshed, in milliseconds."),
+    k("strip", "thumbnail_interval_ms", i(0, 60_000), "0",
+        "How often thumbnails are refreshed, in milliseconds (250 at least); 0 = only when a stage leaves for its card, the pointer reaches a card or the strip comes into view."),
     k("strip", "thumbnail_resolution", f(0.5, 4.0), "2.0", "Thumbnails are captured at this multiple of their drawn size."),
     k("strip", "capture", Kind::Bool, "true",
         "Capture pictures of windows (Screen Recording) for card thumbnails and switch animations; false draws plain cards and ghosts and never uses screen capture."),
@@ -602,6 +603,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-41.toml"),
     include_str!("legacy/default-42.toml"),
     include_str!("legacy/default-43.toml"),
+    include_str!("legacy/default-44.toml"),
 ];
 
 #[cfg(test)]

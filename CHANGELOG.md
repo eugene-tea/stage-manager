@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Card pictures are taken when a stage leaves for its card, when the strip comes into view
+  and when the pointer reaches a card, no longer every 1.5 seconds, and every window picture
+  comes from the window server directly: much less CPU at rest. `[strip]
+  thumbnail_interval_ms` brings back a refresh timer. A popover open over a window is no
+  longer in its card's picture.
 - New setting `[windows] engine` (`"auto"` or `"accessibility"`, read at launch). It
   chooses how hidden windows are kept: `"accessibility"` always uses the park corner and
   never tries macOS's own Spaces, a way out if windows misbehave on a stage change. In this

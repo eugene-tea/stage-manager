@@ -13,8 +13,13 @@
 //! worked in this run, so a switch is never the process's probe and never raises an alert.
 //! Each still counts in the day's log and in [`capture::quiesce`]'s wait like any other.
 //!
-//! **The listing.** Every capture starts from a listing of the shareable content (every
-//! window of the system: ~50 ms on a busy screen, 11-14). The last listing any capture made
+//! **The window server first** (S6b): each window is taken by [`super::capture_fast`] (one call,
+//! ~13 ms, no listing), the windows one after another on a thread of the switch's own, so the
+//! WM thread's wait stays bounded; a window that source misses goes through ScreenCaptureKit as
+//! below. Four windows: ~55 ms instead of ~145 ms (S4c's timings; not measured live here).
+//!
+//! **The listing** (ScreenCaptureKit only). Every such capture starts from a listing of the
+//! shareable content (every window of the system: ~50 ms on a busy screen, 11-14). The last listing any capture made
 //! (the cards' rounds every 1.5 s, the pointer's prefetch, a switch's) is remembered
 //! ([`remember`]); a switch reuses it when it lists every window asked for at the frame the
 //! window server gives it now, and lists afresh otherwise. Measured: the pictures came with
@@ -156,18 +161,69 @@ pub fn take(targets: Vec<Target>, max: Duration) -> Taken {
     Taken { asked, got: n.1, answered: n.0, ms: t0.elapsed().as_millis() as u64, skipped: None }
 }
 
-/// Captures `targets` now, each at its size, in parallel: one listing of the shareable
-/// content, then one still per window. `Err` (nothing issued, `done` never called) when
-/// captures may not run now ([`capture::desktop_may_capture`]).
+/// Captures `targets` now, each at its size: through the window server where it can, one
+/// window after another on a thread of its own ([`shoot_fast`]), the rest through
+/// ScreenCaptureKit in parallel (one listing of the shareable content, or the remembered one,
+/// then one still per window). `Err` (nothing issued, `done` never called) when captures may
+/// not run now ([`capture::desktop_may_capture`]).
 pub fn shoot(targets: Vec<Target>, done: ShotDone) -> Result<(), &'static str> {
     capture::desktop_may_capture()?;
     let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
     let now: Vec<(u32, Rect)> = super::windows::describe(&ids).iter().map(|w| (w.id, w.bounds)).collect();
-    match reusable(&targets, &now) {
+    if super::capture_fast::enabled() {
+        let (t, n, d) = (targets.clone(), now.clone(), done.clone());
+        let spawned = std::thread::Builder::new().name("switch-pictures".into()).spawn(move || {
+            autoreleasepool(|_| {
+                let left = shoot_fast(&t, &n, &d);
+                shoot_sck(left, &n, d);
+            });
+        });
+        match spawned {
+            Ok(_) => return Ok(()),
+            Err(e) => tracing::debug!("switch pictures: no thread for the window server's capture ({e}); ScreenCaptureKit takes them"),
+        }
+    }
+    shoot_sck(targets, &now, done);
+    Ok(())
+}
+
+/// Takes `targets` through ScreenCaptureKit: from the remembered listing when it lists every
+/// one where the window server has it now (`now`), else from a new listing.
+fn shoot_sck(targets: Vec<Target>, now: &[(u32, Rect)], done: ShotDone) {
+    if targets.is_empty() {
+        return;
+    }
+    match reusable(&targets, now) {
         Some(listing) => autoreleasepool(|_| shoot_from(&listing.content, &targets, &done)),
         None => issue(targets, done),
     }
-    Ok(())
+}
+
+/// Takes each of `targets` through the window server ([`super::capture_fast`]) at its frame in
+/// `now`, one after another; each picture, and each window no longer described (closed),
+/// answers `done`. The windows it misses, for ScreenCaptureKit.
+pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDone) -> Vec<Target> {
+    let displays = super::desktop::cg_display_bounds();
+    let mut left = Vec::new();
+    for t in targets {
+        let Some(frame) = now.iter().find(|(id, _)| *id == t.id).map(|(_, f)| *f) else {
+            tracing::trace!(window = t.id, "switch pictures: the window server no longer describes the window");
+            done(t.id, None);
+            continue;
+        };
+        match super::capture_fast::picture(*t, frame, &displays) {
+            Ok(picture) => {
+                counters::bump(Count::CaptureOk);
+                capture::IMAGES.fetch_add(1, Ordering::Relaxed);
+                done(t.id, Some(picture));
+            }
+            Err(miss) => {
+                tracing::trace!(window = t.id, why = miss.as_str(), "switch picture: ScreenCaptureKit takes it");
+                left.push(*t);
+            }
+        }
+    }
+    left
 }
 
 /// [`shoot`] without its checks, always with a new listing (remembered for the next one).

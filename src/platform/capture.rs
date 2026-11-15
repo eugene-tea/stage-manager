@@ -1,6 +1,19 @@
-//! Window thumbnails through ScreenCaptureKit: stills of the windows shown on strip cards.
+//! Window thumbnails and full-size pictures: stills of the windows shown on strip cards and of
+//! those a switch moves.
 //!
-//! A worker thread takes a still of every requested window each interval with
+//! **The window server first** (1.9, S6b): each round takes what it can through
+//! [`super::capture_fast`] (one call a window, no listing: ~13 ms and ~3 ms of CPU a window,
+//! against ~85 ms and ~45 ms through ScreenCaptureKit, most of it the listing), and only the
+//! windows that source misses through ScreenCaptureKit as below; a round it takes whole lists
+//! nothing. Its pictures are the window alone (no child window, no shadow), so a window's look
+//! ([`super::window_look`], read from its shadow) still comes from a ScreenCaptureKit still,
+//! one a round at most, each window's every 20 s at most. Rounds come at events by default
+//! (`[strip] thumbnail_interval_ms = 0`: [`NO_TIMER`]): a window newly asked for (a stage
+//! leaving for its card, the strip coming into view), [`Capturer::recapture`] (the pointer on a
+//! card) and [`Capturer::capture_now`].
+//!
+//! **ScreenCaptureKit** (every picture before 1.9, now the fallback). A worker thread takes a
+//! still of every requested window each interval with
 //! `SCScreenshotManager` and an `SCContentFilter(desktopIndependentWindow:)`, sized as asked
 //! (the strip asks for 2× its thumbnail size) but always in the window's own proportions
 //! ([`capture_frame::fit_to_content`]): asked for another shape, ScreenCaptureKit pads the image
@@ -113,6 +126,15 @@ const IDLE_CHECK: Duration = Duration::from_secs(1);
 /// After the last capture answered, how long [`quiesce`] still keeps the process alive, so
 /// replayd finishes its approval bookkeeping while the app's path can be resolved.
 const SETTLE: Duration = Duration::from_millis(250);
+
+/// A capturer's interval that never comes: its rounds go only at events (a window newly asked
+/// for, [`Capturer::recapture`], [`Capturer::capture_now`]).
+pub const NO_TIMER: Duration = Duration::from_secs(24 * 3600);
+
+/// The interval for a configured number of milliseconds: 0 is [`NO_TIMER`].
+pub fn interval_of(ms: u64) -> Duration {
+    if ms == 0 { NO_TIMER } else { Duration::from_millis(ms) }
+}
 
 /// Any value turns captures off for the whole run, whatever the config says (test runs).
 pub const NO_CAPTURE_ENV: &str = "STAGE_MANAGER_NO_CAPTURE";
@@ -280,6 +302,7 @@ pub fn status() -> serde_json::Value {
         "pace": pace().describe(),
         "in_flight": IN_FLIGHT.load(Ordering::SeqCst),
         "images": IMAGES.load(Ordering::SeqCst),
+        "window_server": super::capture_fast::status(),
     })
 }
 
@@ -329,7 +352,47 @@ struct Shared {
     force: bool,
     /// No round starts before this ([`Capturer::hold_until`]).
     held_until: Option<Instant>,
+    /// Windows whose last capture failed, taken again then (an interval longer than
+    /// [`RETRY_AFTER`] only: with no timer a failed card would wait for the pointer).
+    retry_at: HashMap<u32, Instant>,
+    /// Failed captures in a row per window since its last picture (at most [`RETRIES`] retried).
+    tries: HashMap<u32, u8>,
     shutdown: bool,
+}
+
+/// How long after a failed capture a window is taken again, with a long interval or none.
+const RETRY_AFTER: Duration = Duration::from_secs(3);
+/// Retries of a window's failed capture before it waits for the next event.
+const RETRIES: u8 = 2;
+
+impl Shared {
+    /// After a round of `batch`: the windows that failed (no picture, not known closed, not
+    /// refused) are taken again after [`RETRY_AFTER`], [`RETRIES`] times at most, while the
+    /// interval is longer than that.
+    fn schedule_retries(&mut self, batch: &[Target], result: &RoundResult, now: Instant) {
+        let retrying = self.interval > RETRY_AFTER && result.outcome != Outcome::Declined;
+        for t in batch {
+            if result.ok.contains(&t.id) {
+                self.tries.remove(&t.id);
+            } else if retrying && !result.gone.contains(&t.id) {
+                let n = self.tries.entry(t.id).or_insert(0);
+                if *n < RETRIES {
+                    *n += 1;
+                    self.retry_at.insert(t.id, now + RETRY_AFTER);
+                }
+            }
+        }
+    }
+
+    /// The retries due by `now` become windows to capture; how long until the next one.
+    fn due_retries(&mut self, now: Instant) -> Option<Duration> {
+        let due: Vec<u32> = self.retry_at.iter().filter(|(_, at)| **at <= now).map(|(id, _)| *id).collect();
+        for id in due {
+            self.retry_at.remove(&id);
+            self.captured.remove(&id);
+        }
+        self.retry_at.values().map(|at| at.saturating_duration_since(now)).min()
+    }
 }
 
 /// The capture worker. Dropping it stops the thread after its current round.
@@ -384,6 +447,8 @@ impl Capturer {
             }
             let ids: HashSet<u32> = targets.iter().map(|t| t.id).collect();
             s.captured.retain(|id| ids.contains(id));
+            s.retry_at.retain(|id, _| ids.contains(id));
+            s.tries.retain(|id, _| ids.contains(id));
             s.targets = targets;
             cv.notify_all();
         }
@@ -492,10 +557,14 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                         }
                     }
                 }
+                let next_retry = s.due_retries(Instant::now());
                 let held = s.held_until.map(|t| t.saturating_duration_since(Instant::now())).filter(|d| !d.is_zero());
                 let ready = on && held.is_none() && !s.targets.is_empty() && CGPreflightScreenCaptureAccess();
                 let due_in = last_full.map_or(Duration::ZERO, |t| s.interval.saturating_sub(t.elapsed()));
                 let mut wait = held.map_or(IDLE_CHECK, |h| h.min(IDLE_CHECK));
+                if let Some(r) = next_retry {
+                    wait = wait.min(r.max(Duration::from_millis(10)));
+                }
                 // Paused (nobody sees the screen: woken when that ends) or backing off.
                 let paced = if ready { pace().wait(Instant::now()) } else { Some(Duration::ZERO) };
                 if let Some(left) = paced.filter(|d| !d.is_zero()) {
@@ -577,6 +646,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
             wake_all();
         }
         if let Ok(mut s) = lock.lock() {
+            s.schedule_retries(&batch, &result, Instant::now());
             s.captured.extend(result.done);
         }
     }
@@ -827,6 +897,10 @@ struct RoundResult {
     /// round failed (captures issued and none brought an image back, or no answer in time),
     /// `None` it tells nothing (cut short by quit, refused, or only windows gone).
     paced: Option<bool>,
+    /// Window ids whose picture came back (a fill not used counts).
+    ok: Vec<u32>,
+    /// Window ids known closed (the window server no longer describes them).
+    gone: Vec<u32>,
 }
 
 /// Messages from ScreenCaptureKit's queues back to the worker.
@@ -896,27 +970,132 @@ fn probe_look(filter: &SCContentFilter, id: u32, size_pt: (f64, f64), generation
 /// `sink`, for `probe-shadow` (its own windows only, which sit at the desktop's level: those
 /// count here). Nothing when the window is not in the shareable content.
 pub fn look_shot(id: u32, sink: LookSink) {
+    look_listed(id, 0, sink, false);
+}
+
+/// Window `id`'s look read now under `generation` ([`super::window_look`]), for a window whose
+/// picture came from the window server ([`super::capture_fast`], which has no shadow): the one
+/// capture that still lists the shareable content, at most one a round and each window's every
+/// [`crate::ui::shadow_look::REFRESH`] seconds.
+fn look_now(id: u32, generation: u64) {
+    look_listed(id, generation, super::window_look::read, true);
+}
+
+/// Lists the shareable content (desktop windows left out when `exclude_desktop`) and takes
+/// window `id`'s still with its shadow ([`probe_look`]) for `sink` under `generation`.
+fn look_listed(id: u32, generation: u64, sink: LookSink, exclude_desktop: bool) {
+    let flight = InFlight::issue();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, _error: *mut NSError| {
+        let _answered = &flight;
         // SAFETY: SCK passes a valid object or null.
         let Some(content) = (unsafe { content.as_ref() }) else { return };
+        if CLOSING.load(Ordering::SeqCst) {
+            return;
+        }
+        // A switch's pictures may start from this listing.
+        super::switch_shots::remember(content);
         // SAFETY: plain getters on a live SCShareableContent and its SCWindows.
         let windows = unsafe { content.windows() };
         let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == id) else { return };
         // SAFETY: designated initializer with a live SCWindow; a plain getter.
         let (filter, frame) = unsafe { (SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window), to_rect(window.frame())) };
-        probe_look(&filter, id, (frame.w, frame.h), 0, sink);
+        probe_look(&filter, id, (frame.w, frame.h), generation, sink);
     });
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe {
-        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(false, false, &handler);
+        SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(exclude_desktop, false, &handler);
     }
 }
 
-/// Captures `batch` once; returns the window ids that produced an image or were found
-/// missing (so they are not retried as "fresh" in a tight loop) and the outcome for the gate.
-/// Counts every outcome and logs the windows whose outcome changed since `outcomes` last saw
-/// them.
+/// What the window server's capture ([`super::capture_fast`]) did with a round's windows.
+#[derive(Default)]
+struct FastPart {
+    /// Windows whose picture went to `deliver`.
+    handled: Vec<u32>,
+    /// Windows the window server no longer describes (closed).
+    gone: Vec<u32>,
+    /// Windows left to ScreenCaptureKit (the source off, or missed).
+    left: Vec<Target>,
+}
+
+/// Takes `batch` through the window server's capture where it can ([`super::capture_fast`]),
+/// one window after another on this thread, each picture to `deliver` on the main thread;
+/// the windows it misses are left for ScreenCaptureKit.
+fn fast_part(batch: &[Target], deliver: Deliver) -> FastPart {
+    if !super::capture_fast::enabled() || CLOSING.load(Ordering::SeqCst) {
+        return FastPart { left: batch.to_vec(), ..FastPart::default() };
+    }
+    let ids: Vec<u32> = batch.iter().map(|t| t.id).collect();
+    let described = super::windows::describe(&ids);
+    let displays = super::desktop::cg_display_bounds();
+    let mut part = FastPart::default();
+    for t in batch {
+        let Some(w) = described.iter().find(|w| w.id == t.id) else {
+            part.gone.push(t.id);
+            continue;
+        };
+        if CLOSING.load(Ordering::SeqCst) {
+            part.left.push(*t);
+            continue;
+        }
+        match super::capture_fast::picture(*t, w.bounds, &displays) {
+            Ok(picture) => {
+                IMAGES.fetch_add(1, Ordering::Relaxed);
+                let id = t.id;
+                DispatchQueue::main().exec_async(move || deliver(id, picture));
+                part.handled.push(t.id);
+            }
+            Err(miss) => {
+                tracing::trace!(window = t.id, why = miss.as_str(), "window picture: ScreenCaptureKit takes it");
+                part.left.push(*t);
+            }
+        }
+    }
+    part
+}
+
+/// Captures `batch` once: through the window server where it can ([`fast_part`]), the rest
+/// through ScreenCaptureKit ([`sck_round`]: a listing of the shareable content first). Returns
+/// what [`sck_round`] returns, for the whole batch.
 fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut HashMap<u32, bool>) -> RoundResult {
+    let fast = fast_part(batch, deliver);
+    let took: Vec<Target> = batch.iter().filter(|t| !fast.left.contains(t)).copied().collect();
+    if !took.is_empty() && !CLOSING.load(Ordering::SeqCst) {
+        let gone: HashMap<u32, String> = fast.gone.iter().map(|id| (*id, "the window server no longer describes it".to_string())).collect();
+        note_outcomes(&took, &fast.handled, &gone, outcomes);
+    }
+    // A look due for a window the window server took (its picture has no shadow): read through
+    // ScreenCaptureKit, one a round at most.
+    let look = fast.handled.iter().find_map(|id| super::window_look::due(*id).map(|g| (*id, g)));
+    if let Some((id, generation)) = look {
+        look_now(id, generation);
+    }
+    let mut done = fast.handled.clone();
+    done.extend(&fast.gone);
+    let took_some = !fast.handled.is_empty();
+    if fast.left.is_empty() {
+        tracing::trace!(round, captured = fast.handled.len(), requested = batch.len(), "capture round, the window server's capture alone");
+        let outcome = if took_some { Outcome::Captured } else { Outcome::Inconclusive };
+        return RoundResult { done, outcome, timed_out: false, paced: took_some.then_some(true), ok: fast.handled, gone: fast.gone };
+    }
+    let mut result = sck_round(round, &fast.left, deliver, outcomes, look.is_none());
+    result.done.extend(done);
+    result.ok.extend(&fast.handled);
+    result.gone.extend(&fast.gone);
+    if took_some && result.outcome != Outcome::Declined {
+        result.outcome = Outcome::Captured;
+        if !CLOSING.load(Ordering::SeqCst) {
+            result.paced = Some(true);
+        }
+    }
+    result
+}
+
+/// Captures `batch` once through ScreenCaptureKit; returns the window ids that produced an image
+/// or were found missing (so they are not retried as "fresh" in a tight loop) and the outcome
+/// for the gate. Counts every outcome and logs the windows whose outcome changed since
+/// `outcomes` last saw them. `may_look`: a window's look may be read in this round.
+fn sck_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut HashMap<u32, bool>, may_look: bool) -> RoundResult {
     let (tx, rx) = mpsc::channel::<Msg>();
     let targets: Vec<Target> = batch.to_vec();
     let content_tx = tx.clone();
@@ -948,7 +1127,7 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
         let mut issued = 0;
         // At most one look a round: never every window's at once (at launch, after the
         // system's appearance changed), each read a round or more apart instead.
-        let mut looked = false;
+        let mut looked = !may_look;
         for t in &targets {
             // SAFETY: plain getter on a live SCWindow.
             let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == t.id) else {
@@ -1086,7 +1265,7 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
     } else {
         None
     };
-    RoundResult { done: all, outcome, timed_out, paced }
+    RoundResult { done: all, outcome, timed_out, paced, ok: handled, gone: Vec::new() }
 }
 
 /// Counts a round's outcomes and logs each window whose captures start failing or work
@@ -1291,6 +1470,49 @@ mod tests {
     }
 
     /// U5: a probe that told nothing is not repeated on the same window while another waits.
+    /// `[strip] thumbnail_interval_ms = 0` (the default): cards at events, no timer.
+    #[test]
+    fn a_zero_interval_never_comes() {
+        assert_eq!(interval_of(0), NO_TIMER);
+        assert_eq!(interval_of(1500), Duration::from_millis(1500));
+    }
+
+    /// With no timer a failed capture is taken again twice, 3 s apart, never a window known
+    /// closed, and the count starts over once a picture came; with a short timer, never.
+    #[test]
+    fn a_failed_capture_is_retried_a_few_times_without_a_timer() {
+        let t = |id| Target { id, width: 10, height: 10 };
+        let batch = [t(1), t(2), t(3)];
+        let result = |ok: Vec<u32>, gone: Vec<u32>| RoundResult {
+            done: vec![1, 2, 3],
+            outcome: Outcome::Captured,
+            timed_out: false,
+            paced: Some(true),
+            ok,
+            gone,
+        };
+        let mut s = Shared { interval: NO_TIMER, captured: [1, 2, 3].into(), ..Shared::default() };
+        let t0 = Instant::now();
+        s.schedule_retries(&batch, &result(vec![1], vec![3]), t0);
+        assert_eq!(s.retry_at.keys().copied().collect::<Vec<_>>(), vec![2], "only the failed one, not the closed one");
+        assert_eq!(s.due_retries(t0 + Duration::from_secs(1)), Some(Duration::from_secs(2)));
+        assert!(s.captured.contains(&2), "not due yet");
+        assert_eq!(s.due_retries(t0 + RETRY_AFTER), None);
+        assert!(!s.captured.contains(&2), "due: captured again");
+        for _ in 0..3 {
+            s.schedule_retries(&batch[1..2], &result(vec![], vec![]), t0);
+        }
+        assert_eq!(s.tries.get(&2), Some(&RETRIES), "two retries at most");
+        s.retry_at.clear();
+        s.schedule_retries(&batch[1..2], &result(vec![], vec![]), t0);
+        assert!(s.retry_at.is_empty(), "spent: it waits for the next event");
+        s.schedule_retries(&batch[1..2], &result(vec![2], vec![]), t0);
+        assert!(!s.tries.contains_key(&2), "a picture came: counted afresh");
+        let mut timed = Shared { interval: Duration::from_millis(1500), ..Shared::default() };
+        timed.schedule_retries(&batch, &result(vec![], vec![]), t0);
+        assert!(timed.retry_at.is_empty(), "the timer takes it again anyway");
+    }
+
     #[test]
     fn a_probe_takes_a_window_not_tried_yet() {
         let t = |id| Target { id, width: 10, height: 10 };

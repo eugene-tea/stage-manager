@@ -14,7 +14,7 @@ gives it. The defaults look and behave like Apple's; every extra is off until co
 ```text
 main thread (AppKit)          WM thread (CFRunLoop)            helpers
 ─────────────────────         ──────────────────────           ──────────────────────
-NSApplication run loop        AXObservers (all apps)            capture: SCScreenshotManager
+NSApplication run loop        AXObservers (all apps)            capture: window server, SCK
 status item + menu            AX reads/writes (timeout 0.25s)   config watcher (mtime poll)
 strip NSPanels                engine::Model (owns state)        signal watcher (self-pipe)
 Carbon hotkeys        ──cmd──▶ executes engine Actions          guardian process (parent death)
@@ -227,11 +227,22 @@ pictures (`Motion::Pictures`), but none is kept fresh on a timer: the trait's
 `pictures_at_switch` answers true, so the strip captures full-size pictures only as the
 pointer nears a card, and the controller, before it sends a switch to the strip, captures
 every outgoing window whose picture is not fresh (`platform/controller/switch_pictures.rs`,
-through `platform/switch_shots.rs`: all in parallel, from the last listing of the shareable
-content when its windows are still where it says) and waits for them, 160 ms at most. The
+through `platform/switch_shots.rs`: the window server's own capture a window at a time, any
+window it misses through ScreenCaptureKit) and waits for them, 160 ms at most. The
 windows stay on screen meanwhile and hide behind their pictures in one step each. A window
 in a stage Space still draws and is captured with its current content, so an incoming
 window's picture taken while it is hidden (the pointer on its card) is current too.
+
+Window pictures (`platform/capture.rs`, `platform/capture_fast.rs`, 1.9): every capture asks
+the window server first, one call a window and no listing (`SLSHWCaptureWindowList` for a
+window within the displays, on screen or in a stage Space; `CGWindowListCreateImage` for one
+partly off every display, a parked window), and ScreenCaptureKit only for a window that
+source misses (the call missing, nothing handed back, a picture that cannot be the window),
+for every picture when the first one of a call came back blank, and for a window's look read
+from its shadow (one a round, each window's every 20 s at most). Card thumbnails are taken at
+events, no timer (`[strip] thumbnail_interval_ms = 0`): a window newly on a card, the strip
+coming into view, the pointer reaching a card; a failed one twice more, 3 s apart. The Corner
+engine keeps its full-size pictures fresh every 2 s, the same way.
 
 A newly opened app's window under the Spaces engine (`platform/spaces/launch_watch.rs`): the
 window server lists it, off screen and on no Space, tens to hundreds of ms before it first

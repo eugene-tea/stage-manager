@@ -64,9 +64,9 @@
 //!   command (a switch) while these windows' descriptions are read every ms: when each
 //!   incoming window is at its frame for good, each outgoing one gone from its own
 //!   ([`super::settle_probe`], round sm-measure); reads only.
-//! - `capture BUNDLE [--rounds N] [hidden file=PATH]` (S4b): a switch's pictures taken at the
-//!   switch, through the app's path, timed on screen and in a stage Space not shown
-//!   ([`capture`]'s docs).
+//! - `capture BUNDLE [--rounds N] [hidden|cached file=PATH] [fast]` (S4b, S6b): a switch's
+//!   pictures taken at the switch, through the app's path, timed on screen and in a stage
+//!   Space not shown; `fast` through the window server's call alone ([`capture`]'s docs).
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
 
