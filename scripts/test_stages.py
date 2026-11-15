@@ -8687,8 +8687,102 @@ def phase_landing_abort():
     all_onscreen("landing abort: end")
 
 
+def phase_tabs():
+    """Round tab-lost (11-15: a Terminal tab selected again stayed on the Desktop under the
+    stage switched to). A tab group in a stage (the fixture's NSWindow tabbing: Fixture 1
+    selected, Fixture 3 its hidden tab), Fixture 2 in a stage of its own. Selecting the other
+    tab (the fixture's SIGIO, as ⌘⇧] would) gives the stage the tab selected, in the tab's
+    place; the tab left is a hidden tab, never "left this Space"; selected back, the place goes
+    back. A card click right after a tab switch takes the tab selected with its stage: no
+    window of the stage left behind stays on screen, and back in front the tab selected shows."""
+    say("\n== tabs: a window tab selected belongs to its group's stage ==")
+    stop_app()
+    stop_fixture()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    start_fixture(3, "--tabbed", "1")
+    fixture = pids_of(FIX_EXE)
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None and bool(fixture), "tabs setup: the app manages the selected tab and the lone window"):
+        stop_app()
+        stop_fixture()
+        return
+    t = by_title(s)
+    if not check("Fixture 1" in t and "Fixture 2" in t and "Fixture 3" not in t, "tabs setup: Fixture 1 managed, its hidden tab Fixture 3 not"):
+        stop_app()
+        stop_fixture()
+        return
+    f1, f2 = t["Fixture 1"]["id"], t["Fixture 2"]["id"]
+    tab = next((w["id"] for w in fixture_windows([FIX_ID])[0] if w["id"] not in (f1, f2)), None)
+    do("new", f2)
+    s = state()
+    home = by_title(s)["Fixture 1"]["home"]
+    check(not by_title(s)["Fixture 1"].get("parked") and bool(by_title(s)["Fixture 2"].get("parked")),
+          "tabs setup: the tab group's stage in front, Fixture 2 in a stage of its own behind")
+    left_before = log_text().count("window left this Space")
+
+    def holds(shown, hidden):
+        def look():
+            s = state()
+            bt = by_title(s)
+            st = next((st for st in s["stages"] if st["number"] == home), None)
+            ok = shown in bt and bt[shown]["home"] == home and hidden not in bt and st is not None and bt[shown]["id"] in st["windows"]
+            return s if ok else None
+        return look
+
+    def place(s, title):
+        st = next(st for st in s["stages"] if st["number"] == home)
+        return st["windows"].index(by_title(s)[title]["id"])
+
+    at = place(s, "Fixture 1")
+    os.kill(fixture[0], signal.SIGIO)
+    s = wait_until(holds("Fixture 3", "Fixture 1"), 5, "the tab selected to take the tab's place")
+    if check(s is not None, "tabs: the tab selected (Fixture 3) is the stage's window, the tab left (Fixture 1) is not managed"):
+        check(place(s, "Fixture 3") == at, "tabs: the tab selected has the tab's place in the stage")
+    os.kill(fixture[0], signal.SIGIO)
+    s = wait_until(holds("Fixture 1", "Fixture 3"), 5, "the tab selected back to take its place again")
+    check(s is not None, "tabs: selected back, Fixture 1 is the stage's window again, Fixture 3 a hidden tab")
+    text = log_text()
+    check("a window tab was selected" in text, "tabs: the log says a tab was selected")
+    check(text.count("window left this Space") == left_before, "tabs: no tab is let go as \"left this Space\"")
+
+    # A card click right after a tab switch: the switch takes the tab selected with its stage.
+    s = state()
+    os.kill(fixture[0], signal.SIGIO)
+    time.sleep(0.25)
+    click_card(s, "Fixture 2", "Fixture 2's card right after a tab switch")
+    wait_until(lambda: (lambda s: s if s.get("switching") is None and not by_title(s).get("Fixture 2", {}).get("parked") else None)(state(landed=False)),
+               5, "the switch to Fixture 2's stage")
+    time.sleep(1.5)
+
+    def stage_left_shows():
+        wins, d = fixture_windows([FIX_ID])
+        return [w["id"] for w in wins if w["id"] in (f1, tab) and w["onscreen"] and not tucked(w, d)]
+
+    showing = stage_left_shows()
+    check(not showing, f"tabs: after the switch no window of the tab group's stage is on screen (on screen: {showing})")
+    s = state()
+    check("Fixture 3" in by_title(s) and by_title(s)["Fixture 3"]["home"] == home,
+          "tabs: the tab selected before the click went with its stage")
+    do("switch", home)
+    time.sleep(1.0)
+    wins, d = fixture_windows([FIX_ID])
+    sel = next((w for w in wins if w["id"] == tab), None)
+    check(sel is not None and sel["onscreen"] and not tucked(sel, d), "tabs: back in front, the tab selected shows")
+    lone = next((w for w in wins if w["id"] == f2), None)
+    check(lone is not None and (not lone["onscreen"] or tucked(lone, d)), "tabs: back in front, Fixture 2's stage is hidden")
+    # The tab group back as it began, for the cleanup's look (Fixture 1 selected).
+    os.kill(fixture[0], signal.SIGIO)
+    wait_until(holds("Fixture 1", "Fixture 3"), 5, "Fixture 1 selected again")
+    stop_app()
+    all_onscreen("tabs", never_ours=(tab,) if tab else ())
+    stop_fixture()
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays", "screens", "engine"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -8706,7 +8800,7 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "away": phase_away,
+             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort}[p]()
     finally:

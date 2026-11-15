@@ -155,6 +155,7 @@ mod raise_order;
 mod spaces;
 mod stale;
 mod switch_pictures;
+mod tabs;
 #[cfg(test)]
 mod tick_scenarios;
 mod upkeep;
@@ -911,6 +912,9 @@ pub struct Controller {
     /// Windows of `unplaced` that were just found, not yet listed on screen, and until when
     /// the fast tick looks at them ([`FRESH_LOOK`]).
     fresh_unplaced: BTreeMap<u32, Instant>,
+    /// Window tabs selected that Accessibility did not list when their app was asked again
+    /// ([`tabs`]), and when it was: asked again only after [`tabs::ASK_AGAIN`].
+    tab_asked: HashMap<u32, Instant>,
     /// The launch's stages wait: the app could not see the Desktop ([`session::blindness`])
     /// when observation started; why and since when. Nothing is built or saved meanwhile.
     build_wait: Option<(session::Blind, Instant)>,
@@ -1179,6 +1183,7 @@ impl Controller {
             patch_items: PatchItems::default(),
             unplaced: BTreeSet::new(),
             fresh_unplaced: BTreeMap::new(),
+            tab_asked: HashMap::new(),
             build_wait: None,
             screens_wait: None,
             build_tried: None,
@@ -2634,6 +2639,19 @@ impl Controller {
                 self.unplaced.remove(&id);
                 self.absent.remove(&id);
                 self.user_focus.remove(&id);
+                // A tab no longer selected may be reported destroyed while its app keeps it
+                // (8J): when the tab selected shows in its place already, it takes that place in
+                // the stage, as at the Space check (round tab-lost).
+                let shown_tab = self.model.as_ref().is_some_and(|m| {
+                    m.window(WindowId(id)).is_some_and(|w| w.meta.role == WindowRole::Standard && !w.parked && m.is_shown_space(w.space))
+                });
+                if shown_tab
+                    && self.take_tabs(ob, &windows::list_windows())
+                    && self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_none())
+                {
+                    tracing::debug!(id, "a window reported destroyed while the window server keeps it, a tab selected in its place: a hidden tab");
+                    return;
+                }
                 let kept = self.parked_entries_of(&[id]);
                 // Its saved entry as it is now, should its app be quitting (round 8H).
                 if let Some(c) = self.model.as_ref().and_then(|m| m.closing(WindowId(id))) {
@@ -4576,6 +4594,9 @@ impl Controller {
         if self.phase.fullscreen() {
             return;
         }
+        // A window tab selected takes the place of the tab it hides, before the tab left is
+        // counted missing or the tab selected is taken for a new window (round tab-lost).
+        self.take_tabs(ob, &list);
         let shown = self.present_in(&list);
         let shown_main = self.shown_managed(&list);
         if self.active_shown_changed(&shown) {
@@ -5048,6 +5069,11 @@ impl Controller {
                 tracing::debug!(id, "the window list disagrees with the Space shown; the window is placed on arrival");
             }
             self.new_window_waits(id);
+            return;
+        }
+        // A window tab selected (an activation or a focus may offer it before the Space
+        // check): it takes the place of the tab it hides, never a new window's.
+        if self.take_tabs(ob, &list) && self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_some()) {
             return;
         }
         let waited = self.unplaced.remove(&id);
@@ -5529,6 +5555,11 @@ impl Controller {
             tracing::debug!("a card dropped on a screen showing a full-screen app's Space or settling: nothing happens");
             self.present();
             return;
+        }
+        if matches!(event, StripEvent::CardClicked { .. } | StripEvent::IconClicked { .. }) {
+            // A tab selected just now, before the Space check saw it: the switch takes it with
+            // its stage, never leaving it on screen (round tab-lost).
+            self.take_tabs(ob, &windows::list_windows());
         }
         let pressed = self.pressed_obs.take().filter(|(at, _)| at.elapsed() < PRESSED_OBS_MAX).map(|(_, obs)| obs);
         let obs = match pressed {

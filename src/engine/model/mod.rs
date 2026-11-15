@@ -42,6 +42,7 @@ mod quit;
 mod saved_size;
 mod spaces;
 mod strip;
+mod tabs;
 #[cfg(test)]
 mod displays_tests;
 #[cfg(test)]
