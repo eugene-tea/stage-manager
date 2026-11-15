@@ -260,7 +260,7 @@ coming into view, the pointer reaching a card; a failed one twice more, 3 s apar
 engine keeps its full-size pictures fresh every 2 s, the same way.
 
 The landing, behind a test switch for now (round sm-landing; `ui/landing_math.rs`, pure;
-`STAGE_MANAGER_LANDING` with `STAGE_MANAGER_ONLY`, default today's): **ordered** puts each
+`STAGE_MANAGER_LANDING` with `STAGE_MANAGER_ONLY` or `STAGE_MANAGER_SPACES=1`, default today's): **ordered** puts each
 incoming picture whose window ends behind a real window in place (the model's order after
 the batch, `Transition::order` and `in_place`) in a side panel of the overlay's own frame
 and eye, ordered just under that window (`ui/overlay.rs`), both engines; **live** (the Spaces
