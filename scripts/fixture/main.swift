@@ -33,6 +33,9 @@
 //                                      minimizes a window that has been on screen; one never
 //                                      ordered in was never listed by Accessibility in the
 //                                      10-15 live run, and SIGHUP had nothing to un-minimize).
+//   --minimize-after-ms N | FIXTURE_MINIMIZE_AFTER_MS=N  that moment (default 250; 0: the next
+//                                      turn, so a running Stage Manager never places the window
+//                                      before it is minimized)
 //                                      A test starts this fixture before Stage Manager, so
 //                                      the moment on screen is not seen as a new window.
 //   --tabbed N   | FIXTURE_TABBED=N    the last N standard windows open as tabs of window 1
@@ -134,6 +137,7 @@ struct Options {
     var reverse = false
     var retitle: [String: String] = [:]
     var retitleAfterMs = 0
+    var minimizeAfterMs = 250
     var minimized: Set<String> = []
     var tabbed = 0
     var child = false
@@ -186,6 +190,7 @@ struct Options {
         if env["FIXTURE_REVERSE"] == "1" { o.reverse = true }
         if let r = env["FIXTURE_RETITLE"] { o.retitle = parseRetitle(r) }
         if let n = env["FIXTURE_RETITLE_AFTER_MS"].flatMap(Int.init) { o.retitleAfterMs = n }
+        if let n = env["FIXTURE_MINIMIZE_AFTER_MS"].flatMap(Int.init) { o.minimizeAfterMs = n }
         if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
         if let n = env["FIXTURE_TABBED"].flatMap(Int.init) { o.tabbed = n }
         if env["FIXTURE_CHILD"] == "1" { o.child = true }
@@ -214,6 +219,7 @@ struct Options {
             case "--reverse": o.reverse = true
             case "--retitle": if let r = args.next() { o.retitle = parseRetitle(r) }
             case "--retitle-after-ms": if let n = args.next().flatMap(Int.init) { o.retitleAfterMs = n }
+            case "--minimize-after-ms": if let n = args.next().flatMap(Int.init) { o.minimizeAfterMs = n }
             case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
             case "--tabbed": if let n = args.next().flatMap(Int.init) { o.tabbed = n }
             case "--child": o.child = true
@@ -235,6 +241,7 @@ struct Options {
         o.delayMs = max(0, o.delayMs)
         o.staggerMs = max(0, o.staggerMs)
         o.retitleAfterMs = max(0, o.retitleAfterMs)
+        o.minimizeAfterMs = max(0, o.minimizeAfterMs)
         o.raiseDelayMs = max(0, o.raiseDelayMs)
         o.tabbed = max(0, min(o.tabbed, o.windows - 1))
         return o
@@ -646,7 +653,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Accessibility and not minimized (the 10-15 live run). A moment later, so the
             // window server has shown it, it goes to the Dock.
             window.orderBack(nil)
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { window.miniaturize(nil) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.minimizeAfterMs)) { window.miniaturize(nil) }
         } else {
             show(window)
         }

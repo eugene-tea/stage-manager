@@ -3353,7 +3353,9 @@ def phase_motion():
     say("-- a card click to an app with a window waiting off screen: the switch's own activation never brings its windows early (11-09)")
     # Alpha 2 opens minimized: it waits in `unplaced`. The card click's activation of Alpha
     # (our echo) offered it to the window placement, which brought the held windows in at once.
-    start_extra_args("a", 2, "--minimized", "Alpha 2")
+    # Minimized on the fixture's next turn: 250 ms on screen let a fast placement (Spaces, 68 ms
+    # live 11-14) take it for a shown window the user then minimized, a card of its own.
+    start_extra_args("a", 2, "--minimized", "Alpha 2", "--minimize-after-ms", "0")
     s = wait_state(lambda x: "Alpha 1" in by_title(x) and len(x.get("unplaced", [])) >= 1, "Alpha 1 managed, Alpha 2 waiting minimized", timeout=10)
     if check(s is not None, "Alpha 1 has a stage, Alpha 2 waits off screen (minimized)"):
         alpha = by_title(s)["Alpha 1"]["home"]
