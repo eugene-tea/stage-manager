@@ -5,8 +5,7 @@
 - Card pictures are taken when a stage leaves for its card, when the strip comes into view
   and when the pointer reaches a card, no longer every 1.5 seconds, and every window picture
   comes from the window server directly: much less CPU at rest. `[strip]
-  thumbnail_interval_ms` brings back a refresh timer. A popover open over a window is no
-  longer in its card's picture.
+  thumbnail_interval_ms` brings back a refresh timer.
 - Less CPU while nothing happens: the app's housekeeping, which ran four times a second,
   runs every two seconds once no window, app or click has changed anything for a few
   seconds (every 0.75 seconds with the park corner while windows are parked), and reads the

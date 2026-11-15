@@ -287,6 +287,25 @@ pub fn picture(t: Target, frame: Rect, displays: &[Rect]) -> Result<Picture, Mis
     Ok(Picture { image, extent: Extent::NONE })
 }
 
+/// Of `ids`, the windows with another window of their app on screen over them or reaching out
+/// of them (a popover, a menu, a sheet, a child panel: ScreenCaptureKit's picture carries those,
+/// the window server's call gives the window alone): ScreenCaptureKit takes their pictures, as
+/// before (live 11-14: a card lost its popup). One query of the windows on screen.
+pub fn with_children(ids: &[u32]) -> std::collections::HashSet<u32> {
+    if ids.is_empty() {
+        return Default::default();
+    }
+    let on = super::windows::on_screen();
+    ids.iter().copied().filter(|id| on.iter().find(|w| w.id == *id).is_some_and(|w| has_child_over(w.id, w.pid, w.bounds, &on))).collect()
+}
+
+/// True when a window of `pid` other than `id`, on screen and not see-through, overlaps
+/// `frame` (`on`: the windows on screen). A same-app window merely overlapping counts too: the
+/// slower picture is right either way.
+pub fn has_child_over(id: u32, pid: i32, frame: Rect, on: &[super::windows::CgWindow]) -> bool {
+    on.iter().any(|w| w.id != id && w.pid == pid && w.alpha > 0.0 && w.bounds.intersect(&frame).is_some_and(|i| i.w >= 1.0 && i.h >= 1.0))
+}
+
 /// True when a picture of `have` pixels is worth drawing smaller to `want` (a card's thumbnail
 /// of a large window): a tenth smaller or more on a side.
 pub fn needs_scaling(have: (usize, usize), want: (u32, u32)) -> bool {
@@ -311,6 +330,27 @@ fn first_image(list: &NSArray) -> Option<CFRetained<CGImage>> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_window_of_its_app_over_it_sends_the_picture_to_screencapturekit() {
+        let w = |id: u32, pid: i32, x: f64, alpha: f64| crate::platform::windows::CgWindow {
+            id,
+            pid,
+            owner: String::new(),
+            name: None,
+            layer: 0,
+            bounds: Rect::new(x, 141.0, 276.0, 298.0),
+            onscreen: true,
+            alpha,
+        };
+        let frame = Rect::new(80.0, 78.0, 520.0, 392.0);
+        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 1.0)]), "a popup reaching out of it");
+        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 100.0, 1.0)]), "a sheet inside it");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 8, 500.0, 1.0)]), "another app's window");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 0.0)]), "a see-through one");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 900.0, 1.0)]), "one beside it");
+        assert!(!super::has_child_over(1, 7, frame, &[w(1, 7, 80.0, 1.0)]), "itself");
+    }
+
     use super::*;
 
     const SCREEN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);

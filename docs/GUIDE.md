@@ -450,7 +450,7 @@ Some limits to know about:
   window's as it takes its place, which can still show as a faint flicker at the shadow's
   edge. Card pictures are taken when a stage leaves for its card, when the strip comes into
   view and when the pointer reaches a card, not live (`[strip] thumbnail_interval_ms` adds a
-  timer). A popover open over a window is not in its card's picture.
+  timer).
 - With ⌘M, macOS may show a short animation toward the corner.
 - When an accessibility tool has turned on an app's enhanced interface, Stage Manager turns
   it off for a moment around each switch and back on right after.
