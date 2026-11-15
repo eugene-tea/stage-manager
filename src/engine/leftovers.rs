@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use super::geometry::Rect;
+use super::hidden_tab::{same_place, same_size};
 use super::persist::StateFile;
 use super::recovery::{FrameSource, LiveWindow, ScanDisplays, plan_sourced, safe_restore};
 
@@ -218,6 +219,9 @@ pub struct Remembered {
     pub unparked: Option<Rect>,
     /// The frame an old guardian handed it over with (round 8N).
     pub taken: Option<Rect>,
+    /// Its tab group's frame ([`group_frame`], round tab-quit): a window unknown to this run,
+    /// of the same app and size as one the unpark just put back.
+    pub group: Option<Rect>,
 }
 
 impl Remembered {
@@ -227,7 +231,23 @@ impl Remembered {
             .map(|r| (r, LeftoverSource::Registry))
             .or(self.unparked.map(|r| (r, LeftoverSource::Unparked)))
             .or(self.taken.map(|r| (r, LeftoverSource::Registry)))
+            .or(self.group.map(|r| (r, LeftoverSource::Group)))
     }
+}
+
+/// The frame of the tab group a window found in the park zone belongs to (round tab-quit):
+/// among the windows the unpark just put back (`unparked`: app and frame), those of its app
+/// `pid` whose size is its `size` ([`same_size`]), when they all went to one place
+/// ([`same_place`]). macOS window tabs are windows of one size; a group parked whose other
+/// tab is selected while it waits leaves that tab at the park spot, unknown to the model, and
+/// the hidden tab, the model's, goes back at the quit. The tab selected goes to the same
+/// frame. Before, it went to whatever `state.json` frame its title matched (the safety drill
+/// after the tabs phase, 11-15: Fixture 3 at 300,218 600x392, its group at 80,78 520x392).
+/// Two places, or none, say nothing.
+pub fn group_frame(pid: i32, size: Rect, unparked: impl IntoIterator<Item = (i32, Rect)>) -> Option<Rect> {
+    let mut frames = unparked.into_iter().filter(|&(p, r)| p == pid && same_size(r, size)).map(|(_, r)| r);
+    let first = frames.next()?;
+    frames.all(|r| same_place(r, first)).then_some(first)
 }
 
 /// Where a window still parked after the unpark goes back to.
@@ -239,6 +259,9 @@ pub enum LeftoverSource {
     /// The frame the unpark restored it to a moment before (its app carried the move out
     /// late, or not at all).
     Unparked,
+    /// Its tab group's frame: a window of its app and size the unpark put back
+    /// ([`group_frame`]).
+    Group,
     /// Its window's frame in `state.json`.
     Saved,
     /// Nothing known: centered on the visible frame.
@@ -251,6 +274,7 @@ impl LeftoverSource {
         match self {
             Self::Registry => "registry",
             Self::Unparked => "unpark",
+            Self::Group => "tab group",
             Self::Saved => "state.json",
             Self::Centered => "centered",
         }
@@ -574,10 +598,38 @@ mod tests {
         let renamed = live("com.apple.mail", "Inbox (3)", mail.frame);
         assert_eq!(leftover_frame(unparked, &renamed, None, &d), (fresh, LeftoverSource::Unparked), "never centered");
         let failed = Rect::new(80.0, 50.0, 1500.0, 1100.0);
-        let both = Remembered { registry: Some(failed), unparked: Some(fresh), taken: Some(older) };
+        let both = Remembered { registry: Some(failed), unparked: Some(fresh), taken: Some(older), group: None };
         assert_eq!(leftover_frame(both, &mail, Some(&st), &d), (failed, LeftoverSource::Registry), "the registry first");
         let taken = Remembered { unparked: Some(fresh), taken: Some(older), ..Remembered::default() };
         assert_eq!(taken.first(), Some((fresh, LeftoverSource::Unparked)), "this run's unpark before an old guardian's frame");
+    }
+
+    /// Round tab-quit (11-15, the safety drill after the tabs phase): the fixture's group
+    /// parked, Fixture 3 selected while it waited; the quit put the hidden tab Fixture 1 back
+    /// at 80,78 520x392 and found Fixture 3 in the corner, unknown. It goes to its group's
+    /// frame, not the `state.json` frame of another run's "Fixture 3" (300,218 600x392).
+    #[test]
+    fn a_tab_left_in_the_corner_goes_to_its_groups_frame_before_any_saved_one() {
+        let d = displays();
+        const FIXTURE: i32 = 54826;
+        let group = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let tab = live("dev.example.fixture", "Fixture 3", Rect::new(2559.0, 1408.0, 520.0, 392.0));
+        let st = state(vec![saved("dev.example.fixture", "Fixture 3", Rect::new(300.0, 218.0, 600.0, 392.0))]);
+        let lone = Rect::new(190.0, 148.0, 560.0, 422.0);
+        let found = group_frame(FIXTURE, tab.frame, [(FIXTURE, group), (FIXTURE, lone)]);
+        assert_eq!(found, Some(group));
+        let remembered = Remembered { group: found, ..Remembered::default() };
+        assert_eq!(leftover_frame(remembered, &tab, Some(&st), &d), (group, LeftoverSource::Group));
+        // Another app's window of that size, or one of another size, says nothing.
+        assert_eq!(group_frame(FIXTURE, tab.frame, [(1, group), (FIXTURE, lone)]), None);
+        // Two windows of that size put back at two places: no group is known.
+        let other = Rect::new(700.0, 300.0, 521.0, 391.0);
+        assert_eq!(group_frame(FIXTURE, tab.frame, [(FIXTURE, group), (FIXTURE, other)]), None);
+        // Two at one place (two tabs of the group put back): that place.
+        assert_eq!(group_frame(FIXTURE, tab.frame, [(FIXTURE, group), (FIXTURE, group)]), Some(group));
+        // A frame this run remembers for the window itself comes first.
+        let fresh = Rect::new(120.0, 60.0, 520.0, 392.0);
+        assert_eq!(Remembered { unparked: Some(fresh), group: found, ..Remembered::default() }.first(), Some((fresh, LeftoverSource::Unparked)));
     }
 
     #[test]

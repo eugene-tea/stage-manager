@@ -731,6 +731,10 @@ pub struct Ours {
     /// in the park zone at the check goes back there before any `state.json` frame (its
     /// registry entry left as done with the batch).
     pub unparked: BTreeMap<u32, Rect>,
+    /// The app of each window in [`Self::unparked`]: a window unknown to this run in the park
+    /// zone, of the same app and size, goes back to that frame, its tab group's
+    /// ([`leftovers::group_frame`], round tab-quit).
+    pub unparked_apps: BTreeMap<u32, i32>,
     /// Windows parked on purpose as the check runs ([`parked_on_purpose`]): left where they
     /// are ([`Self::left_alone`]). Empty for a check right after an unpark (nothing is parked
     /// on purpose then); a later look for a stand-down's leftovers, made while the app
@@ -751,7 +755,7 @@ impl Ours {
 
     /// What is known from the registry's ids, the model's windows and `state.json`.
     pub fn from_parts(registered: BTreeSet<u32>, managed: BTreeSet<u32>, state: Option<StateFile>) -> Self {
-        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new(), parked_now: BTreeSet::new() }
+        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new(), unparked_apps: BTreeMap::new(), parked_now: BTreeSet::new() }
     }
 
     /// `self`, leaving the windows `parked_now` where they are ([`Self::parked_now`]).
@@ -771,6 +775,19 @@ impl Ours {
     pub fn with_unparked(mut self, unparked: BTreeMap<u32, Rect>) -> Self {
         self.unparked = unparked;
         self
+    }
+
+    /// `self`, with the app of each window the controller's latest unpark restored
+    /// ([`Self::unparked_apps`]).
+    pub fn with_unparked_apps(mut self, apps: BTreeMap<u32, i32>) -> Self {
+        self.unparked_apps = apps;
+        self
+    }
+
+    /// The frames the latest unpark restored windows of app `pid` to, for a tab group's
+    /// frame ([`leftovers::group_frame`]).
+    pub fn unparked_of(&self, pid: i32) -> impl Iterator<Item = (i32, Rect)> + '_ {
+        self.unparked.iter().filter(move |(id, _)| self.unparked_apps.get(id) == Some(&pid)).map(move |(_, r)| (pid, *r))
     }
 
     /// `self`, with what the hidden-tab test needs from the model (8J): the registered
@@ -816,6 +833,7 @@ impl Ours {
         self.shown_managed = now.shown_managed;
         // A later unpark's frame is the fresher one.
         self.unparked.extend(now.unparked);
+        self.unparked_apps.extend(now.unparked_apps);
         // What is parked on purpose is `now`'s alone.
         self.parked_now = now.parked_now;
         if self.state.is_none() {
@@ -1416,8 +1434,9 @@ fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
 
 /// Brings back every window in `left` (listed in the park zone after an unpark) before
 /// `deadline`: to its registry frame, else the frame the unpark restored it to
-/// ([`Ours::unparked`]), else the frame it was taken with from an old guardian, else its
-/// `state.json` frame, else centered ([`leftovers::leftover_frame`]), through the
+/// ([`Ours::unparked`]), else the frame it was taken with from an old guardian, else its tab
+/// group's ([`leftovers::group_frame`]), else its `state.json` frame, else centered
+/// ([`leftovers::leftover_frame`]), through the
 /// registry's element or the app's own list.
 /// A window is tried only when its try fits in the time left ([`leftovers::leftover_fits`]),
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
@@ -1456,11 +1475,17 @@ fn bring_back(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours:
                 continue;
             }
         };
-        let remembered = Remembered {
+        let mut remembered = Remembered {
             registry: entry.as_ref().map(|e| e.restore),
             unparked: ours.unparked.get(&w.id).copied(),
             taken: taken_entry(w.id).map(|r| r.restore),
+            group: None,
         };
+        // Unknown to this run, the same app and size as a window the unpark put back: the
+        // tab group's selected tab, put back with its group (round tab-quit).
+        if remembered.first().is_none() {
+            remembered.group = leftovers::group_frame(w.pid, w.bounds, ours.unparked_of(w.pid));
+        }
         // The title only matters for a state.json match (no frame remembered).
         let title = if remembered.first().is_none() { element.title().unwrap_or_default() } else { String::new() };
         let live = LiveWindow { id: Some(w.id), bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };

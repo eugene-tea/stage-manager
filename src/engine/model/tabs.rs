@@ -7,21 +7,28 @@
 //! tab no longer selected leaves the model as a hidden tab. It is never "left this Space":
 //! that let it go with no stage, and a tab selected later showed over every stage switch
 //! (the owner's Terminal on 11-15). Selected again, it takes the place back the same way.
+//!
+//! The stage may be hidden (round tab-quit): a tab selected while its group waits hidden (a
+//! tab closed there, or selected by its app) is hidden with the stage, and its frame to come
+//! back to is the group's, the tab left's. Before, the tab left stayed the stage's window: a
+//! quit put the hidden tab back and left the tab selected in the corner, for the leftovers
+//! check to put at whatever frame `state.json` gave a window of its title.
 
 use super::{Action, Home, Model, WindowId, WindowMeta, WindowRole, WindowState};
 
 impl Model {
     /// Tab `selected` (on screen, not managed yet) took the place of managed tab `left` (the
     /// stage's window, off screen now as a hidden tab): `selected` joins `left`'s stage at
-    /// `left`'s place in it, shown, `left`'s key when `left` had it, and `left` (with its
-    /// children, ordered out with it) leaves the model. Nothing when `left` is not a managed
-    /// standard window shown by the model, or `selected` is managed already, of another app,
-    /// or not a standard window. Returns the actions and the windows the model forgot: the
-    /// platform keeps them waiting, offered again once they show.
+    /// `left`'s place in it, `left`'s key when `left` had it, and `left` (with its children,
+    /// ordered out with it) leaves the model. Shown when `left` was shown; when `left` was
+    /// hidden with its stage, `selected` is hidden too (a `Hide`: where the engine keeps it, it
+    /// stays) with `left`'s frame to come back to, the group's. Nothing when `left` is not a
+    /// managed standard window, or `selected` is managed already, of another app, or not a
+    /// standard window. Returns the actions and the windows the model forgot: the platform
+    /// keeps them waiting, offered again once they show.
     pub fn tab_selected(&mut self, left: WindowId, selected: WindowMeta) -> (Vec<Action>, Vec<WindowId>) {
         let Some(old) = self.windows.get(&left) else { return (Vec::new(), Vec::new()) };
         if old.meta.role != WindowRole::Standard
-            || old.parked
             || selected.role != WindowRole::Standard
             || selected.pid != old.meta.pid
             || self.windows.contains_key(&selected.id)
@@ -30,12 +37,19 @@ impl Model {
         }
         let home = old.home;
         let display = old.meta.display;
-        let frame = if selected.frame.is_degenerate() || self.listed_hidden(display, selected.frame) { old.restore } else { selected.frame };
+        let hidden = old.parked;
+        // Hidden, it was found where the engine keeps the group (the park spot): the group's
+        // frame is the tab left's.
+        let frame = if hidden || selected.frame.is_degenerate() || self.listed_hidden(display, selected.frame) {
+            old.restore
+        } else {
+            selected.frame
+        };
         let state = WindowState {
             meta: WindowMeta { display, ..selected },
             home,
             restore: self.safe_restore(frame, display),
-            parked: false,
+            parked: hidden,
             // The group's frame is the one `left` had: so is where it goes back at a quit.
             original: old.original,
             space: old.space,
@@ -65,6 +79,9 @@ impl Model {
             && let Some(stage) = self.stage_mut(s)
         {
             stage.key = Some(id);
+        }
+        if hidden {
+            actions.push(Action::Hide { id });
         }
         if !actions.contains(&Action::StateChanged) {
             actions.push(Action::StateChanged);
@@ -172,6 +189,34 @@ mod tests {
         assert_eq!(m.stage(stage).expect("stage").key, Some(w(4)));
     }
 
+    /// Round tab-quit: Mail's stage hidden (left behind), its tab 13 selected there, found at
+    /// the park spot. It is Mail's stage's window, hidden, and comes back at Mail's frame (the
+    /// group's), never the park spot's; a switch back shows it there, and a quit too.
+    #[test]
+    fn a_tab_selected_in_a_hidden_stage_is_hidden_with_it_and_comes_back_at_the_groups_frame() {
+        let (mut m, mut d) = desk();
+        let mail = m.stage_of(w(12)).expect("Mail's stage");
+        assert!(m.window(w(12)).expect("managed").parked, "Mail's stage is hidden");
+        let group = m.window(w(12)).expect("managed").restore;
+        let at_spot = Rect::new(2559.0, 1408.0, group.w, group.h);
+        let tab = WindowMeta { frame: at_spot, ..meta(13, 12, "com.example.mail") };
+        d.close(w(12));
+        d.open(&tab);
+        let (a, gone) = m.tab_selected(w(12), tab);
+        d.apply(&m, &a);
+        assert_eq!(gone, vec![w(12)]);
+        assert!(a.contains(&Action::Hide { id: w(13) }), "hidden with its stage: {a:?}");
+        assert!(!a.iter().any(|a| matches!(a, Action::SetFrame { .. } | Action::Focus { .. })), "nothing shows: {a:?}");
+        let t = m.window(w(13)).expect("managed");
+        assert!(t.parked);
+        assert_eq!(t.restore, group, "the group's frame, not the park spot's");
+        assert_eq!(m.stage(mail).expect("stage").windows, vec![w(13)]);
+        assert!(m.unpark_all().contains(&Action::SetFrame { id: w(13), frame: group }), "a quit puts it at the group's frame");
+        let obs = d.obs();
+        let a = m.switch_to(mail, &obs);
+        assert!(a.contains(&Action::SetFrame { id: w(13), frame: group }), "back in front at the group's frame: {a:?}");
+    }
+
     #[test]
     fn a_child_of_the_hidden_tab_leaves_with_it() {
         let (mut m, mut d) = desk();
@@ -184,11 +229,8 @@ mod tests {
     }
 
     #[test]
-    fn nothing_changes_for_a_parked_window_another_apps_window_or_one_managed_already() {
+    fn nothing_changes_for_another_apps_window_or_one_managed_already() {
         let (mut m, _) = desk();
-        // Mail is parked (its stage was left).
-        let mail_tab = WindowMeta { frame: m.window(w(12)).expect("managed").restore, ..meta(13, 12, "com.example.mail") };
-        assert_eq!(m.tab_selected(w(12), mail_tab), (Vec::new(), Vec::new()), "parked: not the stage shown");
         let other = WindowMeta { pid: 99, ..tab4(&m) };
         assert_eq!(m.tab_selected(w(1), other), (Vec::new(), Vec::new()), "another app");
         let notes = WindowMeta { pid: 10, ..meta(2, 10, "com.example.notes") };

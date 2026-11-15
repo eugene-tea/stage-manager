@@ -664,7 +664,7 @@ impl WmState {
             }
             WmCommand::Shutdown(reply) => {
                 // The unpark saves the stages before the leftovers check reads them (S1).
-                let failed = self.controller.unpark_all(&self.observer);
+                let failed = self.controller.unpark_all(&mut self.observer);
                 // Every window of an allowed app still in a park zone on any Space comes back
                 // now, known to this run or not (6X); one that cannot (another Space's, an app
                 // that does not answer) leaves the exit unclean, so the guardian watches until
@@ -794,7 +794,7 @@ impl WmState {
         for task in release_plan(self.displays.is_some(), self.settings.is_some()) {
             match task {
                 Task::UnparkAll => {
-                    let failed = self.controller.unpark_all(&self.observer);
+                    let failed = self.controller.unpark_all(&mut self.observer);
                     if failed > 0 || safety::registry_len() > 0 {
                         window_engine::current().bring_all_back("stand-down");
                     }
@@ -868,7 +868,7 @@ impl WmState {
                 Task::UnparkAll => {
                     // As at quit: the controller's unpark, then the window server's word on
                     // every allowed app's window still in a park zone (6X).
-                    let failed = self.controller.unpark_all(&self.observer);
+                    let failed = self.controller.unpark_all(&mut self.observer);
                     let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
                     let left = window_engine::current().bring_back_rest("logout", ours, true);
                     let back = left.is_none();
