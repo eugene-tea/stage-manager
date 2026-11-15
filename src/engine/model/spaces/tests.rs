@@ -9,6 +9,7 @@ use crate::engine::model::{NativeTarget, Observation, Pid, Target};
 use crate::engine::persist::{StateFile, rematch};
 use crate::engine::recovery::EngineKind;
 use crate::engine::rules::Decision;
+use crate::engine::switcher;
 use crate::engine::testkit::*;
 
 /// The model plus a fake Mac with two Desktops: each window lives on one (or, sticky, on
@@ -1556,6 +1557,25 @@ mod arranged_ahead {
         mac
     }
 
+    /// Round cmd-tab: ⌘Tab's keys, the app they select, the window put home for it, and the
+    /// activation at ⌘'s release, in the order a person makes them. Mail (40) waits in a stage
+    /// here and shows on Desktop 2; the browser (20) is in front, chat (30) lives on Desktop 2;
+    /// the apps were used browser, Mail, chat.
+    fn cmd_tab(mac: &Mac, keys: &mut switcher::Switcher, key: switcher::Key, lent: Option<(Pid, WindowId)>) -> Vec<switcher::Act> {
+        use crate::engine::model::AppFacts;
+        let heard = keys.hear(key);
+        let steps = match heard {
+            switcher::Heard::Selected { steps, .. } | switcher::Heard::Released { steps } => steps,
+            _ => None,
+        };
+        let selected = steps.and_then(|s| switcher::predict(&[20, 40, 30], 3, s));
+        switcher::plan(heard, selected, lent, |pid| mac.m.dock_home(pid, AppFacts { active: pid == 20, ..AppFacts::default() }))
+    }
+
+    fn tab(shift: bool) -> switcher::Key {
+        switcher::Key::Down { code: switcher::KEY_TAB, cmd: true, shift }
+    }
+
     both_engines! {
     #[test]
     fn a_dock_click_predicts_the_window_macos_will_show_on_another_desktop() {
@@ -1699,6 +1719,87 @@ mod arranged_ahead {
         mac.run(a);
         assert_eq!(mac.m.stage_of(w(5)), mac.m.main_active_stage(), "Mail's stage here in front");
         assert_eq!(mac.shown, 0);
+    }
+
+    #[test]
+    fn cmd_tab_puts_the_selected_apps_window_home_and_its_activation_switches_here() {
+        use switcher::{Act, Key};
+        let mut mac = mail_waiting_here_and_shown_elsewhere();
+        let mail_stage = mac.m.stage_of(w(5));
+        let mut keys = switcher::Switcher::default();
+        assert!(cmd_tab(&mac, &mut keys, Key::Command(true), None).is_empty(), "⌘ alone");
+        let acts = cmd_tab(&mac, &mut keys, tab(false), None);
+        match mac.m.options().engine {
+            EngineKind::Corner => {
+                // The parked window is on Desktop 1 already: nothing to put home, macOS stays.
+                assert!(acts.is_empty(), "the Corner engine: nothing put home ({acts:?})");
+                assert!(cmd_tab(&mac, &mut keys, Key::Command(false), None).is_empty());
+            }
+            EngineKind::Spaces => {
+                assert_eq!(acts, vec![Act::Lend { pid: 40, window: w(5) }], "one Tab: Mail, its stage's window put home");
+                let lent = Some((40, w(5)));
+                let acts = cmd_tab(&mac, &mut keys, tab(false), lent);
+                assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher's selection moved on" }], "on to chat");
+                // Back to Mail (⇧Tab), then ⌘ let go.
+                let acts = cmd_tab(&mac, &mut keys, tab(true), None);
+                assert_eq!(acts, vec![Act::Lend { pid: 40, window: w(5) }], "back on Mail");
+                let acts = cmd_tab(&mac, &mut keys, Key::Command(false), lent);
+                assert_eq!(acts, vec![Act::Release { window: w(5) }], "⌘ let go on Mail: kept for the activation");
+                assert!(mac.m.activation_stays_here(40, true), "window 5 home: macOS activates Mail here");
+            }
+        }
+        // The activation at the release: Mail's stage here comes in front (its focused window
+        // on Desktop 2 or the one put home: either way the stage here).
+        let obs = Observation { focused: Some(w(6)), ..mac.obs() };
+        let a = mac.m.app_activated(40, &obs);
+        mac.run(a);
+        assert_eq!(mac.m.stage_of(w(5)), mac.m.main_active_stage(), "Mail's stage here in front");
+        assert_eq!(mac.m.stage_of(w(5)), mail_stage, "in its own stage");
+        assert!(!mac.parked(5), "window 5 shown");
+        assert_eq!(mac.shown, 0, "on Desktop 1 all along");
+    }
+
+    #[test]
+    fn cmd_tab_takes_the_window_back_when_the_selection_moves_on_or_is_cancelled() {
+        use switcher::{Act, Key};
+        let mac = mail_waiting_here_and_shown_elsewhere();
+        let spaces = mac.m.options().engine == EngineKind::Spaces;
+        let lent = spaces.then_some((40, w(5)));
+        // Mail selected, then chat (a second Tab): chat has no stage here, nothing to put home.
+        let mut keys = switcher::Switcher::default();
+        let first = cmd_tab(&mac, &mut keys, tab(false), None);
+        assert_eq!(first.is_empty(), !spaces);
+        let acts = cmd_tab(&mac, &mut keys, tab(false), lent);
+        if spaces {
+            assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher's selection moved on" }], "moved on to chat");
+        } else {
+            assert!(acts.is_empty());
+        }
+        // ⌘ let go on chat: nothing lent any more, nothing to do here (macOS goes to Desktop 2).
+        assert!(cmd_tab(&mac, &mut keys, Key::Command(false), None).is_empty());
+        // Mail selected, then Escape: back, and ⌘'s release activates nothing.
+        let mut keys = switcher::Switcher::default();
+        cmd_tab(&mac, &mut keys, tab(false), None);
+        let acts = cmd_tab(&mac, &mut keys, Key::Down { code: switcher::KEY_ESCAPE, cmd: true, shift: false }, lent);
+        if spaces {
+            assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher was cancelled" }]);
+        } else {
+            assert!(acts.is_empty());
+        }
+        assert!(cmd_tab(&mac, &mut keys, Key::Command(false), None).is_empty(), "no switcher up: nothing");
+        // Mail selected, then a key the keys do not follow (H hides it): back.
+        let mut keys = switcher::Switcher::default();
+        cmd_tab(&mac, &mut keys, tab(false), None);
+        let acts = cmd_tab(&mac, &mut keys, Key::Down { code: 4, cmd: true, shift: false }, lent);
+        assert_eq!(acts.len(), usize::from(spaces), "lost: back ({acts:?})");
+        // ⌘⇧Tab: the last app (chat), whose order is known here: nothing to put home.
+        let mut keys = switcher::Switcher::default();
+        assert!(cmd_tab(&mac, &mut keys, tab(true), None).is_empty());
+        // Three Tabs go around to the browser in front: no activation, nothing put home.
+        let mut keys = switcher::Switcher::default();
+        cmd_tab(&mac, &mut keys, tab(false), None);
+        cmd_tab(&mac, &mut keys, tab(false), lent);
+        assert!(cmd_tab(&mac, &mut keys, tab(false), None).is_empty(), "the app in front");
     }
 
     #[test]

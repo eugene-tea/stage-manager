@@ -235,7 +235,9 @@ impl Model {
     /// stage here, 295 shown on Desktop 4; macOS slid to 4 and back). `None` otherwise: an app hidden, active (its click goes to
     /// another Desktop, [`Model::dock_arrival`]), on screen here or on every Desktop, with no
     /// stage here, or with nothing counted elsewhere (macOS goes nowhere; its activation
-    /// switches here, [`Model::activation_stays_here`]).
+    /// switches here, [`Model::activation_stays_here`]). The same window is put home while
+    /// ⌘Tab's switcher selects the app (round cmd-tab, [`crate::engine::switcher`]): the
+    /// switcher activates its app at ⌘'s release, as the Dock at the click's.
     pub fn dock_home(&self, pid: Pid, facts: AppFacts) -> Option<WindowId> {
         if self.macos_counts_hidden() || facts.hidden || facts.active || facts.visible_here {
             return None;
