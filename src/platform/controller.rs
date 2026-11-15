@@ -565,7 +565,7 @@ fn offered_at_notice(waiting: impl IntoIterator<Item = u32>, listed: &HashSet<u3
 /// `debug-space`, `debug-expose`, ...) never reach the WM thread's `ctl`, so they leave the
 /// motion alone too (`mark` asks `state` and `dump`).
 fn ctl_lands_switch(cmd: &Command) -> bool {
-    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_))
+    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher)
 }
 
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
@@ -6407,6 +6407,19 @@ impl Controller {
             Command::Reload => {
                 self.reload_config(ob);
                 json!({ "ok": self.config_error.is_none(), "error": self.config_error })
+            }
+            Command::DebugSwitcher => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-switcher needs STAGE_MANAGER_TEST=1" });
+                }
+                match super::dock::dock_pid() {
+                    Some(dock) => {
+                        let mut v = super::switcher_ax::list(dock);
+                        v["ok"] = json!(true);
+                        v
+                    }
+                    None => json!({ "ok": false, "error": "the Dock does not run" }),
+                }
             }
             Command::DebugCmdTab(probe) => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

@@ -522,6 +522,26 @@ unsafe extern "C-unwind" fn ax_callback(
     pace_tick(false);
 }
 
+/// The Dock's Accessibility notices about ⌘Tab's switcher (round cmd-tab): the list made,
+/// its selection changed, an element gone ([`Controller::switcher_notice`]). Registered on
+/// the Dock's application element on the WM run loop.
+pub(super) unsafe extern "C-unwind" fn switcher_ax_callback(
+    _observer: NonNull<AXObserver>,
+    _element: NonNull<AXUIElement>,
+    notification: NonNull<CFString>,
+    _refcon: *mut c_void,
+) {
+    // SAFETY: AX passes a live notification name for the callback's duration.
+    let name = unsafe { notification.as_ref() }.to_string();
+    guarded_state("the switcher's AX callback", "switcher AX callback", &name, |s| {
+        if !safety::quit_requested() {
+            s.controller.switcher_notice(&s.observer, &name);
+        }
+    });
+    arm_fast_tick();
+    pace_tick(false);
+}
+
 impl WmState {
     /// Hands the observer's events to the controller; then the retry cadence of apps that do
     /// not answer yet follows the restore window (fast while it is open).

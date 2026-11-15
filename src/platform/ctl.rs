@@ -17,7 +17,8 @@
 //! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
-//! `debug-cmd-tab result` reports what answered it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
+//! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
+//! as the Dock shows it (its items' titles, the one selected), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
@@ -266,6 +267,9 @@ pub enum Command {
     /// A posted ⌘Tab and what answered it, or the last one's report (needs
     /// `STAGE_MANAGER_TEST=1`; round cmd-tab, [`crate::platform::switcher_probe`]).
     DebugCmdTab(CmdTabProbe),
+    /// ⌘Tab's switcher as the Dock's Accessibility shows it now: the items' titles, the one
+    /// selected (needs `STAGE_MANAGER_TEST=1`; round cmd-tab).
+    DebugSwitcher,
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
     DebugClose {
@@ -445,6 +449,7 @@ impl Command {
                 };
                 Ok(Self::DebugFullscreen { id, on })
             }
+            ["debug-switcher"] => Ok(Self::DebugSwitcher),
             ["debug-cmd-tab", "result"] => Ok(Self::DebugCmdTab(CmdTabProbe::Result)),
             ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
             ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: false }),
@@ -1003,6 +1008,8 @@ mod tests {
             Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 1, hold_ms: 0, lend: true }))
         );
         assert_eq!(Command::parse("debug-cmd-tab result"), Ok(Command::DebugCmdTab(CmdTabProbe::Result)));
+        assert_eq!(Command::parse("debug-switcher"), Ok(Command::DebugSwitcher));
+        assert!(Command::parse("debug-switcher now").is_err());
         assert!(Command::parse("debug-cmd-tab").is_err());
         assert!(Command::parse("debug-cmd-tab press").is_err());
         assert!(Command::parse("debug-cmd-tab cancel 0").is_err(), "no Tab");

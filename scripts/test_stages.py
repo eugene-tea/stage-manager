@@ -8851,6 +8851,10 @@ def say_cmd_tab_report(r, label):
             say(f"         first item's attributes {li.get('first_child_attributes')}")
             for it in items:
                 say(f"         {it}")
+    if r.get("list_up"):
+        lu = r["list_up"]
+        say(f"     the switcher's list while up: found {lu.get('found')}, items {lu.get('items')}, "
+            f"selected {lu.get('selected_index')} {lu.get('selected_title')!r} (pid {lu.get('selected_pid')})")
     shown = [sm for sm in r.get("samples", []) if sm.get("read") not in ("no switcher in the Dock's Accessibility", "the Dock did not answer")]
     heard = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "heard"]
     tap = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "tap"]
@@ -8862,11 +8866,13 @@ def say_cmd_tab_report(r, label):
 def phase_cmdtab_probe():
     """Round cmd-tab, the probe (no activation): with the fixture's two windows managed and
     the fixture in front, a posted ⌘Tab (⌘ down, Tab, held, Escape, ⌘ up), twice: one Tab
-    held 300 ms, three Tabs held 400 ms. Escape goes before ⌘'s release, so nothing is
+    and three Tabs, each held 400 ms (past the Dock's list at ~180 ms). Escape goes before ⌘'s release, so nothing is
     activated. The report says whether the Dock's Accessibility shows ⌘Tab's switcher and
     its selection (and how soon after the Tab), what the app's input monitor heard (⌘, each
     Tab, Escape, ⌘'s release) and decided, and what an event tap made for the probe sees.
-    Either engine; not in the default phases (it posts ⌘Tab: run it while nobody types)."""
+    Run it with SM_ENGINE=spaces (under the Corner engine the app follows no switcher: only
+    the Dock's samples and the tap mean anything). Not in the default phases (it posts ⌘Tab:
+    run it while nobody types)."""
     say("\n== cmd-tab probe: what the Dock and the input monitor show of ⌘Tab's switcher (Escape before ⌘'s release) ==")
     stop_app()
     stop_fixture()
@@ -8879,7 +8885,7 @@ def phase_cmdtab_probe():
     subprocess.run(["open", FIX_APP], capture_output=True)
     time.sleep(1.0)
     before = state()
-    for words in (("cancel", "1", "300"), ("cancel", "3", "400")):
+    for words in (("cancel", "1", "400"), ("cancel", "3", "400")):
         r = cmd_tab_probe(*words)
         check(r.get("ok") and r.get("done"), f"cmd-tab probe {' '.join(words)}: the probe ran ({r.get('error') or r.get('outcome')})")
         say_cmd_tab_report(r, f"debug-cmd-tab {' '.join(words)}")

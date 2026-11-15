@@ -1,14 +1,16 @@
 //! ⌘Tab's switcher as the Dock's Accessibility shows it (round cmd-tab): which app it
 //! selects, read on a switcher key only, never polled.
 //!
-//! The ⌘Tab switcher is the Dock's UI. Whether the Dock lists it among its Accessibility
-//! children, and how it marks the selection, is not documented: [`read`] looks for a child of
-//! the Dock's application element whose role or subrole names a switcher (one public source,
-//! the Hammerspoon and AltTab discussions, gives the subrole `AXProcessSwitcherList`), and
-//! takes its selection from `AXSelectedChildren`, else the item whose `AXSelected` is true.
-//! An item names its app by `AXURL` (as the Dock's own items do), else by its title, matched
-//! to one running app's name. [`dump`] (`ctl debug-cmd-tab`'s probe) prints what the Dock
-//! shows two levels down, so the owner's run can tell whether any of this holds.
+//! The ⌘Tab switcher is the Dock's UI. Seen live on the owner's Mac (11-15, macOS 27.2):
+//! while it shows, the Dock's application element has a second child, role `AXList`,
+//! subrole `AXProcessSwitcherList`, whose children are `AXButton`s titled with the apps'
+//! names in the switcher's order (the app in front first); `AXSelectedChildren` gives the
+//! button selected (under 1 ms). The list comes ~180 ms after the first Tab. [`read`] looks
+//! for a Dock child whose role or subrole names a switcher, takes the selection from
+//! `AXSelectedChildren` (else the item whose `AXSelected` is true), and names its app by
+//! `AXURL` when an item has one, else by its title matched to one running app's name (the
+//! caller may map its place in the order instead, [`Read::index`]). [`dump`] and [`list`]
+//! (`ctl debug-cmd-tab`, `ctl debug-switcher`) print what the Dock shows.
 //!
 //! Every call runs at [`SWITCHER_AX_SECONDS`]; the first call the Dock leaves unanswered ends
 //! the read.
@@ -60,6 +62,14 @@ impl Read {
     pub fn pid(&self) -> Option<i32> {
         match self {
             Read::Shown { selected: Some(item), .. } => item.pid,
+            _ => None,
+        }
+    }
+
+    /// The selected item's place in the switcher's list (0: the app in front).
+    pub fn index(&self) -> Option<usize> {
+        match self {
+            Read::Shown { selected: Some(item), .. } => item.index,
             _ => None,
         }
     }
@@ -166,6 +176,34 @@ fn only_named(names: &[(String, i32)], title: &str) -> Option<i32> {
     let mut found = names.iter().filter(|(n, _)| n == title).map(|(_, pid)| *pid);
     let first = found.next()?;
     found.next().is_none().then_some(first)
+}
+
+/// The switcher's list as the Dock shows it now (`ctl debug-switcher`): found or not, the
+/// items' titles in order, the selected one's place and title. App names only; printed, never
+/// logged.
+pub fn list(dock: i32) -> Value {
+    let t = SWITCHER_AX_SECONDS;
+    let app = AxElement::application(dock);
+    let Ok(children) = app.bounded(t, AxElement::children) else { return json!({ "found": false, "error": "the Dock did not answer" }) };
+    let Some(list) = children.into_iter().find(|c| {
+        let (role, subrole) = c.bounded(t, |e| (e.role().unwrap_or_default(), e.subrole().unwrap_or_default()));
+        is_switcher(&role, &subrole)
+    }) else {
+        return json!({ "found": false });
+    };
+    let items = list.bounded(t, AxElement::children).unwrap_or_default();
+    let titles: Vec<Option<String>> = items.iter().map(|i| i.bounded(t, AxElement::title).ok()).collect();
+    let selected = list.bounded(t, |e| e.elements(SELECTED_CHILDREN)).ok().and_then(|s| s.into_iter().next());
+    let index = selected.as_ref().and_then(|s| items.iter().position(|i| i == s));
+    let read = read(dock);
+    json!({
+        "found": true,
+        "items": titles,
+        "selected_index": index,
+        "selected_title": index.and_then(|i| titles.get(i).cloned().flatten()),
+        "selected_pid": read.pid(),
+        "read": read.name(),
+    })
 }
 
 /// What the Dock shows to Accessibility, two levels down (the probe's dump): each child's

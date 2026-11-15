@@ -316,9 +316,12 @@ a window elsewhere, that stage's window is put home for a while, still counted h
 follows. ⌘Tab has the same shape: the switcher shows while ⌘ is held after a Tab and
 activates its app at ⌘'s release, so the same window is put home while the switcher selects
 the app (`engine::switcher` follows the keys the input monitor hears, ⌘ pressed and let go
-among them; the Dock's Accessibility is asked for the switcher's selection at each key, the
-order of activations predicts it otherwise; `platform/controller/switcher.rs`), and taken
-back when the selection moves on, at Escape, or when ⌘ is let go on another app.
+among them). The first Tab's app is predicted from the order of activations and put home at
+once (macOS picks the Desktop 3-12 ms after ⌘'s release; the Dock lists the switcher only
+~180 ms after the Tab); the Dock's own selection (`AXProcessSwitcherList`, observed through
+its `AXCreated` and `AXSelectedChildrenChanged` notices) corrects it while the switcher
+shows (`platform/controller/switcher.rs`, `platform/switcher_ax.rs`). It is taken back when
+the selection moves on, at Escape, or when ⌘ is let go on another app.
 
 ```mermaid
 sequenceDiagram

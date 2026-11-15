@@ -100,6 +100,14 @@ impl Switcher {
         self.open.flatten()
     }
 
+    /// The switcher shows although its Tab was not heard (the Dock said so): up, its
+    /// selection not known from the keys.
+    pub fn open_unfollowed(&mut self) {
+        if self.open.is_none() {
+            self.open = Some(None);
+        }
+    }
+
     /// Forgets the switcher (⌘ found let go without its key event): true when it was up.
     pub fn reset(&mut self) -> bool {
         self.open.take().is_some()
@@ -303,6 +311,9 @@ mod tests {
         assert!(!s.reset());
         s.hear(tab(false));
         assert!(s.reset(), "a switcher found closed by the live modifiers");
+        s.open_unfollowed();
+        assert!(s.is_open() && s.steps().is_none(), "the Dock shows it, its Tab unheard");
+        assert_eq!(s.hear(Key::Command(false)), Heard::Released { steps: None });
     }
 
     #[test]

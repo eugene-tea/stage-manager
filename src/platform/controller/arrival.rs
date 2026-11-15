@@ -1160,7 +1160,6 @@ impl Controller {
             || self.slide_held()
             || self.upkeep_wants_fast_tick(now)
             || self.fresh_waiting()
-            || self.switcher_wants_fast_tick()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -1171,8 +1170,6 @@ impl Controller {
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
         let now = Instant::now();
-        // ⌘Tab's switcher not in the Dock's Accessibility at its key: asked again.
-        self.switcher_fast_tick(ob, now);
         // A newly opened app's window seen by AX before its first frame: placed as it shows.
         self.offer_fresh(ob, now);
         // The engine's share (the Corner engine: its patch after a focus, through Show Desktop).

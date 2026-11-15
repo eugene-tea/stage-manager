@@ -5,10 +5,16 @@
 //! app whose windows here all wait in stage Spaces, while it has a window on another Desktop,
 //! took macOS to that Desktop and back (S3d gap 5; the owner's VS Code and Mail on 11-15).
 //! The switcher shows while ⌘ is held after a Tab and activates its app at ⌘'s release; the
-//! keys reach the input monitor while it shows ([`crate::engine::switcher::Switcher`]). At
-//! each switcher key the app selected is known: from the Dock's Accessibility, which draws
-//! the switcher ([`switcher_ax::read`]), else from the keys and the order of the apps'
-//! activations ([`switcher::predict`]); the log says which decided. When that app has a
+//! keys reach the input monitor while it shows ([`crate::engine::switcher::Switcher`]). The
+//! first Tab selects the app used before the one in front, always; the Dock builds the
+//! switcher's list only ~180 ms after it (live 11-15, macOS 27.2), and a quicker ⌘Tab never
+//! shows it, while macOS activates the app 3-12 ms after ⌘'s release and picks the Desktop
+//! then. So at the first Tab the app is predicted from the order of the apps' activations
+//! ([`switcher::predict`]) and its window put home at once; once the Dock's list shows
+//! (`AXCreated`) and at each change of its selection (`AXSelectedChildrenChanged`), both
+//! observed on the Dock's application element, the switcher's own selection
+//! ([`switcher_ax::read`]: `AXProcessSwitcherList`, `AXSelectedChildren`, the button's title
+//! or its place in the order) corrects it. The log says which decided. When that app has a
 //! stage here, every window of it here waits off every Desktop and macOS counts one of its
 //! windows on another Desktop, the key window of its most recent stage here is put home
 //! ([`WindowEngine::lend_home`]); the selection moving on, Escape, a key not followed or ⌘
@@ -16,15 +22,16 @@
 //! whose switch takes it as after a Dock press ([`super::arrival::LEND_WAIT`] from the
 //! release, then back unshown).
 //!
-//! Nothing is polled: the Dock is asked at a switcher key, and once or twice more within
-//! ~120 ms of one when its switcher was not built yet ([`LOOK_AGAIN`], on the fast tick
-//! only then). The tick asks the live modifiers only while the switcher is up (a release
-//! the monitor missed). The Corner engine: [`Model::dock_home`] answers nothing, nothing is
-//! read or put home.
+//! Nothing is polled: the Dock is asked at a switcher key and at its own notices; the list
+//! gone (`AXUIElementDestroyed` with the switcher up) counts as the release, so a window put
+//! home goes back [`super::arrival::LEND_WAIT`] later unless its app's activation came. The
+//! tick asks the live modifiers only while the switcher is up (a release the monitor
+//! missed). The Corner engine: [`Model::dock_home`] answers nothing, nothing is read or put
+//! home.
 //!
-//! A ⌘Tab let go before the first key event is handled (a quick tap) gets nothing put home:
-//! macOS decides at the activation, as before (`⌘ let go … lent=false` in the log, with
-//! the time from the Tab).
+//! A ⌘Tab let go before its Tab is handled on this thread gets nothing put home: macOS
+//! decides at the activation, as before (`⌘ let go … lent=false` in the log, with the time
+//! from the Tab).
 //!
 //! [`Model::dock_home`]: crate::engine::model::Model::dock_home
 //! [`WindowEngine::lend_home`]: crate::platform::window_engine::WindowEngine::lend_home
@@ -40,14 +47,12 @@ use crate::engine::switcher::{self, Act, Heard, Key, Switcher};
 use crate::platform::ctl::CmdTabProbe;
 use crate::platform::input::{self, InputEvent, InputKind};
 use crate::platform::observe::Observer;
+use crate::platform::ax::{AxElement, AxObserver};
 use crate::platform::{apps, dock, switcher_ax, switcher_probe, windows};
 
-/// After a switcher key that found no switcher in the Dock's Accessibility (not built yet),
-/// the Dock is asked again this long after, on the fast tick.
-pub(super) const LOOK_AGAIN: Duration = Duration::from_millis(40);
-
-/// How many times the Dock is asked again after one key ([`LOOK_AGAIN`] apart).
-const LOOKS: u8 = 3;
+/// The Dock's notices about the switcher (observed on its application element, live 11-15):
+/// the list made (its selection already set), its selection changed, an element gone.
+const NOTICES: [&str; 3] = ["AXCreated", "AXSelectedChildrenChanged", "AXUIElementDestroyed"];
 
 /// A switcher up this long with no key is forgotten (its release missed and ⌘ not seen
 /// held either is caught sooner, at the tick).
@@ -86,9 +91,11 @@ pub(super) struct SwitcherWatch {
     /// When it came up (the first Tab), and its last key.
     opened: Option<Instant>,
     last_key: Option<Instant>,
-    /// The Dock to be asked again at this time (its switcher was not built at the key).
-    look_again: Option<Instant>,
-    looks: u8,
+    /// The observer of the Dock's notices, and the Dock's pid it was made for (kept once made;
+    /// the Dock sends them only while the switcher shows, or for its own menus).
+    ax: Option<(i32, AxObserver)>,
+    /// The Dock's pid an observer was last tried for (one try per Dock process).
+    ax_tried: Option<i32>,
     /// ⌘ let go with the switcher up: when, and whether a window was put home by then.
     released: Option<(Instant, bool)>,
     /// `ctl debug-cmd-tab … nolend`: nothing put home for this switcher (the probe's measure
@@ -102,11 +109,6 @@ impl Controller {
         self.switcher.keys.is_open()
     }
 
-    /// True while the Dock is to be asked again for the switcher's selection (the fast tick).
-    pub(super) fn switcher_wants_fast_tick(&self) -> bool {
-        self.switcher.look_again.is_some()
-    }
-
     /// A key event from the input monitor: ⌘ pressed or let go, or a key pressed. Anything but
     /// a switcher key with the switcher down returns at once.
     pub(super) fn switcher_key(&mut self, ob: &Observer, event: &InputEvent, now: Instant) {
@@ -115,6 +117,20 @@ impl Controller {
             (InputKind::KeyDown, Some(code)) => Key::Down { code, cmd: event.cmd, shift: event.shift },
             _ => return,
         };
+        // Only where a hidden window is on no Desktop for macOS (the Spaces engine): under
+        // the Corner engine nothing is read, observed or put home.
+        if !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
+            if matches!(key, Key::Command(false) | Key::Down { code: switcher::KEY_TAB, cmd: true, .. }) {
+                switcher_probe::note("heard", format!("{key:?} (nothing done: no model, or the Corner engine)"));
+            }
+            return;
+        }
+        if key == Key::Command(true) && self.switcher.ax.is_none() && self.switcher.ax_tried.is_none() {
+            // The Dock's notices observed before the first switcher shows, so a Tab the
+            // monitor misses is still seen when the Dock lists the switcher.
+            self.switcher.dock = dock::dock_pid();
+            self.watch_dock();
+        }
         let heard = self.switcher.keys.hear(key);
         if heard != Heard::Nothing || self.switcher.keys.is_open() {
             switcher_probe::note("heard", format!("{key:?} -> {heard:?}"));
@@ -131,9 +147,9 @@ impl Controller {
                 if first {
                     self.switcher.opened = Some(now);
                     self.switcher.selected = None;
-                    self.switcher.looks = 0;
                     self.switcher.released = None;
                     self.switcher.dock = dock::dock_pid();
+                    self.watch_dock();
                 }
                 self.switcher.last_key = Some(now);
                 self.switcher.selected = self.switcher_selection(ob, steps, now);
@@ -161,7 +177,6 @@ impl Controller {
         match heard {
             Heard::Released { .. } | Heard::Cancelled => {
                 self.switcher.selected = None;
-                self.switcher.look_again = None;
                 self.switcher.opened = None;
                 self.switcher.lend_off = false;
             }
@@ -172,18 +187,14 @@ impl Controller {
     }
 
     /// The app the switcher selects `steps` from the app in front: the Dock's answer when it
-    /// gives one, else the prediction from the keys; logged with who decided. With no switcher
-    /// in the Dock's Accessibility yet, the Dock is asked again shortly ([`LOOK_AGAIN`]).
+    /// gives one (the button's title as a running app's name, else its place in the order of
+    /// activations), else the prediction from the keys; logged with who decided.
     fn switcher_selection(&mut self, ob: &Observer, steps: Option<i32>, now: Instant) -> Option<(i32, By)> {
         let read = self.switcher.dock.map_or(switcher_ax::Read::NoSwitcher, switcher_ax::read);
         let (order, running) = self.switcher_order(ob);
         let predicted = steps.and_then(|s| switcher::predict(&order, running, s));
-        if read == switcher_ax::Read::NoSwitcher && self.switcher.looks < LOOKS {
-            self.switcher.look_again = Some(now + LOOK_AGAIN);
-        } else {
-            self.switcher.look_again = None;
-        }
-        let chosen = match (read.pid(), predicted) {
+        let docked = read.pid().or_else(|| read.index().and_then(|i| order.get(i).copied()));
+        let chosen = match (docked, predicted) {
             (Some(pid), _) => Some((pid, By::Dock)),
             (None, Some(pid)) => Some((pid, By::Keys)),
             (None, None) => None,
@@ -194,9 +205,10 @@ impl Controller {
             selected = ?chosen.map(|(pid, _)| pid),
             by = chosen.map(|(_, by)| by.name()),
             dock = read.name(),
-            dock_pid = ?read.pid(),
+            dock_pid = ?docked,
+            dock_index = ?read.index(),
             predicted = ?predicted,
-            agree = read.pid().zip(predicted).map(|(a, b)| a == b),
+            agree = docked.zip(predicted).map(|(a, b)| a == b),
             known_order = order.len(),
             running,
             took_ms,
@@ -288,19 +300,73 @@ impl Controller {
         }
     }
 
-    /// The fast tick: the Dock asked again for the switcher's selection when due.
-    pub(super) fn switcher_fast_tick(&mut self, ob: &Observer, now: Instant) {
-        let Some(due) = self.switcher.look_again else { return };
-        if now < due {
+    /// Makes the observer of the Dock's switcher notices, once per Dock process
+    /// ([`NOTICES`], [`crate::platform::wm_thread::switcher_ax_callback`]).
+    fn watch_dock(&mut self) {
+        let Some(dock) = self.switcher.dock else { return };
+        if self.switcher.ax.as_ref().is_some_and(|(pid, _)| *pid == dock) || self.switcher.ax_tried == Some(dock) {
             return;
         }
-        self.switcher.look_again = None;
-        if !self.switcher.keys.is_open() {
+        self.switcher.ax = None;
+        self.switcher.ax_tried = Some(dock);
+        let observer = match AxObserver::new(dock, crate::platform::wm_thread::switcher_ax_callback) {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::info!(dock, "cmd-tab: the Dock's notices cannot be observed ({e}); the switcher is followed from the keys");
+                return;
+            }
+        };
+        let app = AxElement::application(dock);
+        let added: Vec<String> = NOTICES
+            .iter()
+            .map(|n| match app.bounded(switcher_ax::SWITCHER_AX_SECONDS, |a| observer.add(a, n, 0)) {
+                Ok(()) => format!("{n}: ok"),
+                Err(e) => format!("{n}: {e}"),
+            })
+            .collect();
+        tracing::info!(dock, ?added, "cmd-tab: the Dock's switcher notices are observed");
+        self.switcher.ax = Some((dock, observer));
+    }
+
+    /// A notice from the Dock (`name`, [`NOTICES`]): the switcher's list made or its selection
+    /// changed reads the selection again and corrects the window put home; the list gone
+    /// with the switcher still up counts as the release (Escape's own key, when heard, came
+    /// first). The list made while the keys missed the Tab opens the switcher, its selection
+    /// the Dock's only. Nothing when the switcher is down otherwise (the Dock's menus).
+    pub fn switcher_notice(&mut self, ob: &Observer, name: &str) {
+        if !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
             return;
         }
-        self.switcher.looks += 1;
-        let steps = self.switcher.keys.steps();
-        self.switcher_heard(ob, Heard::Selected { steps, first: false }, now);
+        let now = Instant::now();
+        switcher_probe::note("dock notice", name);
+        match name {
+            "AXCreated" | "AXSelectedChildrenChanged" => {
+                if !self.switcher.keys.is_open() {
+                    if name != "AXCreated" || self.switcher.dock.is_none() {
+                        return;
+                    }
+                    // Its list says it shows: the keys missed its Tab.
+                    if switcher_ax::read(self.switcher.dock.unwrap_or_default()) == switcher_ax::Read::NoSwitcher {
+                        return;
+                    }
+                    self.switcher.keys.open_unfollowed();
+                    self.switcher.opened = Some(now);
+                    tracing::info!("cmd-tab: the Dock shows the switcher although its Tab was not heard");
+                }
+                let steps = self.switcher.keys.steps();
+                self.switcher_heard(ob, Heard::Selected { steps, first: false }, now);
+            }
+            "AXUIElementDestroyed" if self.switcher.keys.is_open() => {
+                if self.switcher.dock.is_some_and(|d| switcher_ax::read(d) != switcher_ax::Read::NoSwitcher) {
+                    return;
+                }
+                let steps = self.switcher.keys.steps();
+                self.switcher.keys.reset();
+                tracing::info!("cmd-tab: the Dock's switcher is gone before ⌘'s release was heard: taken as the release");
+                self.switcher_heard(ob, Heard::Released { steps }, now);
+            }
+            _ => {}
+        }
     }
 
     /// The tick, while the switcher is up: ⌘ found let go without its event (the monitor
@@ -320,7 +386,6 @@ impl Controller {
             self.switcher_heard(ob, heard, now);
             if quiet {
                 self.switcher.selected = None;
-                self.switcher.look_again = None;
                 self.switcher.opened = None;
                 self.switcher.lend_off = false;
             }

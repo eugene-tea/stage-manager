@@ -70,6 +70,7 @@ struct Report {
     samples: Vec<Value>,
     dump_before: Value,
     dump_up: Option<Value>,
+    list_up: Option<Value>,
     released_ms: Option<u64>,
     outcome: Option<String>,
     done: bool,
@@ -110,6 +111,7 @@ pub fn result() -> Value {
         "samples": r.samples,
         "dump_before": r.dump_before,
         "dump_up": r.dump_up,
+        "list_up": r.list_up,
     })
 }
 
@@ -197,6 +199,7 @@ fn run(req: Request, dock: i32, allowed: impl Fn(i32) -> bool) {
             samples: Vec::new(),
             dump_before,
             dump_up: None,
+            list_up: None,
             released_ms: None,
             outcome: None,
             done: false,
@@ -258,7 +261,11 @@ fn run(req: Request, dock: i32, allowed: impl Fn(i32) -> bool) {
         if !dumped && (shown || off >= 150) {
             dumped = true;
             let d = switcher_ax::dump(dock, 12);
-            with_report(|r| r.dump_up = Some(d));
+            let l = switcher_ax::list(dock);
+            with_report(|r| {
+                r.dump_up = Some(d);
+                r.list_up = Some(l);
+            });
         }
     }
     std::thread::sleep(req.hold.saturating_sub(last_tab.elapsed()));
