@@ -252,10 +252,30 @@ window within the displays, on screen or in a stage Space; `CGWindowListCreateIm
 partly off every display, a parked window), and ScreenCaptureKit only for a window that
 source misses (the call missing, nothing handed back, a picture that cannot be the window),
 for every picture when the first one of a call came back blank, and for a window's look read
-from its shadow (one a round, each window's every 20 s at most). Card thumbnails are taken at
+from its shadow (every window of a round with no reading, a few at most and one listing, else
+one a round, each window's every 20 s at most; and after each switch lands, for its windows
+with none). Card thumbnails are taken at
 events, no timer (`[strip] thumbnail_interval_ms = 0`): a window newly on a card, the strip
 coming into view, the pointer reaching a card; a failed one twice more, 3 s apart. The Corner
 engine keeps its full-size pictures fresh every 2 s, the same way.
+
+The landing, behind a test switch for now (round sm-landing; `ui/landing_math.rs`, pure;
+`STAGE_MANAGER_LANDING` with `STAGE_MANAGER_ONLY`, default today's): **ordered** puts each
+incoming picture whose window ends behind a real window in place (the model's order after
+the batch, `Transition::order` and `in_place`) in a side panel of the overlay's own frame
+and eye, ordered just under that window (`ui/overlay.rs`), both engines; **live** (the Spaces
+engine, trait `lands_live`, `fly_stretch`) has each incoming window take over from its
+picture where the flat transform's miss against the picture's turned pose stays within a
+tolerance for good (an 1800 pt window: 0.45 s into a 0.74 s flight at 1 pt), in a classic
+Space of its own made ahead and shown, its transform set at the picture's pose every 8 ms on
+a thread of its own (`platform/spaces/landing.rs`), then the identity, the window onto its
+Desktop and the Space ended. Its picture goes once the window server lists it on screen, and
+every picture still flying, each in a panel of its own, is ordered again under the nearest
+real window in front of it. The controller counts the window hidden until its unveil, and
+its show then asks the app nothing (the window list reports a window in a transformed Space
+at its frame, `windows::set_transformed`); a show before the handover stops the stretch, a
+hide mid-flight takes the window out of its landing Space, a bring-back takes every flying
+window home first.
 
 A newly opened app's window under the Spaces engine (`platform/spaces/launch_watch.rs`): the
 window server lists it, off screen and on no Space, tens to hundreds of ms before it first

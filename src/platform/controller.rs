@@ -1940,6 +1940,18 @@ impl Controller {
         shown.contains(&front.id).then_some(front.id)
     }
 
+    /// The arriving stage's windows front to back as they end (the model after the batch),
+    /// and those of them shown in place already (neither `arriving` nor parked): where each
+    /// incoming picture goes in the window order ([`Transition::order`], round sm-landing).
+    fn arriving_order(&self, arriving: &HashSet<u32>) -> (Vec<u32>, Vec<u32>) {
+        let Some(m) = self.model.as_ref() else { return (Vec::new(), Vec::new()) };
+        let display = arriving.iter().find_map(|id| m.window(WindowId(*id)).map(|w| w.meta.display)).unwrap_or(m.main_display().id);
+        let Some(stage) = m.active_stage(display).and_then(|s| m.stage(s)) else { return (Vec::new(), Vec::new()) };
+        let order = stage.windows.iter().map(|id| id.0).collect();
+        let in_place = stage.windows.iter().filter(|id| !arriving.contains(&id.0) && m.window(**id).is_some_and(|w| !w.parked)).map(|id| id.0).collect();
+        (order, in_place)
+    }
+
     /// Routes the keyboard to window `key` now, for transition `id`, outside any batch (the
     /// registry is left as it is: the windows of the switch still wait parked, the outgoing
     /// ones not parked yet; a batch would note the model's view of them before they moved):
@@ -2023,6 +2035,7 @@ impl Controller {
             }
         };
         t.under = self.window_in_place(&arriving, &outgoing, &actions, &list);
+        (t.order, t.in_place) = self.arriving_order(&arriving);
         t.corner = corner;
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
         let cover = self.send_transition(ob, t, &actions, &run, cover_ms);

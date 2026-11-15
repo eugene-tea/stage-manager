@@ -60,7 +60,7 @@
 //! - `overlap OLD-BUNDLE APP-PATH NEW-BUNDLE [--for MS] [--args …]`: opens the app while the
 //!   old app's windows show and samples the on-screen list every ms: any sample with both
 //!   ([`super::new_window_probe::overlap`]); reads only.
-//! - `settle --in "ID,X,Y,W,H;…" [--out …] [--for MS] [--every MS] --then CMD ARG…`: runs the
+//! - `settle --in "ID,X,Y,W,H;…" [--out …] [--for MS] [--every MS] [--overlay PID] --then CMD ARG…`: runs the
 //!   command (a switch) while these windows' descriptions are read every ms: when each
 //!   incoming window is at its frame for good, each outgoing one gone from its own
 //!   ([`super::settle_probe`], round sm-measure); reads only.

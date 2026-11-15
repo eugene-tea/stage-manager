@@ -6,8 +6,9 @@
 //! against ~85 ms and ~45 ms through ScreenCaptureKit, most of it the listing), and only the
 //! windows that source misses through ScreenCaptureKit as below; a round it takes whole lists
 //! nothing. Its pictures are the window alone (no child window, no shadow), so a window's look
-//! ([`super::window_look`], read from its shadow) still comes from a ScreenCaptureKit still,
-//! one a round at most, each window's every 20 s at most. Rounds come at events by default
+//! ([`super::window_look`], read from its shadow) still comes from a ScreenCaptureKit still:
+//! a round's windows with no reading together (a few at most, one listing), else one window
+//! a round, each window's every 20 s at most; and after a switch ([`read_looks`]). Rounds come at events by default
 //! (`[strip] thumbnail_interval_ms = 0`: [`NO_TIMER`]): a window newly asked for (a stage
 //! leaving for its card, the strip coming into view), [`Capturer::recapture`] (the pointer on a
 //! card) and [`Capturer::capture_now`].
@@ -970,20 +971,39 @@ fn probe_look(filter: &SCContentFilter, id: u32, size_pt: (f64, f64), generation
 /// `sink`, for `probe-shadow` (its own windows only, which sit at the desktop's level: those
 /// count here). Nothing when the window is not in the shareable content.
 pub fn look_shot(id: u32, sink: LookSink) {
-    look_listed(id, 0, sink, false);
+    look_listed(&[(id, 0)], sink, false);
 }
 
-/// Window `id`'s look read now under `generation` ([`super::window_look`]), for a window whose
-/// picture came from the window server ([`super::capture_fast`], which has no shadow): the one
-/// capture that still lists the shareable content, at most one a round and each window's every
-/// [`crate::ui::shadow_look::REFRESH`] seconds.
-fn look_now(id: u32, generation: u64) {
-    look_listed(id, generation, super::window_look::read, true);
+/// The looks of `ids` read now ([`super::window_look`]), each under its generation, for
+/// windows whose pictures came from the window server ([`super::capture_fast`], which has no
+/// shadow): one listing of the shareable content for them all, a small still each.
+fn look_now(ids: &[(u32, u64)]) {
+    if !ids.is_empty() {
+        look_listed(ids, super::window_look::read, true);
+    }
+}
+
+/// The looks of those of `ids` with none ([`super::window_look::to_read`]: a few at most,
+/// else one read long ago), read now off any round (fire and forget): the strip asks after a
+/// switch has landed, for its windows (round sm-landing: a picture with no reading takes the
+/// system's appearance, and a window flies again at the next switch). Nothing while window
+/// captures may not go ([`desktop_may_capture`]: off, quitting, no access, never worked yet).
+pub fn read_looks(ids: &[u32]) {
+    if ids.is_empty() || desktop_may_capture().is_err() {
+        return;
+    }
+    let due = super::window_look::to_read(ids);
+    if !due.is_empty() {
+        tracing::trace!(windows = ?due.iter().map(|(id, _)| *id).collect::<Vec<_>>(), "window look: read after a switch");
+        look_now(&due);
+    }
 }
 
 /// Lists the shareable content (desktop windows left out when `exclude_desktop`) and takes
-/// window `id`'s still with its shadow ([`probe_look`]) for `sink` under `generation`.
-fn look_listed(id: u32, generation: u64, sink: LookSink, exclude_desktop: bool) {
+/// each of `ids`'s still with its shadow ([`probe_look`]) for `sink`, each under its
+/// generation.
+fn look_listed(ids: &[(u32, u64)], sink: LookSink, exclude_desktop: bool) {
+    let ids = ids.to_vec();
     let flight = InFlight::issue();
     let handler = RcBlock::new(move |content: *mut SCShareableContent, _error: *mut NSError| {
         let _answered = &flight;
@@ -996,10 +1016,12 @@ fn look_listed(id: u32, generation: u64, sink: LookSink, exclude_desktop: bool) 
         super::switch_shots::remember(content);
         // SAFETY: plain getters on a live SCShareableContent and its SCWindows.
         let windows = unsafe { content.windows() };
-        let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == id) else { return };
-        // SAFETY: designated initializer with a live SCWindow; a plain getter.
-        let (filter, frame) = unsafe { (SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window), to_rect(window.frame())) };
-        probe_look(&filter, id, (frame.w, frame.h), generation, sink);
+        for (id, generation) in &ids {
+            let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == *id) else { continue };
+            // SAFETY: designated initializer with a live SCWindow; a plain getter.
+            let (filter, frame) = unsafe { (SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window), to_rect(window.frame())) };
+            probe_look(&filter, *id, (frame.w, frame.h), *generation, sink);
+        }
     });
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe {
@@ -1070,12 +1092,11 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
         let gone: HashMap<u32, String> = fast.gone.iter().map(|id| (*id, "the window server no longer describes it".to_string())).collect();
         note_outcomes(&took, &fast.handled, &gone, outcomes);
     }
-    // A look due for a window the window server took (its picture has no shadow): read through
-    // ScreenCaptureKit, one a round at most.
-    let look = fast.handled.iter().find_map(|id| super::window_look::due(*id).map(|g| (*id, g)));
-    if let Some((id, generation)) = look {
-        look_now(id, generation);
-    }
+    // The looks due for windows the window server took (its pictures have no shadow): read
+    // through ScreenCaptureKit, one listing for them all (every one with no reading, a few at
+    // most, else one read long ago: [`super::window_look::to_read`]).
+    let looks = super::window_look::to_read(&fast.handled);
+    look_now(&looks);
     let mut done = fast.handled.clone();
     done.extend(&fast.gone);
     let took_some = !fast.handled.is_empty();
@@ -1084,7 +1105,7 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
         let outcome = if took_some { Outcome::Captured } else { Outcome::Inconclusive };
         return RoundResult { done, outcome, timed_out: false, paced: took_some.then_some(true), ok: fast.handled, gone: fast.gone };
     }
-    let mut result = sck_round(round, &fast.left, deliver, outcomes, look.is_none());
+    let mut result = sck_round(round, &fast.left, deliver, outcomes, looks.is_empty());
     result.done.extend(done);
     result.ok.extend(&fast.handled);
     result.gone.extend(&fast.gone);
@@ -1131,9 +1152,10 @@ fn sck_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut Hash
         let windows = unsafe { content.windows() };
         let displays = display_frames(content);
         let mut issued = 0;
-        // At most one look a round: never every window's at once (at launch, after the
-        // system's appearance changed), each read a round or more apart instead.
-        let mut looked = !may_look;
+        // The looks due ([`super::window_look::to_read`]): every window with no reading, a few
+        // at most (never every window's at once at launch or after the system's appearance
+        // changed), else one read long ago.
+        let looks = if may_look { super::window_look::to_read(&targets.iter().map(|t| t.id).collect::<Vec<_>>()) } else { Vec::new() };
         for t in &targets {
             // SAFETY: plain getter on a live SCWindow.
             let Some(window) = windows.iter().find(|w| unsafe { w.windowID() } == t.id) else {
@@ -1192,11 +1214,9 @@ fn sck_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut Hash
                 );
             }
             issued += 1;
-            // The window's look, from its shadow, when due (not counted in the round), one a
-            // round at most.
-            if !looked && let Some(generation) = super::window_look::due(id) {
-                looked = true;
-                probe_look(&filter, id, size_pt, generation, super::window_look::read);
+            // The window's look, from its shadow, when due (not counted in the round).
+            if let Some((_, generation)) = looks.iter().find(|(w, _)| *w == id) {
+                probe_look(&filter, id, size_pt, *generation, super::window_look::read);
             }
         }
         let _ = content_tx.send(Msg::Issued { round, n: issued });

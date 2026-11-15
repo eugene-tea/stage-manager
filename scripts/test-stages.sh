@@ -14,6 +14,9 @@
 #   scripts/test-stages.sh m3 safety       # some phases
 #   scripts/test-stages.sh launch          # a newly opened app's window never over the stage left:
 #                                          # 20 launches sampled every ms (SM_LAUNCHES=n)
+#   scripts/test-stages.sh landing         # under CPU load, no incoming window in place while its
+#                                          # stage's pictures fly (round sm-landing; SM_LANDING_SWITCHES=n,
+#                                          # STAGE_MANAGER_LANDING=pictures|ordered|live|live-early|live-late)
 #   scripts/test-stages.sh behave          # an app's front window on arrival; a card dropped
 #                                          # on the other screen (round parity-behave)
 #   scripts/test-stages.sh screens         # two screens (skipped with one): ⌘-Tab to a card on the other

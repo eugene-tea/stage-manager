@@ -21,6 +21,10 @@
   the stage shown for up to a second first: an app just launched from the Dock is not ready
   to be watched at its first ask and was asked again a second later, and a window that
   shows a moment after macOS announces it waited for the next once-a-second look.
+- A window's picture in a switch takes the shadow of the appearance its app draws it in
+  again, for every window of a stage: since card pictures are taken at events, only one
+  window was read each time, and the others flew with the system's shadow (a dark window on
+  a light system landed with a light shadow that flipped to its own).
 
 ## 1.8.5 — 2026-11-12
 

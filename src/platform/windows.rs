@@ -7,12 +7,18 @@
 //! ([`note_write`]: every Accessibility set and action, the Spaces engine's moves) makes it
 //! stale: a duty after a write reads afresh, as each did before. Outside a wake every read is
 //! fresh.
+//!
+//! **Windows in a transformed Space** (round sm-landing): while a switch's incoming window
+//! flies its last stretch through its Space's transform, the window server lists its drawn
+//! bounds; every read here reports its frame instead ([`set_transformed`]), so nothing reads
+//! a window mid-flight as moved or resized.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFIndex, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
@@ -78,6 +84,32 @@ fn joined(mut on: Vec<CgWindow>) -> Vec<CgWindow> {
             .filter(|w| !seen.contains(&w.id)),
     );
     on
+}
+
+/// Windows drawn in a transformed Space now, each with its frame ([`set_transformed`]).
+static TRANSFORMED: Mutex<Vec<(u32, Rect)>> = Mutex::new(Vec::new());
+/// How many there are (the reads skip the lock while none is).
+static TRANSFORMED_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Window `id` is drawn in a transformed Space from now on, its frame `frame` (`Some`), or is
+/// no longer (`None`): the reads report `frame` for it meanwhile (any thread).
+pub fn set_transformed(id: u32, frame: Option<Rect>) {
+    let mut t = TRANSFORMED.lock().unwrap_or_else(|p| p.into_inner());
+    t.retain(|(w, _)| *w != id);
+    if let Some(f) = frame {
+        t.push((id, f));
+    }
+    TRANSFORMED_COUNT.store(t.len(), Ordering::Relaxed);
+}
+
+/// The bounds to report for window `id` listed at `listed`: its frame while it is drawn in a
+/// transformed Space ([`set_transformed`]), else as listed.
+fn reported(id: u32, listed: Rect) -> Rect {
+    if TRANSFORMED_COUNT.load(Ordering::Relaxed) == 0 {
+        return listed;
+    }
+    let t = TRANSFORMED.lock().unwrap_or_else(|p| p.into_inner());
+    t.iter().find(|(w, _)| *w == id).map_or(listed, |(_, f)| *f)
 }
 
 /// Window writes of ours so far ([`note_write`]).
@@ -252,7 +284,7 @@ fn parse_window(item: &CFType) -> Option<CgWindow> {
     let id = u32::try_from(number(k_id)?).ok()?;
     let pid = i32::try_from(number(k_pid)?).ok()?;
     let onscreen = dict.get(k_onscreen).and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()));
-    let bounds = dict.get(k_bounds).and_then(|v| parse_bounds(&v)).unwrap_or_default();
+    let bounds = reported(id, dict.get(k_bounds).and_then(|v| parse_bounds(&v)).unwrap_or_default());
     Some(CgWindow {
         id,
         pid,
@@ -314,6 +346,19 @@ pub fn z_order(list: &[CgWindow]) -> HashMap<u32, usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window flying in a transformed Space reads at its frame; others as listed; once it
+    /// lands, as listed again.
+    #[test]
+    fn a_window_in_a_transformed_space_reads_at_its_frame() {
+        let frame = Rect::new(100.0, 80.0, 1200.0, 800.0);
+        let drawn = Rect::new(400.0, 300.0, 600.0, 400.0);
+        set_transformed(4_000_001, Some(frame));
+        assert_eq!(reported(4_000_001, drawn), frame);
+        assert_eq!(reported(4_000_002, drawn), drawn);
+        set_transformed(4_000_001, None);
+        assert_eq!(reported(4_000_001, drawn), drawn);
+    }
 
     fn w(id: u32, pid: i32, layer: i64, onscreen: bool) -> CgWindow {
         CgWindow { id, pid, owner: String::new(), name: None, layer, bounds: Rect::default(), onscreen, alpha: 1.0 }

@@ -50,9 +50,12 @@ use crate::engine::model::{Display, Model, WindowId};
 use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
 use crate::platform::ax::{AxElement, AxError, AxResult};
 use crate::platform::safety::{self, Ours, Report, ScanScope};
-use crate::platform::window_engine::{EngineKind, Motion, ShowHow, WindowEngine};
+use crate::platform::window_engine::{EngineKind, Motion, ShowHow, Stretch, StretchDone, WindowEngine};
 use crate::platform::windows;
 use crate::ui::strip_model::Transition;
+
+#[path = "landing.rs"]
+mod landing;
 
 /// How long a hide or a show waits for the window server to list the window where the call
 /// put it (the spike: within a millisecond or two).
@@ -158,19 +161,24 @@ struct State {
     /// Stage Spaces of another process, as its parked file names them, each with its
     /// Desktop (the guardian's: [`WindowEngine::assume`]); swept with this engine's own.
     foreign: BTreeMap<u64, u64>,
+    /// What the incoming windows' last stretches counted ([`landing`]).
+    stretch: landing::StretchCounts,
 }
 
 /// The Spaces engine (see the module docs).
 pub struct SpacesEngine {
     sky: OnceLock<Option<Sky>>,
     state: Mutex<State>,
+    /// The incoming windows' last stretches ([`landing`]): their own lock, taken before the
+    /// state's when both are.
+    stretches: Mutex<BTreeMap<u32, landing::Fly>>,
 }
 
 /// The one Spaces engine of this process: the stage Spaces belong to the process's
 /// window-server connection, so there is one map of them.
 pub fn shared() -> Arc<SpacesEngine> {
     static ENGINE: OnceLock<Arc<SpacesEngine>> = OnceLock::new();
-    ENGINE.get_or_init(|| Arc::new(SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()) })).clone()
+    ENGINE.get_or_init(|| Arc::new(SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()) })).clone()
 }
 
 /// The engine the environment asks for: `STAGE_MANAGER_ENGINE=spaces`, honoured only with
@@ -388,8 +396,11 @@ impl SpacesEngine {
         }
     }
 
-    /// Window `id` into its stage's Space; true when the window server lists it there.
+    /// Window `id` into its stage's Space; true when the window server lists it there. A
+    /// window flying its last stretch ([`landing`]) stops and comes out of its landing Space
+    /// with every other Space.
     pub(crate) fn hide_window(&self, id: u32) -> bool {
+        let (_flying_guard, flying) = self.stop_stretch(id, true);
         let Some(sky) = self.sky() else { return false };
         let stage = self.state().plans.get(&id).map_or(NO_STAGE, |(stage, _)| *stage);
         let was = self.state().held.get(&id).copied();
@@ -419,7 +430,11 @@ impl SpacesEngine {
             if failing {
                 return;
             }
-            let sent = if out_of(&now, &ours) { sky.add_remove(Route::Bridged, space, &[id]) } else { sky.add_remove_from(Route::Bridged, space, &[id], ALL_SPACES_MASK) };
+            let sent = if out_of(&now, &ours) && flying.is_none() {
+                sky.add_remove(Route::Bridged, space, &[id])
+            } else {
+                sky.add_remove_from(Route::Bridged, space, &[id], ALL_SPACES_MASK)
+            };
             if let Err(e) = sent {
                 tracing::warn!(id, space, "spaces engine: the hide could not be sent: {e}");
             }
@@ -446,8 +461,11 @@ impl SpacesEngine {
     }
 
     /// Window `id` out of every stage Space, onto its Desktop; true when the window server
-    /// lists it in none of them (also when it was in none).
+    /// lists it in none of them (also when it was in none). A window planned to fly its last
+    /// stretch ([`landing`]) never takes over now; one flying is out of every stage Space
+    /// already and lands by itself.
     pub(crate) fn show_window(&self, id: u32) -> bool {
+        let _ = self.stop_stretch(id, false);
         let ours = self.ours();
         let held = self.state().held.get(&id).copied();
         if held.is_none() && ours.is_empty() {
@@ -605,6 +623,9 @@ impl SpacesEngine {
     /// arranging: its rescans every 3 s brought every hidden window back for a moment, live
     /// 11-14).
     fn sweep_where(&self, why: &str, end: bool, strays_only: bool) -> Report {
+        if !strays_only {
+            self.end_stretches(why);
+        }
         let mut report = Report::default();
         let ours = self.ours();
         if ours.is_empty() {
@@ -849,6 +870,13 @@ impl SpacesEngine {
             "new_placed": st.counts.new_placed,
             "new_unplaced": st.counts.new_unplaced,
             "new_missed": st.counts.new_missed,
+            "stretches": {
+                "planned": st.stretch.planned,
+                "shown": st.stretch.shown,
+                "skipped": st.stretch.skipped,
+                "landed": st.stretch.landed,
+                "stopped": st.stretch.stopped,
+            },
         })
     }
 }
@@ -943,6 +971,20 @@ impl WindowEngine for SpacesEngine {
     /// Pictures, as the Corner engine: the windows hide and show in one step behind them.
     fn animate(&self, _t: &Transition) -> Motion {
         Motion::Pictures
+    }
+
+    /// True: an incoming window can fly the last stretch itself in a Space of its own
+    /// ([`landing`]).
+    fn lands_live(&self) -> bool {
+        true
+    }
+
+    fn fly_stretch(&self, s: Stretch, done: StretchDone) -> bool {
+        self.begin_stretch(s, done)
+    }
+
+    fn cancel_stretch(&self, id: u32) {
+        self.cancel(id);
     }
 
     /// True: a hide is one window-server call (~2 ms a window), so the outgoing windows wait
@@ -1076,7 +1118,7 @@ mod tests {
 
     #[test]
     fn an_engine_that_hid_nothing_shows_and_sweeps_without_the_window_server() {
-        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()) };
+        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()) };
         assert!(e.show_window(42), "never hidden: nothing to bring out");
         assert_eq!(e.sweep("test", true), Report::default());
         assert!(e.present_off_screen().is_empty());

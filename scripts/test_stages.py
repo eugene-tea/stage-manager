@@ -3565,6 +3565,10 @@ def click_slot(slot, what, settle=1.0):
             b = cg_bounds(g["window"])
             if not g.get("real") or not b or off(g["real"], b) > 1.0 or off(g["end"], b) > 1.0:
                 bad.append(f"incoming {g['window']} ends at {fmt(g['end'])}, the window is at {b and fmt(b)}")
+            # A window that took over from its snapshot to fly the last stretch itself (the
+            # Spaces engine's live landing, round sm-landing) has no handover at the unveil.
+            if g.get("stretch_ms") is not None:
+                continue
             # The handover: where its snapshot was drawn when the window took its place.
             if b and (not g.get("at_unveil") or edge_gap(g["at_unveil"], b) > 2.0):
                 hand.append(f"incoming {g['window']} drawn at {g.get('at_unveil') and fmt(g['at_unveil'])}, the window is at {fmt(b)}")
@@ -8442,6 +8446,106 @@ def phase_engine():
     all_onscreen("engine: quit")
 
 
+def phase_landing():
+    """Round sm-landing (1.9): the "into a window" case under load. Two stages of fixture
+    windows: Fixture 1 alone, and Fixtures 2-4 together, Fixture 2 a large window at the back
+    with two smaller ones over it. With synthetic CPU load (a busy process per core but one, at
+    normal priority), SM_LANDING_SWITCHES card clicks (default 12) alternate the two stages;
+    each switch is read every ms from the window server (`probe-spaces settle --overlay PID`).
+    It fails when a real window of the incoming stage is on screen at its frame while its
+    stage's pictures still fly: before the unveil (the overlay's first sample plus the
+    transition's `motion_ms` and `unveil_ms`, less 40 ms for the sampling and a frame). Every
+    switch also lands every window at its frame. The landing variant is the environment's
+    (`STAGE_MANAGER_LANDING`: pictures, ordered, live, live-early, live-late; the live ones
+    under SM_ENGINE=spaces only); the windows that took over from their pictures are counted
+    from `ctl state`'s last transition (`stretch_ms`)."""
+    variant = os.environ.get("STAGE_MANAGER_LANDING") or "pictures"
+    say(f"\n== landing: the incoming stage's windows never in place while its pictures fly, under load ({ENGINE}, {variant}) ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config(CONFIG_BACKDROP)
+    start_fixture(4)
+    s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "landing: app up with four fixture windows"):
+        return
+    t = by_title(s)
+    vis = s["display"]["visible"]
+    left = vis["x"] + s["strip_width"] + 60
+    big_w = min(1400, vis["w"] - (left - vis["x"]) - 40)
+    big_h = min(900, vis["h"] - 80)
+    ctl("debug-frame", t["Fixture 2"]["id"], left, vis["y"] + 40, big_w, big_h)
+    for n, (dx, dy) in ((3, (80, 120)), (4, (260, 240))):
+        ctl("debug-frame", t[f"Fixture {n}"]["id"], left + dx, vis["y"] + dy, min(700, big_w - dx), min(480, big_h - dy))
+    ctl("debug-frame", t["Fixture 1"]["id"], left + 120, vis["y"] + 80, min(900, big_w - 120), min(600, big_h - 80))
+    if [x for x in stage_titles(s).get(t["Fixture 1"]["home"], []) if x != "Fixture 1"]:
+        do("new", t["Fixture 1"]["id"])
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2", "Fixture 3", "Fixture 4"]], "two stages")
+    if not check(s is not None, f"landing: Fixture 1 alone, Fixtures 2-4 together ({s and stage_sets(s)})"):
+        return
+    switches = int(os.environ.get("SM_LANDING_SWITCHES") or 12)
+    busy = [subprocess.Popen([sys.executable, "-c", "while True: pass"]) for _ in range(max(2, (os.cpu_count() or 4) - 1))]
+    say(f"  load: {len(busy)} busy processes")
+    early, unlanded, ran, took = [], [], 0, 0
+    try:
+        time.sleep(2.0)
+        for i in range(switches):
+            s = state()
+            others = [c for c in (s.get("strip_cards") or []) if c["number"] != s["active"]]
+            if not others:
+                check(False, f"landing: a card to click (switch {i + 1})")
+                break
+            c = others[0]
+            f = c["frame"]
+            if card_under_window(s, f):
+                skip(f"landing switch {i + 1}", "the card is under a window")
+                continue
+            target = c["number"]
+            incoming = [w for w in s["windows"] if w["home"] == target and w["role"] == "standard"]
+            outgoing = [w for w in s["windows"] if w["home"] == s["active"] and w["role"] == "standard"]
+            spec = lambda ws: ";".join(f"{w['id']},{w['restore']['x']:.1f},{w['restore']['y']:.1f},{w['restore']['w']:.1f},{w['restore']['h']:.1f}" for w in ws)  # noqa: E731
+            r = subprocess.run([BIN, "probe-spaces", "settle", "--in", spec(incoming), "--out", spec(outgoing), "--for", "1800",
+                                "--overlay", str(app_pid()), "--then", BIN, "ctl", "debug-click", f"{f['x'] + f['w'] / 2:.1f}", f"{f['y'] + f['h'] / 2:.1f}"],
+                               env=ENV, capture_output=True, text=True, timeout=30)
+            try:
+                o = json.loads(r.stdout.strip().splitlines()[-1])
+            except (ValueError, IndexError):
+                o = {"ok": False, "error": (r.stdout + r.stderr)[-200:]}
+            x = wait_state(lambda y: y["active"] == target, f"stage {target} in front", timeout=4)
+            if not o.get("ok") or x is None:
+                check(False, f"landing switch {i + 1}: switched and sampled ({o.get('error', 'not switched')})")
+                continue
+            ran += 1
+            lt = x.get("last_transition") or {}
+            ghosts = [g for g in lt.get("ghosts", []) if not g.get("outgoing")]
+            took += sum(1 for g in ghosts if g.get("stretch_ms") is not None)
+            first = o.get("overlay_first_ms")
+            unveil = None if first is None or lt.get("unveil_ms") is None else first + (lt.get("motion_ms") or 0) + lt["unveil_ms"]
+            for w in o.get("incoming", []):
+                at = w.get("first_at_ms")
+                if unveil is not None and at is not None and at < unveil - 40:
+                    early.append(f"switch {i + 1}: window {w['id']} at its frame {at:.0f} ms after the click, the unveil at {unveil:.0f} ms")
+                if w.get("arrived_ms") is None:
+                    unlanded.append(f"switch {i + 1}: window {w['id']} never at its frame for good")
+            say(f"  switch {i + 1}: overlay from {first} ms, unveil ~{unveil and round(unveil)} ms, last in {o.get('last_in_ms')} ms, "
+                f"took over {sum(1 for g in ghosts if g.get('stretch_ms') is not None)} of {len(ghosts)} (mean sample {o.get('mean_interval_ms')} ms)")
+            time.sleep(1.2)
+    finally:
+        for b in busy:
+            b.kill()
+        for b in busy:
+            b.wait()
+    check(ran >= switches - 1, f"landing: {ran} of {switches} switches ran under load")
+    check(not early, "landing: no window of the incoming stage was in place while its stage's pictures still flew" + (f" ({'; '.join(early[:4])})" if early else ""))
+    check(not unlanded, "landing: every incoming window ended at its frame" + (f" ({'; '.join(unlanded[:4])})" if unlanded else ""))
+    if variant.startswith("live"):
+        say(f"  {took} incoming windows took over from their pictures in {ran} switches")
+        if SPACES:
+            check(took > 0, f"landing: under the live variant windows fly their last stretch ({took})")
+    consistent("landing")
+    stop_app()
+    all_onscreen("landing: quit")
+
+
 def main():
     phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays", "screens", "engine"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
@@ -8463,7 +8567,7 @@ def main():
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
-             "launch": phase_launch}[p]()
+             "launch": phase_launch, "landing": phase_landing}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
