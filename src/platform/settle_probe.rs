@@ -11,8 +11,16 @@
 //! - **gone**: an outgoing window no longer on screen at its frame from this sample to the end
 //!   (parked in the corner, or in a stage Space off screen); `last_out_ms` the last of them.
 //!
-//! `settle --in "ID,X,Y,W,H;…" [--out "ID,X,Y,W,H;…"] [--for MS] [--every MS] --then CMD ARG…`:
-//! one JSON object on stdout, with the command's own reply (its last line) as `reply`.
+//! - **overlay** (with `--overlay PID`, round sm-landing): the first and the last sample with a
+//!   large window of that process on screen (the app's motion overlay and its side panels,
+//!   [`is_overlay`]): when the switch's pictures were up. An incoming window at its frame well
+//!   before the unveil (the overlay's first sample, plus the transition's `motion_ms` and
+//!   `unveil_ms`) was in place while its stage's pictures still flew: the suite's `landing`
+//!   phase fails on it.
+//!
+//! `settle --in "ID,X,Y,W,H;…" [--out "ID,X,Y,W,H;…"] [--for MS] [--every MS] [--overlay PID]
+//! --then CMD ARG…`: one JSON object on stdout, with the command's own reply (its last line)
+//! as `reply`.
 
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -52,6 +60,12 @@ fn parse_specs(text: &str) -> Result<Vec<Spec>, String> {
             }
         })
         .collect()
+}
+
+/// True when `w`, a window of the watched process, is one of its motion overlay's panels: on
+/// screen, at the normal level or above, as large as a display (the strip is a narrow column).
+fn is_overlay(w: &windows::CgWindow, pid: i32) -> bool {
+    w.pid == pid && w.onscreen && w.layer >= 0 && w.bounds.w >= 800.0 && w.bounds.h >= 500.0
 }
 
 fn at_frame(a: Rect, b: Rect) -> bool {
@@ -119,10 +133,12 @@ struct Opts {
     span: Duration,
     every: Duration,
     then: Vec<String>,
+    /// The app whose motion overlay is watched (`--overlay PID`).
+    overlay: Option<i32>,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { incoming: Vec::new(), outgoing: Vec::new(), span: Duration::from_millis(1500), every: Duration::from_millis(1), then: Vec::new() };
+    let mut o = Opts { incoming: Vec::new(), outgoing: Vec::new(), span: Duration::from_millis(1500), every: Duration::from_millis(1), then: Vec::new(), overlay: None };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut value = || it.next().cloned().ok_or(format!("{a} needs a value"));
@@ -131,6 +147,7 @@ fn parse(args: &[String]) -> Result<Opts, String> {
             "--out" => o.outgoing = parse_specs(&value()?)?,
             "--for" => o.span = Duration::from_millis(value()?.parse().map_err(|_| "--for takes ms".to_string())?),
             "--every" => o.every = Duration::from_millis(value()?.parse::<u64>().map_err(|_| "--every takes ms".to_string())?.max(1)),
+            "--overlay" => o.overlay = Some(value()?.parse().map_err(|_| "--overlay takes a process id".to_string())?),
             "--then" => {
                 o.then = it.by_ref().cloned().collect();
                 break;
@@ -165,6 +182,8 @@ pub fn run(args: &[String]) -> ExitCode {
     let (mut samples, mut prev, mut max_gap, mut due) = (0u32, start, Duration::ZERO, start);
     let mut cmd_ms = None;
     let mut reply = String::new();
+    // The overlay's first and last sample on screen after the command started.
+    let (mut overlay_first, mut overlay_last): (Option<f64>, Option<f64>) = (None, None);
     loop {
         let listed = windows::describe(&ids);
         let at = Instant::now();
@@ -172,6 +191,12 @@ pub fn run(args: &[String]) -> ExitCode {
         for (spec, track) in specs.iter().zip(tracks.iter_mut()) {
             let on = listed.iter().any(|w| w.id == spec.id && w.onscreen && at_frame(w.bounds, spec.frame));
             track.sample(t, on);
+        }
+        if let Some(pid) = o.overlay.filter(|_| t >= 0.0)
+            && windows::on_screen().iter().any(|w| is_overlay(w, pid))
+        {
+            overlay_first.get_or_insert(t);
+            overlay_last = Some(t);
         }
         samples += 1;
         if t0.is_some() {
@@ -231,6 +256,8 @@ pub fn run(args: &[String]) -> ExitCode {
             "outgoing": o.outgoing.iter().zip(out).map(|(s, t)| json!({ "id": s.id, "gone_ms": opt(t.gone()) })).collect::<Vec<_>>(),
             "last_in_ms": opt(last_of(&arrived)),
             "last_out_ms": opt(last_of(&gone)),
+            "overlay_first_ms": opt(overlay_first),
+            "overlay_last_ms": opt(overlay_last),
             "reply": reply,
         })
     );
@@ -298,5 +325,19 @@ mod tests {
         assert!(parse(&args("--in 1,0,0,10,10 --for 900 --then ctl debug-click 5 5")).is_ok_and(|o| o.then.len() == 4 && o.span.as_millis() == 900));
         assert!(parse(&args("--in 1,0,0,10,10")).is_err());
         assert!(parse(&args("--for 900 --then ctl")).is_err());
+        assert!(parse(&args("--in 1,0,0,10,10 --overlay 321 --then ctl state")).is_ok_and(|o| o.overlay == Some(321)));
+        assert!(parse(&args("--in 1,0,0,10,10 --overlay x --then ctl state")).is_err());
+    }
+
+    /// The overlay is the watched app's display-sized panel at the normal level or above;
+    /// its strip, another app's window, one off screen are not.
+    #[test]
+    fn the_overlay_is_the_apps_large_panel() {
+        let w = |pid: i32, layer: i64, w: f64, onscreen: bool| windows::CgWindow { id: 1, pid, owner: String::new(), name: None, layer, bounds: Rect { x: 0.0, y: 0.0, w, h: 1440.0 }, onscreen, alpha: 1.0 };
+        assert!(is_overlay(&w(5, 2, 2560.0, true), 5));
+        assert!(is_overlay(&w(5, 0, 2560.0, true), 5), "a side panel under a window, at the normal level");
+        assert!(!is_overlay(&w(5, -1, 260.0, true), 5), "the strip");
+        assert!(!is_overlay(&w(6, 2, 2560.0, true), 5));
+        assert!(!is_overlay(&w(5, 2, 2560.0, false), 5));
     }
 }
