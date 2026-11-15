@@ -1888,7 +1888,11 @@ impl Controller {
         let mut hit = dock::item_at(dock, at);
         let main = self.model.as_ref().map(|m| m.main_display().frame);
         let mut revealed = false;
-        if hit.is_err()
+        // The Dock's hit-test answers for an auto-hidden Dock too, at the item's place off the
+        // display: a posted click there goes nowhere (the live pass of 11-15), so an item off
+        // the display is shown first whatever the hit-test said.
+        let off_display = main.is_some_and(|d| !d.contains(at));
+        if (hit.is_err() || off_display)
             && let Some(edge) = main.and_then(|d| dock_edge(listed.frame, d))
         {
             // An auto-hidden Dock: the pointer to its edge shows it (a move, no click), then
