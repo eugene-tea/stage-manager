@@ -156,6 +156,7 @@ mod raise_order;
 mod spaces;
 mod stale;
 mod switch_pictures;
+mod switcher;
 mod tabs;
 #[cfg(test)]
 mod tick_scenarios;
@@ -564,7 +565,7 @@ fn offered_at_notice(waiting: impl IntoIterator<Item = u32>, listed: &HashSet<u3
 /// `debug-space`, `debug-expose`, ...) never reach the WM thread's `ctl`, so they leave the
 /// motion alone too (`mark` asks `state` and `dump`).
 fn ctl_lands_switch(cmd: &Command) -> bool {
-    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_))
+    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_))
 }
 
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
@@ -1029,6 +1030,8 @@ pub struct Controller {
     /// A window put on the Desktop shown at a Dock press, still counted hidden, until its
     /// stage comes in front or it goes back ([`arrival::Lent`]).
     lent: Option<arrival::Lent>,
+    /// ⌘Tab's switcher as the keys and the Dock show it ([`switcher`], round cmd-tab).
+    switcher: switcher::SwitcherWatch,
     /// While set, a batch leaves the strip snapshot for later (`strip_dirty`): an arrival
     /// hands the strip one snapshot, in its final order.
     defer_present: bool,
@@ -1238,6 +1241,7 @@ impl Controller {
             verify: None,
             dock_seen: None,
             lent: None,
+            switcher: switcher::SwitcherWatch::default(),
             defer_present: false,
             absent: HashMap::new(),
             busy_apps: std::cell::RefCell::new(BusyApps::default()),
@@ -2900,6 +2904,7 @@ impl Controller {
                 self.front_after_quit(ob, &left);
             }
             WinEvent::AppActivated(pid, fired) => {
+                crate::platform::switcher_probe::note("activated", format!("pid={pid} notice_age_ms={}", fired.elapsed().as_millis()));
                 // Its enhanced UI is read again at its next move (round enhanced-ui).
                 enhanced_ui::forget(pid);
                 // Before the echo check: a window of the app that shows now is placed whoever
@@ -3419,6 +3424,11 @@ impl Controller {
     /// over the visible strip, which slot a dragged window goes to.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent, drop: Option<StripDrop>) {
         let now = Instant::now();
+        if event.kind == InputKind::CommandKey {
+            // ⌘ pressed or let go: only ⌘Tab's switcher cares (its release activates).
+            self.switcher_key(ob, &event, now);
+            return;
+        }
         let mods = Modifiers { shift: event.shift, cmd: event.cmd };
         if event.kind == InputKind::MouseUp {
             self.triggers.record_release(now, mods);
@@ -3521,7 +3531,10 @@ impl Controller {
                 tracing::debug!(x = event.at.x, y = event.at.y, "right or other mouse down in another app");
                 self.end_restore(ob, "a right or middle click", End::User);
             }
+            InputKind::CommandKey => {}
             InputKind::KeyDown => {
+                // The switcher's selection first: its window put home before ⌘'s release.
+                self.switcher_key(ob, &event, now);
                 // ⌘Tab's own app switch brings its stage; nothing else comes forward for it.
                 if event.is_switcher_key() {
                     self.end_restore(ob, "an app switcher key", End::Switcher);
@@ -4110,6 +4123,7 @@ impl Controller {
         tracing::debug!(changes = self.space_changes, "Space change notified");
         self.space_checked = now;
         self.pressed_obs = None;
+        self.switcher_space_changed(now);
         // A focus held for the Desktop being recognized counts from this change: a change
         // inferred from the window list comes seconds after the focus (R3 4).
         self.focus_replay.touch(now);
@@ -6021,6 +6035,9 @@ impl Controller {
             if self.overview.expectation_over(now) {
                 self.look_at_screen();
             }
+            // ⌘Tab's switcher closed with its release unheard first: its window put home is
+            // then judged as after a release.
+            self.switcher_tick(ob, now);
             self.expire_ahead(ob, now);
             self.slide_hold_step(ob);
             if self.absent_due.is_some_and(|t| now >= t) && !self.ax_sees_nothing() {
@@ -6390,6 +6407,12 @@ impl Controller {
             Command::Reload => {
                 self.reload_config(ob);
                 json!({ "ok": self.config_error.is_none(), "error": self.config_error })
+            }
+            Command::DebugCmdTab(probe) => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-cmd-tab needs STAGE_MANAGER_TEST=1" });
+                }
+                self.debug_cmd_tab(ob, probe)
             }
             Command::DebugDockClick { bundle, real } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

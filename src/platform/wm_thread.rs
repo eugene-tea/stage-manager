@@ -116,6 +116,8 @@ pub fn tick_status() -> serde_json::Value {
 /// the tick looks at, and a shortcut that does comes with its own notices).
 fn stirs(cmd: &WmCommand) -> bool {
     match cmd {
+        // ⌘ pressed or let go alone moves nothing; the Tab that opens ⌘Tab's switcher stirs.
+        WmCommand::Input(e, _) if e.kind == input::InputKind::CommandKey => false,
         WmCommand::Input(e, _) => e.kind != input::InputKind::KeyDown || e.cmd || e.other_modifiers,
         _ => true,
     }
@@ -1274,6 +1276,8 @@ mod tests {
         assert!(!stirs(&event(InputKind::KeyDown, false, false)), "typing");
         assert!(stirs(&event(InputKind::KeyDown, true, false)), "a ⌘ shortcut");
         assert!(stirs(&event(InputKind::KeyDown, false, true)), "a ⌃ or ⌥ key (Desktop switches, Mission Control)");
+        assert!(!stirs(&event(InputKind::CommandKey, true, false)), "⌘ pressed alone");
+        assert!(!stirs(&event(InputKind::CommandKey, false, false)), "⌘ let go alone");
         assert!(stirs(&event(InputKind::MouseDown, false, false)));
         assert!(stirs(&event(InputKind::MouseUp, false, false)));
         assert!(stirs(&event(InputKind::OtherMouseDown, false, false)));

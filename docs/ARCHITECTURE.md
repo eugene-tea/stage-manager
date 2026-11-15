@@ -313,7 +313,12 @@ macOS should go to is put on its Desktop first: an arrangement ahead for another
 made at the press, and for an app whose stage on the Desktop shown is hidden while it shows
 a window elsewhere, that stage's window is put home for a while, still counted hidden
 (`WindowEngine::lend_home`, `Model::dock_home`), and taken back when no switch to its stage
-follows.
+follows. ⌘Tab has the same shape: the switcher shows while ⌘ is held after a Tab and
+activates its app at ⌘'s release, so the same window is put home while the switcher selects
+the app (`engine::switcher` follows the keys the input monitor hears, ⌘ pressed and let go
+among them; the Dock's Accessibility is asked for the switcher's selection at each key, the
+order of activations predicts it otherwise; `platform/controller/switcher.rs`), and taken
+back when the selection moves on, at Escape, or when ⌘ is let go on another app.
 
 ```mermaid
 sequenceDiagram

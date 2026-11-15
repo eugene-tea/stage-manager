@@ -315,7 +315,7 @@ pub fn app_path(pid: i32) -> Option<String> {
 }
 
 /// The running apps by their bundle's path (no trailing slash).
-fn running_by_path() -> HashMap<String, i32> {
+pub(crate) fn running_by_path() -> HashMap<String, i32> {
     NSWorkspace::sharedWorkspace()
         .runningApplications()
         .iter()

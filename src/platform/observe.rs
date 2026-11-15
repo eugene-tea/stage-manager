@@ -531,6 +531,25 @@ impl Observer {
         self.activated_at.get(&pid).copied()
     }
 
+    /// The running regular apps activated since this observer started, the most recent
+    /// first (⌘Tab's switcher lists the running apps in that order: round cmd-tab).
+    pub fn apps_by_recent_activation(&self) -> Vec<i32> {
+        let mut seen: Vec<(Instant, i32)> =
+            self.activated_at.iter().filter(|(pid, _)| self.apps.contains_key(pid)).map(|(pid, at)| (*at, *pid)).collect();
+        seen.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        seen.into_iter().map(|(_, pid)| pid).collect()
+    }
+
+    /// How many regular apps run (the apps ⌘Tab's switcher lists).
+    pub fn regular_app_count(&self) -> usize {
+        self.apps.len()
+    }
+
+    /// True when app `pid` runs with the regular activation policy (as this observer knows).
+    pub fn is_regular_app(&self, pid: i32) -> bool {
+        self.apps.contains_key(&pid)
+    }
+
     /// When the last regular app launched, if one did since this observer started.
     pub fn last_launch(&self) -> Option<Instant> {
         self.last_launch
@@ -1556,6 +1575,26 @@ mod tests {
     }
 
     unsafe extern "C-unwind" fn no_callback(_: NonNull<AXObserver>, _: NonNull<AXUIElement>, _: NonNull<CFString>, _: *mut c_void) {}
+
+    /// Round cmd-tab: ⌘Tab's switcher lists the running apps most recently used first; the
+    /// observer knows that order for the apps activated since it started.
+    #[test]
+    fn running_apps_come_most_recently_activated_first() {
+        let info = |pid: i32| AppInfo { pid, bundle_id: Some(format!("com.example.app{pid}")), name: None };
+        let mut ob = Observer::new(1, None);
+        ob.set_apps(vec![info(10), info(20), info(30)], no_callback);
+        let t0 = Instant::now();
+        ob.on_app_event(AppEvent::Activated(info(20), t0), no_callback);
+        ob.on_app_event(AppEvent::Activated(info(10), t0 + Duration::from_millis(5)), no_callback);
+        assert_eq!(ob.apps_by_recent_activation(), vec![10, 20], "30 never activated: its place is not known");
+        assert_eq!(ob.regular_app_count(), 3);
+        assert!(ob.is_regular_app(30) && !ob.is_regular_app(99));
+        ob.on_app_event(AppEvent::Activated(info(20), t0 + Duration::from_millis(9)), no_callback);
+        assert_eq!(ob.apps_by_recent_activation(), vec![20, 10]);
+        ob.on_app_event(AppEvent::Terminated(info(20)), no_callback);
+        assert_eq!(ob.apps_by_recent_activation(), vec![10], "quit: out of the switcher");
+        assert_eq!(ob.regular_app_count(), 2);
+    }
 
     /// The 11-10 login: an app answered the first registration and then none (each waited out
     /// the messaging timeout on the WM thread). The first timeout ends the try, wherever it

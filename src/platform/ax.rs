@@ -566,6 +566,34 @@ impl AxElement {
         Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(AxElement)).collect())
     }
 
+    /// The array of elements attribute `name` holds (`AXSelectedChildren`, …); items of
+    /// another type are left out.
+    pub fn elements(&self, name: &'static str) -> AxResult<Vec<AxElement>> {
+        let v = self.attribute(name)?;
+        let array = v.downcast::<CFArray>().map_err(|_| AxError::WrongType(name))?;
+        // SAFETY: a CF array holds CF objects; each item is type-checked below.
+        let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
+        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(AxElement)).collect())
+    }
+
+    /// The boolean attribute `name` (`AXSelected`, …).
+    pub fn flag(&self, name: &'static str) -> AxResult<bool> {
+        self.bool_attr(name)
+    }
+
+    /// The names of the attributes this element has (`AXUIElementCopyAttributeNames`; the
+    /// probes' dumps).
+    pub fn attribute_names(&self) -> AxResult<Vec<String>> {
+        let mut names: *const CFArray = std::ptr::null();
+        // SAFETY: valid element and out pointer; on success it holds a +1 reference.
+        AxError::check(unsafe { self.0.copy_attribute_names(NonNull::from(&mut names)) })?;
+        let ptr = NonNull::new(names.cast_mut()).ok_or(AxError::NO_VALUE)?;
+        // SAFETY: the Copy rule hands us ownership of one reference; the array holds strings,
+        // each type-checked below.
+        let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(ptr)) };
+        Ok(array.iter().filter_map(|n| n.downcast_ref::<CFString>().map(|s| s.to_string())).collect())
+    }
+
     /// `AXURL` as a POSIX path (a Dock item's application bundle).
     pub fn url_path(&self) -> AxResult<String> {
         let v = self.attribute(names::URL)?;

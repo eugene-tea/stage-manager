@@ -15,7 +15,9 @@
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
 //! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
-//! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
+//! prediction sees it, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [nolend]` posts ⌘Tab
+//! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
+//! `debug-cmd-tab result` reports what answered it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
@@ -72,6 +74,52 @@ use super::paths;
 use super::space_keys::{Direction, Expose};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::handoff::{self, Offer, Trust};
+
+/// `debug-cmd-tab`: a posted ⌘Tab ([`crate::platform::switcher_probe`]), or the last one's
+/// report: `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [nolend]` (1 Tab and 300 ms by
+/// default), `debug-cmd-tab result`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmdTabProbe {
+    /// Post one.
+    Start {
+        /// ⌘ let go on the selection (an activation); else Escape first (none).
+        release: bool,
+        /// How many Tabs (1-9).
+        tabs: u8,
+        /// From the last Tab to Escape or ⌘'s release (ms, at most 5000).
+        hold_ms: u64,
+        /// Put the selected app's window home as the switcher shows (`nolend`: macOS's own
+        /// way, measured).
+        lend: bool,
+    },
+    /// The last probe's report.
+    Result,
+}
+
+impl CmdTabProbe {
+    fn parse(mode: &str, rest: &[&str]) -> Result<Self, String> {
+        let release = match mode {
+            "cancel" => false,
+            "release" => true,
+            other => return Err(format!("expected cancel, release or result, got {other:?}")),
+        };
+        let (lend, numbers) = match rest {
+            [numbers @ .., "nolend"] => (false, numbers),
+            numbers => (true, numbers),
+        };
+        let number = |w: &str| w.parse::<u64>().map_err(|_| format!("expected a number, got {w:?}"));
+        let (tabs, hold_ms) = match numbers {
+            [] => (1, 300),
+            [tabs] => (number(tabs)?, 300),
+            [tabs, hold] => (number(tabs)?, number(hold)?),
+            _ => return Err("debug-cmd-tab takes cancel|release [TABS] [HOLD_MS] [nolend]".into()),
+        };
+        if !(1..=9).contains(&tabs) || hold_ms > 5000 {
+            return Err("debug-cmd-tab: 1-9 Tabs, a hold of at most 5000 ms".into());
+        }
+        Ok(Self::Start { release, tabs: tabs as u8, hold_ms, lend })
+    }
+}
 
 /// A parsed ctl command.
 #[derive(Clone, Debug, PartialEq)]
@@ -215,6 +263,9 @@ pub enum Command {
         /// A posted press and release, not the controller fed and `AXPress`.
         real: bool,
     },
+    /// A posted ⌘Tab and what answered it, or the last one's report (needs
+    /// `STAGE_MANAGER_TEST=1`; round cmd-tab, [`crate::platform::switcher_probe`]).
+    DebugCmdTab(CmdTabProbe),
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
     DebugClose {
@@ -394,6 +445,8 @@ impl Command {
                 };
                 Ok(Self::DebugFullscreen { id, on })
             }
+            ["debug-cmd-tab", "result"] => Ok(Self::DebugCmdTab(CmdTabProbe::Result)),
+            ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
             ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: false }),
             ["debug-dock-click", bundle, "real"] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: true }),
             ["adopted", ids @ ..] => ids
@@ -937,6 +990,24 @@ mod tests {
             Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: true })
         );
         assert!(Command::parse("debug-dock-click dev.example.app fake").is_err());
+        assert_eq!(
+            Command::parse("debug-cmd-tab cancel"),
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 1, hold_ms: 300, lend: true }))
+        );
+        assert_eq!(
+            Command::parse("debug-cmd-tab release 2 40 nolend"),
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 2, hold_ms: 40, lend: false }))
+        );
+        assert_eq!(
+            Command::parse("debug-cmd-tab release 1 0"),
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 1, hold_ms: 0, lend: true }))
+        );
+        assert_eq!(Command::parse("debug-cmd-tab result"), Ok(Command::DebugCmdTab(CmdTabProbe::Result)));
+        assert!(Command::parse("debug-cmd-tab").is_err());
+        assert!(Command::parse("debug-cmd-tab press").is_err());
+        assert!(Command::parse("debug-cmd-tab cancel 0").is_err(), "no Tab");
+        assert!(Command::parse("debug-cmd-tab cancel 1 9000").is_err(), "held too long");
+        assert!(Command::parse("debug-cmd-tab cancel 1 300 40").is_err());
         assert!(Command::parse("debug-dock-click").is_err());
         assert!(Command::parse("debug-click 60 70 alt").is_err());
         assert_eq!(Command::parse("space"), Ok(Command::Space));
