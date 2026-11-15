@@ -51,6 +51,10 @@
   dragged onto the strip, or when a card is clicked or an app is brought forward while the
   stage in front shows nothing; a window shown on every Desktop can be dragged onto the
   strip too.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), the first click on
+  the Dock item of the app in front goes to its window in a stage of another Desktop every
+  time. The other Desktop, made ready when the button went down, was sometimes put back
+  before the button came up, and a second click was needed.
 
 ## 1.8.5 — 2026-11-12
 
