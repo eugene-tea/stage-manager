@@ -307,7 +307,7 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     tracing::info!(engine = choice.kind.name(), "window engine: {}", choice.why);
     let landing = crate::ui::landing_math::Landing::current();
     if landing != crate::ui::landing_math::Landing::Pictures {
-        tracing::info!(landing = landing.name(), "window engine: a test run lands switches this way");
+        tracing::info!(landing = landing.name(), "window engine: a test or review run lands switches this way");
     }
     install(of(choice.kind));
     *lock_choice() = Some(choice.clone());
