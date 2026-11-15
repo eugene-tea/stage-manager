@@ -237,6 +237,12 @@ pub fn wants_list() -> bool {
     judged_zones().is_some()
 }
 
+/// True while macOS keeps the tap off for user input (secure input): the WM tick switches it
+/// on again once secure input is over ([`refresh`]).
+pub fn off_for_secure_input() -> bool {
+    OFF_BY_INPUT.load(Ordering::Relaxed)
+}
+
 /// The least time between two switches on after user input: should macOS keep switching the
 /// tap off without secure input on, the log takes a line every few seconds, not every tick.
 const BACK_ON_EVERY: Duration = Duration::from_secs(5);

@@ -715,8 +715,9 @@ impl SpacesEngine {
     /// Lets out every window the window server lists in one of this engine's Spaces that
     /// the engine does not hold (a window its app ordered out while hidden, forgotten, and
     /// ordered in again comes back in the Space it was in): onto that Space's Desktop. No
-    /// window stays in a stage Space with nothing answering for it. How many came out.
-    pub fn let_strangers_out(&self) -> usize {
+    /// window stays in a stage Space with nothing answering for it. `list`: every window, on
+    /// screen or not (the tick's read, [`windows::wake_list`]). How many came out.
+    pub fn let_strangers_out(&self, list: &[windows::CgWindow]) -> usize {
         let (spaces, held): (BTreeMap<u64, u64>, BTreeSet<u32>) = {
             let st = self.state();
             (st.stages.iter().map(|((desktop, _), space)| (*space, *desktop)).collect(), st.held.keys().copied().collect())
@@ -729,7 +730,7 @@ impl SpacesEngine {
         let ours: BTreeSet<u64> = spaces.keys().copied().collect();
         let (desktops, shown) = Self::desktops(sky);
         let mut out = 0;
-        for w in windows::every_window().iter().filter(|w| w.pid != own && !w.onscreen && w.layer == 0 && !held.contains(&w.id)) {
+        for w in list.iter().filter(|w| w.pid != own && !w.onscreen && w.layer == 0 && !held.contains(&w.id)) {
             let now = sky.spaces_of(&[w.id]);
             let Some(space) = now.iter().find(|s| ours.contains(s)) else { continue };
             let home = spaces.get(space).copied().filter(|d| desktops.contains(d)).or(shown.first().copied());

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Less CPU while nothing happens: the app's housekeeping, which ran four times a second,
+  runs every two seconds once no window, app or click has changed anything for a few
+  seconds (every 0.75 seconds with the park corner while windows are parked), and reads the
+  window list once per round instead of two or three times. A window or an app that closes
+  without the usual notice is still handled, up to two seconds later when nothing else
+  happens.
 - New setting `[windows] engine` (`"auto"` or `"accessibility"`, read at launch). It
   chooses how hidden windows are kept: `"accessibility"` always uses the park corner and
   never tries macOS's own Spaces, a way out if windows misbehave on a stage change. In this

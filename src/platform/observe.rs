@@ -1012,7 +1012,8 @@ impl Observer {
         if !self.observing || self.windows.is_empty() {
             return;
         }
-        let list = windows::list_windows();
+        // The tick's read, shared with its other duties ([`windows::wake_list`]).
+        let list = windows::wake_list();
         // Nothing on screen at all: the window server answered nothing (or the session is not
         // the console's): no observation.
         let blind = !list.iter().any(|w| w.onscreen);
@@ -1181,6 +1182,25 @@ impl Observer {
     /// exists is tested at the next pass ([`Self::reap_gone`]).
     pub fn suspect(&self, pid: i32) {
         self.gone.borrow_mut().suspect(pid);
+    }
+
+    /// Why the tick stays brisk for the observer ([`crate::engine::tick_pace`]): a tracked
+    /// window missing from the window server's list waits for its second look
+    /// ([`Self::sweep_closed`]), an app whose windows were not listed yet is rescanned
+    /// ([`Self::retry_pending`]), an app whose call failed waits for its pid's test
+    /// ([`Self::reap_gone`]). `None` when nothing does.
+    pub fn tick_waits(&self) -> Option<&'static str> {
+        if !self.observing {
+            None
+        } else if !self.vanished.missing().is_empty() {
+            Some("a window missing from the list")
+        } else if !self.recheck.is_empty() {
+            Some("windows not listed yet")
+        } else if !self.gone.borrow().is_empty() {
+            Some("an app whose call failed")
+        } else {
+            None
+        }
     }
 
     /// Apps gone without a termination notice (round missed-quit, [`crate::engine::gone`]):

@@ -94,6 +94,7 @@ unsafe extern "C-unwind" fn on_ax(_: NonNull<AXObserver>, element: NonNull<AXUIE
 }
 
 type ConnectionProc = extern "C" fn(u32, *mut c_void, usize, *mut c_void, i32);
+type FnRequestForWindows = unsafe extern "C" fn(i32, *const u32, i32) -> i32;
 type Proc = extern "C" fn(u32, *mut c_void, usize, *mut c_void);
 type FnRegisterConnection = unsafe extern "C" fn(i32, ConnectionProc, u32, *mut c_void) -> i32;
 type FnRegister = unsafe extern "C" fn(Proc, u32, *mut c_void) -> i32;
@@ -122,6 +123,67 @@ fn register(cid: i32, range: std::ops::RangeInclusive<u32>) -> (usize, usize) {
         }
     }
     (a, b)
+}
+
+/// `notices --ids ID,… [--events A-B] [--for MS]` (round sm-tick): registers both notice
+/// callbacks for every type in the range (default 700-1700), asks the window server for the
+/// notices of windows `ids` (`SLSRequestNotificationsForWindows(cid, ids, count)`, as yabai's
+/// extern.h gives it; S3b registered without it and heard nothing at a launch), then turns the
+/// main run loop for MS (default 30000) while the windows are closed, moved, minimized or
+/// ordered out by hand, and prints every notice heard: when (ms from the request), its type
+/// (`0x8000_0000` set: the plain registration's), its first words, and whether a word names one
+/// of the windows. Moves nothing.
+pub fn notices(args: &[String]) -> ExitCode {
+    let Some(mtm) = MainThreadMarker::new() else { return ExitCode::from(4) };
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    app.finishLaunching();
+    let Ok(sky) = Sky::open() else { return ExitCode::from(3) };
+    let (mut ids, mut range, mut wait) = (Vec::<u32>::new(), 700u32..=1700u32, Duration::from_secs(30));
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--ids" => ids = it.next().map(|s| s.split(',').filter_map(|x| x.trim().parse().ok()).collect()).unwrap_or_default(),
+            "--events" => {
+                if let Some((x, y)) = it.next().and_then(|s| s.split_once('-')) {
+                    range = x.parse().unwrap_or(700)..=y.parse().unwrap_or(1700);
+                }
+            }
+            "--for" => wait = it.next().and_then(|s| s.parse().ok()).map_or(wait, Duration::from_millis),
+            _ => {}
+        }
+    }
+    if ids.is_empty() {
+        println!("{}", json!({ "ok": false, "error": "usage: probe-spaces notices --ids ID,… [--events A-B] [--for MS]" }));
+        return ExitCode::from(2);
+    }
+    let registered = register(sky.cid, range.clone());
+    // SAFETY: a system framework path; RTLD_NOW resolves everything at load.
+    let h = unsafe { libc::dlopen(SKYLIGHT.as_ptr(), libc::RTLD_NOW) };
+    let mut names = Vec::new();
+    // SAFETY: the signature as yabai's extern.h gives it: (cid, window ids, count) -> CGError.
+    let request: Option<FnRequestForWindows> = if h.is_null() { None } else { unsafe { super::spaces::ffi::load(h, c"SLSRequestNotificationsForWindows", &mut names) } };
+    let Ok(count) = i32::try_from(ids.len()) else { return ExitCode::from(2) };
+    // SAFETY: `ids` holds `count` window ids and outlives the call.
+    let asked = request.map(|f| unsafe { f(sky.cid, ids.as_ptr(), count) });
+    let t0 = Instant::now();
+    println!(
+        "{}",
+        json!({ "event": "asked", "ids": ids, "connection": registered.0, "plain": registered.1, "range": [range.start(), range.end()], "request": asked })
+    );
+    let mut printed = 0;
+    while t0.elapsed() < wait {
+        pump(Duration::from_millis(50));
+        let heard: Vec<(Instant, u32, Vec<u32>)> =
+            NOTICES.lock().map(|v| v[printed..].iter().map(|n| (n.at, n.kind, n.words.clone())).collect()).unwrap_or_default();
+        printed += heard.len();
+        for (at, kind, words) in heard {
+            let names_window = words.iter().find(|w| ids.contains(w));
+            println!("{}", json!({ "event": "notice", "ms": ms(t0, Some(at)), "type": kind, "words": words, "window": names_window }));
+        }
+    }
+    println!("{}", json!({ "ok": true, "event": "done", "heard": printed }));
+    ExitCode::SUCCESS
 }
 
 /// Lets the main run loop turn for up to `d` (notices and Accessibility callbacks land then).

@@ -264,6 +264,12 @@ fn note(n: Note) {
     }
 }
 
+/// True while macOS keeps the tap off for user input (secure input): the WM tick switches it
+/// on again once secure input is over ([`refresh`]).
+pub fn off_for_secure_input() -> bool {
+    OFF_BY_INPUT.load(Ordering::Relaxed)
+}
+
 /// From the WM thread's tick: switches a tap that macOS switched off for user input on again
 /// once secure input is over, then logs what the callback noted since the last tick.
 pub fn refresh() {

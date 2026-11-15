@@ -313,6 +313,11 @@ impl Persisting {
     pub fn clear(&mut self) {
         self.pending = None;
     }
+
+    /// True while evidence waits for its second look.
+    pub fn is_pending(&self) -> bool {
+        self.pending.is_some()
+    }
 }
 
 #[cfg(test)]

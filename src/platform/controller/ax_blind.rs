@@ -118,7 +118,7 @@ impl Controller {
         if facts.listed > 0 || !facts.trusted {
             return facts;
         }
-        let list = windows::on_screen();
+        let list = windows::wake_on_screen();
         facts.regular = session::real_windows(&list, |w| ob.wants(w.pid)).count();
         let real: Vec<&windows::CgWindow> = session::real_windows(&list, |w| ob.observes(w.pid)).collect();
         facts.shown = real.len();

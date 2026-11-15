@@ -115,7 +115,7 @@ impl TakenWatch {
             self.attempts.clear();
         }
         // The window server's complete list (every Desktop, ordered-out windows included).
-        let list = windows::list_windows();
+        let list = windows::wake_list();
         let listed: HashSet<u32> = list.iter().map(|c| c.id).collect();
         let blind = !list.iter().any(|c| c.onscreen);
         let dropped = self.drops.look(now, &taken, &listed, blind, process_runs);

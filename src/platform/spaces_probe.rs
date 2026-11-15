@@ -64,6 +64,10 @@
 //!   command (a switch) while these windows' descriptions are read every ms: when each
 //!   incoming window is at its frame for good, each outgoing one gone from its own
 //!   ([`super::settle_probe`], round sm-measure); reads only.
+//! - `notices --ids ID,… [--events A-B] [--for MS]`: the window server's notices this process
+//!   hears for windows that exist, asked for by id (`SLSRequestNotificationsForWindows`), while
+//!   they are closed, moved or ordered out by hand ([`super::new_window_probe::notices`],
+//!   round sm-tick: which could stir the WM tick); reads only.
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
 
@@ -188,7 +192,7 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|launch-probe|key|dock-click|cleanup|sources|overlap|settle …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|launch-probe|key|dock-click|cleanup|sources|overlap|settle|notices …");
     };
     // Read only (no window moves): any app, their own arguments.
     if cmd == "sources" {
@@ -199,6 +203,9 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     if cmd == "settle" {
         return super::settle_probe::run(rest);
+    }
+    if cmd == "notices" {
+        return super::new_window_probe::notices(rest);
     }
     let o = match parse(rest) {
         Ok(o) => o,

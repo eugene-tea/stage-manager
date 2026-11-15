@@ -73,9 +73,10 @@ impl Controller {
     /// judges presses on it, never reading it itself), then the park reconcile on the same
     /// list.
     pub(super) fn corner_tick(&mut self, ob: &mut Observer) {
-        let list = self.update_patch().or_else(|| sliver_tap::wants_list().then(windows::on_screen));
-        sliver_tap::refresh(list.as_deref());
-        self.reconcile_parked(ob, list.as_deref());
+        let list = self.update_patch().or_else(|| sliver_tap::wants_list().then(windows::wake_on_screen));
+        let list = list.as_deref().map(Vec::as_slice);
+        sliver_tap::refresh(list);
+        self.reconcile_parked(ob, list);
     }
 
     /// The fast tick's share of the corner patch: after a focus or an activation (round

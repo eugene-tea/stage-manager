@@ -153,6 +153,8 @@ mod fallback;
 mod raise_order;
 mod spaces;
 mod stale;
+#[cfg(test)]
+mod tick_scenarios;
 mod upkeep;
 
 /// A focus this soon after a click or key press is the user's: the window is touched
@@ -3929,7 +3931,7 @@ impl Controller {
             // Recognized once the screen unlocks (the tick tries again).
             return;
         }
-        let list = windows::list_windows();
+        let list = windows::wake_list();
         // Clicked in Mission Control (or switched there with the keyboard), the Desktop shows
         // once Mission Control has closed: until then the list holds its layout (App Exposé
         // even other Desktops' windows). The notification stays authoritative; the arrival
@@ -4405,7 +4407,8 @@ impl Controller {
         self.space_checked = now;
         let Some(m) = self.model.as_ref() else { return };
         let main = *m.main_display();
-        let list = windows::list_windows();
+        // The tick's read, shared with its other duties ([`windows::wake_list`]).
+        let list = windows::wake_list();
         // The other screens first (round displays-2): each is judged on its own, whatever
         // the main screen shows.
         self.check_other_screens(ob, &list, now);
@@ -5760,6 +5763,51 @@ impl Controller {
         }
     }
 
+    /// Why the tick stays brisk for the controller ([`crate::engine::tick_pace`]): the first
+    /// of its duties that waits on the tick, or `None` when none does and the tick may rest.
+    /// What waits here is what the tick would otherwise act on late: a deadline set (a
+    /// switch's unveil, a save, the restore's ends, an arrangement made ahead, a held focus),
+    /// evidence counted towards a second look (windows missing from the Space, windows of
+    /// another Space on screen, a dead handle judged closed once), a press or a drag, and the
+    /// engine's own retries ([`Self::upkeep_tick_waits`]). Cheap: fields and one read of the
+    /// mouse button.
+    pub fn tick_waits(&self, now: Instant) -> Option<&'static str> {
+        let waits = [
+            (self.model.is_none() && (self.build_wait.is_some() || self.screens_wait.is_some()), "the launch's stages wait"),
+            (self.settling.is_some(), "the restore window is open"),
+            (self.phase.switching().is_some() || self.pending.is_some(), "a switch"),
+            (self.phase.space_settling(now), "a Space change settles"),
+            (self.save.is_dirty(), "a save is due"),
+            (self.strip_dirty, "the strip is presented"),
+            (self.press.is_some() || self.drag.is_some() || self.focus_after_press.is_some(), "a press or a drag"),
+            (self.front_after_restore || self.focus_after_restore, "after the restore"),
+            (self.absent_due.is_some() || self.rematch_until.is_some(), "the restore's deadlines"),
+            (
+                self.ahead.is_some() || self.verify.is_some() || self.slide_hold.is_some() || self.dock_press.is_some(),
+                "an arrangement made ahead",
+            ),
+            (self.overview.showing_or_expected(now) || self.overview.freezes(now) || self.macos_reveal_at.is_some(), "an overview"),
+            (!self.absent.is_empty() || self.foreign.is_pending() || !self.stale.waiting().is_empty(), "windows counted missing"),
+            (self.focus_replay.peek(now).is_some(), "a focus held"),
+            (self.unminimizing.values().any(|at| now.duration_since(*at) < UNMINIMIZE_MAX), "an un-minimize"),
+            (self.fresh_waiting(), "a new window"),
+            (self.ax_sees_nothing(), "Accessibility lists no window"),
+        ];
+        if let Some((_, why)) = waits.into_iter().find(|(w, _)| *w) {
+            return Some(why);
+        }
+        if let Some(why) = self.upkeep_tick_waits(now) {
+            return Some(why);
+        }
+        input::left_button_down().then_some("the mouse button is down")
+    }
+
+    /// The longest the tick may rest for the controller ([`crate::engine::tick_pace::REST`],
+    /// or less when the engine's upkeep caps it: [`Self::upkeep_rest_cap`]).
+    pub fn tick_rest(&self) -> Duration {
+        self.upkeep_rest_cap().map_or(crate::engine::tick_pace::REST, |cap| cap.min(crate::engine::tick_pace::REST))
+    }
+
     /// True while the restore window is open (the login settles): apps that do not answer
     /// Accessibility yet are asked often then ([`crate::engine::observe_retry`]).
     pub fn restore_window_open(&self) -> bool {
@@ -6251,6 +6299,8 @@ impl Controller {
         state["corner_patch"] = corner_patch;
         // Which window engine runs, and what it keeps and counts.
         state["engine"] = self.status_engine();
+        // The WM tick's pace (round sm-tick): ticks brisk and at rest since the launch.
+        state["tick"] = super::wm_thread::tick_status();
         // Accessibility lists no window for the session (round ax-blind), since (Unix s).
         (state["accessibility_blind"], state["accessibility_blind_since"]) = self.ax_blind_json();
         state["displays"] = Value::Array(displays_json);

@@ -230,15 +230,18 @@ impl AxElement {
         Ok(unsafe { CFRetained::from_raw(ptr) })
     }
 
-    /// Sets an attribute value.
+    /// Sets an attribute value (a window write: the wake's window list is stale after it,
+    /// [`super::windows::note_write`]).
     pub fn set_attribute(&self, name: &str, value: &CFType) -> AxResult<()> {
+        super::windows::note_write();
         let attr = CFString::from_str(name);
         // SAFETY: valid element, attribute name and CF value.
         AxError::check(unsafe { self.0.set_attribute_value(&attr, value) })
     }
 
-    /// Performs an action such as `AXRaise`.
+    /// Performs an action such as `AXRaise` (a window write, as [`Self::set_attribute`]).
     pub fn perform_action(&self, name: &str) -> AxResult<()> {
+        super::windows::note_write();
         let action = CFString::from_str(name);
         // SAFETY: valid element and action name.
         AxError::check(unsafe { self.0.perform_action(&action) })

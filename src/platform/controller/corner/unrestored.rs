@@ -191,7 +191,7 @@ impl Controller {
         }
         let _quiet = enhanced_ui::Batch::open();
         self.corner.unrestored_checked = now;
-        let list = windows::list_windows();
+        let list = windows::wake_list();
         let mut scan: Option<recovery::ScanDisplays> = None;
         let mut tabs: Option<hidden_tabs::Tabs> = None;
         let mut shown: Option<BTreeSet<u32>> = None;
