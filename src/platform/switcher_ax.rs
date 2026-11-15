@@ -8,14 +8,17 @@
 //! button selected (under 1 ms). The list comes ~180 ms after the first Tab. [`read`] looks
 //! for a Dock child whose role or subrole names a switcher, takes the selection from
 //! `AXSelectedChildren` (else the item whose `AXSelected` is true), and names its app by
-//! `AXURL` when an item has one, else by its title matched to one running app's name (the
-//! caller may map its place in the order instead, [`Read::index`]). [`dump`] and [`list`]
+//! `AXURL` when an item has one, else by its title matched to one running app under its own
+//! name, its bundle's file name (what the switcher shows: "Visual Studio Code" for the app
+//! named "Code") or its Info.plist's names (the caller may map its place in the order
+//! instead, [`Read::index`]). [`dump`] and [`list`]
 //! (`ctl debug-cmd-tab`, `ctl debug-switcher`) print what the Dock shows.
 //!
 //! Every call runs at [`SWITCHER_AX_SECONDS`]; the first call the Dock leaves unanswered ends
 //! the read.
 
 use objc2_app_kit::NSWorkspace;
+use objc2_foundation::{NSBundle, NSString};
 use serde_json::{Value, json};
 
 use super::ax::{AxElement, AxError, AxResult};
@@ -159,23 +162,62 @@ fn app_of(path: Option<&str>, title: Option<&str>) -> (Option<i32>, &'static str
         return (Some(pid), "url");
     }
     if let Some(title) = title {
-        let names: Vec<(String, i32)> = NSWorkspace::sharedWorkspace()
-            .runningApplications()
+        let apps = NSWorkspace::sharedWorkspace().runningApplications();
+        // The cheap names first (the app's own name, its bundle's file name); the bundle's
+        // Info.plist names only when they name none.
+        let cheap: Vec<AppNames> = apps
             .iter()
-            .filter_map(|a| Some((a.localizedName()?.to_string(), a.processIdentifier())))
+            .map(|a| {
+                let mut names: Vec<String> = a.localizedName().map(|n| n.to_string()).into_iter().collect();
+                names.extend(a.bundleURL().and_then(|u| u.path()).and_then(|p| file_name(&p.to_string())));
+                AppNames { pid: a.processIdentifier(), names }
+            })
             .collect();
-        if let Some(pid) = only_named(&names, title) {
+        if let Some(pid) = only_named(&cheap, title) {
+            return (Some(pid), "title");
+        }
+        let full: Vec<AppNames> = apps
+            .iter()
+            .zip(cheap)
+            .map(|(a, mut n)| {
+                if let Some(bundle) = a.bundleURL().and_then(|u| NSBundle::bundleWithURL(&u)) {
+                    for key in ["CFBundleDisplayName", "CFBundleName"] {
+                        if let Some(v) = bundle.objectForInfoDictionaryKey(&NSString::from_str(key)).and_then(|v| v.downcast::<NSString>().ok()) {
+                            n.names.push(v.to_string());
+                        }
+                    }
+                }
+                n
+            })
+            .collect();
+        if let Some(pid) = only_named(&full, title) {
             return (Some(pid), "title");
         }
     }
     (None, "unmatched")
 }
 
-/// The one app named `title` among `names` (`None` for none or several).
-fn only_named(names: &[(String, i32)], title: &str) -> Option<i32> {
-    let mut found = names.iter().filter(|(n, _)| n == title).map(|(_, pid)| *pid);
+/// The names a running app may show under in the switcher: its own (`localizedName`: "Code"),
+/// its bundle's file name ("Visual Studio Code" of "Visual Studio Code.app", what the switcher
+/// shows, live 11-15), its Info.plist's display name and name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AppNames {
+    pid: i32,
+    names: Vec<String>,
+}
+
+/// The bundle's file name without ".app" (`path`: the bundle's path).
+fn file_name(path: &str) -> Option<String> {
+    let last = path.trim_end_matches('/').rsplit('/').next()?;
+    let name = last.strip_suffix(".app").unwrap_or(last);
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// The one app that shows as `title` under any of its names (`None` for none or several).
+fn only_named(apps: &[AppNames], title: &str) -> Option<i32> {
+    let mut found = apps.iter().filter(|a| a.names.iter().any(|n| n == title)).map(|a| a.pid);
     let first = found.next()?;
-    found.next().is_none().then_some(first)
+    found.all(|p| p == first).then_some(first)
 }
 
 /// The switcher's list as the Dock shows it now (`ctl debug-switcher`): found or not, the
@@ -268,12 +310,37 @@ mod tests {
         assert!(!is_switcher("AXList", "AXSectionList"));
     }
 
+    fn app(pid: i32, names: &[&str]) -> AppNames {
+        AppNames { pid, names: names.iter().map(|n| n.to_string()).collect() }
+    }
+
     #[test]
     fn a_title_names_an_app_only_when_one_app_has_it() {
-        let names = vec![("Mail".to_string(), 10), ("Notes".to_string(), 20), ("Notes".to_string(), 21)];
-        assert_eq!(only_named(&names, "Mail"), Some(10));
-        assert_eq!(only_named(&names, "Notes"), None, "two apps of that name");
-        assert_eq!(only_named(&names, "Chat"), None);
+        let apps = vec![app(10, &["Mail"]), app(20, &["Notes"]), app(21, &["Notes"])];
+        assert_eq!(only_named(&apps, "Mail"), Some(10));
+        assert_eq!(only_named(&apps, "Notes"), None, "two apps of that name");
+        assert_eq!(only_named(&apps, "Chat"), None);
+    }
+
+    /// Live 11-15: the switcher shows the bundle's file name, not `localizedName`.
+    #[test]
+    fn a_title_matches_the_bundles_file_name_as_well_as_the_apps_own_name() {
+        let code = |path: &str| file_name(path).expect("a name");
+        assert_eq!(code("/Applications/Visual Studio Code.app"), "Visual Studio Code");
+        assert_eq!(code("/Applications/Visual Studio Code.app/"), "Visual Studio Code");
+        assert_eq!(code("/tmp/target/SM Fixture Stages.app"), "SM Fixture Stages");
+        assert_eq!(file_name("/"), None);
+        let apps = vec![
+            app(10, &["Code", "Visual Studio Code"]),
+            app(20, &["SM Fixture", "SM Fixture Stages"]),
+            app(30, &["SM Fixture", "SM Fixture Stages A"]),
+            app(40, &["Mail", "Mail"]),
+        ];
+        assert_eq!(only_named(&apps, "Visual Studio Code"), Some(10), "the switcher's title of VS Code");
+        assert_eq!(only_named(&apps, "Code"), Some(10), "its own name still matches");
+        assert_eq!(only_named(&apps, "SM Fixture Stages"), Some(20));
+        assert_eq!(only_named(&apps, "SM Fixture"), None, "two fixtures share their own name");
+        assert_eq!(only_named(&apps, "Mail"), Some(40), "one app under two equal names is one app");
     }
 
     #[test]
