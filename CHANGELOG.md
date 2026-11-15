@@ -39,6 +39,14 @@
   when that other window is hidden too. A click on the Dock item of the app in front whose
   other window waits in a stage of another Desktop goes there at the first click, not the
   second.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a stage brought in
+  front by ⌘Tab while the screen slides to another Desktop and back keeps its windows. After
+  a few such slides they were taken for windows shown on every Desktop: they left their
+  stage, stayed on screen over every other stage, and a drag of one onto the strip did
+  nothing. A window on screen that no stage holds now joins the stage in front when it is
+  dragged onto the strip, or when a card is clicked or an app is brought forward while the
+  stage in front shows nothing; a window shown on every Desktop can be dragged onto the
+  strip too.
 
 ## 1.8.5 — 2026-11-12
 
