@@ -1128,6 +1128,21 @@ impl Observer {
         ids
     }
 
+    /// Re-reads app `pid`'s window list now and tracks the windows not tracked yet, without
+    /// reporting them as [`WinEvent::Found`]: the caller places them (a window tab selected,
+    /// which its app announces with no notification: round tab-lost). Logged at info each.
+    pub fn rescan_app_now(&mut self, pid: i32) -> Vec<u32> {
+        if !self.observing {
+            return Vec::new();
+        }
+        let cg = cg_lookup();
+        let ids = self.rescan_app_quietly(pid, &cg);
+        for &id in &ids {
+            self.log_window("window found (a tab selected)", id);
+        }
+        ids
+    }
+
     /// After a Space change: re-reads every observed app's window list (most apps list only
     /// the current Space's windows) and returns the windows tracked for the first time,
     /// without reporting them as [`WinEvent::Found`]: the controller places them as the
