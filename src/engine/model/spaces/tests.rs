@@ -1787,6 +1787,20 @@ mod arranged_ahead {
             assert!(acts.is_empty());
         }
         assert!(cmd_tab(&mac, &mut keys, Key::Command(false), None).is_empty(), "no switcher up: nothing");
+        // The live order of 11-15: the Dock's list gone 1 ms after Escape's key down, the
+        // monitor's Escape after it: the list gone decides nothing, Escape takes it back.
+        let mut keys = switcher::Switcher::default();
+        assert_eq!(cmd_tab(&mac, &mut keys, tab(false), None).is_empty(), !spaces);
+        let t0 = std::time::Instant::now();
+        keys.list_gone(t0);
+        assert_eq!(keys.gone_due(t0 + std::time::Duration::from_millis(20)), switcher::Heard::Nothing, "not decided at the list gone");
+        let acts = cmd_tab(&mac, &mut keys, Key::Down { code: switcher::KEY_ESCAPE, cmd: true, shift: false }, lent);
+        if spaces {
+            assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher was cancelled" }], "Escape after the list gone: back");
+        } else {
+            assert!(acts.is_empty());
+        }
+        assert_eq!(keys.gone_due(t0 + switcher::GONE_WAIT * 2), switcher::Heard::Nothing, "nothing left for the wait");
         // Mail selected, then a key the keys do not follow (H hides it): back.
         let mut keys = switcher::Switcher::default();
         cmd_tab(&mac, &mut keys, tab(false), None);

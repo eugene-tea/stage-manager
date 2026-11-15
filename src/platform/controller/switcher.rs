@@ -22,9 +22,12 @@
 //! whose switch takes it as after a Dock press ([`super::arrival::LEND_WAIT`] from the
 //! release, then back unshown).
 //!
-//! Nothing is polled: the Dock is asked at a switcher key and at its own notices; the list
-//! gone (`AXUIElementDestroyed` with the switcher up) counts as the release, so a window put
-//! home goes back [`super::arrival::LEND_WAIT`] later unless its app's activation came. The
+//! Nothing is polled: the Dock is asked at a switcher key and at its own notices. The list
+//! gone (`AXUIElementDestroyed` with the switcher up) decides nothing by itself: the list goes
+//! ~1 ms after Escape's or ⌘'s key, before the monitor's event (live 11-15), so that key
+//! decides; with none within [`switcher::GONE_WAIT`] (the fast tick, armed only then) it
+//! counts as the release, and a window put home goes back [`super::arrival::LEND_WAIT`]
+//! later unless its app's activation came. The
 //! tick asks the live modifiers only while the switcher is up (a release the monitor
 //! missed). The Corner engine: [`Model::dock_home`] answers nothing, nothing is read or put
 //! home.
@@ -330,8 +333,9 @@ impl Controller {
 
     /// A notice from the Dock (`name`, [`NOTICES`]): the switcher's list made or its selection
     /// changed reads the selection again and corrects the window put home; the list gone
-    /// with the switcher still up counts as the release (Escape's own key, when heard, came
-    /// first). The list made while the keys missed the Tab opens the switcher, its selection
+    /// with the switcher still up waits for the key on its way (Escape: back; ⌘ up: kept for
+    /// the activation), and with none within [`switcher::GONE_WAIT`] counts as the release
+    /// ([`Self::switcher_fast_tick`]). The list made while the keys missed the Tab opens the switcher, its selection
     /// the Dock's only. Nothing when the switcher is down otherwise (the Dock's menus).
     pub fn switcher_notice(&mut self, ob: &Observer, name: &str) {
         if !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
@@ -360,12 +364,29 @@ impl Controller {
                 if self.switcher.dock.is_some_and(|d| switcher_ax::read(d) != switcher_ax::Read::NoSwitcher) {
                     return;
                 }
-                let steps = self.switcher.keys.steps();
-                self.switcher.keys.reset();
-                tracing::info!("cmd-tab: the Dock's switcher is gone before ⌘'s release was heard: taken as the release");
-                self.switcher_heard(ob, Heard::Released { steps }, now);
+                // Escape or ⌘'s release is on its way (the list goes ~1 ms after the key, the
+                // monitor's event comes later): it decides; else the fast tick after GONE_WAIT.
+                self.switcher.keys.list_gone(now);
+                tracing::debug!("cmd-tab: the Dock's switcher list is gone; the key on its way decides");
             }
             _ => {}
+        }
+    }
+
+    /// True while the Dock's list is gone and its key not heard yet (the fast tick, at most
+    /// [`switcher::GONE_WAIT`]).
+    pub(super) fn switcher_wants_fast_tick(&self) -> bool {
+        self.switcher.keys.waits_gone()
+    }
+
+    /// The fast tick (and the tick): the Dock's list gone [`switcher::GONE_WAIT`] ago with no
+    /// key since is taken as ⌘'s release (a window put home then goes back
+    /// [`super::arrival::LEND_WAIT`] later unless its app's activation came).
+    pub(super) fn switcher_fast_tick(&mut self, ob: &Observer, now: Instant) {
+        let heard = self.switcher.keys.gone_due(now);
+        if heard != Heard::Nothing {
+            tracing::info!("cmd-tab: the Dock's switcher is gone and no key came for it: taken as the release");
+            self.switcher_heard(ob, heard, now);
         }
     }
 
@@ -373,6 +394,7 @@ impl Controller {
     /// missed it) counts as the release; a switcher with no key for [`SWITCHER_MAX`] is
     /// forgotten. Nothing is read while it is down.
     pub(super) fn switcher_tick(&mut self, ob: &Observer, now: Instant) {
+        self.switcher_fast_tick(ob, now);
         if !self.switcher.keys.is_open() {
             return;
         }

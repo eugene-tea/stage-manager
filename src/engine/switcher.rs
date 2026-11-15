@@ -26,6 +26,8 @@
 //! The platform prefers the switcher's own selection, read from the Dock's Accessibility at
 //! these key events, over [`predict`]; the decision is the same either way.
 
+use std::time::{Duration, Instant};
+
 use super::model::{Pid, WindowId};
 
 /// The Tab key's virtual key code.
@@ -82,11 +84,19 @@ pub enum Heard {
     Lost,
 }
 
+/// How long after the Dock's switcher list is gone with no key heard for it the switcher is
+/// taken as let go ([`Switcher::gone_due`]). Live 11-15: the list goes 1 ms after Escape's
+/// key down, the monitor's Escape comes later; ⌘'s release likewise.
+pub const GONE_WAIT: Duration = Duration::from_millis(150);
+
 /// The switcher as the keys show it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Switcher {
     /// The switcher is up, with its selection this far from the app in front (`None`: lost).
     open: Option<Option<i32>>,
+    /// The Dock's list went at this time with the switcher still up for the keys: Escape or
+    /// ⌘'s release is on its way ([`Switcher::list_gone`]).
+    gone: Option<Instant>,
 }
 
 impl Switcher {
@@ -110,11 +120,49 @@ impl Switcher {
 
     /// Forgets the switcher (⌘ found let go without its key event): true when it was up.
     pub fn reset(&mut self) -> bool {
+        self.gone = None;
         self.open.take().is_some()
+    }
+
+    /// The Dock's switcher list went at `at` (`AXUIElementDestroyed`) while the keys still have
+    /// it up: nothing is decided now, the key on its way (Escape: cancelled; ⌘ up: released)
+    /// decides, else [`Self::gone_due`] after [`GONE_WAIT`].
+    pub fn list_gone(&mut self, at: Instant) {
+        if self.open.is_some() && self.gone.is_none() {
+            self.gone = Some(at);
+        }
+    }
+
+    /// True while a list gone waits for its key.
+    pub fn waits_gone(&self) -> bool {
+        self.gone.is_some()
+    }
+
+    /// The list gone [`GONE_WAIT`] ago with no key since: the switcher is taken as let go now
+    /// ([`Heard::Released`]); else nothing.
+    pub fn gone_due(&mut self, now: Instant) -> Heard {
+        match self.gone {
+            Some(at) if now.saturating_duration_since(at) >= GONE_WAIT => {
+                self.gone = None;
+                match self.open.take() {
+                    Some(steps) => Heard::Released { steps },
+                    None => Heard::Nothing,
+                }
+            }
+            _ => Heard::Nothing,
+        }
     }
 
     /// Follows one key event.
     pub fn hear(&mut self, key: Key) -> Heard {
+        let heard = self.hear_key(key);
+        if self.open.is_none() {
+            self.gone = None;
+        }
+        heard
+    }
+
+    fn hear_key(&mut self, key: Key) -> Heard {
         match key {
             Key::Command(true) => Heard::Nothing,
             Key::Command(false) => match self.open.take() {
@@ -314,6 +362,41 @@ mod tests {
         s.open_unfollowed();
         assert!(s.is_open() && s.steps().is_none(), "the Dock shows it, its Tab unheard");
         assert_eq!(s.hear(Key::Command(false)), Heard::Released { steps: None });
+    }
+
+    /// Live 11-15: Escape's key down at 454 ms, the Dock's list gone at 455 ms, the monitor's
+    /// Escape after. The list gone decides nothing: the Escape that follows cancels.
+    #[test]
+    fn the_list_gone_waits_for_the_key_on_its_way() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut s = Switcher::default();
+        s.hear(tab(false));
+        s.list_gone(ms(455));
+        assert!(s.waits_gone() && s.is_open());
+        assert_eq!(s.gone_due(ms(470)), Heard::Nothing, "too soon: the key is on its way");
+        assert_eq!(s.hear(down(KEY_ESCAPE)), Heard::Cancelled, "Escape decides");
+        assert!(!s.waits_gone());
+        assert_eq!(s.gone_due(ms(700)), Heard::Nothing, "nothing left to decide");
+        // ⌘ up after the list went: released as before.
+        let mut s = Switcher::default();
+        s.hear(tab(false));
+        s.list_gone(ms(0));
+        assert_eq!(s.hear(Key::Command(false)), Heard::Released { steps: Some(1) });
+        assert!(!s.waits_gone());
+        // No key at all: released after the wait.
+        let mut s = Switcher::default();
+        s.hear(tab(false));
+        s.hear(tab(false));
+        s.list_gone(ms(0));
+        s.list_gone(ms(100));
+        assert_eq!(s.gone_due(ms(149)), Heard::Nothing);
+        assert_eq!(s.gone_due(ms(150)), Heard::Released { steps: Some(2) }, "the first notice's time counts");
+        assert!(!s.is_open() && !s.waits_gone());
+        // A list gone with the switcher down (another Dock element) waits for nothing.
+        let mut s = Switcher::default();
+        s.list_gone(ms(0));
+        assert!(!s.waits_gone());
     }
 
     #[test]
