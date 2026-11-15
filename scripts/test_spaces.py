@@ -1253,6 +1253,9 @@ def _dock_home_cases(d1, d2):
     if not check(x is not None, "dock home 2: the fixture app active on Desktop 2 (Fixture 3's stage in front)"):
         return
     time.sleep(1.0)
+    # This click is meant to change the Desktop: `go` armed the watcher for Desktop 2, so it is
+    # paused again (armed, it stopped the run at the change, live 11-15 under Spaces).
+    WATCH.pause()
     t0 = time.time()
     r = ctl("debug-dock-click", ts.FIX_ID, "real")
     check(r.get("ok"), f"dock home 2: the fixture app's Dock item got a posted click ({r.get('error') or 'ok'})")
