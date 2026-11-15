@@ -116,6 +116,8 @@ pub fn tick_status() -> serde_json::Value {
 /// the tick looks at, and a shortcut that does comes with its own notices).
 fn stirs(cmd: &WmCommand) -> bool {
     match cmd {
+        // ⌘ pressed or let go alone moves nothing; the Tab that opens ⌘Tab's switcher stirs.
+        WmCommand::Input(e, _) if e.kind == input::InputKind::CommandKey => false,
         WmCommand::Input(e, _) => e.kind != input::InputKind::KeyDown || e.cmd || e.other_modifiers,
         _ => true,
     }
@@ -516,6 +518,26 @@ unsafe extern "C-unwind" fn ax_callback(
         }
     });
     // A focus held for a Desktop slide is looked at on the fast tick.
+    arm_fast_tick();
+    pace_tick(false);
+}
+
+/// The Dock's Accessibility notices about ⌘Tab's switcher (round cmd-tab): the list made,
+/// its selection changed, an element gone ([`Controller::switcher_notice`]). Registered on
+/// the Dock's application element on the WM run loop.
+pub(super) unsafe extern "C-unwind" fn switcher_ax_callback(
+    _observer: NonNull<AXObserver>,
+    _element: NonNull<AXUIElement>,
+    notification: NonNull<CFString>,
+    _refcon: *mut c_void,
+) {
+    // SAFETY: AX passes a live notification name for the callback's duration.
+    let name = unsafe { notification.as_ref() }.to_string();
+    guarded_state("the switcher's AX callback", "switcher AX callback", &name, |s| {
+        if !safety::quit_requested() {
+            s.controller.switcher_notice(&s.observer, &name);
+        }
+    });
     arm_fast_tick();
     pace_tick(false);
 }
@@ -1274,6 +1296,8 @@ mod tests {
         assert!(!stirs(&event(InputKind::KeyDown, false, false)), "typing");
         assert!(stirs(&event(InputKind::KeyDown, true, false)), "a ⌘ shortcut");
         assert!(stirs(&event(InputKind::KeyDown, false, true)), "a ⌃ or ⌥ key (Desktop switches, Mission Control)");
+        assert!(!stirs(&event(InputKind::CommandKey, true, false)), "⌘ pressed alone");
+        assert!(!stirs(&event(InputKind::CommandKey, false, false)), "⌘ let go alone");
         assert!(stirs(&event(InputKind::MouseDown, false, false)));
         assert!(stirs(&event(InputKind::MouseUp, false, false)));
         assert!(stirs(&event(InputKind::OtherMouseDown, false, false)));

@@ -8810,6 +8810,97 @@ def phase_tabs():
     stop_fixture()
 
 
+def cmd_tab_probe(*words, wait=8.0):
+    """Round cmd-tab: `ctl debug-cmd-tab WORDS` (a posted ⌘Tab: cancel or release, Tabs, hold,
+    nolend), then its report once the probe says it is done (or after `wait` seconds). The
+    start reply is under "start"."""
+    start = ctl("debug-cmd-tab", *words)
+    if not start.get("ok"):
+        return {"ok": False, "start": start, "error": start.get("error")}
+    end = time.time() + wait
+    r = {}
+    while time.time() < end:
+        time.sleep(0.5)
+        r = ctl("debug-cmd-tab", "result")
+        if r.get("done"):
+            break
+    r["start"] = start
+    return r
+
+
+def say_cmd_tab_report(r, label):
+    """Prints what a ⌘Tab probe found: the Dock's switcher (each sample, and the switcher's
+    list in the dump while it was up), what the app's input monitor heard and did, what the
+    probe's own event tap saw, and the Space change after ⌘'s release. App names appear (the
+    switcher's items); nothing here is written to the repo."""
+    say(f"  -- {label}: {r.get('outcome') or r.get('error')} (released at {r.get('released_ms')} ms; "
+        f"expected {r.get('start', {}).get('expected_bundle')}, order {r.get('start', {}).get('order')})")
+    for sm in r.get("samples", []):
+        say(f"     dock {sm['ms']:>5} ms {sm['label']:<14} {sm['read']}; items {sm.get('items')} index {sm.get('index')} "
+            f"pid {sm.get('pid')} ({sm.get('matched')}) {sm.get('took_us')} us")
+    for ev in r.get("events", []):
+        say(f"     {ev['kind']:<12} {ev['ms']:>5} ms {ev['what']}")
+    for name in ("dump_before", "dump_up"):
+        d = r.get(name) or {}
+        lists = d.get("lists", [])
+        say(f"     {name}: {d.get('children')} children of the Dock" + (f" ({d['error']})" if d.get("error") else ""))
+        for li in lists:
+            items = [f"{i.get('role')}/{i.get('subrole')} {i.get('title')!r} sel={i.get('selected')}" for i in li.get("items", [])[:6]]
+            say(f"       {li.get('role')}/{li.get('subrole')} {li.get('title')!r}: {li.get('children')} items, "
+                f"selected_children {li.get('selected_children')}; attributes {li.get('attributes')}")
+            say(f"         first item's attributes {li.get('first_child_attributes')}")
+            for it in items:
+                say(f"         {it}")
+    if r.get("list_up"):
+        lu = r["list_up"]
+        say(f"     the switcher's list while up: found {lu.get('found')}, items {lu.get('items')}, "
+            f"selected {lu.get('selected_index')} {lu.get('selected_title')!r} (pid {lu.get('selected_pid')})")
+    shown = [sm for sm in r.get("samples", []) if sm.get("read") not in ("no switcher in the Dock's Accessibility", "the Dock did not answer")]
+    heard = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "heard"]
+    tap = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "tap"]
+    say(f"     summary: the Dock showed the switcher: {bool(shown)}"
+        + (f" (first at {shown[0]['ms']} ms, '{shown[0]['label']}', {shown[0]['read']})" if shown else "")
+        + f"; the monitor heard {len(heard)} switcher event(s); the tap saw {len(tap)} key event(s)")
+
+
+def phase_cmdtab_probe():
+    """Round cmd-tab, the probe (no activation): with the fixture's two windows managed and
+    the fixture in front, a posted ⌘Tab (⌘ down, Tab, held, Escape, ⌘ up), twice: one Tab
+    and three Tabs, each held 400 ms (past the Dock's list at ~180 ms). Escape goes before ⌘'s release, so nothing is
+    activated. The report says whether the Dock's Accessibility shows ⌘Tab's switcher and
+    its selection (and how soon after the Tab), what the app's input monitor heard (⌘, each
+    Tab, Escape, ⌘'s release) and decided, and what an event tap made for the probe sees.
+    Run it with SM_ENGINE=spaces (under the Corner engine the app follows no switcher: only
+    the Dock's samples and the tap mean anything). Not in the default phases (it posts ⌘Tab:
+    run it while nobody types)."""
+    say("\n== cmd-tab probe: what the Dock and the input monitor show of ⌘Tab's switcher (Escape before ⌘'s release) ==")
+    stop_app()
+    stop_fixture()
+    start_fixture(2)
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "cmd-tab probe: the app manages the fixture's two windows"):
+        stop_app()
+        stop_fixture()
+        return
+    subprocess.run(["open", FIX_APP], capture_output=True)
+    time.sleep(1.0)
+    before = state()
+    for words in (("cancel", "1", "400"), ("cancel", "3", "400")):
+        r = cmd_tab_probe(*words)
+        check(r.get("ok") and r.get("done"), f"cmd-tab probe {' '.join(words)}: the probe ran ({r.get('error') or r.get('outcome')})")
+        say_cmd_tab_report(r, f"debug-cmd-tab {' '.join(words)}")
+        heard = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "heard"]
+        if not any("Selected" in h for h in heard):
+            skip(f"cmd-tab probe {' '.join(words)}: the input monitor heard the switcher's Tab",
+                 "no Tab reached the global monitor while ⌘ was held: the pre-signal needs another source (see the tap's lines)")
+        time.sleep(1.0)
+    after = state()
+    check(after.get("active") == before.get("active") and after.get("space") == before.get("space"),
+          f"cmd-tab probe: the same stage in front on the same Desktop (nothing activated): {before.get('active')} then {after.get('active')}")
+    stop_app()
+    stop_fixture()
+
+
 def main():
     phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
@@ -8831,7 +8922,8 @@ def main():
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
-             "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort}[p]()
+             "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort,
+             "cmdtab-probe": phase_cmdtab_probe}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

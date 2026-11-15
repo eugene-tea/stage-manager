@@ -163,8 +163,8 @@ pub trait WindowEngine: Send + Sync {
 
     /// Puts window `id`, hidden by this engine off every Desktop, on its own Desktop at its
     /// frame for a while, still counted hidden: macOS counts it there from now on when it
-    /// picks a Desktop for its app's activation (a Dock press under the Spaces engine,
-    /// [`crate::engine::model::Model::dock_home`]). It shows at its old place in the window
+    /// picks a Desktop for its app's activation (a Dock press, or ⌘Tab's switcher selecting
+    /// the app, under the Spaces engine: [`crate::engine::model::Model::dock_home`]). It shows at its old place in the window
     /// order; the model's show of it later asks nothing more, and [`Self::take_back`] hides it
     /// again. True when it is on its Desktop now. The Corner engine: false (a parked window is
     /// on its Desktop already).

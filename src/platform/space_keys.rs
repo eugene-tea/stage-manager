@@ -232,7 +232,8 @@ fn boolean(value: &CFType) -> Option<bool> {
     value.downcast_ref::<CFNumber>().and_then(|n| n.as_i64()).map(|n| n != 0)
 }
 
-fn post_key(keycode: u16, down: bool, flags: u64) -> Result<(), String> {
+/// Posts one key event (`down` or up) with modifier `flags` at the HID tap.
+pub(crate) fn post_key(keycode: u16, down: bool, flags: u64) -> Result<(), String> {
     let event = CGEvent::new_keyboard_event(None, keycode, down).ok_or("cannot create a key event")?;
     CGEvent::set_flags(Some(&event), CGEventFlags(flags));
     CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
@@ -265,8 +266,8 @@ pub fn post(key: &SpaceKey, numpad: bool) -> Result<(), String> {
 }
 
 /// The Command key's virtual key code and flag.
-const COMMAND_KEY: u16 = 55;
-const COMMAND: u64 = 0x10_0000;
+pub(crate) const COMMAND_KEY: u16 = 55;
+pub(crate) const COMMAND: u64 = 0x10_0000;
 
 /// Posts ⌘ and one key (⌘M): Command down, the key down and up with the Command flag,
 /// Command up with no flags (the session's modifier state clean after).

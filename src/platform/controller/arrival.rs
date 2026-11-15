@@ -51,6 +51,7 @@ use super::{Controller, cards_in};
 use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
+use crate::engine::switcher::{LetGo, LetGoStep};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Display, DisplayId, Model, Observation, SpaceId, StageId, WindowId};
 use crate::platform::ax::{AxElement, AxError, AxResult, names};
@@ -567,13 +568,19 @@ pub(super) struct DockSeen {
     predicted: Option<u64>,
 }
 
-/// A window put on the Desktop shown at a Dock press, still counted hidden, so macOS
-/// activates its app here ([`crate::engine::model::Model::dock_home`]; the Spaces engine).
+/// A window put on the Desktop shown at a Dock press, or while ⌘Tab's switcher selects its
+/// app, still counted hidden, so macOS activates its app here
+/// ([`crate::engine::model::Model::dock_home`]; the Spaces engine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct Lent {
     pub(super) window: WindowId,
     pub(super) pid: i32,
+    /// When it was put home: a Dock press's [`LEND_WAIT`] counts from here.
     pub(super) at: Instant,
+    /// Put home for ⌘Tab's switcher (round cmd-tab, [`super::switcher`]): kept while the
+    /// switcher is up, then only if its app is activated soon after the switcher closes
+    /// ([`LetGo`]). `None`: a Dock press's.
+    pub(super) switcher: Option<LetGo>,
 }
 
 /// A window put home at a Dock press goes back into its stage Space when its stage has not
@@ -583,18 +590,21 @@ pub const LEND_WAIT: Duration = Duration::from_millis(1000);
 
 /// What becomes of a window put home at a Dock press, at a look ([`lent_step`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LentStep {
+pub(super) enum LentStep {
     /// Still waiting for its stage to come in front.
     Keep,
     /// The model shows it, or its stage is in front (the switch shows it): nothing to do.
     Forget,
     /// No switch came for it: back into its stage Space.
     TakeBack,
+    /// Put home for ⌘Tab's switcher, and no activation of its app came once the switcher
+    /// closed: the switcher was cancelled (Escape, a click outside it); back unshown.
+    NoActivation,
 }
 
-/// The step for a window put home `waited` ago: `parked` while the model counts it hidden,
-/// `in_front` once its stage is the active one of its Desktop.
-fn lent_step(parked: bool, in_front: bool, waited: Duration) -> LentStep {
+/// The step for a window put home at a Dock press `waited` ago: `parked` while the model
+/// counts it hidden, `in_front` once its stage is the active one of its Desktop.
+pub(super) fn lent_step(parked: bool, in_front: bool, waited: Duration) -> LentStep {
     if !parked || in_front {
         LentStep::Forget
     } else if waited >= LEND_WAIT {
@@ -1151,6 +1161,7 @@ impl Controller {
             || self.slide_held()
             || self.upkeep_wants_fast_tick(now)
             || self.fresh_waiting()
+            || self.switcher_wants_fast_tick()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -1161,6 +1172,12 @@ impl Controller {
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
         let now = Instant::now();
+        // ⌘Tab's switcher list gone with no key for it yet: decided after its wait; a window
+        // put home for it taken back when no activation of its app came.
+        self.switcher_fast_tick(ob, now);
+        if self.lent_awaits_activation() {
+            self.expire_lent(now);
+        }
         // A newly opened app's window seen by AX before its first frame: placed as it shows.
         self.offer_fresh(ob, now);
         // The engine's share (the Corner engine: its patch after a focus, through Show Desktop).
@@ -1581,16 +1598,33 @@ impl Controller {
         }
     }
 
-    /// About every tick: a window put home at a Dock press whose stage did not come in front
-    /// ([`LEND_WAIT`]) goes back into its stage Space; one the model shows, or whose stage is
-    /// in front, is forgotten (the switch shows it).
+    /// About every tick: a window put home at a Dock press (or for ⌘Tab's switcher, once ⌘
+    /// was let go) whose stage did not come in front ([`LEND_WAIT`]) goes back into its stage
+    /// Space; one the model shows, or whose stage is in front, is forgotten (the switch shows
+    /// it).
     fn expire_lent(&mut self, now: Instant) {
         let Some(lent) = self.lent else { return };
         let (parked, in_front) = self.model.as_ref().map_or((false, false), |m| {
             (m.window(lent.window).is_some_and(|w| w.parked), m.stage_of(lent.window).is_some_and(|s| m.is_active(s)))
         });
-        match lent_step(parked, in_front, now.saturating_duration_since(lent.at)) {
+        let step = match lent.switcher {
+            // Put home for ⌘Tab's switcher: kept while it is up, then only for its app's
+            // activation (the 1 s wait is the Dock press's only).
+            Some(go) if parked && !in_front => match go.step(self.switcher_up(), now, lent.at, LEND_WAIT) {
+                LetGoStep::Keep => LentStep::Keep,
+                LetGoStep::NoActivation => LentStep::NoActivation,
+                LetGoStep::NoSwitch => LentStep::TakeBack,
+            },
+            _ => lent_step(parked, in_front, now.saturating_duration_since(lent.at)),
+        };
+        match step {
             LentStep::Keep => {}
+            LentStep::NoActivation => {
+                self.lent = None;
+                let back = self.engine.take_back(lent.window);
+                tracing::info!(window = lent.window.0, back, "cmd-tab: the window put home for the switcher goes back: no activation came: the switcher was cancelled");
+                crate::platform::switcher_probe::note("taken back", format!("window={} why=no activation came", lent.window.0));
+            }
             LentStep::Forget => {
                 self.lent = None;
                 tracing::debug!(window = lent.window.0, parked, in_front, "dock: the window put home at the press is the switch's now");
@@ -1752,7 +1786,7 @@ impl Controller {
         }
         if let Some(home) = m.dock_home(pid, facts) {
             if self.engine.lend_home(home) {
-                self.lent = Some(Lent { window: home, pid, at: Instant::now() });
+                self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: None });
                 tracing::info!(
                     bundle,
                     pid,

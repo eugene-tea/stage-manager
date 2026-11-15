@@ -55,6 +55,11 @@
   the Dock item of the app in front goes to its window in a stage of another Desktop every
   time. The other Desktop, made ready when the button went down, was sometimes put back
   before the button came up, and a second click was needed.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), ⌘Tab to an app whose
+  windows on the Desktop shown all wait in a stage, while it has a window shown on another
+  Desktop, no longer takes the screen to that Desktop and back: while the app switcher
+  selects the app, its stage's window is made ready on the Desktop shown, and taken back
+  when the selection moves on or the switcher is cancelled.
 
 ## 1.8.5 — 2026-11-12
 

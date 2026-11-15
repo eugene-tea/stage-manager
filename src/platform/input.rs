@@ -5,8 +5,9 @@
 //! - The monitor (main thread) reports every left mouse-down (wallpaper clicks, the start of
 //!   a window drag), left mouse-up (the end of a window drag), right or other button press
 //!   (a user action: it ends the login's settling, nothing more) and key-down, each with the
-//!   Shift and Command flags the user held. Global monitors never see our own windows'
-//!   events.
+//!   Shift and Command flags the user held, and ⌘ pressed or let go
+//!   ([`InputKind::CommandKey`]: ⌘Tab's switcher activates its app at ⌘'s release, round
+//!   cmd-tab). Global monitors never see our own windows' events.
 //! - [`Triggers`] remembers the latest of those user actions, so a window or an activation
 //!   that arrives a little later can tell whether the user held Shift when they caused it
 //!   ("hold Shift to bring things here"). A trigger with Command held is the app switcher
@@ -17,7 +18,7 @@
 //!   ([`drag`]).
 
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -48,6 +49,11 @@ pub enum InputKind {
     OtherMouseDown,
     /// A key pressed.
     KeyDown,
+    /// ⌘ pressed (`cmd` true) or let go (`cmd` false): reported only when ⌘'s state changes,
+    /// never for another modifier, so ⇧ or ⌥ while typing costs nothing. ⌘Tab's switcher
+    /// shows while ⌘ is held after a Tab and activates its app at ⌘'s release
+    /// ([`crate::engine::switcher`]).
+    CommandKey,
 }
 
 /// One user action in another app, global top-left coordinates.
@@ -75,9 +81,18 @@ pub struct InputEvent {
 }
 
 /// The Tab key's virtual key code.
-pub const KEY_TAB: u16 = 48;
+pub const KEY_TAB: u16 = crate::engine::switcher::KEY_TAB;
 /// The ` key's virtual key code (⌘` cycles an app's windows).
-pub const KEY_GRAVE: u16 = 50;
+pub const KEY_GRAVE: u16 = crate::engine::switcher::KEY_GRAVE;
+
+/// ⌘'s state as last reported ([`InputKind::CommandKey`]); main thread.
+static COMMAND_HELD: AtomicBool = AtomicBool::new(false);
+
+/// True when a modifier change with ⌘ `held` now is worth a report: ⌘'s state changed since
+/// the last one (`was`).
+fn command_changed(was: bool, held: bool) -> bool {
+    was != held
+}
 
 impl InputEvent {
     /// A key-down of an app or window switcher, ⌘Tab or ⌘`: the next activation may switch
@@ -112,6 +127,12 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
             moved(point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)));
             return;
         }
+        if event.r#type() == NSEventType::FlagsChanged {
+            let held = event.modifierFlags().contains(NSEventModifierFlags::Command);
+            if !command_changed(COMMAND_HELD.swap(held, Ordering::Relaxed), held) {
+                return;
+            }
+        }
         let Some(kind) = kind_of(event.r#type()) else { return };
         if kind == InputKind::MouseUp {
             LEFT_UPS.fetch_add(1, Ordering::Relaxed);
@@ -121,6 +142,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
         // clickCount and keyCode raise on the other kind of event: ask each only its own.
         let (clicks, key) = match kind {
             InputKind::KeyDown => (0, Some(event.keyCode())),
+            InputKind::CommandKey => (0, None),
             InputKind::MouseDown | InputKind::MouseUp | InputKind::OtherMouseDown => (event.clickCount() as i64, None),
         };
         sink(InputEvent {
@@ -139,6 +161,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
         | NSEventMask::RightMouseDown
         | NSEventMask::OtherMouseDown
         | NSEventMask::KeyDown
+        | NSEventMask::FlagsChanged
         | NSEventMask::MouseMoved;
     let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block)?;
     Some(InputMonitor { token })
@@ -158,6 +181,7 @@ fn kind_of(t: NSEventType) -> Option<InputKind> {
         NSEventType::LeftMouseUp => Some(InputKind::MouseUp),
         NSEventType::RightMouseDown | NSEventType::OtherMouseDown => Some(InputKind::OtherMouseDown),
         NSEventType::KeyDown => Some(InputKind::KeyDown),
+        NSEventType::FlagsChanged => Some(InputKind::CommandKey),
         _ => None,
     }
 }
@@ -175,6 +199,12 @@ pub struct Modifiers {
 pub fn live_modifiers() -> Modifiers {
     let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
     Modifiers { shift: flags.contains(CGEventFlags::MaskShift), cmd: flags.contains(CGEventFlags::MaskCommand) }
+}
+
+/// True when ⌘ is held now, by a person's keyboard or a posted event (the session's combined
+/// state; any thread): ⌘Tab's switcher closed with its release unheard is found so.
+pub fn command_held() -> bool {
+    CGEventSource::flags_state(CGEventSourceStateID::CombinedSessionState).contains(CGEventFlags::MaskCommand)
 }
 
 /// Where the pointer is now, global top-left coordinates (any thread).
@@ -850,6 +880,16 @@ mod tests {
 
     fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {
         InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, clicks, key, stamp: 0.0 }
+    }
+
+    #[test]
+    fn only_a_change_of_command_is_reported() {
+        assert!(command_changed(false, true), "⌘ pressed");
+        assert!(command_changed(true, false), "⌘ let go");
+        assert!(!command_changed(true, true), "⇧ pressed with ⌘ held");
+        assert!(!command_changed(false, false), "⇧ or ⌥ alone");
+        assert_eq!(kind_of(NSEventType::FlagsChanged), Some(InputKind::CommandKey));
+        assert!(!event(InputKind::CommandKey, true, 0, None).is_switcher_key(), "⌘ alone is no switcher key");
     }
 
     #[test]
