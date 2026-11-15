@@ -18,11 +18,11 @@ use crate::platform::windows;
 
 /// How many times the tick puts a window into its stage's Space again before it says so
 /// once and leaves it.
-const HIDE_TRIES: u8 = 3;
+pub(super) const HIDE_TRIES: u8 = 3;
 
 /// How often what the engine keeps for windows and stages that are gone is dropped, and a
 /// window in a stage Space that the engine does not hold is let out.
-const TIDY_EVERY: Duration = Duration::from_secs(10);
+pub(super) const TIDY_EVERY: Duration = Duration::from_secs(10);
 
 /// What the Spaces engine's upkeep keeps between ticks, on the WM thread.
 pub(super) struct SpacesUpkeep {
@@ -100,9 +100,11 @@ impl Controller {
         }
         if now.duration_since(self.spaces.tidied) >= TIDY_EVERY {
             self.spaces.tidied = now;
-            let alive: HashSet<u32> = windows::every_window().iter().map(|w| w.id).collect();
+            // The tick's read of every window, shared with its other duties (read afresh
+            // for the strangers only when the tidy ended a Space).
+            let alive: HashSet<u32> = windows::wake_list().iter().map(|w| w.id).collect();
             spaces.tidy(&alive, |stage| m.stages().iter().any(|s| s.id.0 == stage));
-            spaces.let_strangers_out();
+            spaces.let_strangers_out(&windows::wake_list());
         }
     }
 

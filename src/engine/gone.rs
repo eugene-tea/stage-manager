@@ -50,6 +50,11 @@ impl GoneCheck {
         pids.into_iter().filter(|&p| known(p)).collect()
     }
 
+    /// True while no pid waits for the next pass.
+    pub fn is_empty(&self) -> bool {
+        self.suspects.is_empty()
+    }
+
     /// Forgets everything (observation stopped).
     pub fn clear(&mut self) {
         self.suspects.clear();

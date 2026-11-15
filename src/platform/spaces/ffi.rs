@@ -270,6 +270,8 @@ impl Sky {
     }
 
     pub(crate) fn destroy(&self, route: Route, sid: u64) -> Result<i32, String> {
+        // Ending a Space that holds windows puts them on the Desktop shown.
+        crate::platform::windows::note_write();
         match route {
             Route::Classic => {
                 let f = self.destroy.ok_or("SLSSpaceDestroy is missing")?;
@@ -332,6 +334,7 @@ impl Sky {
     /// The windows into Space `sid`, out of the other Spaces `options` names (a mask of kinds
     /// of Space, as [`ALL_SPACES_MASK`] is).
     pub(crate) fn add_remove_from(&self, route: Route, sid: u64, ids: &[u32], options: i32) -> Result<i32, String> {
+        crate::platform::windows::note_write();
         let arr = wid_array(ids);
         match route {
             Route::Classic => {
@@ -360,6 +363,7 @@ impl Sky {
 
     /// The windows onto the managed Space (a Desktop) `sid`.
     pub(crate) fn move_managed(&self, route: Route, ids: &[u32], sid: u64) -> Result<i32, String> {
+        crate::platform::windows::note_write();
         let arr = wid_array(ids);
         match route {
             Route::Classic => {

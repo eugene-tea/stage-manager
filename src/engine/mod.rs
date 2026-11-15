@@ -48,6 +48,7 @@ pub mod stale_handle;
 pub mod vanished;
 pub mod stage_area;
 pub mod stand_down;
+pub mod tick_pace;
 pub mod wallpaper;
 pub mod window_match;
 #[cfg(test)]

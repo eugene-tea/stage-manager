@@ -55,6 +55,19 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   afresh by id; one unlisted and off screen on two looks a second apart is let go as closed
   (`engine::stale_handle`). Commands go main → WM by channel plus `CFRunLoopPerformBlock`;
   snapshots WM → main via GCD.
+- **The WM tick** (`engine::tick_pace`): the duties no event announces (a window closed or
+  an app gone with no notice, the Space check, the engine's upkeep, the debounced save, the
+  config poll, the controller's own deadlines) run on one timer, every 0.25 s for 3 s after
+  any event that may change windows (an AX notice other than a title change, a workspace
+  notice, a click, a key with ⌘, ⌥ or ⌃, any strip, hotkey, display or ctl command) and
+  while a duty waits on it (`Controller::tick_waits` and the observer's and the thread's
+  own: a switch, a save due, a window counted missing, a stray parked again, a deadline),
+  else every 2 s. The Corner engine caps the rest at 0.75 s while the inert slivers' tap
+  judges presses (it trusts the tick's list for a second). Every duty runs at every tick,
+  so nothing is missed, only caught up to a rest later when nothing happens; at rest every
+  tick is a full pass. The tick's duties share one read of each window list
+  (`windows::wake`), read again after any window write of ours. `ctl state`'s `tick`
+  counts brisk and rest ticks.
 
 ## Window engines (1.9, in progress)
 

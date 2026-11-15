@@ -5,6 +5,7 @@
 //! ([`crate::ui::corner_patch`]).
 
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -150,7 +151,7 @@ impl Controller {
     /// activation raising a parked window undoes it), and has it ordered again when it was
     /// right and is not any more. Returns the list when it read one, for the rest of the tick
     /// ([`crate::platform::corner::sliver_tap::refresh`]).
-    pub(in crate::platform::controller) fn update_patch(&mut self) -> Option<Vec<windows::CgWindow>> {
+    pub(in crate::platform::controller) fn update_patch(&mut self) -> Option<Rc<Vec<windows::CgWindow>>> {
         use crate::ui::corner_patch::PatchPlan;
         let config = self.store.config();
         let (on, reach, space) = (config.windows.corner_patch, config.windows.patch_reach(), self.space_changes);
@@ -176,7 +177,7 @@ impl Controller {
             && self.overview.show_desktop_up(now)
             && let Some(display) = self.model.as_ref().map(|m| m.main_display().frame)
         {
-            let list = windows::on_screen();
+            let list = windows::wake_on_screen();
             self.look_for_overview(&list, display, now);
             early = Some(list);
         }
@@ -207,7 +208,7 @@ impl Controller {
             }
             return None;
         }
-        let list = early.take().unwrap_or_else(windows::on_screen);
+        let list = early.take().unwrap_or_else(windows::wake_on_screen);
         // The screens gone are forgotten (their patches close on the main thread with the
         // display change).
         self.corner.patches.retain(|screen, _| displays.iter().any(|d| d.id.0 == *screen));

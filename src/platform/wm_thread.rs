@@ -25,6 +25,12 @@
 //! Every entry point (command drain, AX callback, timer) runs inside
 //! [`safety::guarded`]: a panic is caught, logged and followed by a registry resync, instead
 //! of killing the thread that owns the windows.
+//!
+//! The housekeeping tick is paced by what happens ([`crate::engine::tick_pace`], round
+//! sm-tick): every 0.25 s for a few seconds after an event that may change windows ([`stirs`],
+//! an AX notice but a title change) and while a duty waits on it ([`WmState::tick_waits`]),
+//! else every 2 s (less while a duty caps it: [`Controller::tick_rest`]). The tick's duties
+//! share one read of the window list ([`windows::wake`]).
 
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
@@ -51,19 +57,21 @@ use super::launch_scan;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
 use super::observe_probe;
-use super::{enhanced_ui, safety, window_engine};
+use super::{enhanced_ui, input, safety, window_engine, windows};
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
 use crate::engine::leftovers::{self, UNPARK_SETTLE};
 use crate::engine::slow_task::{self, SlowTasks};
 use crate::engine::stand_down::{Heard, Logout, Quit, Signal, StandDown, Step, Task, Work, logout_plan, release_plan, resume_plan};
+use crate::engine::tick_pace::{self, Pace, TickPace};
 use crate::ui::strip_model::{StripDrop, StripEvent};
 
 /// Global AX messaging timeout, set on the system-wide element at thread start.
 pub const AX_TIMEOUT_SECONDS: f32 = 0.25;
 
-/// Housekeeping period of the WM run loop (saves, config polling, strip refresh).
+/// Housekeeping period of the WM run loop (saves, config polling, strip refresh) while
+/// something happens; at rest it is longer ([`tick_pace`]).
 const TICK_SECONDS: f64 = 0.25;
 
 /// The fast tick: work that must land within a Desktop slide (~0.25–0.45 s), such as
@@ -75,6 +83,79 @@ const FAST_TICK_SECONDS: f64 = 0.02;
 thread_local! {
     /// The fast tick's timer, armed and disarmed by [`arm_fast_tick`].
     static FAST_TIMER: RefCell<Option<CFRetained<CFRunLoopTimer>>> = const { RefCell::new(None) };
+    /// The housekeeping tick's timer, paced by [`pace_tick`].
+    static TICK_TIMER: RefCell<Option<CFRetained<CFRunLoopTimer>>> = const { RefCell::new(None) };
+}
+
+/// The tick's pace as last set, for `ctl state` ([`tick_status`]).
+#[derive(Debug, Clone, Copy, Default)]
+struct TickStatus {
+    brisk: u64,
+    rest: u64,
+    pace: Option<Pace>,
+}
+
+static TICK_STATUS: std::sync::Mutex<TickStatus> =
+    std::sync::Mutex::new(TickStatus { brisk: 0, rest: 0, pace: None });
+
+/// `ctl state`'s `tick`: how many ticks ran brisk and at rest since the launch, and the pace
+/// set after the last one (`why` it is brisk, or the rest's period). A ctl command stirs the
+/// tick itself, so read the counts across an untouched spell rather than the pace.
+pub fn tick_status() -> serde_json::Value {
+    let s = TICK_STATUS.lock().map(|s| *s).unwrap_or_default();
+    let (pace, why, rest_ms) = match s.pace {
+        Some(Pace::Brisk(why)) => ("brisk", why, None),
+        Some(Pace::Rest(d)) => ("rest", None, Some(d.max(tick_pace::BRISK).as_millis() as u64)),
+        None => ("none", None, None),
+    };
+    serde_json::json!({ "brisk_ticks": s.brisk, "rest_ticks": s.rest, "pace": pace, "why": why, "rest_ms": rest_ms })
+}
+
+/// Whether command `cmd` stirs the tick ([`TickPace::stir`]): everything that may change
+/// windows or that a test waits on, but a plain key (no ⌘, ⌥ or ⌃: typing changes no window
+/// the tick looks at, and a shortcut that does comes with its own notices).
+fn stirs(cmd: &WmCommand) -> bool {
+    match cmd {
+        WmCommand::Input(e, _) => e.kind != input::InputKind::KeyDown || e.cmd || e.other_modifiers,
+        _ => true,
+    }
+}
+
+/// Sets the tick's next firing for its pace now ([`tick_pace::retime`]): after a tick
+/// (`after_tick`), and after every event (the next tick comes sooner when it must). The
+/// rest's cap is asked after a tick only (the inert slivers' answer takes the lock their tap
+/// tries at every press).
+fn pace_tick(after_tick: bool) {
+    let now = Instant::now();
+    let pace = STATE.with(|s| {
+        let mut st = s.try_borrow_mut().ok()?;
+        let st = st.as_mut()?;
+        if after_tick {
+            st.rest = st.controller.tick_rest();
+        }
+        Some(st.pace.pace(now, st.tick_waits(now), st.rest))
+    });
+    let Some(pace) = pace else { return };
+    let was = TICK_STATUS.lock().ok().and_then(|mut s| {
+        if after_tick {
+            match pace {
+                Pace::Brisk(_) => s.brisk += 1,
+                Pace::Rest(_) => s.rest += 1,
+            }
+        }
+        s.pace.replace(pace)
+    });
+    TICK_TIMER.with(|t| {
+        let Some(timer) = t.borrow().as_ref().cloned() else { return };
+        if was.is_none_or(|w| w.tolerance() != pace.tolerance()) {
+            // SAFETY: a valid timer; the tolerance only lets the system fire it a little late.
+            unsafe { timer.set_tolerance(pace.tolerance().as_secs_f64()) };
+        }
+        let cf_now = CFAbsoluteTimeGetCurrent();
+        if let Some(at) = tick_pace::retime(pace, cf_now, timer.next_fire_date(), after_tick) {
+            timer.set_next_fire_date(at);
+        }
+    });
 }
 
 /// Arms the fast tick while the controller wants it, else parks its timer far in the future
@@ -92,9 +173,6 @@ fn arm_fast_tick() {
         }
     });
 }
-
-/// App-observation retries run every this many ticks (about once a second).
-const RETRY_EVERY: u32 = 4;
 
 /// After the main display changes, how long until every allowed app's windows are scanned
 /// for the park zone: macOS puts windows back where they were the last time that display
@@ -278,7 +356,11 @@ struct WmState {
     observer: Observer,
     controller: Controller,
     scanned: bool,
-    ticks: u32,
+    /// The tick's clock: when an event last stirred it, the last full pass ([`tick_pace`]).
+    pace: TickPace,
+    /// The longest rest, as the controller answered after the last tick
+    /// ([`Controller::tick_rest`]).
+    rest: Duration,
     /// Accessibility as last reported by the main thread.
     trusted: bool,
     /// Apple's Stage Manager is on: nothing is arranged.
@@ -371,12 +453,14 @@ fn fast_tick() {
     }
     guarded_state("the WM fast tick", "fast tick", "", |s| s.controller.fast_tick(&mut s.observer));
     arm_fast_tick();
+    pace_tick(false);
 }
 
 /// Handles every queued command (scheduled by `WmHandle::send`). Once Quit is requested,
 /// every command but `Shutdown` is dropped, so Quit never waits behind queued work (a
 /// dropped ctl request gets no reply; its caller times out).
 fn drain() {
+    let mut stirred = false;
     loop {
         let cmd = INBOX.with(|i| i.borrow().as_ref().and_then(|rx| rx.try_recv().ok()));
         let Some(cmd) = cmd else { break };
@@ -384,9 +468,14 @@ fn drain() {
             tracing::debug!("quitting: a queued WM command is dropped");
             continue;
         }
+        stirred |= stirs(&cmd);
         guarded_state("a WM command", cmd.name(), "", |s| s.handle(cmd));
     }
+    if stirred {
+        with_state(|s| s.pace.stir(Instant::now()));
+    }
     arm_fast_tick();
+    pace_tick(false);
 }
 
 /// Periodic housekeeping (none once Quit is requested).
@@ -394,8 +483,13 @@ fn tick() {
     if safety::quit_requested() {
         return;
     }
-    guarded_state("the WM tick", "tick", "", WmState::tick);
+    {
+        // One read of the window list for the tick's duties, until a write of ours.
+        let _wake = windows::wake();
+        guarded_state("the WM tick", "tick", "", WmState::tick);
+    }
     arm_fast_tick();
+    pace_tick(true);
 }
 
 /// The AX observer callback. `refcon` carries the app's pid.
@@ -411,6 +505,11 @@ unsafe extern "C-unwind" fn ax_callback(
     // SAFETY: as above.
     let name = unsafe { notification.as_ref() }.to_string();
     guarded_state("an AX callback", "AX callback", &name, |s| {
+        // A title change moves no window: it does not stir the tick (the strip's label it
+        // may change is presented on the next tick, brought in by the strip's wait).
+        if name != super::ax::notifications::TITLE_CHANGED {
+            s.pace.stir(Instant::now());
+        }
         s.observer.on_notification(pid, element, &name);
         if !safety::quit_requested() {
             s.pump();
@@ -418,6 +517,7 @@ unsafe extern "C-unwind" fn ax_callback(
     });
     // A focus held for a Desktop slide is looked at on the fast tick.
     arm_fast_tick();
+    pace_tick(false);
 }
 
 impl WmState {
@@ -898,8 +998,8 @@ impl WmState {
         if self.logout.cancelled(Instant::now()) {
             self.logout_cancelled("no quit came in time");
         }
-        self.ticks = self.ticks.wrapping_add(1);
-        let full = self.ticks.is_multiple_of(RETRY_EVERY);
+        // About once a second by the clock: every fourth tick while brisk, every tick at rest.
+        let full = self.pace.full_pass(Instant::now());
         // Apps gone without a termination notice (round missed-quit): the pids whose calls
         // failed each tick, the apps with tracked windows about once a second.
         step("reap gone apps", || self.observer.reap_gone(full));
@@ -923,6 +1023,32 @@ impl WmState {
         step("minimize tap", minimize_tap::refresh);
         // An app's enhanced UI a restore could not put back, or held off too long: on again.
         step("enhanced UI sweep", enhanced_ui::sweep);
+    }
+
+    /// Why the tick stays brisk ([`tick_pace`]): the first duty of the thread's own, the
+    /// observer's or the controller's that waits on it ([`Observer::tick_waits`],
+    /// [`Controller::tick_waits`]); `None` when the tick may rest. The thread's own: the
+    /// launch's recovery scan, the rescans queued, a display change's sweep or a leftovers
+    /// look due, a logout's hold, windows taken from an old guardian, an event tap macOS keeps
+    /// off for secure input (switched on again by the tick), an app's enhanced UI held off.
+    fn tick_waits(&self, now: Instant) -> Option<&'static str> {
+        if self.launch_scan.is_some() {
+            Some("the launch scan")
+        } else if !self.rescan.is_empty() || self.display_sweep.is_some() {
+            Some("a rescan")
+        } else if self.leftovers_look.is_some() {
+            Some("a leftovers look")
+        } else if self.logout.holding() {
+            Some("a logout's hold")
+        } else if safety::taken_len() > 0 {
+            Some("windows taken from an old guardian")
+        } else if minimize_tap::off_for_secure_input() || super::corner::sliver_tap::off_for_secure_input() {
+            Some("an event tap off for secure input")
+        } else if enhanced_ui::held_off() {
+            Some("an app's enhanced UI held off")
+        } else {
+            self.observer.tick_waits().or_else(|| self.controller.tick_waits(now))
+        }
     }
 
     /// Whether windows are arranged now: not standing down for Apple's Stage Manager, no
@@ -1074,7 +1200,8 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
         observer,
         controller: Controller::new(),
         scanned: false,
-        ticks: 0,
+        pace: TickPace::new(Instant::now()),
+        rest: tick_pace::REST,
         trusted: false,
         stand_down: StandDown::default(),
         displays: None,
@@ -1099,8 +1226,11 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
     // SAFETY: valid arguments; the block is copied by CoreFoundation.
     let timer = unsafe { CFRunLoopTimer::with_handler(None, first_fire, TICK_SECONDS, 0, 0, Some(&tick_block)) };
     match &timer {
-        // SAFETY: the default-mode constant is a valid static.
-        Some(t) => run_loop.add_timer(Some(t), unsafe { kCFRunLoopDefaultMode }),
+        Some(t) => {
+            // SAFETY: the default-mode constant is a valid static.
+            run_loop.add_timer(Some(t), unsafe { kCFRunLoopDefaultMode });
+            TICK_TIMER.with(|f| *f.borrow_mut() = Some(t.clone()));
+        }
         None => tracing::error!("could not create the WM tick timer"),
     }
 
@@ -1128,6 +1258,28 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
 mod tests {
     use super::*;
     use crate::engine::leftovers;
+
+    /// Round sm-tick: what stirs the tick. Typing does not; a click, a shortcut and every
+    /// other command do.
+    #[test]
+    fn a_plain_key_does_not_stir_the_tick_a_click_or_a_shortcut_does() {
+        use crate::engine::geometry::Point;
+        use input::{InputEvent, InputKind};
+        let event = |kind, cmd, other_modifiers| {
+            WmCommand::Input(
+                InputEvent { kind, at: Point::new(10.0, 10.0), shift: false, cmd, other_modifiers, clicks: 0, key: None, stamp: 0.0 },
+                None,
+            )
+        };
+        assert!(!stirs(&event(InputKind::KeyDown, false, false)), "typing");
+        assert!(stirs(&event(InputKind::KeyDown, true, false)), "a ⌘ shortcut");
+        assert!(stirs(&event(InputKind::KeyDown, false, true)), "a ⌃ or ⌥ key (Desktop switches, Mission Control)");
+        assert!(stirs(&event(InputKind::MouseDown, false, false)));
+        assert!(stirs(&event(InputKind::MouseUp, false, false)));
+        assert!(stirs(&event(InputKind::OtherMouseDown, false, false)));
+        assert!(stirs(&WmCommand::SpaceChanged));
+        assert!(stirs(&WmCommand::ReloadConfig));
+    }
 
     /// The leftovers' time bounds count each Accessibility call at the timeout set here.
     #[test]

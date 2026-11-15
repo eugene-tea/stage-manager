@@ -1,8 +1,18 @@
 //! The window server's view: `CGWindowListCopyWindowInfo` front to back, exclusions and
 //! z-order.
+//!
+//! **One read per wake** (round sm-tick): the WM tick's duties that read the list (the
+//! closed windows' sweep, the Space check, the engine's upkeep) share one read of it while a
+//! [`Wake`] is open ([`wake_list`], [`wake_on_screen`]), until a window write of ours
+//! ([`note_write`]: every Accessibility set and action, the Spaces engine's moves) makes it
+//! stale: a duty after a write reads afresh, as each did before. Outside a wake every read is
+//! fresh.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use objc2_core_foundation::{CFArray, CFBoolean, CFDictionary, CFIndex, CFNumber, CFRetained, CFString, CFType};
 use objc2_core_graphics::{
@@ -55,14 +65,94 @@ pub struct CgWindow {
 /// list puts windows created later (our own strip panels, say) after older windows they
 /// cover, which once made a test's safety check see a covered window as topmost.
 pub fn list_windows() -> Vec<CgWindow> {
-    let mut out = query(CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements);
-    let seen: HashSet<u32> = out.iter().map(|w| w.id).collect();
-    out.extend(
+    joined(on_screen())
+}
+
+/// The on-screen list `on` (front to back) followed by every other window the "all" query
+/// lists ([`list_windows`]).
+fn joined(mut on: Vec<CgWindow>) -> Vec<CgWindow> {
+    let seen: HashSet<u32> = on.iter().map(|w| w.id).collect();
+    on.extend(
         query(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements)
             .into_iter()
             .filter(|w| !seen.contains(&w.id)),
     );
-    out
+    on
+}
+
+/// Window writes of ours so far ([`note_write`]).
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// A window write of ours (any thread): a list read in the open [`Wake`] before it is stale.
+pub fn note_write() {
+    WRITES.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The lists read in the open wake, and the writes counted when they were read.
+#[derive(Default)]
+struct WakeLists {
+    writes: u64,
+    on: Option<Rc<Vec<CgWindow>>>,
+    full: Option<Rc<Vec<CgWindow>>>,
+}
+
+impl WakeLists {
+    /// Forgets what was read before a write of ours.
+    fn fresh(&mut self) -> &mut Self {
+        let writes = WRITES.load(Ordering::Relaxed);
+        if writes != self.writes {
+            *self = Self { writes, ..Self::default() };
+        }
+        self
+    }
+}
+
+thread_local! {
+    /// The open wake's lists on this thread ([`wake`]); `None` outside one.
+    static WAKE: RefCell<Option<WakeLists>> = const { RefCell::new(None) };
+}
+
+/// An open wake ([`wake`]): its reads are shared until it is dropped.
+pub struct Wake(());
+
+impl Drop for Wake {
+    fn drop(&mut self) {
+        WAKE.with(|w| *w.borrow_mut() = None);
+    }
+}
+
+/// Opens a wake on this thread (the WM tick): [`wake_list`] and [`wake_on_screen`] read the
+/// window server once each until a write of ours, then afresh.
+pub fn wake() -> Wake {
+    WAKE.with(|w| *w.borrow_mut() = Some(WakeLists { writes: WRITES.load(Ordering::Relaxed), ..WakeLists::default() }));
+    Wake(())
+}
+
+/// [`list_windows`], read once per wake (the on-screen part shared with
+/// [`wake_on_screen`]); fresh outside one.
+pub fn wake_list() -> Rc<Vec<CgWindow>> {
+    WAKE.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(lists) = w.as_mut() else { return Rc::new(list_windows()) };
+        let lists = lists.fresh();
+        if let Some(full) = &lists.full {
+            return full.clone();
+        }
+        let on = lists.on.get_or_insert_with(|| Rc::new(on_screen())).as_ref().clone();
+        let full = Rc::new(joined(on));
+        lists.full = Some(full.clone());
+        full
+    })
+}
+
+/// [`on_screen`], read once per wake (the on-screen query [`wake_list`] made, when it came
+/// first); fresh outside one.
+pub fn wake_on_screen() -> Rc<Vec<CgWindow>> {
+    WAKE.with(|w| {
+        let mut w = w.borrow_mut();
+        let Some(lists) = w.as_mut() else { return Rc::new(on_screen()) };
+        lists.fresh().on.get_or_insert_with(|| Rc::new(on_screen())).clone()
+    })
 }
 
 /// Every window, on screen or not, on any Space (desktop elements excluded), in the window
@@ -268,5 +358,27 @@ mod tests {
             assert_eq!(w.pid, listed.pid, "window {}: the same owner", w.id);
         }
         assert!(describe(&[u32::MAX]).is_empty(), "an id the window server does not know");
+    }
+
+    /// Round sm-tick: inside a wake the tick's duties share one read of each list, the
+    /// on-screen query shared between the two, until a window write of ours; outside a wake
+    /// every read is fresh.
+    #[test]
+    fn a_wake_reads_each_list_once_until_a_write_of_ours() {
+        let a = wake_on_screen();
+        assert!(!Rc::ptr_eq(&a, &wake_on_screen()), "outside a wake: read afresh");
+        let wake = wake();
+        let full = wake_list();
+        let on = wake_on_screen();
+        assert!(Rc::ptr_eq(&full, &wake_list()), "the complete list, read once");
+        assert!(Rc::ptr_eq(&on, &wake_on_screen()), "the on-screen list, read once");
+        assert!(full.starts_with(&on), "the complete list starts with the same on-screen read");
+        note_write();
+        assert!(!Rc::ptr_eq(&full, &wake_list()), "after a write of ours: read afresh");
+        assert!(!Rc::ptr_eq(&on, &wake_on_screen()));
+        let again = wake_on_screen();
+        assert!(Rc::ptr_eq(&again, &wake_on_screen()), "then shared again");
+        drop(wake);
+        assert!(!Rc::ptr_eq(&again, &wake_on_screen()), "the wake over: read afresh");
     }
 }

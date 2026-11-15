@@ -151,6 +151,11 @@ pub fn sweep() {
     }
 }
 
+/// True while an app's flag is held off (the periodic check puts it back when it is due).
+pub fn held_off() -> bool {
+    !lock().held().is_empty()
+}
+
 /// App `pid` activated: its flag is read again at its next move.
 pub fn forget(pid: i32) {
     lock().forget(pid);

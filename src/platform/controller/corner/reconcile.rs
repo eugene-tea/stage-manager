@@ -77,8 +77,8 @@ impl Controller {
         let list = match list {
             Some(l) => l,
             None => {
-                read = windows::on_screen();
-                &read
+                read = windows::wake_on_screen();
+                read.as_slice()
             }
         };
         let parked_here: HashSet<u32> = model_parked.iter().map(|(id, _)| *id).collect();
