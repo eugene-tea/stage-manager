@@ -1414,6 +1414,12 @@ impl Strip {
         let display = self.display;
         let Some(mut r) = self.motion.running.take() else { return };
         self.capturer.hold_until(None);
+        // Landed: the looks of its windows that have none are read now, off the motion (a
+        // picture with no reading takes the system's appearance; round sm-landing).
+        if landed {
+            let windows: Vec<u32> = r.ghosts.iter().map(|g| g.window).filter(|w| *w != 0).collect();
+            capture::read_looks(&windows);
+        }
         for t in &r.timers {
             t.invalidate();
         }

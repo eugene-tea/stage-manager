@@ -543,8 +543,10 @@ the others, turning into the card's shadow on the spring as it nears its card. m
 window's shadow by the window's appearance: in Dark Mode the drop reaches as far but is
 nearly twice as dark and the hairline nearly opaque. The picture takes the shadow of the
 appearance macOS draws that window in, read from the window's own shadow: a small capture of
-the window with its shadow (half a pixel a point) next to its usual capture, when it was
-never read, read before the system's appearance last changed, or 20 seconds ago; the alpha
+the window with its shadow (half a pixel a point) next to its usual capture: every captured
+window never read or read before the system's appearance last changed (up to four at once,
+one listing), else one read 20 seconds ago or more; and after each switch lands, for its
+windows with no reading; the alpha
 past three of its sides is compared with the four shadows (light or dark, key or inactive).
 An app may draw its window in another appearance than the system's (Messages draws a
 conversation with a dark chat background all dark on a light system, and the system's light
