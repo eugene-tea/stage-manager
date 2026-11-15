@@ -3353,11 +3353,24 @@ def phase_motion():
     say("-- a card click to an app with a window waiting off screen: the switch's own activation never brings its windows early (11-09)")
     # Alpha 2 opens minimized: it waits in `unplaced`. The card click's activation of Alpha
     # (our echo) offered it to the window placement, which brought the held windows in at once.
-    # Minimized on the fixture's next turn: 250 ms on screen let a fast placement (Spaces, 68 ms
-    # live 11-14) take it for a shown window the user then minimized, a card of its own.
-    start_extra_args("a", 2, "--minimized", "Alpha 2", "--minimize-after-ms", "0")
-    s = wait_state(lambda x: "Alpha 1" in by_title(x) and len(x.get("unplaced", [])) >= 1, "Alpha 1 managed, Alpha 2 waiting minimized", timeout=10)
-    if check(s is not None, "Alpha 1 has a stage, Alpha 2 waits off screen (minimized)"):
+    # The fixture shows Alpha 2 and minimizes it 250 ms later (AppKit minimizes only a window
+    # that has been on screen; on the next turn it never reached Accessibility, live 11-14). A
+    # placement faster than that (Spaces, 68 ms live 11-14) takes it for a shown window the user
+    # then minimized: a card of its own, not `unplaced`. Two tries, then the step is skipped.
+    def waiting_or_raced(x):
+        t = by_title(x)
+        raced = "Alpha 2" in t and t["Alpha 2"]["id"] not in x.get("unplaced", [])
+        return raced or ("Alpha 1" in t and len(x.get("unplaced", [])) >= 1)
+    s, raced = None, False
+    for _ in range(2):
+        start_extra_args("a", 2, "--minimized", "Alpha 2")
+        s = wait_state(waiting_or_raced, "Alpha 1 managed, Alpha 2 waiting minimized", timeout=10)
+        raced = s is not None and "Alpha 2" in by_title(s) and by_title(s)["Alpha 2"]["id"] not in s.get("unplaced", [])
+        if not raced:
+            break
+    if raced:
+        skip("Alpha 2 waits off screen (minimized)", "twice placed before the fixture minimized it (a card of its own)")
+    elif check(s is not None, "Alpha 1 has a stage, Alpha 2 waits off screen (minimized)"):
         alpha = by_title(s)["Alpha 1"]["home"]
         if s["active"] == alpha:
             other = next((c for c in s.get("strip_cards", []) if c["number"] != alpha), None)
@@ -8456,7 +8469,8 @@ def phase_landing():
     each switch is read every ms from the window server (`probe-spaces settle --overlay PID`).
     It fails when a real window of the incoming stage is on screen at its frame while its
     stage's pictures still fly: before the unveil (the overlay's first sample plus the
-    transition's `motion_ms` and `unveil_ms`, less 40 ms for the sampling and a frame). Every
+    transition's `motion_ms` and `unveil_ms`, less 40 ms for the sampling and a frame); a window
+    that flew its own last stretch counts only while a picture of its stage still flies. Every
     switch also lands every window at its frame. The landing variant is the environment's
     (`STAGE_MANAGER_LANDING`: pictures, ordered, live, live-early, live-late; the live ones
     under SM_ENGINE=spaces only); the windows that took over from their pictures are counted
@@ -8522,9 +8536,16 @@ def phase_landing():
             took += sum(1 for g in ghosts if g.get("stretch_ms") is not None)
             first = o.get("overlay_first_ms")
             unveil = None if first is None or lt.get("unveil_ms") is None else first + (lt.get("motion_ms") or 0) + lt["unveil_ms"]
+            # A window that took over from its picture is the motion itself: it reaches its
+            # frame at the end of its own flight, before the unveil's tail (live 11-14: ~150 ms).
+            # It is early only while a picture of its stage that did not take over still flies.
+            flown = {g["window"] for g in ghosts if g.get("stretch_ms") is not None}
+            all_flown = bool(ghosts) and len(flown) == len(ghosts)
             for w in o.get("incoming", []):
                 at = w.get("first_at_ms")
-                if unveil is not None and at is not None and at < unveil - 40:
+                if w["id"] in flown and all_flown:
+                    pass
+                elif unveil is not None and at is not None and at < unveil - 40:
                     early.append(f"switch {i + 1}: window {w['id']} at its frame {at:.0f} ms after the click, the unveil at {unveil:.0f} ms")
                 if w.get("arrived_ms") is None:
                     unlanded.append(f"switch {i + 1}: window {w['id']} never at its frame for good")

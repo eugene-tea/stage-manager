@@ -33,9 +33,8 @@
 //                                      minimizes a window that has been on screen; one never
 //                                      ordered in was never listed by Accessibility in the
 //                                      10-15 live run, and SIGHUP had nothing to un-minimize).
-//   --minimize-after-ms N | FIXTURE_MINIMIZE_AFTER_MS=N  that moment (default 250; 0: the next
-//                                      turn, so a running Stage Manager never places the window
-//                                      before it is minimized)
+//   --minimize-after-ms N | FIXTURE_MINIMIZE_AFTER_MS=N  that moment (default 250; 0, the next
+//                                      turn, left the window unknown to Accessibility, live 11-14)
 //                                      A test starts this fixture before Stage Manager, so
 //                                      the moment on screen is not seen as a new window.
 //   --tabbed N   | FIXTURE_TABBED=N    the last N standard windows open as tabs of window 1
