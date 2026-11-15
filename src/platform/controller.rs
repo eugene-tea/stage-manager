@@ -1059,6 +1059,10 @@ pub struct Controller {
     /// The frames the latest [`Self::unpark_all`] restored windows to: the leftovers check
     /// after it brings a window its app moved late back there ([`safety::Ours::unparked`], S1).
     unparked: BTreeMap<u32, Rect>,
+    /// The app of each window in [`Self::unparked`]: a window of the same app and size the
+    /// leftovers check finds unknown in the corner is the tab group's selected tab, and goes
+    /// back to the group's frame ([`safety::Ours::unparked_apps`], round tab-quit).
+    unparked_apps: BTreeMap<u32, i32>,
     /// Windows whose Accessibility handle died: when each was looked up afresh, and those
     /// judged closed once ([`stale`], [`crate::engine::stale_handle`]).
     stale: stale::StaleHandles,
@@ -1245,6 +1249,7 @@ impl Controller {
             strip_hidden_for_desktop: false,
             focus_after_press: None,
             unparked: BTreeMap::new(),
+            unparked_apps: BTreeMap::new(),
             stale: stale::StaleHandles::default(),
             user_focus: HashMap::new(),
             active_off_screen: HashMap::new(),
@@ -1839,6 +1844,7 @@ impl Controller {
         safety::Ours::now(self.model_window_ids())
             .with_tab_signs(self.let_go_destroyed(), self.model_shown_ids())
             .with_unparked(self.unparked.clone())
+            .with_unparked_apps(self.unparked_apps.clone())
     }
 
     /// Notes which windows are parked, where every window lives and the strip's slots, for
@@ -2662,7 +2668,7 @@ impl Controller {
                 // (8J): when the tab selected shows in its place already, it takes that place in
                 // the stage, as at the Space check (round tab-lost).
                 let shown_tab = self.model.as_ref().is_some_and(|m| {
-                    m.window(WindowId(id)).is_some_and(|w| w.meta.role == WindowRole::Standard && !w.parked && m.is_shown_space(w.space))
+                    m.window(WindowId(id)).is_some_and(|w| w.meta.role == WindowRole::Standard && m.is_shown_space(w.space))
                 });
                 if shown_tab
                     && self.take_tabs(ob, &windows::list_windows())
@@ -5881,14 +5887,18 @@ impl Controller {
     /// failed; the registry is empty afterwards when none did. The frames it restored stay
     /// known to the leftovers check that follows ([`Self::safety_ours`]), and the stages are
     /// saved before that check reads `state.json` (the review of 10-29, S1).
-    pub fn unpark_all(&mut self, ob: &Observer) -> usize {
+    pub fn unpark_all(&mut self, ob: &mut Observer) -> usize {
         self.flush_pending(ob);
+        // A tab selected since the last check, its group hidden: the tab selected comes back
+        // at the group's frame, not the hidden tab (round tab-quit).
+        self.take_tabs(ob, &windows::list_windows());
         // Windows whose restore failed earlier: the model counts them shown, so its unpark
         // has nothing for them (S1).
         self.retry_shows(ob, true);
         let Some(m) = self.model.as_mut() else { return self.shows_owed() };
         let actions = m.unpark_all();
         self.unparked = unparked_frames(&actions);
+        self.unparked_apps = self.unparked.keys().filter_map(|&id| m.window(WindowId(id)).map(|w| (id, w.meta.pid))).collect();
         let n = actions.len();
         let failed = self.execute_batch(ob, actions, Batch::Unpark);
         safety::registry_replace(self.parked_entries(ob));

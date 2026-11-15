@@ -33,10 +33,13 @@
 //!   failure.
 //!
 //! **A tab selected** (round tab-lost, [`tabs_selected`]): the same signature read the other
-//! way. A managed window the model shows, now listed off screen, whose exact frame
-//! ([`same_place`]) a window of its app not managed takes on screen, is a tab no longer
-//! selected beside the tab selected: the stage takes the tab selected in its place
-//! ([`crate::engine::model::Model::tab_selected`]), never "left this Space".
+//! way. A managed window the model holds on a Desktop shown, now listed off screen, whose
+//! exact frame ([`same_place`]) a window of its app not managed takes on screen, is a tab no
+//! longer selected beside the tab selected: the stage takes the tab selected in its place
+//! ([`crate::engine::model::Model::tab_selected`]), never "left this Space". Its stage may be
+//! hidden (round tab-quit): a group parked in the corner whose other tab is selected shows
+//! that tab at the park spot (a sliver on screen), the tab left off screen at the same frame;
+//! the tab selected is then hidden with its stage and goes back to the group's frame.
 
 use super::geometry::Rect;
 
@@ -111,15 +114,18 @@ pub struct TabSelected {
 }
 
 /// The tabs selected in `listed` (the window server's list, every Desktop): each window of
-/// `shown` (windows the model shows on a Desktop shown: managed, standard, not hidden by the
-/// engine) listed off screen whose place another window of its app, on screen on layer 0
-/// and not managed (`managed`), takes exactly ([`same_place`]). A tab not selected keeps its
+/// `held` (managed standard windows of a Desktop shown, shown or hidden by the engine)
+/// listed off screen whose place another window of its app, on screen on layer 0 and not
+/// managed (`managed`), takes exactly ([`same_place`]). A window parked in the corner is on
+/// screen as a sliver; once its other tab is selected there, it is off screen and the tab
+/// selected is the sliver at the same frame. The other hidden tabs of a group are off screen
+/// and never count. A tab not selected keeps its
 /// last frame, and the tab selected takes its group's frame, which is that same frame: the
 /// signature of a tab switch, read from one listing. Two candidates for one place, or one
 /// window in two places, say nothing (left to the usual checks).
-pub fn tabs_selected(listed: &[TabListed], shown: &[u32], managed: impl Fn(u32) -> bool) -> Vec<TabSelected> {
+pub fn tabs_selected(listed: &[TabListed], held: &[u32], managed: impl Fn(u32) -> bool) -> Vec<TabSelected> {
     let mut out: Vec<TabSelected> = Vec::new();
-    for &id in shown {
+    for &id in held {
         let Some(left) = listed.iter().find(|w| w.id == id && w.layer == 0) else { continue };
         if left.onscreen {
             continue;
@@ -338,6 +344,21 @@ mod tests {
             win(212, 864.0, 215.0, 1406.0, 985.0, true),
         ];
         assert!(tabs_selected(&l, &[213, 215], |id| id == 213 || id == 215).is_empty(), "one window for two places");
+    }
+
+    /// Round tab-quit (the safety drill after the tabs phase, 11-15): the fixture's group
+    /// parked in the corner (Fixture 1 selected, at the park spot, a sliver on screen; Fixture 3
+    /// a hidden tab beside it), then Fixture 3 selected while parked. The model holds Fixture 1,
+    /// parked: the tab selected at the park spot takes its place; a third tab of the group, off
+    /// screen at the same spot, never counts; before the switch nothing is told.
+    #[test]
+    fn a_tab_selected_while_its_group_is_parked_takes_the_place_of_the_parked_tab() {
+        let spot = |id, onscreen| win(id, 2559.0, 1408.0, 520.0, 392.0, onscreen);
+        let before = vec![spot(52016, true), spot(52018, false), spot(52019, false), win(52017, 190.0, 148.0, 560.0, 422.0, true)];
+        let managed = |id| id == 52016 || id == 52017;
+        assert!(tabs_selected(&before, &[52016, 52017], managed).is_empty(), "the parked tab is still the selected one");
+        let after = vec![spot(52018, true), spot(52016, false), spot(52019, false), win(52017, 190.0, 148.0, 560.0, 422.0, true)];
+        assert_eq!(tabs_selected(&after, &[52016, 52017], managed), vec![TabSelected { left: 52016, selected: 52018 }]);
     }
 
     #[test]

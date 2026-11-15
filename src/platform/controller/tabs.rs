@@ -13,11 +13,17 @@
 //! (`unplaced`), as a new window, if at all: the owner's 11-15 Terminal tab stayed on
 //! screen under the stage switched to.
 //!
+//! A hidden stage's tab group counts too (round tab-quit): its tab selected at the park spot
+//! is hidden with the stage, at the group's frame to come back to. The quit looks once
+//! before its unpark ([`Controller::unpark_all`]): a tab selected a moment before is put
+//! back at its group's frame, not left in the corner for the leftovers check.
+//!
 //! [`Model::tab_selected`]: crate::engine::model::Model::tab_selected
 
 use std::time::{Duration, Instant};
 
 use super::Controller;
+use crate::platform::window_engine::EngineKind;
 use crate::engine::busy_apps::Reply;
 use crate::engine::hidden_tab::{self, TabListed};
 use crate::engine::model::{WindowId, WindowRole};
@@ -30,8 +36,8 @@ use crate::platform::windows::{self, CgWindow};
 pub(super) const ASK_AGAIN: Duration = Duration::from_secs(3);
 
 impl Controller {
-    /// The tabs selected in `list` (every window, on screen first): each managed window the
-    /// model shows on a Desktop shown, listed off screen, whose place a window of its app not
+    /// The tabs selected in `list` (every window, on screen first): each managed window of a
+    /// Desktop shown (shown, or hidden with its stage), listed off screen, whose place a window of its app not
     /// managed takes on screen, hands its stage to that window, which the app's window list
     /// is read again for when Accessibility does not track it yet; the tab no longer
     /// selected waits with the windows not placed (`unplaced`), and takes the place back the
@@ -42,17 +48,18 @@ impl Controller {
             return false;
         }
         let Some(m) = self.model.as_ref() else { return false };
-        // Parked windows (hidden by the engine) are not looked at: a stage shown only.
-        let shown: Vec<u32> = m
+        // Hidden windows too (round tab-quit): a group parked in the corner shows its tab
+        // selected there.
+        let held: Vec<u32> = m
             .windows()
-            .filter(|w| w.meta.role == WindowRole::Standard && !w.parked && m.is_shown_space(w.space))
+            .filter(|w| w.meta.role == WindowRole::Standard && m.is_shown_space(w.space))
             .map(|w| w.meta.id.0)
             .collect();
-        if shown.is_empty() {
+        if held.is_empty() {
             return false;
         }
         let listed: Vec<TabListed> = list.iter().map(tab_listed).collect();
-        let found = hidden_tab::tabs_selected(&listed, &shown, |id| m.window(WindowId(id)).is_some());
+        let found = hidden_tab::tabs_selected(&listed, &held, |id| m.window(WindowId(id)).is_some());
         if found.is_empty() {
             return false;
         }
@@ -92,19 +99,37 @@ impl Controller {
             }
             let Some(m) = self.model.as_mut() else { return took };
             let stage = m.stage_of(WindowId(t.left)).map(|s| s.0);
+            let hidden = m.window(WindowId(t.left)).is_some_and(|w| w.parked);
             let (actions, gone) = m.tab_selected(WindowId(t.left), meta);
             if actions.is_empty() {
                 continue;
             }
-            tracing::info!(left = t.left, selected = t.selected, ?stage, "a window tab was selected: it takes the place of the tab it hides in its stage");
+            tracing::info!(left = t.left, selected = t.selected, ?stage, hidden, "a window tab was selected: it takes the place of the tab it hides in its stage");
             self.unplaced.remove(&t.selected);
             self.fresh_unplaced.remove(&t.selected);
             self.tab_asked.remove(&t.selected);
             self.absent.remove(&t.left);
             self.execute(ob, actions);
+            if hidden {
+                self.release_hidden_tab(t.left);
+            }
             self.unplaced.extend(gone.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
             took = true;
         }
         took
+    }
+
+    /// The tab left by a tab selected in a hidden stage (round tab-quit), out of the model now.
+    /// The Corner engine: nothing; it stays at the park spot, ordered out, and moving a hidden
+    /// tab is never asked (its group moves with the tab selected; the leftovers check judges it
+    /// a hidden tab beside it). The Spaces engine: let out of the stage Space where it is, as
+    /// any window the model no longer counts, so it shows on its Desktop once selected again.
+    fn release_hidden_tab(&mut self, left: u32) {
+        match self.engine.kind() {
+            EngineKind::Corner => {}
+            EngineKind::Spaces => {
+                crate::platform::spaces::engine::shared().release(&[left], "a hidden tab: the tab selected took its place");
+            }
+        }
     }
 }

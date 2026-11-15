@@ -755,6 +755,14 @@ def drill(name, kill, evidence):
 
 def phase_safety():
     say("\n== safety drills ==")
+    # A fresh start, as m3's and tabs': a phase before (tabs, 11-15) leaves a state.json whose
+    # saved stages a launch here would rebuild (its drills then began from another layout:
+    # stage 1 a stage waiting for a window the fixture never opens).
+    stop_app()
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
     if not pids_of(FIX_EXE):
         start_fixture(4, "--panel")
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
@@ -1047,6 +1055,12 @@ def drill_closed_unanswered():
     5.1 s live)."""
     say("-- drill: a window closed while its app answers nothing leaves the model and its card (8M)")
     stop_app()
+    # Its own layout (stage 1 the fixture's two other windows): the drills before leave
+    # saved stages of other fixture sets (a stage kept for a saved window that never comes,
+    # numbered 1 and brought in front by the switch below, is no card left without a window).
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
     start_fixture(3, "--hang-ms", "3000")
     fixture = pids_of(FIX_EXE)
     s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_DROP_AX_DESTROYED": "1"})
@@ -1125,10 +1139,19 @@ def drill_hidden_tab():
         w = [w for w in wins if w["id"] == first["id"]]
         return w if w and not w[0]["onscreen"] and tucked(w[0], d) else None
 
+    group = first["restore"]
     os.kill(fixture[0], signal.SIGIO)
     hidden = wait_until(hidden_in_zone, 5, "Fixture 1 to become a hidden tab in the park zone")
     check(hidden is not None, "drill setup: Fixture 1, now a hidden tab, stays in the park zone off screen")
-    time.sleep(1.5)  # the app hears of the tab switch (the tab left is reported destroyed)
+    # Round tab-quit (11-15): the tab selected while its group is parked takes the hidden tab's
+    # place in the stage, hidden with it; a Space check (once a second) sees it.
+    took = wait_until(lambda: (lambda bt: bt if "Fixture 3" in bt and "Fixture 1" not in bt else None)(by_title(state())),
+                      3, "the tab selected to take the parked tab's place")
+    check(took is not None and bool(took["Fixture 3"].get("parked")),
+          "hidden tab: the tab selected while parked (Fixture 3) is the stage's window, hidden with it; Fixture 1 is not managed")
+    check("a window tab was selected" in log_text(), "hidden tab: the log says a tab was selected")
+    selected_id = took["Fixture 3"]["id"] if took else None
+    time.sleep(0.5)
     pid = app_pid()
     guards = guardian_pids(pid)
     ctl("quit")
@@ -1153,6 +1176,12 @@ def drill_hidden_tab():
     rest = [w for w in wins if w["id"] != first["id"]]
     stuck = [w["id"] for w in rest if tucked(w, d) or not w["onscreen"]]
     check(bool(rest) and not stuck, f"hidden tab: after the quit every other fixture window is on screen out of the zone (stuck: {stuck})")
+    # The tab selected comes back at its group's frame (11-15: at the state.json frame of
+    # another run's "Fixture 3", 300,218 600x392, its group at 80,78 520x392).
+    sel = next((w for w in wins if w["id"] == selected_id), None)
+    check(sel is not None and close(sel["bounds"], group, 2.0),
+          f"hidden tab: after the quit the tab selected is at its group's frame ({fmt(sel['bounds']) if sel else None}, the group's {fmt(group)})")
+    check("source=\"state.json\"" not in text, "hidden tab: the quit took no frame from state.json")
     if not followed:
         check(hidden_in_zone() is not None, "hidden tab: after the quit only the hidden tab stays in the zone, off screen")
 
