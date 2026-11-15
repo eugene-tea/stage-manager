@@ -422,9 +422,22 @@ impl Echoes {
     /// True when an activation of `pid` is probably our own: within the echo window, or
     /// the first activation reported since we made it frontmost with no user input between.
     /// Call it once per reported activation: it consumes the awaited one.
+    ///
+    /// An awaited one it consumes also ends the awaits of the apps we made frontmost more
+    /// than an echo window before it: our later switch made this app frontmost and macOS
+    /// says so, so an older request is answered by now or never will be (11-14, the live
+    /// landing: the fixture's activation never came, Alpha's switch 1.8 s later was reported,
+    /// and the user's activation of the fixture 1.3 s after that was taken for the late
+    /// echo). Quick switches keep theirs: within the echo window of each other the first
+    /// app may still be answering ([`ECHO_WINDOW`]), and one switch focuses one window.
     pub fn is_app_echo(&mut self, pid: i32, now: Instant) -> bool {
         self.front = Some(pid);
-        let late = self.awaiting.remove(&pid).is_some_and(|t| now.saturating_duration_since(t) < LATE_ACTIVATION_MAX);
+        let asked = self.awaiting.remove(&pid);
+        if let Some(at) = asked {
+            let window = self.window;
+            self.awaiting.retain(|_, t| at.saturating_duration_since(*t) < window);
+        }
+        let late = asked.is_some_and(|t| now.saturating_duration_since(t) < LATE_ACTIVATION_MAX);
         late || self.apps.get(&pid).is_some_and(|t| now.duration_since(*t) < self.window)
     }
 
@@ -7291,6 +7304,39 @@ mod tests {
         e.touch_app(fixture, t0 + Duration::from_millis(10));
         e.touch_app(fixture, t0 + Duration::from_millis(500));
         assert!(e.is_app_echo(fixture, t0 + Duration::from_millis(1500)), "late, but the one we asked for");
+    }
+
+    #[test]
+    fn our_later_switch_ends_an_older_apps_late_echo() {
+        // The suite on 9af41d3 (11-14, the live landing): the switch to the fixture's stage
+        // focuses its window (14.578, again at the unveil 15.121) and no activation comes; a
+        // switch to Alpha's new stage (16.880) is reported (16.937); the test's ⌘Tab-style
+        // activation of the fixture (18.265) is the user's, not that late echo.
+        let (fixture, alpha) = (85618, 86476);
+        let mut e = Echoes::default();
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        e.touch_app(fixture, at(0));
+        e.touch_app(fixture, at(543));
+        e.touch_app(alpha, at(2302));
+        assert!(e.is_app_echo(alpha, at(2359)));
+        assert!(!e.is_app_echo(fixture, at(3687)), "the user's activation brings the fixture's stage");
+        // Only an awaited activation ends the others': one reported within the echo window
+        // of a focus that awaited none (the app was in front) leaves them.
+        let mut e = Echoes::default();
+        e.touch_app(fixture, at(0));
+        e.front = Some(alpha);
+        e.touch_app(alpha, at(1000));
+        assert!(e.is_app_echo(alpha, at(1050)));
+        assert!(e.is_app_echo(fixture, at(1400)), "still the late echo we asked for");
+        // Two apps focused by one batch (or two quick switches): the first one's late echo
+        // stays ours after the second one's activation.
+        let (mail, slack) = (20, 10);
+        let mut e = Echoes::default();
+        e.touch_app(slack, at(0));
+        e.touch_app(mail, at(5));
+        assert!(e.is_app_echo(mail, at(30)));
+        assert!(e.is_app_echo(slack, at(1500)), "busy, but the one we asked for");
     }
 
     #[test]
