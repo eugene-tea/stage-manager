@@ -493,6 +493,35 @@ pub fn click(p: Point, shift: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// A synthetic left press at `p` held `hold`, then its release, posted on a thread of its
+/// own: the caller (the WM thread, `ctl debug-dock-click BUNDLE real`) returns at once, so
+/// the press and the release reach the input monitor and the controller as a person's do,
+/// and the Dock activates the app on the release. Only for a Dock item the caller hit-tested
+/// as a `STAGE_MANAGER_ONLY` app's (the Dock is no test window, so [`path_is_safe`] would
+/// refuse it). The pointer goes back where it was.
+pub fn dock_item_click(p: Point, hold: Duration) -> Result<(), String> {
+    let back = pointer_home();
+    std::thread::Builder::new()
+        .name("test-dock-click".into())
+        .spawn(move || {
+            let posted = move_first(p, false)
+                .and_then(|()| post_mouse(CGEventType::LeftMouseDown, p, false))
+                .and_then(|()| {
+                    std::thread::sleep(hold);
+                    post_mouse(CGEventType::LeftMouseUp, p, false)
+                });
+            if let Err(e) = posted {
+                tracing::warn!("test Dock click: {e}");
+            }
+            std::thread::sleep(Duration::from_millis(60));
+            if let Some(back) = back {
+                let _ = CGWarpMouseCursorPosition(back);
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| format!("no thread for the click: {e}"))
+}
+
 /// A synthetic left-button drag along `waypoints` (straight segments), only when every point
 /// it passes is over our own windows or a fixture's (checked before anything is posted). The
 /// button is held `hold` at the end before release; the pointer goes back where it was.

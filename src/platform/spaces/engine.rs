@@ -98,6 +98,10 @@ struct Counts {
     new_placed: u64,
     new_unplaced: u64,
     new_missed: u64,
+    /// Windows put home for a Dock press ([`SpacesEngine::lend_window`]), and taken back
+    /// into their stage Space unshown.
+    lent: u64,
+    taken_back: u64,
 }
 
 /// Which calls a test run makes fail (`ctl debug-engine-fail`): nothing is sent for them,
@@ -163,6 +167,9 @@ struct State {
     foreign: BTreeMap<u64, u64>,
     /// What the incoming windows' last stretches counted ([`landing`]).
     stretch: landing::StretchCounts,
+    /// Windows put on their Desktop while still counted hidden ([`SpacesEngine::lend_window`]):
+    /// each also in `held`, with the stage Space it goes back to.
+    lent: BTreeSet<u32>,
 }
 
 /// The Spaces engine (see the module docs).
@@ -419,7 +426,9 @@ impl SpacesEngine {
         };
         self.state().counts.hides += 1;
         if hidden_in(&now, space) {
-            self.state().held.insert(id, Held { space, home });
+            let mut st = self.state();
+            st.held.insert(id, Held { space, home });
+            st.lent.remove(&id);
             return true;
         }
         // Off its Desktop; a window already in another stage's Space (moved between two
@@ -453,6 +462,7 @@ impl SpacesEngine {
             let mut st = self.state();
             st.held.insert(id, Held { space, home });
             st.owed.remove(&id);
+            st.lent.remove(&id);
             if st.new.remove(&id) {
                 st.counts.new_placed += 1;
             }
@@ -477,6 +487,7 @@ impl SpacesEngine {
             let mut st = self.state();
             st.held.remove(&id);
             st.owed.remove(&id);
+            st.lent.remove(&id);
             return true;
         }
         let (desktops, shown) = Self::desktops(sky);
@@ -510,6 +521,7 @@ impl SpacesEngine {
             let mut st = self.state();
             st.held.remove(&id);
             st.owed.remove(&id);
+            st.lent.remove(&id);
             if st.new.remove(&id) {
                 // A new window's show from the model's batch: placed.
                 st.counts.new_placed += 1;
@@ -536,6 +548,95 @@ impl SpacesEngine {
     /// True when this engine holds window `id` hidden (as last read back).
     pub fn holds(&self, id: u32) -> bool {
         self.state().held.contains_key(&id)
+    }
+
+    /// True when window `id` is held but put on its Desktop for a while
+    /// ([`Self::lend_window`]).
+    pub fn lent(&self, id: u32) -> bool {
+        self.state().lent.contains(&id)
+    }
+
+    /// True when window `id` is on no Desktop for macOS: held in its stage Space (not lent),
+    /// or flying its last stretch in its landing Space, until it lands (the unveil's show
+    /// counts it shown before that: the owner's log of 11-15 06:42:57, a focus then let
+    /// VS Code take macOS to its window on Desktop 1).
+    fn off_desktop(&self, id: u32) -> bool {
+        if self.in_flight(id) {
+            return true;
+        }
+        let st = self.state();
+        st.held.contains_key(&id) && !st.lent.contains(&id)
+    }
+
+    /// Window `id`, held in its stage Space, onto its own Desktop at its frame, while the
+    /// engine still counts it hidden (the model does): macOS counts it on that Desktop from
+    /// now on when it picks a Desktop for its app's activation (a Dock press, the owner's
+    /// log of 11-15). Nothing moves its frame; it takes its old place in the window order
+    /// (under the windows raised since it hid). The model's show of it later finds it out of
+    /// every stage Space and asks nothing more ([`Self::show_window`]); a hide puts it back
+    /// as any hide; [`Self::take_back_window`] puts it back unshown. A window planned to fly
+    /// its last stretch is not lent. True when the window server lists it out of every stage
+    /// Space now.
+    pub(crate) fn lend_window(&self, id: u32) -> bool {
+        if self.stretches().contains_key(&id) {
+            return false;
+        }
+        let Some(held) = self.state().held.get(&id).copied() else { return false };
+        if self.lent(id) {
+            return true;
+        }
+        if self.blocked() {
+            return false;
+        }
+        let Some(sky) = self.sky() else { return false };
+        let (desktops, _) = Self::desktops(sky);
+        if !desktops.contains(&held.home) {
+            return false;
+        }
+        let ours = self.ours();
+        if let Err(e) = sky.add_remove_from(Route::Bridged, held.home, &[id], ALL_SPACES_MASK) {
+            tracing::warn!(id, desktop = held.home, "spaces engine: a window could not be put home: {e}");
+            return false;
+        }
+        let (ok, after) = self.read_back(sky, id, |s| out_of(s, &ours));
+        if ok {
+            let mut st = self.state();
+            st.lent.insert(id);
+            st.counts.lent += 1;
+        } else {
+            tracing::warn!(id, desktop = held.home, listed = ?after, "spaces engine: a window put home is still in a stage Space");
+        }
+        ok
+    }
+
+    /// Window `id`, put home ([`Self::lend_window`]) and still counted hidden, back into its
+    /// stage Space. False when it is not lent any more (shown or hidden since: nothing to do),
+    /// or when it did not go back: then it is no longer held, so the tick's look hides it
+    /// again ([`Self::hide_again`]).
+    pub(crate) fn take_back_window(&self, id: u32) -> bool {
+        let held = {
+            let mut st = self.state();
+            if !st.lent.remove(&id) {
+                return false;
+            }
+            st.held.get(&id).copied()
+        };
+        let Some(held) = held else { return false };
+        let Some(sky) = self.sky() else { return false };
+        if !self.blocked()
+            && let Err(e) = sky.add_remove(Route::Bridged, held.space, &[id])
+        {
+            tracing::warn!(id, space = held.space, "spaces engine: a window put home could not be taken back: {e}");
+        }
+        let (ok, after) = self.read_back(sky, id, |s| hidden_in(s, held.space));
+        let mut st = self.state();
+        if ok {
+            st.counts.taken_back += 1;
+        } else {
+            tracing::warn!(id, space = held.space, listed = ?after, "spaces engine: a window put home did not go back into its stage Space");
+            st.held.remove(&id);
+        }
+        ok
     }
 
     /// The windows this engine holds hidden (as last read back).
@@ -593,6 +694,8 @@ impl SpacesEngine {
             st.plans.retain(|id, _| alive.contains(id));
             st.owed.retain(|id| alive.contains(id));
             st.new.retain(|id| alive.contains(id));
+            let held: BTreeSet<u32> = st.held.keys().copied().collect();
+            st.lent.retain(|id| held.contains(id));
             let used: BTreeSet<u64> = st.held.values().map(|h| h.space).collect();
             // The Space where new windows wait stays (a launch's watch may be putting a window
             // into it now); it ends with the others at a bring-back.
@@ -870,6 +973,9 @@ impl SpacesEngine {
             "new_placed": st.counts.new_placed,
             "new_unplaced": st.counts.new_unplaced,
             "new_missed": st.counts.new_missed,
+            "lent_now": st.lent,
+            "lent": st.counts.lent,
+            "taken_back": st.counts.taken_back,
             "stretches": {
                 "planned": st.stretch.planned,
                 "shown": st.stretch.shown,
@@ -946,12 +1052,21 @@ impl WindowEngine for SpacesEngine {
     /// keyboard goes to the new stage at once, as under the Corner engine (the full Spaces
     /// pass on 0eaa56b, 11-14: a card click on one Desktop waited for the unveil).
     fn focus_waits_for_show(&self, id: WindowId) -> bool {
-        self.holds(id.0) && self.app_elsewhere(id.0)
+        self.off_desktop(id.0) && self.app_elsewhere(id.0)
     }
 
-    /// While the engine holds it: a stage Space is no Desktop.
+    /// While the engine holds it in its stage Space (not put home for a while): a stage Space
+    /// is no Desktop.
     fn off_every_desktop(&self, id: WindowId) -> bool {
-        self.holds(id.0)
+        self.off_desktop(id.0)
+    }
+
+    fn lend_home(&self, id: WindowId) -> bool {
+        self.lend_window(id.0)
+    }
+
+    fn take_back(&self, id: WindowId) -> bool {
+        self.take_back_window(id.0)
     }
 
     /// Never: no frame says a window is in a stage Space, and the Spaces end with the app.

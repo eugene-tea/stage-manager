@@ -167,7 +167,9 @@ impl Controller {
                 std::thread::sleep(order::POLL.min(until - now));
             }
         }
-        if let Some(key) = focus.filter(|k| again.contains(k))
+        // A focus the landing owes waits for it (the key window flies on no Desktop).
+        let owed = |k: &u32| self.landing_focus.as_ref().is_some_and(|f| f.owes(*k));
+        if let Some(key) = focus.filter(|k| again.contains(k) && !owed(k))
             && let Some(w) = ob.window(key)
         {
             let now = Instant::now();

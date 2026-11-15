@@ -29,6 +29,13 @@
   change to that app never made it frontmost and another stage has come in front since: the
   activation was taken for the late answer to that earlier change for up to five seconds.
 
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a click on an app's
+  Dock item or its card no longer takes the screen to another Desktop and back when the app
+  has a stage on the Desktop shown and a window on another Desktop; ⌘Tab no longer does
+  when that other window is hidden too. A click on the Dock item of the app in front whose
+  other window waits in a stage of another Desktop goes there at the first click, not the
+  second.
+
 ## 1.8.5 — 2026-11-12
 
 - Quit (the menu's, or ⌘Q) chosen at a moment the app is busy is tried again for a few

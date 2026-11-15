@@ -77,6 +77,14 @@ pub fn macos_fronts_after_quit() -> bool {
     false
 }
 
+/// False: a window in a stage Space is on no Desktop, so macOS does not count it when it
+/// picks a Desktop for an app's activation; an app whose windows on the Desktop shown are all
+/// hidden, with one on another Desktop, takes macOS there (the owner's log of 11-15: Mail
+/// and VS Code, a Dock click and Command-Tab).
+pub fn macos_counts_hidden() -> bool {
+    false
+}
+
 /// Where a hide leaves window `w`: its own frame, as last seen.
 pub fn hidden_frame(w: &WindowState) -> Rect {
     w.meta.frame

@@ -14,7 +14,7 @@
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
-//! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
+//! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
@@ -206,10 +206,14 @@ pub enum Command {
     },
     /// Finds the Dock item of a `STAGE_MANAGER_ONLY` app, feeds it to the controller as a
     /// click on it (the Dock-click prediction runs as for a real click), then presses it
-    /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`).
+    /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`). With `real`, a synthetic press and release
+    /// are posted at the item instead, on a thread of their own, so the press, the release and
+    /// the Dock's own activation race as a person's click does.
     DebugDockClick {
         /// The app's bundle id.
         bundle: String,
+        /// A posted press and release, not the controller fed and `AXPress`.
+        real: bool,
     },
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
@@ -390,7 +394,8 @@ impl Command {
                 };
                 Ok(Self::DebugFullscreen { id, on })
             }
-            ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string() }),
+            ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: false }),
+            ["debug-dock-click", bundle, "real"] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: true }),
             ["adopted", ids @ ..] => ids
                 .iter()
                 .map(|id| id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}")))
@@ -925,8 +930,13 @@ mod tests {
         assert!(Command::parse("debug-frame 7 200 300 800").is_err());
         assert_eq!(
             Command::parse("debug-dock-click dev.example.app"),
-            Ok(Command::DebugDockClick { bundle: "dev.example.app".into() })
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: false })
         );
+        assert_eq!(
+            Command::parse("debug-dock-click dev.example.app real"),
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: true })
+        );
+        assert!(Command::parse("debug-dock-click dev.example.app fake").is_err());
         assert!(Command::parse("debug-dock-click").is_err());
         assert!(Command::parse("debug-click 60 70 alt").is_err());
         assert_eq!(Command::parse("space"), Ok(Command::Space));

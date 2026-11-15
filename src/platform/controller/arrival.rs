@@ -61,6 +61,10 @@ use crate::ui::strip_model::{self, StripSnapshot};
 /// app goes back to the global timeout right after ([`AxElement::bounded`]).
 const QUERY_AX_TIMEOUT_SECONDS: f32 = 0.05;
 
+/// How long `ctl debug-dock-click BUNDLE real` holds its press (the owner's clicks: ~100 ms
+/// from the press to the Dock's activation).
+const DOCK_PRESS_HOLD: Duration = Duration::from_millis(100);
+
 /// An arrangement made at a Dock click is undone when no Space change has come this long
 /// after it (the notice comes ~0.35–0.45 s after the click).
 pub const DOCK_SWITCH_WAIT: Duration = Duration::from_millis(1000);
@@ -558,6 +562,43 @@ pub(super) struct DockSeen {
     predicted: Option<u64>,
 }
 
+/// A window put on the Desktop shown at a Dock press, still counted hidden, so macOS
+/// activates its app here ([`crate::engine::model::Model::dock_home`]; the Spaces engine).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Lent {
+    pub(super) window: WindowId,
+    pub(super) pid: i32,
+    pub(super) at: Instant,
+}
+
+/// A window put home at a Dock press goes back into its stage Space when its stage has not
+/// come in front this long after the press (no click, no activation): the click's
+/// activation comes ~100 ms after the press, its switch at once.
+pub const LEND_WAIT: Duration = Duration::from_millis(1000);
+
+/// What becomes of a window put home at a Dock press, at a look ([`lent_step`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LentStep {
+    /// Still waiting for its stage to come in front.
+    Keep,
+    /// The model shows it, or its stage is in front (the switch shows it): nothing to do.
+    Forget,
+    /// No switch came for it: back into its stage Space.
+    TakeBack,
+}
+
+/// The step for a window put home `waited` ago: `parked` while the model counts it hidden,
+/// `in_front` once its stage is the active one of its Desktop.
+fn lent_step(parked: bool, in_front: bool, waited: Duration) -> LentStep {
+    if !parked || in_front {
+        LentStep::Forget
+    } else if waited >= LEND_WAIT {
+        LentStep::TakeBack
+    } else {
+        LentStep::Keep
+    }
+}
+
 /// A Space change this long after a Dock press counts as its click's.
 const DOCK_SEEN_FOR: Duration = Duration::from_millis(2000);
 
@@ -577,6 +618,9 @@ pub(super) struct AheadSent {
     sent_at: Instant,
     /// Space changes notified before it went out.
     changes_at: u64,
+    /// Made at the Dock press, before the release (the Spaces engine: the window waited off
+    /// every Desktop, and the Dock acts at the release).
+    at_press: bool,
 }
 
 /// Milliseconds from `then` to `now`.
@@ -1013,7 +1057,7 @@ impl Controller {
             since_input_ms = self.since_input_ms(sent),
             "arrival: the Desktop arranged ahead for the window it is shown for"
         );
-        self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent, changes_at });
+        self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent, changes_at, at_press: false });
         // A previous arrival's check still looking ends here (its tally logged).
         self.finish_verify("a new arrangement went out");
         // The first look a fast tick later: right after the calls the window server's list
@@ -1417,7 +1461,81 @@ impl Controller {
             took_ms = ms(now, Instant::now()),
             "dock: pressed"
         );
+        if let Ok((_, window)) = prediction {
+            self.arrange_at_press(ob, &item, window, now);
+        }
         self.dock_press = Some(DockPress { item, at: p, when: now, prediction });
+    }
+
+    /// A press whose click goes to `window` on another Desktop, kept off every Desktop by the
+    /// engine (the Spaces engine's stage Space): its Desktop is arranged now, before the
+    /// release. The Dock activates the app at the release, and macOS goes to a Desktop for
+    /// it only where it counts one of its windows; arranged at the release (4–18 ms after
+    /// it), the window was still on no Desktop, and the first click did nothing (the
+    /// owner's log of 11-15 06:32:34: an active app, its window in a stage of Desktop 1; the
+    /// second click went). The Corner engine's parked window is on its Desktop all along:
+    /// arranged at the release as before. A press that is no click undoes it at the release
+    /// ([`Self::press_not_click`]); no Space change within [`DOCK_SWITCH_WAIT`] as at a click.
+    fn arrange_at_press(&mut self, ob: &Observer, item: &DockItem, window: WindowId, now: Instant) {
+        if !self.engine.off_every_desktop(window) || self.frozen() || self.ahead.is_some() {
+            return;
+        }
+        if !self.arrange_ahead(ob, window, Trigger::DockClick, now, None) {
+            return;
+        }
+        if let Some(sent) = self.ahead.as_mut() {
+            sent.at_press = true;
+        }
+        if let Some(space) = self.ahead_space() {
+            self.present_away(space);
+        }
+        tracing::info!(
+            path = item.path,
+            window = window.0,
+            since_press_ms = ms(now, Instant::now()),
+            "dock: the Desktop the press goes to is arranged at the press (its window waited off every Desktop)"
+        );
+    }
+
+    /// A press on the Dock that was no click (a drag, a held press, a modifier): what was
+    /// done at the press for its click is undone now: the Desktop arranged at the press, the
+    /// window put home.
+    fn press_not_click(&mut self, ob: &Observer) {
+        if self.ahead.as_ref().is_some_and(|s| s.at_press) {
+            self.undo_ahead(ob, "the Dock press was no click");
+        }
+        if let Some(lent) = self.lent.take() {
+            let back = self.engine.take_back(lent.window);
+            tracing::info!(window = lent.window.0, back, "dock: the window put home at the press goes back (the press was no click)");
+        }
+    }
+
+    /// About every tick: a window put home at a Dock press whose stage did not come in front
+    /// ([`LEND_WAIT`]) goes back into its stage Space; one the model shows, or whose stage is
+    /// in front, is forgotten (the switch shows it).
+    fn expire_lent(&mut self, now: Instant) {
+        let Some(lent) = self.lent else { return };
+        let (parked, in_front) = self.model.as_ref().map_or((false, false), |m| {
+            (m.window(lent.window).is_some_and(|w| w.parked), m.stage_of(lent.window).is_some_and(|s| m.is_active(s)))
+        });
+        match lent_step(parked, in_front, now.saturating_duration_since(lent.at)) {
+            LentStep::Keep => {}
+            LentStep::Forget => {
+                self.lent = None;
+                tracing::debug!(window = lent.window.0, parked, in_front, "dock: the window put home at the press is the switch's now");
+            }
+            LentStep::TakeBack => {
+                self.lent = None;
+                let back = self.engine.take_back(lent.window);
+                tracing::info!(window = lent.window.0, back, "dock: the window put home at the press goes back: its stage did not come in front");
+            }
+        }
+    }
+
+    /// True when app `pid`'s activation finds a window of it put home at a Dock press
+    /// ([`Lent`]): macOS counts the app on the Desktop shown.
+    pub(super) fn lent_for(&self, pid: i32) -> bool {
+        self.lent.is_some_and(|l| l.pid == pid)
     }
 
     /// A left mouse-up at `p` (`modifiers`: any of ⌘⌥⌃⇧ held): a click on the Dock item
@@ -1428,6 +1546,7 @@ impl Controller {
             self.dock_clicked(ob, &press, now)
         } else {
             tracing::debug!(path = press.item.path, held_ms = ms(press.when, now), modifiers, "dock: a press, not a click; no prediction");
+            self.press_not_click(ob);
             None
         }
     }
@@ -1449,6 +1568,15 @@ impl Controller {
                     "the window predicted at the press is gone"
                 } else if let Some(sent) = &self.ahead {
                     if sent.ahead.window == window {
+                        if sent.at_press {
+                            self.focus_replay.hold(Wanted::Window { id: window, pid }, started);
+                            tracing::info!(
+                                path = press.item.path,
+                                window = window.0,
+                                since_click_ms = ms(press.when, Instant::now()),
+                                "dock: the Desktop the click goes to was arranged at the press"
+                            );
+                        }
                         return Some(window);
                     }
                     "another arrangement stands"
@@ -1546,6 +1674,25 @@ impl Controller {
         );
         let ax_window = focused.or(main_window).map(WindowId);
         let facts = AppFacts { hidden, unplaced, active, visible_here };
+        if let Some(prev) = self.lent.take() {
+            // A press after a press: the window put home for the first goes back.
+            let _ = self.engine.take_back(prev.window);
+        }
+        if let Some(home) = m.dock_home(pid, facts) {
+            if self.engine.lend_home(home) {
+                self.lent = Some(Lent { window: home, pid, at: Instant::now() });
+                tracing::info!(
+                    bundle,
+                    pid,
+                    window = home.0,
+                    took_ms = ms(started, Instant::now()),
+                    "dock: the app's windows here wait off every Desktop and macOS counts one elsewhere: its stage's window is put home before the release"
+                );
+                self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted: None });
+                return Err("the app's window here was put home at the press: macOS activates it here");
+            }
+            tracing::info!(bundle, pid, window = home.0, "dock: the app's window here could not be put home; macOS goes where it counts one");
+        }
         let result = m.dock_arrival(pid, facts, ax_window);
         let predicted = result.ok().and_then(|w| m.space_of(w)).map(|s| s.0);
         self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted });
@@ -1693,6 +1840,7 @@ impl Controller {
 
     /// About every tick: an arrangement whose Desktop did not come is undone ([`expire_step`]).
     pub(super) fn expire_ahead(&mut self, ob: &Observer, now: Instant) {
+        self.expire_lent(now);
         let Some(sent) = &self.ahead else { return };
         let changed = self.space_changes != sent.changes_at;
         let waited = now.saturating_duration_since(sent.sent_at);
@@ -1718,8 +1866,13 @@ impl Controller {
     /// found (its frame, from the Dock's lists), then clicked the way a real click goes: the
     /// hit-test at its center ([`dock::item_at`]), the prediction at the press, the
     /// arrangement at the release; then the item the hit-test found is pressed (`AXPress`,
-    /// which activates the app as a click does, the Dock auto-hidden or not).
-    pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str) -> serde_json::Value {
+    /// which activates the app as a click does, the Dock auto-hidden or not). With `real`, a
+    /// press and a release are posted at the item once the hit-test found it there
+    /// ([`crate::platform::input::dock_item_click`]): this thread returns at once, so the
+    /// press reaches the controller ~100 ms before the release, and the Dock activates the app
+    /// on the release as for a person's click (the fed path above arranges before `AXPress`,
+    /// which hid the race of the owner's log of 11-15 06:32:34).
+    pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str, real: bool) -> serde_json::Value {
         use serde_json::json;
         let only = std::env::var("STAGE_MANAGER_ONLY").unwrap_or_default();
         if !only.split(',').any(|b| b.trim() == bundle) {
@@ -1746,7 +1899,18 @@ impl Controller {
                 hit = dock::item_at(dock, at);
             }
         }
-        let mut result = self.debug_dock_press(ob, &list, bundle, &listed, at, hit);
+        let mut result = if real {
+            match hit {
+                Ok((_, item)) if item.path == listed.path => match crate::platform::input::dock_item_click(at, DOCK_PRESS_HOLD) {
+                    Ok(()) => json!({ "ok": true, "real": true, "at": [at.x, at.y] }),
+                    Err(e) => json!({ "ok": false, "error": e }),
+                },
+                Ok((_, other)) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found another item ({})", other.path) }),
+                Err(miss) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
+            }
+        } else {
+            self.debug_dock_press(ob, &list, bundle, &listed, at, hit)
+        };
         if revealed {
             crate::platform::input::pointer_back();
         }
@@ -1910,6 +2074,16 @@ mod tests {
         // Arranged for a focus the engine hid off its Desktop: away as a Dock click's is.
         assert!(Trigger::Hidden.away());
         assert!(expire_step(Trigger::Hidden, false, false, DOCK_SWITCH_WAIT, false).is_some(), "no Space change came for the focus");
+    }
+
+    #[test]
+    fn a_window_put_home_at_a_dock_press_goes_back_unless_its_stage_comes_in_front() {
+        let ms = Duration::from_millis;
+        assert_eq!(lent_step(true, false, ms(100)), LentStep::Keep, "the activation not here yet");
+        assert_eq!(lent_step(true, true, ms(100)), LentStep::Forget, "its stage in front: the switch shows it");
+        assert_eq!(lent_step(false, false, ms(100)), LentStep::Forget, "the model shows it");
+        assert_eq!(lent_step(true, true, LEND_WAIT * 2), LentStep::Forget, "the switch's show at the unveil may come late");
+        assert_eq!(lent_step(true, false, LEND_WAIT), LentStep::TakeBack, "no click, no activation: back unshown");
     }
 
     #[test]

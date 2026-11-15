@@ -25,7 +25,7 @@
 //! ([`Model::arrive`]: a parked window found shown is parked again, a shown one found parked
 //! is brought back) covers a move macOS did not carry out on a Desktop not shown.
 
-use super::{Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowRole};
+use super::{Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, WindowRole, WindowState};
 
 /// What the platform knows of an app a Dock click is for, beyond the model, asked at the
 /// press.
@@ -143,11 +143,18 @@ impl Model {
     ///   each active with windows on two Desktops, every click went to the other one). Only
     ///   when exactly one other Desktop holds them, none unplaced: the key window of its
     ///   most recent stage there.
-    /// - **An inactive app with a window on the Desktop shown** (in the model, parked or not,
-    ///   or on screen in the window server's list): macOS activates it here, no switch (the
-    ///   owner's log of 10-13 09:55:50, VS Code inactive with a window on each Desktop, and
-    ///   the hands-free run go10: the fixture app's focused window on the other Desktop did
-    ///   not take macOS there).
+    /// - **An inactive app with a window on the Desktop shown** that macOS counts there (in
+    ///   the model shown, or hidden by an engine whose hidden windows stay on their Desktop:
+    ///   the Corner engine's park corner, [`Model::macos_counts_hidden`]; or on screen in the
+    ///   window server's list): macOS activates it here, no switch (the owner's log of 10-13
+    ///   09:55:50, VS Code inactive with a window on each Desktop, and the hands-free run
+    ///   go10: the fixture app's focused window on the other Desktop did not take macOS
+    ///   there). Under the Spaces engine a window in a stage Space is on no Desktop: an app
+    ///   whose windows here are all hidden so goes nowhere when macOS counts none of its
+    ///   windows elsewhere either (its activation switches here), and otherwise to the
+    ///   Desktop of the window it counts (the owner's log of 11-15: Mail, a stage here and a
+    ///   window shown on Desktop 4), unless the platform puts the stage's window home first
+    ///   ([`Model::dock_home`]).
     /// - **The app's own answer** (`ax_window`: its focused, else main window, asked at the
     ///   press): macOS shows that window. A known window on another Desktop is the
     ///   prediction; one on the Desktop shown means no switch.
@@ -186,8 +193,12 @@ impl Model {
         if self.windows.values().any(|w| w.meta.pid == pid && w.sticky) {
             return Err("the inactive app has a window on every Desktop: macOS activates it here");
         }
-        if facts.visible_here || self.windows.values().any(|w| w.meta.pid == pid && self.is_shown_space(w.space)) {
+        let here = |w: &&WindowState| w.meta.pid == pid && self.is_shown_space(w.space);
+        if facts.visible_here || self.windows.values().filter(here).any(|w| self.macos_counts(w)) {
             return Err("the inactive app has a window on the Desktop shown: macOS activates it here");
+        }
+        if self.windows.values().any(|w| here(&w)) && !self.counted_elsewhere(pid) && !facts.unplaced {
+            return Err("the inactive app's windows are all hidden off every Desktop: macOS stays, its activation switches here");
         }
         if let Some(answer) = ax_window.and_then(|id| self.resolve_standard(id)).filter(|id| mine(id)) {
             return elsewhere(answer).ok_or("the app's focused window is on the Desktop shown");
@@ -196,6 +207,74 @@ impl Model {
             return Err("the app did not answer, and has windows not placed (minimized, or on a Desktop not visited)");
         }
         key_of_recent(None).ok_or("the app did not say which window, and no stage of it is known elsewhere")
+    }
+
+    /// True when macOS counts window `w` on its Desktop: shown, or hidden by an engine that
+    /// leaves hidden windows there ([`Model::macos_counts_hidden`]).
+    fn macos_counts(&self, w: &WindowState) -> bool {
+        !w.parked || self.macos_counts_hidden()
+    }
+
+    /// True when macOS counts a standard window of app `pid` on a Desktop not shown (on every
+    /// Desktop windows left out): where an activation of the app may take it.
+    fn counted_elsewhere(&self, pid: Pid) -> bool {
+        self.windows.values().any(|w| {
+            w.meta.pid == pid && w.meta.role == WindowRole::Standard && !w.sticky && !self.is_shown_space(w.space) && self.macos_counts(w)
+        })
+    }
+
+    /// The window of inactive app `pid` the platform puts on the Desktop shown at the press
+    /// of a click on the app's Dock item, before the release (the Dock activates the app on
+    /// the release, ~100 ms later), so macOS activates the app here as Apple's Stage Manager
+    /// does, and the Corner engine, whose parked windows are on their Desktop: the key window
+    /// of the app's most recent stage on a Desktop shown, the one its activation switches to
+    /// ([`Model::app_activated`]). Only under an engine whose hidden windows macOS counts on
+    /// no Desktop ([`Model::macos_counts_hidden`]: Spaces) and when the click would otherwise
+    /// take macOS away: the app's windows here all hidden, one it counts on another Desktop,
+    /// or windows not placed, which may be (the owner's log of 11-15: Mail, window 182 in a
+    /// stage here, 295 shown on Desktop 4; macOS slid to 4 and back). `None` otherwise: an app hidden, active (its click goes to
+    /// another Desktop, [`Model::dock_arrival`]), on screen here or on every Desktop, with no
+    /// stage here, or with nothing counted elsewhere (macOS goes nowhere; its activation
+    /// switches here, [`Model::activation_stays_here`]).
+    pub fn dock_home(&self, pid: Pid, facts: AppFacts) -> Option<WindowId> {
+        if self.macos_counts_hidden() || facts.hidden || facts.active || facts.visible_here {
+            return None;
+        }
+        self.dock_gates(pid).ok()?;
+        if self.windows.values().any(|w| w.meta.pid == pid && (w.sticky || (self.is_shown_space(w.space) && self.macos_counts(w)))) {
+            return None;
+        }
+        // Windows not placed may be counted on a Desktop not visited: put home all the same.
+        if !self.counted_elsewhere(pid) && !facts.unplaced {
+            return None;
+        }
+        let has = |ids: &[WindowId]| ids.iter().any(|id| self.windows.get(id).is_some_and(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard));
+        let stage = self
+            .stages
+            .iter()
+            .filter(|s| self.is_shown_space(s.space) && !self.is_active(s.id) && has(&s.windows))
+            .max_by_key(|s| s.last_active)?;
+        self.activated_key(stage.id, pid, None)
+    }
+
+    /// True when an activation of app `pid` leaves macOS on the Desktop shown although the
+    /// app's focused window is on another Desktop, hidden there off every Desktop: the app
+    /// has a window in a stage of a Desktop shown, and macOS counts one of its windows here
+    /// (`lent_here`: one put home for a Dock press, [`Model::dock_home`]) or none on a
+    /// Desktop not shown. Asked only for a focused window the engine keeps off every Desktop
+    /// (Spaces): macOS then goes nowhere, and the activation switches to the app's stage
+    /// here, where the Corner engine (its parked windows counted on their Desktop) and
+    /// Apple's end too. The owner's log of 11-15 06:31:28: VS Code, a window in a stage here,
+    /// its focused window hidden on Desktop 4: the app went to Desktop 4 for it.
+    pub fn activation_stays_here(&self, pid: Pid, lent_here: bool) -> bool {
+        let stage_here = self.windows.values().any(|w| {
+            w.meta.pid == pid
+                && w.meta.role == WindowRole::Standard
+                && !w.sticky
+                && matches!(w.home, Home::Stage(_))
+                && self.is_shown_space(w.space)
+        });
+        stage_here && (lent_here || !self.counted_elsewhere(pid))
     }
 
     /// The Desktops not shown that hold a standard window of app `pid` (on every Desktop

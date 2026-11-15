@@ -150,7 +150,8 @@ impl SpacesEngine {
     /// Plans window `s.window`'s stretch on a thread of its own (see the module notes); false
     /// when the engine does not hold it in a stage Space or the stretch has no steps.
     pub(super) fn begin_stretch(&self, s: Stretch, done: StretchDone) -> bool {
-        if s.steps.is_empty() || !self.holds(s.window) || self.sky().is_none() {
+        // A window put home for a Dock press shows already: its picture lands on it.
+        if s.steps.is_empty() || !self.holds(s.window) || self.lent(s.window) || self.sky().is_none() {
             return false;
         }
         {
@@ -342,6 +343,12 @@ impl SpacesEngine {
             }
             Phase::Flying => (None, None),
         }
+    }
+
+    /// True while window `id` has a stretch planned or flying that has not stopped: until it
+    /// lands it is in its stage Space or its landing Space, on no Desktop for macOS.
+    pub(super) fn in_flight(&self, id: u32) -> bool {
+        self.stretches().get(&id).is_some_and(|f| !f.stop && !f.ended)
     }
 
     /// Window `id`'s stretch, when one not taken over yet is no longer wanted.

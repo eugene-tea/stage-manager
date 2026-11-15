@@ -11,6 +11,14 @@
 //! over), and at least one landed, the focus runs again with the window on its Desktop
 //! ([`super::Controller::stretch_ended`]). A switch superseded, or the user's own switch
 //! meanwhile, forgets it.
+//!
+//! The owner's apps do activate for that early focus (11-15, review build, five card clicks
+//! of 28: Mail and VS Code activated at the unveil, their key window still flying), and with
+//! the key window on no Desktop macOS went to the app's window on another Desktop (06:42:57:
+//! VS Code's window 255 on Desktop 1, the Space changed ~330 ms after the activation). So
+//! when the key window flies and its app has a window elsewhere, the unveil leaves its
+//! focus out ([`LandingFocus::defer`]) and only the focus after the landing runs, owed even
+//! when no stretch landed.
 
 use std::collections::HashSet;
 
@@ -25,6 +33,9 @@ pub(super) struct LandingFocus {
     flying: HashSet<u32>,
     /// One of them landed on its Desktop.
     landed: bool,
+    /// The unveil left the focus out ([`Self::defer`]): it runs once the last stretch ended,
+    /// landed or not.
+    owed: bool,
 }
 
 /// What a stretch's end leaves of a [`LandingFocus`].
@@ -47,7 +58,23 @@ impl LandingFocus {
     pub(super) fn after_unveil(switch: u64, key: Option<u32>, asked: impl IntoIterator<Item = u32>, stretching: &HashSet<u32>) -> Option<Self> {
         let key = key?;
         let flying: HashSet<u32> = asked.into_iter().filter(|id| stretching.contains(id)).collect();
-        (!flying.is_empty()).then_some(Self { switch, key, flying, landed: false })
+        (!flying.is_empty()).then_some(Self { switch, key, flying, landed: false, owed: false })
+    }
+
+    /// The window the switch focuses.
+    pub(super) fn key(&self) -> u32 {
+        self.key
+    }
+
+    /// The unveil leaves the focus out: it runs only after the stretches, whatever their end.
+    pub(super) fn defer(&mut self) {
+        self.owed = true;
+    }
+
+    /// True when the focus of window `key` waits for the stretches' end ([`Self::defer`]):
+    /// nothing else focuses it before.
+    pub(super) fn owes(&self, key: u32) -> bool {
+        self.owed && self.key == key
     }
 
     /// Window `window`'s stretch in transition `switch` ended, on its Desktop when `landed`.
@@ -56,7 +83,7 @@ impl LandingFocus {
             return AfterEnd::Waiting;
         }
         self.landed |= landed;
-        match (self.flying.is_empty(), self.landed) {
+        match (self.flying.is_empty(), self.landed || self.owed) {
             (false, _) => AfterEnd::Waiting,
             (true, false) => AfterEnd::Done,
             (true, true) => AfterEnd::Refocus(self.key),
@@ -99,5 +126,20 @@ mod tests {
         assert_eq!(f.ended(2, 1, false), AfterEnd::Done);
         assert_eq!(LandingFocus::after_unveil(2, Some(1), [1], &HashSet::new()), None, "no stretch: the pictures landing");
         assert_eq!(LandingFocus::after_unveil(2, None, [1], &stretching), None, "no focus in the batch");
+    }
+
+    /// The owner's card click of 11-15 06:42:57: VS Code's 240 and Terminal's 214 fly, VS Code
+    /// has a window on Desktop 1; the unveil leaves the focus out, and the focus runs once
+    /// both ended, even when neither landed (each shown by the unveil instead).
+    #[test]
+    fn a_focus_left_out_at_the_unveil_runs_after_the_last_stretch_whatever_its_end() {
+        let stretching: HashSet<u32> = [214, 240].into();
+        let mut f = LandingFocus::after_unveil(37, Some(240), [214, 240], &stretching).expect("both fly");
+        assert!(!f.owes(240), "not left out yet");
+        f.defer();
+        assert!(f.owes(240) && !f.owes(214), "only the key's focus is owed");
+        assert_eq!(f.key(), 240);
+        assert_eq!(f.ended(37, 214, false), AfterEnd::Waiting);
+        assert_eq!(f.ended(37, 240, false), AfterEnd::Refocus(240), "owed though none landed");
     }
 }
