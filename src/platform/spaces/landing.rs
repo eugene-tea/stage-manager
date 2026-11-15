@@ -435,6 +435,18 @@ mod tests {
         assert!(e.sky.get().is_none(), "no window server asked");
     }
 
+    /// The controller owes a focus to the windows whose stretch still tells its end: planned
+    /// or flying, not one already stopped.
+    #[test]
+    fn stretching_names_the_stretches_not_stopped() {
+        use crate::platform::window_engine::WindowEngine;
+        let e = engine();
+        e.stretches().insert(1, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0 });
+        e.stretches().insert(2, Fly { phase: Phase::Flying, stop: false, ended: false, space: 900 });
+        e.stretches().insert(3, Fly { phase: Phase::Flying, stop: true, ended: false, space: 901 });
+        assert_eq!(e.stretching(), [1, 2].into());
+    }
+
     /// Waits end at their instant, never before.
     #[test]
     fn a_step_waits_for_its_instant() {

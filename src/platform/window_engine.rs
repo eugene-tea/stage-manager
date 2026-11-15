@@ -91,6 +91,18 @@ pub enum StretchNote {
     Stopped,
 }
 
+impl StretchNote {
+    /// How the stretch ended: `Some(true)` on its Desktop, `Some(false)` stopped or never
+    /// taken over; `None` while it flies ([`Self::Shown`]).
+    pub fn ended(self) -> Option<bool> {
+        match self {
+            Self::Shown => None,
+            Self::Landed => Some(true),
+            Self::Skipped(_) | Self::Stopped => Some(false),
+        }
+    }
+}
+
 /// Hears each [`StretchNote`] of a window (any thread).
 pub type StretchDone = Arc<dyn Fn(u32, StretchNote) + Send + Sync>;
 
@@ -189,6 +201,12 @@ pub trait WindowEngine: Send + Sync {
     /// Window `id`'s stretch is no longer wanted (its picture goes elsewhere now): it never
     /// takes over if it has not yet; one already flying finishes.
     fn cancel_stretch(&self, _id: u32) {}
+
+    /// The windows whose stretch has not ended yet (planned or flying, not stopped): each
+    /// still tells its end to its `done`. The Corner engine: none.
+    fn stretching(&self) -> HashSet<u32> {
+        HashSet::new()
+    }
 
     /// The last line of defence in this process: every hidden window brought back, whatever
     /// state the model and the WM thread are in. Any thread. True when nothing failed.

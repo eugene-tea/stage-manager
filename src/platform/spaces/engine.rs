@@ -987,6 +987,10 @@ impl WindowEngine for SpacesEngine {
         self.cancel(id);
     }
 
+    fn stretching(&self) -> HashSet<u32> {
+        self.stretches().iter().filter(|(_, f)| !f.stop).map(|(id, _)| *id).collect()
+    }
+
     /// True: a hide is one window-server call (~2 ms a window), so the outgoing windows wait
     /// on screen for pictures taken at the switch; a window in a stage Space still draws and
     /// is captured with its current content there (`probe-spaces capture`, 11-14).

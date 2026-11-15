@@ -378,6 +378,9 @@ pub enum StripEvent {
     /// The incoming windows of transition `id` are covered by their growing snapshots: put
     /// them in place now.
     Unveil { id: u64 },
+    /// Incoming window `window` of transition `id` ended its last stretch (the live landing):
+    /// on its Desktop when `landed`, else stopped or never taken over.
+    StretchEnded { id: u64, window: u32, landed: bool },
 }
 
 type Presenter = Box<dyn Fn(StripSnapshot) + Send + Sync>;

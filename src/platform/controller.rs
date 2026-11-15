@@ -150,6 +150,7 @@ mod ax_blind;
 mod corner;
 mod dock_order;
 mod fallback;
+mod landing_focus;
 mod raise_order;
 mod spaces;
 mod stale;
@@ -884,6 +885,9 @@ pub struct Controller {
     before: transition_plan::Before,
     /// Incoming windows waiting behind their growing snapshots.
     pending: Option<Pending>,
+    /// The last switch's focus, owed again once its windows flying their last stretch have
+    /// landed ([`landing_focus`]).
+    landing_focus: Option<landing_focus::LandingFocus>,
     next_transition: u64,
     /// The transition whose outgoing windows just parked, for the next snapshot.
     parked_note: Option<u64>,
@@ -1162,6 +1166,7 @@ impl Controller {
             announce: false,
             before: transition_plan::Before::default(),
             pending: None,
+            landing_focus: None,
             next_transition: 0,
             parked_note: None,
             under_note: None,
@@ -2031,6 +2036,8 @@ impl Controller {
         cover_ms: u64,
     ) -> usize {
         let id = t.id;
+        // A new switch: the last one's windows owe no focus when they land.
+        self.landing_focus = None;
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
         let outgoing: HashSet<u32> = t.outgoing.iter().map(|w| w.window.id).collect();
         let (corner, list) = match early_corner {
@@ -2158,6 +2165,7 @@ impl Controller {
 
     fn flush_pending_as(&mut self, ob: &Observer, superseded: Option<&'static str>) {
         if let Some(mut p) = self.pending.take() {
+            self.landing_focus = None;
             if let Some(why) = superseded {
                 let (kept, dropped) = without_focus(p.actions);
                 p.actions = kept;
@@ -2178,6 +2186,9 @@ impl Controller {
                 })
                 .collect();
             let (raises, focus) = raise_order::raises_and_focus(&p.actions);
+            // Read before the shows below, which stop a stretch not taken over yet (it ends
+            // and tells so all the same).
+            self.landing_focus = landing_focus::LandingFocus::after_unveil(p.id, focus, asked.iter().map(|(id, _)| *id), &self.engine.stretching());
             self.execute_batch(ob, p.actions, Batch::Unveil);
             // Where the windows really are now: their snapshots land exactly there.
             let mut arrived = Vec::new();
@@ -2194,6 +2205,44 @@ impl Controller {
             // The strip has its note: now the order its card shows (`raise_order`), unless the
             // user clicked since the switch began (this flush may be the owner's next click's).
             self.settle_raise_order(ob, &raises, focus, since);
+        }
+    }
+
+    /// The user may have switched apps (a click, a ⌘ key press, an activation not ours): no
+    /// late echo is awaited any more ([`Echoes::user_switched`]), and no focus of a switch
+    /// left behind runs when its windows land.
+    fn user_switched(&mut self) {
+        self.echoes.user_switched();
+        self.landing_focus = None;
+    }
+
+    /// Window `window` of transition `id` ended its last stretch (on its Desktop when
+    /// `landed`): once the switch's last flying window has, and one landed, the switch's
+    /// focus runs again, now that the window is on a Desktop (round S7b: a focus while it
+    /// flies in its landing Space never activates its app), when its stage is still in front.
+    fn stretch_ended(&mut self, ob: &Observer, id: u64, window: u32, landed: bool) {
+        let Some(f) = self.landing_focus.as_mut() else { return };
+        let key = match f.ended(id, window, landed) {
+            landing_focus::AfterEnd::Waiting => return,
+            landing_focus::AfterEnd::Done => {
+                self.landing_focus = None;
+                return;
+            }
+            landing_focus::AfterEnd::Refocus(key) => key,
+        };
+        self.landing_focus = None;
+        let in_front = self.model.as_ref().is_some_and(|m| m.stage_of(WindowId(key)).is_some_and(|s| m.stage_in_front(s)));
+        let Some(w) = ob.window(key).filter(|_| in_front) else {
+            tracing::debug!(id, key, "landing: the switch's window is no longer in front; no focus again");
+            return;
+        };
+        let now = Instant::now();
+        self.echoes.touch_window(key, now);
+        self.echoes.touch_app(w.pid, now);
+        let element = ob.element(key).unwrap_or_else(|| w.element.clone());
+        match ax_focus(&element, w.pid) {
+            Ok(()) => tracing::debug!(id, key, pid = w.pid, "landing: the window is on its Desktop; the switch's focus again, so its app comes in front"),
+            Err(e) => tracing::debug!(id, key, pid = w.pid, "landing: the focus again failed: {e}"),
         }
     }
 
@@ -2842,7 +2891,7 @@ impl Controller {
                 }
                 // The user switched apps: a late echo of an earlier focus of ours is no
                 // longer one.
-                self.echoes.user_switched();
+                self.user_switched();
                 self.flush_superseded(ob, "an activation");
                 self.show_strip_after_desktop("an app was activated");
                 if self.activation_frozen(pid) {
@@ -3304,7 +3353,7 @@ impl Controller {
                     self.flush_superseded(ob, "a click");
                 }
                 self.end_drag();
-                self.echoes.user_switched();
+                self.user_switched();
                 self.press = self.model.as_ref().map(|m| Press {
                     at: event.at,
                     frames: m.windows().filter(|w| !w.parked).map(|w| (w.meta.id.0, w.restore)).collect(),
@@ -3364,7 +3413,7 @@ impl Controller {
                 // Typing never cuts a switch's animation short: the keyboard is already the
                 // new stage's (its focus ran before the windows arrived).
                 if event.cmd {
-                    self.echoes.user_switched();
+                    self.user_switched();
                 }
                 if self.desktop_echo.user_acted() {
                     tracing::debug!("a key press after a wallpaper click: Finder's next activation is deliberate");
@@ -5363,6 +5412,7 @@ impl Controller {
             StripEvent::WindowToNewCard { stage, window, before } => StripEvent::WindowToNewCard { stage: f(stage), window, before: before.map(f) },
             StripEvent::WindowToCard { stage, window, into } => StripEvent::WindowToCard { stage: f(stage), window, into: f(into) },
             StripEvent::Unveil { id } => StripEvent::Unveil { id },
+            StripEvent::StretchEnded { id, window, landed } => StripEvent::StretchEnded { id, window, landed },
         }
     }
 
@@ -5377,7 +5427,7 @@ impl Controller {
 
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
-        if !matches!(event, StripEvent::Unveil { .. }) {
+        if !matches!(event, StripEvent::Unveil { .. } | StripEvent::StretchEnded { .. }) {
             self.end_restore(ob, "a card click", End::User);
         }
         if let StripEvent::CardPressed { stage } = event {
@@ -5393,6 +5443,10 @@ impl Controller {
             if self.phase.switching().is_some_and(|s| s.id == id) {
                 self.flush_pending(ob);
             }
+            return;
+        }
+        if let StripEvent::StretchEnded { id, window, landed } = event {
+            self.stretch_ended(ob, id, window, landed);
             return;
         }
         // The restore window's end (at this event or at the card's press) may have moved a
@@ -5498,7 +5552,7 @@ impl Controller {
                 tracing::info!(stage, window, into, "a window dragged off a combined card onto a card: it alone joins that stage");
                 m.move_window_to_stage(StageId(stage), WindowId(window), StageId(into), &obs)
             }
-            StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } | StripEvent::CardPressed { .. } => Vec::new(),
+            StripEvent::CardMoved { .. } | StripEvent::Unveil { .. } | StripEvent::StretchEnded { .. } | StripEvent::CardPressed { .. } => Vec::new(),
         };
         let changed = actions.contains(&Action::StateChanged);
         self.execute_animated(ob, actions);
@@ -5534,7 +5588,7 @@ impl Controller {
             | StripEvent::CardMerged { stage, .. }
             | StripEvent::WindowToNewCard { stage, .. }
             | StripEvent::WindowToCard { stage, .. } => Some(stage),
-            StripEvent::Unveil { .. } => None,
+            StripEvent::Unveil { .. } | StripEvent::StretchEnded { .. } => None,
         };
         stage
             .and_then(|s| self.model.as_ref()?.stage(StageId(s)).map(|s| s.display))
