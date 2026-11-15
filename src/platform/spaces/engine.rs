@@ -597,6 +597,14 @@ impl SpacesEngine {
     /// says: the bring-back of quit, a stand-down, a panic. With `end`, the Spaces left
     /// empty are ended. Any thread.
     pub fn sweep(&self, why: &str, end: bool) -> Report {
+        self.sweep_where(why, end, false)
+    }
+
+    /// [`Self::sweep`]; with `strays_only`, the windows this run holds hidden stay where they
+    /// are: only what nothing answers for comes back (a recovery scan while the run is
+    /// arranging: its rescans every 3 s brought every hidden window back for a moment, live
+    /// 11-14).
+    fn sweep_where(&self, why: &str, end: bool, strays_only: bool) -> Report {
         let mut report = Report::default();
         let ours = self.ours();
         if ours.is_empty() {
@@ -612,6 +620,9 @@ impl SpacesEngine {
         for w in windows::every_window().iter().filter(|w| w.pid != own) {
             let now = sky.spaces_of(&[w.id]);
             let Some(space) = now.iter().copied().find(|s| ours.contains(s)) else { continue };
+            if strays_only && self.state().held.contains_key(&w.id) {
+                continue;
+            }
             in_space.insert(w.id, space);
             report.checked += 1;
             let home = self
@@ -976,7 +987,7 @@ impl WindowEngine for SpacesEngine {
     /// must bring them back the Corner way (this engine leaves nothing there itself, and the
     /// windows it registers are skipped).
     fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
-        let swept = self.sweep(why, false);
+        let swept = self.sweep_where(why, false, true);
         if scope.registered.is_empty() && !why.starts_with("launch") {
             return (swept, Vec::new());
         }

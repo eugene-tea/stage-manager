@@ -1034,7 +1034,7 @@ impl WmState {
     fn tick_waits(&self, now: Instant) -> Option<&'static str> {
         if self.launch_scan.is_some() {
             Some("the launch scan")
-        } else if !self.rescan.is_empty() || self.display_sweep.is_some() {
+        } else if self.rescan.wants_brisk() || self.display_sweep.is_some() {
             Some("a rescan")
         } else if self.leftovers_look.is_some() {
             Some("a leftovers look")
