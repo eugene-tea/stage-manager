@@ -6,6 +6,10 @@
   of its tab group: it takes the place of the tab it hides, and goes with its stage when
   another stage is chosen. A tab selected was let go with no stage, and selected again it
   could stay on the Desktop under the next stage.
+- A window tab selected while its stage waits hidden (a tab closed there, or selected by its
+  app) is hidden with the stage and comes back at its tab group's frame, at a stage change
+  and at quit. The tab hidden was put back at quit instead, and the tab selected left in the
+  corner was then put back at the saved frame of another window with its title.
 - Card pictures are taken when a stage leaves for its card, when the strip comes into view
   and when the pointer reaches a card, no longer every 1.5 seconds, and every window picture
   comes from the window server directly: much less CPU at rest. `[strip]
