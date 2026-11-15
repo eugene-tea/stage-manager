@@ -90,6 +90,14 @@ pub fn macos_fronts_after_quit() -> bool {
     true
 }
 
+/// True: a parked window stays on its Desktop (in the corner), so macOS counts it there when
+/// it picks a Desktop for an app's activation ("switch to a Space with open windows for the
+/// application"): an inactive app with a window parked on the Desktop shown is activated
+/// there (the owner's log of 10-13, run go10).
+pub fn macos_counts_hidden() -> bool {
+    true
+}
+
 /// The frame that parks a window whose restore frame is `restore` on display `d`: its
 /// restore size in the display's park corner, asked as `asked` (`[windows] park_inside`,
 /// `park_drop`).

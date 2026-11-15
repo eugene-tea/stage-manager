@@ -1445,7 +1445,7 @@ impl Model {
     /// window (`focused`, a child standing for its parent) when that is a member of the stage,
     /// else the stage's key when it is the app's, else the app's front member. None when the
     /// stage holds no standard window of the app.
-    fn activated_key(&self, stage: StageId, pid: Pid, focused: Option<WindowId>) -> Option<WindowId> {
+    pub(super) fn activated_key(&self, stage: StageId, pid: Pid, focused: Option<WindowId>) -> Option<WindowId> {
         let s = self.stage(stage)?;
         let mine = |id: &WindowId| self.windows.get(id).is_some_and(|w| w.meta.pid == pid);
         focused

@@ -21,8 +21,9 @@
 //!   engine that hides without moving has no such place.
 //!
 //! And one answer the engine gives about a window the model hid: where it left it
-//! ([`Model::frame_left`]); and one about macOS: whether it brings another app in front when
-//! the app in front quits ([`Model::macos_fronts_after_quit`]).
+//! ([`Model::frame_left`]); and two about macOS: whether it brings another app in front when
+//! the app in front quits ([`Model::macos_fronts_after_quit`]), and whether it counts a hidden
+//! window on its Desktop at an app's activation ([`Model::macos_counts_hidden`]).
 
 use super::{Display, DisplayId, Model, WindowId, WindowMeta, WindowState};
 use crate::engine::{corner, spaces};
@@ -137,6 +138,17 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::macos_fronts_after_quit(),
             EngineKind::Spaces => spaces::macos_fronts_after_quit(),
+        }
+    }
+
+    /// True when macOS counts a window the engine hides on its Desktop when it picks a
+    /// Desktop for an app's activation: the Corner engine's parked window is on its Desktop
+    /// (in the corner); the Spaces engine's is in a stage Space, on no Desktop
+    /// ([`Model::dock_arrival`], [`Model::dock_home`]).
+    pub(crate) fn macos_counts_hidden(&self) -> bool {
+        match self.options.engine {
+            EngineKind::Corner => corner::macos_counts_hidden(),
+            EngineKind::Spaces => spaces::macos_counts_hidden(),
         }
     }
 

@@ -1536,6 +1536,26 @@ mod arranged_ahead {
         mac
     }
 
+    /// The owner's log of 11-15: Desktop 1 shown with the browser's stage in front and Mail's
+    /// window 5 waiting in a stage of its own there; Mail's window 6 shown on Desktop 2 with
+    /// chat behind it. Mail is not the active app.
+    fn mail_waiting_here_and_shown_elsewhere() -> Mac {
+        let mut mac = Mac::new();
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 5, 40, "com.example.mail", "Inbox");
+        mac.put(1, 6, 40, "com.example.mail", "Sent");
+        mac.put(1, 4, 30, "com.example.chat", "Family");
+        mac.focused = Some(w(6));
+        mac.go(1);
+        mac.focused = Some(w(5));
+        mac.go(0);
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        mac.click(browser);
+        assert!(mac.parked(5) && !mac.parked(6), "Mail waits here, shows on Desktop 2");
+        mac.elsewhere.clear();
+        mac
+    }
+
     both_engines! {
     #[test]
     fn a_dock_click_predicts_the_window_macos_will_show_on_another_desktop() {
@@ -1615,6 +1635,70 @@ mod arranged_ahead {
             Err("the inactive app has a window on the Desktop shown: macOS activates it here"),
             "not active with window 3 here: macOS activates it here, whatever its answer (run go10)"
         );
+    }
+
+    #[test]
+    fn a_window_hidden_here_counts_for_macos_only_under_the_corner_engine() {
+        use crate::engine::model::AppFacts;
+        let mac = mail_waiting_here_and_shown_elsewhere();
+        let none = AppFacts::default();
+        let mail_stage = mac.m.stage_of(w(5));
+        match mac.m.options().engine {
+            EngineKind::Corner => {
+                // The parked window is on Desktop 1 (in the corner): macOS activates Mail here.
+                assert_eq!(
+                    mac.m.dock_arrival(40, none, Some(w(6))),
+                    Err("the inactive app has a window on the Desktop shown: macOS activates it here"),
+                );
+                assert_eq!(mac.m.dock_home(40, none), None, "nothing to put home: the parked window counts here");
+            }
+            EngineKind::Spaces => {
+                // Window 5 is in a stage Space, on no Desktop: macOS counts Mail on Desktop 2
+                // only, and its focused window there is where the click goes.
+                assert_eq!(mac.m.dock_arrival(40, none, Some(w(6))), Ok(w(6)), "macOS goes to Desktop 2 for window 6");
+                assert_eq!(mac.m.dock_home(40, none), Some(w(5)), "window 5 goes home before the release, so macOS stays");
+                assert_eq!(mac.m.stage_of(w(5)), mail_stage);
+                assert!(mac.m.activation_stays_here(40, true), "window 5 put home: macOS counts Mail here");
+                assert!(!mac.m.activation_stays_here(40, false), "window 6 counted on Desktop 2: macOS goes there");
+                assert_eq!(mac.m.dock_home(40, AppFacts { active: true, ..none }), None, "active: its click goes elsewhere");
+                assert_eq!(mac.m.dock_home(40, AppFacts { hidden: true, ..none }), None, "hidden");
+                assert_eq!(mac.m.dock_home(40, AppFacts { visible_here: true, ..none }), None, "on screen here");
+                assert_eq!(mac.m.dock_home(20, none), None, "the browser has nothing on another Desktop");
+            }
+        }
+    }
+
+    #[test]
+    fn an_app_hidden_everywhere_with_a_stage_here_stays_here() {
+        use crate::engine::model::AppFacts;
+        // VS Code at 06:31:28 (11-15): a stage here, its focused window hidden in an inactive
+        // stage of Desktop 2.
+        let mut mac = mail_waiting_here_and_shown_elsewhere();
+        mac.go(1);
+        let chat = mac.m.stage_of(w(4)).expect("chat stage");
+        mac.click(chat);
+        assert!(mac.parked(6), "Mail's window on Desktop 2 waits behind chat");
+        mac.focused = Some(w(2));
+        mac.go(0);
+        assert!(mac.parked(5));
+        let none = AppFacts::default();
+        let prediction = mac.m.dock_arrival(40, none, Some(w(6)));
+        assert!(prediction.is_err(), "macOS stays either way: {prediction:?}");
+        assert_eq!(mac.m.dock_home(40, none), None, "nothing counted elsewhere: nothing to put home");
+        match mac.m.options().engine {
+            EngineKind::Corner => assert_eq!(prediction, Err("the inactive app has a window on the Desktop shown: macOS activates it here")),
+            EngineKind::Spaces => {
+                assert_eq!(prediction, Err("the inactive app's windows are all hidden off every Desktop: macOS stays, its activation switches here"));
+                assert!(mac.m.activation_stays_here(40, false), "macOS goes nowhere: the activation switches here");
+                assert!(!mac.m.activation_stays_here(30, false), "chat has no stage here");
+            }
+        }
+        // Its activation here switches to Mail's stage (the stage the Spaces engine keeps).
+        let obs = Observation { focused: Some(w(6)), ..mac.obs() };
+        let a = mac.m.app_activated(40, &obs);
+        mac.run(a);
+        assert_eq!(mac.m.stage_of(w(5)), mac.m.main_active_stage(), "Mail's stage here in front");
+        assert_eq!(mac.shown, 0);
     }
 
     #[test]
