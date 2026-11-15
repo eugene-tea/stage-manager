@@ -25,6 +25,9 @@
   again, for every window of a stage: since card pictures are taken at events, only one
   window was read each time, and the others flew with the system's shadow (a dark window on
   a light system landed with a light shadow that flipped to its own).
+- An app brought forward with ⌘Tab or the Dock brings its stage also when an earlier stage
+  change to that app never made it frontmost and another stage has come in front since: the
+  activation was taken for the late answer to that earlier change for up to five seconds.
 
 ## 1.8.5 — 2026-11-12
 

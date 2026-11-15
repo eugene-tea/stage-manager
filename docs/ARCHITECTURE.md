@@ -275,7 +275,11 @@ real window in front of it. The controller counts the window hidden until its un
 its show then asks the app nothing (the window list reports a window in a transformed Space
 at its frame, `windows::set_transformed`); a show before the handover stops the stretch, a
 hide mid-flight takes the window out of its landing Space, a bring-back takes every flying
-window home first.
+window home first. A focus while the window is in its landing Space is no activation of its
+app (no Desktop holds the window), so each stretch tells its end to the controller
+(`StripEvent::StretchEnded`), which runs the switch's focus again once the batch's last
+flying window has ended and one landed, its stage still in front and no click, ⌘ key or
+other app's activation since (`platform/controller/landing_focus.rs`).
 
 A newly opened app's window under the Spaces engine (`platform/spaces/launch_watch.rs`): the
 window server lists it, off screen and on no Space, tens to hundreds of ms before it first

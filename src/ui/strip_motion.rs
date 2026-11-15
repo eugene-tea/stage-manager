@@ -1314,6 +1314,11 @@ impl Strip {
                 .collect();
             let done: StretchDone = std::sync::Arc::new(move |window, note| {
                 DispatchQueue::main().exec_async(move || {
+                    // The controller hears every end, its transition still running or not:
+                    // a window that landed is focused again there (round S7b).
+                    if let Some(landed) = note.ended() {
+                        strip_model::emit(StripEvent::StretchEnded { id, window, landed });
+                    }
                     with_strip_of(display, |s| s.stretch_note(id, window, note));
                 });
             });
