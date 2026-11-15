@@ -51,6 +51,7 @@ use super::{Controller, cards_in};
 use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
+use crate::engine::switcher::{LetGo, LetGoStep};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Display, DisplayId, Model, Observation, SpaceId, StageId, WindowId};
 use crate::platform::ax::{AxElement, AxError, AxResult, names};
@@ -574,12 +575,12 @@ pub(super) struct DockSeen {
 pub(super) struct Lent {
     pub(super) window: WindowId,
     pub(super) pid: i32,
-    /// When it was put home (a Dock press), or when ⌘ was let go on its app (the switcher):
-    /// [`LEND_WAIT`] counts from here.
+    /// When it was put home: a Dock press's [`LEND_WAIT`] counts from here.
     pub(super) at: Instant,
-    /// Put home for ⌘Tab's switcher, which is still up: kept until ⌘'s release (round
-    /// cmd-tab, [`super::switcher`]), however long the switcher shows.
-    pub(super) switcher: bool,
+    /// Put home for ⌘Tab's switcher (round cmd-tab, [`super::switcher`]): kept while the
+    /// switcher is up, then only if its app is activated soon after the switcher closes
+    /// ([`LetGo`]). `None`: a Dock press's.
+    pub(super) switcher: Option<LetGo>,
 }
 
 /// A window put home at a Dock press goes back into its stage Space when its stage has not
@@ -596,16 +597,16 @@ pub(super) enum LentStep {
     Forget,
     /// No switch came for it: back into its stage Space.
     TakeBack,
+    /// Put home for ⌘Tab's switcher, and no activation of its app came once the switcher
+    /// closed: the switcher was cancelled (Escape, a click outside it); back unshown.
+    NoActivation,
 }
 
-/// The step for a window put home `waited` ago: `parked` while the model counts it hidden,
-/// `in_front` once its stage is the active one of its Desktop, `held` while ⌘Tab's switcher
-/// it was put home for is still up (no activation before ⌘'s release).
-pub(super) fn lent_step(parked: bool, in_front: bool, waited: Duration, held: bool) -> LentStep {
+/// The step for a window put home at a Dock press `waited` ago: `parked` while the model
+/// counts it hidden, `in_front` once its stage is the active one of its Desktop.
+pub(super) fn lent_step(parked: bool, in_front: bool, waited: Duration) -> LentStep {
     if !parked || in_front {
         LentStep::Forget
-    } else if held {
-        LentStep::Keep
     } else if waited >= LEND_WAIT {
         LentStep::TakeBack
     } else {
@@ -1171,8 +1172,12 @@ impl Controller {
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
         let now = Instant::now();
-        // ⌘Tab's switcher list gone with no key for it yet: decided after its wait.
+        // ⌘Tab's switcher list gone with no key for it yet: decided after its wait; a window
+        // put home for it taken back when no activation of its app came.
         self.switcher_fast_tick(ob, now);
+        if self.lent_awaits_activation() {
+            self.expire_lent(now);
+        }
         // A newly opened app's window seen by AX before its first frame: placed as it shows.
         self.offer_fresh(ob, now);
         // The engine's share (the Corner engine: its patch after a focus, through Show Desktop).
@@ -1602,11 +1607,24 @@ impl Controller {
         let (parked, in_front) = self.model.as_ref().map_or((false, false), |m| {
             (m.window(lent.window).is_some_and(|w| w.parked), m.stage_of(lent.window).is_some_and(|s| m.is_active(s)))
         });
-        // Put home for ⌘Tab's switcher: kept while it is up (its release, missed or not, is
-        // looked at first: [`Self::switcher_tick`]).
-        let held = lent.switcher && self.switcher_up();
-        match lent_step(parked, in_front, now.saturating_duration_since(lent.at), held) {
+        let step = match lent.switcher {
+            // Put home for ⌘Tab's switcher: kept while it is up, then only for its app's
+            // activation (the 1 s wait is the Dock press's only).
+            Some(go) if parked && !in_front => match go.step(self.switcher_up(), now, lent.at, LEND_WAIT) {
+                LetGoStep::Keep => LentStep::Keep,
+                LetGoStep::NoActivation => LentStep::NoActivation,
+                LetGoStep::NoSwitch => LentStep::TakeBack,
+            },
+            _ => lent_step(parked, in_front, now.saturating_duration_since(lent.at)),
+        };
+        match step {
             LentStep::Keep => {}
+            LentStep::NoActivation => {
+                self.lent = None;
+                let back = self.engine.take_back(lent.window);
+                tracing::info!(window = lent.window.0, back, "cmd-tab: the window put home for the switcher goes back: no activation came: the switcher was cancelled");
+                crate::platform::switcher_probe::note("taken back", format!("window={} why=no activation came", lent.window.0));
+            }
             LentStep::Forget => {
                 self.lent = None;
                 tracing::debug!(window = lent.window.0, parked, in_front, "dock: the window put home at the press is the switch's now");
@@ -1768,7 +1786,7 @@ impl Controller {
         }
         if let Some(home) = m.dock_home(pid, facts) {
             if self.engine.lend_home(home) {
-                self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: false });
+                self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: None });
                 tracing::info!(
                     bundle,
                     pid,
@@ -2362,14 +2380,11 @@ mod tests {
     #[test]
     fn a_window_put_home_at_a_dock_press_goes_back_unless_its_stage_comes_in_front() {
         let ms = Duration::from_millis;
-        assert_eq!(lent_step(true, false, ms(100), false), LentStep::Keep, "the activation not here yet");
-        assert_eq!(lent_step(true, true, ms(100), false), LentStep::Forget, "its stage in front: the switch shows it");
-        assert_eq!(lent_step(false, false, ms(100), false), LentStep::Forget, "the model shows it");
-        assert_eq!(lent_step(true, true, LEND_WAIT * 2, false), LentStep::Forget, "the switch's show at the unveil may come late");
-        assert_eq!(lent_step(true, false, LEND_WAIT, false), LentStep::TakeBack, "no click, no activation: back unshown");
-        // Round cmd-tab: put home for ⌘Tab's switcher, kept while ⌘ is held however long.
-        assert_eq!(lent_step(true, false, LEND_WAIT * 10, true), LentStep::Keep, "the switcher still up: no activation yet");
-        assert_eq!(lent_step(true, true, LEND_WAIT * 10, true), LentStep::Forget, "its stage came in front all the same");
+        assert_eq!(lent_step(true, false, ms(100)), LentStep::Keep, "the activation not here yet");
+        assert_eq!(lent_step(true, true, ms(100)), LentStep::Forget, "its stage in front: the switch shows it");
+        assert_eq!(lent_step(false, false, ms(100)), LentStep::Forget, "the model shows it");
+        assert_eq!(lent_step(true, true, LEND_WAIT * 2), LentStep::Forget, "the switch's show at the unveil may come late");
+        assert_eq!(lent_step(true, false, LEND_WAIT), LentStep::TakeBack, "no click, no activation: back unshown");
     }
 
     #[test]

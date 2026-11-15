@@ -2905,6 +2905,8 @@ impl Controller {
             }
             WinEvent::AppActivated(pid, fired) => {
                 crate::platform::switcher_probe::note("activated", format!("pid={pid} notice_age_ms={}", fired.elapsed().as_millis()));
+                // A window put home for ⌘Tab's switcher is kept only for its app's activation.
+                self.switcher_activated(pid);
                 // Its enhanced UI is read again at its next move (round enhanced-ui).
                 enhanced_ui::forget(pid);
                 // Before the echo check: a window of the app that shows now is placed whoever

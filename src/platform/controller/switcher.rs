@@ -17,17 +17,18 @@
 //! or its place in the order) corrects it. The log says which decided. When that app has a
 //! stage here, every window of it here waits off every Desktop and macOS counts one of its
 //! windows on another Desktop, the key window of its most recent stage here is put home
-//! ([`WindowEngine::lend_home`]); the selection moving on, Escape, a key not followed or ⌘
-//! let go on another app take it back. ⌘ let go on that app keeps it for the activation,
-//! whose switch takes it as after a Dock press ([`super::arrival::LEND_WAIT`] from the
-//! release, then back unshown).
+//! ([`WindowEngine::lend_home`]); the selection moving on, a key not followed or ⌘ let go on
+//! another app take it back. Once the switcher closes (⌘ let go, or the Dock's list gone,
+//! the later counts) it stays only if its app is activated within
+//! [`switcher::ACTIVATION_WAIT`]: Escape never reaches the input monitor while the switcher
+//! shows (live 11-15, the switcher takes it), so the keys cannot tell a cancel from a
+//! release, and the activation (3-12 ms after ⌘'s release) does. Activated, the activation's
+//! switch takes it as after a Dock press; not, it goes back unshown ("no activation came").
 //!
 //! Nothing is polled: the Dock is asked at a switcher key and at its own notices. The list
-//! gone (`AXUIElementDestroyed` with the switcher up) decides nothing by itself: the list goes
-//! ~1 ms after Escape's or ⌘'s key, before the monitor's event (live 11-15), so that key
-//! decides; with none within [`switcher::GONE_WAIT`] (the fast tick, armed only then) it
-//! counts as the release, and a window put home goes back [`super::arrival::LEND_WAIT`]
-//! later unless its app's activation came. The
+//! gone (`AXUIElementDestroyed` with the switcher up) starts the activation wait; for the keys
+//! it counts as the release when ⌘'s own release is not heard within
+//! [`switcher::GONE_WAIT`]. Both waits run on the fast tick, armed only then. The
 //! tick asks the live modifiers only while the switcher is up (a release the monitor
 //! missed). The Corner engine: [`Model::dock_home`] answers nothing, nothing is read or put
 //! home.
@@ -46,7 +47,7 @@ use serde_json::{Value, json};
 use super::Controller;
 use super::arrival::Lent;
 use crate::engine::model::{AppFacts, WindowId};
-use crate::engine::switcher::{self, Act, Heard, Key, Switcher};
+use crate::engine::switcher::{self, Act, Heard, Key, LetGo, Switcher};
 use crate::platform::ctl::CmdTabProbe;
 use crate::platform::input::{self, InputEvent, InputKind};
 use crate::platform::observe::Observer;
@@ -158,7 +159,7 @@ impl Controller {
                 self.switcher.selected = self.switcher_selection(ob, steps, now);
             }
             Heard::Released { steps } => {
-                let lent = self.lent.is_some_and(|l| l.switcher);
+                let lent = self.lent.is_some_and(|l| l.switcher.is_some());
                 self.switcher.released = Some((now, lent));
                 tracing::info!(
                     steps,
@@ -172,7 +173,7 @@ impl Controller {
             Heard::Cancelled | Heard::Lost => {}
         }
         let selected = self.switcher.selected.map(|(pid, _)| pid);
-        let lent = self.lent.filter(|l| l.switcher).map(|l| (l.pid, l.window));
+        let lent = self.lent.filter(|l| l.switcher.is_some()).map(|l| (l.pid, l.window));
         let acts = switcher::plan(heard, selected, lent, |pid| self.switcher_home(ob, pid));
         for act in acts {
             self.switcher_act(act, now);
@@ -272,7 +273,7 @@ impl Controller {
                     let _ = self.engine.take_back(prev.window);
                 }
                 if self.engine.lend_home(window) {
-                    self.lent = Some(Lent { window, pid, at: now, switcher: true });
+                    self.lent = Some(Lent { window, pid, at: now, switcher: Some(LetGo::default()) });
                     tracing::info!(
                         pid,
                         window = window.0,
@@ -293,10 +294,13 @@ impl Controller {
                 }
             }
             Act::Release { window } => {
-                if let Some(l) = self.lent.as_mut().filter(|l| l.window == window) {
-                    l.at = now;
-                    l.switcher = false;
-                    tracing::info!(window = window.0, "cmd-tab: ⌘ let go on the app its window was put home for: the activation's switch takes it");
+                if let Some(go) = self.lent.as_mut().filter(|l| l.window == window).and_then(|l| l.switcher.as_mut()) {
+                    go.let_go(now);
+                    tracing::info!(
+                        window = window.0,
+                        activated = go.activated,
+                        "cmd-tab: ⌘ let go on the app its window was put home for: kept only if that app is activated now (the activation's switch takes it)"
+                    );
                     switcher_probe::note("released", format!("window={}", window.0));
                 }
             }
@@ -364,24 +368,47 @@ impl Controller {
                 if self.switcher.dock.is_some_and(|d| switcher_ax::read(d) != switcher_ax::Read::NoSwitcher) {
                     return;
                 }
-                // Escape or ⌘'s release is on its way (the list goes ~1 ms after the key, the
-                // monitor's event comes later): it decides; else the fast tick after GONE_WAIT.
+                // ⌘'s release may be on its way (the list goes ~1 ms after the key, the
+                // monitor's event comes later; Escape is never heard): it decides the keys;
+                // else the fast tick after GONE_WAIT. The window put home waits for its app's
+                // activation from now on (or from ⌘'s release, the later).
                 self.switcher.keys.list_gone(now);
+                if let Some(go) = self.lent.as_mut().and_then(|l| l.switcher.as_mut()) {
+                    go.let_go(now);
+                }
                 tracing::debug!("cmd-tab: the Dock's switcher list is gone; the key on its way decides");
             }
             _ => {}
         }
     }
 
-    /// True while the Dock's list is gone and its key not heard yet (the fast tick, at most
-    /// [`switcher::GONE_WAIT`]).
+    /// True while the Dock's list is gone and its key not heard yet (at most
+    /// [`switcher::GONE_WAIT`]), or a window put home for a closed switcher waits for its
+    /// app's activation (at most [`switcher::ACTIVATION_WAIT`]): the fast tick.
     pub(super) fn switcher_wants_fast_tick(&self) -> bool {
-        self.switcher.keys.waits_gone()
+        self.switcher.keys.waits_gone() || self.lent_awaits_activation()
+    }
+
+    /// True while a window put home for the switcher waits for its app's activation, the
+    /// switcher closed.
+    pub(super) fn lent_awaits_activation(&self) -> bool {
+        self.lent.and_then(|l| l.switcher).is_some_and(|go| go.at.is_some() && !go.activated)
+    }
+
+    /// App `pid` activated: a window put home for the switcher for that app is kept for the
+    /// activation's switch ([`LetGo`]).
+    pub(super) fn switcher_activated(&mut self, pid: i32) {
+        if let Some(go) = self.lent.as_mut().filter(|l| l.pid == pid).and_then(|l| l.switcher.as_mut())
+            && !go.activated
+        {
+            go.activated = true;
+            tracing::info!(pid, "cmd-tab: the app its window was put home for is activated: kept for its switch");
+        }
     }
 
     /// The fast tick (and the tick): the Dock's list gone [`switcher::GONE_WAIT`] ago with no
-    /// key since is taken as ⌘'s release (a window put home then goes back
-    /// [`super::arrival::LEND_WAIT`] later unless its app's activation came).
+    /// key since is taken as ⌘'s release (a window put home then waits for its app's
+    /// activation, [`switcher::ACTIVATION_WAIT`]).
     pub(super) fn switcher_fast_tick(&mut self, ob: &Observer, now: Instant) {
         let heard = self.switcher.keys.gone_due(now);
         if heard != Heard::Nothing {

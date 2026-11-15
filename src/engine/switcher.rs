@@ -227,6 +227,61 @@ pub fn predict(order: &[Pid], running: usize, steps: i32) -> Option<Pid> {
     order.get(at).copied()
 }
 
+/// After the switcher closes (⌘ let go, or its list gone), a window put home for it stays only
+/// when its app is activated within this long of the later of the two. macOS activates the
+/// app 3-12 ms after ⌘'s release (live 11-15). Escape is never heard by the input monitor
+/// while the switcher shows (the switcher takes it), so the keys cannot tell a cancel from a
+/// release: the activation does.
+pub const ACTIVATION_WAIT: Duration = Duration::from_millis(200);
+
+/// A window put home for the switcher, as the switcher's end and its app's activation leave
+/// it ([`LetGo::step`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LetGo {
+    /// The later of ⌘'s release heard (on the app it was put home for) and the Dock's list
+    /// gone.
+    pub at: Option<Instant>,
+    /// Its app was activated since it was put home.
+    pub activated: bool,
+}
+
+/// What becomes of a window put home for the switcher, at a look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LetGoStep {
+    /// The switcher is up, or its app's activation may still come.
+    Keep,
+    /// No activation of its app came within [`ACTIVATION_WAIT`]: the switcher was cancelled
+    /// (Escape, a click outside it), or let go on another app.
+    NoActivation,
+    /// Its app was activated, but its stage did not come in front within the Dock's wait.
+    NoSwitch,
+}
+
+impl LetGo {
+    /// ⌘ let go on its app, or the Dock's list gone, at `at`: the later counts.
+    pub fn let_go(&mut self, at: Instant) {
+        self.at = Some(self.at.map_or(at, |t| t.max(at)));
+    }
+
+    /// The step at `now`: `up` while the keys still have the switcher up, `lent_at` when it was
+    /// put home (the base when the switcher closed unseen), `lend_wait` the Dock press's wait
+    /// for the switch once activated. Its stage in front, or the model showing it, is the
+    /// caller's to see first.
+    pub fn step(&self, up: bool, now: Instant, lent_at: Instant, lend_wait: Duration) -> LetGoStep {
+        let base = match self.at {
+            Some(t) => t,
+            None if up => return LetGoStep::Keep,
+            None => lent_at,
+        };
+        let since = now.saturating_duration_since(base);
+        match self.activated {
+            true if since >= lend_wait => LetGoStep::NoSwitch,
+            false if since >= ACTIVATION_WAIT => LetGoStep::NoActivation,
+            _ => LetGoStep::Keep,
+        }
+    }
+}
+
 /// What becomes of the window put home for the switcher.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Act {
@@ -245,8 +300,8 @@ pub enum Act {
         /// Why, for the log.
         why: &'static str,
     },
-    /// ⌘ let go on the app it was put home for: it stays home for the activation, whose
-    /// switch takes it (as after a Dock press), else it goes back after the usual wait.
+    /// ⌘ let go on the app it was put home for: it stays home only if that app's activation
+    /// comes within [`ACTIVATION_WAIT`] ([`LetGo`]); its switch takes it then.
     Release {
         /// The window.
         window: WindowId,
@@ -397,6 +452,58 @@ mod tests {
         let mut s = Switcher::default();
         s.list_gone(ms(0));
         assert!(!s.waits_gone());
+    }
+
+    /// Live 11-15 (rerun): Escape is never heard; the list goes at +300 ms, ⌘ up is heard at
+    /// +387 ms as a release on the app put home for. No activation: back at +587 ms.
+    #[test]
+    fn escape_order_no_activation_takes_the_window_back() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let lend_wait = Duration::from_millis(1000);
+        let mut s = Switcher::default();
+        s.hear(tab(false));
+        let w = WindowId(5);
+        assert_eq!(plan(Heard::Selected { steps: Some(1), first: true }, Some(40), None, |_| Some(w)), vec![Act::Lend { pid: 40, window: w }]);
+        let mut lent = LetGo::default();
+        assert_eq!(lent.step(s.is_open(), ms(250), t0, lend_wait), LetGoStep::Keep, "the switcher up");
+        s.list_gone(ms(300));
+        lent.let_go(ms(300));
+        let heard = s.hear(Key::Command(false));
+        assert_eq!(heard, Heard::Released { steps: Some(1) }, "Escape unheard: ⌘ up looks like a release");
+        assert_eq!(plan(heard, Some(40), Some((40, w)), |_| None), vec![Act::Release { window: w }]);
+        lent.let_go(ms(387));
+        assert_eq!(lent.at, Some(ms(387)), "the later of the two");
+        assert_eq!(lent.step(false, ms(500), t0, lend_wait), LetGoStep::Keep, "the activation may still come");
+        assert_eq!(lent.step(false, ms(586), t0, lend_wait), LetGoStep::Keep);
+        assert_eq!(lent.step(false, ms(587), t0, lend_wait), LetGoStep::NoActivation, "no activation came: cancelled");
+        // ⌘ held after Escape: the list gone alone starts the wait.
+        let mut held = LetGo::default();
+        held.let_go(ms(300));
+        assert_eq!(held.step(true, ms(499), t0, lend_wait), LetGoStep::Keep);
+        assert_eq!(held.step(true, ms(500), t0, lend_wait), LetGoStep::NoActivation);
+        // The switcher closed unseen: from when it was put home.
+        assert_eq!(LetGo::default().step(false, ms(200), t0, lend_wait), LetGoStep::NoActivation);
+    }
+
+    /// The release order: ⌘ up, the activation 10 ms later: kept until its switch (the caller
+    /// forgets it once its stage is in front), back only if no switch came in the Dock's wait.
+    #[test]
+    fn release_order_with_the_activation_keeps_the_window() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let lend_wait = Duration::from_millis(1000);
+        let mut lent = LetGo::default();
+        lent.let_go(ms(400));
+        lent.activated = true; // +410 ms
+        lent.let_go(ms(401)); // the list gone after ⌘ up
+        assert_eq!(lent.step(false, ms(700), t0, lend_wait), LetGoStep::Keep, "activated: past the activation wait, kept");
+        assert_eq!(lent.step(false, ms(1401), t0, lend_wait), LetGoStep::NoSwitch, "activated, but no switch in the Dock's wait");
+        // The activation before ⌘ up is heard (both orders reach the WM thread).
+        let mut early = LetGo { at: None, activated: true };
+        assert_eq!(early.step(true, ms(900), t0, lend_wait), LetGoStep::Keep);
+        early.let_go(ms(410));
+        assert_eq!(early.step(false, ms(700), t0, lend_wait), LetGoStep::Keep);
     }
 
     #[test]
