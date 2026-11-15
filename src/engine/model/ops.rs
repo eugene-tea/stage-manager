@@ -421,6 +421,40 @@ impl Model {
         self.current_space(self.known_display(keyboard))
     }
 
+    /// Why [`Model::send_window`] (and a drop on the strip, [`Model::drop_window_on_strip`])
+    /// would do nothing for window `id`, for the platform's log: a user's act never does
+    /// nothing silently (round stage-lost). `None` when it acts.
+    pub fn send_refused(&self, id: WindowId) -> Option<&'static str> {
+        let Some(std) = self.resolve_standard(id) else {
+            return Some(if self.windows.contains_key(&id) { "a child window with no parent managed" } else { "the window is not managed" });
+        };
+        let w = &self.windows[&std];
+        (!w.sticky && !self.is_shown_space(w.space)).then_some("its Desktop is not the one shown")
+    }
+
+    /// A window the user sees on screen that the model does not manage (stranded, round
+    /// stage-lost: [`crate::engine::stranded`]) joins the stage in front on its screen,
+    /// shown where it is, as Apple's Stage Manager counts every window on screen in the
+    /// stage in front. The platform does this before a switch whose front stage shows
+    /// nothing, so the window leaves with that stage, and before the user's act on it (a drop
+    /// on the strip, a send), which then goes on as for any managed window. Returns the
+    /// actions; nothing for a window managed already or not a standard one.
+    pub fn adopt_stranded(&mut self, meta: WindowMeta, obs: &Observation) -> Vec<Action> {
+        if self.windows.contains_key(&meta.id) || meta.role != WindowRole::Standard {
+            return Vec::new();
+        }
+        let decision = Decision { action: RuleAction::Current, ..Default::default() };
+        self.add_window(meta, &decision, obs)
+    }
+
+    /// True when the stage in front on `display`'s Desktop shows no window (none, or every
+    /// member parked): a switch then has nothing to take out ([`Model::adopt_stranded`]).
+    pub fn front_shows_nothing(&self, display: DisplayId) -> bool {
+        let display = self.known_display(display);
+        let Some(front) = self.active_stage(display) else { return true };
+        self.stage(front).is_none_or(|s| s.windows.iter().all(|id| self.windows.get(id).is_none_or(|w| w.parked)))
+    }
+
     /// Sends a standard window (a child stands for its parent) and its children to another
     /// stage, at the front, as its key window. The view does not switch: if the target is
     /// inactive the window is parked; if the source is the active stage and the window was
@@ -434,7 +468,16 @@ impl Model {
             return actions;
         };
         let src = self.windows[&id].home;
-        let space = self.windows[&id].space;
+        let mut space = self.windows[&id].space;
+        if !self.is_shown_space(space) && self.windows[&id].sticky {
+            // On every Desktop: it is on the one shown too, so it is sent from there (round
+            // stage-lost: a drag of such a window onto the strip did nothing).
+            let here = self.current_space(self.windows[&id].meta.display);
+            let mut group = vec![id];
+            group.extend(self.children_of(id));
+            self.set_space(&group, here);
+            space = here;
+        }
         if !self.is_shown_space(space) {
             // Its Desktop is not shown: moving, raising or focusing it there could make macOS
             // switch Desktops (L2; only `ctl send` by window id can ask this).

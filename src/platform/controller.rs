@@ -119,6 +119,7 @@ use crate::engine::early_start;
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
 use crate::engine::stale_activation;
+use crate::engine::stranded;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::minimize;
@@ -174,6 +175,13 @@ const PRESSED_OBS_MAX: Duration = Duration::from_secs(1);
 /// How long focus and activation events for windows and apps we just touched are ignored
 /// by default (`[windows] focus_echo_ms`).
 pub const ECHO_WINDOW: Duration = Duration::from_millis(700);
+
+/// How long after our own batch showed a window an arrival of a Space change still counts it
+/// as carried by our switch, not moved by the user ([`Model::set_slide_carried`]): macOS's
+/// slide away for a switch's activation and back took ~70 ms and ~330 ms from the unveil
+/// (11-15 07:33:48, 07:35:02); a second is ample and far below a user's move to another
+/// Desktop and back.
+const SLIDE_CARRY: Duration = Duration::from_millis(1500);
 
 /// How long before its app's quit notice a destroyed window still counts as quit with it (an
 /// app closes its windows as it quits, a moment before macOS says it terminated; round 8H).
@@ -768,6 +776,9 @@ struct WindowDrag {
     moving: bool,
     /// Where the button went down: the point of the window the pointer holds.
     grab: Point,
+    /// A window no stage holds (stranded, round stage-lost): taken into the stage in front
+    /// when the drag ends, before the drop is done.
+    adopt: bool,
 }
 
 /// Incoming windows of a transition, held parked until their snapshots cover their frames:
@@ -915,6 +926,10 @@ pub struct Controller {
     /// Window tabs selected that Accessibility did not list when their app was asked again
     /// ([`tabs`]), and when it was: asked again only after [`tabs::ASK_AGAIN`].
     tab_asked: HashMap<u32, Instant>,
+    /// Windows our own batches moved onto the screen or set a frame for, and when (round
+    /// stage-lost): named to the arrivals of a Space change within [`SLIDE_CARRY`]
+    /// ([`Model::set_slide_carried`]).
+    shown_by_us: HashMap<u32, Instant>,
     /// The launch's stages wait: the app could not see the Desktop ([`session::blindness`])
     /// when observation started; why and since when. Nothing is built or saved meanwhile.
     build_wait: Option<(session::Blind, Instant)>,
@@ -1184,6 +1199,7 @@ impl Controller {
             unplaced: BTreeSet::new(),
             fresh_unplaced: BTreeMap::new(),
             tab_asked: HashMap::new(),
+            shown_by_us: HashMap::new(),
             build_wait: None,
             screens_wait: None,
             build_tried: None,
@@ -1667,6 +1683,9 @@ impl Controller {
                     continue;
                 }
             };
+            if matches!(action, Action::SetFrame { .. }) {
+                self.shown_by_us.insert(id, now);
+            }
             // Where a hide puts the window (asked once: a write tried again asks the same).
             let park = match action {
                 Action::Hide { .. } => match self.hide_frame(id) {
@@ -2978,6 +2997,7 @@ impl Controller {
             }
             return;
         }
+        let list = if self.adopt_stranded_before_switch(ob, "an activation") { windows::list_windows() } else { list };
         let obs = self.observe_activation(ob, &list, focused.filter(|_| needs_focus));
         // The window server's frames the switch keeps are tracked too: its outgoing picture
         // starts where the windows are (an app may move one without a notice).
@@ -3343,21 +3363,45 @@ impl Controller {
         if self.drag.is_some() || self.echoes.is_window_echo(id, now) {
             return;
         }
-        let (Some(press), Some(m)) = (&self.press, &self.model) else { return };
-        let Some(w) = m.window(WindowId(id)) else { return };
-        let shown = !w.parked
-            && (w.home == Home::Pinned || m.stage_of(WindowId(id)).is_some_and(|s| m.stage_in_front(s)));
-        if !shown || w.meta.role != WindowRole::Standard || !input::left_button_down() {
+        let (Some(_), Some(m)) = (&self.press, &self.model) else { return };
+        // A window no stage holds, on screen (stranded, round stage-lost): its drag counts
+        // too, and it is taken into the stage in front when the drag ends.
+        let (pid, restore, adopt) = match m.window(WindowId(id)) {
+            Some(w) => {
+                let shown = !w.parked
+                    && (w.home == Home::Pinned || m.stage_of(WindowId(id)).is_some_and(|s| m.stage_in_front(s)));
+                if !shown || w.meta.role != WindowRole::Standard {
+                    return;
+                }
+                (w.meta.pid, w.restore, false)
+            }
+            None => {
+                let Some(t) = ob.window(id) else { return };
+                let (pid, frame) = (t.pid, t.frame);
+                // The cheap reasons first: the window server is read only for a window that
+                // may be stranded (a dialog's or a new window's drag reads nothing).
+                let maybe = t.kind == WindowKind::Standard
+                    && !self.unplaced.contains(&id)
+                    && now.saturating_duration_since(t.found_at) >= stranded::SETTLED
+                    && m.windows().any(|w| w.meta.pid == pid);
+                if !maybe || self.stranded_windows(ob, &windows::on_screen(), Some(id)).is_empty() {
+                    return;
+                }
+                (pid, frame, true)
+            }
+        };
+        if !input::left_button_down() {
             return;
         }
+        let Some(press) = &self.press else { return };
         if !drag_plausible(press.at, press.live.get(&id).copied(), input::pointer()) {
             tracing::trace!(id, "a move while the button is down elsewhere: the app moved its window, no drag");
             return;
         }
-        let pre = press.frames.get(&id).copied().unwrap_or(w.restore);
+        let pre = press.frames.get(&id).copied().unwrap_or(restore);
         let Some(now_frame) = ob.window(id).map(|t| t.frame) else { return };
         let moving = (now_frame.w - pre.w).abs() < 1.0 && (now_frame.h - pre.h).abs() < 1.0;
-        self.drag = Some(WindowDrag { id, pid: w.meta.pid, pre, moving, grab: press.at });
+        self.drag = Some(WindowDrag { id, pid, pre, moving, grab: press.at, adopt });
         self.user_took(id, "dragged");
         if moving {
             tracing::info!(id, "window drag started");
@@ -3438,12 +3482,26 @@ impl Controller {
                 }
                 self.focus_after_press_done(ob);
                 let Some(drag) = self.drag.take() else { return };
+                if drag.adopt && self.model.as_ref().is_some_and(|m| m.window(WindowId(drag.id)).is_none()) {
+                    // A window no stage held: the user's own act on it takes it into the stage
+                    // in front first, then the drop goes on (round stage-lost).
+                    let why = if drop.is_some() { "dropped on the strip" } else { "moved by the user" };
+                    if self.adopt_stranded(ob, why, Some(drag.id)).is_empty() {
+                        tracing::info!(id = drag.id, "a window no stage holds was dragged: it is not one to take in (not stranded any more); nothing done");
+                        self.present();
+                        return;
+                    }
+                }
                 if let Some(slot) = drop.filter(|_| drag.moving) {
                     counters::bump(Count::Drop);
                     tracing::info!(id = drag.id, before = ?slot.before, "window dropped on the strip: a stage of its own");
                     let obs = self.observe(ob);
                     if let Some(m) = self.model.as_mut() {
+                        let refused = m.send_refused(WindowId(drag.id));
                         let actions = m.drop_window_on_strip(WindowId(drag.id), drag.pre, slot.before.map(StageId), &obs);
+                        if actions.is_empty() {
+                            tracing::info!(id = drag.id, why = refused.unwrap_or("nothing to change"), "window dropped on the strip: nothing done");
+                        }
                         self.execute_animated(ob, actions);
                     }
                 } else if drag.moving {
@@ -4178,8 +4236,10 @@ impl Controller {
         }
         let hints = launch_hints(list);
         let hold = self.macos_after_display_change();
+        let carried = self.slide_carried(Instant::now());
         let Some(m) = self.model.as_mut() else { return };
         m.set_hold_arrivals(hold);
+        m.set_slide_carried(carried);
         let mut actions = m.arrive(main.id, &live, &absent, &hints);
         m.set_hold_arrivals(false);
         let after = m.current_space(main.id);
@@ -4202,8 +4262,11 @@ impl Controller {
             carried = note.carried,
             beside = ?note.beside,
             held = note.held.len(),
+            kept_home = note.kept_home.len(),
+            sticky = note.sticky.len(),
             "Space changed"
         );
+        log_arrival_lets(&note);
         self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
         let (more, predicted) = self.settle_ahead(ob, list, main.id, after, Instant::now());
@@ -4244,6 +4307,88 @@ impl Controller {
             .filter(|meta| self.allowed_by_rules(meta))
             .collect();
         (live, self.absent_windows(ob, &self.present_in(list), display.id))
+    }
+
+    /// Windows stranded on screen (round stage-lost, [`stranded`]): seen by the window server
+    /// on a managed screen and tracked by Accessibility, of an app the model manages another
+    /// window of, that the model neither manages nor holds waiting. `only`: that window alone.
+    fn stranded_windows(&self, ob: &Observer, list: &[windows::CgWindow], only: Option<u32>) -> Vec<u32> {
+        let Some(m) = self.model.as_ref() else { return Vec::new() };
+        let frames: Vec<Rect> = self.managed_displays().iter().map(|d| d.frame).collect();
+        let on = on_managed_screens(list, &frames, |_| false);
+        let now = Instant::now();
+        let managed_pids: HashSet<i32> = m.windows().map(|w| w.meta.pid).collect();
+        let z = windows::z_order(list);
+        let seen: Vec<stranded::Seen> = list
+            .iter()
+            .filter(|w| only.is_none_or(|o| o == w.id) && w.onscreen && w.layer == 0)
+            .filter_map(|w| {
+                let t = ob.window(w.id)?;
+                let meta = self.meta(ob, w.id, &z)?;
+                Some(stranded::Seen {
+                    id: w.id,
+                    standard: t.kind == WindowKind::Standard,
+                    on_managed_screen: on.contains(&w.id),
+                    managed: m.window(WindowId(w.id)).is_some(),
+                    waiting: self.unplaced.contains(&w.id),
+                    ignored: !self.allowed_by_rules(&meta),
+                    arriving: self.engine.about_to_show(WindowId(w.id)),
+                    app_managed: managed_pids.contains(&t.pid),
+                    tracked: now.saturating_duration_since(t.found_at),
+                })
+            })
+            .collect();
+        stranded::stranded(&seen)
+    }
+
+    /// Takes the stranded windows (`only`: that one alone) into the stage in front on their
+    /// screen ([`Model::adopt_stranded`]), each said with `why`. The windows taken.
+    fn adopt_stranded(&mut self, ob: &mut Observer, why: &'static str, only: Option<u32>) -> Vec<u32> {
+        let list = windows::list_windows();
+        let ids = self.stranded_windows(ob, &list, only);
+        if ids.is_empty() {
+            return ids;
+        }
+        let z = windows::z_order(&list);
+        let mut taken = Vec::new();
+        for id in ids {
+            let Some(mut meta) = self.meta(ob, id, &z) else { continue };
+            if let Some(w) = list.iter().find(|w| w.id == id) {
+                meta.frame = w.bounds;
+            }
+            let obs = self.observe_with(ob, &list);
+            let Some(m) = self.model.as_mut() else { break };
+            let actions = m.adopt_stranded(meta, &obs);
+            let stage = m.stage_of(WindowId(id)).map(|s| s.0);
+            if stage.is_none() && m.window(WindowId(id)).is_none() {
+                tracing::warn!(id, why, "a window stranded on screen could not be taken into the stage in front");
+                continue;
+            }
+            tracing::info!(id, why, ?stage, "a window on screen that no stage held (stranded): taken into the stage in front");
+            self.unplaced.remove(&id);
+            self.execute(ob, actions);
+            taken.push(id);
+        }
+        taken
+    }
+
+    /// Before a switch: when the stage in front on the main screen shows nothing while
+    /// stranded windows are on screen, they join it first, so they leave with it rather than
+    /// stay over the stage that comes (round stage-lost: the owner's 08:05 card click). True
+    /// when one was taken.
+    fn adopt_stranded_before_switch(&mut self, ob: &mut Observer, why: &'static str) -> bool {
+        let main = self.main_display_id();
+        if !self.model.as_ref().is_some_and(|m| m.front_shows_nothing(main)) {
+            return false;
+        }
+        !self.adopt_stranded(ob, why, None).is_empty()
+    }
+
+    /// The windows our own batches showed within [`SLIDE_CARRY`] (older ones forgotten), for
+    /// the arrival about to run ([`Model::set_slide_carried`]).
+    fn slide_carried(&mut self, now: Instant) -> HashSet<WindowId> {
+        self.shown_by_us.retain(|_, at| now.saturating_duration_since(*at) < SLIDE_CARRY);
+        self.shown_by_us.keys().map(|id| WindowId(*id)).collect()
     }
 
     /// What is held now (a window's focus, an app's activation) for a Desktop no screen
@@ -4305,9 +4450,11 @@ impl Controller {
                 self.unplaced.remove(&meta.id.0);
             }
             let hold = self.macos_after_display_change();
+            let carried = self.slide_carried(now);
             let Some(m) = self.model.as_mut() else { return predicted };
             let before = m.current_space(d.id);
             m.set_hold_arrivals(hold);
+            m.set_slide_carried(carried);
             let mut actions = m.arrive(d.id, &live, &absent, &hints);
             m.set_hold_arrivals(false);
             let after = m.current_space(d.id);
@@ -4328,6 +4475,7 @@ impl Controller {
                     "Space changed on another display"
                 );
             }
+            log_arrival_lets(&note);
             // A Desktop of this screen arranged ahead: confirmed or undone, in its batch.
             let (more, window) = self.settle_ahead(ob, list, d.id, after, now);
             actions.extend(more);
@@ -5560,6 +5708,9 @@ impl Controller {
             // A tab selected just now, before the Space check saw it: the switch takes it with
             // its stage, never leaving it on screen (round tab-lost).
             self.take_tabs(ob, &windows::list_windows());
+            if self.adopt_stranded_before_switch(ob, "a card click") {
+                self.pressed_obs = None;
+            }
         }
         let pressed = self.pressed_obs.take().filter(|(at, _)| at.elapsed() < PRESSED_OBS_MAX).map(|(_, obs)| obs);
         let obs = match pressed {
@@ -5685,9 +5836,16 @@ impl Controller {
     fn send(&mut self, ob: &mut Observer, id: Option<u32>, target: Target, animated: bool) -> Result<usize, String> {
         let obs = self.observe(ob);
         let id = id.map(WindowId).or(obs.focused).ok_or("no focused window")?;
+        let unknown = self.model.as_ref().ok_or_else(not_managing)?.window(id).is_none();
+        // A window no stage holds, on screen (round stage-lost): taken into the stage in
+        // front first, then sent.
+        let obs = if unknown && !self.adopt_stranded(ob, "sent to a stage", Some(id.0)).is_empty() { self.observe(ob) } else { obs };
         let m = self.model.as_mut().ok_or_else(not_managing)?;
         if m.window(id).is_none() {
             return Err(format!("window {} is not managed", id.0));
+        }
+        if let Some(why) = m.send_refused(id) {
+            return Err(format!("window {} is not sent: {why}", id.0));
         }
         let actions = m.send_window(id, target, &obs);
         let count = actions.len();
@@ -6680,6 +6838,20 @@ fn focus_may_switch(hidden: Option<bool>, active: Option<bool>, button_down: boo
 
 /// Recency hints for windows placed on arrival: the window list's z-order and the frontmost
 /// app.
+/// The arrival's windows that stayed out of it or left their stage, each said (round
+/// stage-lost: a window never leaves its stage without a line).
+fn log_arrival_lets(note: &crate::engine::model::ArrivalNote) {
+    if !note.kept_home.is_empty() {
+        tracing::info!(
+            windows = ?note.kept_home.iter().map(|w| w.0).collect::<Vec<_>>(),
+            "windows our switch had just shown, listed on the Desktop macOS slid to: they stay in their stage on their own Desktop"
+        );
+    }
+    for id in &note.sticky {
+        tracing::info!(id = id.0, "window seen on every Desktop gone to, back where it came from: on every Desktop now, out of its stage (pinned)");
+    }
+}
+
 fn launch_hints(list: &[windows::CgWindow]) -> LaunchHints {
     LaunchHints {
         z_order: list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| WindowId(w.id)).collect(),

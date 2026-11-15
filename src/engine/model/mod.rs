@@ -445,6 +445,9 @@ pub struct Model {
     /// An arrival leaves out windows first seen on the Desktop still shown
     /// ([`Model::set_hold_arrivals`]).
     pub(crate) hold_arrivals: bool,
+    /// Windows the platform's own switch just showed while macOS slid to another Desktop,
+    /// for the next arrival only ([`Model::set_slide_carried`]).
+    pub(crate) slide_carried: HashSet<WindowId>,
     /// Windows the launch's first arrival moved to the screen their saved stage is on (that
     /// screen's Desktop not formed yet; `pool.rs`, [`Model::screen_claims`]), at their saved
     /// frame there: that screen's arrival takes them with its own ([`Model::arrive`]).
@@ -539,6 +542,7 @@ impl Model {
             adopted: BTreeSet::new(),
             front_owed: BTreeSet::new(),
             hold_arrivals: false,
+            slide_carried: HashSet::new(),
             travellers: Vec::new(),
             desktop_counts: HashMap::new(),
             rescore: HashSet::new(),

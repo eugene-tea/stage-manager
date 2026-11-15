@@ -828,6 +828,9 @@ def run():
     say("\n== an activation on Desktop 2 of an app whose windows there are all hidden, with one shown on Desktop 1 ==")
     activation_with_a_window_elsewhere(d1, d2)
 
+    say("\n== a stage shown while macOS slides away for its activation and back keeps its windows ==")
+    slide_away_and_back_keeps_the_stage(d1, d2)
+
     say("\n== Dock home: a real Dock click and a card click never take macOS to another Desktop by mistake ==")
     dock_home_cases(d1, d2)
 
@@ -1073,6 +1076,84 @@ def activation_with_a_window_elsewhere(d1, d2):
         go("d1", "Switch to Desktop 1")
     else:
         WATCH.desk("d1")
+
+
+def slide_away_and_back_keeps_the_stage(d1, d2):
+    """Round stage-lost (the owner's log of 11-15 07:33:48 and 07:35:02, VS Code): the
+    activation of [`activation_with_a_window_elsewhere`], three times in a row. Each time the
+    switch to Fixture 3's stage on Desktop 2 runs while macOS slides to Desktop 1 (the app's
+    windows there, Fixture 3 in its stage Space on no Desktop) and back; the Space change
+    brings the switch's windows in at once, and the window server lists Fixture 3 on Desktop
+    1 for a moment. Before the fix the third such hop took Fixture 3 for a window on every
+    Desktop: pinned, out of its stage, with no log line; its stage left empty went at the next
+    switch, and Fixture 3 stayed on screen over every stage. After each round: Fixture 3 is
+    in its stage (not pinned), in front on Desktop 2; Bravo's card click replaces it (Fixture
+    3 hidden). The app's log has no "on every Desktop now" line. Hands-free only, Spaces
+    only (the Corner engine never slides). Ends on Desktop 1."""
+    if not AUTO or not ts.SPACES:
+        ts.skip("a stage slid away from and back keeps its windows", "hands-free only (--auto), Spaces engine only")
+        return
+    WATCH.pause()
+    try:
+        _slide_away_and_back(d1, d2)
+    finally:
+        WATCH.desk("d1" if current_space() == d1 else "d2")
+        if current_space() != d1:
+            go("d1", "Switch to Desktop 1")
+
+
+def _slide_away_and_back(d1, d2):
+    if current_space() != d1:
+        go("d1", "Switch to Desktop 1")
+    x = state()
+    fixture = stage_holding(x, "Fixture 1")
+    if not check(x.get("space") == d1 and fixture is not None, f"slide back: on Desktop 1 with the Fixture stage (Space {x.get('space')})"):
+        return
+    ctl("switch", fixture)
+    if not check(ts.wait_state(lambda y: y["active"] == fixture, "the Fixture stage in front", timeout=4) is not None,
+                 "slide back: Fixture 1-2 show in Desktop 1's front stage"):
+        return
+    go("d2", "Switch to Desktop 2")
+    t_all = time.time()
+    for round_no in (1, 2, 3):
+        x = state()
+        bravo = stage_holding(x, "Bravo 1")
+        if not check(x.get("space") == d2 and bravo is not None, f"slide back {round_no}: on Desktop 2 with Bravo's stage"):
+            return
+        if x["active"] != bravo:
+            if not ts.click_card(x, "Bravo 1", f"slide back {round_no}: Bravo's card"):
+                return
+        x = ts.wait_state(lambda y: y["active"] == stage_holding(y, "Bravo 1")
+                          and any(w["title"] == "Fixture 3" and w["parked"] for w in y["windows"]),
+                          "Bravo's stage in front, Fixture 3 hidden", timeout=4)
+        if not check(x is not None, f"slide back {round_no}: Bravo's card click replaced Fixture 3's stage (Fixture 3 hidden)"):
+            return
+        time.sleep(1.0)  # past the echo window of the switch's own activation
+        t0 = time.time()
+        subprocess.run(["open", ts.FIX_APP], capture_output=True)
+        time.sleep(2.5)
+        changes = space_changes_since(t0)
+        x = state()
+        f3 = next((w for w in x["windows"] if w["title"] == "Fixture 3"), None)
+        say(f"    round {round_no}: Space changes {changes}; Fixture 3 {f3 and {k: f3[k] for k in ('home', 'stage', 'sticky', 'parked', 'space')}}")
+        if not check(f3 is not None, f"slide back {round_no}: Fixture 3 is still managed"):
+            return
+        check(f3["home"] != "pinned" and not f3["sticky"], f"slide back {round_no}: Fixture 3 is in a stage, not pinned on every Desktop")
+        check(x.get("space") == d2 and x["active"] == stage_holding(x, "Fixture 3") and not f3["parked"],
+              f"slide back {round_no}: Fixture 3's stage in front on Desktop 2 ({ts.stage_titles(x)})")
+        if changes:
+            lines = [line for _, line in log_events(t0)]
+            say(f"    round {round_no}: macOS slid away and back; carried kept home: "
+                f"{any('they stay in their stage on their own Desktop' in line for line in lines)}")
+    lines = [line for _, line in log_events(t_all)]
+    check(not any("on every Desktop now" in line for line in lines), "slide back: no window was taken for one on every Desktop")
+    # The next card click replaces the stage.
+    x = state()
+    if ts.click_card(x, "Bravo 1", "slide back: Bravo's card after the rounds"):
+        x = ts.wait_state(lambda y: y["active"] == stage_holding(y, "Bravo 1")
+                          and any(w["title"] == "Fixture 3" and w["parked"] for w in y["windows"]),
+                          "Bravo's stage in front, Fixture 3 hidden", timeout=4)
+        check(x is not None, "slide back: the next card click replaces Fixture 3's stage (Fixture 3 hidden, not left on screen)")
 
 
 def space_changes_since(t0):
