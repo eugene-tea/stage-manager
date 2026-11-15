@@ -16,6 +16,7 @@
 #                                          # 20 launches sampled every ms (SM_LAUNCHES=n)
 #   scripts/test-stages.sh landing         # under CPU load, no incoming window in place while its
 #                                          # stage's pictures fly (round sm-landing; SM_LANDING_SWITCHES=n,
+#   scripts/test-stages.sh landing-abort   # a window flying its last stretch cut short, quit, killed (SM_ENGINE=spaces, STAGE_MANAGER_LANDING=live*)
 #                                          # STAGE_MANAGER_LANDING=pictures|ordered|live|live-early|live-late)
 #   scripts/test-stages.sh behave          # an app's front window on arrival; a card dropped
 #                                          # on the other screen (round parity-behave)

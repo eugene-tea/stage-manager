@@ -8569,6 +8569,124 @@ def phase_landing():
     all_onscreen("landing: quit")
 
 
+def phase_landing_abort():
+    """Round sm-landing's live checks (1.9): a real window flying its last stretch (the live
+    landing, a landing Space of its own with a transform) when the switch is cut short by
+    another card click, when the app quits, and when it is killed (the app alone, then the app
+    and its guardian). Every fixture window must end on the Desktop at its frame, no transform
+    left: the landing Space ends with the process. Only under SM_ENGINE=spaces with
+    STAGE_MANAGER_LANDING=live*; skipped otherwise."""
+    variant = os.environ.get("STAGE_MANAGER_LANDING") or "pictures"
+    say(f"\n== landing abort: a window cut short, quit or killed mid-stretch ({ENGINE}, {variant}) ==")
+    if not (SPACES and variant.startswith("live")):
+        skip("landing abort", "the live landing runs under SM_ENGINE=spaces with STAGE_MANAGER_LANDING=live* only")
+        return
+    mid = float(os.environ.get("SM_LANDING_MID_S") or 0.5)
+
+    def setup(what):
+        s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+        if not check(s is not None, f"{what}: app up with four fixture windows"):
+            return None
+        t = by_title(s)
+        vis = s["display"]["visible"]
+        left = vis["x"] + s["strip_width"] + 60
+        big_w, big_h = min(1400, vis["w"] - (left - vis["x"]) - 40), min(900, vis["h"] - 80)
+        ctl("debug-frame", t["Fixture 2"]["id"], left, vis["y"] + 40, big_w, big_h)
+        ctl("debug-frame", t["Fixture 3"]["id"], left + 80, vis["y"] + 120, min(700, big_w - 80), min(480, big_h - 120))
+        ctl("debug-frame", t["Fixture 4"]["id"], left + 260, vis["y"] + 240, min(700, big_w - 260), min(480, big_h - 240))
+        ctl("debug-frame", t["Fixture 1"]["id"], left + 120, vis["y"] + 80, min(900, big_w - 120), min(600, big_h - 80))
+        if [x for x in stage_titles(s).get(t["Fixture 1"]["home"], []) if x != "Fixture 1"]:
+            do("new", t["Fixture 1"]["id"])
+        s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2", "Fixture 3", "Fixture 4"]], "two stages")
+        if not check(s is not None, f"{what}: Fixture 1 alone, Fixtures 2-4 together"):
+            return None
+        time.sleep(1.0)
+        return state()
+
+    def click_other(s):
+        """Clicks the card of the stage not in front; returns (its number, its windows' frames)."""
+        c = next((c for c in (s.get("strip_cards") or []) if c["number"] != s["active"]), None)
+        if c is None or card_under_window(s, c["frame"]):
+            return None, {}
+        frames = {w["id"]: w["restore"] for w in s["windows"] if w["home"] == c["number"] and w["role"] == "standard"}
+        f = c["frame"]
+        ctl("debug-click", f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
+        return c["number"], frames
+
+    def at_frames(what, frames):
+        """Every window of `frames` on screen at its frame (±2): no transform, no landing Space."""
+        wins, d = fixture_windows()
+        by = {w["id"]: w for w in wins}
+        off = []
+        for i, r in frames.items():
+            w = by.get(i)
+            b = w and w["bounds"]
+            if b is None or tucked(w, d) or any(abs(b[k] - r[k]) > 2 for k in ("x", "y", "w", "h")):
+                off.append(f"{i}: {b and fmt(b)} want {fmt(r)}")
+        check(not off, f"{what}: the flying windows are on the Desktop at their frames" + (f" ({'; '.join(off[:3])})" if off else ""))
+
+    def flew(what):
+        took = "the window took over from its picture" in log_text()
+        if not took:
+            skip(f"{what}: mid-stretch", "no window had taken over by then (SM_LANDING_MID_S)")
+        return took
+
+    stop_app()
+    stop_all_fixtures()
+    write_config(CONFIG_BACKDROP)
+    start_fixture(4)
+
+    say("-- a switch cut short mid-stretch by a click on the card it left")
+    s = setup("cut short")
+    if s is not None:
+        before = s["active"]
+        n, frames = click_other(s)
+        if check(n is not None, "cut short: a card to click"):
+            time.sleep(mid)
+            back = next((c for c in (state().get("strip_cards") or []) if c["number"] == before), None)
+            if check(back is not None, "cut short: the card of the stage it left"):
+                f = back["frame"]
+                ctl("debug-click", f["x"] + f["w"] / 2, f["y"] + f["h"] / 2)
+                flew("cut short")
+                x = wait_state(lambda y: y["active"] == before and y.get("switching") is None, "back to the first stage", timeout=5)
+                check(x is not None, "cut short: the first stage is in front again")
+                time.sleep(1.0)
+                consistent("cut short")
+                n, frames = click_other(state())
+                if n is not None:
+                    wait_state(lambda y: y["active"] == n and y.get("switching") is None, "the other stage", timeout=5)
+                    time.sleep(1.0)
+                    at_frames("cut short, then a full switch", frames)
+
+    for name, kill in (("quit", lambda pid: ctl("quit")),
+                       ("kill -9 of the app", lambda pid: os.kill(pid, signal.SIGKILL)),
+                       ("kill -9 of the app and its guardian", None)):
+        say(f"-- {name} mid-stretch")
+        s = setup(name)
+        if s is None:
+            continue
+        n, frames = click_other(s)
+        if not check(n is not None, f"{name}: a card to click"):
+            continue
+        time.sleep(mid)
+        pid = app_pid()
+        guards = guardian_pids(pid)
+        if kill is None:
+            for g in guards:
+                os.kill(g, signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)
+        else:
+            kill(pid)
+        wait_gone(pid)
+        for g in guards:
+            wait_gone(g, 15)
+        time.sleep(0.8)
+        flew(name)
+        at_frames(name, frames)
+        all_onscreen(name)
+    all_onscreen("landing abort: end")
+
+
 def main():
     phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "displays", "screens", "engine"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
@@ -8590,7 +8708,7 @@ def main():
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
-             "launch": phase_launch, "landing": phase_landing}[p]()
+             "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
