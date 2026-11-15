@@ -24,6 +24,9 @@
 #                                          # screen, full screen there, Mission Control (PLAN live checks 3-5)
 #   scripts/test-stages.sh glass           # the cards' glass (captures on): white, grey and black
 #                                          # cards and a switch's snapshots against the model
+#   scripts/test-stages.sh cmdtab-probe    # ⌘Tab posted, Escape before ⌘'s release (nothing activated):
+#                                          # does the Dock show the switcher's selection, what the input
+#                                          # monitor and an event tap see (round cmd-tab; not a default phase)
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
 #                                          # Desktops and toggles full screen; nobody at the Mac
