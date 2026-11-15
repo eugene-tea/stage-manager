@@ -102,6 +102,12 @@ pub struct ArrivalNote {
     /// ([`Model::set_hold_arrivals`]): not placed; the platform offers them again once they
     /// still show after the change.
     pub held: Vec<WindowId>,
+    /// Windows the platform's own switch had just shown ([`Model::set_slide_carried`]),
+    /// listed here while their own Desktop is another: they stay in their stage there.
+    pub kept_home: Vec<WindowId>,
+    /// Windows taken for windows on every Desktop at this arrival ([`STICKY_HOPS`]): pinned,
+    /// out of their stage.
+    pub sticky: Vec<WindowId>,
 }
 
 /// A Space's synthetic id: given by the model, stable while the app runs and kept in
@@ -527,6 +533,18 @@ impl Model {
         self.hold_arrivals = on;
     }
 
+    /// Names, for the next [`Model::arrive`] only, the windows the platform's own switch
+    /// showed just before or during this Space change (round stage-lost). macOS may slide to
+    /// another Desktop for the switch's activation and back (an app activated while its
+    /// stage waited hidden off every Desktop and it had a window on another one); the window
+    /// server then lists the windows just shown on the Desktop slid to for a moment. Such a
+    /// window listed on screen on a Desktop not its own is not taken as moved there and never
+    /// counts a hop towards a window on every Desktop: it stays in its stage on its own
+    /// Desktop ([`ArrivalNote::kept_home`]). The Desktop is recognized as ever.
+    pub fn set_slide_carried(&mut self, ids: HashSet<WindowId>) {
+        self.slide_carried = ids;
+    }
+
     /// The platform arrived on a Space of `display` (a Space change, launch, or the window
     /// list disagreeing with the Space shown). `live` is every manageable window the window
     /// server lists on screen there now (children too), rules already applied (ignored
@@ -557,11 +575,17 @@ impl Model {
             live
         };
         let prev = self.current_space(display);
-        let known: Vec<WindowId> = live
+        let carried = std::mem::take(&mut self.slide_carried);
+        let mut known: Vec<WindowId> = live
             .iter()
             .map(|m| m.id)
             .filter(|id| self.windows.contains_key(id))
             .collect();
+        // Shown by the platform's own switch just before or while macOS slid here (round
+        // stage-lost): they vote as ever (one of another Desktop listed here counts for that
+        // Desktop, which its missing windows outweigh), but are not taken as moved below.
+        let carried_known: Vec<WindowId> =
+            known.iter().copied().filter(|id| carried.contains(id) && self.windows.get(id).is_some_and(|w| !w.sticky)).collect();
         let arrivals: Vec<WindowMeta> = live
             .iter()
             .filter(|m| !self.windows.contains_key(&m.id))
@@ -613,6 +637,18 @@ impl Model {
         // stage and a card until it left 2 s later), not placed. A Desktop that changed takes
         // its windows as ever (the lid closed onto another Desktop: its own are rebuilt).
         let held: Vec<WindowId> = if self.hold_arrivals && target == prev { arrivals.iter().map(|m| m.id).collect() } else { Vec::new() };
+        // A carried window listed on a Desktop not its own stays in its stage there: left out
+        // of this arrival (not moved here, no hop counted, nothing matched on screen for it).
+        let kept_home: Vec<WindowId> =
+            carried_known.iter().copied().filter(|id| self.windows.get(id).is_some_and(|w| w.space != target)).collect();
+        known.retain(|id| !kept_home.contains(id));
+        let unkept: Vec<WindowMeta>;
+        let live = if kept_home.is_empty() {
+            live
+        } else {
+            unkept = live.iter().filter(|m| !kept_home.contains(&m.id)).cloned().collect();
+            &unkept[..]
+        };
         let arrivals: Vec<WindowMeta> = arrivals.into_iter().filter(|m| !held.contains(&m.id)).collect();
         let saved = self
             .leftovers
@@ -642,7 +678,8 @@ impl Model {
         self.show_space(display, target, prev);
         self.match_screen(target, live, &mut actions);
 
-        let mut moving = self.collect_moves(target, &known, &beside, &mut actions);
+        let mut sticky = Vec::new();
+        let mut moving = self.collect_moves(target, &known, &beside, &mut sticky, &mut actions);
         let carried = if bare { self.carry_stages(target, &mut moving, &mut actions) } else { 0 };
         let mut arrivals = arrivals;
         let mut restored = 0;
@@ -778,6 +815,8 @@ impl Model {
             carried,
             beside: beside.iter().map(|s| s.0).collect(),
             held,
+            kept_home,
+            sticky,
         };
         actions.push(Action::StateChanged);
         actions
@@ -1034,6 +1073,7 @@ impl Model {
         target: SpaceId,
         known: &[WindowId],
         beside: &BTreeSet<SpaceId>,
+        sticky: &mut Vec<WindowId>,
         actions: &mut Vec<Action>,
     ) -> Vec<WindowId> {
         let mut moving = Vec::new();
@@ -1046,6 +1086,7 @@ impl Model {
             *hops += 1;
             if *hops >= STICKY_HOPS && self.moved_from.get(&id) == Some(&target) {
                 self.make_sticky(id, target, actions);
+                sticky.push(id);
             } else {
                 moving.push(id);
             }
