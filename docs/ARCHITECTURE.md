@@ -305,7 +305,15 @@ takes macOS nowhere, so the app arranges that Desktop and focuses the window
 (`WindowEngine::off_every_desktop`). A switch's focus on a window still in its stage Space
 waits for its show only when its app has a window on a Desktop not shown, where macOS would
 follow it (`WindowEngine::focus_waits_for_show`); otherwise the keyboard goes at once, as
-under the Corner engine.
+under the Corner engine. A window flying its last stretch is on no Desktop either: the
+unveil leaves its focus to the landing then. The model asks whether macOS counts a hidden
+window on its Desktop (`Model::macos_counts_hidden`) for the Dock-click prediction. At the
+press on a Dock item (the Dock activates the app on the release, ~100 ms later) the window
+macOS should go to is put on its Desktop first: an arrangement ahead for another Desktop is
+made at the press, and for an app whose stage on the Desktop shown is hidden while it shows
+a window elsewhere, that stage's window is put home for a while, still counted hidden
+(`WindowEngine::lend_home`, `Model::dock_home`), and taken back when no switch to its stage
+follows.
 
 ```mermaid
 sequenceDiagram

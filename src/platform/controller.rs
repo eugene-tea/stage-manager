@@ -1007,6 +1007,9 @@ pub struct Controller {
     verify: Option<arrival::Verify>,
     /// The latest Dock press's prediction, until a Space change shows where it went.
     dock_seen: Option<arrival::DockSeen>,
+    /// A window put on the Desktop shown at a Dock press, still counted hidden, until its
+    /// stage comes in front or it goes back ([`arrival::Lent`]).
+    lent: Option<arrival::Lent>,
     /// While set, a batch leaves the strip snapshot for later (`strip_dirty`): an arrival
     /// hands the strip one snapshot, in its final order.
     defer_present: bool,
@@ -1209,6 +1212,7 @@ impl Controller {
             unminimizing: HashMap::new(),
             verify: None,
             dock_seen: None,
+            lent: None,
             defer_present: false,
             absent: HashMap::new(),
             busy_apps: std::cell::RefCell::new(BusyApps::default()),
@@ -2189,6 +2193,17 @@ impl Controller {
             // Read before the shows below, which stop a stretch not taken over yet (it ends
             // and tells so all the same).
             self.landing_focus = landing_focus::LandingFocus::after_unveil(p.id, focus, asked.iter().map(|(id, _)| *id), &self.engine.stretching());
+            // The key window still flying, on no Desktop, its app with a window elsewhere: a
+            // focus now activates the app and macOS goes to that other window (the owner's log
+            // of 11-15 06:42:57). The focus after the landing is the switch's only one.
+            if let Some(f) = self.landing_focus.as_mut()
+                && self.engine.focus_waits_for_show(WindowId(f.key()))
+            {
+                let key = f.key();
+                f.defer();
+                p.actions.retain(|a| !matches!(a, Action::Focus { id } if id.0 == key));
+                tracing::debug!(id = p.id, key, "landing: the key window flies on no Desktop and its app has a window elsewhere: its focus waits for the landing");
+            }
             self.execute_batch(ob, p.actions, Batch::Unveil);
             // Where the windows really are now: their snapshots land exactly there.
             let mut arrived = Vec::new();
@@ -2923,6 +2938,7 @@ impl Controller {
         } else {
             None
         };
+        let wait = wait.filter(|why| !self.activation_stays_here(pid, *why));
         if let Some(why) = wait {
             let wanted = match why {
                 slide_hold::Wait::FocusElsewhere(id) => Wanted::Window { id, pid },
@@ -2975,6 +2991,27 @@ impl Controller {
             self.activation = self.activation_for(pid, &actions, ob);
             self.execute_animated(ob, actions);
         }
+    }
+
+    /// True when an activation held for its focused window on another Desktop (`why`) stays
+    /// on the Desktop shown after all: that window waits off every Desktop (the Spaces
+    /// engine's stage Space), or a window of the app was put home at a Dock press, and the
+    /// app has a stage here with nothing macOS counts elsewhere, or that window put home
+    /// ([`crate::engine::model::Model::activation_stays_here`]). macOS goes nowhere then; the
+    /// app's stage here comes in front, as under the Corner engine and Apple's (the owner's
+    /// log of 11-15 06:31:28: VS Code, a stage here, its focused window hidden on Desktop 4,
+    /// was taken to Desktop 4 by the arrival made for that window). Never under the Corner
+    /// engine.
+    fn activation_stays_here(&self, pid: i32, why: slide_hold::Wait) -> bool {
+        let slide_hold::Wait::FocusElsewhere(id) = why else { return false };
+        let Some(m) = self.model.as_ref() else { return false };
+        let lent = self.lent_for(pid);
+        let off = m.resolve_standard(id).is_some_and(|s| self.engine.off_every_desktop(s));
+        let stays = (lent || off) && m.activation_stays_here(pid, lent);
+        if stays {
+            tracing::info!(pid, focused = id.0, lent, "activation: its focused window waits off every Desktop elsewhere and its stage is here: macOS stays, the stage here comes in front");
+        }
+        stays
     }
 
     /// Holds `wanted` (an activation, else a window focus) for a Desktop slide: the focus
@@ -6155,11 +6192,11 @@ impl Controller {
                 self.reload_config(ob);
                 json!({ "ok": self.config_error.is_none(), "error": self.config_error })
             }
-            Command::DebugDockClick { bundle } => {
+            Command::DebugDockClick { bundle, real } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-click needs STAGE_MANAGER_TEST=1" });
                 }
-                self.debug_dock_click(ob, &bundle)
+                self.debug_dock_click(ob, &bundle, real)
             }
             Command::DebugFrame { id, frame, only } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

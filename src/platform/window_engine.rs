@@ -147,7 +147,8 @@ pub trait WindowEngine: Send + Sync {
     /// there (live 11-14, the Spaces engine: a card click on Desktop 2 for a stage of an app
     /// with windows on Desktop 1 showed Desktop 1 for 300 ms); an app with no window on a
     /// Desktop not shown is followed nowhere. The Corner engine: never, a parked window
-    /// stays on its Desktop, in the corner.
+    /// stays on its Desktop, in the corner. The Spaces engine also while the window flies its
+    /// last stretch in a landing Space, which is no Desktop either.
     fn focus_waits_for_show(&self, _id: WindowId) -> bool {
         false
     }
@@ -157,6 +158,23 @@ pub trait WindowEngine: Send + Sync {
     /// activation for such a window on another Desktop is this app's to carry out (an
     /// arrival, S3c). The Corner engine: never, a parked window stays on its Desktop.
     fn off_every_desktop(&self, _id: WindowId) -> bool {
+        false
+    }
+
+    /// Puts window `id`, hidden by this engine off every Desktop, on its own Desktop at its
+    /// frame for a while, still counted hidden: macOS counts it there from now on when it
+    /// picks a Desktop for its app's activation (a Dock press under the Spaces engine,
+    /// [`crate::engine::model::Model::dock_home`]). It shows at its old place in the window
+    /// order; the model's show of it later asks nothing more, and [`Self::take_back`] hides it
+    /// again. True when it is on its Desktop now. The Corner engine: false (a parked window is
+    /// on its Desktop already).
+    fn lend_home(&self, _id: WindowId) -> bool {
+        false
+    }
+
+    /// Window `id`, put home by [`Self::lend_home`] and still counted hidden, goes back where
+    /// this engine hid it. False when it is not put home any more (shown or hidden since).
+    fn take_back(&self, _id: WindowId) -> bool {
         false
     }
 
