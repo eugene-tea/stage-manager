@@ -606,8 +606,9 @@ windows come to their places at once instead of growing.
 **Card pictures are stills**, not live surfaces, taken when a stage leaves for its card, when
 the strip comes into view and when the pointer reaches the card (`[strip]
 thumbnail_interval_ms`, 0: no timer; a number of milliseconds refreshes them on a timer as
-well). Each is the window alone: a popover or sheet child window over it is not in the card's
-picture. Until a
+well). A window with another window of its app over it (a popover, a sheet, a child panel) is
+taken by ScreenCaptureKit, which carries those; the rest straight from the window server,
+the window alone. Until a
 window's first picture arrives (at launch, a window first seen), its place on the card is
 faint glass: the card's wallpaper-toned under at `[cards] empty_opacity` (0.35), with the
 card's edge, or with no picture of the wallpaper a black as faint (the wallpaper darkened as

@@ -204,8 +204,14 @@ fn shoot_sck(targets: Vec<Target>, now: &[(u32, Rect)], done: ShotDone) {
 /// answers `done`. The windows it misses, for ScreenCaptureKit.
 pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDone) -> Vec<Target> {
     let displays = super::desktop::cg_display_bounds();
+    let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+    let children = super::capture_fast::with_children(&ids);
     let mut left = Vec::new();
     for t in targets {
+        if children.contains(&t.id) {
+            left.push(*t);
+            continue;
+        }
         let Some(frame) = now.iter().find(|(id, _)| *id == t.id).map(|(_, f)| *f) else {
             tracing::trace!(window = t.id, "switch pictures: the window server no longer describes the window");
             done(t.id, None);
