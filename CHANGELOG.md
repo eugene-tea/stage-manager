@@ -59,8 +59,7 @@
   windows on the Desktop shown all wait in a stage, while it has a window shown on another
   Desktop, no longer takes the screen to that Desktop and back: while the app switcher
   selects the app, its stage's window is made ready on the Desktop shown, and taken back
-  when the selection moves on or the switcher is cancelled. A ⌘Tab let go faster than that
-  slides as before.
+  when the selection moves on or the switcher is cancelled.
 
 ## 1.8.5 — 2026-11-12
 
