@@ -28,6 +28,14 @@
 //! window, the window behind's picture at `a·(1−a)`, a quarter at mid-fade (11-02, Photos
 //! under VS Code, seen at every switch to VS Code).
 //!
+//! **Side panels** (1.9, round sm-landing). The overlay is one panel at one place in the
+//! window order; a picture whose window ends behind a real window in place (shown already, or
+//! flying the last stretch itself under the Spaces engine) must pass under it, and one whose
+//! window ends in front over it. Such pictures go in a panel of their own ([`Overlay::side_group`]),
+//! the same frame and the same eye as the overlay, ordered just under that window
+//! ([`crate::ui::landing_math::anchors`]); the others stay in the overlay. Side panels are a
+//! transition's: they go when the overlay hides.
+//!
 //! **Glass.** A card lets the wallpaper through ([`crate::ui::glass_math`]): each ghost holds
 //! a flat colour under its picture, the under of the card it flies to or from
 //! ([`GlassLook`]), so a snapshot shrinking into a card lands on the card's look, the picture
@@ -62,6 +70,7 @@ use objc2_quartz_core::{
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::platform::capture::Picture;
 use crate::platform::capture_frame::Extent;
+use crate::ui::landing_math::Flown;
 use crate::ui::motion_math::{Eye, Flight, Path, Plane, Pose, Spring, Toward, flight_samples, path_duration, travel};
 use crate::ui::panels;
 use crate::ui::window_shadow::{ShadowLayers, WindowShadow};
@@ -235,6 +244,8 @@ pub struct Ghost {
     flight: f64,
     /// It stacks in a [`GhostGroup`] (it goes with the group).
     grouped: bool,
+    /// Its current flight and when it started ([`Self::spring_to`]; none while it sits).
+    flown: Option<(Flown, std::time::Instant)>,
 }
 
 /// The name marking a [`GhostGroup`]'s layer among the ghosts' containers
@@ -411,6 +422,7 @@ impl Ghost {
             }
         }
         self.take_pending();
+        self.flown = None;
         let look = Look::of(&p.pose(self.strip, self.eye()));
         self.plane.setPosition(look.position);
         self.plane.setBounds(look.bounds);
@@ -509,7 +521,9 @@ impl Ghost {
         // Every part runs as long as the farthest edge needs to come to rest on the path.
         let duration = path_duration(spring, travel(unturned(&from.plane(eye, self.strip)), unturned(&p)), toward);
         self.flight = duration;
-        let samples = flight_samples(&Path { from, to, toward, origin_x: self.origin_x }, spring, duration);
+        let path = Path { from, to, toward, origin_x: self.origin_x };
+        self.flown = Some((Flown { path, spring, duration, eye }, std::time::Instant::now()));
+        let samples = flight_samples(&path, spring, duration);
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         self.take_pending();
@@ -551,6 +565,12 @@ impl Ghost {
         }
         CATransaction::commit();
         self.target = p;
+    }
+
+    /// Its current flight as Core Animation plays it (the path, the spring, how long, the eye)
+    /// and when it started; `None` while it sits ([`Self::set`]).
+    pub fn flown(&self) -> Option<(Flown, std::time::Instant)> {
+        self.flown
     }
 
     /// Shows `amount` of the card's look `look` (0 the window: the picture opaque, no under;
@@ -691,6 +711,21 @@ fn make_panel(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSPanel> {
     panel
 }
 
+/// A panel of the overlay's own frame and eye for some pictures, ordered just under a window
+/// (see the module notes, "Side panels").
+struct Side {
+    /// What the caller keys it by (an anchor window, or a picture's window).
+    key: u32,
+    /// Where it stacks among the sides: lower ranks above higher ones (front to back).
+    rank: usize,
+    panel: Retained<NSPanel>,
+    _view: Retained<OverlayView>,
+    root: Retained<CALayer>,
+    space: Retained<CALayer>,
+    /// The window it goes just under (`None`: where the overlay is, just above it).
+    below: Option<u32>,
+}
+
 /// The overlay panel and its stack of ghosts.
 pub struct Overlay {
     panel: Retained<NSPanel>,
@@ -716,6 +751,8 @@ pub struct Overlay {
     /// A fresh panel is owed ([`Self::renew`] found the overlay in use): taken at the next
     /// [`Self::hide`].
     stale: bool,
+    /// The side panels of the running transition ([`Self::side_group`]).
+    sides: Vec<Side>,
 }
 
 /// What a Space change asks of the overlay's panel ([`renewal`]).
@@ -752,7 +789,7 @@ impl Overlay {
         panel.setContentView(Some(&view));
         let eye = (Point::new(0.0, 0.0), 1.0);
         let flight = Flight::over(0.0, Size::new(100.0, 100.0), 0.0);
-        Self { panel, view, root, space, eye, flight, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false, stale: false }
+        Self { panel, view, root, space, eye, flight, origin: Point::new(0.0, 0.0), shown: false, under: None, top: false, stale: false, sides: Vec::new() }
     }
 
     /// Covers the display `frame` (Cocoa coordinates; `primary_height` flips them), with the
@@ -774,8 +811,22 @@ impl Overlay {
         self.space.setFrame(all);
         self.eye = (local_eye, distance);
         self.flight = Flight::over(0.0, Size::new(size.width, size.height), local_eye.y);
+        self.refit(&self.space, all);
+        for side in &self.sides {
+            if side.panel.frame() != frame {
+                side.panel.setFrame_display(frame, false);
+            }
+            side.root.setFrame(all);
+            side.space.setFrame(all);
+            self.refit(&side.space, all);
+        }
+        CATransaction::commit();
+    }
+
+    /// Fits every ghost's container in `space` (and in its groups) to the overlay `all`.
+    fn refit(&self, space: &CALayer, all: CGRect) {
         // SAFETY: reading the sublayers array; every one is a ghost's container or a group of them.
-        if let Some(depths) = unsafe { self.space.sublayers() } {
+        if let Some(depths) = unsafe { space.sublayers() } {
             for depth in depths.iter() {
                 if depth.name().is_some_and(|n| n.to_string() == GROUP) {
                     depth.setFrame(all);
@@ -788,7 +839,6 @@ impl Overlay {
                 }
             }
         }
-        CATransaction::commit();
     }
 
     /// Makes `depth` a ghost's perspective container: the whole overlay, the flight's eye
@@ -859,6 +909,7 @@ impl Overlay {
             if self.panel.isVisible() {
                 self.shown = true;
                 self.under = Some(id);
+                self.order_sides();
                 return;
             }
             // The window is gone (closed, or off the Space shown): above every normal window.
@@ -872,6 +923,7 @@ impl Overlay {
             self.shown = false;
         }
         self.order_front();
+        self.order_sides();
     }
 
     /// Shows the overlay above every window, floating ones and the raised strip included:
@@ -884,6 +936,7 @@ impl Overlay {
             self.shown = false;
         }
         self.order_front();
+        self.order_sides();
     }
 
     fn order_front(&mut self) {
@@ -914,8 +967,10 @@ impl Overlay {
         self.stale = false;
     }
 
-    /// Hides the overlay; a fresh panel owed since a Space change is taken now.
+    /// Hides the overlay, its side panels gone; a fresh panel owed since a Space change is
+    /// taken now.
     pub fn hide(&mut self) {
+        self.clear_sides();
         if self.shown {
             self.shown = false;
             self.panel.orderOut(None);
@@ -946,6 +1001,113 @@ impl Overlay {
         self.space.addSublayer(&layer);
         CATransaction::commit();
         GhostGroup { layer }
+    }
+
+    /// A new group of ghosts in the side panel keyed `key` (made now if there is none: the
+    /// overlay's frame and eye, `rank` its place among the sides, front first), which goes
+    /// just under window `below` (`None`: where the overlay is, just above it). See the module
+    /// notes, "Side panels".
+    pub fn side_group(&mut self, mtm: MainThreadMarker, key: u32, rank: usize, below: Option<u32>) -> GhostGroup {
+        if !self.sides.iter().any(|s| s.key == key) {
+            let frame = self.panel.frame();
+            let panel = make_panel(mtm, frame);
+            let view = OverlayView::new(mtm, NSRect::new(NSPoint::new(0.0, 0.0), frame.size));
+            let root = CALayer::new();
+            root.setGeometryFlipped(true);
+            view.setLayer(Some(&root));
+            view.setWantsLayer(true);
+            let space = CALayer::new();
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            let all = self.space.bounds();
+            root.setFrame(all);
+            space.setFrame(all);
+            root.addSublayer(&space);
+            CATransaction::commit();
+            panel.setContentView(Some(&view));
+            self.sides.push(Side { key, rank, panel, _view: view, root, space, below });
+            self.sides.sort_by_key(|s| s.rank);
+        }
+        let layer = CALayer::new();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        layer.setName(Some(&NSString::from_str(GROUP)));
+        layer.setAllowsGroupOpacity(true);
+        layer.setFrame(self.space.bounds());
+        if let Some(side) = self.sides.iter().find(|s| s.key == key) {
+            side.space.addSublayer(&layer);
+        }
+        CATransaction::commit();
+        if self.shown {
+            self.order_sides();
+        }
+        GhostGroup { layer }
+    }
+
+    /// The side panel keyed `key` goes just under window `below` now (`None`: where the
+    /// overlay is); every side is ordered again.
+    pub fn anchor_side(&mut self, key: u32, below: Option<u32>) {
+        let Some(side) = self.sides.iter_mut().find(|s| s.key == key) else { return };
+        if side.below == below {
+            return;
+        }
+        side.below = below;
+        if self.shown {
+            self.order_sides();
+        }
+    }
+
+    /// Every side panel goes (a new transition; their pictures go with them).
+    pub fn clear_sides(&mut self) {
+        for side in self.sides.drain(..) {
+            side.panel.orderOut(None);
+            side.panel.close();
+        }
+    }
+
+    /// The side panel keyed `key` goes (its pictures gone with it).
+    pub fn drop_side(&mut self, key: u32) {
+        if let Some(i) = self.sides.iter().position(|s| s.key == key) {
+            let side = self.sides.remove(i);
+            side.panel.orderOut(None);
+            side.panel.close();
+        }
+    }
+
+    /// True when a side panel is keyed `key`.
+    pub fn has_side(&self, key: u32) -> bool {
+        self.sides.iter().any(|s| s.key == key)
+    }
+
+    /// Orders each side panel where it goes ([`order_plan`]), front first: under its window
+    /// at the normal level, or just under the side before it with the same anchor, or just
+    /// above the overlay. A side whose window is gone from the screen goes above the overlay.
+    fn order_sides(&mut self) {
+        if self.sides.is_empty() || !self.shown {
+            return;
+        }
+        let main = (self.panel.windowNumber(), self.panel.level());
+        let plan = order_plan(&self.sides.iter().map(|s| s.below).collect::<Vec<_>>());
+        let mut placed: Vec<(isize, isize)> = Vec::with_capacity(self.sides.len());
+        for (i, how) in plan.iter().enumerate() {
+            let side = &self.sides[i];
+            let (mode, relative, level) = match *how {
+                SidePlace::UnderWindow(w) => (NSWindowOrderingMode::Below, w as isize, NSNormalWindowLevel),
+                SidePlace::UnderSide(j) => {
+                    let (n, l) = placed[j];
+                    (NSWindowOrderingMode::Below, n, l)
+                }
+                SidePlace::AboveOverlay => (NSWindowOrderingMode::Above, main.0, main.1),
+            };
+            side.panel.setLevel(level);
+            side.panel.orderWindow_relativeTo(mode, relative);
+            if !side.panel.isVisible() {
+                tracing::debug!(key = side.key, ?how, "motion overlay: a side panel cannot go there; above the overlay");
+                side.panel.setLevel(main.1);
+                side.panel.orderWindow_relativeTo(NSWindowOrderingMode::Above, main.0);
+            }
+            placed.push((side.panel.windowNumber(), side.panel.level()));
+        }
     }
 
     /// A new ghost of window `window` showing `image` (or a plain card when there is none),
@@ -1004,6 +1166,7 @@ impl Overlay {
             origin_x: self.flight.origin_x,
             flight: 0.0,
             grouped: group.is_some(),
+            flown: None,
         };
         g.set(at);
         g.set_shadow_amount(shadow.amount);
@@ -1048,7 +1211,7 @@ impl Overlay {
         plane.addSublayer(&body);
         let depth = self.stack(&plane, true, None);
         let glass = glass_layer();
-        let mut g = Ghost { window: 0, depth, plane, body, image: img, glass, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, strip: self.strip_eye(), origin_x: self.flight.origin_x, flight: 0.0, grouped: false };
+        let mut g = Ghost { window: 0, depth, plane, body, image: img, glass, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, strip: self.strip_eye(), origin_x: self.flight.origin_x, flight: 0.0, grouped: false, flown: None };
         g.set(at);
         g
     }
@@ -1082,9 +1245,47 @@ impl Drop for Overlay {
     }
 }
 
+/// Where a side panel goes ([`order_plan`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SidePlace {
+    /// Just under this window (at the normal level).
+    UnderWindow(u32),
+    /// Just under the side panel at this index (it has the same anchor and is in front).
+    UnderSide(usize),
+    /// Just above the overlay's panel, at its level.
+    AboveOverlay,
+}
+
+/// Where each side panel goes, given each one's anchor, front first: under its anchor window,
+/// or under the last side placed with the same anchor (each `orderWindow` puts a panel
+/// directly under or over another, so a later one ordered the same way would land in front
+/// of the earlier ones).
+fn order_plan(below: &[Option<u32>]) -> Vec<SidePlace> {
+    below
+        .iter()
+        .enumerate()
+        .map(|(i, b)| match below[..i].iter().rposition(|x| x == b) {
+            Some(j) => SidePlace::UnderSide(j),
+            None => match b {
+                Some(w) => SidePlace::UnderWindow(*w),
+                None => SidePlace::AboveOverlay,
+            },
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Side panels stack front first: each under its window, or under the side in front of it
+    /// with the same anchor; the first with none just above the overlay.
+    #[test]
+    fn side_panels_stack_front_first() {
+        use SidePlace::*;
+        assert_eq!(order_plan(&[None, None, Some(7), Some(7), None]), vec![AboveOverlay, UnderSide(0), UnderWindow(7), UnderSide(2), UnderSide(1)]);
+        assert!(order_plan(&[]).is_empty());
+    }
 
     /// A Space change while a switch's snapshots are up: the fresh panel is owed, never
     /// forgotten; an idle overlay takes it at once.

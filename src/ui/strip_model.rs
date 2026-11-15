@@ -137,6 +137,13 @@ pub struct Transition {
     /// picture starts at its Dock tile, or its card fades in ([`crate::ui::minimize_motion`]),
     /// never at the frame it had before the genie.
     pub minimized: Option<Minimized>,
+    /// The arriving stage's windows front to back as they end (the model's order after the
+    /// batch), incoming and in place alike: where each picture goes in the window order
+    /// ([`crate::ui::landing_math::anchors`], round sm-landing). Empty: not known.
+    pub order: Vec<u32>,
+    /// The arriving stage's windows shown in place already (not in [`Self::incoming`]): a
+    /// picture of a window that ends behind one passes under it.
+    pub in_place: Vec<u32>,
 }
 
 /// A minimized window on its way to the strip ([`Transition::minimized`]).
@@ -678,6 +685,10 @@ pub struct GhostReport {
     /// For an incoming window: when its snapshot's shadow began to fade (ms after the unveil);
     /// never before `shown_ms`.
     pub handover_ms: Option<u64>,
+    /// For an incoming window: when it took over from its snapshot to fly the last stretch
+    /// itself (ms after the motion started; the Spaces engine's live landing, round
+    /// sm-landing); its snapshot went then, so it has no `shown_ms` or `handover_ms`.
+    pub stretch_ms: Option<u64>,
     /// The window shadow its snapshot carries ([`ShadowReport`]); `None` for a window
     /// dragged onto the strip (its card's shadow).
     pub shadow: Option<ShadowReport>,

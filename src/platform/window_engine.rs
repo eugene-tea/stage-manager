@@ -26,6 +26,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::Instant;
 
 use objc2_foundation::MainThreadMarker;
 
@@ -34,6 +35,7 @@ use super::safety::{Ours, Report, ScanScope};
 use crate::engine::engine_choice::{self, Asked, Choice, ConfigEngine};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Display, Model, WindowId};
+use crate::ui::landing_math::Affine;
 use crate::ui::strip_model::Transition;
 pub use crate::engine::recovery::EngineKind;
 use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
@@ -60,6 +62,37 @@ pub enum Motion {
     /// unveils them.
     Pictures,
 }
+
+/// One incoming window's last stretch (round sm-landing): from the first step on, the real
+/// window flies the rest of its picture's path through its Space's transform (the Spaces
+/// engine), each step's transform at its instant, the last the identity at the flight's end;
+/// then it goes onto its Desktop at `frame`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Stretch {
+    /// The window.
+    pub window: u32,
+    /// Its frame (global, top-left points): where it is listed now, hidden, and where it lands.
+    pub frame: Rect,
+    /// Each step: when, and the transform then ([`crate::ui::landing_math::stretch`]).
+    pub steps: Vec<(Instant, Affine)>,
+}
+
+/// What became of a [`Stretch`], told from the landing's own thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StretchNote {
+    /// The window took over: the window server lists it on screen at its first pose (its
+    /// picture goes now).
+    Shown,
+    /// It never took over (why): its picture lands as before.
+    Skipped(&'static str),
+    /// It flew to the end and is on its Desktop at its frame.
+    Landed,
+    /// It was stopped mid-flight (hidden again, or a bring-back took it home).
+    Stopped,
+}
+
+/// Hears each [`StretchNote`] of a window (any thread).
+pub type StretchDone = Arc<dyn Fn(u32, StretchNote) + Send + Sync>;
 
 /// How a stage's windows are hidden, shown, moved in a switch and brought back.
 pub trait WindowEngine: Send + Sync {
@@ -138,6 +171,24 @@ pub trait WindowEngine: Send + Sync {
     fn pictures_at_switch(&self) -> bool {
         false
     }
+
+    /// True when an incoming window can fly the last stretch of its switch itself
+    /// ([`Self::fly_stretch`]). The Corner engine: never (no live window can be scaled).
+    fn lands_live(&self) -> bool {
+        false
+    }
+
+    /// Plans window `s.window`'s last stretch ([`Stretch`]), told to `done` on the landing's
+    /// thread; false when it cannot be planned (not hidden by this engine). The window stays
+    /// hidden for the controller until it shows it ([`Self::show`] then asks the window
+    /// nothing: it is at its frame). Main thread.
+    fn fly_stretch(&self, _s: Stretch, _done: StretchDone) -> bool {
+        false
+    }
+
+    /// Window `id`'s stretch is no longer wanted (its picture goes elsewhere now): it never
+    /// takes over if it has not yet; one already flying finishes.
+    fn cancel_stretch(&self, _id: u32) {}
 
     /// The last line of defence in this process: every hidden window brought back, whatever
     /// state the model and the WM thread are in. Any thread. True when nothing failed.
@@ -236,6 +287,10 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     }
     let choice = engine_choice::choose(asked, probe);
     tracing::info!(engine = choice.kind.name(), "window engine: {}", choice.why);
+    let landing = crate::ui::landing_math::Landing::current();
+    if landing != crate::ui::landing_math::Landing::Pictures {
+        tracing::info!(landing = landing.name(), "window engine: a test run lands switches this way");
+    }
     install(of(choice.kind));
     *lock_choice() = Some(choice.clone());
     choice
