@@ -7,6 +7,10 @@
 //! refused as user-declined stops captures for a backoff that doubles up to
 //! [`BACKOFF_MAX`]; the user asking for screen access (the menu) retries at once.
 //!
+//! It hears ScreenCaptureKit only: the probe goes through it, and a picture from the window
+//! server ([`super::capture_fast`]) opens nothing. A refusal heard while captures already rest
+//! (two captures refused together) changes nothing.
+//!
 //! Pure state, no clocks of its own: every call takes `now`, so the rules are unit tested.
 //! The capturer keeps one gate for the whole process ([`super::capture`]).
 
@@ -115,6 +119,9 @@ impl Gate {
                 self.refused_before = false;
                 if recovered { Change::Recovered } else { Change::None }
             }
+            // A refusal of a capture issued before the gate heard one (a look's still, a round
+            // running beside it): heard already, the rest is not doubled again.
+            Outcome::Declined if matches!(self.state, State::Refused { .. }) => Change::None,
             Outcome::Declined => {
                 let rest = self.backoff;
                 self.state = State::Refused { retry_at: now + rest };
@@ -207,6 +214,21 @@ mod tests {
         assert_eq!(g.finished(Outcome::Captured, now), Change::Recovered);
         assert_eq!(g.permit(now), Permit::All);
         assert_eq!(g.finished(Outcome::Declined, now), Change::Refused(BACKOFF_MIN));
+    }
+
+    /// D-1: two captures refused for one refusal (a round and a look's still issued together)
+    /// rest the captures once, at the first rest.
+    #[test]
+    fn a_refusal_heard_twice_rests_once() {
+        let now = t0();
+        let mut g = Gate::default();
+        g.permit(now);
+        g.finished(Outcome::Captured, now);
+        assert_eq!(g.finished(Outcome::Declined, now), Change::Refused(BACKOFF_MIN));
+        assert_eq!(g.finished(Outcome::Declined, now), Change::None, "the second word of the same refusal");
+        assert_eq!(g.permit(now + BACKOFF_MIN - Duration::from_secs(1)), Permit::Wait);
+        assert_eq!(g.permit(now + BACKOFF_MIN), Permit::Probe);
+        assert_eq!(g.finished(Outcome::Declined, now + BACKOFF_MIN), Change::RefusedAgain(BACKOFF_MIN * 2), "a retry's refusal still doubles");
     }
 
     #[test]

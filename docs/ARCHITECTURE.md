@@ -252,7 +252,9 @@ window within the displays, on screen or in a stage Space; `CGWindowListCreateIm
 partly off every display, a parked window), and ScreenCaptureKit only for a window that
 source misses (the call missing, nothing handed back, a picture that cannot be the window),
 for every picture of a call while it rests (its pictures of three windows came back blank
-before any was the window: 30 min, then it is tried again), and for a window's look read
+before any was the window: 30 min, then it is tried again), for the capture gate's probe (the
+first capture of a launch, and the retry after a refusal: the alert the gate guards against is
+ScreenCaptureKit's), and for a window's look read
 from its shadow (every window of a round with no reading, a few at most and one listing, else
 one a round, each window's every 20 s at most; and after each switch lands, for its windows
 with none). Card thumbnails are taken at
