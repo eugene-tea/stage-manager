@@ -380,7 +380,20 @@ def pids_of(pattern):
 
 def consistent(what):
     """Every managed window is where the model says: shown ones at their restore frame (±1),
-    parked ones in the park zone, and nothing parked that the model shows."""
+    parked ones in the park zone, and nothing parked that the model shows. Under the live
+    landing a switch is over at its unveil while its window still flies its last stretch in
+    its landing Space (~100 ms, live 11-15): read again for up to 1 s before it counts."""
+    end = time.time() + (1.0 if LIVE_LANDING else 0.0)
+    while True:
+        s, bad = _consistent_now()
+        if not bad or time.time() >= end:
+            break
+        time.sleep(0.1)
+    return check(not bad, f"{what}: windows match the model" + (f" ({'; '.join(bad)})" if bad else ""))
+
+
+def _consistent_now():
+    """`consistent`'s one read: the state and what does not match."""
     s = state()
     wins, d = fixture_windows()
     cg = {w["id"]: w for w in wins}
@@ -399,7 +412,7 @@ def consistent(what):
                 bad.append(f"{w['title']} should be shown, is parked")
             elif w["role"] == "standard" and not close(c["bounds"], w["restore"]):
                 bad.append(f"{w['title']} at {fmt(c['bounds'])}, expected {fmt(w['restore'])}")
-    return check(not bad, f"{what}: windows match the model" + (f" ({'; '.join(bad)})" if bad else ""))
+    return s, bad
 
 
 def phase_launch():
