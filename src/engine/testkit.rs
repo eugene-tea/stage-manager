@@ -8,6 +8,8 @@
 //! one. A test that checks one engine's own geometry sits in [`corner_nuance!`] (the park
 //! corner) or in that engine's module (`engine::spaces::tests`) and names its engine.
 
+pub mod apple;
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
