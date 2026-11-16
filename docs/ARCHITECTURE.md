@@ -169,7 +169,12 @@ guardian's engine takes them as its own (`assume`) and its sweep moves windows o
 if the app still holds them; after a crash they are gone already. A Spaces run's recovery
 scan also runs the Corner scan when an earlier copy left registered windows, so a Corner
 run that crashed with windows in the park corner is brought back the Corner way under
-Spaces (the launch scan is the Corner one under either engine).
+Spaces (the launch scan is the Corner one under either engine). So are the windows the model
+first meets in the park corner later (a Desktop shown for the first time since, a window an
+app reopens at a park frame it saved): a window first seen is asked the park corner's
+questions under either engine (`Model::found_parked`, `found_out_of_sight`, `safe_restore`),
+and the app's watch of windows taken from an old guardian judges them by the park corner
+(`Watch::taken`): the copy that hid them is gone, and its stage Spaces with it.
 
 In the code so far (the seam, Corner only): the model emits `Action::Hide { id }` and never a
 park frame, and asks every question about where hidden windows are through one door

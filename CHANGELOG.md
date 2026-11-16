@@ -72,6 +72,10 @@
   exactly where a hidden window of its app sits (a window filling the screen, say) stays
   where it opened. It was taken for a window tab selected: it went into the hidden window's
   stage, and the hidden window came out on the Desktop.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), windows an earlier
+  copy using the park corner left there (it stopped unexpectedly, or was an earlier version)
+  come out of the corner when their Desktop shows, as does a window an app reopens at a
+  corner frame it saved then. They stayed in the corner as slivers counted shown.
 
 ## 1.8.5 — 2026-11-12
 

@@ -54,7 +54,7 @@ use serde::{Deserialize, Serialize};
 
 use super::displays::ScreenKey;
 use super::geometry::Rect;
-use super::corner::park::{Corner, ParkRequest, clamp_to_visible, is_corner_piece_in, is_parked_in_at, onto_visible, reach_in};
+use super::corner::park::{Corner, ParkRequest, is_corner_piece_in, is_parked_in_at, onto_visible, reach_in};
 use super::recovery::EngineKind;
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
@@ -997,20 +997,6 @@ impl Model {
             w.restore = to;
         }
         true
-    }
-
-    /// A restore frame that is safe to record for a new window: `frame`, a centered one if
-    /// `frame` is unusable (degenerate, or where hidden windows are:
-    /// [`Model::no_restore`]), brought on screen if it shows only a piece where they are
-    /// ([`Model::shows_a_piece`]).
-    pub(crate) fn safe_restore(&self, frame: Rect, display: DisplayId) -> Rect {
-        if frame.is_degenerate() || self.no_restore(display, frame) {
-            clamp_to_visible(frame, self.display(display).visible)
-        } else if self.shows_a_piece(display, frame) {
-            self.within_reach(display, frame)
-        } else {
-            frame
-        }
     }
 
     /// Parks one window (no-op for pinned windows).

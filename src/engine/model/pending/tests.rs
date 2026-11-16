@@ -1042,7 +1042,10 @@ fn the_restore_line_counts_windows_stages_and_desktops() {
 }
 }
 
-corner_nuance! {
+// Both engines (the review of 1.9, C-2): a window first seen in the park corner is a Corner
+// copy's park, or a parked frame its app saved under one, whichever engine runs now; under
+// Spaces it was counted shown there, a sliver in the corner.
+both_engines! {
 #[test]
 fn saved_frames_come_back_only_on_a_display_of_the_saved_size() {
     // Saved on a 2560×1440 main display; the test display is 1440×900.

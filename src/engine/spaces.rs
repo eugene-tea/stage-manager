@@ -17,6 +17,11 @@
 //!   where they were.
 //! - **May a window be brought back here?** Anywhere within reach: its title bar on screen.
 //! - **Where does a hide leave it?** At its own frame.
+//!
+//! A window the model first sees (a launch, a Desktop shown for the first time since, a
+//! window born) is asked the park corner's questions under this engine too
+//! (`model/hiding.rs`, "A window first seen"): no window of a Spaces run is ever at a park
+//! frame, so one found there was left by a Corner copy, or reopened there by its app.
 
 use super::geometry::Rect;
 use super::model::{Display, WindowState};
@@ -158,11 +163,10 @@ mod tests {
         m.switch_to(m.stage_of(w(1)).expect("staged"), &obs);
         assert!(m.window(w(2)).is_some_and(|x| x.parked), "B hidden at the crash");
         let saved = m.to_state().spaces.remove(0);
-        // Relaunched with new ids; B's window is where the user had it, even at the
-        // Corner engine's corner: no frame is a stuck park here.
+        // Relaunched with new ids; B's window is where the user had moved it since.
         let mut b_back = meta(12, 20, "com.example.b");
         b_back.title = b.title.clone();
-        b_back.frame = Rect::new(FRAME.max_x() - 1.0, FRAME.max_y() - 1.0, 600.0, 400.0);
+        b_back.frame = Rect::new(700.0, 300.0, 600.0, 400.0);
         let mut a_back = meta(11, 10, "com.example.a");
         a_back.title = a.title.clone();
         a_back.frame = a.frame;
@@ -175,8 +179,48 @@ mod tests {
             assert!(!back.seen_hidden(x), "its frame is its own: a match counts it");
         }
         assert_eq!(back.window(w(11)).map(|x| x.restore), Some(a.frame), "A's frame kept");
-        assert_eq!(back.window(w(12)).map(|x| x.restore), Some(b_back.frame), "B's found frame kept, corner or not");
+        assert_eq!(back.window(w(12)).map(|x| x.restore), Some(b_back.frame), "B's found frame kept");
         assert!(acts.contains(&Action::Hide { id: w(12) }), "B hides again for its stage: {acts:?}");
         assert!(!acts.iter().any(|x| matches!(x, Action::SetFrame { .. })), "nothing moved: {acts:?}");
+    }
+
+    /// The review of 1.9, C-2: a Corner copy (an earlier version, or a run that fell back to
+    /// the Corner engine) died with both stages' windows in the park corner; this run is a
+    /// Spaces one. No window of a Spaces run is ever at a park frame, so a window first seen
+    /// there is the Corner copy's: the front's comes out to its saved frame, the card's keeps
+    /// its saved frame to show at. Counted shown at the park frame, they stayed slivers.
+    #[test]
+    fn a_corner_copys_windows_found_in_the_corner_take_their_saved_frames() {
+        let mut m = spaces_model();
+        let obs = Observation::default();
+        let a = meta(1, 10, "com.example.a");
+        let b = meta(2, 20, "com.example.b");
+        m.add_window(a.clone(), &Decision::default(), &obs);
+        m.add_window(b.clone(), &Decision { action: RuleAction::New, ..Decision::default() }, &obs);
+        m.switch_to(m.stage_of(w(1)).expect("staged"), &obs);
+        let saved = m.to_state().spaces.remove(0);
+        let d = display();
+        let park = |x: &crate::engine::model::WindowMeta| crate::engine::corner::park_frame_of(x.frame, &d, m.options().park);
+        let (mut a_back, mut b_back) = (meta(11, 10, "com.example.a"), meta(12, 20, "com.example.b"));
+        (a_back.title, a_back.frame) = (a.title.clone(), park(&a));
+        (b_back.title, b_back.frame) = (b.title.clone(), park(&b));
+        assert!(d.parks(a_back.frame) && d.parks(b_back.frame), "both in the Corner engine's park zone");
+        let relive = [a_back, b_back];
+        let found = crate::engine::persist::rematch(&saved, &relive);
+        let mut back = spaces_model();
+        let acts = back.apply_assignment(&relive, &found, false);
+        assert_eq!(back.window(w(11)).map(|x| x.restore), Some(a.frame), "A's saved frame, not the park frame");
+        assert!(acts.contains(&Action::SetFrame { id: w(11), frame: a.frame }), "A, in front, comes out of the corner: {acts:?}");
+        assert_eq!(back.window(w(12)).map(|x| x.restore), Some(b.frame), "B's saved frame to show at");
+        assert!(acts.contains(&Action::Hide { id: w(12) }), "B hides for its stage: {acts:?}");
+        // A window born in the corner (its app saved the park frame under a Corner run) is
+        // brought out of it, as under the Corner engine.
+        let mut m = spaces_model();
+        let mut c = meta(3, 30, "com.example.c");
+        c.frame = park(&c);
+        let acts = m.add_window(c, &Decision::default(), &obs);
+        let restore = m.window(w(3)).expect("managed").restore;
+        assert!(!d.parks(restore), "a restore frame out of the zone: {restore}");
+        assert!(acts.contains(&Action::SetFrame { id: w(3), frame: restore }), "shown out of the corner: {acts:?}");
     }
 }
