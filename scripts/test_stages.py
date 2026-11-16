@@ -4770,7 +4770,9 @@ def phase_capture():
           f"window pictures arrive and captures stay open ({cap})")
     # Review 1.9, D-1 and D-3: the gate opened on ScreenCaptureKit's probe, and the window
     # server's call still takes the pictures after it (not rested by a blank first picture).
-    check((cap.get("window_server") or {}).get("fast") == "works",
+    # Either of its routes: the one for a window with nothing of its app over it, or the whole
+    # window's (parked windows on the card take that one under Corner).
+    check("works" in ((cap.get("window_server") or {}).get("fast"), (cap.get("window_server") or {}).get("whole")),
           f"the window server takes pictures once ScreenCaptureKit's probe opened the gate ({cap.get('window_server')})")
     popup_picture_check(state())
     quiet_listings_check(state())
