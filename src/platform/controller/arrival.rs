@@ -614,6 +614,15 @@ pub(super) fn lent_step(parked: bool, in_front: bool, waited: Duration) -> LentS
     }
 }
 
+/// True when a Dock press takes back the window put home now (`lent`): always one put home
+/// for an earlier press; one put home for ⌘Tab's switcher (`for_switcher`) only when this
+/// press puts another window home (`lends_another`: one lend is kept at a time). A press that
+/// was no click, or one kept from a missed release, never undoes the switcher's (its app's
+/// activation after ⌘'s release would then go to its other Desktop, review B-6).
+pub(super) fn dock_takes_back(for_switcher: bool, lends_another: bool) -> bool {
+    !for_switcher || lends_another
+}
+
 /// A Space change this long after a Dock press counts as its click's.
 const DOCK_SEEN_FOR: Duration = Duration::from_millis(2000);
 
@@ -1592,7 +1601,7 @@ impl Controller {
         if self.ahead.as_ref().is_some_and(|s| s.at_press) {
             self.undo_ahead(ob, "the Dock press was no click");
         }
-        if let Some(lent) = self.lent.take() {
+        if let Some(lent) = self.lent.take_if(|l| dock_takes_back(l.switcher.is_some(), false)) {
             let back = self.engine.take_back(lent.window).back;
             tracing::info!(window = lent.window.0, back, "dock: the window put home at the press goes back (the press was no click)");
         }
@@ -1780,11 +1789,13 @@ impl Controller {
         );
         let ax_window = focused.or(main_window).map(WindowId);
         let facts = AppFacts { hidden, unplaced, active, visible_here };
-        if let Some(prev) = self.lent.take() {
-            // A press after a press: the window put home for the first goes back.
+        let home = m.dock_home(pid, facts);
+        if let Some(prev) = self.lent.take_if(|l| dock_takes_back(l.switcher.is_some(), home.is_some())) {
+            // A press after a press: the window put home for the first goes back (one put
+            // home for ⌘Tab's switcher only when this press puts another home).
             let _ = self.engine.take_back(prev.window);
         }
-        if let Some(home) = m.dock_home(pid, facts) {
+        if let Some(home) = home {
             if self.engine.lend_home(home, None).home {
                 self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: None });
                 tracing::info!(
@@ -2385,6 +2396,17 @@ mod tests {
         assert_eq!(lent_step(false, false, ms(100)), LentStep::Forget, "the model shows it");
         assert_eq!(lent_step(true, true, LEND_WAIT * 2), LentStep::Forget, "the switch's show at the unveil may come late");
         assert_eq!(lent_step(true, false, LEND_WAIT), LentStep::TakeBack, "no click, no activation: back unshown");
+    }
+
+    /// Review B-6: a Dock press that was no click, or one kept from a missed release, leaves
+    /// the window put home for ⌘Tab's switcher; a press that puts another window home takes
+    /// it back (one lend at a time); an earlier press's lend always goes.
+    #[test]
+    fn a_dock_press_leaves_the_switchers_lend_unless_it_lends_another() {
+        assert!(!dock_takes_back(true, false), "no click, or a press that puts nothing home: the switcher's stays");
+        assert!(dock_takes_back(true, true), "another window put home: the switcher's goes back");
+        assert!(dock_takes_back(false, false), "an earlier press's: back");
+        assert!(dock_takes_back(false, true));
     }
 
     #[test]

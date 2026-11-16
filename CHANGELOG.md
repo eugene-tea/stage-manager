@@ -84,6 +84,9 @@
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), a window waiting at
   the display's corner for the app switcher is brought back when Stage Manager ends
   unexpectedly, as with the park corner; it stayed there until the next launch.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a press on the Dock
+  that is no click (or whose release went unseen) while the app switcher shows no longer
+  undoes what ⌘Tab made ready: the app chosen took the screen to its other Desktop.
 
 ## 1.8.5 — 2026-11-12
 
