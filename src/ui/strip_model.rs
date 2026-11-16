@@ -145,8 +145,10 @@ pub struct Transition {
     /// picture of a window that ends behind one passes under it.
     pub in_place: Vec<u32>,
     /// The windows land behind their pictures even under the live landing (none flies its
-    /// last stretch itself): the key's focus waits for its window's show and the stage holds
-    /// windows of two apps or more ([`crate::platform::controller`]'s `pictures_land`).
+    /// last stretch itself): another app's window would stay in front of the key's until its
+    /// focus, after the landing (the key's focus waiting for its window's show with two apps
+    /// in the stage, or another app's window in place: [`crate::platform::controller`]'s
+    /// `pictures_land`).
     pub pictures_land: bool,
 }
 

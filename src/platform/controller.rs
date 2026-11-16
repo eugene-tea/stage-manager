@@ -2141,7 +2141,8 @@ impl Controller {
         t.corner = corner;
         let key_in = actions.iter().rev().find_map(|a| if let Action::Focus { id } = a { Some(id.0) } else { None });
         let key_waits = key_in.is_some_and(|k| arriving.contains(&k) && self.engine.focus_waits_for_show(WindowId(k)));
-        t.pictures_land = pictures_land(key_waits, t.incoming.iter().map(|w| w.window.pid));
+        let in_place_pids: Vec<i32> = t.in_place.iter().filter_map(|id| ob.window(*id).map(|w| w.pid)).collect();
+        t.pictures_land = pictures_land(key_waits, t.incoming.iter().map(|w| w.window.pid), in_place_pids);
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
         let cover = self.send_transition(ob, t, &actions, &run, cover_ms);
         if cover.outgoing {
@@ -6942,19 +6943,26 @@ fn supersedes(actions: &[Action]) -> bool {
 /// where the user's click put it. Returns the batch kept and the windows whose focus went.
 /// Whether a switch's windows land behind their pictures under the live landing too
 /// ([`Transition::pictures_land`]): when the key's focus waits for its window's show
-/// (`key_waits`) and the incoming windows (their apps' `pids`) belong to two apps or more.
-/// Flying, the windows land in the order macOS keeps for all windows, the hidden ones too,
-/// and with the key's app in front only after the landing, a window of another app can land
-/// on top of the key's until then: raises sent while they fly reach only some apps' windows
-/// (VS Code's never, on no Desktop), and the order kept may be wrong already (11-16 09:51:47,
-/// Calendar's 241 above Mail's 182 while hidden, Calendar on top at the landing ~85 ms).
-/// Behind their pictures they are shown on their Desktop first, where every raise reaches
-/// them, and the pictures go once the focus has run. One app's windows come in front
-/// together with its activation: they fly.
-fn pictures_land(key_waits: bool, pids: impl IntoIterator<Item = i32>) -> bool {
-    let mut pids = pids.into_iter();
-    let Some(first) = pids.next() else { return false };
-    key_waits && pids.any(|p| p != first)
+/// (`key_waits`) and the stage's windows, incoming (`incoming` apps' pids) and already in
+/// place (`in_place`), belong to two apps or more. Flying, the windows land in the order
+/// macOS keeps for all windows, the hidden ones too, and with the key's app in front only
+/// after the landing, a window of another app can be on top of the key's until then: raises
+/// sent while they fly reach only some apps' windows (VS Code's never, on no Desktop), the
+/// order kept may be wrong already (11-16 09:51:47, Calendar's 241 above Mail's 182 while
+/// hidden, Calendar on top at the landing ~85 ms), and a window in place stays in front of a
+/// window landing by it (10:49:45, a shift-click of Safari's card into Mail's stage: Safari
+/// under Mail for 21 ms after its landing). Behind their pictures they are shown on their
+/// Desktop first, where every raise reaches them, and the pictures go once the focus has
+/// run. One app's windows come in front together with its activation: they fly.
+/// A window of another app in place lands them behind pictures whether the key's focus waits
+/// or not: the focus reaching a window on no Desktop never activates its app, so the app
+/// comes in front only with the focus after the landing (10:16:38, Terminal's window
+/// shift-clicked into VS Code's stage, the focus again 7 ms after the landing).
+fn pictures_land(key_waits: bool, incoming: impl IntoIterator<Item = i32>, in_place: impl IntoIterator<Item = i32>) -> bool {
+    let incoming: HashSet<i32> = incoming.into_iter().collect();
+    let in_place: HashSet<i32> = in_place.into_iter().collect();
+    let other_in_place = in_place.iter().any(|p| !incoming.contains(p));
+    (key_waits && incoming.union(&in_place).count() > 1) || (!incoming.is_empty() && other_in_place)
 }
 
 fn without_focus(actions: Vec<Action>) -> (Vec<Action>, Vec<u32>) {
@@ -7785,11 +7793,18 @@ mod tests {
     fn a_held_focus_with_two_apps_lands_behind_pictures() {
         // 11-16 09:51:47: Mail's 182 (the key, Mail with a window on another Desktop) and
         // Calendar's 241; 09:47:02 VS Code's 49841 and Terminal's 214.
-        let (mail, calendar) = (1545, 1600);
-        assert!(pictures_land(true, [calendar, mail]));
-        assert!(!pictures_land(false, [calendar, mail]), "the focus runs at once: they fly");
-        assert!(!pictures_land(true, [mail, mail]), "one app: its activation brings them together");
-        assert!(!pictures_land(true, []));
+        let (mail, calendar, safari) = (1545, 1600, 1540);
+        assert!(pictures_land(true, [calendar, mail], []));
+        assert!(!pictures_land(false, [calendar, mail], []), "the focus runs at once: they fly");
+        assert!(!pictures_land(true, [mail, mail], []), "one app: its activation brings them together");
+        assert!(!pictures_land(true, [], []));
+        // 10:49:45: Safari's window shift-clicked into Mail's stage, Mail's window in place.
+        assert!(pictures_land(true, [safari], [mail]));
+        assert!(!pictures_land(true, [safari], [safari]), "its own app's window in place comes in front with it");
+        // 10:16:38: Terminal's window into VS Code's stage, the focus not waiting.
+        let (terminal, code) = (1534, 25420);
+        assert!(pictures_land(false, [terminal], [code]));
+        assert!(!pictures_land(false, [terminal], [terminal]));
     }
 
     #[test]

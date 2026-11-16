@@ -840,7 +840,7 @@ impl Strip {
         let landing = landing_math::Landing::current();
         let live = landing.live().filter(|_| crossfade.is_none() && t.late.is_empty() && !t.pictures_land && crate::platform::window_engine::current().lands_live());
         if t.pictures_land && landing.live().is_some() {
-            tracing::debug!(id = t.id, "transition: the windows land behind their pictures: the key's focus waits for its show, the stage holds two apps");
+            tracing::debug!(id = t.id, "transition: the windows land behind their pictures: another app's window would stay in front of the key's until its focus");
         }
         let ordered = landing.ordered() && crossfade.is_none();
         let incoming_ids: Vec<u32> = t.incoming.iter().map(|w| w.window.id).collect();
