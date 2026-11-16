@@ -75,6 +75,10 @@ const PARK_AX_SECONDS: f32 = 0.1;
 /// moved (the app moves it as it answers; a frame or so).
 const PARK_READ_BACK: Duration = Duration::from_millis(20);
 
+/// How often a frame a show owes a window parked for a lend is tried again
+/// ([`SpacesEngine::retry_owed`]): the pace at which the Corner engine retries a restore.
+const FRAME_RETRY: Duration = Duration::from_secs(1);
+
 /// The stage key of a window the model names no stage for (a child read before its parent).
 const NO_STAGE: u64 = 0;
 
@@ -89,6 +93,21 @@ struct Held {
     space: u64,
     /// The Desktop it was on when hidden: where a show puts it back.
     home: u64,
+}
+
+/// A window parked for a lend ([`State::parked`]).
+#[derive(Clone)]
+struct ParkedLend {
+    /// Where it parked, and the frame it had before.
+    park: Parked,
+    /// The element its moves go through.
+    element: AxElement,
+    /// The frame a show asked that it did not take (the activation's switch, its app busy
+    /// for that one call): it is out of every stage Space, still at the park, and the model
+    /// counts it shown at this frame. Owed, tried again ([`SpacesEngine::retry_owed`]).
+    shown_at: Option<Rect>,
+    /// When that frame was last tried.
+    tried: Option<Instant>,
 }
 
 /// What the engine counts, for `ctl state` and the checks while running.
@@ -182,10 +201,11 @@ struct State {
     /// each also in `held`, with the stage Space it goes back to.
     lent: BTreeSet<u32>,
     /// Windows parked for a lend whose frame is not set again yet (round cmdtab-park,
-    /// [`lend_park`]), with the element their moves go through: lent and parked, or taken back
-    /// with the restore owed. Their move notices are not the model's
-    /// ([`WindowEngine::parked_lend`]); a hide, a show or a sweep sets the frame again.
-    parked: BTreeMap<u32, (Parked, AxElement)>,
+    /// [`lend_park`]): lent and parked, taken back with the restore owed, or shown with the
+    /// show's frame owed. Their move notices are not the model's
+    /// ([`WindowEngine::parked_lend`]); a hide, a show, a sweep or the retry of a show's frame
+    /// sets the frame again.
+    parked: BTreeMap<u32, ParkedLend>,
 }
 
 /// One window's lend and take back calls ([`LendSteps`]): the window server's add and read
@@ -567,6 +587,10 @@ impl SpacesEngine {
             if st.new.remove(&id) {
                 st.counts.new_placed += 1;
             }
+            // Hidden again: a show's frame is owed no longer (its own frame is restored).
+            if let Some(p) = st.parked.get_mut(&id) {
+                p.shown_at = None;
+            }
         }
         ok
     }
@@ -589,7 +613,7 @@ impl SpacesEngine {
     /// hidden, or shown now); forgotten once the window server lists it there. `why` for the
     /// log.
     fn restore_parked(&self, id: u32, why: &str) {
-        let Some((parked, element)) = self.state().parked.get(&id).cloned() else { return };
+        let Some((parked, element)) = self.state().parked.get(&id).map(|p| (p.park, p.element.clone())) else { return };
         let Some(sky) = self.sky() else { return };
         let ours = BTreeSet::new();
         let held = Held { space: 0, home: 0 };
@@ -736,7 +760,7 @@ impl SpacesEngine {
             st.counts.lent += 1;
         }
         if let (Some(p), Some(e)) = (done.owed, element) {
-            st.parked.insert(id, (p, e));
+            st.parked.insert(id, ParkedLend { park: p, element: e, shown_at: None, tried: None });
         }
         Lend { home: done.home, parked: done.parked, park_ms }
     }
@@ -752,7 +776,7 @@ impl SpacesEngine {
             if !st.lent.remove(&id) {
                 return Back::default();
             }
-            (st.held.get(&id).copied(), st.parked.get(&id).cloned())
+            (st.held.get(&id).copied(), st.parked.get(&id).map(|p| (p.park, p.element.clone())))
         };
         let Some(held) = held else { return Back::default() };
         let Some(sky) = self.sky() else { return Back::default() };
@@ -792,8 +816,10 @@ impl SpacesEngine {
         back
     }
 
-    /// The shows that left a window hidden, tried again; the windows still owed one.
-    pub fn retry_owed(&self) -> BTreeSet<u32> {
+    /// The shows that left a window hidden, tried again, and the frames a show owes a window
+    /// parked for a lend ([`ParkedLend::shown_at`], each about once every [`FRAME_RETRY`],
+    /// all of them with `force`: a quit); the windows still owed one.
+    pub fn retry_owed(&self, force: bool) -> BTreeSet<u32> {
         let owed: Vec<u32> = self.state().owed.iter().copied().collect();
         for id in owed {
             if windows::describe(&[id]).is_empty() {
@@ -805,12 +831,50 @@ impl SpacesEngine {
                 tracing::info!(id, "spaces engine: a window owed its show is back");
             }
         }
+        self.retry_frames(force);
         self.owed()
     }
 
-    /// The windows whose show left them hidden.
+    /// The frames a show owes windows parked for a lend, set again through each one's
+    /// element; forgotten once taken, or when the window is gone.
+    fn retry_frames(&self, force: bool) {
+        let now = Instant::now();
+        let due: Vec<(u32, Rect, AxElement)> = {
+            let st = self.state();
+            st.parked
+                .iter()
+                .filter(|(id, p)| !st.held.contains_key(id) && (force || p.tried.is_none_or(|t| now.duration_since(t) >= FRAME_RETRY)))
+                .filter_map(|(id, p)| p.shown_at.map(|frame| (*id, frame, p.element.clone())))
+                .collect()
+        };
+        for (id, frame, element) in due {
+            if windows::describe(&[id]).is_empty() {
+                self.state().parked.remove(&id);
+                tracing::debug!(id, "spaces engine: a window owed the frame its show asked is gone: nothing is owed");
+                continue;
+            }
+            let framed = element.set_frame(frame);
+            let mut st = self.state();
+            match framed {
+                Ok(()) => {
+                    st.parked.remove(&id);
+                    tracing::info!(id, "spaces engine: a window parked for a lend took the frame its show asked, tried again");
+                }
+                Err(e) => {
+                    if let Some(p) = st.parked.get_mut(&id) {
+                        p.tried = Some(Instant::now());
+                    }
+                    tracing::debug!(id, "spaces engine: a window parked for a lend still does not take the frame its show asked: {e}");
+                }
+            }
+        }
+    }
+
+    /// The windows still owed a show: their show left them hidden, or (parked for a lend)
+    /// they came out at the park and did not take the show's frame.
     pub fn owed(&self) -> BTreeSet<u32> {
-        self.state().owed.clone()
+        let st = self.state();
+        st.owed.iter().copied().chain(st.parked.iter().filter(|(_, p)| p.shown_at.is_some()).map(|(id, _)| *id)).collect()
     }
 
     /// Hides window `id` again by the tick's look: the model counts it hidden and the engine
@@ -1125,6 +1189,7 @@ impl SpacesEngine {
             "new_missed": st.counts.new_missed,
             "lent_now": st.lent,
             "parked_lends": st.parked.keys().collect::<Vec<_>>(),
+            "frames_owed": st.parked.iter().filter(|(_, p)| p.shown_at.is_some()).map(|(id, _)| *id).collect::<Vec<_>>(),
             "lent": st.counts.lent,
             "taken_back": st.counts.taken_back,
             "stretches": {
@@ -1174,10 +1239,13 @@ impl WindowEngine for SpacesEngine {
     ///
     /// A window parked for a lend (round cmdtab-park: kept for the activation's switch) is
     /// never taken to be at its frame by where it is listed: the frame asked is set, and the
-    /// park forgotten once it took (until then its move notices stay dropped).
+    /// park forgotten once it took (until then its move notices stay dropped). One that comes
+    /// out of its Space and does not take the frame (its app busy for that one call) is owed
+    /// it: the tick tries it again ([`SpacesEngine::retry_owed`]), so it never stays at the
+    /// park while the model counts it shown.
     fn show(&self, id: WindowId, frame: Rect, window: &AxElement, how: ShowHow) -> AxResult<()> {
         let was_held = self.holds(id.0);
-        let parked = self.state().parked.get(&id.0).map(|(p, _)| *p);
+        let parked = self.state().parked.get(&id.0).map(|p| p.park);
         if let Some(p) = parked
             && windows::describe(&[id.0]).first().is_some_and(|w| !p.display.parks(w.bounds))
         {
@@ -1195,9 +1263,16 @@ impl WindowEngine for SpacesEngine {
         if !out {
             return Err(AxError::FAILURE);
         }
-        if framed.is_ok() && parked.is_some() {
-            self.state().parked.remove(&id.0);
-            tracing::debug!(id = id.0, "spaces engine: a window parked for a lend shown at its frame");
+        if parked.is_some() {
+            let mut st = self.state();
+            if framed.is_ok() {
+                st.parked.remove(&id.0);
+                tracing::debug!(id = id.0, "spaces engine: a window parked for a lend shown at its frame");
+            } else if let Some(p) = st.parked.get_mut(&id.0) {
+                p.shown_at = Some(frame);
+                p.tried = Some(Instant::now());
+                tracing::warn!(id = id.0, "spaces engine: a window parked for a lend came out at the park without the frame its show asked: owed, tried again");
+            }
         }
         framed
     }
@@ -1413,5 +1488,45 @@ mod tests {
         assert!(e.present_off_screen().is_empty());
         assert!(e.owed().is_empty() && e.held().is_empty());
         assert!(e.sky.get().is_none(), "SkyLight is not opened until a window hides");
+    }
+
+    /// An engine whose SkyLight did not load: nothing reaches the window server.
+    fn unloaded() -> SpacesEngine {
+        let sky = OnceLock::new();
+        let _ = sky.set(None);
+        SpacesEngine { sky, state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) }
+    }
+
+    /// A window id the window server lists for no window.
+    const NO_WINDOW: u32 = 0xFFFF_FF01;
+
+    /// An element no app answers for (no process has this pid: macOS's highest is 99998), so
+    /// every call through it fails at once.
+    fn dead_element() -> AxElement {
+        AxElement::application(99_999)
+    }
+
+    fn parked_lend(frame: Rect) -> ParkedLend {
+        let display = crate::engine::testkit::display();
+        let at = Rect::new(display.frame.max_x() - 20.0, display.frame.max_y() - 20.0, frame.w, frame.h);
+        ParkedLend { park: Parked { at, frame, display }, element: dead_element(), shown_at: None, tried: None }
+    }
+
+    /// Review A-1/B-1: a window parked for ⌘Tab's lend comes out of its stage Space at the
+    /// park and does not take the frame the activation's switch asks (its app busy for that
+    /// one call). It is owed the frame (the tick tries it again, a quit counts it) and stays
+    /// parked until then, its move notices dropped; once gone it is owed nothing.
+    #[test]
+    fn a_parked_lend_whose_show_missed_its_frame_is_owed_it() {
+        let e = unloaded();
+        let frame = Rect::new(300.0, 120.0, 1100.0, 800.0);
+        e.state().parked.insert(NO_WINDOW, parked_lend(frame));
+        assert!(e.show(WindowId(NO_WINDOW), frame, &dead_element(), ShowHow::Once).is_err(), "the app did not take the frame");
+        assert_eq!(e.owed(), [NO_WINDOW].into(), "owed the frame");
+        assert!(e.parked_lend(WindowId(NO_WINDOW)), "still at the park: its move notices are not the model's");
+        assert_eq!(e.state().parked[&NO_WINDOW].shown_at, Some(frame));
+        assert_eq!(e.retry_owed(false), [NO_WINDOW].into(), "tried a moment ago: not yet again");
+        assert!(e.retry_owed(true).is_empty(), "tried again at once with force: the window is gone, nothing is owed");
+        assert!(!e.parked_lend(WindowId(NO_WINDOW)));
     }
 }

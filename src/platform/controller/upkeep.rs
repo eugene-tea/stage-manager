@@ -25,7 +25,7 @@ use crate::engine::geometry::{Point, Rect};
 use crate::platform::corner::sliver_tap;
 use crate::platform::observe::Observer;
 use crate::platform::safety::ParkedEntry;
-use crate::platform::window_engine::EngineKind;
+use crate::platform::window_engine::{EngineKind, WindowEngine};
 use crate::platform::windows;
 
 /// The longest the tick rests while the inert slivers' tap judges presses on the tick's list
@@ -192,11 +192,16 @@ impl Controller {
             EngineKind::Spaces => {
                 // The engine brings the window out of its stage Space before it asks the app
                 // for the frame. Still in the Space: the engine owes the show and the tick
-                // tries it again ([`Self::retry_shows`]). Out of it: the window shows where
-                // it was, the frame not taken; nothing is owed and nothing kept registered.
-                let _ = entry;
-                let owed = crate::platform::spaces::engine::shared().owed().contains(&id);
-                tracing::warn!(id, owed, "a show failed: still hidden and tried again when owed, else shown where it was");
+                // tries it again ([`Self::retry_shows`]). Out of it at the park of a lend
+                // (⌘Tab's switcher): the engine owes the frame and tries it again; the entry
+                // stays registered meanwhile, so a crash or a quit finds the window. Out of it
+                // otherwise: the window shows where it was (its own frame), nothing is owed.
+                let spaces = crate::platform::spaces::engine::shared();
+                let owed = spaces.owed().contains(&id);
+                if owed && spaces.parked_lend(crate::engine::model::WindowId(id)) {
+                    self.spaces.frames_owed.insert(id, entry);
+                }
+                tracing::warn!(id, owed, "a show failed: tried again when owed (still hidden, or left at a lend's park), else shown where it was");
             }
         }
     }
@@ -232,7 +237,11 @@ impl Controller {
     pub(super) fn kept_entries(&self) -> Vec<(u32, ParkedEntry)> {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.unrestored.iter().map(|(id, u)| (*id, u.entry.clone())).collect(),
-            EngineKind::Spaces => Vec::new(),
+            // The windows left at a lend's park whose show's frame is still owed.
+            EngineKind::Spaces => {
+                let owed = crate::platform::spaces::engine::shared().owed();
+                self.spaces.frames_owed.iter().filter(|(id, _)| owed.contains(id)).map(|(id, e)| (*id, e.clone())).collect()
+            }
         }
     }
 
@@ -271,8 +280,9 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.retry_unrestored(ob, force),
             EngineKind::Spaces => {
-                let _ = (ob, force);
-                crate::platform::spaces::engine::shared().retry_owed();
+                let _ = ob;
+                let owed = crate::platform::spaces::engine::shared().retry_owed(force);
+                self.spaces.frames_owed.retain(|id, _| owed.contains(id));
             }
         }
     }
@@ -301,7 +311,9 @@ impl Controller {
             EngineKind::Corner => self.account_unrestored(ob),
             EngineKind::Spaces => {
                 let _ = ob;
-                crate::platform::spaces::engine::shared().retry_owed().len()
+                let owed = crate::platform::spaces::engine::shared().retry_owed(true);
+                self.spaces.frames_owed.retain(|id, _| owed.contains(id));
+                owed.len()
             }
         }
     }

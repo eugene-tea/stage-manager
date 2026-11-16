@@ -13,6 +13,7 @@ use super::Controller;
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Home, SpaceId, WindowId};
 use crate::platform::input;
+use crate::platform::safety::ParkedEntry;
 use crate::platform::spaces::engine;
 use crate::platform::windows;
 
@@ -36,12 +37,15 @@ pub(super) struct SpacesUpkeep {
     /// un-minimizes on the Desktop, out of any stage Space, so it is put beyond the Dock's
     /// edge while minimized, comes up off the screen, and is hidden again once it is down.
     pub(super) dive: Option<(u32, Rect)>,
+    /// Windows left at a lend's park whose show did not take its frame, with their registry
+    /// entries: kept registered while the engine owes the frame ([`Controller::show_failed`]).
+    pub(super) frames_owed: BTreeMap<u32, ParkedEntry>,
 }
 
 impl SpacesUpkeep {
     /// Nothing kept.
     pub(super) fn new() -> Self {
-        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None }
+        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None, frames_owed: BTreeMap::new() }
     }
 }
 
@@ -73,10 +77,10 @@ impl Controller {
         {
             return;
         }
-        spaces.retry_owed();
+        let owed = spaces.retry_owed(false);
+        self.spaces.frames_owed.retain(|id, _| owed.contains(id));
         let shown: Vec<SpaceId> = m.displays().iter().map(|d| m.current_space(d.id)).collect();
         let held = spaces.held();
-        let owed = spaces.owed();
         let hidden: Vec<u32> =
             m.windows().filter(|w| w.parked && shown.contains(&w.space) && w.home != Home::Pinned).map(|w| w.meta.id.0).collect();
         self.spaces.strays.retain(|id, _| hidden.contains(id) && !held.contains(id));
