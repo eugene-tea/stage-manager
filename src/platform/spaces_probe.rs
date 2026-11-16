@@ -64,6 +64,9 @@
 //!   command (a switch) while these windows' descriptions are read every ms: when each
 //!   incoming window is at its frame for good, each outgoing one gone from its own
 //!   ([`super::settle_probe`], round sm-measure); reads only.
+//! - `pixels --rect X,Y,W,H --windows ID,… [--every MS] [--for MS] --then CMD ARG…` (round
+//!   landing-order): runs the command (a switch) while the screen's region is captured every
+//!   few ms with only these fixture windows in it ([`super::pixels_probe`]); reads only.
 //! - `capture BUNDLE [--rounds N] [hidden|cached file=PATH] [fast]` (S4b, S6b): a switch's
 //!   pictures taken at the switch, through the app's path, timed on screen and in a stage
 //!   Space not shown; `fast` through the window server's call alone ([`capture`]'s docs).
@@ -198,7 +201,7 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle|notices …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle|pixels|notices …");
     };
     // Read only (no window moves): any app, their own arguments.
     if cmd == "sources" {
@@ -209,6 +212,9 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     if cmd == "settle" {
         return super::settle_probe::run(rest);
+    }
+    if cmd == "pixels" {
+        return super::pixels_probe::run(rest);
     }
     if cmd == "notices" {
         return super::new_window_probe::notices(rest);

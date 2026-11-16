@@ -8841,6 +8841,194 @@ def phase_landing_abort():
     all_onscreen("landing abort: end")
 
 
+# The landing-order phase's two flat colours: the window in front, the window behind.
+ORDER_FRONT = (217, 64, 64)
+ORDER_BACK = (51, 128, 217)
+
+
+def order_colour(rgba):
+    """'front', 'back' or None: which of the landing-order phase's two windows a read of the
+    screen shows (nearest colour, within reach; a read with nothing opaque is None)."""
+    if not rgba or rgba[3] < 200:
+        return None
+    dist = lambda c: sum((rgba[i] - c[i]) ** 2 for i in range(3)) ** 0.5  # noqa: E731
+    f, b = dist(ORDER_FRONT), dist(ORDER_BACK)
+    if min(f, b) > 110:
+        return None
+    return "front" if f < b else "back"
+
+
+def order_reads(samples):
+    """From a switch's reads of the overlap (`probe-spaces pixels`, in the order answered):
+    (ms of the first read of the front window, the reads of the back window after it, the
+    reads of the back window before it, the last read's colour)."""
+    reads = sorted(((x.get("at_ms"), order_colour(x.get("rgba"))) for x in samples if x.get("at_ms") is not None), key=lambda r: r[0])
+    first = next((t for t, c in reads if c == "front"), None)
+    after = [t for t, c in reads if c == "back" and first is not None and t > first]
+    before = [t for t, c in reads if c == "back" and (first is None or t < first)]
+    last = next((c for _, c in reversed(reads) if c is not None), None)
+    return first, after, before, last
+
+
+def order_list_swaps(samples, front, back):
+    """The window server's samples (`probe-windows --every`) with both windows on screen and
+    the one behind listed above the one in front (a lower z is nearer the front)."""
+    out = []
+    for x in samples:
+        by = {w["id"]: w for w in x.get("windows", [])}
+        f, b = by.get(front), by.get(back)
+        if f and b and f.get("onscreen") and b.get("onscreen") and f.get("z") is not None and b.get("z") is not None and b["z"] < f["z"]:
+            out.append(x.get("t"))
+    return out
+
+
+def phase_landing_order():
+    """Round landing-order (1.9; live 11-15: Messages and Telegram, two overlapping windows of
+    two apps in one stage, flickered, trading places, from the stage's entry under the live
+    landing). Alpha's window (flat red) over Bravo's (flat blue), overlapping, in one stage;
+    Fixture 1 alone in another. SM_LANDING_ORDER_SWITCHES rounds (default 4): to Fixture 1's
+    stage, then back by a card click while the screen's pixels in the middle of the overlap
+    are read every 10 ms with only the two windows in the capture (`probe-spaces pixels`:
+    nothing of anyone else's, our overlay neither) and the window server's list every 10 ms
+    (`probe-windows --every 10 --focus`), from the click to 1.5 s after. It fails on a read of
+    the back window's colour once the front one's has shown, on a last read that is not the
+    front's, and on a sample of the list with both windows on screen and the back one above.
+    Under SM_ENGINE=spaces with STAGE_MANAGER_LANDING=live* both windows must also have flown
+    their last stretch themselves in some round (`ctl state`'s `stretch_ms`)."""
+    variant = os.environ.get("STAGE_MANAGER_LANDING") or "pictures"
+    say(f"\n== landing order: two overlapping windows of two apps keep their order as they land ({ENGINE}, {variant}) ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config(CONFIG_BACKDROP)
+    hexed = lambda c: "".join(f"{v:02x}" for v in c)  # noqa: E731
+    start_fixture(1, "--colors", "808080", "--no-label", "--frames", "470,190,640,460")
+    start_extra_args("a", 1, "--colors", hexed(ORDER_FRONT), "--no-label", "--frames", "420,140,700,520")
+    start_extra_args("b", 1, "--colors", hexed(ORDER_BACK), "--no-label", "--frames", "640,280,700,520")
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "landing order: app up with Fixture 1, Alpha's and Bravo's windows"):
+        return
+    of = lambda x, k: next((w for w in x["windows"] if w["bundle_id"] == EXTRA[k][0] and w["role"] == "standard"), None)  # noqa: E731
+    a, b = of(s, "a"), of(s, "b")
+    if not check(a is not None and b is not None, "landing order: Alpha's and Bravo's windows are managed"):
+        return
+    front, back = a["id"], b["id"]
+    if b["home"] != a["home"]:
+        do("send", a["home"], back)
+    s = wait_state(lambda x: (lambda p, q: p and q and p["home"] == q["home"])(of(x, "a"), of(x, "b")), "Alpha and Bravo in one stage")
+    if not check(s is not None, "landing order: Alpha's and Bravo's windows in one stage"):
+        return
+    pair = of(s, "a")["home"]
+
+    def click_card(number):
+        c = next((c for c in (state().get("strip_cards") or []) if c["number"] == number), None)
+        if c is None or card_under_window(state(), c["frame"]):
+            return None
+        f = c["frame"]
+        return f["x"] + f["w"] / 2, f["y"] + f["h"] / 2
+
+    if s["active"] != pair:
+        at = click_card(pair)
+        if not check(at is not None, "landing order: the pair's card to click"):
+            return
+        ctl("debug-click", *at)
+        wait_state(lambda x: x["active"] == pair and x.get("switching") is None, "the pair in front")
+        time.sleep(1.0)
+    # Bravo raised, then Alpha: Alpha in front (each in place).
+    for w in (back, front):
+        r = next(x for x in state()["windows"] if x["id"] == w)["restore"]
+        ctl("debug-frame", w, r["x"], r["y"], r["w"], r["h"])
+        time.sleep(0.9)
+    wins, _ = fixture_windows([EXTRA["a"][0], EXTRA["b"][0]])
+    z = {w["id"]: w for w in wins}
+    if not check(front in z and back in z and z[front]["z"] is not None and z[back]["z"] is not None and z[front]["z"] < z[back]["z"],
+                 "landing order: Alpha's window over Bravo's on screen"):
+        return
+    fa, fb = z[front]["bounds"], z[back]["bounds"]
+    ox, oy = max(fa["x"], fb["x"]), max(fa["y"], fb["y"])
+    ow, oh = min(fa["x"] + fa["w"], fb["x"] + fb["w"]) - ox, min(fa["y"] + fa["h"], fb["y"] + fb["h"]) - oy
+    if not check(ow > 120 and oh > 120, f"landing order: the two windows overlap ({ow:.0f} x {oh:.0f})"):
+        return
+    box = f"{ox + ow / 2 - 12:.0f},{oy + oh / 2 - 12:.0f},24,24"
+    other = next((st["number"] for st in state()["stages"] if st["number"] != pair and st["windows"]), None)
+    if not check(other is not None, "landing order: Fixture 1's stage"):
+        return
+    rounds = int(os.environ.get("SM_LANDING_ORDER_SWITCHES") or 4)
+    bad_px, bad_last, unseen, swaps, flew, ran = [], [], [], [], 0, 0
+    for i in range(rounds):
+        at = click_card(other)
+        if at is None:
+            skip(f"landing order round {i + 1}", "Fixture 1's card is under a window")
+            continue
+        ctl("debug-click", *at)
+        if wait_state(lambda x: x["active"] == other and x.get("switching") is None, "Fixture 1's stage") is None:
+            check(False, f"landing order round {i + 1}: Fixture 1's stage in front")
+            continue
+        time.sleep(1.2)
+        x = state()
+        st = next((st for st in x["stages"] if st["number"] == pair), None)
+        if st is None or st["windows"][:2] != [front, back]:
+            check(False, f"landing order round {i + 1}: the pair's stage keeps Alpha in front ({st and st['windows']})")
+            continue
+        at = click_card(pair)
+        if at is None:
+            skip(f"landing order round {i + 1}", "the pair's card is under a window")
+            continue
+        sampler = subprocess.Popen([BIN, "probe-windows", "--every", "10", "--for", "1900", "--focus", EXTRA["a"][0], EXTRA["b"][0]],
+                                   env=ENV, stdout=subprocess.PIPE, text=True)
+        time.sleep(0.15)
+        r = subprocess.run([BIN, "probe-spaces", "pixels", "--rect", box, "--windows", f"{front},{back}", "--every", "10", "--for", "1500",
+                            "--then", BIN, "ctl", "debug-click", f"{at[0]:.1f}", f"{at[1]:.1f}"], env=ENV, capture_output=True, text=True, timeout=30)
+        try:
+            px = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            px = {"ok": False, "error": (r.stdout + r.stderr)[-200:]}
+        try:
+            out, _ = sampler.communicate(timeout=10)
+            listed = json.loads(out).get("samples", [])
+        except Exception as e:  # noqa: BLE001 - a sampler that failed is reported, not fatal
+            sampler.kill()
+            listed = None
+            check(False, f"landing order round {i + 1}: the window server was sampled ({e})")
+        y = wait_state(lambda x: x["active"] == pair and x.get("switching") is None, "the pair's stage", timeout=5)
+        if not check(px.get("ok") and y is not None, f"landing order round {i + 1}: switched, the overlap read ({px.get('error', 'ok')})"):
+            continue
+        ran += 1
+        first, after, before, last = order_reads(px.get("samples", []))
+        sw = order_list_swaps(listed or [], front, back)
+        ghosts = [g for g in ((y.get("last_transition") or {}).get("ghosts") or []) if not g.get("outgoing")]
+        took = {g["window"] for g in ghosts if g.get("stretch_ms") is not None}
+        flew += 1 if {front, back} <= took else 0
+        say(f"  round {i + 1}: {px.get('answered')} of {px.get('asked')} reads, the front first read at {first} ms, back reads after it "
+            f"{len(after)} {after[:5]}, before it {len(before)}, last {last}; list samples with the back on top {len(sw)} of {len(listed or [])}; "
+            f"flew {sorted(took)}")
+        if first is None:
+            unseen.append(f"round {i + 1}")
+        if after:
+            bad_px.append(f"round {i + 1}: {len(after)} at {', '.join(f'{t:.0f}' for t in after[:5])} ms (front from {first:.0f} ms)")
+        if first is not None and last != "front":
+            bad_last.append(f"round {i + 1}: {last}")
+        if sw:
+            swaps.append(f"round {i + 1}: {len(sw)} samples")
+        time.sleep(0.8)
+    check(ran >= max(1, rounds - 1), f"landing order: {ran} of {rounds} switches read")
+    check(not unseen, "landing order: the front window's colour read in the overlap every round (the capture sees the windows)"
+                      + (f" (never: {'; '.join(unseen)})" if unseen else ""))
+    check(not bad_px, "landing order: no read of the back window's colour in the overlap once the front one's showed"
+                      + (f" ({'; '.join(bad_px[:4])})" if bad_px else ""))
+    check(not bad_last, "landing order: the overlap shows the front window at the end" + (f" ({'; '.join(bad_last[:4])})" if bad_last else ""))
+    check(not swaps, "landing order: the window list never puts the back window above the front one with both on screen"
+                     + (f" ({'; '.join(swaps[:4])})" if swaps else ""))
+    if LIVE_LANDING:
+        check(flew > 0, f"landing order: both windows flew their last stretch themselves ({flew} of {ran} rounds)")
+    log = log_text()
+    for line in ("waited at its frame for the windows behind it to land", "a window behind still flew; this one lands first",
+                 "the landing Spaces are made at this level"):
+        say(f"  log: {log.count(line)} x \"{line}\"")
+    consistent("landing order")
+    stop_app()
+    all_onscreen("landing order: quit")
+
+
 def phase_tabs():
     """Round tab-lost (11-15: a Terminal tab selected again stayed on the Desktop under the
     stage switched to). A tab group in a stage (the fixture's NSWindow tabbing: Fixture 1
@@ -9111,7 +9299,7 @@ def main():
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
-             "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort,
+             "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order,
              "cmdtab-probe": phase_cmdtab_probe}[p]()
     finally:
         stop_app()
