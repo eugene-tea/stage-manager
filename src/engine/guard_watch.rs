@@ -1059,11 +1059,12 @@ mod tests {
         assert_eq!(w.shown().len(), 1, "shown in the corner: to be brought back");
         assert!(w.read_through_ax(1, parked(), false, &displays()).is_none(), "read in the corner: still away");
         assert!(matches!(w.read_through_ax(1, RESTORE, true, &displays()), Some(Event::LetGo { why: Release::BroughtBack { .. }, .. })));
-        // The defect: the same watch run by the Spaces engine.
+        // A watch run by the Spaces engine keeps it too (review A-8: a registered window in the
+        // park zone is stranded under either engine); before both fixes it let it go as read back.
         let mut spaces = Watch::registered_only(&[]).run_by(EngineKind::Spaces);
         spaces.add(reg()[0]);
         pass(&mut spaces, t0, 0, &on_desktop_1());
-        assert!(matches!(spaces.read_through_ax(1, parked(), false, &displays()), Some(Event::LetGo { why: Release::ReadBack { .. }, .. })));
+        assert!(spaces.read_through_ax(1, parked(), false, &displays()).is_none(), "read in the corner under Spaces: still away");
     }
 
     /// Review M3 (1.1.0): Stage Manager running again is no reason to stop watching. A new app
