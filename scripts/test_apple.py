@@ -233,15 +233,34 @@ def phase_mirror():
         check(s["apple"]["list_vs_ax_misses"] == 0, f"the list and Accessibility agree ({s['apple']['list_vs_ax_misses']} misses)")
 
 
+def settled_state(timeout=5):
+    """`ctl state` once the mirror is settled (Apple's motion over)."""
+    return wait_until(lambda: (lambda s: s if (s.get("apple") or {}).get("settled") else None)(ctl("state")), timeout, "the mirror settled")
+
+
+def others(s):
+    """The stages besides the one in front, as `ctl switch N` counts them: the strip's slots
+    top to bottom, then the remembered ones."""
+    a = s.get("apple") or {}
+    return a.get("strip", []) + a.get("remembered", [])
+
+
 def phase_switch():
     say("\n== switch: ctl switch N through the focus route ==")
-    s = ctl("state")
-    count = len((s.get("apple") or {}).get("strip", []))
-    if not check(count >= 1, f"Apple's strip lists {count} stages"):
+    s = settled_state()
+    if not check(s is not None, "the mirror settles before the switches"):
         return
+    count = len(others(s))
+    if not check(count >= 1, f"Apple's shows {count} stages besides the one in front"):
+        return
+    # Each switch reorders the strip (the stage leaving takes the slot of the one coming in):
+    # the stages are read again before each, and N runs over as many as the mirror reports.
     for n in range(1, count + 1):
-        s = ctl("state")
-        target = titles(s, s["apple"]["strip"][n - 1]) if n - 1 < len(s["apple"]["strip"]) else []
+        s = settled_state()
+        if s is None or n > len(others(s)):
+            check(False, f"switch {n}: the mirror still reports stage {n}")
+            break
+        target = titles(s, others(s)[n - 1])
         runs = s["apple"]["routes"]["focus"]["runs"]
         before = pointer()
         t0 = time.time()
@@ -255,7 +274,8 @@ def phase_switch():
         check(pointer() == before, f"switch {n}: the pointer did not move ({before} -> {pointer()})")
         if s:
             check(s["apple"]["routes"]["focus"]["runs"] >= runs + 1, f"switch {n}: the route counted its run")
-    r = ctl("switch", count + 5)
+    s = ctl("state")
+    r = ctl("switch", len(others(s)) + 1)
     check(not r.get("ok"), f"a stage that is not there is refused ({r.get('error')})")
 
 

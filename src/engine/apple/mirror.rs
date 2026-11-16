@@ -18,8 +18,11 @@
 //! - **Current stage**: managed full-size windows on screen with no WindowManager window over
 //!   them, front to back.
 //! - **In motion**: any managed window's bounds differ from the read before, or a step of
-//!   ours began less than [`SETTLE`] ago. Groups are taken from still reads only; while in
-//!   motion the groups read before stand.
+//!   ours or an event that may change the arrangement (an activation, a window found or
+//!   gone) came less than [`SETTLE`] ago ([`Arrangement::step_began`]): Apple's motion starts
+//!   about 100 ms after its cause, and a read before it shows the stage coming in beside the
+//!   one leaving. Groups are taken from reads out of motion only; in motion the groups read
+//!   before stand.
 //! - **Settled**: no motion for [`STILL_READS`] reads and at least [`SETTLE`] since the last
 //!   change: what a posted step waits for (A3), and when the model follows.
 //! - **Stages Apple no longer lists** (past the strip's room, on a Desktop not shown) stay as
@@ -227,8 +230,9 @@ impl Arrangement {
         (sorted(&self.current), rest)
     }
 
-    /// A step of ours began at `now` (a focus, a posted click): the arrangement counts in
-    /// motion for [`SETTLE`], whatever the list shows meanwhile.
+    /// A step of ours began at `now` (a focus, a posted click), or an event came that may
+    /// change the arrangement (an activation, a window found or gone): the arrangement counts
+    /// in motion for [`SETTLE`], whatever the list shows meanwhile.
     pub fn step_began(&mut self, now: Instant) {
         self.step_at = Some(now);
         self.settled = false;
@@ -301,9 +305,11 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
     // Closed windows leave what is kept of them.
     next.full.retain(|id, _| listed.has(*id) && managed.contains(id));
 
-    if moved {
-        // Mid-motion bounds say nothing of the groups: the ones read before stand, less the
-        // windows closed meanwhile.
+    if in_motion {
+        // Mid-motion bounds say nothing of the groups, nor does a read in the moment between
+        // a cause and Apple's motion (an activation: the stage coming in is listed full size
+        // beside the one leaving, live 11-16): the groups read before stand, less the windows
+        // closed meanwhile.
         next.current = prev.current.iter().copied().filter(|id| listed.has(*id) && managed.contains(id)).collect();
         next.strip = kept(&prev.strip, listed, managed);
         next.remembered = kept(&prev.remembered, listed, managed);
@@ -571,6 +577,109 @@ mod tests {
         f.close(2);
         let d = settle(&mut f, c);
         assert!(d.remembered.is_empty(), "closed windows leave even a remembered group");
+    }
+
+    /// The live capture of 11-16 (a 1512x982 pt laptop screen; three fixture apps among the
+    /// owner's own, whose strip items are WindowManager windows with no managed window under
+    /// them): the window list front to back, layer 0, as `owner x y w h`; `WM` is
+    /// WindowManager. Each WindowManager stand-in is listed right above its thumbnail, with
+    /// the same bounds; app icons are 66x82 at x = -7.
+    const CAPTURE: [&str; 3] = [
+        "charlie 221 87 520 392|WM -7 312 66 82|WM 15 220 119 156|WM -7 502 66 82|WM 32 385 149 165|WM 15 385 152 165|WM -7 628 66 82|WM 15 575 87 97|bravo 15 575 87 97|WM -7 818 66 82|WM 15 688 162 174|WM -7 944 66 82|WM 32 872 85 116|alpha 32 872 85 116|WM 15 872 87 116|alpha 15 872 87 116",
+        "alpha 221 157 560 422|alpha 221 87 520 392|WM -7 312 66 82|WM 15 220 119 156|WM -7 502 66 82|WM 32 385 149 165|WM 15 385 152 165|WM -7 628 66 82|WM 15 575 87 97|bravo 15 575 87 97|WM -7 818 66 82|WM 15 688 162 174|WM -7 944 66 82|WM 15 872 87 116|charlie 15 872 87 116",
+        "bravo 221 87 520 392|WM -7 312 66 82|WM 15 220 119 156|WM -7 502 66 82|WM 32 385 149 165|WM 15 385 152 165|WM -7 628 66 82|WM 32 575 85 97|alpha 32 575 85 97|WM 15 575 87 97|alpha 15 575 87 97|WM -7 818 66 82|WM 15 688 162 174|WM -7 944 66 82|WM 15 872 87 116|charlie 15 872 87 116",
+    ];
+
+    /// The capture's rows as a window list: alpha's two windows 73 (listed first) and 74,
+    /// bravo's 80, charlie's 86; WindowManager's windows numbered from 1000.
+    fn captured(rows: &str) -> Listed {
+        let mut alpha = [73, 74].into_iter();
+        let mut wm = 1000..;
+        let windows = rows
+            .split('|')
+            .map(|row| {
+                let f: Vec<&str> = row.split(' ').collect();
+                let n = |i: usize| f[i].parse::<f64>().expect("a number");
+                let (id, pid) = match f[0] {
+                    "WM" => (wm.next().expect("ids"), 99),
+                    "alpha" => (alpha.next().expect("two alpha windows"), 1),
+                    "bravo" => (80, 2),
+                    _ => (86, 3),
+                };
+                ListedWindow { id, pid, layer: 0, bounds: Rect::new(n(1), n(2), n(3), n(4)), onscreen: true }
+            })
+            .collect();
+        Listed { windows, manager: Some(99) }
+    }
+
+    #[test]
+    fn the_live_capture_of_three_activations_reads_as_apple_showed_it() {
+        let screen = Display { frame: Rect::new(0.0, 0.0, 1512.0, 982.0), visible: Rect::new(0.0, 33.0, 1512.0, 949.0), ..display() };
+        let managed: BTreeSet<u32> = [73, 74, 80, 86].into();
+        let sorted = |a: &Arrangement| -> (Vec<u32>, Vec<Vec<u32>>) {
+            let mut c = a.current.clone();
+            c.sort_unstable();
+            (c, a.strip.iter().map(|g| { let mut w = g.windows.clone(); w.sort_unstable(); w }).collect())
+        };
+        let want = [
+            (vec![86], vec![vec![80], vec![73, 74]]),
+            (vec![73, 74], vec![vec![80], vec![86]]),
+            (vec![80], vec![vec![73, 74], vec![86]]),
+        ];
+        let t0 = Instant::now();
+        let mut a = Arrangement::default();
+        for (k, (rows, want)) in CAPTURE.iter().zip(want).enumerate() {
+            let at = t0 + Duration::from_secs(3 * k as u64);
+            let list = captured(rows);
+            // Read twice: the first after a change is in motion; the second, still, is read.
+            a = fold(&a, None, &list, &managed, &screen, at);
+            a = fold(&a, None, &list, &managed, &screen, at + Duration::from_millis(800));
+            a = fold(&a, None, &list, &managed, &screen, at + Duration::from_millis(850));
+            assert_eq!(sorted(&a), want, "capture {k}: the stage in front and the strip, top to bottom");
+            assert!(a.settled, "capture {k}");
+            assert_eq!(a.strip_shown, Some(true));
+            assert!(a.remembered.is_empty(), "capture {k}: nothing past the room: {:?}", a.remembered);
+        }
+        // The capture's Accessibility after bravo's activation: the same two items.
+        let r = Reading { items: vec![Item { frame: Rect::new(15.0, 575.0, 87.0, 97.0), windows: vec![74, 73] }, Item { frame: Rect::new(15.0, 872.0, 87.0, 116.0), windows: vec![86] }] };
+        let b = fold(&a, Some(&r), &captured(CAPTURE[2]), &managed, &screen, t0 + Duration::from_secs(9));
+        assert!(!b.disagree && b.misses == 0, "the list and Accessibility agree");
+    }
+
+    /// Live 11-16: a read in the moment after an activation, before Apple's motion starts,
+    /// lists the stage coming in at full size beside the one leaving; the model followed
+    /// that read and put both in one stage. An event marks the arrangement in motion for
+    /// [`SETTLE`]: the groups read before stand until Apple's has moved.
+    #[test]
+    fn a_read_right_after_an_activation_keeps_the_groups_until_apples_motion_is_over() {
+        let screen = Display { frame: Rect::new(0.0, 0.0, 1512.0, 982.0), visible: Rect::new(0.0, 33.0, 1512.0, 949.0), ..display() };
+        let managed: BTreeSet<u32> = [73, 74, 80, 86].into();
+        let t0 = Instant::now();
+        let list = captured(CAPTURE[1]);
+        let mut a = fold(&Arrangement::default(), None, &list, &managed, &screen, t0);
+        a = fold(&a, None, &list, &managed, &screen, t0 + Duration::from_millis(800));
+        a = fold(&a, None, &list, &managed, &screen, t0 + Duration::from_millis(850));
+        assert!(a.settled);
+        // Bravo's activation: bravo listed full size, alpha not moved yet.
+        let at = t0 + Duration::from_secs(2);
+        a.step_began(at);
+        let mixed = Listed {
+            windows: [ListedWindow { id: 80, pid: 2, layer: 0, bounds: Rect::new(221.0, 87.0, 520.0, 392.0), onscreen: true }]
+                .into_iter()
+                .chain(list.windows.iter().filter(|w| w.id != 80).cloned())
+                .collect(),
+            manager: Some(99),
+        };
+        // Several reads within that moment (one per notice: the activation, the app's own,
+        // a focus) list the same: still reads, yet no settled one.
+        let mut b = a.clone();
+        for ms in [10, 20, 30, 40] {
+            b = fold(&b, None, &mixed, &managed, &screen, at + Duration::from_millis(ms));
+        }
+        assert!(b.in_motion && !b.settled, "an activation's moment is no settled read");
+        let mut front = b.current.clone();
+        front.sort_unstable();
+        assert_eq!(front, vec![73, 74], "the groups read before stand");
     }
 
     #[test]

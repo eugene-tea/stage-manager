@@ -224,8 +224,13 @@ impl AppleController {
     }
 
     /// Reads at the motion's pace for [`WATCH`] from now: Apple's motion follows its cause.
+    /// The arrangement counts in motion from now ([`Arrangement::step_began`]): a read in
+    /// the moment before Apple's motion starts shows the stage coming in beside the one
+    /// leaving (live 11-16: an activation followed that way put both in one stage).
     fn watch(&mut self) {
-        self.watch_until = Some(Instant::now() + WATCH);
+        let now = Instant::now();
+        self.watch_until = Some(now + WATCH);
+        self.mirror.step_began(now);
     }
 
     /// The displays (the main one first).

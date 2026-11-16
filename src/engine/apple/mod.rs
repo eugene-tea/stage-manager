@@ -29,13 +29,12 @@ use super::geometry::Rect;
 use super::model::{Display, WindowState};
 
 /// How far right of the screen's visible left edge Apple's strip column reaches, in points:
-/// its thumbnails sit at x = 15 with about 80 pt of width, its app icons beside them
-/// (a recording of 11-16). Generous: a full-size window never fits inside it.
-pub const STRIP_COLUMN: f64 = 220.0;
+/// its thumbnails sit at x = 15 to 32, up to 162 pt wide, its app icons at x = -7 (live
+/// 11-16, a 1512x982 pt screen). Generous: a full-size window never fits inside it.
+pub const STRIP_COLUMN: f64 = 260.0;
 
-/// The largest side of a strip thumbnail, in points (79x104 measured; a tall, narrow window
-/// scales to at most about this).
-pub const THUMBNAIL_MAX: f64 = 180.0;
+/// The largest side of a strip thumbnail, in points (79x104 to 162x174 measured).
+pub const THUMBNAIL_MAX: f64 = 240.0;
 
 /// True when `listed`, on display `d`, is a strip thumbnail's place: thumbnail-sized and
 /// inside the strip column, or wholly left of the screen (the strip hidden).
