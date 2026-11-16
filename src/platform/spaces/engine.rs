@@ -79,6 +79,12 @@ const PARK_READ_BACK: Duration = Duration::from_millis(20);
 /// ([`SpacesEngine::retry_owed`]): the pace at which the Corner engine retries a restore.
 const FRAME_RETRY: Duration = Duration::from_secs(1);
 
+/// How long a bring-back of the panic or abort paths waits for the state's lock before it
+/// goes on without the sweep ([`SpacesEngine::state_free_within`]): the state is held for a
+/// map edit at a time, so longer means its holder cannot let it go (the panicking thread
+/// itself).
+const STATE_WAIT: Duration = Duration::from_millis(100);
+
 /// How often what this engine left in its stage Spaces is swept again once the Corner engine
 /// runs instead ([`SpacesEngine::sweep_left_behind`]).
 const AFTERLIFE_EVERY: Duration = Duration::from_secs(2);
@@ -397,6 +403,31 @@ impl SpacesEngine {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// True when the state's lock is free, or freed within `wait`: false when it stays held
+    /// (by the thread asking too: a panic hook runs on the panicking thread, before its
+    /// guards are dropped, and a blocking lock there never returns, review A-13, B-5).
+    fn state_free_within(&self, wait: Duration) -> bool {
+        let by = Instant::now() + wait;
+        loop {
+            match self.state.try_lock() {
+                Ok(_) | Err(std::sync::TryLockError::Poisoned(_)) => return true,
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < by => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::TryLockError::WouldBlock) => return false,
+            }
+        }
+    }
+
+    /// [`Self::sweep`] for the panic and abort paths: `None` without a sweep when the state
+    /// stays busy past [`STATE_WAIT`]. The Spaces are classic: the window server puts their
+    /// windows back once the process ends, which follows.
+    fn sweep_bounded(&self, why: &str, end: bool) -> Option<Report> {
+        if !self.state_free_within(STATE_WAIT) {
+            tracing::error!(why, wait_ms = STATE_WAIT.as_millis() as u64, "spaces engine: the engine's state stayed busy; no sweep (the stage Spaces end with the process)");
+            return None;
+        }
+        Some(self.sweep(why, end))
     }
 
     /// SkyLight's calls, opened once; `None` (said once) when it did not load.
@@ -1451,14 +1482,17 @@ impl WindowEngine for SpacesEngine {
     /// Every window out of the stage Spaces by the window server's own list, then the
     /// registry's frames (a fitted window's frame from before, a show that did not take its
     /// frame).
+    /// Bounded: with the state held (a panic inside one of its short scopes) the sweep is
+    /// skipped, the registry's restore still runs.
     fn bring_all_back(&self, why: &str) -> bool {
-        let report = self.sweep(why, true);
-        safety::emergency_unpark(why) && report.failed == 0
+        let report = self.sweep_bounded(why, true);
+        safety::emergency_unpark(why) && report.is_some_and(|r| r.failed == 0)
     }
 
-    /// The sweep (a few window-server calls, no app asked), then the registry's short one.
+    /// The sweep (a few window-server calls, no app asked), then the registry's short one;
+    /// `None` when the engine's state stays busy.
     fn bring_back_briefly(&self) -> Option<Report> {
-        let swept = self.sweep("abort", false);
+        let swept = self.sweep_bounded("abort", false)?;
         let registry = safety::unpark_registry(Duration::from_millis(100), Duration::ZERO)?;
         Some(Report { checked: swept.checked + registry.checked, restored: swept.restored + registry.restored, failed: swept.failed + registry.failed })
     }
@@ -1632,6 +1666,27 @@ mod tests {
         let at = e.state().afterlife;
         assert!(e.sweep_left_behind());
         assert_eq!(e.state().afterlife, at, "not again within its pace");
+    }
+
+    /// Review A-13, B-5: a panic while its own thread holds the engine's state: the hook's
+    /// bring-back goes on without the sweep, in a bounded time, instead of locking against
+    /// itself for good (the process never exiting, the guardian never woken).
+    #[test]
+    fn a_bring_back_on_a_thread_holding_the_state_is_bounded() {
+        let e = Arc::new(unloaded());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_e = e.clone();
+        std::thread::spawn(move || {
+            let _held = thread_e.state();
+            let began = Instant::now();
+            let swept = thread_e.sweep_bounded("panic", true);
+            let briefly = thread_e.bring_back_briefly();
+            let _ = tx.send((swept, briefly, began.elapsed()));
+        });
+        let (swept, briefly, took) = rx.recv_timeout(Duration::from_secs(3)).expect("the bring-back returned");
+        assert!(swept.is_none() && briefly.is_none(), "no sweep with the state held");
+        assert!(took < STATE_WAIT * 4, "bounded: {took:?}");
+        assert_eq!(e.sweep_bounded("quit", true), Some(Report::default()), "free: swept as before");
     }
 
     /// A window id the window server lists for no window.
