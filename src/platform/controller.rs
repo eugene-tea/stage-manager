@@ -202,6 +202,10 @@ const CONFIG_POLL: Duration = Duration::from_secs(1);
 /// the stage shown for up to a second before its own stage came (11-13: 925 ms).
 const FRESH_LOOK: Duration = Duration::from_millis(1500);
 
+/// A window of an app launched this recently, found off screen, is looked at as a new one
+/// ([`looks_soon`]): a heavy app's first window can show seconds after its launch notice.
+const FRESH_APP: Duration = Duration::from_secs(10);
+
 /// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::refresh_dock_bar`]).
 const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
 /// A window un-minimized on its way to the strip is parked again when its un-minimize ends
@@ -1138,6 +1142,17 @@ fn described_bounds(list: &[windows::CgWindow]) -> HashMap<u32, Rect> {
 /// every active window every two seconds, for nothing).
 fn kept_ready(strip_visible: bool, windows: Vec<CardWindow>) -> Vec<CardWindow> {
     if strip_visible { windows } else { Vec::new() }
+}
+
+/// True when a window found off screen may be about to show, so the fast tick looks at it
+/// ([`FRESH_LOOK`]): the window server does not list it yet or lists it with no frame yet (a
+/// new window is listed off screen at 0x0 from its creation until it first shows, `probe-spaces
+/// sources`), or its app launched within [`FRESH_APP`] (`launched_ago`). A window of another
+/// Desktop, a minimized one or one of a hidden app is listed at its frame: an app's rescan at
+/// its activation finds such windows, and each kept the fast tick reading the whole window
+/// list every 20 ms for 1.5 s (the review of 1.9, B-7); the once-a-second check offers them.
+fn looks_soon(listed: Option<Rect>, launched_ago: Option<Duration>) -> bool {
+    listed.is_none_or(|b| b.is_degenerate()) || launched_ago.is_some_and(|d| d < FRESH_APP)
 }
 
 /// Notes in `shown` that our own batch set window `id`'s frame at `now`, forgetting the
@@ -5094,10 +5109,15 @@ impl Controller {
         }
     }
 
-    /// Window `id`, just found and not listed on screen yet, is looked at on every fast tick
-    /// for [`FRESH_LOOK`] from its first wait (a later offer never lengthens it).
-    fn look_soon(&mut self, id: u32) {
-        self.fresh_unplaced.entry(id).or_insert_with(|| Instant::now() + FRESH_LOOK);
+    /// Window `id`, just found and not listed on screen yet (`listed`: its frame in the
+    /// window server's list, if there), is looked at on every fast tick for [`FRESH_LOOK`]
+    /// from its first wait (a later offer never lengthens it) when it may be about to show
+    /// ([`looks_soon`]).
+    fn look_soon(&mut self, ob: &Observer, id: u32, listed: Option<Rect>) {
+        let launched = ob.window(id).and_then(|w| ob.launched_at(w.pid)).map(|at| at.elapsed());
+        if looks_soon(listed, launched) {
+            self.fresh_unplaced.entry(id).or_insert_with(|| Instant::now() + FRESH_LOOK);
+        }
     }
 
     /// The fast tick's look at windows of [`Self::look_soon`]: those listed on a managed
@@ -5173,12 +5193,13 @@ impl Controller {
         // (round displays-2), so a full-screen app on one screen never stops windows arriving
         // on another. A Space change settling holds every screen (the arrival places it).
         let screen = list.iter().find(|w| w.id == id).map(|w| w.bounds).map(|b| self.display_at(b));
+        let listed = list.iter().find(|w| w.id == id).map(|w| w.bounds);
         let Some(screen) = screen.and_then(|s| self.managed_displays().into_iter().find(|d| d.id == s)) else {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
             }
             self.new_window_waits(id);
-            self.look_soon(id);
+            self.look_soon(ob, id, listed);
             return;
         };
         let is_main = screen.id == self.main_display_id();
@@ -5189,7 +5210,7 @@ impl Controller {
             }
             self.new_window_waits(id);
             if !frozen {
-                self.look_soon(id);
+                self.look_soon(ob, id, listed);
             }
             return;
         }
@@ -7130,6 +7151,18 @@ mod tests {
         assert!(read_state_or_set_aside(&path).is_some());
         assert!(path.exists());
         assert_eq!(std::fs::read_to_string(&aside).ok().as_deref(), Some("{ not json"), "untouched");
+    }
+
+    /// The review of 1.9, B-7: the fast tick looks at a window found off screen only when it
+    /// may be about to show.
+    #[test]
+    fn only_a_window_that_may_be_about_to_show_is_looked_at_on_the_fast_tick() {
+        let at = Rect::new(300.0, 200.0, 800.0, 600.0);
+        assert!(looks_soon(None, None), "not listed yet: a new window");
+        assert!(looks_soon(Some(Rect::new(0.0, 0.0, 0.0, 0.0)), None), "listed with no frame yet: a new window");
+        assert!(looks_soon(Some(at), Some(Duration::from_secs(2))), "a just-opened app's window");
+        assert!(!looks_soon(Some(at), None), "another Desktop's, a minimized one, a hidden app's: at its frame");
+        assert!(!looks_soon(Some(at), Some(FRESH_APP)), "an app launched long ago");
     }
 
     /// The review of 1.9, B-8: the windows our batches showed are kept only for the slide
