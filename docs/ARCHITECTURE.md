@@ -101,9 +101,14 @@ controller's upkeep door, the trait unchanged), and a second conductor beside th
 (`platform/conductor.rs`: the WM thread holds a `Conductor`, `Ours(Controller)` or
 `Apples(AppleController)`). The mode's pure half (`engine/apple`) reads Apple's arrangement
 from the window list and WindowManager's Accessibility (`mirror.rs`), keeps the model in step
-with the model's own ops, their actions dropped (`follow.rs`), and plans steps for routes
-Apple's answers to (`plan.rs`, `platform/apple/routes`), all of it run in the tests against
-a fake WindowManager (`engine::testkit::apple`). Every strategy and route, with what it
+with the model's own ops, their actions dropped (`follow.rs`), plans what is asked into jobs
+(`plan.rs`, `job.rs`: goals met one step at a time against the mirror as it is at each read)
+for routes Apple's answers to (`platform/apple/routes`: focus, Shift-click, drag), every
+posted step through the gate (`gate.rs`: never while the user's button is down, keys are
+held, the pointer moved, nor mid-motion), all of it run in the tests against a fake
+WindowManager (`engine::testkit::apple`). The posted gestures run on a thread of their own
+(`platform/apple/post.rs`); a newly opened app the rules want here is hidden at its launch
+(`platform/apple/launch_hide.rs`) so Apple's keeps the stage in front. Every strategy and route, with what it
 costs and how it was measured: [STRATEGIES.md](STRATEGIES.md).
 
 A switch in each engine:

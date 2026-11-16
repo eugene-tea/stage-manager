@@ -7,6 +7,12 @@
   stage hotkeys and `ctl switch N` bring stage N of Apple's strip to the front, and
   `ctl state` lists Apple's stages. `"stand_down"`, the default, keeps the behaviour as it
   was.
+- With `[windows] with_apple = "augment"`, `ctl merge N`, `ctl send N`, `ctl new` and the
+  send and new-stage hotkeys move windows between Apple's stages, by a Shift-click on a
+  thumbnail in Apple's strip or a drag of the title bar onto it; nothing is posted while the
+  user clicks, types or holds a key. A newly opened app that a rule's `current`,
+  `[stages] new_apps_join_current` or Shift wants in the stage in front joins it: the app is
+  hidden as it launches, so Apple's Stage Manager keeps the stage in front, then brought in.
 - A window tab selected (Terminal, Finder, any app with window tabs) belongs to the stage
   of its tab group: it takes the place of the tab it hides, and goes with its stage when
   another stage is chosen. A tab selected was let go with no stage, and selected again it

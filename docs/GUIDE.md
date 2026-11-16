@@ -258,12 +258,34 @@ with it, and each screen's corner has its own, drawn from that screen's desktop.
 
 While Apple's Stage Manager is on, Stage Manager brings every window back and arranges
 nothing until it is off. With `[windows] with_apple = "augment"` it follows Apple's stages
-instead: the stage hotkeys (`[hotkeys] switch`) and `ctl switch N` bring stage N of Apple's
-strip to the front, counted from the top (then the stages the strip has no room for),
-without moving the pointer. Apple's Stage Manager draws the strip and arranges the windows;
-Stage Manager shows no strip of its own, and its other hotkeys, rules and extras do nothing
-meanwhile. The stages followed are saved apart from Stage Manager's own, which come back
-when Apple's is turned off.
+instead. Apple's Stage Manager draws the strip and arranges the windows; Stage Manager shows
+no strip of its own.
+
+- The stage hotkeys (`[hotkeys] switch`) and `ctl switch N` bring stage N of Apple's strip
+  to the front, counted from the top (then the stages the strip has no room for), without
+  moving the pointer.
+- `ctl merge N` brings stage N's windows into the stage in front, the send hotkeys and
+  `ctl send N` move the focused window to stage N, and the new-stage hotkey and `ctl new`
+  give it a stage of its own. Apple's Stage Manager takes these only from the pointer: Stage
+  Manager Shift-clicks a thumbnail in Apple's strip (one click per window) or drags the
+  window's title bar onto the strip. The pointer jumps there and comes back within about a
+  frame for a click, about half a second for a drag. Nothing is posted while you click, drag,
+  move the pointer, type or hold a modifier key, or while Apple's Stage Manager is still
+  moving windows; a step that cannot go within a moment is given up and logged.
+- A newly opened app joins the stage in front when a rule says `current`, with
+  `[stages] new_apps_join_current` on, or when Shift is held as it opens
+  (`[sugar] shift_brings_here`). Stage Manager hides the app as it launches, so Apple's
+  Stage Manager keeps the stage in front and puts the app's window in the strip, then
+  Shift-clicks it in and brings it forward. If the window shows before the hide takes,
+  Apple's Stage Manager has already switched: the stage left is Shift-clicked back, a
+  visible round trip of about a second. While Apple's strip is covered (a window over it,
+  or its recent apps hidden) the click waits for the strip to show, a few seconds at most;
+  then the app is left in a stage of its own, as Apple's Stage Manager puts it.
+- Placement, pins, `float` and the other rules, the strip's looks and its extras do nothing
+  meanwhile.
+
+The stages followed are saved apart from Stage Manager's own, which come back when Apple's
+is turned off.
 
 ## Settings
 
