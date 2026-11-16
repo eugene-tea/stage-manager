@@ -1494,10 +1494,10 @@ impl WindowEngine for SpacesEngine {
         Motion::Pictures
     }
 
-    /// True: an incoming window can fly the last stretch itself in a Space of its own
-    /// ([`landing`]).
+    /// True when SkyLight has the calls a last stretch needs ([`landing`]): an incoming
+    /// window can fly it itself in a Space of its own.
     fn lands_live(&self) -> bool {
-        true
+        self.landing_calls()
     }
 
     fn fly_stretch(&self, s: Stretch, done: StretchDone) -> bool {

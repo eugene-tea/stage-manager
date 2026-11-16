@@ -32,9 +32,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::MutexGuard;
 use std::time::{Duration, Instant};
 
+use objc2::sel;
 use objc2_core_foundation::CGAffineTransform;
 
-use super::super::ffi::{ALL_SPACES_MASK, Route, Sky};
+use super::super::ffi::{ALL_SPACES_MASK, Route, Sky, answers};
 use super::{SpacesEngine, hidden_in, shared};
 use crate::platform::window_engine::{Stretch, StretchDone, StretchNote};
 use crate::platform::windows;
@@ -134,6 +135,14 @@ fn lands_home(now: &[u64], space: u64) -> bool {
     now.contains(&space)
 }
 
+/// True when a last stretch can be flown: a landing Space can be shown (`show`,
+/// `SLSShowSpaces`) and transformed, by the classic call with its read back (`classic`) or
+/// by the bridged operation (`bridged`). Without, the window would wait in a Space not shown,
+/// or fly at full size, after its picture went (review A-10).
+fn can_land(show: bool, classic: bool, bridged: bool) -> bool {
+    show && (classic || bridged)
+}
+
 /// True when two transforms are the same (read back).
 fn same(a: [f64; 6], b: Affine) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
@@ -173,28 +182,40 @@ impl SpacesEngine {
         }
     }
 
-    /// Sets landing Space `space`'s transform to `m` by the route that works ([`TRANSFORM_ROUTE`]).
-    fn set_landing_transform(&self, sky: &Sky, space: u64, m: Affine) {
+    /// Sets landing Space `space`'s transform to `m` by the route that works
+    /// ([`TRANSFORM_ROUTE`]); false when that call could not be sent (a missing function or
+    /// class).
+    fn set_landing_transform(&self, sky: &Sky, space: u64, m: Affine) -> bool {
         match TRANSFORM_ROUTE.load(Ordering::Relaxed) {
-            ROUTE_CLASSIC => {
-                let _ = sky.set_transform(Route::Classic, space, affine(m));
-            }
-            ROUTE_BRIDGED => {
-                let _ = sky.set_transform(Route::Bridged, space, affine(m));
-            }
+            ROUTE_CLASSIC => sky.set_transform(Route::Classic, space, affine(m)).is_ok(),
+            ROUTE_BRIDGED => sky.set_transform(Route::Bridged, space, affine(m)).is_ok(),
             _ => {
                 let _ = sky.set_transform(Route::Classic, space, affine(m));
                 let classic = sky.get_transform(space).is_some_and(|t| same(t, m));
-                let route = if classic {
-                    ROUTE_CLASSIC
+                let (route, sent) = if classic {
+                    (ROUTE_CLASSIC, true)
                 } else {
-                    let _ = sky.set_transform(Route::Bridged, space, affine(m));
-                    ROUTE_BRIDGED
+                    (ROUTE_BRIDGED, sky.set_transform(Route::Bridged, space, affine(m)).is_ok())
                 };
-                tracing::info!(route = if classic { "classic" } else { "bridged" }, readback = ?sky.get_transform(space), "spaces engine: the landing Spaces' transform is set by this call");
+                tracing::info!(route = if classic { "classic" } else { "bridged" }, sent, readback = ?sky.get_transform(space), "spaces engine: the landing Spaces' transform is set by this call");
                 TRANSFORM_ROUTE.store(route, Ordering::Relaxed);
+                sent
             }
         }
+    }
+
+    /// True when this Mac's SkyLight has what a last stretch needs ([`can_land`]): asked once.
+    pub(super) fn landing_calls(&self) -> bool {
+        static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let Some(sky) = self.sky() else { return false };
+        *CAN.get_or_init(|| {
+            let bridged = Sky::class(c"SLSBridgedSpaceSetTransformOperation").is_some_and(|c| answers(c, sel!(initWithSpaceID:transform:options:)).is_ok());
+            let can = can_land(sky.show.is_some(), sky.set_transform.is_some() && sky.get_transform.is_some(), bridged);
+            if !can {
+                tracing::warn!(show = sky.show.is_some(), classic = sky.set_transform.is_some(), read_back = sky.get_transform.is_some(), bridged, "spaces engine: SkyLight lacks a call the last stretch needs; incoming windows land as pictures");
+            }
+            can
+        })
     }
 
     /// Plans window `s.window`'s stretch on a thread of its own (see the module notes); false
@@ -249,8 +270,13 @@ impl SpacesEngine {
             Ok(space) if space != 0 => space,
             _ => return self.skip(id, None, "no Space made"),
         };
-        self.set_landing_transform(sky, space, first);
-        let _ = sky.show_hide(Route::Classic, &[space], true);
+        if !self.set_landing_transform(sky, space, first) {
+            return self.skip(id, Some(space), "its Space's transform could not be set");
+        }
+        if let Err(e) = sky.show_hide(Route::Classic, &[space], true) {
+            tracing::debug!(id, space, "spaces engine: a landing Space could not be shown: {e}");
+            return self.skip(id, Some(space), "its Space could not be shown");
+        }
         if !self.claim_space(id, space) {
             return self.skip(id, Some(space), "stopped before the handover");
         }
@@ -621,6 +647,16 @@ mod tests {
         assert!(lands_home(&[900], 900));
         assert!(!lands_home(&[836], 900), "hidden again in its stage Space: left there");
         assert!(!lands_home(&[], 900), "in no Space (closed): nothing to move");
+    }
+
+    /// Review A-10: a last stretch is flown only with a Space that can be shown and
+    /// transformed.
+    #[test]
+    fn a_stretch_needs_a_space_shown_and_transformed() {
+        assert!(can_land(true, true, false));
+        assert!(can_land(true, false, true), "the bridged transform alone");
+        assert!(!can_land(false, true, true), "no SLSShowSpaces: the window would wait unseen");
+        assert!(!can_land(true, false, false), "no transform: it would fly at full size");
     }
 
     /// Waits end at their instant, never before.
