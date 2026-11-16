@@ -13,12 +13,19 @@
 //! ([`activation_waits`]) when:
 //!
 //! - the window server's list read for it shows a slide ([`slide_listed`]): a known window of
-//!   another Desktop of the main display listed on screen (the Desktop sliding in), or this
-//!   Desktop's parked windows listed out of the park zone, all moved sideways by the same
-//!   distance ([`crate::engine::corner::corner_patch::desktop_slides`]); or
+//!   another Desktop of the main display listed on screen (the Desktop sliding in), a window
+//!   not known yet that a saved Desktop not visited since launch names (the same, right after
+//!   a relaunch), or this Desktop's parked windows listed out of the park zone, all moved
+//!   sideways by the same distance ([`crate::engine::corner::corner_patch::desktop_slides`]); or
 //! - the activated app's focused window (asked of the app only when it has a window on a
-//!   Desktop not shown, [`asks_focus`]) is a window of another Desktop: the activation belongs
-//!   to that Desktop (12:00:29: no slide listed yet at the activation).
+//!   Desktop not shown, known or saved on one not visited yet, [`asks_focus`]) is a window of
+//!   another Desktop: the activation belongs to that Desktop (12:00:29: no slide listed yet at
+//!   the activation).
+//!
+//! After a relaunch a Desktop not shown yet has no known windows until its first visit: only
+//! the saved file names them (live 11-15 16:34:28, the relaunch's first ⌃← to Desktop 2: the
+//! slide went unseen, the activation of Desktop 2's front app switched to its stage on
+//! Desktop 1, and macOS slid back there).
 //!
 //! The platform holds it with the focus replay ([`crate::engine::focus_replay`]), where the
 //! Space change's arrival takes it: on the new Desktop Apple's rule applies (its stage there,
@@ -61,7 +68,9 @@ impl Wait {
 
 /// Whether the on-screen windows `listed` (window server id and bounds, layer 0 only) show a
 /// Desktop of the main display sliding: a known standard window of another of its Desktops
-/// on screen there (sticky ones are on every Desktop), or this Desktop's parked windows listed
+/// on screen there (sticky ones are on every Desktop), a window not known yet that a saved
+/// Desktop of it not visited since launch names ([`Model::saved_on_unvisited_desktop`]: its
+/// windows are known only from its first visit), or this Desktop's parked windows listed
 /// slid aside together ([`crate::engine::corner::corner_patch::desktop_slides`]; parked windows not
 /// listed at all are not counted: a hidden app's are not listed either).
 pub fn slide_listed(m: &Model, listed: &[(u32, Rect)]) -> bool {
@@ -70,9 +79,9 @@ pub fn slide_listed(m: &Model, listed: &[(u32, Rect)]) -> bool {
     let on_main = |b: &Rect| b.intersect(&main.frame).is_some_and(|i| !i.is_degenerate());
     let elsewhere = listed.iter().any(|(id, b)| {
         on_main(b)
-            && m.window(WindowId(*id)).is_some_and(|w| {
+            && (m.window(WindowId(*id)).is_some_and(|w| {
                 w.meta.role == WindowRole::Standard && !w.sticky && w.space != here && m.space_display(w.space) == main.id
-            })
+            }) || m.saved_on_unvisited_desktop(WindowId(*id), main.id))
     });
     if elsewhere {
         return true;
@@ -86,20 +95,26 @@ pub fn slide_listed(m: &Model, listed: &[(u32, Rect)]) -> bool {
 }
 
 /// Whether an activation of app `pid` asks the app for its focused window: only when the
-/// app has a known standard window on a Desktop not shown (otherwise macOS cannot be taking
-/// the user anywhere for it, and nothing is asked).
+/// app has a known standard window on a Desktop not shown, or one saved on a Desktop of the
+/// main display not visited since launch ([`Model::app_saved_on_unvisited_desktop`]);
+/// otherwise macOS cannot be taking the user anywhere for it, and nothing is asked.
 pub fn asks_focus(m: &Model, pid: Pid) -> bool {
     m.windows().any(|w| w.meta.pid == pid && w.meta.role == WindowRole::Standard && !w.sticky && !m.is_shown_space(w.space))
+        || m.app_saved_on_unvisited_desktop(pid, m.main_display().id)
 }
 
 /// Whether an activation that would switch stages on the Desktop shown waits, and why:
 /// `slides` is [`slide_listed`] for the list read for it, `focused` the app's focused window
-/// when asked ([`asks_focus`]).
+/// when asked ([`asks_focus`]): a known window of a Desktop not shown, or one not known yet
+/// that a saved Desktop not visited since launch names.
 pub fn activation_waits(m: &Model, slides: bool, focused: Option<WindowId>) -> Option<Wait> {
     if slides {
         return Some(Wait::Slides);
     }
-    focused.filter(|f| m.waits_on_another_space(*f)).map(Wait::FocusElsewhere)
+    let main = m.main_display().id;
+    focused
+        .filter(|f| m.waits_on_another_space(*f) || m.saved_on_unvisited_desktop(*f, main))
+        .map(Wait::FocusElsewhere)
 }
 
 /// What a held activation (or focus) does at a look ([`SlideHold::step`]).

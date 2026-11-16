@@ -170,6 +170,42 @@ impl Model {
         self.leftovers.len()
     }
 
+    /// True when window `id` is not known yet and a saved Desktop of `display` not visited
+    /// since launch names it by its window id: a window of a Desktop macOS has not shown
+    /// since the app started (after a relaunch in the same window server session; ids saved
+    /// in another session are dropped at load, `StateFile::for_session`). Entries of apps
+    /// that quit are left out.
+    pub fn saved_on_unvisited_desktop(&self, id: WindowId, display: DisplayId) -> bool {
+        !self.windows.contains_key(&id) && self.unvisited_saved_windows(display).any(|w| w.window == Some(id.0))
+    }
+
+    /// True when app `pid` (by the bundle of a window of it the model knows) has a standard
+    /// window saved on a Desktop of `display` not visited since launch, not known yet
+    /// ([`Self::saved_on_unvisited_desktop`]).
+    pub fn app_saved_on_unvisited_desktop(&self, pid: super::Pid, display: DisplayId) -> bool {
+        let bundles: HashSet<&str> = self
+            .windows
+            .values()
+            .filter(|w| w.meta.pid == pid && !w.meta.bundle_id.is_empty())
+            .map(|w| w.meta.bundle_id.as_str())
+            .collect();
+        !bundles.is_empty()
+            && self
+                .unvisited_saved_windows(display)
+                .any(|w| bundles.contains(w.bundle_id.as_str()) && w.window.is_some_and(|id| !self.windows.contains_key(&WindowId(id))))
+    }
+
+    /// The standard windows saved on the Desktops of `display` not visited since launch,
+    /// those of apps that quit left out.
+    fn unvisited_saved_windows(&self, display: DisplayId) -> impl Iterator<Item = &crate::engine::persist::SavedWindow> {
+        let display = self.known_display(display);
+        self.leftovers
+            .iter()
+            .filter(move |l| self.saved_fits_display(l, display))
+            .flat_map(|l| l.stages.iter().flat_map(|s| s.windows.iter()))
+            .filter(|w| w.role == crate::engine::persist::SavedRole::Standard && w.quit_at.is_none())
+    }
+
     /// What the last arrival did ([`Model::arrive`]).
     pub fn last_arrival(&self) -> &ArrivalNote {
         &self.last_arrival

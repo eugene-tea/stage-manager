@@ -624,7 +624,9 @@ planned steps (hands-free):
               windows moved clear of the strip, its own strip shown, no tab on screen; a Desktop 2 window over
               the column: Desktop 2's own tab, put back: it goes; ctl debug-space <back>: Desktop 1's strip still
               hidden and its tab where it was; the key off: no tab; the Desktop 1 window put back
-  quit        quit with a window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided
+  quit        Alpha in front on Desktop 1 (the Fixture stage waiting), Fixture 3 in front on Desktop 2; quit with a
+              window parked on Desktop 2; relaunch; ctl debug-space <toward>; checks as guided, and the first switch
+              stays on Desktop 2 (no stage switched on Desktop 1 for the activation during the slide)
   guardian    debug-space <back> to Desktop 1; kill -9 the app; checks: still parked, the guardian waits;
               `open -n <app> --args debug-post-space <toward>` (app down) to Desktop 2, else activate Bravo;
               checks: restored (held a second), the guardian alive until then and logged it, it ends
@@ -879,6 +881,15 @@ def run():
     edge_tab_across_desktops(d1, d2)
 
     say("\n== quit with a window parked on Desktop 2 ==")
+    # In front at the quit: Alpha, an app with windows on Desktop 1 only, the Fixture stage
+    # waiting there and Fixture 3's stage in front on Desktop 2. At the relaunch's first switch
+    # to Desktop 2 macOS activates the fixture app as Desktop 2 slides in, while none of
+    # Desktop 2's windows is known yet (live 11-15: that activation switched to the Fixture
+    # stage on Desktop 1 and macOS slid back there).
+    front_set = _cmd_tab_setup(d1, d2, "relaunch setup")
+    WATCH.desk("d1" if current_space() == d1 else "d2")
+    if front_set:
+        check(ts.frontmost_bundle() == ts.EXTRA["a"][0], f"relaunch setup: Alpha in front at the quit (front: {ts.frontmost_bundle()})")
     s = state()
     parked_d2 = [w["title"] for w in s["windows"] if w["space"] == d2 and w["parked"]]
     check(bool(parked_d2), f"a window is parked on Desktop 2: {parked_d2}")
@@ -892,11 +903,24 @@ def run():
     s = ts.start_app(3, extra_env=app_env())
     check(s is not None and s["space"] == d1, "Desktop 1 recognized at launch with its saved id")
     check(spaces().get("saved_spaces_not_visited") == 1, "Desktop 2 waits for its first visit")
+    t0 = time.time()
     go("d2", "Switch to Desktop 2")
     s = ts.wait_state(lambda x: x["space"] == d2, "Desktop 2 rebuilt", timeout=6)
     check(s is not None, "Desktop 2 rebuilt with its saved id")
     if s:
         check(titles_on_space(s, d2) == ["Bravo 1", "Fixture 3"], f"Desktop 2's windows in its stages: {titles_on_space(s, d2)}")
+    if front_set:
+        stayed = holds(lambda: current_space() == d2, 1.5)
+        changes = space_changes_since(t0)
+        check(stayed and changes[-1:] == [(d1, d2)],
+              f"relaunch: the first switch to Desktop 2 stays there (Space changes {changes}, now {current_space()})")
+        lines = [line for _, line in log_events(t0)]
+        switched = [line for line in lines if "activated app lives in another stage; switching" in line]
+        held = [line for line in lines if "activation held: it belongs to the Desktop sliding in" in line]
+        say(f"    relaunch: the activation as Desktop 2 slid in: {'held' if held else 'not held (none came before the notice)'}")
+        check(not switched, f"relaunch: no stage switched on Desktop 1 for an activation during the slide ({switched[:1]})")
+        busy = [line for line in lines if "the stretches stayed busy" in line]
+        check(not busy, f"relaunch: no landing stuck ({busy[:1]})")
 
     say("\n== kill -9 with a window parked on the other Desktop: the guardian ==")
     s = state()
@@ -1505,9 +1529,10 @@ def _cmd_tab_cases(d1, d2):
     by = [m.group(0) for m in (re.search(r'by="[^"]*"', line) for line in lines if "cmd-tab: the switcher selects an app" in line) if m]
     say(f"    who decided the selection: {by or 'no selection line'}")
 
-    # 4. Browsing, before the tap: the run then leaves the fixture app in front as before (a
-    # relaunch later in the run after an Escape here met an open bug: an app activated during a
-    # relaunch's first slide to Desktop 2 took macOS back to Desktop 1, live 11-15). Tab to the fixture app, 250 ms, Tab on, held 300 ms, Escape.
+    # 4. Browsing, before the tap (moved here while an open bug made the order matter: an app
+    # activated during a relaunch's first slide to Desktop 2 took macOS back to Desktop 1, live
+    # 11-15; fixed in round relaunch-slide, and the relaunch step now sets its own front app,
+    # Alpha). Tab to the fixture app, 250 ms, Tab on, held 300 ms, Escape.
     if not _cmd_tab_setup(d1, d2, "cmd-tab browse"):
         return
     before = {w["id"]: w["bounds"] for w in probe_all()}
