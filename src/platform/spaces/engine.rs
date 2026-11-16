@@ -76,6 +76,12 @@ const PARK_AX_SECONDS: f32 = 0.1;
 /// moved (the app moves it as it answers; a frame or so).
 const PARK_READ_BACK: Duration = Duration::from_millis(20);
 
+/// How long a restore's move waits for the window server to list the window at its frame
+/// exactly. The window is hidden then (nothing waits on it to be seen), and a window in a
+/// stage Space can be listed at its new place later than a frame (live 11-15: a take back
+/// read "not restored" at the first change listed, the window at its frame a moment later).
+const RESTORE_READ_BACK: Duration = Duration::from_millis(100);
+
 /// How long a bring-back of the panic or abort paths waits for the state's lock before it
 /// goes on without the sweep ([`SpacesEngine::state_free_within`]): the state is held for a
 /// map edit at a time, so longer means its holder cannot let it go (the panicking thread
@@ -252,6 +258,9 @@ struct Steps<'a> {
     element: Option<&'a AxElement>,
     /// What the moves took, with their read back.
     moves: Duration,
+    /// A restore's move: wait for the frame exactly, up to [`RESTORE_READ_BACK`]. A park's
+    /// (false) takes the first change listed (macOS clamps a park, so its frame is never exact).
+    exact: bool,
 }
 
 impl LendSteps for Steps<'_> {
@@ -270,10 +279,11 @@ impl LendSteps for Steps<'_> {
                 None
             }
             Ok(()) => {
-                let by = Instant::now() + PARK_READ_BACK;
+                let by = Instant::now() + if self.exact { RESTORE_READ_BACK } else { PARK_READ_BACK };
                 loop {
                     let now = self.listed();
-                    if now != before || now.is_some_and(|r| lend_park::at_origin(r, to)) || Instant::now() >= by {
+                    let there = now.is_some_and(|r| lend_park::at_origin(r, to));
+                    if there || (!self.exact && now != before) || Instant::now() >= by {
                         break now;
                     }
                     std::thread::sleep(READ_BACK_STEP);
@@ -696,7 +706,7 @@ impl SpacesEngine {
         let Some(sky) = self.sky() else { return };
         let ours = BTreeSet::new();
         let held = Held { space: 0, home: 0 };
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: Some(&element), moves: Duration::ZERO };
+        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: Some(&element), moves: Duration::ZERO, exact: true };
         let restored = lend_park::restore(&mut steps, parked);
         if restored {
             self.state().parked.remove(&id);
@@ -830,7 +840,7 @@ impl SpacesEngine {
             Some(p) => (Some(p.ask), Some(p.window)),
             None => (None, None),
         };
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), moves: Duration::ZERO };
+        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), moves: Duration::ZERO, exact: false };
         let done = lend_park::lend(&mut steps, ask);
         let park_ms = steps.moves.as_millis() as u64;
         let mut st = self.state();
@@ -861,7 +871,7 @@ impl SpacesEngine {
         let Some(sky) = self.sky() else { return Back::default() };
         let ours = self.ours();
         let element = parked.as_ref().map(|(_, e)| e.clone());
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), moves: Duration::ZERO };
+        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), moves: Duration::ZERO, exact: true };
         let done = lend_park::take_back(&mut steps, parked.map(|(p, _)| p));
         if done.moved_off {
             tracing::info!(id, "spaces engine: a window parked for a lend was moved off the park by its app");
