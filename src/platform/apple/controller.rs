@@ -676,6 +676,7 @@ impl AppleController {
     fn ask(&mut self, ob: &mut Observer, ask: Ask) -> Result<Value, Refusal> {
         let now = Instant::now();
         let refused = |this: &mut Self, r: Refusal| {
+            tracing::info!(?ask, why = r.0, "apple mode: refused");
             this.stats.entry("plan").or_default().refused += 1;
             this.last_refusal = Some(r.0.clone());
             Err(r)
@@ -698,8 +699,16 @@ impl AppleController {
             match ask {
                 Ask::Switch(n) => plan::switch_job(&self.mirror, n, key, now),
                 Ask::Merge(n) => plan::merge(&self.mirror, n, now),
-                Ask::Send(n, id) => window(id).and_then(|w| plan::send(&self.mirror, n, w, key, now)),
-                Ask::New(id) => window(id).and_then(|w| plan::new_stage(&self.mirror, w, now)),
+                // Apple's keeps an app's windows in one stage under All at Once: refused up
+                // front, nothing posted (`plan::apart`).
+                Ask::Send(n, id) => window(id).and_then(|w| {
+                    plan::apart(&self.mirror, w, &self.pids, self.settings.app_windows)?;
+                    plan::send(&self.mirror, n, w, key, now)
+                }),
+                Ask::New(id) => window(id).and_then(|w| {
+                    plan::apart(&self.mirror, w, &self.pids, self.settings.app_windows)?;
+                    plan::new_stage(&self.mirror, w, now)
+                }),
             }
         };
         let job = match planned {

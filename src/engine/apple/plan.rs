@@ -12,12 +12,21 @@
 //!   the window Shift-clicked in from the strip, the stage left brought back in front.
 //! - **New** (`ctl new`, the new-stage hotkey): a window out to a stage of its own, a drag of
 //!   its title bar onto the strip.
+//!
+//! **Apple's rule for an app's windows** ([`apart`]): with "Show windows from an application:
+//! All at Once" (`AppWindowGroupingBehavior = 1`, the default) Apple's never splits one app's
+//! windows into two stages: a window dragged out while another window of its app stays only
+//! moves (the fifth probe of 11-16, every drop point tried). Send and New for such a window
+//! are refused up front with that reason; with "One at a Time" they are tried (unprobed).
 //! - **Open here** (a rule's `current`, `[stages] new_apps_join_current`, Shift held at the
 //!   launch): a newly opened app's windows into the stage in front ([`open_here`]).
+
+use std::collections::BTreeMap;
 
 use serde::Serialize;
 
 use super::desk::Posted;
+use crate::engine::settings::AppWindows;
 use super::job::{Goal, Job};
 use super::mirror::{Arrangement, Where};
 
@@ -103,6 +112,27 @@ pub fn merge(a: &Arrangement, n: usize, now: std::time::Instant) -> Result<Job, 
     let mut windows = a.current.clone();
     windows.extend(group.windows.iter().copied());
     Ok(Job::new(Intent::Merge(n), vec![Goal::Gather { windows, app: None, focus_app: false }], now))
+}
+
+/// Whether window `w` may leave its stage for another (send, new) under Apple's grouping
+/// `app_windows`, `pids` giving each window's app: refused under All at Once while another
+/// window of its app is in its stage (module docs).
+pub fn apart(a: &Arrangement, w: u32, pids: &BTreeMap<u32, i32>, app_windows: AppWindows) -> Result<(), Refusal> {
+    if app_windows != AppWindows::AllAtOnce {
+        return Ok(());
+    }
+    let Some(pid) = pids.get(&w) else { return Ok(()) };
+    let stage: &[u32] = match a.where_is(w) {
+        None => return Ok(()),
+        Some((Where::Current, _)) => &a.current,
+        Some(_) => a.strip.iter().chain(&a.remembered).find(|g| g.windows.contains(&w)).map_or(&[][..], |g| &g.windows),
+    };
+    if stage.iter().any(|x| *x != w && pids.get(x) == Some(pid)) {
+        return Err(Refusal(format!(
+            "window {w}'s app has another window in its stage: with \"Show windows from an application: All at Once\" Apple's Stage Manager keeps an app's windows in one stage"
+        )));
+    }
+    Ok(())
 }
 
 /// Window `w` to stage `n`: stage `n` brought in front (its key window, `key`), `w`

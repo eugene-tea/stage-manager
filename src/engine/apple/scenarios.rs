@@ -515,6 +515,38 @@ fn a_new_app_that_never_shows_a_window_is_unhidden() {
     assert_eq!(r.undo, None);
 }
 
+/// The fifth probe of 11-16: under "All at Once" Apple's never splits one app's windows (a
+/// drag of one while its sibling stays only moves it). Send and New for such a window are
+/// refused up front, nothing posted; a window of another app goes; "One at a Time" tries.
+#[test]
+fn under_all_at_once_a_window_whose_app_stays_in_its_stage_is_refused_up_front() {
+    use crate::engine::settings::AppWindows;
+    let mut f = FakeWindowManager::new();
+    f.all_at_once = true;
+    f.open_app(10, &[1, 2]);
+    f.open_app(20, &[3]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    // Bravo's window 3 merged into Alpha's stage of two.
+    let mut job = plan::merge(&a, 1, f.now()).expect("planned");
+    drive(&mut f, &mut a, &mut job, 4000).end.expect("ended").expect("merged");
+    a = settle(&mut f, &a);
+    let pids = f.pids();
+    let r = plan::apart(&a, 1, &pids, AppWindows::AllAtOnce).expect_err("Alpha's other window stays");
+    assert!(r.0.contains("All at Once"), "{r:?}");
+    assert!(plan::apart(&a, 3, &pids, AppWindows::AllAtOnce).is_ok(), "Bravo's window: another app's");
+    assert!(plan::apart(&a, 1, &pids, AppWindows::OneAtATime).is_ok(), "One at a Time: tried");
+    // What the refusal spares: the fake's Apple only moves such a window.
+    let posted = f.posted.len();
+    let mut job = plan::new_stage(&a, 1, f.now()).expect("planned without the rule");
+    let d = drive(&mut f, &mut a, &mut job, 5000);
+    d.end.expect("ended").expect_err("Apple's never takes it out");
+    assert!(f.posted.len() > posted);
+    // Bravo out of the Alpha and Bravo stage: done.
+    let mut job = plan::new_stage(&a, 3, f.now()).expect("planned");
+    drive(&mut f, &mut a, &mut job, 5000).end.expect("ended").expect("taken out");
+    assert!(f.stages().iter().any(|st| st == &vec![3]), "{:?}", f.stages());
+}
+
 #[test]
 fn the_plans_refuse_what_has_nothing_to_do() {
     let (f, a) = three();

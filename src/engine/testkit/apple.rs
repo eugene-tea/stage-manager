@@ -66,6 +66,10 @@ pub struct FakeWindowManager {
     pub ignored_mid_motion: u32,
     /// Apple's answers no posted gesture (a macOS that changed).
     pub deaf: bool,
+    /// "Show windows from an application: All at Once": a drag of a window whose app keeps
+    /// another window in the stage in front only moves it (the fifth probe of 11-16). Off by
+    /// default here, so the other tests can split an app's windows.
+    pub all_at_once: bool,
     /// How far right each thumbnail of a stage sits from the one in front of it (16 points
     /// measured; 0 for windows at one frame, whose thumbnails stack exactly).
     pub stack: f64,
@@ -98,6 +102,7 @@ impl FakeWindowManager {
             ignored_mid_motion: 0,
             deaf: false,
             stack: 16.0,
+            all_at_once: false,
             landed: None,
         }
     }
@@ -344,7 +349,9 @@ impl FakeWindowManager {
                     return Landed::Refused(format!("the topmost window at {:.0},{:.0} is not the one meant", from.x, from.y));
                 }
                 let grabbed = self.frame(window).is_some_and(|f| from.y >= f.y && from.y < f.y + 28.0 && from.x >= f.x && from.x < f.max_x());
-                if grabbed && to.x < THUMB.max_x() && self.moving().is_none() {
+                let pid = self.windows.get(&window).map(|(p, _)| *p);
+                let sibling = self.current.iter().any(|w| *w != window && self.windows.get(w).map(|(p, _)| *p) == pid);
+                if grabbed && to.x < THUMB.max_x() && self.moving().is_none() && !(self.all_at_once && sibling) {
                     self.take_out(window);
                 }
                 Landed::Posted
