@@ -941,6 +941,8 @@ mod app {
             stage_manager::platform::window_look::appearance_changed();
             // The cards' app icons follow it, as the Dock's do.
             stage_manager::ui::strip::icons_changed();
+            // And their pictures: the windows redraw in the new look.
+            stage_manager::ui::strip::pictures_changed();
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::appearance_changed(mtm);
             }

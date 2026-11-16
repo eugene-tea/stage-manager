@@ -1463,6 +1463,22 @@ pub fn icons_changed() {
     }
 }
 
+/// How long after an appearance change every card's pictures are taken again: an app redraws
+/// its windows in the new look some time after the notification, a busy or hidden one later
+/// (11-16: the morning's change to light left cards dark until the pointer reached them), so
+/// three rounds, the last one late.
+const PICTURES_AGAIN: [Duration; 3] = [super::corner_patch::SETTLE, Duration::from_millis(1500), Duration::from_secs(5)];
+
+/// The appearance changed (main thread): every strip's thumbnails and its switch snapshots
+/// are taken again ([`PICTURES_AGAIN`]); with no timer (`thumbnail_interval_ms = 0`) nothing
+/// else would until the pointer reached a card or its stage moved.
+pub fn pictures_changed() {
+    for after in PICTURES_AGAIN {
+        let when = dispatch2::DispatchTime::try_from(after).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = DispatchQueue::main().after(when, || with_strips(Strip::capture_again));
+    }
+}
+
 // ---------------------------------------------------------------------------------------
 // Card drag
 
@@ -2986,6 +3002,13 @@ impl Strip {
         for stage in stages {
             self.paint_glass(stage, Ease::Out(fade));
         }
+    }
+
+    /// Every card's thumbnails and the switch snapshots taken again ([`pictures_changed`]).
+    fn capture_again(&mut self) {
+        tracing::debug!(display = self.display, "the appearance changed: every picture is taken again");
+        self.capturer.capture_now();
+        self.capture_snapshots_again();
     }
 
     /// Every card's app icons fetched again, in the look the Dock shows now ([`icons_changed`]).

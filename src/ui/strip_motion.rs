@@ -1572,6 +1572,12 @@ impl Strip {
         self.motion.capturer.recapture(&[key]);
     }
 
+    /// Every kept snapshot taken again as soon as the current round ends (the appearance
+    /// changed: [`super::pictures_changed`]).
+    pub(super) fn capture_snapshots_again(&mut self) {
+        self.motion.capturer.capture_now();
+    }
+
     /// Transition `id` has landed: the snapshots go and the held cards show, in one frame
     /// (the incoming snapshots fade out over their windows, [`LANDING_FADE`]); not before its
     /// incoming windows show under their snapshots (else it looks again then).
