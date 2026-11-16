@@ -195,9 +195,11 @@ impl Controller {
                 // tries it again ([`Self::retry_shows`]). Out of it away from the frame (a
                 // lend's park, a minimize's dive): the engine owes the frame and tries it
                 // again; the entry stays registered meanwhile, so a crash or a quit finds the
-                // window. Out of it at its own frame: shown where it was, nothing is owed.
-                let owed = crate::platform::spaces::engine::shared().owed().contains(&id);
-                if owed {
+                // window (one still in its Space needs none: the Space ends with the process).
+                // Out of it at its own frame: shown where it was, nothing is owed.
+                let spaces = crate::platform::spaces::engine::shared();
+                let owed = spaces.owed().contains(&id);
+                if spaces.owes_frame(id) {
                     self.spaces.frames_owed.insert(id, entry);
                 }
                 tracing::warn!(id, owed, "a show failed: tried again when owed (still hidden, or out away from its frame), else shown where it was");

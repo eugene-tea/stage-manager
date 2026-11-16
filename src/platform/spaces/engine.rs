@@ -896,6 +896,11 @@ impl SpacesEngine {
         back
     }
 
+    /// True when a show owes window `id` its frame ([`State::frames`]).
+    pub fn owes_frame(&self, id: u32) -> bool {
+        self.state().frames.contains_key(&id)
+    }
+
     /// Forgets the frames owed to windows `ids` (the model no longer has them).
     pub fn forget_frames(&self, ids: &[u32]) {
         self.state().frames.retain(|id, _| !ids.contains(id));
