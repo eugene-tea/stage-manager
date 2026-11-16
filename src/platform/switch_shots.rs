@@ -331,6 +331,7 @@ pub(crate) fn issue(targets: Vec<Target>, done: ShotDone) {
             shoot_from(content, &targets, &done);
         });
     });
+    capture::listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(true, false, &handler);

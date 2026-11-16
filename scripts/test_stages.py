@@ -78,7 +78,8 @@ keep it, a card dragged down springs back with no switch, and the strip still fo
 an app quits), capture (the one phase with window
 captures on: real thumbnails and snapshots, a popup sticking out of a window drawn beside it on
 its card as Apple's thumbnails show it, two overlapping windows landing as one picture (the
-one behind never through the one in front), no capture while the strip is hidden, and a quit
+one behind never through the one in front), no capture while the strip is hidden, no
+ScreenCaptureKit listing at rest beside an app's parked windows (Corner), and a quit
 that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
 is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
@@ -4767,7 +4768,12 @@ def phase_capture():
     cap = state().get("capture", {})
     check(s is not None and cap.get("gate") == "open",
           f"window pictures arrive and captures stay open ({cap})")
+    # Review 1.9, D-1 and D-3: the gate opened on ScreenCaptureKit's probe, and the window
+    # server's call still takes the pictures after it (not rested by a blank first picture).
+    check((cap.get("window_server") or {}).get("fast") == "works",
+          f"the window server takes pictures once ScreenCaptureKit's probe opened the gate ({cap.get('window_server')})")
     popup_picture_check(state())
+    quiet_listings_check(state())
     for n in (2, 1):
         do("switch", n)
         time.sleep(1.2)
@@ -4800,6 +4806,32 @@ def phase_capture():
     all_onscreen("capture quit")
     for over in (0, 230):
         popup_over_check(over)
+
+
+def quiet_listings_check(s):
+    """Review 1.9, D-2 (the Corner engine): an app's parked windows are listed on screen at their
+    full frames in the park corner; they are no children of each other nor of the app's window
+    shown, so at rest no ScreenCaptureKit listing goes for them. Fixture 3, shown, of the app
+    whose Fixture 1 and 2 are parked, is stretched to the display's bottom-right corner, over
+    where they sit; over 6.5 s (three of the motion capturer's 2 s rounds) at most one listing
+    goes (a window's look read again, every 20 s at most). Before the fix each round listed."""
+    if corner_only("no ScreenCaptureKit listing at rest beside the app's parked windows"):
+        return
+    say("-- at rest beside the app's parked windows: no ScreenCaptureKit listing (review 1.9, D-2)")
+    wid = by_title(s)["Fixture 3"]["id"]
+    vis, display = s["display"]["visible"], s["display"]["frame"]
+    r = frames_of(["Fixture 3"])["Fixture 3"]
+    x = max(r["x"], vis["x"] + s["strip_width"] + 20)
+    ctl("debug-frame", wid, x, r["y"], display["x"] + display["w"] - x, vis["y"] + vis["h"] - r["y"])
+    time.sleep(3.0)  # the frame settles, a round after it
+    a = state().get("capture", {})
+    time.sleep(6.5)
+    b = state().get("capture", {})
+    check(b.get("listings", 0) - a.get("listings", 0) <= 1 and b.get("images", 0) > a.get("images", 0),
+          f"at rest, Fixture 3 reaching the parked windows' corner: pictures keep coming without a listing a round "
+          f"(listings {a.get('listings')} -> {b.get('listings')}, pictures {a.get('images')} -> {b.get('images')})")
+    ctl("debug-frame", wid, r["x"], r["y"], r["w"], r["h"])
+    time.sleep(0.9)  # past the echo window
 
 
 GHOST_LAYER = 4  # NSFloatingWindowLevel + 1: a dragged card's ghost panel

@@ -160,6 +160,15 @@ static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static LAST_DONE_MS: AtomicU64 = AtomicU64::new(0);
 /// Images delivered since launch.
 pub(crate) static IMAGES: AtomicU64 = AtomicU64::new(0);
+/// Listings of ScreenCaptureKit's shareable content asked since launch ([`listing_asked`]): the
+/// cost the window server's pictures avoid, for the ctl dump (a live check reads it at rest).
+static LISTINGS: AtomicU64 = AtomicU64::new(0);
+
+/// A listing of the shareable content is asked now (counted for the ctl dump).
+pub(crate) fn listing_asked() {
+    LISTINGS.fetch_add(1, Ordering::Relaxed);
+}
+
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// The one gate of the process: every capturer asks it before a round.
 static GATE: LazyLock<Mutex<Gate>> = LazyLock::new(|| Mutex::new(Gate::default()));
@@ -316,6 +325,7 @@ pub fn status() -> serde_json::Value {
         "pace": pace().describe(),
         "in_flight": IN_FLIGHT.load(Ordering::SeqCst),
         "images": IMAGES.load(Ordering::SeqCst),
+        "listings": LISTINGS.load(Ordering::Relaxed),
         "window_server": super::capture_fast::status(),
     })
 }
@@ -555,6 +565,7 @@ fn request_access() {
             tracing::info!("ScreenCaptureKit access request: {}", e.localizedDescription());
         }
     });
+    listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
 }
@@ -1069,6 +1080,7 @@ fn look_listed(ids: &[(u32, u64)], sink: LookSink, exclude_desktop: bool) {
             probe_look(&filter, *id, (frame.w, frame.h), *generation, sink);
         }
     });
+    listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(exclude_desktop, false, &handler);
@@ -1282,6 +1294,7 @@ fn sck_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut Hash
         }
         let _ = content_tx.send(Msg::Issued { round, n: issued });
     });
+    listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
@@ -1525,6 +1538,7 @@ pub fn capture_desktop(display_id: u32, region: Rect, done: DesktopDone) -> Resu
         // SAFETY: filter, configuration and handler are valid; SCK copies the block.
         unsafe { SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(&filter, &config, Some(&on_image)) };
     });
+    listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block. Desktop
     // windows are listed (only they are included in the still).
     unsafe {
