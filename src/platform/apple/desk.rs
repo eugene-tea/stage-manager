@@ -37,7 +37,12 @@ impl AppleDesk for Desk<'_> {
     fn listed(&mut self) -> Listed {
         let list = windows::wake_list();
         Listed {
-            windows: list.iter().map(|w| ListedWindow { id: w.id, pid: w.pid, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen }).collect(),
+            windows: list
+                .iter()
+                // A clear window above the windows' layer covers nothing (the gestures' guard
+                // passes over it too): counted off screen.
+                .map(|w| ListedWindow { id: w.id, pid: w.pid, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen && (w.layer == 0 || w.alpha > 0.0) })
+                .collect(),
             manager: self.manager,
         }
     }
@@ -83,7 +88,7 @@ impl AppleDesk for Desk<'_> {
 
     /// Starts the gesture on a thread of its own ([`super::post::start`]).
     fn post(&mut self, posted: &Posted) -> Result<(), String> {
-        super::post::start(*posted, self.manager)
+        super::post::start(posted.clone(), self.manager)
     }
 
     fn landed(&mut self) -> Option<Landed> {

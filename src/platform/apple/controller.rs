@@ -611,7 +611,7 @@ impl AppleController {
         let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
         let route: &dyn Route = match step {
             Step::Focus(_) => &Focus,
-            Step::Post(Posted::Click { .. }) => &ShiftClick,
+            Step::Post(Posted::Clicks { .. }) => &ShiftClick,
             Step::Post(Posted::Drag { .. }) => &Drag,
             Step::AwaitSettle | Step::AwaitStrip(_) => return Ok(()),
         };
@@ -625,7 +625,7 @@ impl AppleController {
         }
         if ran.is_ok() {
             if let Step::Post(p) = step {
-                self.posting = Some(*p);
+                self.posting = Some(p.clone());
             }
             self.mirror.step_began(now);
             self.watch();
@@ -746,7 +746,7 @@ impl AppleController {
         let ran: Result<Value, String> = match t {
             AppleTry::Focus(w) => Focus.can(&Step::Focus(w), &self.mirror, &input).map_err(|r| r.0).and_then(|()| Focus.run(&Step::Focus(w), &mut desk)).map(|()| json!({})),
             AppleTry::ShiftClick(w) => point(w).and_then(|at| {
-                let step = Step::Post(Posted::Click { window: w, at, own_shift: !input.shift });
+                let step = Step::Post(Posted::click(w, at, !input.shift));
                 ShiftClick.can(&step, &self.mirror, &input).map_err(|r| r.0)?;
                 ShiftClick.run(&step, &mut desk)?;
                 self.posting = if let Step::Post(p) = step { Some(p) } else { None };
@@ -755,7 +755,7 @@ impl AppleController {
             AppleTry::Drag(w) => match self.mirror.frames.get(&w).copied() {
                 None => Err(format!("window {w} is not listed")),
                 Some(frame) => {
-                    let from = points::title_point(frame);
+                    let from = self.mirror.title_at.get(&w).copied().unwrap_or_else(|| points::title_point(frame));
                     let step = Step::Post(Posted::Drag { window: w, from, to: points::strip_drop(&screen, from), frame });
                     Drag.can(&step, &self.mirror, &input).map_err(|r| r.0).and_then(|()| Drag.run(&step, &mut desk)).map(|()| {
                         self.posting = if let Step::Post(p) = step { Some(p) } else { None };

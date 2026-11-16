@@ -2,11 +2,18 @@
 //! of a title bar onto the strip, each on a thread of its own (never a sleep on the WM
 //! thread), one at a time. How the gesture ended is taken with [`take_landed`].
 //!
-//! - **The Shift-click** (a probe of 11-16): a real Shift key-down about 12 ms before (none
-//!   when the person holds Shift: theirs is used as it is), the click at the point with no hold
-//!   between down and up, the pointer warped back at once (away 2-15 ms, about a frame), Shift
-//!   up about 12 ms after. Flags on the click alone switch instead of adding: the key events
-//!   are what Apple's reads.
+//! - **The Shift press** (probes of 11-16): a real Shift key-down about 12 ms before (none
+//!   when the person holds Shift: theirs is used as it is), then each Shift-click of the press
+//!   [`CLICK_GAP`] apart, at its point with no hold between down and up, the pointer warped
+//!   back at once (away 2-15 ms, about a frame), Shift up about 12 ms after the last. Flags on
+//!   the click alone switch instead of adding: the key events are what Apple's reads. Each
+//!   click checks its point first; one whose point is no longer WindowManager's is left for
+//!   the next settle, and the person's own move or press ends the press there.
+//! - **The pointer back**: the posted events wait in the event queue, so a warp right after
+//!   posting can land before them and the click then leaves the pointer at its point (live
+//!   11-16: after a merge of three, the pointer stayed at the second click's point). The warp
+//!   back waits until the pointer reads at the point posted (at most [`POINTER_WAIT`]), and
+//!   is checked and made again once if the pointer is not home.
 //! - **The drag**: the left button pressed on the title bar, moved in steps to the strip's
 //!   column, held there [`DRAG_HOLD`], released; the pointer warped back. The person's own
 //!   input ends it at once (their release, the button up, the pointer moved from where the
@@ -31,7 +38,7 @@ use objc2_core_graphics::{
     CGWarpMouseCursorPosition,
 };
 
-use crate::engine::apple::desk::{Landed, Posted};
+use crate::engine::apple::desk::{CLICK_GAP, Landed, Posted, Press};
 use crate::engine::geometry::Point;
 use crate::platform::{input, windows};
 
@@ -51,6 +58,10 @@ pub const DRAG_HOLD: Duration = Duration::from_millis(300);
 
 /// The pointer this far from where the drag last put it is the person's own move.
 const MOVED: f64 = 4.0;
+
+/// How long the warp back waits for the posted events to have moved the pointer, and then for
+/// the warp to show.
+pub const POINTER_WAIT: Duration = Duration::from_millis(20);
 
 /// Input events heard this soon after a gesture of ours ended are its own echoes (the global
 /// monitor hears posted events), never the person's.
@@ -108,9 +119,9 @@ pub fn start(posted: Posted, manager: Option<i32>) -> Result<(), String> {
         // whatever was held as it unwound.
         let landed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut g = Gesture::begin();
-            let landed = match posted {
-                Posted::Click { at, own_shift, .. } => shift_click(&mut g, at, own_shift, manager),
-                Posted::Drag { window, from, to, .. } => drag(&mut g, window, from, to),
+            let landed = match &posted {
+                Posted::Clicks { presses, own_shift } => shift_press(&mut g, presses, *own_shift, manager),
+                &Posted::Drag { window, from, to, .. } => drag(&mut g, window, from, to),
             };
             g.finish();
             landed
@@ -178,11 +189,24 @@ impl Gesture {
         self.publish();
     }
 
-    /// The pointer back where it was.
-    fn home(&self) {
-        if let Some((x, y)) = self.held.home {
+    /// The pointer back where it was, once the events posted at `posted` have moved it there
+    /// (a warp before them would be undone by them); checked, and warped again once.
+    fn home_from(&self, posted: Point) {
+        let Some((x, y)) = self.held.home else { return };
+        pointer_at(posted, POINTER_WAIT);
+        for _ in 0..2 {
             let _ = CGWarpMouseCursorPosition(CGPoint { x, y });
+            if pointer_at(Point::new(x, y), POINTER_WAIT) {
+                return;
+            }
         }
+        tracing::debug!(x, y, "apple mode: the pointer not read back home after the warp");
+    }
+
+    /// True when the pointer is no longer where the gesture keeps it (home): the person moved
+    /// it.
+    fn moved_away(&self) -> bool {
+        self.held.home.is_some_and(|(x, y)| pointer_now().is_some_and(|p| (p.x - x).abs() > MOVED || (p.y - y).abs() > MOVED))
     }
 
     /// Ended as planned: nothing held, nothing to put back on drop.
@@ -215,10 +239,12 @@ fn release(held: Held) {
     }
 }
 
-/// The Shift-click (module docs).
-fn shift_click(g: &mut Gesture, at: Point, own_shift: bool, manager: Option<i32>) -> Landed {
+/// The Shift press (module docs): every click of `presses` within one Shift press.
+fn shift_press(g: &mut Gesture, presses: &[Press], own_shift: bool, manager: Option<i32>) -> Landed {
     let Some(manager) = manager else { return Landed::Refused("WindowManager is not running".into()) };
-    if let Err(why) = top_is(at, |w| w.pid == manager && w.layer == 0) {
+    let manager_at = |at: Point| top_is(at, |w| w.pid == manager && w.layer == 0);
+    let Some(first) = presses.first() else { return Landed::Refused("no click to post".into()) };
+    if let Err(why) = manager_at(first.at) {
         return Landed::Refused(why);
     }
     if any_button_down() {
@@ -231,24 +257,56 @@ fn shift_click(g: &mut Gesture, at: Point, own_shift: bool, manager: Option<i32>
         g.shift(true);
         std::thread::sleep(SHIFT_LEAD);
     }
-    let t0 = Instant::now();
-    if let Err(e) = mouse(CGEventType::LeftMouseDown, at, CGEventFlags::MaskShift) {
-        return Landed::Refused(e);
+    let (mut posted, mut skipped, mut away_ms) = (0_u32, 0_u32, 0.0_f64);
+    let mut ended: Option<&str> = None;
+    let mut failed: Option<String> = None;
+    for (k, p) in presses.iter().enumerate() {
+        if k > 0 {
+            std::thread::sleep(CLICK_GAP);
+            if any_button_down() {
+                ended = Some("a mouse button is down");
+                break;
+            }
+            if g.moved_away() {
+                // The person's own move: the pointer is theirs, the clicks left wait.
+                g.held.home = None;
+                g.publish();
+                ended = Some("the pointer moved");
+                break;
+            }
+            if manager_at(p.at).is_err() {
+                skipped += 1;
+                continue;
+            }
+        }
+        let t0 = Instant::now();
+        if let Err(e) = mouse(CGEventType::LeftMouseDown, p.at, CGEventFlags::MaskShift) {
+            failed = Some(e);
+            break;
+        }
+        g.button(true);
+        let up = mouse(CGEventType::LeftMouseUp, p.at, CGEventFlags::MaskShift);
+        g.button(up.is_err());
+        g.home_from(p.at);
+        away_ms = away_ms.max(t0.elapsed().as_secs_f64() * 1000.0);
+        match up {
+            Ok(()) => posted += 1,
+            Err(e) => {
+                failed = Some(e);
+                break;
+            }
+        }
     }
-    g.button(true);
-    let up = mouse(CGEventType::LeftMouseUp, at, CGEventFlags::MaskShift);
-    g.button(up.is_err());
-    g.home();
-    let away = t0.elapsed();
     std::thread::sleep(SHIFT_LEAD);
     if own {
         key(SHIFT_KEY, false, CGEventFlags::empty());
         g.shift(false);
     }
-    tracing::debug!(away_ms = away.as_secs_f64() * 1000.0, own_shift = own, "apple mode: Shift-click posted");
-    match up {
-        Ok(()) => Landed::Posted,
-        Err(e) => Landed::Refused(e),
+    tracing::debug!(posted, of = presses.len(), skipped, ended, away_ms, own_shift = own, "apple mode: Shift press posted");
+    match (posted, failed) {
+        (0, Some(e)) => Landed::Refused(e),
+        (0, None) => Landed::Refused("no click of the press posted".into()),
+        _ => Landed::Posted,
     }
 }
 
@@ -296,7 +354,7 @@ fn drag(g: &mut Gesture, window: u32, from: Point, to: Point) -> Landed {
     }
     let up = mouse(CGEventType::LeftMouseUp, to, CGEventFlags::empty());
     g.button(up.is_err());
-    g.home();
+    g.home_from(to);
     match up {
         Ok(()) => Landed::Posted,
         Err(e) => Landed::Refused(e),
@@ -341,6 +399,20 @@ fn person_holds_shift() -> bool {
 
 fn pointer_now() -> Option<CGPoint> {
     CGEvent::new(None).map(|e| CGEvent::location(Some(&e)))
+}
+
+/// Waits up to `limit` for the pointer to read at `p` (within a point): true when it does.
+fn pointer_at(p: Point, limit: Duration) -> bool {
+    let t0 = Instant::now();
+    loop {
+        if pointer_now().is_some_and(|q| (q.x - p.x).abs() <= 1.0 && (q.y - p.y).abs() <= 1.0) {
+            return true;
+        }
+        if t0.elapsed() >= limit {
+            return false;
+        }
+        std::thread::sleep(Duration::from_micros(500));
+    }
 }
 
 /// A left-button mouse event of `kind` at `p` with `flags`, posted at the HID tap.

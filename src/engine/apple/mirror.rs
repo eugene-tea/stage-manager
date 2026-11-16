@@ -75,7 +75,8 @@ pub struct ListedWindow {
     pub layer: i64,
     /// Its bounds, top-left origin.
     pub bounds: Rect,
-    /// Listed on screen.
+    /// Listed on screen and drawn (a window above the windows' layer that is fully clear
+    /// counts off screen: it covers nothing, as the gestures' guard counts it).
     pub onscreen: bool,
 }
 
@@ -171,6 +172,10 @@ pub struct Arrangement {
     /// Where each strip window's thumbnail shows a part of its own, on screen, at this read
     /// (none in motion): the point a Shift-click on it presses ([`points::visible_point`]).
     pub click_at: BTreeMap<u32, Point>,
+    /// Where each window of the stage in front shows a part of its title bar of its own, at
+    /// this read (none in motion): the point a drag grabs ([`points::title_free`]); a window
+    /// missing here is covered all along its title bar and is raised before the drag.
+    pub title_at: BTreeMap<u32, Point>,
     /// Each window's bounds when last seen at full size in the current stage: the frame the
     /// model records, never a thumbnail's.
     pub full: BTreeMap<u32, Rect>,
@@ -283,6 +288,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
     let mut current = Vec::new();
     let mut thumbs: Vec<(u32, Rect)> = Vec::new();
     let mut thumb_at: Vec<(u32, usize)> = Vec::new();
+    let mut current_at: Vec<(u32, usize)> = Vec::new();
     for (i, w) in listed.windows.iter().enumerate() {
         if !managed.contains(&w.id) || frames.insert(w.id, w.bounds).is_some() {
             continue;
@@ -292,6 +298,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
             thumb_at.push((w.id, i));
         } else if w.onscreen && !w.bounds.is_degenerate() && w.bounds.intersect(&screen.frame).is_some_and(|r| r.w > 0.0 && r.h > 0.0) {
             current.push(w.id);
+            current_at.push((w.id, i));
         }
     }
 
@@ -343,6 +350,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         };
         next.strip = items(&thumbs, &icons);
         next.click_at = click_points(listed, &thumb_at, &icons, screen);
+        next.title_at = title_points(listed, &current_at, screen);
         next.current = current;
         next.remembered = remembered(prev, &next, listed, managed);
     }
@@ -378,6 +386,21 @@ fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen
         let mut over: Vec<Rect> = listed.windows[..i].iter().enumerate().filter(|(j, o)| o.onscreen && Some(*j) != twin).map(|(_, o)| o.bounds).collect();
         over.extend(icons.iter().copied());
         if let Some(p) = points::visible_point(w.bounds, &over, screen.frame) {
+            out.insert(id, p);
+        }
+    }
+    out
+}
+
+/// Where each window of the stage in front (`current`: its id and its place in `listed`)
+/// shows a part of its title bar of its own: what covers it is every window listed in front
+/// of it on screen, at the windows' layer or above (as the drag's guard counts them).
+fn title_points(listed: &Listed, current: &[(u32, usize)], screen: &Display) -> BTreeMap<u32, Point> {
+    let mut out = BTreeMap::new();
+    for &(id, i) in current {
+        let Some(w) = listed.windows.get(i) else { continue };
+        let over: Vec<Rect> = listed.windows[..i].iter().filter(|o| o.onscreen && o.layer >= 0).map(|o| o.bounds).collect();
+        if let Some(p) = points::title_free(w.bounds, &over, screen.frame) {
             out.insert(id, p);
         }
     }

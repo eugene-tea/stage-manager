@@ -10,23 +10,32 @@
 //!
 //! - [`Goal::Front`]: a window in the stage in front, by the focus route.
 //! - [`Goal::Gather`]: windows (and, for a newly opened app, every window of the app as it
-//!   shows) in the stage in front, by one Shift-click per window on its thumbnail, front to
-//!   back (a Shift-click adds only the window clicked, a probe of 11-16); a window whose
-//!   stage is not listed is brought in front by a focus first (the round trip: the stage in
-//!   front goes to the strip and its windows are Shift-clicked back after the settle).
+//!   shows) in the stage in front, by a Shift-click per window on its thumbnail (a
+//!   Shift-click adds only the window clicked, a probe of 11-16), every window that shows a
+//!   point of its own at one settled read clicked in one Shift press, front to back (the
+//!   fourth probe of 11-16: a stage of two, both clicked 50 ms apart, both joined); a window
+//!   fully under the ones clicked is clicked at the next settle. A window whose stage is not
+//!   listed is brought in front by a focus first (the round trip: the stage in front goes to
+//!   the strip and its windows are Shift-clicked back after the settle). The goal is met at
+//!   the first read that shows every window in the stage in front, settled or not; a newly
+//!   opened app's front window is focused then and there, and the job ends with that focus.
 //! - [`Goal::Out`]: a window out to a stage of its own, by a drag of its title bar onto the
-//!   strip (it works with the strip covered, a probe of 11-16).
+//!   strip (it works with the strip covered, a probe of 11-16), grabbed where the title bar
+//!   shows; one covered all along it is raised first (live 11-16: the fixture windows open at
+//!   one frame, the one to drag under another, the drag's guard refused it twice).
 //!
-//! Every step waits for the settle and for the gate ([`super::gate`]); a step that ran and
-//! whose goal is still not met at the next settle runs once more ([`TRIES`]), then the job is
-//! given up and reported. The person's own input ending a drag gives it up at once.
+//! Whether a goal is met is asked of every read out of motion (the groups are read afresh);
+//! a posted step, and a focus that switches stages, wait for the settle; every posted step
+//! goes through the gate ([`super::gate`]). A step that ran and whose goal is still not met at
+//! the next settle runs once more ([`TRIES`]), then the job is given up and reported. The
+//! person's own input ending a drag gives it up at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use super::desk::{InputNow, Landed, Posted};
+use super::desk::{InputNow, Landed, Posted, Press};
 use super::gate::{self, Hold, Waiting};
 use super::mirror::{Arrangement, Where};
 use super::plan::{Intent, Step};
@@ -35,9 +44,6 @@ use crate::engine::model::Display;
 
 /// Runs of the same step for the same window before the job is given up.
 pub const TRIES: u32 = 2;
-
-/// A newly opened app's windows count as all there once none came for this long.
-pub const LINGER: Duration = Duration::from_millis(1000);
 
 /// How long a newly opened app may take to show its first window.
 pub const FIRST_WINDOW: Duration = Duration::from_secs(10);
@@ -109,6 +115,8 @@ pub struct Report {
     pub focuses: u32,
     /// Shift-clicks posted.
     pub clicks: u32,
+    /// Shift presses posted (each one or more Shift-clicks).
+    pub presses: u32,
     /// Drags posted.
     pub drags: u32,
     /// Why it was given up.
@@ -152,13 +160,14 @@ pub struct Job {
     report: Report,
     /// The newly opened app was hidden by us at its launch (the hide route took).
     pub hidden: bool,
-    /// The app's windows seen so far, and when the last new one came.
+    /// The app's windows seen so far.
     app_seen: BTreeSet<u32>,
-    app_last_new: Option<Instant>,
     focused_app: bool,
     /// The app's front window, asked to be focused at the end.
     focus_pending: Option<u32>,
     interrupted: Option<String>,
+    /// Why the gesture last posted was not (its guard), for the give-up's words.
+    refused: Option<String>,
     /// The step last asked for and what it waits on, for `ctl state`.
     pub waits_for: &'static str,
 }
@@ -182,10 +191,10 @@ impl Job {
             report: Report { intent: Some(intent), ..Report::default() },
             hidden: false,
             app_seen: BTreeSet::new(),
-            app_last_new: None,
             focused_app: false,
             focus_pending: None,
             interrupted: None,
+            refused: None,
             waits_for: "the settle",
         }
     }
@@ -205,6 +214,12 @@ impl Job {
         if let Some(why) = self.interrupted.take() {
             return self.give_up(cx, now, why);
         }
+        // A last step that met the goals as it ran (the newly opened app's focus): done now,
+        // no settle waited.
+        if self.goals.is_empty() {
+            self.report.ms = ms(now, self.since);
+            return Next::Done(self.report.clone());
+        }
         if now.saturating_duration_since(self.since) > self.deadline {
             let why = format!("not done in {} s", self.deadline.as_secs());
             return self.give_up(cx, now, why);
@@ -214,7 +229,9 @@ impl Job {
         if cx.in_flight {
             return self.wait(Hold::InFlight.why());
         }
-        if !cx.mirror.settled {
+        // In motion the groups read before stand: nothing to tell from them. Out of motion
+        // they are read afresh, settled or not: a goal is met at the first such read.
+        if cx.mirror.in_motion {
             return self.wait(Hold::InMotion.why());
         }
         while let Some(goal) = self.goals.first().cloned() {
@@ -250,9 +267,18 @@ impl Job {
                 self.report.focuses += 1;
                 if self.focus_pending == Some(*w) {
                     self.focused_app = true;
+                    // Every window was in front when the focus was asked: the gather is met,
+                    // and the job ends at the next advance.
+                    if matches!(self.goals.first(), Some(Goal::Gather { focus_app: true, .. })) {
+                        self.goals.remove(0);
+                        self.last = None;
+                    }
                 }
             }
-            Step::Post(Posted::Click { .. }) => self.report.clicks += 1,
+            Step::Post(Posted::Clicks { presses, .. }) => {
+                self.report.clicks += presses.len() as u32;
+                self.report.presses += 1;
+            }
             Step::Post(Posted::Drag { .. }) => self.report.drags += 1,
             Step::AwaitSettle | Step::AwaitStrip(_) => {}
         }
@@ -261,8 +287,10 @@ impl Job {
     /// How the gesture last posted ended: the person's own input ending it gives the job up
     /// at the next advance; a refusal counts as a run (tried once more at the next settle).
     pub fn landed(&mut self, landed: &Landed) {
-        if let Landed::Interrupted(why) = landed {
-            self.interrupted = Some(format!("the person's own input ended the gesture: {why}"));
+        match landed {
+            Landed::Interrupted(why) => self.interrupted = Some(format!("the person's own input ended the gesture: {why}")),
+            Landed::Refused(why) => self.refused = Some(why.clone()),
+            Landed::Posted => {}
         }
     }
 
@@ -285,7 +313,12 @@ impl Job {
                 Some((Where::Current, _)) if a.current.len() <= 1 => Need::Met,
                 Some((Where::Current, _)) => {
                     let Some(frame) = a.frames.get(w).copied() else { return Need::Fail(format!("window {w} is not listed")) };
-                    let from = points::title_point(frame);
+                    let Some(from) = a.title_at.get(w).copied() else {
+                        // Covered all along its title bar: raised first (in the stage in front a
+                        // focus raises it and switches nothing), dragged once the list shows it
+                        // on top.
+                        return Need::Step(Step::Focus(*w));
+                    };
                     let to = points::strip_drop(cx.screen, from);
                     let restore = a.full.get(w).copied().unwrap_or(frame);
                     Need::Step(Step::Post(Posted::Drag { window: *w, from, to, frame: restore }))
@@ -310,7 +343,6 @@ impl Job {
             app_windows = order.copied().filter(|w| cx.pids.get(w) == Some(&pid)).collect();
             for w in &app_windows {
                 if self.app_seen.insert(*w) {
-                    self.app_last_new = Some(now);
                     self.report.first_window_ms.get_or_insert(ms(now, self.since));
                 }
             }
@@ -333,9 +365,8 @@ impl Job {
         }
         let missing: BTreeSet<u32> = want.iter().copied().filter(|w| !a.current.contains(w)).collect();
         if missing.is_empty() {
-            if app.is_some() && self.app_last_new.is_some_and(|t| now.saturating_duration_since(t) < LINGER) {
-                return Need::Wait("the app's other windows");
-            }
+            // Every window in front at this read: the app's front window focused at once (a
+            // window of the stage in front: it switches nothing, no settle waited).
             if focus_app && !self.focused_app {
                 let front = app_windows.iter().copied().find(|w| a.current.contains(w)).or_else(|| want.first().copied());
                 if let Some(front) = front {
@@ -345,10 +376,14 @@ impl Job {
             }
             return Need::Met;
         }
-        // Front to back within each item, the items top to bottom.
+        // Every window that shows a point of its own at this read, in one Shift press: front
+        // to back within each item, the items top to bottom. Each point was taken with the
+        // windows listed in front of it counted (the gather's own not clicked yet too): the
+        // clicks before it in the press take those away, never onto it.
         let in_strip: Vec<u32> = a.strip.iter().flat_map(|g| g.windows.iter().copied()).filter(|w| missing.contains(w)).collect();
-        if let Some(w) = in_strip.iter().copied().find(|w| a.click_at.contains_key(w)) {
-            return Need::Step(Step::Post(Posted::Click { window: w, at: a.click_at[&w], own_shift: true }));
+        let presses: Vec<Press> = in_strip.iter().filter_map(|w| a.click_at.get(w).map(|at| Press { window: *w, at: *at })).collect();
+        if !presses.is_empty() {
+            return Need::Step(Step::Post(Posted::Clicks { presses, own_shift: true }));
         }
         if !in_strip.is_empty() {
             return Need::Hold(if a.strip_shown == Some(true) { Hold::NoPoint } else { Hold::StripCovered });
@@ -364,9 +399,12 @@ impl Job {
     /// `step` through the gate and the retry count.
     fn try_step(&mut self, mut step: Step, cx: &Ctx, now: Instant) -> Next {
         let gated = match &mut step {
+            // A focus that switches stages waits for the settle; one in the stage in front (a
+            // raise, the newly opened app's focus) goes at once.
+            Step::Focus(w) if !cx.mirror.settled && !cx.mirror.current.contains(w) => Err(Hold::InMotion),
             Step::Focus(_) => gate::focus_gate(&cx.input, cx.in_flight),
             Step::Post(posted) => gate::gate(&cx.input, cx.mirror.settled, cx.in_flight).map(|go| {
-                if let Posted::Click { own_shift, .. } = posted {
+                if let Posted::Clicks { own_shift, .. } = posted {
                     *own_shift = go.own_shift;
                 }
             }),
@@ -386,9 +424,13 @@ impl Job {
             _ => 1,
         };
         if tries > TRIES {
-            let why = format!("{} for window {}: Apple's did not answer after {TRIES} tries", step_name(&step), key.1);
+            let why = match self.refused.take() {
+                Some(r) => format!("{} for window {}: not posted in {TRIES} tries ({r})", step_name(&step), key.1),
+                None => format!("{} for window {}: Apple's did not answer after {TRIES} tries", step_name(&step), key.1),
+            };
             return self.give_up(cx, now, why);
         }
+        self.refused = None;
         self.last = Some(Ran { key, tries });
         self.waits_for = "the step's answer";
         Next::Run(step)
@@ -419,7 +461,7 @@ impl Job {
 fn step_key(step: &Step) -> (u8, u32) {
     match step {
         Step::Focus(w) => (0, *w),
-        Step::Post(p @ Posted::Click { .. }) => (1, p.window()),
+        Step::Post(p @ Posted::Clicks { .. }) => (1, p.window()),
         Step::Post(p @ Posted::Drag { .. }) => (2, p.window()),
         Step::AwaitSettle => (3, 0),
         Step::AwaitStrip(slot) => (4, *slot as u32),
@@ -430,7 +472,7 @@ fn step_key(step: &Step) -> (u8, u32) {
 pub fn step_name(step: &Step) -> &'static str {
     match step {
         Step::Focus(_) => "focus",
-        Step::Post(Posted::Click { .. }) => "shift_click",
+        Step::Post(Posted::Clicks { .. }) => "shift_click",
         Step::Post(Posted::Drag { .. }) => "drag",
         Step::AwaitSettle | Step::AwaitStrip(_) => "wait",
     }

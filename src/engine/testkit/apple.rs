@@ -3,10 +3,13 @@
 //! covered strip, the person's input, and Apple's answers as measured on 11-16: a focus
 //! switches to the window's stage; a new app takes a stage of its own, or, hidden at its
 //! launch, goes into the strip with the stage in front left as it is; a Shift-click on a
-//! visible part of a thumbnail adds that window alone to the stage in front, a click mid-motion
-//! is ignored, a click on a covered strip lands on nothing of Apple's; a drag of a title bar
-//! onto the strip takes the window out to a stage of its own (covered or not). Every focus and
-//! posted gesture is recorded. It implements [`AppleDesk`], so the mirror, following, the jobs
+//! visible part of a thumbnail adds that window alone to the stage in front, every click of
+//! one Shift press landing on what the strip showed at the press (the fourth probe of 11-16),
+//! a press mid-motion is ignored, a click on a covered strip lands on nothing of Apple's; a
+//! focus of a window in front raises it within its stage; a drag of a title bar onto the strip
+//! takes the window out to a stage of its own (covered or not), and is not posted when another
+//! window is topmost at the grab point (the gestures' guard). Every focus and posted gesture
+//! is recorded. It implements [`AppleDesk`], so the mirror, following, the jobs
 //! and the routes run against it as against the real desk.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -194,6 +197,12 @@ impl FakeWindowManager {
         if let Some((pid, _)) = self.windows.get(&id) {
             self.hidden.remove(pid);
         }
+        // A window in front is raised within its stage: no motion.
+        if let Some(k) = self.current.iter().position(|w| *w == id) {
+            let w = self.current.remove(k);
+            self.current.insert(0, w);
+            return;
+        }
         let Some(s) = self.stages.iter().position(|st| st.contains(&id)) else { return };
         self.change();
         let mut target = self.stages.remove(s);
@@ -203,6 +212,14 @@ impl FakeWindowManager {
             self.stages.insert(s, std::mem::take(&mut self.current));
         }
         self.current = target;
+    }
+
+    /// Window `id`'s full-size frame set to `frame` (windows opened at one frame, as the
+    /// live fixtures do).
+    pub fn set_frame(&mut self, id: u32, frame: Rect) {
+        if let Some((_, f)) = self.windows.get_mut(&id) {
+            *f = frame;
+        }
     }
 
     /// Window `id` closes.
@@ -299,20 +316,27 @@ impl FakeWindowManager {
         if self.deaf {
             return Landed::Posted;
         }
-        match *posted {
-            Posted::Click { at, .. } => {
+        match posted {
+            Posted::Clicks { presses, .. } => {
                 if self.moving().is_some() {
-                    self.ignored_mid_motion += 1;
+                    self.ignored_mid_motion += presses.len() as u32;
                     return Landed::Posted;
                 }
-                if let Some(id) = self.thumbnail_at(at) {
+                // Every click of the press lands on what the strip showed at its start: Apple's
+                // motion of the first starts after the last (50 ms apart).
+                let hit: Vec<u32> = presses.iter().filter_map(|p| self.thumbnail_at(p.at)).collect();
+                for id in hit {
                     self.add_to_front(id);
                 }
                 Landed::Posted
             }
-            Posted::Drag { window, from, to, .. } => {
+            &Posted::Drag { window, from, to, .. } => {
                 if self.interrupt_drags {
                     return Landed::Interrupted("a left mouse-up came".into());
+                }
+                let top = self.listed().windows.into_iter().find(|w| w.onscreen && w.bounds.contains(from)).map(|w| w.id);
+                if top != Some(window) {
+                    return Landed::Refused(format!("the topmost window at {:.0},{:.0} is not the one meant", from.x, from.y));
                 }
                 let grabbed = self.frame(window).is_some_and(|f| from.y >= f.y && from.y < f.y + 28.0 && from.x >= f.x && from.x < f.max_x());
                 if grabbed && to.x < THUMB.max_x() && self.moving().is_none() {
@@ -408,7 +432,7 @@ impl AppleDesk for FakeWindowManager {
     }
 
     fn post(&mut self, posted: &Posted) -> Result<(), String> {
-        self.posted.push(*posted);
+        self.posted.push(posted.clone());
         let landed = self.answer(posted);
         self.landed = Some(landed);
         Ok(())

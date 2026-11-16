@@ -38,19 +38,28 @@ impl InputNow {
     }
 }
 
-/// A posted gesture (the routes `shift_click` and `drag`).
+/// One Shift-click of a press: window `window`'s thumbnail at global point `at`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Press {
+    /// The window whose thumbnail is clicked (the guard: the topmost window there is
+    /// WindowManager's).
+    pub window: u32,
+    /// Where (global, top-left).
+    pub at: Point,
+}
+
+/// A posted gesture (the routes `shift_click` and `drag`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum Posted {
-    /// A Shift-click on window `window`'s thumbnail at a global point: a real Shift key-down
-    /// about 12 ms before (none when the person holds Shift: `own_shift` false), the click with
-    /// no hold, the pointer warped back at once, Shift up about 12 ms after.
-    Click {
-        /// The window whose thumbnail is clicked (the guard: the topmost window there is
-        /// WindowManager's).
-        window: u32,
-        /// Where (global, top-left).
-        at: Point,
-        /// A Shift key-down and key-up of ours around it.
+    /// Shift-clicks on thumbnails within one Shift press (a probe of 11-16: a stage of two,
+    /// both thumbnails Shift-clicked 50 ms apart from one settled read, both joined): a real
+    /// Shift key-down about 12 ms before the first (none when the person holds Shift:
+    /// `own_shift` false), each click with no hold and the pointer warped back at once, the
+    /// next [`CLICK_GAP`] later, Shift up about 12 ms after the last.
+    Clicks {
+        /// The clicks, in order (front to back within an item, the items top to bottom).
+        presses: Vec<Press>,
+        /// A Shift key-down and key-up of ours around them.
         own_shift: bool,
     },
     /// A drag of window `window`'s title bar onto the strip.
@@ -67,11 +76,21 @@ pub enum Posted {
     },
 }
 
+/// Between two Shift-clicks of one press (the probe of 11-16 that brought a stage of two in
+/// with one Shift press).
+pub const CLICK_GAP: std::time::Duration = std::time::Duration::from_millis(50);
+
 impl Posted {
-    /// The window the gesture is for.
+    /// One Shift-click on window `window`'s thumbnail at `at`.
+    pub fn click(window: u32, at: Point, own_shift: bool) -> Self {
+        Self::Clicks { presses: vec![Press { window, at }], own_shift }
+    }
+
+    /// The window the gesture is for (a press's first).
     pub fn window(&self) -> u32 {
         match self {
-            Self::Click { window, .. } | Self::Drag { window, .. } => *window,
+            Self::Clicks { presses, .. } => presses.first().map_or(0, |p| p.window),
+            Self::Drag { window, .. } => *window,
         }
     }
 }

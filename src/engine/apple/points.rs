@@ -82,6 +82,39 @@ pub fn title_point(frame: Rect) -> Point {
     Point::new(x, frame.y + TITLE_GRAB)
 }
 
+/// Where window `frame`'s title bar shows a part of its own to grab, `over` being every
+/// window listed in front of it (the drag's guard takes the topmost window at the grab point,
+/// live 11-16: three fixture windows at the same frame, the one to drag under another, the
+/// gesture refused twice): [`title_point`] when nothing covers it, else the free point along
+/// the title bar nearest it, clear of the traffic lights at the left and of the middle (where
+/// a title and its document icon sit), within `screen`. `None` when the title bar is covered
+/// all along: the window is raised first.
+pub fn title_free(frame: Rect, over: &[Rect], screen: Rect) -> Option<Point> {
+    let want = title_point(frame);
+    let y = want.y;
+    if y < screen.y + MARGIN || y > screen.max_y() - MARGIN {
+        return None;
+    }
+    let free = |x: f64| {
+        let p = Point::new(x, y);
+        screen.contains(p) && !over.iter().any(|o| Rect::new(o.x - MARGIN, o.y - MARGIN, o.w + 2.0 * MARGIN, o.h + 2.0 * MARGIN).contains(p))
+    };
+    if free(want.x) {
+        return Some(want);
+    }
+    let lo = frame.x + 80.0_f64.min(frame.w / 2.0);
+    let hi = frame.max_x() - 16.0;
+    let (mid, band) = (frame.center().x, 80.0_f64.min(frame.w / 6.0));
+    let mut xs: Vec<f64> = (0..=16).map(|i| lo + (hi - lo) * f64::from(i) / 16.0).collect();
+    for o in over {
+        xs.extend([o.x - MARGIN - 0.5, o.max_x() + MARGIN + 0.5]);
+    }
+    xs.into_iter()
+        .filter(|x| (lo..=hi).contains(x) && (x - mid).abs() >= band && free(*x))
+        .min_by(|a, b| (a - want.x).abs().total_cmp(&(b - want.x).abs()))
+        .map(|x| Point::new(x, y))
+}
+
 /// How far in from the screen's left edge a window is dropped onto the strip (the probe's
 /// release at x = 30, 11-16: the window went into a stage of its own with the strip shown or
 /// covered).
@@ -148,5 +181,20 @@ mod tests {
         assert_eq!(drop.x, d.frame.x + DROP_X);
         assert_eq!(drop.y, p.y);
         assert!(strip_drop(&d, Point::new(400.0, 2.0)).y >= d.visible.y + 40.0, "kept off the menu bar");
+    }
+
+    #[test]
+    fn a_title_bar_under_another_window_is_grabbed_where_it_shows_or_not_at_all() {
+        let f = Rect::new(80.0, 87.0, 520.0, 392.0);
+        assert_eq!(title_free(f, &[], SCREEN), Some(title_point(f)), "nothing over it: the usual point");
+        assert_eq!(title_free(f, &[f], SCREEN), None, "the live run of 11-16: another window at the same frame covers it all");
+        // A window over its left half: grabbed right of it, clear of the middle.
+        let left = Rect::new(60.0, 60.0, 300.0, 300.0);
+        let p = title_free(f, &[left], SCREEN).expect("its right part shows");
+        assert!(p.x > left.max_x() + MARGIN && p.x < f.max_x() - 16.0, "{p:?}");
+        assert!((p.x - f.center().x).abs() >= 80.0, "not on the title: {p:?}");
+        assert_eq!(p.y, f.y + TITLE_GRAB);
+        // A window lower down leaves the title bar free.
+        assert_eq!(title_free(f, &[Rect::new(80.0, 200.0, 520.0, 300.0)], SCREEN), Some(title_point(f)));
     }
 }

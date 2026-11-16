@@ -38,7 +38,7 @@ pub enum Intent {
 }
 
 /// One step of a plan.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Step {
     /// Window focused (the focus route).
@@ -88,7 +88,7 @@ pub fn switch(a: &Arrangement, n: usize, key: impl Fn(&[u32]) -> Option<u32>) ->
 /// The switch to stage `n` as a job: its key window in front.
 pub fn switch_job(a: &Arrangement, n: usize, key: impl Fn(&[u32]) -> Option<u32>, now: std::time::Instant) -> Result<Job, Refusal> {
     let steps = switch(a, n, key)?;
-    let Some(Step::Focus(window)) = steps.last().copied() else { return Err(Refusal("no focus planned".into())) };
+    let Some(Step::Focus(window)) = steps.last().cloned() else { return Err(Refusal("no focus planned".into())) };
     Ok(Job::new(Intent::Switch(n), vec![Goal::Front(window)], now))
 }
 
