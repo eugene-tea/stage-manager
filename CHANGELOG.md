@@ -13,6 +13,15 @@
   user clicks, types or holds a key. A newly opened app that a rule's `current`,
   `[stages] new_apps_join_current` or Shift wants in the stage in front joins it: the app is
   hidden as it launches, so Apple's Stage Manager keeps the stage in front, then brought in.
+- New setting `[stages] restore_with_apple`, on by default. With `[windows] with_apple =
+  "augment"`, Apple's stages are put back as saved after a restart or a new login, once the
+  reopened windows have shown; under "All at Once" an app's windows stay in one stage.
+  `ctl apple restore` puts back the stages saved when the following started.
+- With `[windows] with_apple = "augment"`, each screen's stages are followed apart and a
+  stage hotkey or `ctl` command acts on one screen only; stages of a Desktop not shown are
+  kept and left alone; nothing is done while a full-screen app shows. The menu, the welcome
+  and Settings say that Apple's Stage Manager is followed instead of offering to turn it
+  off.
 - A window tab selected (Terminal, Finder, any app with window tabs) belongs to the stage
   of its tab group: it takes the place of the tab it hides, and goes with its stage when
   another stage is chosen. A tab selected was let go with no stage, and selected again it

@@ -108,7 +108,10 @@ posted step through the gate (`gate.rs`: never while the user's button is down, 
 held, the pointer moved, nor mid-motion), all of it run in the tests against a fake
 WindowManager (`engine::testkit::apple`). The posted gestures run on a thread of their own
 (`platform/apple/post.rs`); a newly opened app the rules want here is hidden at its launch
-(`platform/apple/launch_hide.rs`) so Apple's keeps the stage in front. Every strategy and route, with what it
+(`platform/apple/launch_hide.rs`) so Apple's keeps the stage in front. The restore
+(`engine/apple/restore.rs`) turns the saved stages into one job of a goal per stage; one
+mirror per screen (`engine/apple/screens.rs` splits the window list and matches each
+`sm.space`), Desktops not shown kept away in each mirror. Every strategy and route, with what it
 costs and how it was measured: [STRATEGIES.md](STRATEGIES.md).
 
 A switch in each engine:

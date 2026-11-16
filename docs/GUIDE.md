@@ -285,11 +285,26 @@ no strip of its own.
   visible round trip of about a second. While Apple's strip is covered (a window over it,
   or its recent apps hidden) the click waits for the strip to show, a few seconds at most;
   then the app is left in a stage of its own, as Apple's Stage Manager puts it.
+- After a restart or a new login, Apple's stages are put back as they were saved
+  (`[stages] restore_with_apple`, on by default), once the reopened windows have shown: a
+  window of each stage is brought to the front, the stage's other windows are Shift-clicked
+  in from Apple's strip, and windows of other stages are dragged out of it. Under "All at
+  Once" an app's windows stay in one stage. A stage that is already as saved is left alone;
+  a window that did not reopen is skipped. `ctl apple restore` puts back the stages saved
+  when Stage Manager started following Apple's, at any time.
+- With more than one screen, each screen's stages are followed apart: the hotkeys and `ctl`
+  act on the screen with the keyboard (the focused window's), a window is sent from its own
+  screen, and nothing on another screen moves. The saved stages are the main screen's.
+- Stages of a Desktop not shown are kept and left alone: they get no number, and nothing is
+  sent to or brought from them until their Desktop shows again. While a full-screen app
+  shows on a screen, nothing is done there.
+- Apple's Stage Manager keeps the strip in an order of its own: `[strip] order` does nothing
+  meanwhile.
 - Placement, pins, `float` and the other rules, the strip's looks and its extras do nothing
   meanwhile.
 
 The stages followed are saved apart from Stage Manager's own, which come back when Apple's
-is turned off.
+is turned off. Stage Manager's own stages are not carried into Apple's when it is turned on.
 
 ## Settings
 

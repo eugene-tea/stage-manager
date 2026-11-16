@@ -3,14 +3,16 @@
 How Stage Manager gets stages on screen, every way built or tried, in one table per kind with
 the same columns: what it does, the calls, what it costs (time, pointer, CPU, what is seen),
 what breaks it, where the code is, how it was measured. [ARCHITECTURE.md](ARCHITECTURE.md),
-"Window engines", keeps the code map; this file keeps the catalog. Every phase of the Apple
-mode adds its rows (A1 and A2: the mirror and the focus route; A3: the posted routes and their
-gate; A4: where a newly opened app goes).
+"Window engines", keeps the code map; this file keeps the catalog. The Apple mode's rows came
+phase by phase (A1 and A2: the mirror and the focus route; A3: the posted routes and their
+gate; A4: where a newly opened app goes; A5: the restore; A6: screens, Desktops, full screen
+and the strip's order).
 
 ## Strategies
 
 | Strategy | What it does | Calls | Cost | What breaks it | Code | Measured |
 |---|---|---|---|---|---|---|
+| Stand down | While Apple's Stage Manager is on (`[windows] with_apple = "stand_down"`, the default): every window back, nothing arranged, no strip | Accessibility set frame for each window held, once | Nothing while it lasts | Nothing: Apple's arranges | `engine/stand_down.rs` | The live check `scripts/test-apple-stage-manager.sh` |
 | Corner | Inactive stages' windows parked in a corner of their screen, the motion played by pictures | Accessibility set position and frame; ScreenCaptureKit pictures | A park per window (an app's own move); pictures every 2 s while the strip shows; a sliver per window in the corner, covered by the corner patch | An app that refuses or clamps the move; another screen beyond the corner | `engine/corner`, `platform/corner` | The live suite (`scripts/test_stages.py`) |
 | Spaces with pictures | Each inactive stage in a hidden window-server Space of its own; the motion played by pictures | SkyLight Space calls, read back; Accessibility set frame on a show | About 2 ms a window, no app asked; pictures taken at the switch | A window server that refuses the calls (the launch probe, the health checks, then the fall back to Corner) | `engine/spaces`, `platform/spaces` | The launch probe; the live suite with `SM_ENGINE=spaces` |
 | Spaces live landing | As above, the incoming windows flying the last stretch themselves through their Space's transform | The Space transform per step | As above, no picture over the window at its end | A transform call missing (then pictures) | `platform/spaces/landing.rs` | `STAGE_MANAGER_LANDING=live`, the live suite |
@@ -25,6 +27,7 @@ gate; A4: where a newly opened app goes).
 | Drag | Takes a window out to a stage of its own (`ctl new`, the new-stage hotkey) | The window brought in front by focus if it is not, and raised the same way when its title bar is covered all along (live 11-16: the fixture windows open at one frame); a posted press on its title bar (14 points below its top, at its middle, or the free point along it nearest that, clear of the buttons), 120 ms, 30 moves evenly over about 500 ms to the middle of the strip's items (30 points in at the visible frame's middle height when the strip hides), a 250 ms hold, the release, the pointer warped back (the drag of the first probe, 11-16; a faster one, 60 ms and 24-point steps 6 ms apart dropped at the grab's height above the items, only moved the window, live 11-16; a window a drag moved and did not take out is set back when the job is given up); the topmost window at the press checked to be that window | The pointer away about 0.9 s; the window flies into the strip; works with the strip covered | A title-bar point that is not free (unified toolbars, Electron: probe 6 still open; a window the list does not show over it: the guard refuses, tried once more, then given up with its words); the user's own release, move or button ends it at once: the button up where the pointer is, the window's frame set back through Accessibility, the job given up | `platform/apple/routes/drag.rs`, `platform/apple/post.rs` | Probe 11-16 (third); `scripts/test_apple.py split`, `pointer` |
 | Hide at launch | "Open here" without the round trip: a newly opened app the rules want in the stage in front (a rule's `current`, `[stages] new_apps_join_current`, Shift held at the launch) | The will-launch and did-launch notices; on a thread of its own every 2 ms, `hide()` on the app until it is hidden (false until the app is ready), only for a regular app, stopped once a window of it shows at full size; Apple's puts its window in the strip; one Shift press for its windows, then the app's front window focused as soon as the window list shows them in front | About 0.5 s to the hide, the window in the strip at about 0.7 s, a Shift-click and Apple's add motion (about 0.6 s); the stage in front never moves; joined about 1.7 s after the launch (live 11-16) | A window shown before the hide takes (then the round trip); the strip covered past the wait (the app is then brought in front by focus, Apple's own result, or shown again) | `platform/apple/launch_hide.rs`, `engine/apple/plan.rs` (`open_here`), `engine/apple/job.rs` | Probe 11-16 (third): hidden at about 536 ms, a single-window launch; `scripts/test_apple.py open-here` |
 | The round trip | "Open here" when the hide came too late: the stage pushed into the strip put back with the new app's | The window list to see the old stage land in the strip, then a Shift-click per window of it, then the new app's window focused | About 1 s, visible (out, then back in), longer for a stage of several windows | The strip covered; the old stage past the strip's room (brought in front by focus first, then the rest clicked back) | `engine/apple/job.rs` (`Goal::Gather`) | Probe 11-16: window at about 285 ms, the old stage in the strip at about 1 s; `scripts/test_apple.py open-here` says which route ran |
+| Restore | Puts saved stages back on Apple's (`ctl apple restore`: the stages `state-apple.json` held when the mode started; by itself after a restart, `[stages] restore_with_apple`, on by default) | The restore's own matcher (`engine/persist.rs`, `rematch_on`: the window id within a window server session, else the app, the title's fingerprint and the frame; confident matches only, a strip window's frame counting for nothing); then one goal per saved stage, the saved active one last: a window of it in front by focus (the one whose stage holds the fewest windows of the other saved stages), each window of another saved stage in front with it out by the drag, the rest in one Shift press; a stage that is so already left as it is | Per saved stage that is not so already: a focus and Apple's motion (about 0.7 s), a drag per window to take out (the pointer away about 0.9 s each), one Shift press (about 0.8 s); a visible sequence of a few seconds for a few stages. Estimated from the routes' own costs; `scripts/test_apple.py restore` prints the time | Under All at Once an app's windows saved in two stages (asked in one, said); a window of another saved stage whose app keeps another window in front (it stays, said); a window gone (skipped, said); a window on a Desktop not shown (left there, said); the strip covered (waited for, at most 4 s a step); the gate. A stage that cannot be put back is skipped and the rest go on | `engine/apple/restore.rs`, `engine/apple/job.rs` (`Goal::Stage`), `platform/apple/controller.rs` | Unit tests over the fake; `scripts/test_apple.py restore` (written, not run yet) |
 | The edge reveal | Shows a hidden strip | The pointer resting at the screen's left edge | About 2 s of the pointer at the edge | A single posted move or a quick sweep does not reveal | not built (decided 11-16: wait for the strip to show instead) | Probe 11-16 |
 
 **Apple's rule for an app's windows.** With "Show windows from an application: All at Once"
@@ -33,6 +36,14 @@ two stages: a drag of one window while another of its app stays only moves it, f
 drop point tried (the fifth probe, 11-16; the drags that worked took out another app's
 window). Send and New for such a window are refused up front with that reason, nothing
 posted (`engine/apple/plan.rs`, `apart`); under "One at a Time" they are tried (unprobed).
+
+**The restore after a restart** waits until the restore window's windows have shown: it runs
+when the mode starts in another window server session than the saved file's (a restart, a new
+login), once every saved window is matched and none came for 3 s, or the login settled (apps
+quiet for 20 s and a minute after the login), or five minutes after the start. Until then
+nothing of Apple's fresh arrangement is saved over the file. It moves windows with the posted
+routes, so it goes through the gate like every step: a person already at work holds each step
+back until a still moment, never fights a click or a key.
 
 ### The gate
 
@@ -49,6 +60,52 @@ focus within the stage in front (the newly opened app's, a raise before a drag) 
 a focus that switches stages waits for the settle. A step that ran and whose window is not
 where it should be at the next settle runs once more, then the job is given up. Input events heard within 300 ms of a gesture of ours are its own echoes: they never
 count as the user's Shift for "open here".
+
+## Apple's rules, as met
+
+| Apple's rule | Measured | What the mode does |
+|---|---|---|
+| "Show windows from an application: All at Once" keeps an app's windows in one stage | Fifth probe, 11-16: a drag of one window while another of its app stays only moves it | Send and New for such a window refused up front with the reason; the restore asks an app's windows in one saved stage (the one holding most of them) and never drags one whose app keeps another window in front |
+| The strip has room for a few stages; the rest are not listed | First probe, 11-16: a stage past the room drops out of `sm.strip` | Such stages are remembered with their last membership; switched to by focus (it needs only a known window); gathered by a focus first, then the stage left Shift-clicked back |
+| WindowManager posts no Accessibility notices | Second probe, 11-16: subscriptions taken, nothing posted | The mirror polls: a read at every event, every 50 ms in motion, every 2 s at rest |
+| Clicks mid-motion are ignored or switch back | Second probe, 11-16 | Every posted step waits for the settle |
+| Apple's orders its own strip | First probe, 11-16: the stage pushed into the strip went back to its old slot; what else orders it is not probed | Nothing reorders it (below, "Tried and rejected"); `[strip] order` does nothing in the mode |
+| Each screen has a strip of its own, each Desktop stages of its own | `sm.space` per screen in WindowManager's tree (the first probe saw one screen; a second screen's layout not measured) | One mirror per screen (below) |
+
+### Screens, Desktops and full screen
+
+- **Screens.** One mirror per screen. The window list is one for all screens, so each managed
+  window is given to a screen first (`engine/apple/screens.rs`): the screen its middle is on;
+  off every screen (a hidden strip's thumbnail), the screen it was on, else the one whose left
+  edge is nearest right of it; a thumbnail-sized window with no twin keeps the screen it was
+  on (a hidden strip's thumbnails may lie on the screen to the left). Each screen's strip is
+  the `sm.space` whose `AXFrame` is the screen's, else, when no `sm.space` has a frame, the
+  one at the screen's place (the main one first). A step acts on one screen: send and new on
+  the window's, the rest on the keyboard's (the focused window's screen, the main one with
+  none); the restore on the main one. The model and `state-apple.json` follow the main screen;
+  the others' stages show in `ctl state` (`apple.screens`). Nothing is assumed about a second
+  screen's layout: the log says what each screen's mirror sees and what WindowManager lists
+  against the screens. Not measured live.
+- **Desktops.** Each Desktop has stages of its own, and the window list cannot tell a stage of
+  another Desktop from one past the strip's room (both are listed off screen). So at a Desktop
+  change every group known goes *away*, tagged with the change: away groups are kept (the
+  model keeps them as stages), never counted by `ctl switch N` or the hotkeys, and never acted
+  on (a focus of one of their windows would show their Desktop): send, new and a merge of them
+  are refused, a gather or a restore leaves them there and says so. Once a window of a
+  change's groups is seen again, its Desktop shows again, and the rest of them are that
+  Desktop's stages past the strip's room once more.
+- **Full screen.** A window on screen covering most of a screen that says it is in full
+  screen through Accessibility marks that screen's mirror; no step runs there (a job waits at
+  most 4 s, then is given up), and asks for it are refused with the reason.
+
+## Possible next steps
+
+- **Our stages carried into Apple's when the mode starts** (an open decision): when Apple's is
+  turned on with `with_apple = "augment"`, Stage Manager's own stages (`state.json`'s Desktop
+  shown) could be put on Apple's by the restore's job, as it puts back `state-apple.json`'s.
+  Today they are set aside and come back when Apple's is turned off; Apple's starts from its
+  own arrangement. It would cost the restore's visible sequence at every turn on, and asks
+  for the owner's word: the default never goes against what Apple's shows.
 
 ## Tried and rejected
 
@@ -67,3 +124,4 @@ check red and says so.
 | A click mid-motion | Save the wait for the settle | A posted click while Apple's animates | Ignored early; at about 85 % it switched back to the stage leaving | 11-16, 27.2 | The unit tests (a click held back until settled) |
 | A single posted move to the left edge | Reveal a hidden strip | One posted pointer move | Does not reveal (about 2 s at the edge does) | 11-16, 27.2 | none |
 | An observer on WindowManager | Hear the strip change instead of polling | `AXObserver` on WindowManager (created, destroyed, layout, selected children, value, moved, resized) | Subscriptions taken, no notice ever posted: the mode polls | 11-16, 27.2 | none |
+| Reordering Apple's strip (the Dock order, `[strip] order = "dock"`) | Apple's strip in the order of the Dock, or any order of ours | Considered: an Accessibility action on a strip item (only `AXPress` and `AXAddToStage` are listed, both doing nothing); a drag of a strip item up or down (Apple's strip has no reorder: a thumbnail dragged out of it goes to the stage in front); a setting (`com.apple.WindowManager` has none for the order); a chain of focuses, each sending the stage left to a slot of Apple's choosing (the first probe saw it go back to its old slot), to permute the slots | Not built: no call reorders it, and the chain of focuses would play one visible Apple motion per swap, every time the order drifts, against Apple's own rule for its slots | 11-16, 27.2 (the probes); a finding, not a route | none |
