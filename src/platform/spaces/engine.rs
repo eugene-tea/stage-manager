@@ -528,14 +528,16 @@ impl SpacesEngine {
     }
 
     fn hide_window_only(&self, id: u32) -> bool {
-        let (_flying_guard, flying) = self.stop_stretch(id, true);
+        let (flying_guard, flying) = self.stop_stretch(id, true);
         let Some(sky) = self.sky() else { return false };
         let stage = self.state().plans.get(&id).map_or(NO_STAGE, |(stage, _)| *stage);
         let was = self.state().held.get(&id).copied();
         let now = sky.spaces_of(&[id]);
         let (desktops, shown) = Self::desktops(sky);
-        // Where it is now, else where it was when hidden before, else the Desktop shown.
-        let home = desktop_among(&now, &desktops, &shown).or(was.map(|h| h.home)).or(shown.first().copied());
+        // Where it is now, else where it was when hidden before (a window flying its last
+        // stretch: the Desktop the stretch noted), else the Desktop shown.
+        let flew_from = flying_guard.as_ref().and_then(|l| self.home_of(id, l.get(&id)));
+        let home = desktop_among(&now, &desktops, &shown).or(was.map(|h| h.home)).or(flew_from).or(shown.first().copied());
         let Some(home) = home else {
             tracing::warn!(id, spaces = ?now, "spaces engine: no Desktop known for a window to hide");
             self.state().counts.hide_misses += 1;
