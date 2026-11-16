@@ -2280,7 +2280,12 @@ impl Controller {
                 let key = f.key();
                 f.defer();
                 p.actions.retain(|a| !matches!(a, Action::Focus { id } if id.0 == key));
-                tracing::debug!(id = p.id, key, "landing: the key window flies on no Desktop and its app has a window elsewhere: its focus waits for the landing");
+                // And the flying windows' raises: the key's would do nothing, the others' would
+                // put them in front of it (`landing_focus::without_flying_raises`).
+                let child = |c: u32| ob.window(c).is_some_and(|w| w.kind == WindowKind::Child);
+                let (kept, left_out) = landing_focus::without_flying_raises(std::mem::take(&mut p.actions), f.flying(), child);
+                p.actions = kept;
+                tracing::debug!(id = p.id, key, raises_left_out = ?left_out, "landing: the key window flies on no Desktop and its app has a window elsewhere: its focus waits for the landing, the flying windows' raises too");
             }
             self.execute_batch(ob, p.actions, Batch::Unveil);
             // Where the windows really are now: their snapshots land exactly there.

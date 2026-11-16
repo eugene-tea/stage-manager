@@ -30,6 +30,35 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
+use crate::engine::model::Action;
+
+/// The unveil's raises of the windows still flying (`flying`), and of the children raised
+/// right after each (`child`), left out of `actions` when the key's focus is owed: the
+/// raises left out, in order. The key's raise reaches a window on no Desktop and does
+/// nothing, the others' do: macOS keeps one order of all windows, the hidden ones too, and
+/// the window behind came in front of the key's, which then landed under it (11-16
+/// 09:47:03: VS Code's 49841 above Terminal's 214 in that order before the switch, Terminal
+/// above after the landing until VS Code's app came in front). Left out, they land in the
+/// order their last showing left, and the focus after the landing brings the key's app in
+/// front.
+pub(super) fn without_flying_raises(actions: Vec<Action>, flying: &HashSet<u32>, child: impl Fn(u32) -> bool) -> (Vec<Action>, Vec<u32>) {
+    let mut dropped = Vec::new();
+    let mut after_dropped = false;
+    let kept = actions
+        .into_iter()
+        .filter(|a| {
+            let Action::Raise { id } = a else { return true };
+            let drop = flying.contains(&id.0) || (after_dropped && child(id.0));
+            after_dropped = drop;
+            if drop {
+                dropped.push(id.0);
+            }
+            !drop
+        })
+        .collect();
+    (kept, dropped)
+}
+
 /// The check of a batch's order ([`super::Controller::settle_raise_order`]) held for the
 /// focus a landing owes: the batch's raises in the order sent, its focus, the switch's start.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +133,11 @@ impl LandingFocus {
         }
         self.order_check = Some(check);
         None
+    }
+
+    /// The batch's windows whose stretch has not ended yet.
+    pub(super) fn flying(&self) -> &HashSet<u32> {
+        &self.flying
     }
 
     /// The order check held for the owed focus, once ([`Self::hold_order_check`]).
@@ -193,5 +227,32 @@ mod tests {
         assert_eq!(f.ended(6, 49841, true), AfterEnd::Refocus(49841));
         assert_eq!(f.take_order_check(), Some(check), "run after that focus");
         assert_eq!(f.take_order_check(), None, "once");
+    }
+
+    /// The same switch's unveil: Terminal's 214 and VS Code's 49841 fly, the focus owed; their
+    /// raises are left out, a sheet raised after Terminal's with them, a window shown at once
+    /// (no stretch) keeps its raise, and so do the frames.
+    #[test]
+    fn an_owed_focus_leaves_out_the_raises_of_the_windows_still_flying() {
+        use crate::engine::model::WindowId as W;
+        use crate::engine::geometry::Rect;
+        let frame = Rect::new(0.0, 0.0, 100.0, 100.0);
+        let batch = vec![
+            Action::SetFrame { id: W(214), frame },
+            Action::Raise { id: W(7) },
+            Action::Raise { id: W(214) },
+            Action::Raise { id: W(900) },
+            Action::Raise { id: W(49841) },
+            Action::Raise { id: W(901) },
+        ];
+        let flying: HashSet<u32> = [214, 49841].into();
+        let child = |id: u32| id >= 900;
+        let (kept, dropped) = without_flying_raises(batch, &flying, child);
+        assert_eq!(dropped, [214, 900, 49841, 901]);
+        assert_eq!(kept, [Action::SetFrame { id: W(214), frame }, Action::Raise { id: W(7) }]);
+        // A child after a window that does not fly keeps its raise.
+        let (kept, dropped) = without_flying_raises(vec![Action::Raise { id: W(7) }, Action::Raise { id: W(900) }], &flying, child);
+        assert!(dropped.is_empty());
+        assert_eq!(kept.len(), 2);
     }
 }
