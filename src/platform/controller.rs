@@ -2296,8 +2296,16 @@ impl Controller {
                 self.present();
             }
             // The strip has its note: now the order its card shows (`raise_order`), unless the
-            // user clicked since the switch began (this flush may be the owner's next click's).
-            self.settle_raise_order(ob, &raises, focus, since);
+            // user clicked since the switch began (this flush may be the owner's next click's);
+            // with the focus owed, right after that focus instead (`landing_focus`).
+            let check = landing_focus::OrderCheck { raises, focus, since };
+            let check = match self.landing_focus.as_mut() {
+                Some(f) => f.hold_order_check(check),
+                None => Some(check),
+            };
+            if let Some(c) = check {
+                self.settle_raise_order(ob, &c.raises, c.focus, c.since);
+            }
         }
     }
 
@@ -2323,6 +2331,7 @@ impl Controller {
             }
             landing_focus::AfterEnd::Refocus(key) => key,
         };
+        let check = f.take_order_check();
         self.landing_focus = None;
         let in_front = self.model.as_ref().is_some_and(|m| m.stage_of(WindowId(key)).is_some_and(|s| m.stage_in_front(s)));
         let Some(w) = ob.window(key).filter(|_| in_front) else {
@@ -2336,6 +2345,10 @@ impl Controller {
         match ax_focus(&element, w.pid) {
             Ok(()) => tracing::debug!(id, key, pid = w.pid, "landing: the window is on its Desktop; the switch's focus again, so its app comes in front"),
             Err(e) => tracing::debug!(id, key, pid = w.pid, "landing: the focus again failed: {e}"),
+        }
+        // The batch's order check held for this focus, now that the key's app comes in front.
+        if let Some(c) = check {
+            self.settle_raise_order(ob, &c.raises, c.focus, c.since);
         }
     }
 

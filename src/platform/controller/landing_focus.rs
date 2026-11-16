@@ -19,8 +19,25 @@
 //! when the key window flies and its app has a window elsewhere, the unveil leaves its
 //! focus out ([`LandingFocus::defer`]) and only the focus after the landing runs, owed even
 //! when no stretch landed.
+//!
+//! With the focus owed, the check of the batch's order ([`super::raise_order`]) waits for it
+//! too ([`LandingFocus::hold_order_check`]): the key's app comes in front only with that
+//! focus, so before it the check finds the windows of the other apps in front of the key's
+//! and raises the key's again, holding the WM thread while it watches, and the focus with
+//! it (11-16 09:23:16, VS Code's 49841 and Terminal's 214: Terminal in front for ~160 ms
+//! after the landing, until the check's raise; the focus at 16.824, 170 ms after it).
 
 use std::collections::HashSet;
+use std::time::Instant;
+
+/// The check of a batch's order ([`super::Controller::settle_raise_order`]) held for the
+/// focus a landing owes: the batch's raises in the order sent, its focus, the switch's start.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OrderCheck {
+    pub(super) raises: Vec<u32>,
+    pub(super) focus: Option<u32>,
+    pub(super) since: Instant,
+}
 
 /// The focus a switch owes its windows that are still flying their last stretch.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,6 +53,8 @@ pub(super) struct LandingFocus {
     /// The unveil left the focus out ([`Self::defer`]): it runs once the last stretch ended,
     /// landed or not.
     owed: bool,
+    /// The batch's order check, held for the owed focus ([`Self::hold_order_check`]).
+    order_check: Option<OrderCheck>,
 }
 
 /// What a stretch's end leaves of a [`LandingFocus`].
@@ -58,7 +77,7 @@ impl LandingFocus {
     pub(super) fn after_unveil(switch: u64, key: Option<u32>, asked: impl IntoIterator<Item = u32>, stretching: &HashSet<u32>) -> Option<Self> {
         let key = key?;
         let flying: HashSet<u32> = asked.into_iter().filter(|id| stretching.contains(id)).collect();
-        (!flying.is_empty()).then_some(Self { switch, key, flying, landed: false, owed: false })
+        (!flying.is_empty()).then_some(Self { switch, key, flying, landed: false, owed: false, order_check: None })
     }
 
     /// The window the switch focuses.
@@ -75,6 +94,21 @@ impl LandingFocus {
     /// nothing else focuses it before.
     pub(super) fn owes(&self, key: u32) -> bool {
         self.owed && self.key == key
+    }
+
+    /// The batch's order check `check`: given back to run now, or kept (None) when the focus
+    /// is owed, to run right after it ([`Self::take_order_check`]).
+    pub(super) fn hold_order_check(&mut self, check: OrderCheck) -> Option<OrderCheck> {
+        if !self.owed {
+            return Some(check);
+        }
+        self.order_check = Some(check);
+        None
+    }
+
+    /// The order check held for the owed focus, once ([`Self::hold_order_check`]).
+    pub(super) fn take_order_check(&mut self) -> Option<OrderCheck> {
+        self.order_check.take()
     }
 
     /// Window `window`'s stretch in transition `switch` ended, on its Desktop when `landed`.
@@ -141,5 +175,23 @@ mod tests {
         assert_eq!(f.key(), 240);
         assert_eq!(f.ended(37, 214, false), AfterEnd::Waiting);
         assert_eq!(f.ended(37, 240, false), AfterEnd::Refocus(240), "owed though none landed");
+    }
+
+    /// The owner's card click of 11-16 09:23:15.831: VS Code's 49841 (the key, in front) and
+    /// Terminal's 214 fly, the focus owed. The batch's order check waits for that focus; with
+    /// the focus run at the unveil, it runs at once as before.
+    #[test]
+    fn the_order_check_waits_for_an_owed_focus() {
+        let stretching: HashSet<u32> = [214, 49841].into();
+        let check = OrderCheck { raises: vec![214, 49841], focus: Some(49841), since: Instant::now() };
+        let mut f = LandingFocus::after_unveil(6, Some(49841), [214, 49841], &stretching).expect("both fly");
+        assert_eq!(f.hold_order_check(check.clone()), Some(check.clone()), "the focus ran at the unveil: the check runs now");
+        assert_eq!(f.take_order_check(), None);
+        f.defer();
+        assert_eq!(f.hold_order_check(check.clone()), None, "held for the owed focus");
+        assert_eq!(f.ended(6, 214, true), AfterEnd::Waiting);
+        assert_eq!(f.ended(6, 49841, true), AfterEnd::Refocus(49841));
+        assert_eq!(f.take_order_check(), Some(check), "run after that focus");
+        assert_eq!(f.take_order_check(), None, "once");
     }
 }
