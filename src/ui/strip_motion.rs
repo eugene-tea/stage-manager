@@ -838,7 +838,10 @@ impl Strip {
         // behind a real window goes in a panel under it; flying the last stretch live, each in
         // a panel of its own, ordered again as windows take over.
         let landing = landing_math::Landing::current();
-        let live = landing.live().filter(|_| crossfade.is_none() && t.late.is_empty() && crate::platform::window_engine::current().lands_live());
+        let live = landing.live().filter(|_| crossfade.is_none() && t.late.is_empty() && !t.pictures_land && crate::platform::window_engine::current().lands_live());
+        if t.pictures_land && landing.live().is_some() {
+            tracing::debug!(id = t.id, "transition: the windows land behind their pictures: the key's focus waits for its show, the stage holds two apps");
+        }
         let ordered = landing.ordered() && crossfade.is_none();
         let incoming_ids: Vec<u32> = t.incoming.iter().map(|w| w.window.id).collect();
         let anchor_of: HashMap<u32, Option<u32>> = if ordered { landing_math::anchors(&t.order, &t.in_place, &incoming_ids).into_iter().collect() } else { HashMap::new() };

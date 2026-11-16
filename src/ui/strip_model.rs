@@ -144,6 +144,10 @@ pub struct Transition {
     /// The arriving stage's windows shown in place already (not in [`Self::incoming`]): a
     /// picture of a window that ends behind one passes under it.
     pub in_place: Vec<u32>,
+    /// The windows land behind their pictures even under the live landing (none flies its
+    /// last stretch itself): the key's focus waits for its window's show and the stage holds
+    /// windows of two apps or more ([`crate::platform::controller`]'s `pictures_land`).
+    pub pictures_land: bool,
 }
 
 /// A minimized window on its way to the strip ([`Transition::minimized`]).

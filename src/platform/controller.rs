@@ -2139,6 +2139,9 @@ impl Controller {
         t.under = self.window_in_place(&arriving, &outgoing, &actions, &list);
         (t.order, t.in_place) = self.arriving_order(&arriving);
         t.corner = corner;
+        let key_in = actions.iter().rev().find_map(|a| if let Action::Focus { id } = a { Some(id.0) } else { None });
+        let key_waits = key_in.is_some_and(|k| arriving.contains(&k) && self.engine.focus_waits_for_show(WindowId(k)));
+        t.pictures_land = pictures_land(key_waits, t.incoming.iter().map(|w| w.window.pid));
         let frames: Vec<Rect> = t.incoming.iter().map(|w| w.window.frame).collect();
         let cover = self.send_transition(ob, t, &actions, &run, cover_ms);
         if cover.outgoing {
@@ -6930,6 +6933,23 @@ fn supersedes(actions: &[Action]) -> bool {
 /// A superseded switch's held batch without its focuses: the windows still come to their
 /// frames and stack (the model counts them shown), but the keyboard is the new switch's, or
 /// where the user's click put it. Returns the batch kept and the windows whose focus went.
+/// Whether a switch's windows land behind their pictures under the live landing too
+/// ([`Transition::pictures_land`]): when the key's focus waits for its window's show
+/// (`key_waits`) and the incoming windows (their apps' `pids`) belong to two apps or more.
+/// Flying, the windows land in the order macOS keeps for all windows, the hidden ones too,
+/// and with the key's app in front only after the landing, a window of another app can land
+/// on top of the key's until then: raises sent while they fly reach only some apps' windows
+/// (VS Code's never, on no Desktop), and the order kept may be wrong already (11-16 09:51:47,
+/// Calendar's 241 above Mail's 182 while hidden, Calendar on top at the landing ~85 ms).
+/// Behind their pictures they are shown on their Desktop first, where every raise reaches
+/// them, and the pictures go once the focus has run. One app's windows come in front
+/// together with its activation: they fly.
+fn pictures_land(key_waits: bool, pids: impl IntoIterator<Item = i32>) -> bool {
+    let mut pids = pids.into_iter();
+    let Some(first) = pids.next() else { return false };
+    key_waits && pids.any(|p| p != first)
+}
+
 fn without_focus(actions: Vec<Action>) -> (Vec<Action>, Vec<u32>) {
     let mut dropped = Vec::new();
     let kept = actions
@@ -7752,6 +7772,17 @@ mod tests {
         for c in [Command::Switch(1), Command::Send(1, None), Command::New(None), Command::Reload, Command::UnparkAll] {
             assert!(ctl_lands_switch(&c), "{c:?}");
         }
+    }
+
+    #[test]
+    fn a_held_focus_with_two_apps_lands_behind_pictures() {
+        // 11-16 09:51:47: Mail's 182 (the key, Mail with a window on another Desktop) and
+        // Calendar's 241; 09:47:02 VS Code's 49841 and Terminal's 214.
+        let (mail, calendar) = (1545, 1600);
+        assert!(pictures_land(true, [calendar, mail]));
+        assert!(!pictures_land(false, [calendar, mail]), "the focus runs at once: they fly");
+        assert!(!pictures_land(true, [mail, mail]), "one app: its activation brings them together");
+        assert!(!pictures_land(true, []));
     }
 
     #[test]
