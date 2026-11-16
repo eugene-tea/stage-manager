@@ -1,8 +1,9 @@
 #!/bin/bash
 # Live check of the stand-down: Apple's Stage Manager turned on while Stage Manager runs
-# brings every parked window back and stops managing; turned off again, Stage Manager starts
-# afresh. OFF BY DEFAULT: it toggles Apple's Stage Manager on this Mac (Apple's own then
-# arranges every window on screen for a few seconds), so it runs only with
+# brings every parked window back and stops managing; turned off again, Stage Manager takes
+# back the stages it set aside, each window in its stage again. OFF BY DEFAULT: it toggles
+# Apple's Stage Manager on this Mac (Apple's own then arranges every window on screen for a
+# few seconds), so it runs only with
 # SM_TEST_TOGGLE_APPLE_SM=1, by the owner's choice. The original GloballyEnabled value is
 # restored on every exit (success, failure, Ctrl-C, kill).
 #
@@ -71,6 +72,9 @@ sleep 2
 PARKED="$("$BIN" ctl state | json 'sum(1 for w in d.get("windows", []) if w.get("parked"))')"
 [ "${PARKED:-0}" -ge 1 ] || fail "nothing parked before the toggle"
 echo "parked before: $PARKED"
+# The stages as Apple's comes on: two of the one app (a fresh start would make one).
+STAGES_BEFORE="$("$BIN" ctl state | json 'sum(1 for st in d["stages"] if st["windows"])')"
+echo "stages before: $STAGES_BEFORE"
 
 defaults write "$DOMAIN" "$KEY" -bool true
 sleep 4
@@ -84,4 +88,13 @@ defaults write "$DOMAIN" "$KEY" -bool false
 sleep 4
 "$BIN" ctl state | json 'd["ok"]' | grep -q True || fail "not managing again after Apple's went off"
 echo "resumed: managing again"
+# The stages set aside come back (11-16: they came back as one stage per app).
+for _ in $(seq 1 20); do
+  STAGES_AFTER="$("$BIN" ctl state | json 'sum(1 for st in d["stages"] if st["windows"])')"
+  [ "$STAGES_AFTER" = "$STAGES_BEFORE" ] && break
+  sleep 0.3
+done
+[ "$STAGES_AFTER" = "$STAGES_BEFORE" ] || fail "stages after Apple's went off: $STAGES_AFTER, before: $STAGES_BEFORE (one stage per app: not set aside)"
+echo "stages back: $STAGES_AFTER"
+[ ! -e "$HOME_DIR/state-stood-down.json" ] || [ -e "$HOME_DIR/state.json" ] || fail "the stages set aside were not taken back"
 echo "PASS"
