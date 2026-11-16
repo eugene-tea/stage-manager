@@ -400,14 +400,18 @@ impl EngineKind {
     /// True when a window at `frame` is still where this engine hid it, out of anyone's
     /// reach, as far as what is `known` of the window allows: what the guardian's watch and
     /// every bring-back's last look wait for. The Corner engine: in a park zone of `displays`
-    /// and not meaningfully on another display ([`is_stranded`]). The Spaces engine: never by
-    /// its frame.
+    /// and not meaningfully on another display ([`is_stranded`]). The Spaces engine: a window
+    /// it registered, by the same rule (a window parked for ⌘Tab's lend waits at the park
+    /// corner as the Corner engine parks, and stays there when the app ends, review A-8);
+    /// never any other window by its frame.
     pub fn stranded(self, frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
         match self {
             Self::Corner => is_stranded(frame, displays, known),
             // No frame says a window is in a stage Space, and none is left in one once its
             // app is gone: the window server ends the Spaces with the process that made them.
-            Self::Spaces => false,
+            // A lend's park is the one place a hidden window of this engine has a frame of
+            // its own, and that window is registered (the model counts it hidden).
+            Self::Spaces => known == Known::Registered && is_stranded(frame, displays, known),
         }
     }
 

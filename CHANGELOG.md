@@ -68,6 +68,26 @@
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), Quit is answered in
   its usual time after a stage change whose window was shown before it could fly its last stretch
   itself; the app waited eight seconds and then brought the windows back another way.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a window brought
+  forward with ⌘Tab no longer stays at the display's corner when its app was busy as its
+  stage came in front: its move to its place is tried again until it is taken. A window
+  the app switcher passed over whose app moved it to the corner late is put back as well.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a window brought in
+  by a stage change on a second display ends on that display's Desktop. It was put on the
+  first display's Desktop as its flight ended.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), two apps opened at
+  the same moment (at login, a restored session) no longer leave a new window of one unseen
+  until Stage Manager quits, and a just-opened app's first window no longer shows up to ten
+  seconds late now and then.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a hidden window the
+  change to the park corner mid-run could not bring back at once is tried again every two
+  seconds; it stayed unseen until Stage Manager quit.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a window waiting at
+  the display's corner for the app switcher is brought back when Stage Manager ends
+  unexpectedly, as with the park corner; it stayed there until the next launch.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a press on the Dock
+  that is no click (or whose release went unseen) while the app switcher shows no longer
+  undoes what ⌘Tab made ready: the app chosen took the screen to its other Desktop.
 
 ## 1.8.5 — 2026-11-12
 

@@ -192,11 +192,17 @@ impl Controller {
             EngineKind::Spaces => {
                 // The engine brings the window out of its stage Space before it asks the app
                 // for the frame. Still in the Space: the engine owes the show and the tick
-                // tries it again ([`Self::retry_shows`]). Out of it: the window shows where
-                // it was, the frame not taken; nothing is owed and nothing kept registered.
-                let _ = entry;
-                let owed = crate::platform::spaces::engine::shared().owed().contains(&id);
-                tracing::warn!(id, owed, "a show failed: still hidden and tried again when owed, else shown where it was");
+                // tries it again ([`Self::retry_shows`]). Out of it away from the frame (a
+                // lend's park, a minimize's dive): the engine owes the frame and tries it
+                // again; the entry stays registered meanwhile, so a crash or a quit finds the
+                // window (one still in its Space needs none: the Space ends with the process).
+                // Out of it at its own frame: shown where it was, nothing is owed.
+                let spaces = crate::platform::spaces::engine::shared();
+                let owed = spaces.owed().contains(&id);
+                if spaces.owes_frame(id) {
+                    self.spaces.frames_owed.insert(id, entry);
+                }
+                tracing::warn!(id, owed, "a show failed: tried again when owed (still hidden, or out away from its frame), else shown where it was");
             }
         }
     }
@@ -232,7 +238,11 @@ impl Controller {
     pub(super) fn kept_entries(&self) -> Vec<(u32, ParkedEntry)> {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.unrestored.iter().map(|(id, u)| (*id, u.entry.clone())).collect(),
-            EngineKind::Spaces => Vec::new(),
+            // The windows left at a lend's park whose show's frame is still owed.
+            EngineKind::Spaces => {
+                let owed = crate::platform::spaces::engine::shared().owed();
+                self.spaces.frames_owed.iter().filter(|(id, _)| owed.contains(id)).map(|(id, e)| (*id, e.clone())).collect()
+            }
         }
     }
 
@@ -248,7 +258,9 @@ impl Controller {
                 // the model no longer counts must not stay in one: let out, where it was.
                 let _ = (ob, why);
                 let ids: Vec<u32> = kept.into_iter().map(|(id, _)| id).collect();
-                crate::platform::spaces::engine::shared().release(&ids, "the model let them go");
+                let spaces = crate::platform::spaces::engine::shared();
+                spaces.release(&ids, "the model let them go");
+                spaces.forget_frames(&ids);
             }
         }
     }
@@ -271,8 +283,9 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.retry_unrestored(ob, force),
             EngineKind::Spaces => {
-                let _ = (ob, force);
-                crate::platform::spaces::engine::shared().retry_owed();
+                let _ = ob;
+                let owed = crate::platform::spaces::engine::shared().retry_owed(force, &mut self.busy_apps.borrow_mut());
+                self.spaces.frames_owed.retain(|id, _| owed.contains(id));
             }
         }
     }
@@ -301,7 +314,9 @@ impl Controller {
             EngineKind::Corner => self.account_unrestored(ob),
             EngineKind::Spaces => {
                 let _ = ob;
-                crate::platform::spaces::engine::shared().retry_owed().len()
+                let owed = crate::platform::spaces::engine::shared().retry_owed(true, &mut self.busy_apps.borrow_mut());
+                self.spaces.frames_owed.retain(|id, _| owed.contains(id));
+                owed.len()
             }
         }
     }

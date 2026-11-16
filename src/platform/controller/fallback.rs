@@ -3,7 +3,9 @@
 //! brings every window it hid back, and the Corner engine runs for the rest of the run: the
 //! process's engine, the controller's, the model's answers and the parked file all change
 //! together, then the windows the model counts hidden are hidden again the Corner way. The
-//! next launch probes again.
+//! next launch probes again. What the engine's bring-back could not bring out is swept again
+//! from the tick until nothing is left
+//! ([`SpacesEngine::sweep_left_behind`](crate::platform::spaces::engine::SpacesEngine::sweep_left_behind)).
 
 use super::{Controller, spaces::SpacesUpkeep};
 use crate::engine::model::{Action, Home, SpaceId};
@@ -16,6 +18,9 @@ impl Controller {
     /// a switch's windows still wait behind their pictures (the switch ends first, within its
     /// own time limit) or a quit is under way (its bring-back covers every window).
     pub(super) fn check_engine(&mut self, ob: &Observer) {
+        if self.spaces.left_behind && !safety::quit_requested() {
+            self.spaces.left_behind = crate::platform::spaces::engine::shared().sweep_left_behind();
+        }
         if self.engine.kind() == EngineKind::Corner || safety::quit_requested() || self.phase.switching().is_some() {
             return;
         }
@@ -35,6 +40,9 @@ impl Controller {
         window_engine::fall_back(why);
         self.engine = window_engine::current();
         self.spaces = SpacesUpkeep::new();
+        // Anything still in a stage Space (or a window a launch's watch holds now) is swept
+        // again from the tick ([`Self::check_engine`]).
+        self.spaces.left_behind = from == EngineKind::Spaces;
         let Some(m) = self.model.as_mut() else {
             safety::rewrite_parked_file();
             tracing::warn!(back, "window engine: the Corner engine runs now (no stages yet)");

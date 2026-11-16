@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::ffi::{ALL_SPACES_MASK, Route, Sky};
+use crate::engine::busy_apps::{Backoff, BusyApps, Reply};
 use crate::engine::engine_choice::Health;
 use crate::engine::geometry::Rect;
 use crate::engine::leftovers;
@@ -75,6 +76,16 @@ const PARK_AX_SECONDS: f32 = 0.1;
 /// moved (the app moves it as it answers; a frame or so).
 const PARK_READ_BACK: Duration = Duration::from_millis(20);
 
+/// How long a bring-back of the panic or abort paths waits for the state's lock before it
+/// goes on without the sweep ([`SpacesEngine::state_free_within`]): the state is held for a
+/// map edit at a time, so longer means its holder cannot let it go (the panicking thread
+/// itself).
+const STATE_WAIT: Duration = Duration::from_millis(100);
+
+/// How often what this engine left in its stage Spaces is swept again once the Corner engine
+/// runs instead ([`SpacesEngine::sweep_left_behind`]).
+const AFTERLIFE_EVERY: Duration = Duration::from_secs(2);
+
 /// The stage key of a window the model names no stage for (a child read before its parent).
 const NO_STAGE: u64 = 0;
 
@@ -89,6 +100,28 @@ struct Held {
     space: u64,
     /// The Desktop it was on when hidden: where a show puts it back.
     home: u64,
+}
+
+/// A window parked for a lend ([`State::parked`]).
+#[derive(Clone)]
+struct ParkedLend {
+    /// Where it parked, and the frame it had before.
+    park: Parked,
+    /// The element its moves go through.
+    element: AxElement,
+}
+
+/// A frame a show owes a window ([`State::frames`]).
+#[derive(Clone)]
+struct OwedFrame {
+    /// The frame the show asked, the model's.
+    frame: Rect,
+    /// The window's element.
+    element: AxElement,
+    /// Its app (read from the element, no message sent), for the busy apps' pace.
+    pid: Option<i32>,
+    /// When it is tried again: backing off while its app does not answer.
+    backoff: Backoff,
 }
 
 /// What the engine counts, for `ctl state` and the checks while running.
@@ -165,6 +198,11 @@ struct State {
     plans: BTreeMap<u32, (u64, Rect)>,
     /// Windows whose show left them in a stage Space.
     owed: BTreeSet<u32>,
+    /// Windows a show brought out of their stage Space away from the frame it asked (parked
+    /// for ⌘Tab's lend, or moved for a minimize's dive), where they did not take it (their
+    /// app busy for that one call): the model counts them shown at that frame, so it is owed
+    /// and tried again ([`SpacesEngine::retry_owed`], review A-1, B-1).
+    frames: BTreeMap<u32, OwedFrame>,
     /// Windows of a just-opened app waiting in the Space for new windows, never shown yet
     /// ([`SpacesEngine::hold_new`]); each also in `held`.
     new: BTreeSet<u32>,
@@ -173,19 +211,34 @@ struct State {
     health: Health,
     /// The calls a test run makes fail.
     fail: FailMode,
-    /// Stage Spaces of another process, as its parked file names them, each with its
-    /// Desktop (the guardian's: [`WindowEngine::assume`]); swept with this engine's own.
-    foreign: BTreeMap<u64, u64>,
     /// What the incoming windows' last stretches counted ([`landing`]).
     stretch: landing::StretchCounts,
     /// Windows put on their Desktop while still counted hidden ([`SpacesEngine::lend_window`]):
     /// each also in `held`, with the stage Space it goes back to.
     lent: BTreeSet<u32>,
+    /// When what the engine left behind after a fallback was last swept
+    /// ([`SpacesEngine::sweep_left_behind`]).
+    afterlife: Option<Instant>,
     /// Windows parked for a lend whose frame is not set again yet (round cmdtab-park,
-    /// [`lend_park`]), with the element their moves go through: lent and parked, or taken back
-    /// with the restore owed. Their move notices are not the model's
-    /// ([`WindowEngine::parked_lend`]); a hide, a show or a sweep sets the frame again.
-    parked: BTreeMap<u32, (Parked, AxElement)>,
+    /// [`lend_park`]): lent and parked, taken back with the restore owed, or shown with the
+    /// show's frame owed. Their move notices are not the model's
+    /// ([`WindowEngine::parked_lend`]); a hide, a show, a sweep or the retry of a show's frame
+    /// sets the frame again.
+    parked: BTreeMap<u32, ParkedLend>,
+}
+
+impl State {
+    /// Every window is out of the stage Spaces (a bring-back that ends them): nothing is
+    /// held, lent, waiting as new or owed any more, also for windows the sweep found in no
+    /// stage Space (lent, minimized), whose entries would outlive the Spaces (review A-11).
+    /// The Spaces to end.
+    fn end_all(&mut self) -> Vec<u64> {
+        self.held.clear();
+        self.lent.clear();
+        self.new.clear();
+        self.owed.clear();
+        std::mem::take(&mut self.stages).into_values().collect()
+    }
 }
 
 /// One window's lend and take back calls ([`LendSteps`]): the window server's add and read
@@ -324,6 +377,14 @@ fn hidden_in(now: &[u64], space: u64) -> bool {
     now == [space]
 }
 
+/// True when a window held in `h`'s stage Space is on a Space (`now`) but no longer hidden
+/// there alone: something but this engine took it out (a stretch's last step, an
+/// un-minimize, a Space ended under it), and it shows. A window on no Space (minimized,
+/// ordered out) is not.
+fn escaped(now: &[u64], h: Held) -> bool {
+    !now.is_empty() && !hidden_in(now, h.space)
+}
+
 /// True when `now` (a window's Spaces) names none of `ours`: the window is out of every
 /// stage Space.
 fn out_of(now: &[u64], ours: &BTreeSet<u64>) -> bool {
@@ -361,6 +422,31 @@ impl SpacesEngine {
         self.state.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// True when the state's lock is free, or freed within `wait`: false when it stays held
+    /// (by the thread asking too: a panic hook runs on the panicking thread, before its
+    /// guards are dropped, and a blocking lock there never returns, review A-13, B-5).
+    fn state_free_within(&self, wait: Duration) -> bool {
+        let by = Instant::now() + wait;
+        loop {
+            match self.state.try_lock() {
+                Ok(_) | Err(std::sync::TryLockError::Poisoned(_)) => return true,
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < by => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::TryLockError::WouldBlock) => return false,
+            }
+        }
+    }
+
+    /// [`Self::sweep`] for the panic and abort paths: `None` without a sweep when the state
+    /// stays busy past [`STATE_WAIT`]. The Spaces are classic: the window server puts their
+    /// windows back once the process ends, which follows.
+    fn sweep_bounded(&self, why: &str, end: bool) -> Option<Report> {
+        if !self.state_free_within(STATE_WAIT) {
+            tracing::error!(why, wait_ms = STATE_WAIT.as_millis() as u64, "spaces engine: the engine's state stayed busy; no sweep (the stage Spaces end with the process)");
+            return None;
+        }
+        Some(self.sweep(why, end))
+    }
+
     /// SkyLight's calls, opened once; `None` (said once) when it did not load.
     fn sky(&self) -> Option<&Sky> {
         self.sky
@@ -378,16 +464,14 @@ impl SpacesEngine {
             .as_ref()
     }
 
-    /// Every stage Space this engine made, and those another process's file named.
+    /// Every stage Space this engine made.
     fn ours(&self) -> BTreeSet<u64> {
-        let st = self.state();
-        st.stages.values().copied().chain(st.foreign.keys().copied()).collect()
+        self.state().stages.values().copied().collect()
     }
 
-    /// Each stage Space (this engine's and another process's) with its Desktop.
+    /// Each stage Space with its Desktop.
     fn homes(&self) -> BTreeMap<u64, u64> {
-        let st = self.state();
-        st.stages.iter().map(|((desktop, _), space)| (*space, *desktop)).chain(st.foreign.iter().map(|(s, d)| (*s, *d))).collect()
+        self.state().stages.iter().map(|((desktop, _), space)| (*space, *desktop)).collect()
     }
 
     /// True when the test run makes this `call` fail; a one-call mode is used up by it.
@@ -452,16 +536,23 @@ impl SpacesEngine {
         (all, shown)
     }
 
-    /// The Space of `stage` on Desktop `home`, made now when there is none.
+    /// The Space of `stage` on Desktop `home`, made now when there is none. Made with the
+    /// state's lock let go (a window-server call), so two launch watches may make one for the
+    /// same key at once: the first noted is kept and the other ended ([`Self::claim_stage`]).
     fn stage_space(&self, sky: &Sky, home: u64, stage: u64) -> Option<u64> {
         if let Some(space) = self.state().stages.get(&(home, stage)) {
             return Some(*space);
         }
         match sky.create(Route::Classic, false) {
             Ok(space) if space != 0 => {
-                tracing::debug!(space, desktop = home, stage, "spaces engine: a Space made for a stage");
-                self.state().stages.insert((home, stage), space);
-                Some(space)
+                let (kept, lost) = self.claim_stage((home, stage), space);
+                if lost {
+                    let _ = sky.destroy(Route::Classic, space);
+                    tracing::debug!(space, kept, desktop = home, stage, "spaces engine: a stage's Space made twice at once: the later one ended");
+                } else {
+                    tracing::debug!(space, desktop = home, stage, "spaces engine: a Space made for a stage");
+                }
+                Some(kept)
             }
             Ok(_) => {
                 tracing::warn!(desktop = home, stage, "spaces engine: the window server made no Space");
@@ -474,6 +565,14 @@ impl SpacesEngine {
                 None
             }
         }
+    }
+
+    /// Space `made` noted for (Desktop, stage) `key` unless another was noted meanwhile: the
+    /// Space kept, and true when `made` lost (the caller ends it: a Space no map names holds
+    /// windows nothing answers for, review A-3).
+    fn claim_stage(&self, key: (u64, u64), made: u64) -> (u64, bool) {
+        let kept = *self.state().stages.entry(key).or_insert(made);
+        (kept, kept != made)
     }
 
     /// Reads window `id`'s Spaces until `done` says so or [`READ_BACK`] is over; whether it
@@ -508,14 +607,16 @@ impl SpacesEngine {
     }
 
     fn hide_window_only(&self, id: u32) -> bool {
-        let (_flying_guard, flying) = self.stop_stretch(id, true);
+        let (flying_guard, flying) = self.stop_stretch(id, true);
         let Some(sky) = self.sky() else { return false };
         let stage = self.state().plans.get(&id).map_or(NO_STAGE, |(stage, _)| *stage);
         let was = self.state().held.get(&id).copied();
         let now = sky.spaces_of(&[id]);
         let (desktops, shown) = Self::desktops(sky);
-        // Where it is now, else where it was when hidden before, else the Desktop shown.
-        let home = desktop_among(&now, &desktops, &shown).or(was.map(|h| h.home)).or(shown.first().copied());
+        // Where it is now, else where it was when hidden before (a window flying its last
+        // stretch: the Desktop the stretch noted), else the Desktop shown.
+        let flew_from = flying_guard.as_ref().and_then(|l| self.home_of(id, l.get(&id)));
+        let home = desktop_among(&now, &desktops, &shown).or(was.map(|h| h.home)).or(flew_from).or(shown.first().copied());
         let Some(home) = home else {
             tracing::warn!(id, spaces = ?now, "spaces engine: no Desktop known for a window to hide");
             self.state().counts.hide_misses += 1;
@@ -567,6 +668,8 @@ impl SpacesEngine {
             if st.new.remove(&id) {
                 st.counts.new_placed += 1;
             }
+            // Hidden again: a show's frame is owed no longer.
+            st.frames.remove(&id);
         }
         ok
     }
@@ -589,7 +692,7 @@ impl SpacesEngine {
     /// hidden, or shown now); forgotten once the window server lists it there. `why` for the
     /// log.
     fn restore_parked(&self, id: u32, why: &str) {
-        let Some((parked, element)) = self.state().parked.get(&id).cloned() else { return };
+        let Some((parked, element)) = self.state().parked.get(&id).map(|p| (p.park, p.element.clone())) else { return };
         let Some(sky) = self.sky() else { return };
         let ours = BTreeSet::new();
         let held = Held { space: 0, home: 0 };
@@ -736,7 +839,7 @@ impl SpacesEngine {
             st.counts.lent += 1;
         }
         if let (Some(p), Some(e)) = (done.owed, element) {
-            st.parked.insert(id, (p, e));
+            st.parked.insert(id, ParkedLend { park: p, element: e });
         }
         Lend { home: done.home, parked: done.parked, park_ms }
     }
@@ -752,7 +855,7 @@ impl SpacesEngine {
             if !st.lent.remove(&id) {
                 return Back::default();
             }
-            (st.held.get(&id).copied(), st.parked.get(&id).cloned())
+            (st.held.get(&id).copied(), st.parked.get(&id).map(|p| (p.park, p.element.clone())))
         };
         let Some(held) = held else { return Back::default() };
         let Some(sky) = self.sky() else { return Back::default() };
@@ -792,8 +895,21 @@ impl SpacesEngine {
         back
     }
 
-    /// The shows that left a window hidden, tried again; the windows still owed one.
-    pub fn retry_owed(&self) -> BTreeSet<u32> {
+    /// True when a show owes window `id` its frame ([`State::frames`]).
+    pub fn owes_frame(&self, id: u32) -> bool {
+        self.state().frames.contains_key(&id)
+    }
+
+    /// Forgets the frames owed to windows `ids` (the model no longer has them).
+    pub fn forget_frames(&self, ids: &[u32]) {
+        self.state().frames.retain(|id, _| !ids.contains(id));
+    }
+
+    /// The shows that left a window hidden, tried again, and the frames shows owe
+    /// ([`State::frames`], each at its [`Backoff`]'s pace, never while its app is in `busy`;
+    /// all of them once with `force`: a quit); the windows still owed one. `busy`: the
+    /// controller's apps that did not answer, which these tries add to.
+    pub fn retry_owed(&self, force: bool, busy: &mut BusyApps) -> BTreeSet<u32> {
         let owed: Vec<u32> = self.state().owed.iter().copied().collect();
         for id in owed {
             if windows::describe(&[id]).is_empty() {
@@ -805,12 +921,58 @@ impl SpacesEngine {
                 tracing::info!(id, "spaces engine: a window owed its show is back");
             }
         }
+        self.retry_frames(force, busy, Instant::now(), |id| !windows::describe(&[id]).is_empty(), |f| f.element.set_frame(f.frame));
         self.owed()
     }
 
-    /// The windows whose show left them hidden.
+    /// The frames shows owe, set again through each window's element (`set`) when due
+    /// ([`Backoff::due`]); forgotten once taken (a lend's park with it), or when the window is
+    /// no longer `listed`.
+    fn retry_frames(&self, force: bool, busy: &mut BusyApps, now: Instant, listed: impl Fn(u32) -> bool, set: impl Fn(&OwedFrame) -> AxResult<()>) {
+        let due: Vec<(u32, OwedFrame)> = {
+            let mut st = self.state();
+            let held: BTreeSet<u32> = st.held.keys().copied().collect();
+            st.frames
+                .iter_mut()
+                .filter_map(|(id, f)| (!held.contains(id) && f.backoff.due(f.pid, busy, force, now)).then(|| (*id, f.clone())))
+                .collect()
+        };
+        for (id, owed) in due {
+            if !listed(id) {
+                let mut st = self.state();
+                st.frames.remove(&id);
+                st.parked.remove(&id);
+                tracing::debug!(id, "spaces engine: a window owed the frame its show asked is gone: nothing is owed");
+                continue;
+            }
+            let framed = set(&owed);
+            let mut st = self.state();
+            match framed {
+                Ok(()) => {
+                    st.frames.remove(&id);
+                    st.parked.remove(&id);
+                    if let Some(pid) = owed.pid {
+                        busy.note(pid, Reply::No, now);
+                    }
+                    tracing::info!(id, "spaces engine: a window took the frame its show asked, tried again");
+                }
+                Err(e) => {
+                    let reply = if e == AxError::CANNOT_COMPLETE { Reply::TimedOut } else { Reply::CannotTell };
+                    if let Some(f) = st.frames.get_mut(&id) {
+                        f.backoff.failed(owed.pid, reply, busy, now);
+                    }
+                    let wait_s = st.frames.get(&id).map(|f| f.backoff.wait.as_secs());
+                    tracing::debug!(id, ?reply, ?wait_s, "spaces engine: a window still does not take the frame its show asked: {e}");
+                }
+            }
+        }
+    }
+
+    /// The windows still owed a show: their show left them hidden, or brought them out
+    /// away from its frame, which they did not take ([`State::frames`]).
     pub fn owed(&self) -> BTreeSet<u32> {
-        self.state().owed.clone()
+        let st = self.state();
+        st.owed.iter().chain(st.frames.keys()).copied().collect()
     }
 
     /// Hides window `id` again by the tick's look: the model counts it hidden and the engine
@@ -822,17 +984,27 @@ impl SpacesEngine {
 
     /// Forgets what is kept for windows that are gone (`alive`: the windows the window
     /// server still lists) and ends the Spaces of stages that are gone (`stage_lives`) once
-    /// no window is in them.
+    /// no window is in them. A launch's watch holds new windows from its own thread, so one
+    /// held after `alive` was read is not in it: a new window is forgotten only when the
+    /// window server, asked now, does not list it either (review A-12: forgotten, it showed
+    /// up to the next tidy late).
     pub fn tidy(&self, alive: &HashSet<u32>, stage_lives: impl Fn(u64) -> bool) {
+        let unlisted: BTreeSet<u32> = self.state().new.iter().copied().filter(|id| !alive.contains(id)).collect();
+        let listed: HashSet<u32> =
+            if unlisted.is_empty() { HashSet::new() } else { windows::describe(&unlisted.iter().copied().collect::<Vec<_>>()).iter().map(|w| w.id).collect() };
         let empty: Vec<((u64, u64), u64)> = {
             let mut st = self.state();
-            st.held.retain(|id, _| alive.contains(id));
-            st.plans.retain(|id, _| alive.contains(id));
-            st.owed.retain(|id| alive.contains(id));
-            st.new.retain(|id| alive.contains(id));
+            // New windows held since the look above are kept as they are.
+            let young: BTreeSet<u32> = st.new.iter().copied().filter(|id| !unlisted.contains(id)).collect();
+            let keep = |id: &u32| alive.contains(id) || listed.contains(id) || young.contains(id);
+            st.held.retain(|id, _| keep(id));
+            st.plans.retain(|id, _| keep(id));
+            st.owed.retain(|id| keep(id));
+            st.frames.retain(|id, _| keep(id));
+            st.new.retain(|id| keep(id));
             let held: BTreeSet<u32> = st.held.keys().copied().collect();
             st.lent.retain(|id| held.contains(id));
-            st.parked.retain(|id, _| alive.contains(id));
+            st.parked.retain(|id, _| keep(id));
             let used: BTreeSet<u64> = st.held.values().map(|h| h.space).collect();
             // The Space where new windows wait stays (a launch's watch may be putting a window
             // into it now); it ends with the others at a bring-back.
@@ -946,8 +1118,7 @@ impl SpacesEngine {
             left.retain(|id| !rescued.contains(id));
         }
         if end && left.is_empty() {
-            self.state().foreign.clear();
-            let spaces: Vec<u64> = std::mem::take(&mut self.state().stages).into_values().collect();
+            let spaces = self.state().end_all();
             for space in &spaces {
                 let _ = sky.destroy(Route::Classic, *space);
             }
@@ -979,6 +1150,38 @@ impl SpacesEngine {
                 st.owed.remove(&id);
                 out.push(id);
             }
+        }
+        out
+    }
+
+    /// The windows held on a Desktop shown that the window server no longer lists hidden in
+    /// their stage Space ([`escaped`]), forgotten as held, so that the tick, which compares
+    /// what the model counts hidden with what this engine holds, hides them again (review
+    /// A-7: `held` is only what the engine last read back). Windows lent, waiting as new or
+    /// flying their last stretch are where they are on purpose. The windows forgotten.
+    pub fn forget_escaped(&self) -> Vec<u32> {
+        let held: Vec<(u32, Held)> = {
+            let st = self.state();
+            st.held.iter().filter(|(id, _)| !st.lent.contains(id) && !st.new.contains(id)).map(|(id, h)| (*id, *h)).collect()
+        };
+        if held.is_empty() {
+            return Vec::new();
+        }
+        let Some(sky) = self.sky() else { return Vec::new() };
+        let (_, shown) = Self::desktops(sky);
+        let flying = self.stretching();
+        let out: Vec<u32> = held
+            .into_iter()
+            .filter(|(id, h)| shown.contains(&h.home) && !flying.contains(id) && escaped(&sky.spaces_of(&[*id]), *h))
+            .map(|(id, _)| id)
+            .collect();
+        if !out.is_empty() {
+            let mut st = self.state();
+            for id in &out {
+                st.held.remove(id);
+            }
+            drop(st);
+            tracing::info!(windows = ?out, "spaces engine: windows held were out of their stage Space (not by this engine): no longer held");
         }
         out
     }
@@ -1035,9 +1238,53 @@ impl SpacesEngine {
         sky.active_space().filter(|s| shown.contains(s)).or(shown.first().copied())
     }
 
+    /// True while the engine may hold another app's new window: not once its checks failed
+    /// (the controller falls back to the Corner engine, and a launch's watch started before
+    /// would hold a window into a Space nothing drives any more: review A-5).
+    fn holds_new_windows(&self) -> bool {
+        self.state().health.failed().is_none()
+    }
+
+    /// True while a window or a Space of this engine is left: a window held, a show owed, a
+    /// stage Space not ended.
+    pub fn left_behind(&self) -> bool {
+        let st = self.state();
+        !st.held.is_empty() || !st.owed.is_empty() || !st.stages.is_empty()
+    }
+
+    /// The Corner engine runs now (a fallback): what this engine left behind, when its
+    /// bring-back could not bring everything out (a window server that refuses both routes,
+    /// a launch's watch that held a window just after), is swept again about every
+    /// [`AFTERLIFE_EVERY`] until nothing is left; nothing else drives this engine any more
+    /// (review A-5). True while something is left.
+    pub fn sweep_left_behind(&self) -> bool {
+        if !self.left_behind() {
+            return false;
+        }
+        let now = Instant::now();
+        {
+            let mut st = self.state();
+            if st.afterlife.is_some_and(|t| now.duration_since(t) < AFTERLIFE_EVERY) {
+                return true;
+            }
+            st.afterlife = Some(now);
+        }
+        let report = self.sweep("after the fallback", true);
+        let left = self.left_behind();
+        if left {
+            tracing::warn!(back = report.restored, failed = report.failed, "spaces engine: windows still left in stage Spaces after the fallback; swept again shortly");
+        } else {
+            tracing::info!(back = report.restored, "spaces engine: nothing is left in a stage Space after the fallback");
+        }
+        left
+    }
+
     /// The Space where a just-opened app's new windows wait, made now when there is none (a
     /// launch's watch makes it at the launch notice, ahead of the first window).
     pub(crate) fn prepare_new(&self) -> Option<u64> {
+        if !self.holds_new_windows() {
+            return None;
+        }
         let sky = self.sky()?;
         let home = Self::desktop_for_new(sky)?;
         self.stage_space(sky, home, NEW_STAGE)
@@ -1049,6 +1296,9 @@ impl SpacesEngine {
     /// ([`Self::let_new`], or a hide into its stage's Space). True when the window server
     /// lists it there.
     pub(crate) fn hold_new(&self, id: u32) -> bool {
+        if !self.holds_new_windows() {
+            return false;
+        }
         let Some(sky) = self.sky() else { return false };
         let Some(home) = Self::desktop_for_new(sky) else { return false };
         let Some(space) = self.stage_space(sky, home, NEW_STAGE) else { return false };
@@ -1125,6 +1375,7 @@ impl SpacesEngine {
             "new_missed": st.counts.new_missed,
             "lent_now": st.lent,
             "parked_lends": st.parked.keys().collect::<Vec<_>>(),
+            "frames_owed": st.frames.keys().collect::<Vec<_>>(),
             "lent": st.counts.lent,
             "taken_back": st.counts.taken_back,
             "stretches": {
@@ -1174,17 +1425,23 @@ impl WindowEngine for SpacesEngine {
     ///
     /// A window parked for a lend (round cmdtab-park: kept for the activation's switch) is
     /// never taken to be at its frame by where it is listed: the frame asked is set, and the
-    /// park forgotten once it took (until then its move notices stay dropped).
+    /// park forgotten once it took (until then its move notices stay dropped). A window that
+    /// comes out of its Space away from the frame (at a lend's park, at a minimize's dive)
+    /// and does not take it (its app busy for that one call) is owed it: the tick tries it
+    /// again ([`SpacesEngine::retry_owed`]), so it never stays there while the model counts
+    /// it shown.
     fn show(&self, id: WindowId, frame: Rect, window: &AxElement, how: ShowHow) -> AxResult<()> {
         let was_held = self.holds(id.0);
-        let parked = self.state().parked.get(&id.0).map(|(p, _)| *p);
+        let parked = self.state().parked.get(&id.0).map(|p| p.park);
         if let Some(p) = parked
-            && windows::describe(&[id.0]).first().is_some_and(|w| !p.display.parks(w.bounds))
+            && windows::describe(&[id.0]).first().is_some_and(|w| !p.display.parks(w.bounds) && !lend_park::at_origin(w.bounds, p.frame))
         {
             tracing::info!(id = id.0, "spaces engine: a window parked for a lend was moved off the park by its app; shown at its frame");
         }
         let out = if parked.is_some() { self.show_window_only(id.0) } else { self.show_window(id.0) };
-        if out && was_held && listed_at(id.0, frame) {
+        // Where a parked window is listed says nothing: a late move may still take it to the
+        // park, and a window in a transformed Space is reported at its frame (review A-4).
+        if out && was_held && parked.is_none() && listed_at(id.0, frame) {
             self.state().parked.remove(&id.0);
             return Ok(());
         }
@@ -1195,9 +1452,18 @@ impl WindowEngine for SpacesEngine {
         if !out {
             return Err(AxError::FAILURE);
         }
-        if framed.is_ok() && parked.is_some() {
-            self.state().parked.remove(&id.0);
-            tracing::debug!(id = id.0, "spaces engine: a window parked for a lend shown at its frame");
+        // Away from the frame: parked, or hidden and not listed at it (one that was returned
+        // above).
+        let away = parked.is_some() || was_held;
+        let mut st = self.state();
+        if framed.is_ok() {
+            st.frames.remove(&id.0);
+            if st.parked.remove(&id.0).is_some() {
+                tracing::debug!(id = id.0, "spaces engine: a window parked for a lend shown at its frame");
+            }
+        } else if away {
+            st.frames.insert(id.0, OwedFrame { frame, element: window.clone(), pid: window.pid().ok(), backoff: Backoff::new(Instant::now()) });
+            tracing::warn!(id = id.0, parked = parked.is_some(), "spaces engine: a window came out of its Space away from the frame its show asked and did not take it: owed, tried again");
         }
         framed
     }
@@ -1235,8 +1501,11 @@ impl WindowEngine for SpacesEngine {
         self.take_back_window(id.0)
     }
 
+    /// Also while a show owes the window its frame ([`State::frames`]): it came out of its
+    /// Space away from it (a minimize's dive), so where it is listed is not its frame either.
     fn parked_lend(&self, id: WindowId) -> bool {
-        self.state().parked.contains_key(&id.0)
+        let st = self.state();
+        st.parked.contains_key(&id.0) || st.frames.contains_key(&id.0)
     }
 
     /// Never: no frame says a window is in a stage Space, and the Spaces end with the app.
@@ -1244,13 +1513,22 @@ impl WindowEngine for SpacesEngine {
         EngineKind::Spaces.stranded(frame, displays, known)
     }
 
-    /// The app's stage Spaces as its file names them: swept with this engine's own. They
-    /// end with the app, so after a crash or a kill they are gone and the sweep finds
-    /// nothing; while the app still holds them (it hangs) the windows come out of them all
-    /// the same (another process can move windows out of a Space, not end it).
+    /// The app's screens as its file names them, as the Corner engine takes them: the
+    /// guardian's recovery scan and watch look for a window parked for ⌘Tab's lend at the
+    /// park corner (the one hidden window of this engine with a frame of its own), and that
+    /// corner sits above a bottom Dock, at the corners and on the screens the app used
+    /// (review A-8, B-3). The app's stage Spaces are not taken: the guardian starts once the
+    /// app has ended, and they ended with it (their windows back on their Desktops).
     fn assume(&self, file: &ParkedFile) {
-        let mut st = self.state();
-        st.foreign = file.spaces.iter().map(|s| (s.space, s.desktop)).collect();
+        match file.visible {
+            Some(v) => safety::assume_visible_frame(v),
+            None => tracing::warn!("guardian: the app left no visible frame; guessing one (a Dock at the bottom may hide a window parked for a lend from the scan)"),
+        }
+        safety::assume_corners(&file.corners);
+        safety::assume_zones(&file.zones);
+        if !file.spaces.is_empty() {
+            tracing::info!(spaces = file.spaces.len(), "guardian: the app's stage Spaces ended with it; their windows are back on their Desktops");
+        }
     }
 
     /// Pictures, as the Corner engine: the windows hide and show in one step behind them.
@@ -1258,10 +1536,10 @@ impl WindowEngine for SpacesEngine {
         Motion::Pictures
     }
 
-    /// True: an incoming window can fly the last stretch itself in a Space of its own
-    /// ([`landing`]).
+    /// True when SkyLight has the calls a last stretch needs ([`landing`]): an incoming
+    /// window can fly it itself in a Space of its own.
     fn lands_live(&self) -> bool {
-        true
+        self.landing_calls()
     }
 
     fn fly_stretch(&self, s: Stretch, done: StretchDone) -> bool {
@@ -1286,14 +1564,17 @@ impl WindowEngine for SpacesEngine {
     /// Every window out of the stage Spaces by the window server's own list, then the
     /// registry's frames (a fitted window's frame from before, a show that did not take its
     /// frame).
+    /// Bounded: with the state held (a panic inside one of its short scopes) the sweep is
+    /// skipped, the registry's restore still runs.
     fn bring_all_back(&self, why: &str) -> bool {
-        let report = self.sweep(why, true);
-        safety::emergency_unpark(why) && report.failed == 0
+        let report = self.sweep_bounded(why, true);
+        safety::emergency_unpark(why) && report.is_some_and(|r| r.failed == 0)
     }
 
-    /// The sweep (a few window-server calls, no app asked), then the registry's short one.
+    /// The sweep (a few window-server calls, no app asked), then the registry's short one;
+    /// `None` when the engine's state stays busy.
     fn bring_back_briefly(&self) -> Option<Report> {
-        let swept = self.sweep("abort", false);
+        let swept = self.sweep_bounded("abort", false)?;
         let registry = safety::unpark_registry(Duration::from_millis(100), Duration::ZERO)?;
         Some(Report { checked: swept.checked + registry.checked, restored: swept.restored + registry.restored, failed: swept.failed + registry.failed })
     }
@@ -1312,14 +1593,14 @@ impl WindowEngine for SpacesEngine {
 
     /// The sweep: a window left in a stage Space with nothing answering for it (at a launch
     /// there is none: an earlier run's Spaces ended with it). Then, when an earlier copy
-    /// left windows registered (`scope.registered`: it crashed with a parked file, likely a
-    /// Corner engine's) or the launch's scan asks again for apps that did not answer, the
-    /// Corner engine's scan: such a copy's windows wait in its park corner, and a Spaces run
-    /// must bring them back the Corner way (this engine leaves nothing there itself, and the
-    /// windows it registers are skipped).
+    /// left windows registered (`scope.registered`: it crashed with a parked file, a Corner
+    /// engine's, or a Spaces engine's with a window parked for ⌘Tab's lend), the launch's
+    /// scan asks again for apps that did not answer, or the guardian scans, the Corner
+    /// engine's scan: such windows wait in a park corner and come back the Corner way (the
+    /// windows this run registers are skipped).
     fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
         let swept = self.sweep_where(why, false, true);
-        if scope.registered.is_empty() && !why.starts_with("launch") {
+        if scope.registered.is_empty() && !why.starts_with("launch") && !why.starts_with("guardian") {
             return (swept, Vec::new());
         }
         let (corner, unanswered) = safety::recovery_scan_with(why, scope);
@@ -1413,5 +1694,189 @@ mod tests {
         assert!(e.present_off_screen().is_empty());
         assert!(e.owed().is_empty() && e.held().is_empty());
         assert!(e.sky.get().is_none(), "SkyLight is not opened until a window hides");
+    }
+
+    /// An engine whose SkyLight did not load: nothing reaches the window server.
+    fn unloaded() -> SpacesEngine {
+        let sky = OnceLock::new();
+        let _ = sky.set(None);
+        SpacesEngine { sky, state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) }
+    }
+
+    /// Review A-3: two launch watches make the Space for new windows at once; the first noted
+    /// is kept for both, the other is ended, never put in its place.
+    #[test]
+    fn a_stage_space_made_twice_keeps_the_first() {
+        let e = unloaded();
+        assert_eq!(e.claim_stage((3, NEW_STAGE), 840), (840, false));
+        assert_eq!(e.claim_stage((3, NEW_STAGE), 841), (840, true), "the later one loses");
+        assert_eq!(e.ours(), [840].into());
+        assert_eq!(e.claim_stage((4, NEW_STAGE), 842), (842, false), "another Desktop's: its own");
+    }
+
+    /// Review A-11: a bring-back that ends the stage Spaces forgets every window it held,
+    /// also those it found in no Space (lent, minimized): a stand-down then arranging again
+    /// starts from nothing.
+    #[test]
+    fn ending_the_stage_spaces_forgets_every_window_held() {
+        let e = unloaded();
+        let mut st = e.state();
+        st.stages.insert((3, 1), 836);
+        st.held.insert(10, Held { space: 836, home: 3 });
+        st.held.insert(11, Held { space: 836, home: 3 });
+        st.lent.insert(11);
+        st.new.insert(12);
+        st.owed.insert(13);
+        assert_eq!(st.end_all(), vec![836]);
+        assert!(st.stages.is_empty() && st.held.is_empty() && st.lent.is_empty() && st.new.is_empty() && st.owed.is_empty());
+    }
+
+    /// Review A-5: once the engine failed, a launch's watch started before holds no new window
+    /// (nothing drives the engine after the fallback); what it left behind is swept again,
+    /// paced, until nothing is left.
+    #[test]
+    fn a_failed_engine_holds_no_new_window_and_sweeps_what_it_left() {
+        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) };
+        e.state().health.fail("a test".into());
+        assert!(!e.hold_new(NO_WINDOW) && e.prepare_new().is_none());
+        assert!(e.sky.get().is_none(), "nothing asked of the window server");
+        assert!(!e.sweep_left_behind(), "nothing left: nothing swept");
+        e.state().owed.insert(NO_WINDOW);
+        let _ = e.sky.set(None);
+        assert!(e.sweep_left_behind(), "a show owed: still left");
+        assert!(e.state().afterlife.is_some(), "swept");
+        let at = e.state().afterlife;
+        assert!(e.sweep_left_behind());
+        assert_eq!(e.state().afterlife, at, "not again within its pace");
+    }
+
+    /// Review A-13, B-5: a panic while its own thread holds the engine's state: the hook's
+    /// bring-back goes on without the sweep, in a bounded time, instead of locking against
+    /// itself for good (the process never exiting, the guardian never woken).
+    #[test]
+    fn a_bring_back_on_a_thread_holding_the_state_is_bounded() {
+        let e = Arc::new(unloaded());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_e = e.clone();
+        std::thread::spawn(move || {
+            let _held = thread_e.state();
+            let began = Instant::now();
+            let swept = thread_e.sweep_bounded("panic", true);
+            let briefly = thread_e.bring_back_briefly();
+            let _ = tx.send((swept, briefly, began.elapsed()));
+        });
+        let (swept, briefly, took) = rx.recv_timeout(Duration::from_secs(3)).expect("the bring-back returned");
+        assert!(swept.is_none() && briefly.is_none(), "no sweep with the state held");
+        assert!(took < STATE_WAIT * 4, "bounded: {took:?}");
+        assert_eq!(e.sweep_bounded("quit", true), Some(Report::default()), "free: swept as before");
+    }
+
+    /// Review A-7: a window held that the window server lists elsewhere, or in its stage
+    /// Space and on a Desktop too, has escaped (the tick hides it again); one hidden alone in
+    /// its Space, or on no Space (minimized, ordered out), has not.
+    #[test]
+    fn a_window_out_of_its_stage_space_has_escaped() {
+        let h = Held { space: 836, home: 3 };
+        assert!(!escaped(&[836], h));
+        assert!(escaped(&[3], h), "on its Desktop");
+        assert!(escaped(&[836, 3], h), "on its Desktop and still listed in the Space: it shows");
+        assert!(escaped(&[900], h), "in a Space of its own");
+        assert!(!escaped(&[], h), "on no Space: not shown, left alone");
+    }
+
+    /// Review A-12: the tidy's list was read before a launch's watch held a new window: the
+    /// window is kept while the window server lists it when asked, forgotten once it does not.
+    #[test]
+    fn a_new_window_held_after_the_tidys_list_is_kept() {
+        let e = unloaded();
+        // A window the window server lists now (any app's), if there is one here.
+        let listed = windows::every_window_id().into_iter().find(|id| !windows::describe(&[*id]).is_empty());
+        for id in listed.into_iter().chain([NO_WINDOW]) {
+            let mut st = e.state();
+            st.held.insert(id, Held { space: 840, home: 3 });
+            st.new.insert(id);
+        }
+        e.tidy(&HashSet::new(), |_| true);
+        if let Some(id) = listed {
+            assert!(e.waits_new(id) && e.holds(id), "listed when asked: kept");
+        }
+        assert!(!e.waits_new(NO_WINDOW) && !e.holds(NO_WINDOW), "gone: forgotten");
+    }
+
+    /// A window id the window server lists for no window.
+    const NO_WINDOW: u32 = 0xFFFF_FF01;
+
+    /// An element no app answers for (no process has this pid: macOS's highest is 99998), so
+    /// every call through it fails at once.
+    fn dead_element() -> AxElement {
+        AxElement::application(99_999)
+    }
+
+    fn parked_lend(frame: Rect) -> ParkedLend {
+        let display = crate::engine::testkit::display();
+        let at = Rect::new(display.frame.max_x() - 20.0, display.frame.max_y() - 20.0, frame.w, frame.h);
+        ParkedLend { park: Parked { at, frame, display }, element: dead_element() }
+    }
+
+    /// Review A-1/B-1: a window parked for ⌘Tab's lend comes out of its stage Space at the
+    /// park and does not take the frame the activation's switch asks (its app busy for that
+    /// one call). It is owed the frame (the tick tries it again, a quit counts it) and stays
+    /// parked until then, its move notices dropped; once gone it is owed nothing.
+    #[test]
+    fn a_parked_lend_whose_show_missed_its_frame_is_owed_it() {
+        let e = unloaded();
+        let frame = Rect::new(300.0, 120.0, 1100.0, 800.0);
+        e.state().parked.insert(NO_WINDOW, parked_lend(frame));
+        assert!(e.show(WindowId(NO_WINDOW), frame, &dead_element(), ShowHow::Once).is_err(), "the app did not take the frame");
+        assert_eq!(e.owed(), [NO_WINDOW].into(), "owed the frame");
+        assert!(e.parked_lend(WindowId(NO_WINDOW)), "still at the park: its move notices are not the model's");
+        assert_eq!(e.state().frames[&NO_WINDOW].frame, frame);
+        let mut busy = BusyApps::default();
+        assert_eq!(e.retry_owed(false, &mut busy), [NO_WINDOW].into(), "owed a moment ago: not tried yet");
+        assert!(e.retry_owed(true, &mut busy).is_empty(), "tried again at once with force: the window is gone, nothing is owed");
+        assert!(!e.parked_lend(WindowId(NO_WINDOW)), "the park forgotten with it");
+    }
+
+    /// Review B-1: the same for a window hidden at a minimize's dive frame (beyond the Dock's
+    /// edge): brought out of its Space there, its frame not taken, it is owed the frame.
+    #[test]
+    fn a_window_shown_from_its_dive_frame_that_missed_its_frame_is_owed_it() {
+        let e = unloaded();
+        let frame = Rect::new(300.0, 120.0, 1100.0, 800.0);
+        e.state().held.insert(NO_WINDOW, Held { space: 836, home: 3 });
+        assert!(e.show(WindowId(NO_WINDOW), frame, &dead_element(), ShowHow::Once).is_err());
+        assert_eq!(e.owed(), [NO_WINDOW].into(), "listed away from its frame: owed it");
+        assert!(e.parked_lend(WindowId(NO_WINDOW)), "where it is listed is not its frame: its move notices are not the model's");
+        e.state().held.remove(&NO_WINDOW);
+        assert!(e.retry_owed(true, &mut BusyApps::default()).is_empty(), "gone: nothing owed");
+    }
+
+    /// The coordinator's follow-up: a frame owed to a window of an app that never answers,
+    /// retried from a tick every 250 ms for a simulated minute, costs a handful of
+    /// Accessibility calls, never one while the app is busy; a quit tries it once all the
+    /// same; once the app answers, it is taken and forgotten.
+    #[test]
+    fn a_frame_owed_to_a_hung_app_costs_few_calls_a_minute() {
+        let e = unloaded();
+        let frame = Rect::new(300.0, 120.0, 1100.0, 800.0);
+        let t0 = Instant::now();
+        let owed = OwedFrame { frame, element: dead_element(), pid: Some(4242), backoff: Backoff::new(t0) };
+        e.state().frames.insert(NO_WINDOW, owed);
+        let mut busy = BusyApps::default();
+        let calls = std::cell::Cell::new(0);
+        let hung = |_: &OwedFrame| {
+            calls.set(calls.get() + 1);
+            Err(AxError::CANNOT_COMPLETE)
+        };
+        for tick in 0..240u64 {
+            e.retry_frames(false, &mut busy, t0 + Duration::from_millis(250 * tick), |_| true, hung);
+        }
+        assert!(calls.get() <= 6, "a minute of a hung app: {} calls", calls.get());
+        assert!(busy.not_answering(4242), "the app is known busy to the controller too");
+        let before = calls.get();
+        e.retry_frames(true, &mut busy, t0 + Duration::from_secs(60), |_| true, hung);
+        assert_eq!(calls.get(), before + 1, "a quit tries it once");
+        e.retry_frames(true, &mut busy, t0 + Duration::from_secs(61), |_| true, |_| Ok(()));
+        assert!(e.owed().is_empty() && !busy.not_answering(4242), "taken: forgotten, the app answering again");
     }
 }

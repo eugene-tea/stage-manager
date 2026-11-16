@@ -25,6 +25,12 @@ use std::time::{Duration, Instant};
 /// How long an app that did not answer is left alone.
 pub const BUSY_BACKOFF: Duration = Duration::from_secs(3);
 
+/// The first wait before a write an app owes is tried again ([`Backoff`]).
+pub const RETRY_FIRST: Duration = Duration::from_secs(1);
+
+/// The longest wait between two tries of a write an app does not answer ([`Backoff`]).
+pub const RETRY_CAP: Duration = Duration::from_secs(30);
+
 /// An episode of an app not answering ends when the app has not been asked (no timeout) for
 /// this long: nothing asked it any more.
 pub const EPISODE_FORGET: Duration = Duration::from_secs(60);
@@ -120,11 +126,66 @@ impl BusyApps {
         std::mem::take(&mut self.changes)
     }
 
+    /// True while app `pid` is in an episode of not answering: its last answer was a timeout.
+    /// False once it answered anything (here or to another question).
+    pub fn not_answering(&self, pid: i32) -> bool {
+        self.episodes.contains_key(&pid)
+    }
+
     /// The apps left alone now.
     pub fn pids(&self, now: Instant) -> Vec<i32> {
         let mut v: Vec<i32> = self.until.iter().filter(|(_, t)| now < **t).map(|(p, _)| *p).collect();
         v.sort_unstable();
         v
+    }
+}
+
+/// When one window's owed write is tried again (the Spaces engine's owed frames, review A-1
+/// follow-up): a write its app did not answer waits twice as long each time, from
+/// [`RETRY_FIRST`] up to [`RETRY_CAP`], and never while the app is [`BusyApps::busy`]; any
+/// answer (a refusal, or the app answering another question since) brings it back to the
+/// first pace. A hung app's window then costs a handful of timeouts a minute, not one a second.
+/// A quit tries every one once whatever the pace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Backoff {
+    /// When it may be tried next.
+    pub next: Instant,
+    /// The wait after the last try.
+    pub wait: Duration,
+}
+
+impl Backoff {
+    /// A write owed from `now`: tried first [`RETRY_FIRST`] later.
+    pub fn new(now: Instant) -> Self {
+        Self { next: now + RETRY_FIRST, wait: RETRY_FIRST }
+    }
+
+    /// True when the write is tried at `now`: with `force` (a quit) always; else once its
+    /// wait is over and its app (`pid`, when known) is not left alone. An app that answered
+    /// since its timeouts (`busy` says it is no longer not answering) brings the first pace back.
+    pub fn due(&mut self, pid: Option<i32>, busy: &BusyApps, force: bool, now: Instant) -> bool {
+        if force {
+            return true;
+        }
+        if let Some(pid) = pid {
+            if busy.busy(pid, now) {
+                return false;
+            }
+            if self.wait > RETRY_FIRST && !busy.not_answering(pid) {
+                *self = Self { next: now, wait: RETRY_FIRST };
+            }
+        }
+        now >= self.next
+    }
+
+    /// A try at `now` that did not take, its app's `reply`: a timeout doubles the wait (up to
+    /// [`RETRY_CAP`]), any other answer brings the first pace back. Noted in `busy` too.
+    pub fn failed(&mut self, pid: Option<i32>, reply: Reply, busy: &mut BusyApps, now: Instant) {
+        self.wait = if reply == Reply::TimedOut { (self.wait * 2).min(RETRY_CAP) } else { RETRY_FIRST };
+        self.next = now + self.wait;
+        if let Some(pid) = pid {
+            busy.note(pid, reply, now);
+        }
     }
 }
 
@@ -209,6 +270,36 @@ impl<'a> OffScreen<'a> {
 mod tests {
     use super::*;
     use std::cell::Cell;
+
+    /// A write owed to a window of an app that never answers, tried from a tick every 250 ms
+    /// for a simulated minute: five timeouts (the waits 2, 4, 8, 16 s, the first held to the
+    /// busy app's 3 s), not sixty. An answer brings the first pace back; a quit tries at once.
+    #[test]
+    fn a_write_owed_to_a_hung_app_backs_off() {
+        let t0 = Instant::now();
+        let pid = Some(42);
+        let mut busy = BusyApps::default();
+        let mut b = Backoff::new(t0);
+        let mut calls = Vec::new();
+        for tick in 0..=240u64 {
+            let now = t0 + Duration::from_millis(250 * tick);
+            if b.due(pid, &busy, false, now) {
+                calls.push(now.duration_since(t0).as_secs());
+                b.failed(pid, Reply::TimedOut, &mut busy, now);
+            }
+        }
+        assert_eq!(calls, vec![1, 4, 8, 16, 32], "the waits double, the busy app's 3 s first: {calls:?}");
+        assert_eq!(b.wait, RETRY_CAP, "capped");
+        let now = t0 + Duration::from_secs(61);
+        assert!(b.due(pid, &busy, true, now), "a quit tries it whatever the pace");
+        // The app answers another question: tried at the first pace again.
+        busy.note(42, Reply::No, now);
+        assert!(b.due(pid, &busy, false, now), "answered since: at once");
+        assert_eq!(b.wait, RETRY_FIRST);
+        // A refusal is an answer: the first pace, never longer.
+        b.failed(pid, Reply::CannotTell, &mut busy, now);
+        assert_eq!((b.wait, b.next), (RETRY_FIRST, now + RETRY_FIRST));
+    }
 
     /// The H1 scenario: an app beach-balls with five windows off screen. One timeout per
     /// pass at most, then none until the backoff is over.

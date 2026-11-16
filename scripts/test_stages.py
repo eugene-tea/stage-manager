@@ -8302,7 +8302,8 @@ def phase_engine():
     5. The fallback drill, Fixture 1 and 2 each in a stage, Fixture 2's hidden in its Space:
        `ctl debug-engine-fail hide|show|all`, then a switch to Fixture 2: the engine falls
        back to Corner within seconds, Fixture 2 shown at its frame, Fixture 1 in the park
-       corner, no window in a stage Space; a switch back works the Corner way; the parked
+       corner, no window in a stage Space (and none left for the tick's sweep after the
+       fallback); a switch back works the Corner way; the parked
        file names no engine. `all` blocks the bring-back's own move too (a window server
        that refuses the bridge): the Space is ended with the classic call instead.
     6. A Corner run killed with its guardian, Fixture 2 parked, then a Spaces launch: the
@@ -8432,6 +8433,10 @@ def phase_engine():
         wins, d = engine_windows()
         staged = [w["id"] for w in wins if w.get("staged")]
         check(not staged, f"engine {mode}: no fixture window left in a stage Space ({staged})")
+        # Review A-5: the tick sweeps again what the bring-back left; a fallback that brought
+        # everything back leaves it nothing.
+        check("still left in stage Spaces after the fallback" not in log_text()[mark:],
+              f"engine {mode}: nothing left in a stage Space for the sweep after the fallback")
         if check(got is not None, f"engine {mode}: Fixture 1 in the park corner, Fixture 2 shown"):
             restore = by_title(state())["Fixture 2"]["restore"]
             check(close(got[1]["bounds"], restore), f"engine {mode}: Fixture 2 at its frame ({fmt(got[1]['bounds'])}, saved {fmt(restore)})")

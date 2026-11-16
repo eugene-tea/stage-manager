@@ -392,17 +392,27 @@ fn record_path() -> std::path::PathBuf {
     std::path::Path::new(PROBE_DIR).join("spaces.txt")
 }
 
+/// The Spaces the probe made in this window server session ([`recorded_in`]).
 fn recorded() -> Vec<u64> {
-    std::fs::read_to_string(record_path())
-        .unwrap_or_default()
-        .lines()
+    recorded_in(&std::fs::read_to_string(record_path()).unwrap_or_default(), super::session::window_session())
+}
+
+/// The Space ids of the record `text` made in window server session `session`. A line of
+/// another session (or of a probe that wrote none) names an id that may be anyone's now: the
+/// file outlives a logout (`/tmp` is cleared at a restart), the window server's ids start
+/// over, and cleanup would show and end a Desktop or a running app's Space (review A-14).
+fn recorded_in(text: &str, session: Option<&str>) -> Vec<u64> {
+    let Some(session) = session else { return Vec::new() };
+    text.lines()
+        .filter(|l| l.split_once("\tsession=").is_some_and(|(_, s)| s == session))
         .filter_map(|l| l.split_whitespace().next()?.parse().ok())
         .collect()
 }
 
 fn record(sid: u64, route: Route) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(record_path()) {
-        let _ = writeln!(f, "{sid} {} pid={}", route.name(), std::process::id());
+        let session = super::session::window_session().unwrap_or("?");
+        let _ = writeln!(f, "{sid} {} pid={}\tsession={session}", route.name(), std::process::id());
     }
 }
 
@@ -973,7 +983,9 @@ fn cleanup(sky: &Sky, bundle: Option<&str>) -> Value {
         }
     }
     let mut spaces = Vec::new();
-    for sid in recorded() {
+    // Never a Desktop, whatever the record says.
+    let desktops: std::collections::BTreeSet<u64> = sky.displays().iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
+    for sid in recorded().into_iter().filter(|sid| !desktops.contains(sid)) {
         let mut gone = !sky.all_spaces(0xf).contains(&sid);
         if !gone {
             let _ = sky.show_hide(Route::Bridged, &[sid], true);
@@ -1000,4 +1012,19 @@ fn cleanup(sky: &Sky, bundle: Option<&str>) -> Value {
         "steps": steps,
         "spaces": spaces,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review A-14: only the Spaces recorded in this window server session are the probe's;
+    /// a line of another session, or one with no session, is skipped.
+    #[test]
+    fn only_this_sessions_spaces_are_the_probes() {
+        let now = "boot B session 7 audit 100007";
+        let text = format!("12 classic pid=1\tsession={now}\n13 bridged pid=2\tsession=boot A session 7 audit 100007\n14 classic pid=3\n15 classic pid=4\tsession={now}\n");
+        assert_eq!(recorded_in(&text, Some(now)), vec![12, 15]);
+        assert!(recorded_in(&text, None).is_empty(), "no session known: none is the probe's for sure");
+    }
 }

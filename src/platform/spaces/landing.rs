@@ -32,9 +32,10 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::MutexGuard;
 use std::time::{Duration, Instant};
 
+use objc2::sel;
 use objc2_core_foundation::CGAffineTransform;
 
-use super::super::ffi::{ALL_SPACES_MASK, Route, Sky};
+use super::super::ffi::{ALL_SPACES_MASK, Route, Sky, answers};
 use super::{SpacesEngine, hidden_in, shared};
 use crate::platform::window_engine::{Stretch, StretchDone, StretchNote};
 use crate::platform::windows;
@@ -89,6 +90,11 @@ pub(super) struct Fly {
     pub(super) ended: bool,
     /// The landing Space (0 until made).
     pub(super) space: u64,
+    /// The Desktop the window was hidden from, where it lands (0: not known). Kept here:
+    /// the unveil's show, which comes mid-flight, finds the window out of every stage Space
+    /// and forgets it as hidden (its Desktop with it), and two displays have two Desktops
+    /// shown (review A-2).
+    pub(super) home: u64,
 }
 
 /// What the stretches counted, for `ctl state`.
@@ -119,6 +125,22 @@ fn sleep_until(at: Instant) {
 
 fn affine(m: Affine) -> CGAffineTransform {
     CGAffineTransform { a: m[0], b: m[1], c: m[2], d: m[3], tx: m[4], ty: m[5] }
+}
+
+/// True when a window whose Spaces are `now` is still in its landing Space `space` at the
+/// last step, so it goes home. A hide that could not ask the stretches (a stretch's thread
+/// stuck past [`LOCK_WAIT`]) takes the window out of every Space without stopping its
+/// stretch: moved home then, the hidden window would show (review A-6).
+fn lands_home(now: &[u64], space: u64) -> bool {
+    now.contains(&space)
+}
+
+/// True when a last stretch can be flown: a landing Space can be shown (`show`,
+/// `SLSShowSpaces`) and transformed, by the classic call with its read back (`classic`) or
+/// by the bridged operation (`bridged`). Without, the window would wait in a Space not shown,
+/// or fly at full size, after its picture went (review A-10).
+fn can_land(show: bool, classic: bool, bridged: bool) -> bool {
+    show && (classic || bridged)
 }
 
 /// True when two transforms are the same (read back).
@@ -160,35 +182,49 @@ impl SpacesEngine {
         }
     }
 
-    /// Sets landing Space `space`'s transform to `m` by the route that works ([`TRANSFORM_ROUTE`]).
-    fn set_landing_transform(&self, sky: &Sky, space: u64, m: Affine) {
+    /// Sets landing Space `space`'s transform to `m` by the route that works
+    /// ([`TRANSFORM_ROUTE`]); false when that call could not be sent (a missing function or
+    /// class).
+    fn set_landing_transform(&self, sky: &Sky, space: u64, m: Affine) -> bool {
         match TRANSFORM_ROUTE.load(Ordering::Relaxed) {
-            ROUTE_CLASSIC => {
-                let _ = sky.set_transform(Route::Classic, space, affine(m));
-            }
-            ROUTE_BRIDGED => {
-                let _ = sky.set_transform(Route::Bridged, space, affine(m));
-            }
+            ROUTE_CLASSIC => sky.set_transform(Route::Classic, space, affine(m)).is_ok(),
+            ROUTE_BRIDGED => sky.set_transform(Route::Bridged, space, affine(m)).is_ok(),
             _ => {
                 let _ = sky.set_transform(Route::Classic, space, affine(m));
                 let classic = sky.get_transform(space).is_some_and(|t| same(t, m));
-                let route = if classic {
-                    ROUTE_CLASSIC
+                let (route, sent) = if classic {
+                    (ROUTE_CLASSIC, true)
                 } else {
-                    let _ = sky.set_transform(Route::Bridged, space, affine(m));
-                    ROUTE_BRIDGED
+                    (ROUTE_BRIDGED, sky.set_transform(Route::Bridged, space, affine(m)).is_ok())
                 };
-                tracing::info!(route = if classic { "classic" } else { "bridged" }, readback = ?sky.get_transform(space), "spaces engine: the landing Spaces' transform is set by this call");
+                tracing::info!(route = if classic { "classic" } else { "bridged" }, sent, readback = ?sky.get_transform(space), "spaces engine: the landing Spaces' transform is set by this call");
                 TRANSFORM_ROUTE.store(route, Ordering::Relaxed);
+                sent
             }
         }
+    }
+
+    /// True when this Mac's SkyLight has what a last stretch needs ([`can_land`]): asked once.
+    pub(super) fn landing_calls(&self) -> bool {
+        static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let Some(sky) = self.sky() else { return false };
+        *CAN.get_or_init(|| {
+            let bridged = Sky::class(c"SLSBridgedSpaceSetTransformOperation").is_some_and(|c| answers(c, sel!(initWithSpaceID:transform:options:)).is_ok());
+            let can = can_land(sky.show.is_some(), sky.set_transform.is_some() && sky.get_transform.is_some(), bridged);
+            if !can {
+                tracing::warn!(show = sky.show.is_some(), classic = sky.set_transform.is_some(), read_back = sky.get_transform.is_some(), bridged, "spaces engine: SkyLight lacks a call the last stretch needs; incoming windows land as pictures");
+            }
+            can
+        })
     }
 
     /// Plans window `s.window`'s stretch on a thread of its own (see the module notes); false
     /// when the engine does not hold it in a stage Space or the stretch has no steps.
     pub(super) fn begin_stretch(&self, s: Stretch, done: StretchDone) -> bool {
-        // A window put home for a Dock press shows already: its picture lands on it.
-        if s.steps.is_empty() || !self.holds(s.window) || self.lent(s.window) || self.sky().is_none() {
+        // A window put home for a Dock press shows already: its picture lands on it. One
+        // parked for a lend whose frame is owed is not where its picture flies from (its show
+        // sets the frame: review A-4).
+        if s.steps.is_empty() || !self.holds(s.window) || self.lent(s.window) || self.state().parked.contains_key(&s.window) || self.sky().is_none() {
             return false;
         }
         {
@@ -196,7 +232,8 @@ impl SpacesEngine {
             if l.contains_key(&s.window) {
                 return false;
             }
-            l.insert(s.window, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0 });
+            let home = self.state().held.get(&s.window).map_or(0, |h| h.home);
+            l.insert(s.window, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0, home });
         }
         self.state().stretch.planned += 1;
         let id = s.window;
@@ -233,8 +270,13 @@ impl SpacesEngine {
             Ok(space) if space != 0 => space,
             _ => return self.skip(id, None, "no Space made"),
         };
-        self.set_landing_transform(sky, space, first);
-        let _ = sky.show_hide(Route::Classic, &[space], true);
+        if !self.set_landing_transform(sky, space, first) {
+            return self.skip(id, Some(space), "its Space's transform could not be set");
+        }
+        if let Err(e) = sky.show_hide(Route::Classic, &[space], true) {
+            tracing::debug!(id, space, "spaces engine: a landing Space could not be shown: {e}");
+            return self.skip(id, Some(space), "its Space could not be shown");
+        }
         if !self.claim_space(id, space) {
             return self.skip(id, Some(space), "stopped before the handover");
         }
@@ -244,9 +286,12 @@ impl SpacesEngine {
         let took = {
             let mut l = self.stretches();
             let stopped = l.get(&id).is_none_or(|f| f.stop);
-            let stage = self.state().held.get(&id).map(|h| h.space);
-            match stage {
-                Some(stage) if !stopped && hidden_in(&sky.spaces_of(&[id]), stage) => {
+            let held = self.state().held.get(&id).copied();
+            match held.map(|h| (h.space, h.home)) {
+                Some((stage, home)) if !stopped && hidden_in(&sky.spaces_of(&[id]), stage) => {
+                    if let Some(f) = l.get_mut(&id) {
+                        f.home = home;
+                    }
                     windows::set_transformed(id, Some(s.frame));
                     let late = first_at.elapsed();
                     // The pose for now, not the handover's, when the thread woke late.
@@ -301,12 +346,12 @@ impl SpacesEngine {
         // Home: the identity (the last step), onto its Desktop as a show puts it, the Space
         // ended.
         let mut l = self.stretches();
-        if l.get(&id).is_none_or(|f| f.stop) {
+        if l.get(&id).is_none_or(|f| f.stop) || !lands_home(&sky.spaces_of(&[id]), space) {
             drop(l);
             return self.stopped(sky, id, space);
         }
         self.set_landing_transform(sky, space, IDENTITY);
-        let home = self.state().held.get(&id).map(|h| h.home);
+        let home = self.home_of(id, l.get(&id));
         let (desktops, shown) = Self::desktops(sky);
         let home = home.filter(|h| desktops.contains(h)).or(shown.first().copied());
         if let Some(home) = home {
@@ -355,7 +400,10 @@ impl SpacesEngine {
     /// A stretch stopped mid-flight: once its window is out of the landing Space (a hide
     /// takes it out; a bring-back took it home already), the Space is ended.
     fn stopped(&self, sky: &Sky, id: u32, space: u64) -> StretchNote {
-        let ended = self.stretches().get(&id).is_some_and(|f| f.ended);
+        let (ended, fly) = {
+            let l = self.stretches();
+            (l.get(&id).is_some_and(|f| f.ended), l.get(&id).copied())
+        };
         if !ended {
             let by = Instant::now() + STOP_WAIT;
             while Instant::now() < by && sky.spaces_of(&[id]).contains(&space) {
@@ -364,7 +412,7 @@ impl SpacesEngine {
             if sky.spaces_of(&[id]).contains(&space) {
                 // Nothing took it: home, as a show would.
                 let _ = sky.set_transform(Route::Classic, space, affine(IDENTITY));
-                let home = self.state().held.get(&id).map(|h| h.home);
+                let home = self.home_of(id, fly.as_ref());
                 let (_, shown) = Self::desktops(sky);
                 if let Some(home) = home.or(shown.first().copied()) {
                     let _ = sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK);
@@ -376,6 +424,13 @@ impl SpacesEngine {
         self.stretches().remove(&id);
         tracing::debug!(id, space, "spaces engine: a stretch stopped mid-flight");
         StretchNote::Stopped
+    }
+
+    /// The Desktop window `id` lands on: the one it is held for, else the one its stretch
+    /// `fly` noted as it was planned (the unveil's show forgets the window as held once it
+    /// flies); `None` when neither is known.
+    pub(super) fn home_of(&self, id: u32, fly: Option<&Fly>) -> Option<u64> {
+        self.state().held.get(&id).map(|h| h.home).or_else(|| fly.map(|f| f.home).filter(|h| *h != 0))
     }
 
     /// Window `id`'s stretch stops (a show or a hide of the window is about to go): one not
@@ -445,7 +500,7 @@ impl SpacesEngine {
                 continue;
             }
             let _ = sky.set_transform(Route::Classic, f.space, affine(IDENTITY));
-            let home = self.state().held.get(id).map(|h| h.home).or(shown.first().copied());
+            let home = self.home_of(*id, Some(&*f)).or(shown.first().copied());
             if let Some(home) = home {
                 let _ = sky.add_remove_from(Route::Bridged, home, &[*id], ALL_SPACES_MASK);
             }
@@ -489,11 +544,11 @@ mod tests {
         let s = Stretch { window: 7, frame: crate::engine::geometry::Rect::new(0.0, 0.0, 800.0, 600.0), steps: vec![(Instant::now(), IDENTITY)] };
         let done: StretchDone = std::sync::Arc::new(|_, _| {});
         assert!(!e.begin_stretch(s, done), "not hidden by the engine: nothing planned");
-        e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0 });
+        e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0, home: 0 });
         let (guard, space) = e.stop_stretch(7, false);
         assert!(guard.is_none() && space.is_none());
         assert!(e.stretches()[&7].stop, "a show before the handover: it never takes over");
-        e.stretches().insert(8, Fly { phase: Phase::Flying, stop: false, ended: false, space: 900 });
+        e.stretches().insert(8, Fly { phase: Phase::Flying, stop: false, ended: false, space: 900, home: 0 });
         let (guard, space) = e.stop_stretch(8, false);
         assert!(guard.is_none() && space.is_none());
         assert!(!e.stretches()[&8].stop, "a show mid-flight: it lands by itself");
@@ -512,9 +567,9 @@ mod tests {
     fn stretching_names_the_stretches_not_stopped() {
         use crate::platform::window_engine::WindowEngine;
         let e = engine();
-        e.stretches().insert(1, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0 });
-        e.stretches().insert(2, Fly { phase: Phase::Flying, stop: false, ended: false, space: 900 });
-        e.stretches().insert(3, Fly { phase: Phase::Flying, stop: true, ended: false, space: 901 });
+        e.stretches().insert(1, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0, home: 0 });
+        e.stretches().insert(2, Fly { phase: Phase::Flying, stop: false, ended: false, space: 900, home: 0 });
+        e.stretches().insert(3, Fly { phase: Phase::Flying, stop: true, ended: false, space: 901, home: 0 });
         assert_eq!(e.stretching(), [1, 2].into());
     }
 
@@ -524,12 +579,12 @@ mod tests {
     #[test]
     fn a_stretch_stopped_while_its_space_is_made_lets_the_lock_go() {
         let e = engine();
-        e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: true, ended: false, space: 0 });
+        e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: true, ended: false, space: 0, home: 0 });
         assert!(!e.claim_space(7, 900), "stopped meanwhile: skipped");
         assert!(e.stretches.try_lock().is_ok(), "the lock is free for the skip that follows");
         assert!(!e.claim_space(8, 901), "gone: skipped");
         assert!(e.stretches.try_lock().is_ok());
-        e.stretches().insert(9, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0 });
+        e.stretches().insert(9, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0, home: 0 });
         assert!(e.claim_space(9, 902));
         assert_eq!(e.stretches()[&9].space, 902, "its Space noted");
         assert!(e.stretches.try_lock().is_ok());
@@ -541,7 +596,7 @@ mod tests {
     #[test]
     fn a_quit_while_a_stretch_is_stuck_is_never_held_up_by_it() {
         let e = engine();
-        e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0 });
+        e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0, home: 0 });
         let (held, release) = (std::sync::mpsc::channel::<()>(), std::sync::mpsc::channel::<()>());
         std::thread::scope(|scope| {
             let (held_tx, release_rx) = (held.0, release.1);
@@ -568,6 +623,40 @@ mod tests {
         });
         assert!(e.in_flight(7), "free again: asked as before");
         assert!(!e.stretches_busy.load(Ordering::Relaxed));
+    }
+
+    /// Review A-2: the unveil's show comes mid-flight and forgets the window as held; the
+    /// Desktop it lands on (and a hide mid-flight takes it back to) is the one its stretch
+    /// noted, not the first display's.
+    #[test]
+    fn a_flying_window_lands_on_the_desktop_it_was_hidden_from() {
+        let e = engine();
+        let fly = Fly { phase: Phase::Flying, stop: false, ended: false, space: 900, home: 7 };
+        assert_eq!(e.home_of(5, Some(&fly)), Some(7), "no longer held: the stretch's Desktop");
+        e.state().held.insert(5, super::super::Held { space: 836, home: 3 });
+        assert_eq!(e.home_of(5, Some(&fly)), Some(3), "held (hidden again): where it was hidden from");
+        assert_eq!(e.home_of(6, Some(&Fly { home: 0, ..fly })), None, "neither known");
+        assert_eq!(e.home_of(6, None), None);
+    }
+
+    /// Review A-6: at the last step a window still in its landing Space goes home; one a hide
+    /// took into its stage Space meanwhile (the stretches stuck, the stretch not stopped)
+    /// does not.
+    #[test]
+    fn only_a_window_still_in_its_landing_space_goes_home() {
+        assert!(lands_home(&[900], 900));
+        assert!(!lands_home(&[836], 900), "hidden again in its stage Space: left there");
+        assert!(!lands_home(&[], 900), "in no Space (closed): nothing to move");
+    }
+
+    /// Review A-10: a last stretch is flown only with a Space that can be shown and
+    /// transformed.
+    #[test]
+    fn a_stretch_needs_a_space_shown_and_transformed() {
+        assert!(can_land(true, true, false));
+        assert!(can_land(true, false, true), "the bridged transform alone");
+        assert!(!can_land(false, true, true), "no SLSShowSpaces: the window would wait unseen");
+        assert!(!can_land(true, false, false), "no transform: it would fly at full size");
     }
 
     /// Waits end at their instant, never before.
