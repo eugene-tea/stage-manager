@@ -36,6 +36,8 @@ pub(crate) type FnCopySpacesForWindows = unsafe extern "C" fn(i32, i32, *const c
 pub(crate) type FnSpaceCreate = unsafe extern "C" fn(i32, i32, i32) -> u64;
 pub(crate) type FnSpaceDestroy = unsafe extern "C" fn(i32, u64) -> i32;
 pub(crate) type FnSpaceLevel = unsafe extern "C" fn(i32, u64, i32) -> i32;
+/// `int SLSSpaceGetAbsoluteLevel(cid, sid)` (CGSSpace.h as Penc and BetterSwiftAX carry it).
+pub(crate) type FnSpaceGetLevel = unsafe extern "C" fn(i32, u64) -> i32;
 pub(crate) type FnSpaceList = unsafe extern "C" fn(i32, *const c_void) -> i32;
 pub(crate) type FnAddRemove = unsafe extern "C" fn(i32, u64, *const c_void, i32) -> i32;
 pub(crate) type FnMoveManaged = unsafe extern "C" fn(i32, *const c_void, u64) -> i32;
@@ -56,6 +58,7 @@ pub(crate) struct Sky {
     pub(crate) create: Option<FnSpaceCreate>,
     pub(crate) destroy: Option<FnSpaceDestroy>,
     pub(crate) level: Option<FnSpaceLevel>,
+    pub(crate) get_level: Option<FnSpaceGetLevel>,
     pub(crate) show: Option<FnSpaceList>,
     pub(crate) hide: Option<FnSpaceList>,
     pub(crate) add_remove: Option<FnAddRemove>,
@@ -115,6 +118,7 @@ impl Sky {
             create: unsafe { load(h, c"SLSSpaceCreate", &mut names) },
             destroy: unsafe { load(h, c"SLSSpaceDestroy", &mut names) },
             level: unsafe { load(h, c"SLSSpaceSetAbsoluteLevel", &mut names) },
+            get_level: unsafe { load(h, c"SLSSpaceGetAbsoluteLevel", &mut names) },
             show: unsafe { load(h, c"SLSShowSpaces", &mut names) },
             hide: unsafe { load(h, c"SLSHideSpaces", &mut names) },
             add_remove: unsafe { load(h, c"SLSSpaceAddWindowsAndRemoveFromSpaces", &mut names) },
@@ -292,6 +296,12 @@ impl Sky {
                 .map(|_| 0)
             }),
         }
+    }
+
+    /// Space `sid`'s level ([`Self::set_level`]), when exported.
+    pub(crate) fn get_level(&self, sid: u64) -> Option<i32> {
+        // SAFETY: plain query on this process's connection.
+        self.get_level.map(|f| unsafe { f(self.cid, sid) })
     }
 
     pub(crate) fn set_level(&self, route: Route, sid: u64, level: i32) -> Result<i32, String> {

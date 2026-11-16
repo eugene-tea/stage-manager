@@ -20,6 +20,7 @@ pub mod guard_watch;
 pub mod handoff;
 pub mod hidden_tab;
 pub mod leftovers;
+pub mod landing_order;
 pub mod lend_park;
 pub mod logout_watch;
 pub mod minimize;

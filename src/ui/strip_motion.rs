@@ -83,6 +83,7 @@ use super::{Ghost as CardGhost, Strip, with_strip_of};
 use crate::config::SnapshotShadow;
 use crate::engine::corner::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
 use crate::engine::geometry::{Point, Rect, Size};
+use crate::engine::landing_order;
 use crate::platform::capture::{self, Capturer, Picture, Target};
 use crate::platform::window_engine::{Stretch, StretchDone, StretchNote};
 use crate::platform::windows;
@@ -1291,6 +1292,9 @@ impl Strip {
         let engine = crate::platform::window_engine::current();
         let listed = windows::describe(windows);
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        // The stretches first, then their ranks among them (round landing-order): they fly
+        // together, shown, stepped and landed back to front.
+        let mut planned: Vec<(Stretch, [f64; 3])> = Vec::new();
         for &w in windows {
             let Some(frame) = r.arrived.iter().find(|(a, _)| *a == w).map(|(_, f)| *f) else { continue };
             let Some((flown, flight_started)) = r.ghosts.iter().find(|g| g.window == w).and_then(|g| g.flown()) else { continue };
@@ -1312,6 +1316,15 @@ impl Strip {
                 .into_iter()
                 .map(|(t, m)| (flight_started + Duration::from_secs_f64(t), m))
                 .collect();
+            let miss = landing_math::flat_miss(&flown.drawn_at(at));
+            planned.push((Stretch { window: w, frame, steps, rank: 0, convoy: None }, [at, flown.duration, miss]));
+        }
+        let ids: Vec<u32> = planned.iter().map(|p| p.0.window).collect();
+        let ranks = landing_order::ranks(&r.order, &ids);
+        let convoy = landing_order::convoy_for(planned.len());
+        for ((mut stretch, [at, duration, miss]), (w, rank)) in planned.into_iter().zip(ranks) {
+            stretch.rank = rank;
+            stretch.convoy = convoy.clone();
             let done: StretchDone = std::sync::Arc::new(move |window, note| {
                 DispatchQueue::main().exec_async(move || {
                     // The controller hears every end, its transition still running or not:
@@ -1322,11 +1335,13 @@ impl Strip {
                     with_strip_of(display, |s| s.stretch_note(id, window, note));
                 });
             });
-            let n = steps.len();
-            if engine.fly_stretch(Stretch { window: w, frame, steps }, done) {
-                let miss = landing_math::flat_miss(&flown.drawn_at(at));
-                tracing::debug!(id, window = w, handover_ms = (at * 1000.0).round() as u64, flight_ms = (flown.duration * 1000.0).round() as u64, miss = format!("{miss:.2}"), steps = n, "transition: the window flies the last stretch itself");
+            let n = stretch.steps.len();
+            if engine.fly_stretch(stretch, done) {
+                tracing::debug!(id, window = w, rank, handover_ms = (at * 1000.0).round() as u64, flight_ms = (duration * 1000.0).round() as u64, miss = format!("{miss:.2}"), steps = n, "transition: the window flies the last stretch itself");
                 r.stretched.push(w);
+            } else if let Some(c) = &convoy {
+                // Never planned: nothing in front waits for it.
+                c.mark(rank, landing_order::Leg::Gone);
             }
         }
     }
