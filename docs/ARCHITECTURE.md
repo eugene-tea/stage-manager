@@ -94,6 +94,18 @@ flowchart TD
     S -. "falls back" .-> K
 ```
 
+**The Apple mode** (`[windows] with_apple = "augment"`) is what the app does while Apple's
+Stage Manager is on, in place of standing down: a third engine that hides nothing
+(`platform/apple/engine.rs`, `EngineKind::Apple`; a third arm in the model's door and in the
+controller's upkeep door, the trait unchanged), and a second conductor beside the controller
+(`platform/conductor.rs`: the WM thread holds a `Conductor`, `Ours(Controller)` or
+`Apples(AppleController)`). The mode's pure half (`engine/apple`) reads Apple's arrangement
+from the window list and WindowManager's Accessibility (`mirror.rs`), keeps the model in step
+with the model's own ops, their actions dropped (`follow.rs`), and plans steps for routes
+Apple's answers to (`plan.rs`, `platform/apple/routes`), all of it run in the tests against
+a fake WindowManager (`engine::testkit::apple`). Every strategy and route, with what it
+costs and how it was measured: [STRATEGIES.md](STRATEGIES.md).
+
 A switch in each engine:
 
 ```mermaid
