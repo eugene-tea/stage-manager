@@ -382,6 +382,8 @@ pub const KEYS: &[KeyDef] = &[
         ..k("windows", "engine", Kind::Choice(&["auto", "accessibility"]), "\"auto\"",
             "How a stage's windows are hidden: \"auto\" lets each launch try the window server's own Spaces and keep them only where a trial with a window of the app's own works, with the Accessibility park corner otherwise and for the rest of a run in which a Space call fails; \"accessibility\" always uses the park corner and never tries Spaces (a way out if windows go missing or flicker on a switch). In this version \"auto\" still uses the park corner. Read at launch.")
     },
+    k("windows", "with_apple", Kind::Choice(&["stand_down", "augment"]), "\"stand_down\"",
+        "What Stage Manager does while Apple's Stage Manager is on: \"stand_down\" brings every window back and arranges nothing until Apple's is off; \"augment\" follows Apple's stages instead: the stage hotkeys and `ctl switch` switch between them, and Stage Manager shows no strip of its own. With Apple's off, Stage Manager runs its own stages either way."),
     // [displays]
     KeyDef {
         applies: Applies::Restart,
@@ -604,6 +606,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-42.toml"),
     include_str!("legacy/default-43.toml"),
     include_str!("legacy/default-44.toml"),
+    include_str!("legacy/default-45.toml"),
 ];
 
 #[cfg(test)]

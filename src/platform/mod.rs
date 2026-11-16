@@ -14,6 +14,7 @@ pub mod capture_gate;
 pub mod capture_pace;
 pub mod capture_pixels;
 pub mod code_sign;
+pub mod conductor;
 pub mod controller;
 pub mod corner;
 pub mod ctl;

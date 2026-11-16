@@ -9,6 +9,15 @@
 //! This is the pure part: what to do when the setting is read, as an ordered plan of
 //! [`Task`]s the WM thread (`platform::wm_thread`) carries out.
 //!
+//! **Or augmenting** (`[windows] with_apple = "augment"`, [`WithApple`]): while Apple's is on
+//! the app follows it instead of standing down ([`augment_plan`]): every parked window back
+//! and the saved stages set aside as at a release, then the Apple mode's null-hide engine and
+//! its conductor in place of a fresh controller, observation kept running (the mode reads
+//! Apple's strip and follows it: `engine::apple`). Apple's off, the launch's engine comes back
+//! and observation starts afresh as at a resume. Nothing is hidden by either, so a config
+//! reload swaps the two freely while Apple's is on ([`Step::ToAugment`],
+//! [`Step::ToStandDown`]). `"stand_down"`, the default, gives today's plans unchanged.
+//!
 //! - **Saved stages go aside at the release** ([`Task::DropSavedStages`]), the moment Apple's
 //!   arranges the windows: a quit, crash or logout while standing down then leaves no
 //!   `state.json` for the next launch to re-park from; the next stages built (the resume, or a
@@ -48,6 +57,32 @@
 
 use std::time::{Duration, Instant};
 
+/// What the app does while Apple's Stage Manager is on (`[windows] with_apple`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WithApple {
+    /// Stand down: every window back, nothing arranged (the default, Apple's way).
+    #[default]
+    StandDown,
+    /// Follow Apple's: its stages read into the app's model, hotkeys and `ctl` through
+    /// routes Apple's answers to (`engine::apple`).
+    Augment,
+}
+
+impl WithApple {
+    /// Its name in config and logs.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::StandDown => "stand_down",
+            Self::Augment => "augment",
+        }
+    }
+
+    /// The value of the config text `text` (`"augment"`, else standing down).
+    pub fn parse(text: &str) -> Self {
+        if text == "augment" { Self::Augment } else { Self::StandDown }
+    }
+}
+
 /// What the WM thread must do after a reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
@@ -55,8 +90,19 @@ pub enum Step {
     Nothing,
     /// Apple's came on: carry out [`release_plan`].
     Release,
-    /// Apple's went off: carry out [`resume_plan`].
-    Resume,
+    /// Apple's came on with `with_apple = "augment"`: carry out [`augment_plan`].
+    Augment,
+    /// Apple's went off: carry out [`resume_plan`] (`from`: what the app did while it was on).
+    Resume {
+        /// Standing down or augmenting until now.
+        from: WithApple,
+    },
+    /// Apple's still on, `with_apple` changed to `"augment"` while standing down: carry out
+    /// [`to_augment_plan`].
+    ToAugment,
+    /// Apple's still on, `with_apple` changed to `"stand_down"` while augmenting: carry out
+    /// [`to_stand_down_plan`].
+    ToStandDown,
 }
 
 /// One task of a release or a resume, in order.
@@ -84,6 +130,13 @@ pub enum Task {
     StartObserving,
     /// `state.json` is written now (the logout's head start: the next login restores it).
     SaveStages,
+    /// The Apple mode's null-hide engine is installed (nothing of ours is hidden from now on).
+    InstallAppleEngine,
+    /// The Apple mode's conductor replaces the controller (observation keeps running).
+    AppleConductor,
+    /// The launch's engine is installed again (Apple's is off, or the app stands down),
+    /// before any controller is made: a controller takes the engine that runs then.
+    InstallLaunchEngine,
 }
 
 /// The release, in order. Displays and settings are replayed when the WM thread has them.
@@ -99,13 +152,71 @@ pub fn release_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
     plan
 }
 
+/// Apple's came on with `with_apple = "augment"`, in order: every window back and the saved
+/// stages set aside as at a release ([`release_plan`]), then the Apple mode's engine and
+/// conductor in place of a fresh controller, given the last displays and settings; the strip
+/// hides. Observation keeps running: the mode reads what Apple's shows.
+pub fn augment_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
+    let mut plan = vec![Task::UnparkAll, Task::HoldStranded, Task::DropSavedStages, Task::InstallAppleEngine, Task::AppleConductor];
+    if have_displays {
+        plan.push(Task::ReplayDisplays);
+    }
+    if have_settings {
+        plan.push(Task::ReplaySettings);
+    }
+    plan.push(Task::HideStrip);
+    plan
+}
+
 /// The resume, in order: held windows first (they may be back where the fresh start looks).
-pub fn resume_plan(stranded: bool) -> Vec<Task> {
+/// From augmenting (`from`), the Apple mode's conductor goes first: observation stops, the
+/// launch's engine is installed again (a controller takes the engine that runs when it is
+/// made), then a fresh controller with the last displays and settings, before observation
+/// starts afresh. From standing down, today's plan.
+pub fn resume_plan(stranded: bool, from: WithApple, have_displays: bool, have_settings: bool) -> Vec<Task> {
     let mut plan = Vec::new();
+    if from == WithApple::Augment {
+        plan.extend([Task::StopObserving, Task::InstallLaunchEngine, Task::NewController]);
+        if have_displays {
+            plan.push(Task::ReplayDisplays);
+        }
+        if have_settings {
+            plan.push(Task::ReplaySettings);
+        }
+    }
     if stranded {
         plan.push(Task::RetryHeld);
     }
     plan.push(Task::StartObserving);
+    plan
+}
+
+/// Standing down, `with_apple` turned to `"augment"`: the Apple mode's engine and conductor in
+/// place of the idle controller, observation started (nothing was parked meanwhile).
+pub fn to_augment_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
+    let mut plan = vec![Task::InstallAppleEngine, Task::AppleConductor];
+    if have_displays {
+        plan.push(Task::ReplayDisplays);
+    }
+    if have_settings {
+        plan.push(Task::ReplaySettings);
+    }
+    plan.push(Task::StartObserving);
+    plan
+}
+
+/// Augmenting, `with_apple` turned to `"stand_down"`: observation stops, the launch's engine
+/// comes back and a fresh idle controller waits, as after a release (nothing is hidden by
+/// either, so nothing is brought back).
+pub fn to_stand_down_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
+    let mut plan = vec![Task::StopObserving, Task::InstallLaunchEngine, Task::NewController];
+    if have_displays {
+        plan.push(Task::ReplayDisplays);
+    }
+    if have_settings {
+        plan.push(Task::ReplaySettings);
+    }
+    plan.push(Task::HideStrip);
     plan
 }
 
@@ -335,23 +446,42 @@ pub enum Work {
 /// The stand-down state.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct StandDown {
-    stood_down: bool,
+    /// What the app does while Apple's is on, when it is on (`None`: managing).
+    with: Option<WithApple>,
     /// Windows a release could not bring back yet: held and retried on every Space change,
     /// through a resume, until all are back.
     stranded: bool,
 }
 
 impl StandDown {
-    /// A reading of Apple's `GloballyEnabled` (`on`): the step it calls for.
+    /// A reading of Apple's `GloballyEnabled` (`on`), standing down while it is on: the step
+    /// it calls for ([`Self::reading`] with [`WithApple::StandDown`]).
     pub fn apple(&mut self, on: bool) -> Step {
-        match (self.stood_down, on) {
-            (false, true) => {
-                self.stood_down = true;
-                Step::Release
+        self.reading(on, WithApple::StandDown)
+    }
+
+    /// A reading of Apple's `GloballyEnabled` (`on`) and `[windows] with_apple` (`with`): the
+    /// step it calls for. Apple's coming on releases or augments as `with` says; going off
+    /// resumes from what the app did; while on, a changed `with` swaps the two.
+    pub fn reading(&mut self, on: bool, with: WithApple) -> Step {
+        match (self.with, on) {
+            (None, true) => {
+                self.with = Some(with);
+                match with {
+                    WithApple::StandDown => Step::Release,
+                    WithApple::Augment => Step::Augment,
+                }
             }
-            (true, false) => {
-                self.stood_down = false;
-                Step::Resume
+            (Some(from), false) => {
+                self.with = None;
+                Step::Resume { from }
+            }
+            (Some(now), true) if now != with => {
+                self.with = Some(with);
+                match with {
+                    WithApple::Augment => Step::ToAugment,
+                    WithApple::StandDown => Step::ToStandDown,
+                }
             }
             _ => Step::Nothing,
         }
@@ -362,9 +492,19 @@ impl StandDown {
         self.stranded = !all_back;
     }
 
-    /// Whether the app is standing down.
+    /// Whether the app is standing down (Apple's on, `with_apple = "stand_down"`).
     pub fn stood_down(&self) -> bool {
-        self.stood_down
+        self.with == Some(WithApple::StandDown)
+    }
+
+    /// Whether the app follows Apple's (Apple's on, `with_apple = "augment"`).
+    pub fn augmenting(&self) -> bool {
+        self.with == Some(WithApple::Augment)
+    }
+
+    /// Whether Apple's Stage Manager is on as last read, whatever the app does meanwhile.
+    pub fn apple_on(&self) -> bool {
+        self.with.is_some()
     }
 
     /// Whether held windows still wait to come back (retry when a Space shows).
@@ -372,9 +512,10 @@ impl StandDown {
         self.stranded
     }
 
-    /// Whether `work` may run now.
+    /// Whether `work` may run now: everything while managing or augmenting (the Apple mode's
+    /// conductor takes it), housekeeping only while standing down.
     pub fn admits(&self, work: Work) -> bool {
-        !self.stood_down || work == Work::Housekeeping
+        !self.stood_down() || work == Work::Housekeeping
     }
 }
 
@@ -401,7 +542,7 @@ mod tests {
         assert_eq!(s.apple(true), Step::Release);
         assert!(s.stood_down());
         assert_eq!(s.apple(true), Step::Nothing, "every later reading while on does nothing");
-        assert_eq!(s.apple(false), Step::Resume);
+        assert_eq!(s.apple(false), Step::Resume { from: WithApple::StandDown });
         assert!(!s.stood_down());
         assert_eq!(s.apple(false), Step::Nothing);
     }
@@ -430,14 +571,14 @@ mod tests {
         s.apple(true);
         s.released(false);
         assert!(s.stranded(), "another Space's window waits for its Space");
-        assert_eq!(s.apple(false), Step::Resume);
+        assert_eq!(s.apple(false), Step::Resume { from: WithApple::StandDown });
         assert!(s.stranded(), "resuming does not forget it");
-        assert_eq!(resume_plan(s.stranded()), vec![Task::RetryHeld, Task::StartObserving], "tried again before the fresh start");
+        assert_eq!(resume_plan(s.stranded(), WithApple::StandDown, true, true), vec![Task::RetryHeld, Task::StartObserving], "tried again before the fresh start");
         s.released(false);
         assert!(s.stranded(), "still parked: retried at the next Space change");
         s.released(true);
         assert!(!s.stranded());
-        assert_eq!(resume_plan(s.stranded()), vec![Task::StartObserving]);
+        assert_eq!(resume_plan(s.stranded(), WithApple::StandDown, true, true), vec![Task::StartObserving]);
     }
 
     /// R8 S1: a resumed controller replacing the registry keeps the held windows.
@@ -468,7 +609,7 @@ mod tests {
         assert!(at(Task::UnparkAll) < at(Task::DropSavedStages), "windows come back first");
         assert!(at(Task::HoldStranded) < at(Task::NewController));
         for stranded in [false, true] {
-            assert!(!resume_plan(stranded).contains(&Task::DropSavedStages));
+            assert!(!resume_plan(stranded, WithApple::StandDown, true, true).contains(&Task::DropSavedStages));
         }
     }
 
@@ -625,6 +766,92 @@ mod tests {
     fn a_quick_flip_releases_and_resumes_in_order() {
         let mut s = StandDown::default();
         let steps: Vec<Step> = [true, false, true, false].into_iter().map(|on| s.apple(on)).collect();
-        assert_eq!(steps, vec![Step::Release, Step::Resume, Step::Release, Step::Resume]);
+        let resume = Step::Resume { from: WithApple::StandDown };
+        assert_eq!(steps, vec![Step::Release, resume, Step::Release, resume]);
+    }
+
+    /// `with_apple = "stand_down"` (the default) gives today's plans unchanged.
+    #[test]
+    fn standing_down_keeps_todays_plans() {
+        assert_eq!(WithApple::default(), WithApple::StandDown);
+        let mut s = StandDown::default();
+        assert_eq!(s.reading(true, WithApple::StandDown), Step::Release);
+        assert!(s.stood_down() && s.apple_on() && !s.augmenting());
+        assert_eq!(
+            release_plan(true, true),
+            vec![Task::UnparkAll, Task::HoldStranded, Task::DropSavedStages, Task::StopObserving, Task::NewController, Task::ReplayDisplays, Task::ReplaySettings, Task::HideStrip]
+        );
+        assert_eq!(s.reading(false, WithApple::StandDown), Step::Resume { from: WithApple::StandDown });
+        assert_eq!(resume_plan(false, WithApple::StandDown, true, true), vec![Task::StartObserving], "the fresh controller was made at the release");
+        assert_eq!(resume_plan(true, WithApple::StandDown, true, true), vec![Task::RetryHeld, Task::StartObserving]);
+    }
+
+    /// `with_apple = "augment"`: Apple's coming on brings every window back and sets the
+    /// stages aside as a release does, then the Apple mode runs, observation kept; going off,
+    /// the launch's engine comes back before observation starts afresh.
+    #[test]
+    fn augmenting_follows_apples_and_resumes_with_the_launchs_engine() {
+        let mut s = StandDown::default();
+        assert_eq!(s.reading(true, WithApple::Augment), Step::Augment);
+        assert!(s.augmenting() && s.apple_on() && !s.stood_down());
+        for w in [Work::Input, Work::SpaceChange, Work::Observe, Work::Housekeeping] {
+            assert!(s.admits(w), "the Apple mode's conductor takes {w:?}");
+        }
+        let plan = augment_plan(true, true);
+        let at = |t: Task| plan.iter().position(|p| *p == t).unwrap_or_else(|| panic!("{t:?} planned"));
+        assert!(at(Task::UnparkAll) < at(Task::DropSavedStages), "windows back first, as at a release");
+        assert!(at(Task::HoldStranded) < at(Task::InstallAppleEngine));
+        assert!(at(Task::InstallAppleEngine) < at(Task::AppleConductor));
+        assert!(at(Task::AppleConductor) < at(Task::ReplayDisplays) && at(Task::AppleConductor) < at(Task::ReplaySettings));
+        assert!(plan.contains(&Task::HideStrip));
+        assert!(!plan.contains(&Task::StopObserving), "observation keeps running");
+        assert!(!plan.contains(&Task::NewController));
+        assert!(!augment_plan(false, false).contains(&Task::ReplayDisplays));
+
+        assert_eq!(s.reading(true, WithApple::Augment), Step::Nothing, "every later reading while on does nothing");
+        assert_eq!(s.reading(false, WithApple::Augment), Step::Resume { from: WithApple::Augment });
+        assert!(!s.apple_on());
+        let plan = resume_plan(true, WithApple::Augment, true, true);
+        let at = |t: Task| plan.iter().position(|p| *p == t).unwrap_or_else(|| panic!("{t:?} planned"));
+        assert!(at(Task::StopObserving) < at(Task::NewController), "the conductor goes, a fresh controller comes");
+        assert!(at(Task::InstallLaunchEngine) < at(Task::NewController), "the fresh controller takes the launch's engine");
+        assert!(at(Task::NewController) < at(Task::ReplayDisplays));
+        assert!(at(Task::RetryHeld) < at(Task::StartObserving));
+        assert!(at(Task::InstallLaunchEngine) < at(Task::StartObserving), "the launch's engine before the fresh start");
+        assert_eq!(plan.last(), Some(&Task::StartObserving));
+    }
+
+    /// A config reload while Apple's is on swaps standing down and augmenting (nothing is
+    /// hidden in either); off, `with_apple` changes nothing until Apple's comes on.
+    #[test]
+    fn a_reload_swaps_standing_down_and_augmenting_while_apples_is_on() {
+        let mut s = StandDown::default();
+        assert_eq!(s.reading(false, WithApple::Augment), Step::Nothing, "off: nothing to do");
+        assert_eq!(s.reading(true, WithApple::StandDown), Step::Release);
+        assert_eq!(s.reading(true, WithApple::Augment), Step::ToAugment);
+        assert!(s.augmenting());
+        let plan = to_augment_plan(true, true);
+        assert_eq!(plan.first(), Some(&Task::InstallAppleEngine));
+        assert!(plan.contains(&Task::AppleConductor));
+        assert_eq!(plan.last(), Some(&Task::StartObserving), "observation stopped while standing down starts again");
+        assert!(!plan.contains(&Task::UnparkAll), "nothing was parked while standing down");
+
+        assert_eq!(s.reading(true, WithApple::StandDown), Step::ToStandDown);
+        assert!(s.stood_down());
+        let plan = to_stand_down_plan(true, true);
+        let at = |t: Task| plan.iter().position(|p| *p == t).unwrap_or_else(|| panic!("{t:?} planned"));
+        assert_eq!(plan.first(), Some(&Task::StopObserving));
+        assert!(at(Task::InstallLaunchEngine) < at(Task::NewController));
+        assert!(plan.contains(&Task::HideStrip));
+        assert!(!plan.contains(&Task::StartObserving));
+        assert_eq!(s.reading(false, WithApple::StandDown), Step::Resume { from: WithApple::StandDown });
+    }
+
+    #[test]
+    fn with_apple_reads_its_two_values() {
+        assert_eq!(WithApple::parse("augment"), WithApple::Augment);
+        assert_eq!(WithApple::parse("stand_down"), WithApple::StandDown);
+        assert_eq!(WithApple::parse("anything"), WithApple::StandDown);
+        assert_eq!(WithApple::Augment.name(), "augment");
     }
 }

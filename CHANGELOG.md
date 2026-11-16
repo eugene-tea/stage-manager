@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- New setting `[windows] with_apple` (`"stand_down"` or `"augment"`). With `"augment"`,
+  Stage Manager follows Apple's Stage Manager while it is on instead of stepping aside: the
+  stage hotkeys and `ctl switch N` bring stage N of Apple's strip to the front, and
+  `ctl state` lists Apple's stages. `"stand_down"`, the default, keeps the behaviour as it
+  was.
 - A window tab selected (Terminal, Finder, any app with window tabs) belongs to the stage
   of its tab group: it takes the place of the tab it hides, and goes with its stage when
   another stage is chosen. A tab selected was let go with no stage, and selected again it

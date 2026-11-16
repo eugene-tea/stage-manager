@@ -254,6 +254,17 @@ Without it, the patch is drawn from your wallpaper's file. If a second screen si
 that corner, a free corner is used instead. Each Desktop has its own patch, which slides in
 with it, and each screen's corner has its own, drawn from that screen's desktop.
 
+### With Apple's Stage Manager on
+
+While Apple's Stage Manager is on, Stage Manager brings every window back and arranges
+nothing until it is off. With `[windows] with_apple = "augment"` it follows Apple's stages
+instead: the stage hotkeys (`[hotkeys] switch`) and `ctl switch N` bring stage N of Apple's
+strip to the front, counted from the top (then the stages the strip has no room for),
+without moving the pointer. Apple's Stage Manager draws the strip and arranges the windows;
+Stage Manager shows no strip of its own, and its other hotkeys, rules and extras do nothing
+meanwhile. The stages followed are saved apart from Stage Manager's own, which come back
+when Apple's is turned off.
+
 ## Settings
 
 Open Settings from the menu bar icon. If you hid the icon, open Stage Manager again from

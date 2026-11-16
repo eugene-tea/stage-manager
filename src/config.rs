@@ -399,6 +399,9 @@ pub struct WindowsConfig {
     /// `[windows] engine`: which window engines a launch may choose from (read at launch,
     /// [`crate::engine::engine_choice`]).
     pub engine: crate::engine::engine_choice::ConfigEngine,
+    /// `[windows] with_apple`: what the app does while Apple's Stage Manager is on (stand
+    /// down, or follow it: [`crate::engine::stand_down::WithApple`]). Read on every reload.
+    pub with_apple: crate::engine::stand_down::WithApple,
     /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
     /// shadow side by side ([`crate::engine::corner::corner_patch::DEFAULT_REACH`]), or one number for
     /// every side ([`WindowsConfig::patch_reach`]).
@@ -1091,6 +1094,7 @@ impl Config {
                     "accessibility" => crate::engine::engine_choice::ConfigEngine::Accessibility,
                     _ => crate::engine::engine_choice::ConfigEngine::Auto,
                 },
+                with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.with_apple")),
             },
             displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
             rules: RuleSet::new(rules, defaults),

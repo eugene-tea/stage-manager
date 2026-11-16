@@ -129,6 +129,12 @@ pub fn state_file() -> PathBuf {
     config_dir().join("state.json")
 }
 
+/// `state-apple.json`: the Apple mode's stages (Apple's, as the model followed them), in
+/// `state.json`'s format; `state.json` stays set aside meanwhile.
+pub fn apple_state_file() -> PathBuf {
+    config_dir().join("state-apple.json")
+}
+
 /// `state-stood-down.json`: `state.json` set aside while Apple's Stage Manager is on
 /// ([`set_aside_state`]), back when stages are built again ([`bring_back_state`]).
 pub fn stood_down_state_file() -> PathBuf {

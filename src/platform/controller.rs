@@ -189,7 +189,7 @@ const SLIDE_CARRY: Duration = Duration::from_millis(1500);
 const CLOSING_KEEP: Duration = Duration::from_secs(10);
 
 /// Now, in Unix seconds (0 when the clock is before 1970).
-fn unix_now() -> u64 {
+pub(crate) fn unix_now() -> u64 {
     SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_secs())
 }
 
@@ -375,7 +375,19 @@ pub fn set_ui_sink(f: impl Fn(UiUpdate) + Send + Sync + 'static) {
     }
 }
 
-fn notify_ui(update: UiUpdate) {
+/// Tells the main thread the config in force (`error`: why the file could not be read; the
+/// last good config stays): its hotkeys, the strip's picture pace, captures on or off.
+pub(crate) fn notify_config(config: &Config, error: Option<String>) {
+    notify_ui(UiUpdate::Config {
+        error,
+        config: Box::new(config.clone()),
+        hotkeys: config.hotkeys.clone(),
+        thumbnail_interval_ms: config.strip.thumbnail_interval_ms,
+        capture: config.strip.capture,
+    });
+}
+
+pub(crate) fn notify_ui(update: UiUpdate) {
     if let Ok(s) = ui_sink().lock()
         && let Some(f) = s.as_ref()
     {
@@ -585,7 +597,7 @@ fn ctl_lands_switch(cmd: &Command) -> bool {
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
 /// app brought forward (never all its windows): with its main window on the shown Space, macOS
 /// has no reason to switch Spaces. The engine never focuses another Space's.
-fn ax_focus(element: &AxElement, pid: i32) -> Result<(), AxError> {
+pub(crate) fn ax_focus(element: &AxElement, pid: i32) -> Result<(), AxError> {
     let _ = element.raise();
     let main = element.set_main(true);
     let front = AxElement::application(pid).set_frontmost(true);
@@ -1316,14 +1328,12 @@ impl Controller {
     }
 
     fn notify_config(&self) {
-        let config = self.store.config();
-        notify_ui(UiUpdate::Config {
-            error: self.config_error.clone(),
-            config: Box::new(config.clone()),
-            hotkeys: config.hotkeys.clone(),
-            thumbnail_interval_ms: config.strip.thumbnail_interval_ms,
-            capture: config.strip.capture,
-        });
+        notify_config(self.store.config(), self.config_error.clone());
+    }
+
+    /// `[windows] with_apple` as the config in force has it (re-read at every reload).
+    pub fn with_apple(&self) -> crate::engine::stand_down::WithApple {
+        self.store.config().windows.with_apple
     }
 
     /// True once the model exists (observation started).
