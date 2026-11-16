@@ -11,7 +11,10 @@
 //! as the model's door is (`engine/model/hiding.rs`). No other file of the controller asks
 //! which engine runs, and none but the Corner engine's own ([`super::corner`]) touches its
 //! state ([`CornerUpkeep`](super::corner::CornerUpkeep)): an engine that hides its windows
-//! elsewhere answers each moment here with its own work, or with none.
+//! elsewhere answers each moment here with its own work, or with none. The Apple mode
+//! ([`EngineKind::Apple`]) answers none in every arm: no controller of ours runs while Apple's
+//! Stage Manager arranges the windows (`platform::apple::controller` does, behind
+//! `platform::conductor`).
 
 use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
@@ -55,7 +58,7 @@ impl Controller {
     pub(super) fn hidden_changed(&self) {
         match self.engine.kind() {
             EngineKind::Corner => self.publish_shield(),
-            EngineKind::Spaces => {},
+            EngineKind::Spaces | EngineKind::Apple => {},
         }
     }
 
@@ -66,7 +69,7 @@ impl Controller {
     pub(super) fn look_at_screen(&mut self) -> Option<std::rc::Rc<Vec<windows::CgWindow>>> {
         match self.engine.kind() {
             EngineKind::Corner => self.update_patch(),
-            EngineKind::Spaces => None,
+            EngineKind::Spaces | EngineKind::Apple => None,
         }
     }
 
@@ -76,7 +79,7 @@ impl Controller {
     pub(super) fn raised_by_macos(&mut self, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.replan_patch(now),
-            EngineKind::Spaces => {},
+            EngineKind::Spaces | EngineKind::Apple => {},
         }
     }
 
@@ -85,7 +88,7 @@ impl Controller {
     pub(super) fn pointer_released(&self, at: Point, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_touched(at, now),
-            EngineKind::Spaces => {},
+            EngineKind::Spaces | EngineKind::Apple => {},
         }
     }
 
@@ -94,7 +97,7 @@ impl Controller {
     pub(super) fn upkeep_wants_fast_tick(&self, now: Instant) -> bool {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_replans(now) || self.reveal_fast(now),
-            EngineKind::Spaces => false,
+            EngineKind::Spaces | EngineKind::Apple => false,
         }
     }
 
@@ -124,6 +127,8 @@ impl Controller {
                     None
                 }
             }
+            // Nothing of the Apple mode's is hidden: no controller of ours runs it.
+            EngineKind::Apple => None,
         }
     }
 
@@ -135,7 +140,7 @@ impl Controller {
     pub(super) fn upkeep_rest_cap(&self) -> Option<Duration> {
         match self.engine.kind() {
             EngineKind::Corner => sliver_tap::wants_list().then_some(SLIVER_REST),
-            EngineKind::Spaces => None,
+            EngineKind::Spaces | EngineKind::Apple => None,
         }
     }
 
@@ -144,7 +149,7 @@ impl Controller {
     pub(super) fn upkeep_fast_tick(&mut self, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_fast_tick(now),
-            EngineKind::Spaces => {},
+            EngineKind::Spaces | EngineKind::Apple => {},
         }
     }
 
@@ -158,6 +163,7 @@ impl Controller {
                 let _ = ob;
                 self.spaces_tick();
             }
+            EngineKind::Apple => {}
         }
     }
 
@@ -171,6 +177,7 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.dive.filter(|(w, _)| *w == id).map(|(_, frame)| frame),
             EngineKind::Spaces => self.spaces.dive.filter(|(w, _)| *w == id).map(|(_, frame)| frame),
+            EngineKind::Apple => None,
         }
     }
 
@@ -180,6 +187,7 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.dive = place,
             EngineKind::Spaces => self.spaces.dive = place,
+            EngineKind::Apple => {}
         }
     }
 
@@ -204,6 +212,7 @@ impl Controller {
                 }
                 tracing::warn!(id, owed, "a show failed: tried again when owed (still hidden, or out away from its frame), else shown where it was");
             }
+            EngineKind::Apple => {}
         }
     }
 
@@ -218,6 +227,7 @@ impl Controller {
                 let _ = now;
                 tracing::info!(id, "hide failed: the window is hidden again by the tick");
             }
+            EngineKind::Apple => {}
         }
     }
 
@@ -228,7 +238,7 @@ impl Controller {
     pub(super) fn keep_until_seen(&mut self, id: u32, entry: ParkedEntry) {
         match self.engine.kind() {
             EngineKind::Corner => self.keep_unrestored(id, entry),
-            EngineKind::Spaces => {},
+            EngineKind::Spaces | EngineKind::Apple => {},
         }
     }
 
@@ -243,6 +253,7 @@ impl Controller {
                 let owed = crate::platform::spaces::engine::shared().owed();
                 self.spaces.frames_owed.iter().filter(|(id, _)| owed.contains(id)).map(|(id, e)| (*id, e.clone())).collect()
             }
+            EngineKind::Apple => Vec::new(),
         }
     }
 
@@ -262,6 +273,7 @@ impl Controller {
                 spaces.release(&ids, "the model let them go");
                 spaces.forget_frames(&ids);
             }
+            EngineKind::Apple => {}
         }
     }
 
@@ -271,7 +283,7 @@ impl Controller {
     pub(super) fn hidden_moved_by_user(&mut self, id: u32) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.strays.entry(id).or_default().user_moved = true,
-            EngineKind::Spaces => {},
+            EngineKind::Spaces | EngineKind::Apple => {},
         }
     }
 
@@ -287,6 +299,7 @@ impl Controller {
                 let owed = crate::platform::spaces::engine::shared().retry_owed(force, &mut self.busy_apps.borrow_mut());
                 self.spaces.frames_owed.retain(|id, _| owed.contains(id));
             }
+            EngineKind::Apple => {}
         }
     }
 
@@ -295,6 +308,7 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.corner.unrestored.len(),
             EngineKind::Spaces => crate::platform::spaces::engine::shared().owed().len(),
+            EngineKind::Apple => 0,
         }
     }
 
@@ -303,6 +317,7 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.unrestored_ids(),
             EngineKind::Spaces => crate::platform::spaces::engine::shared().owed(),
+            EngineKind::Apple => BTreeSet::new(),
         }
     }
 
@@ -318,6 +333,7 @@ impl Controller {
                 self.spaces.frames_owed.retain(|id, _| owed.contains(id));
                 owed.len()
             }
+            EngineKind::Apple => 0,
         }
     }
 
@@ -327,7 +343,7 @@ impl Controller {
     pub(super) fn let_go_destroyed(&self) -> BTreeSet<u32> {
         match self.engine.kind() {
             EngineKind::Corner => self.destroyed_ids(),
-            EngineKind::Spaces => BTreeSet::new(),
+            EngineKind::Spaces | EngineKind::Apple => BTreeSet::new(),
         }
     }
 
@@ -350,7 +366,7 @@ impl Controller {
             EngineKind::Corner => {
                 self.switch_corner(arriving, outgoing, activated, list).and_then(|c| self.cover_ready(c).map_err(Refused::from)).map(Some)
             }
-            EngineKind::Spaces => Ok(None),
+            EngineKind::Spaces | EngineKind::Apple => Ok(None),
         }
     }
 
@@ -366,6 +382,7 @@ impl Controller {
                 status["kind"] = json!(EngineKind::Spaces.name());
                 status
             }
+            EngineKind::Apple => json!({ "kind": EngineKind::Apple.name() }),
         };
         // Why it runs (the launch's choice, the probe's verdict, a fallback), every engine.
         if let Some(c) = crate::platform::window_engine::choice() {
@@ -382,6 +399,7 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.strays_status(),
             EngineKind::Spaces => self.spaces_strays_status(),
+            EngineKind::Apple => Vec::new(),
         }
     }
 
@@ -389,7 +407,7 @@ impl Controller {
     pub(super) fn status_patch(&self, screen: u32) -> Value {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_status(screen),
-            EngineKind::Spaces => json!({ "on": false, "mode": "off", "shown": false, "rect": null, "refused_against": null, "hidden_why": null }),
+            EngineKind::Spaces | EngineKind::Apple => json!({ "on": false, "mode": "off", "shown": false, "rect": null, "refused_against": null, "hidden_why": null }),
         }
     }
 
@@ -397,7 +415,7 @@ impl Controller {
     pub(super) fn status_patch_plan(&self, screen: u32) -> Value {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_plan_status(screen),
-            EngineKind::Spaces => Value::Null,
+            EngineKind::Spaces | EngineKind::Apple => Value::Null,
         }
     }
 }

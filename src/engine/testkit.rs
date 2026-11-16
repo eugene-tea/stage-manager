@@ -244,6 +244,8 @@ impl Desk {
                             self.stage_space.insert(id);
                         }
                     }
+                    // Apple's strip takes it: the model's hide is dropped, nothing moves.
+                    EngineKind::Apple => {}
                 },
                 Action::Raise { id } => self.raise(id),
                 Action::Focus { id } => {
@@ -281,6 +283,7 @@ impl Desk {
         match self.engine {
             EngineKind::Corner => self.frames.get(&id).is_some_and(|f| self.display.unwrap_or_else(display).parks(*f)),
             EngineKind::Spaces => self.stage_space.contains(&id),
+            EngineKind::Apple => false,
         }
     }
 }

@@ -4,6 +4,7 @@
 //! Accessibility call runs on the WM thread ([`wm_thread`]), which owns the engine through
 //! [`controller`]; the ctl socket and the signal watcher have their own threads.
 
+pub mod apple;
 pub mod apps;
 pub mod ax;
 pub mod capture;

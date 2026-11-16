@@ -181,6 +181,7 @@ impl Mac {
         match self.m.options().engine {
             EngineKind::Corner => parked_at(self.wins[&id].1),
             EngineKind::Spaces => self.stage_space.contains(&id),
+            EngineKind::Apple => false,
         }
     }
 
@@ -1791,6 +1792,7 @@ mod arranged_ahead {
                 assert_eq!(mac.m.dock_home(40, AppFacts { visible_here: true, ..none }), None, "on screen here");
                 assert_eq!(mac.m.dock_home(20, none), None, "the browser has nothing on another Desktop");
             }
+            EngineKind::Apple => unreachable!("the engine matrix runs the Corner and Spaces engines"),
         }
     }
 
@@ -1818,6 +1820,7 @@ mod arranged_ahead {
                 assert!(mac.m.activation_stays_here(40, false), "macOS goes nowhere: the activation switches here");
                 assert!(!mac.m.activation_stays_here(30, false), "chat has no stage here");
             }
+            EngineKind::Apple => unreachable!("the engine matrix runs the Corner and Spaces engines"),
         }
         // Its activation here switches to Mail's stage (the stage the Spaces engine keeps).
         let obs = Observation { focused: Some(w(6)), ..mac.obs() };
@@ -1860,6 +1863,7 @@ mod arranged_ahead {
                 let wait = std::time::Duration::from_millis(1000);
                 assert_eq!(go.step(false, t0 + switcher::ACTIVATION_WAIT * 2, t0, wait), switcher::LetGoStep::Keep);
             }
+            EngineKind::Apple => unreachable!("the engine matrix runs the Corner and Spaces engines"),
         }
         // The activation at the release: Mail's stage here comes in front (its focused window
         // on Desktop 2 or the one put home: either way the stage here).

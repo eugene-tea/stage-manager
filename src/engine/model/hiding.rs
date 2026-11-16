@@ -1,8 +1,9 @@
 //! The model's one door to the window engine: every question the model asks about where
 //! hidden windows are goes through here, to the pure half of the engine that runs
 //! ([`ModelOptions::engine`](super::ModelOptions::engine); the Corner engine's is
-//! [`crate::engine::corner`], the Spaces engine's [`crate::engine::spaces`]). No other file
-//! of the model tests a park zone.
+//! [`crate::engine::corner`], the Spaces engine's [`crate::engine::spaces`], the Apple mode's
+//! [`crate::engine::apple`]: a window in Apple's strip is listed at its thumbnail). No other
+//! file of the model tests a park zone.
 //!
 //! The questions are of two kinds, kept apart because the engines answer them differently:
 //!
@@ -37,7 +38,7 @@
 //! window on its Desktop at an app's activation ([`Model::macos_counts_hidden`]).
 
 use super::{Display, DisplayId, Model, WindowId, WindowMeta, WindowState};
-use crate::engine::{corner, spaces};
+use crate::engine::{apple, corner, spaces};
 use crate::engine::corner::park::clamp_to_visible;
 use crate::engine::geometry::Rect;
 use crate::engine::recovery::EngineKind;
@@ -49,6 +50,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::is_hidden(self.display(display), listed),
             EngineKind::Spaces => spaces::is_hidden(self.display(display), listed),
+            EngineKind::Apple => apple::is_hidden(self.display(display), listed),
         }
     }
 
@@ -60,6 +62,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => self.listed_hidden(display, listed),
             EngineKind::Spaces => spaces::hidden_by_record(self.windows.get(&id)),
+            EngineKind::Apple => apple::hidden_by_record(self.windows.get(&id)),
         }
     }
 
@@ -79,6 +82,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::out_of_sight(self.display(display), listed),
             EngineKind::Spaces => spaces::out_of_sight(self.display(display), listed),
+            EngineKind::Apple => apple::out_of_sight(self.display(display), listed),
         }
     }
 
@@ -88,6 +92,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::shows_a_piece(self.display(display), frame),
             EngineKind::Spaces => spaces::shows_a_piece(self.display(display), frame),
+            EngineKind::Apple => apple::shows_a_piece(self.display(display), frame),
         }
     }
 
@@ -97,6 +102,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::clamped_at_hiding(self.display(display), listed),
             EngineKind::Spaces => spaces::clamped_at_hiding(self.display(display), listed),
+            EngineKind::Apple => apple::clamped_at_hiding(self.display(display), listed),
         }
     }
 
@@ -106,6 +112,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::no_restore(self.display(display), frame),
             EngineKind::Spaces => spaces::no_restore(self.display(display), frame),
+            EngineKind::Apple => apple::no_restore(self.display(display), frame),
         }
     }
 
@@ -116,6 +123,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::within_reach(self.display(display), frame),
             EngineKind::Spaces => spaces::within_reach(self.display(display), frame),
+            EngineKind::Apple => apple::within_reach(self.display(display), frame),
         }
     }
 
@@ -129,6 +137,7 @@ impl Model {
         match engine {
             EngineKind::Corner => corner::within_reach(to, moved),
             EngineKind::Spaces => spaces::within_reach(to, moved),
+            EngineKind::Apple => apple::within_reach(to, moved),
         }
     }
 
@@ -138,6 +147,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::lands_hidden(w.restore, self.display(w.meta.display), self.options.park, frame),
             EngineKind::Spaces => spaces::lands_hidden(frame),
+            EngineKind::Apple => apple::lands_hidden(frame),
         }
     }
 
@@ -150,6 +160,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::macos_fronts_after_quit(),
             EngineKind::Spaces => spaces::macos_fronts_after_quit(),
+            EngineKind::Apple => apple::macos_fronts_after_quit(),
         }
     }
 
@@ -161,6 +172,7 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::macos_counts_hidden(),
             EngineKind::Spaces => spaces::macos_counts_hidden(),
+            EngineKind::Apple => apple::macos_counts_hidden(),
         }
     }
 
@@ -204,6 +216,8 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => false,
             EngineKind::Spaces => spaces::hidden_by_record(self.windows.get(&id)),
+            // A strip window is listed at its thumbnail, never off screen at its own frame.
+            EngineKind::Apple => false,
         }
     }
 
@@ -219,6 +233,7 @@ impl Model {
         Some(match self.options.engine {
             EngineKind::Corner => corner::park_frame_of(w.restore, self.display(w.meta.display), self.options.park),
             EngineKind::Spaces => spaces::hidden_frame(w),
+            EngineKind::Apple => apple::hidden_frame(w),
         })
     }
 }
