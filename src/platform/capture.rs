@@ -260,6 +260,16 @@ pub fn retry_now() {
     wake_all();
 }
 
+/// True once quit has begun ([`begin_shutdown`]): nothing more is issued.
+pub(crate) fn closing() -> bool {
+    CLOSING.load(Ordering::SeqCst)
+}
+
+/// Captures issued and not answered yet (what [`quiesce`] waits for).
+pub(crate) fn in_flight() -> usize {
+    IN_FLIGHT.load(Ordering::SeqCst)
+}
+
 /// Quit has begun: no capture is issued from now on (those in flight finish).
 pub fn begin_shutdown() {
     CLOSING.store(true, Ordering::SeqCst);
