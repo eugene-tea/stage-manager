@@ -25,7 +25,7 @@ use crate::engine::geometry::{Point, Rect};
 use crate::platform::corner::sliver_tap;
 use crate::platform::observe::Observer;
 use crate::platform::safety::ParkedEntry;
-use crate::platform::window_engine::{EngineKind, WindowEngine};
+use crate::platform::window_engine::EngineKind;
 use crate::platform::windows;
 
 /// The longest the tick rests while the inert slivers' tap judges presses on the tick's list
@@ -192,16 +192,15 @@ impl Controller {
             EngineKind::Spaces => {
                 // The engine brings the window out of its stage Space before it asks the app
                 // for the frame. Still in the Space: the engine owes the show and the tick
-                // tries it again ([`Self::retry_shows`]). Out of it at the park of a lend
-                // (⌘Tab's switcher): the engine owes the frame and tries it again; the entry
-                // stays registered meanwhile, so a crash or a quit finds the window. Out of it
-                // otherwise: the window shows where it was (its own frame), nothing is owed.
-                let spaces = crate::platform::spaces::engine::shared();
-                let owed = spaces.owed().contains(&id);
-                if owed && spaces.parked_lend(crate::engine::model::WindowId(id)) {
+                // tries it again ([`Self::retry_shows`]). Out of it away from the frame (a
+                // lend's park, a minimize's dive): the engine owes the frame and tries it
+                // again; the entry stays registered meanwhile, so a crash or a quit finds the
+                // window. Out of it at its own frame: shown where it was, nothing is owed.
+                let owed = crate::platform::spaces::engine::shared().owed().contains(&id);
+                if owed {
                     self.spaces.frames_owed.insert(id, entry);
                 }
-                tracing::warn!(id, owed, "a show failed: tried again when owed (still hidden, or left at a lend's park), else shown where it was");
+                tracing::warn!(id, owed, "a show failed: tried again when owed (still hidden, or out away from its frame), else shown where it was");
             }
         }
     }
@@ -257,7 +256,9 @@ impl Controller {
                 // the model no longer counts must not stay in one: let out, where it was.
                 let _ = (ob, why);
                 let ids: Vec<u32> = kept.into_iter().map(|(id, _)| id).collect();
-                crate::platform::spaces::engine::shared().release(&ids, "the model let them go");
+                let spaces = crate::platform::spaces::engine::shared();
+                spaces.release(&ids, "the model let them go");
+                spaces.forget_frames(&ids);
             }
         }
     }

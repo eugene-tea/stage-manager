@@ -37,8 +37,9 @@ pub(super) struct SpacesUpkeep {
     /// un-minimizes on the Desktop, out of any stage Space, so it is put beyond the Dock's
     /// edge while minimized, comes up off the screen, and is hidden again once it is down.
     pub(super) dive: Option<(u32, Rect)>,
-    /// Windows left at a lend's park whose show did not take its frame, with their registry
-    /// entries: kept registered while the engine owes the frame ([`Controller::show_failed`]).
+    /// Windows whose failed show the engine still owes (out of their Space away from the
+    /// frame, or still in it), with their registry entries: kept registered until it is
+    /// carried out ([`Controller::show_failed`]).
     pub(super) frames_owed: BTreeMap<u32, ParkedEntry>,
     /// After a fallback from this engine: what it left in its stage Spaces is swept again
     /// until nothing is left ([`Controller::check_engine`]).
