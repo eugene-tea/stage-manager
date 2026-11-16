@@ -77,14 +77,19 @@ UX-SPEC, "Known gaps".
     the layer above every window: the window stays in front while the old stage shrinks
     away behind it, instead of the old window's picture covering it for a moment. Check
     Apple's order first (a recording at 120 fps).
-- **Stages kept through Apple's Stage Manager on and off.** Turning Apple's on drops
-  `state.json` (so a quit, crash or logout meanwhile leaves no stale file, 10-13), and
-  turning it off starts fresh, one stage per app: VS Code and Terminal, one stage before,
-  came back as two (11-13 09:54:55 to 09:55:21). Keep the stages in memory through the
-  stand-down and put each window still open back in its stage at the resume, matched by
-  window id (stable until the logout); a window opened meanwhile gets a stage per app, one
-  closed drops out. A quit, crash or logout while standing down still starts the next launch
-  fresh. A live-suite case for the on, off, on round trip.
+- **Apple's Stage Manager on and off, live.** The stages now come back from `state.json`
+  set aside at the stand-down (CHANGELOG). Left: a live check of the round trip with the
+  owner turning Apple's on and off by hand (the suite's toggle writes
+  `com.apple.WindowManager`, which is not done on the owner's Mac).
+- **Video calls in a hidden stage (Spaces engine).** A stage's windows off every Desktop
+  count as hidden to their apps: Google Meet in Safari stops drawing other people's video and
+  its card shows grey tiles (11-16); Apple's keeps them playing. Option, the owner's call: a
+  hidden call window (or the apps the config names) stays on its Desktop, parked in the
+  corner as the Corner engine does.
+- **Card pictures: spread like Apple's, as switchable variants.** Ours follow the windows'
+  real layout, so a window mostly behind another hardly shows (VS Code over Terminal, 11-16);
+  Apple's spreads them. Variants for the owner to compare from the menu: the real layout,
+  Apple's spread, spread only when a window is mostly covered.
 - **Less work while nobody looks: CPU and battery.** At rest the app takes 4 to 5 % CPU (11-13:
   1 min 51 s of CPU in 37 min, 4.5 % over 30 s), about half of it macOS's screen capture on
   short-lived threads (card thumbnails every 1.5 s, full-size switch pictures every 2 s),
@@ -107,6 +112,13 @@ UX-SPEC, "Known gaps".
     numbers in UX-SPEC.
 
 ## 2.0: new features
+
+- **R&D: an engine mode that augments Apple's Stage Manager** (after 1.9 settles). Apple's
+  arranges and draws; the app adds what it lacks: per-app rules for where a new app opens
+  (its own stage or the current one), Shift while opening to bring it here, keyboard
+  shortcuts, maybe the Dock's order. First a read-only look at what WindowManager exposes
+  through Accessibility while Apple's is on (its strip, stages, actions); the whole idea rests
+  on adding a window to Apple's current stage without a visible round trip.
 
 - **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
   Window, Quit App. A named stage shows its name on hover (R7).
