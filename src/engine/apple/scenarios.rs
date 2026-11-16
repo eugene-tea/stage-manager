@@ -570,3 +570,266 @@ fn a_switch_is_a_job_of_one_focus() {
     assert!(f.posted.is_empty(), "no pointer");
     assert_eq!(sorted(f.current()), vec![1, 2]);
 }
+
+// ── Restore (A5) ────────────────────────────────────────────────────────────────────────
+
+use super::job::Goal;
+use super::restore::{self, Target, Wanted};
+use crate::engine::model::{Display, DisplayId, WindowMeta};
+use crate::engine::persist::{SavedRole, SavedSpace, SavedStage, SavedWindow};
+
+/// Wanted: the stages `stages` (each front to back), the one at `front` the saved active one.
+fn wanting(stages: &[&[u32]], front: usize) -> Wanted {
+    Wanted { stages: stages.iter().map(|w| Target { windows: w.to_vec(), name: None }).collect(), front: Some(front), ..Wanted::default() }
+}
+
+/// The fake's arrangement as sets: the stage in front, then the others sorted.
+fn arrangement(f: &FakeWindowManager) -> (Vec<u32>, Vec<Vec<u32>>) {
+    let mut rest: Vec<Vec<u32>> = f.stages().iter().map(|s| sorted(s)).collect();
+    rest.sort();
+    (sorted(f.current()), rest)
+}
+
+/// Every drag posted, by window.
+fn dragged(f: &FakeWindowManager) -> Vec<u32> {
+    f.posted.iter().filter_map(|p| if let Posted::Drag { window, .. } = p { Some(*window) } else { None }).collect()
+}
+
+/// The saved stages through the restore's own matcher (app and title), as `state-apple.json`
+/// has them: Alpha's two windows with Bravo's, and Charlie's alone, the active one.
+fn saved_alpha_bravo_and_charlie(f: &FakeWindowManager, a: &Arrangement) -> Wanted {
+    let saved = |bundle: &str, title: &str, z: usize| SavedWindow { bundle_id: bundle.into(), title: title.into(), frame: Rect::new(300.0, 120.0, 700.0, 500.0), z, key: z == 0, role: SavedRole::Standard, ..SavedWindow::default() };
+    let space = SavedSpace {
+        id: 1,
+        current: true,
+        stages: vec![
+            SavedStage { windows: vec![saved("a", "Alpha 1", 0), saved("a", "Alpha 2", 1), saved("b", "Bravo 1", 2)], ..SavedStage::default() },
+            SavedStage { windows: vec![saved("c", "Charlie 1", 0)], ..SavedStage::default() },
+        ],
+        active_index: Some(1),
+        ..SavedSpace::default()
+    };
+    let titled = |id: u32, pid: i32, bundle: &str, title: &str| WindowMeta { title: title.into(), frame: f.frame(id).unwrap_or_default(), ..crate::engine::testkit::meta(id, pid, bundle) };
+    let live = [titled(1, 10, "a", "Alpha 1"), titled(2, 10, "a", "Alpha 2"), titled(3, 20, "b", "Bravo 1"), titled(4, 30, "c", "Charlie 1")];
+    let mut w = restore::wanted(&space, &live, |m| !a.current.contains(&m.id.0));
+    restore::keep_apps_together(&mut w, &f.pids(), true);
+    w
+}
+
+/// The live check's scramble, by Apple's own answers: Alpha in front, Charlie merged into it
+/// (a Shift-click), Bravo alone in the strip.
+fn scrambled(all_at_once: bool) -> (FakeWindowManager, Arrangement) {
+    let (mut f, a) = three();
+    f.all_at_once = all_at_once;
+    f.focus_window(1);
+    let mut a = settle(&mut f, &a);
+    let n = a.strip.iter().position(|g| g.windows == [4]).expect("Charlie's stage") + 1;
+    let mut job = plan::merge(&a, n, f.now()).expect("planned");
+    drive(&mut f, &mut a, &mut job, 6000).end.expect("ended").expect("merged");
+    let a = settle(&mut f, &a);
+    assert_eq!(arrangement(&f), (vec![1, 2, 4], vec![vec![3]]), "scrambled");
+    f.posted.clear();
+    f.focused.clear();
+    (f, a)
+}
+
+/// A5: two saved stages (Alpha's two windows with Bravo's; Charlie's alone, the active one)
+/// put back under All at Once: Charlie, another app's window, dragged out of Alpha's stage,
+/// Bravo Shift-clicked in, Charlie's stage brought in front last; Alpha's sibling never dragged.
+#[test]
+fn a_restore_puts_two_saved_stages_back_under_all_at_once() {
+    let (mut f, mut a) = scrambled(true);
+    let w = saved_alpha_bravo_and_charlie(&f, &a);
+    assert_eq!((w.saved, w.matched), (4, 4));
+    assert!(w.could_not.is_empty(), "{:?}", w.could_not);
+    let mut job = restore::plan(&w, true, f.now()).expect("planned");
+    let d = drive(&mut f, &mut a, &mut job, 15_000);
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(arrangement(&f), (vec![4], vec![vec![1, 2, 3]]), "as saved, the active one in front: {:?}", d.steps);
+    assert_eq!(r.stages, 2);
+    assert_eq!(dragged(&f), vec![4], "Charlie out of Alpha's stage, never one of Alpha's");
+    assert_eq!(clicks(&d.steps), vec![3], "Bravo in by one Shift-click");
+    assert!(r.could_not.is_empty() && r.gone.is_empty(), "{r:?}");
+    assert_eq!(f.ignored_mid_motion, 0);
+    // A restore of what Apple's shows already moves nothing.
+    let a2 = settle(&mut f, &a);
+    assert!(restore::in_place(&a2, &w));
+    let mut again = restore::plan(&w, true, f.now()).expect("planned");
+    let posted = f.posted.len();
+    let d = drive(&mut f, &mut a, &mut again, 4000);
+    d.end.expect("ended").expect("done");
+    assert!(d.steps.is_empty() && f.posted.len() == posted, "nothing to do: {:?}", d.steps);
+}
+
+/// A saved arrangement that split one app's windows (saved under One at a Time) is asked with
+/// the app's windows together under All at Once: no drag of a window whose sibling stays, and
+/// the report says why.
+#[test]
+fn a_restore_never_asks_for_a_split_all_at_once_refuses() {
+    let (mut f, mut a) = scrambled(true);
+    // Alpha 1 saved with Bravo, Alpha 2 with Charlie (the active one).
+    let mut w = wanting(&[&[1, 3], &[2, 4]], 1);
+    restore::keep_apps_together(&mut w, &f.pids(), true);
+    assert_eq!(w.stages.iter().map(|t| sorted(&t.windows)).collect::<Vec<_>>(), vec![vec![3], vec![1, 2, 4]]);
+    let mut job = restore::plan(&w, true, f.now()).expect("planned");
+    let d = drive(&mut f, &mut a, &mut job, 15_000);
+    let r = d.end.expect("ended").expect("done");
+    assert!(!dragged(&f).iter().any(|w| *w == 1 || *w == 2), "no window of Alpha's dragged: {:?}", f.posted);
+    assert_eq!(arrangement(&f), (vec![1, 2, 4], vec![vec![3]]));
+    assert_eq!(r.could_not.len(), 1, "{:?}", r.could_not);
+}
+
+#[test]
+fn a_restore_skips_a_window_gone_meanwhile() {
+    let (mut f, mut a) = scrambled(true);
+    let w = wanting(&[&[1, 2, 3], &[4]], 1);
+    let mut job = restore::plan(&w, true, f.now()).expect("planned");
+    f.close(3);
+    let d = drive(&mut f, &mut a, &mut job, 15_000);
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.gone, vec![3]);
+    assert_eq!(arrangement(&f), (vec![4], vec![vec![1, 2]]));
+}
+
+#[test]
+fn a_restore_waits_for_a_covered_strip_to_show() {
+    let (mut f, a) = three();
+    f.cover(true);
+    let mut a = settle(&mut f, &a);
+    // Bravo saved with Charlie (the active one), Alpha's two alone: a Shift-click is needed.
+    let w = wanting(&[&[1, 2], &[4, 3]], 1);
+    let mut job = restore::plan(&w, true, f.now()).expect("planned");
+    let d = drive_with(&mut f, &mut a, &mut job, 12_000, |f, t| {
+        if t == 2500 {
+            f.cover(false);
+        }
+    });
+    let r = d.end.expect("ended").expect("done once the strip showed");
+    assert!(times(&d.steps, "shift_click").iter().all(|t| *t > 2500), "no click while covered: {:?}", d.steps);
+    assert_eq!(arrangement(&f), (vec![3, 4], vec![vec![1, 2]]));
+    assert_eq!(r.stages, 2);
+}
+
+// ── Screens and Desktops (A6) ───────────────────────────────────────────────────────────
+
+/// A6: two screens, a fake WindowManager each (the second right of the main one, its windows
+/// numbered from 101): the list joined, split by screen, each folded into its own mirror; a
+/// switch on the second screen focuses its window and moves nothing on the main one.
+#[test]
+fn two_screens_each_have_a_mirror_of_their_own_and_a_step_acts_on_one() {
+    use super::screens;
+    let main = display();
+    let right = Display { id: DisplayId(2), frame: Rect::new(main.frame.max_x(), 0.0, 1440.0, 900.0), visible: Rect::new(main.frame.max_x(), 25.0, 1440.0, 800.0), ..main };
+    let displays = [main, right];
+    let mut one = FakeWindowManager::new();
+    one.open_app(10, &[1, 2]);
+    one.open_app(30, &[4]);
+    let mut two = FakeWindowManager::new().on_screen_at(right.frame.x, 9950);
+    two.open_app(50, &[101]);
+    two.open_app(60, &[102]);
+    let joined = |one: &FakeWindowManager, two: &FakeWindowManager| super::mirror::Listed { windows: one.listed().windows.into_iter().chain(two.listed().windows).collect(), manager: one.listed().manager };
+    let managed: BTreeSet<u32> = one.window_ids().into_iter().chain(two.window_ids()).collect();
+    let (mut m1, mut m2) = (Arrangement::default(), Arrangement::default());
+    let mut on = std::collections::BTreeMap::new();
+    let mut read_both = |one: &mut FakeWindowManager, two: &mut FakeWindowManager, m1: &mut Arrangement, m2: &mut Arrangement| {
+        one.advance(50);
+        two.advance(50);
+        let listed = joined(one, two);
+        let split = screens::split(&listed, &managed, &displays, &on);
+        on = split.iter().flat_map(|(d, ws)| ws.iter().map(move |w| (*w, *d))).collect();
+        *m1 = fold(m1, None, &listed, &split[&main.id], &main, one.now());
+        *m2 = fold(m2, None, &listed, &split[&right.id], &right, two.now());
+    };
+    for _ in 0..40 {
+        read_both(&mut one, &mut two, &mut m1, &mut m2);
+    }
+    assert!(m1.settled && m2.settled);
+    assert_eq!((m1.current.clone(), m1.strip.iter().map(|g| sorted(&g.windows)).collect::<Vec<_>>()), (vec![4], vec![vec![1, 2]]), "the main screen's own");
+    assert_eq!((m2.current.clone(), m2.strip.iter().map(|g| g.windows.clone()).collect::<Vec<_>>()), (vec![102], vec![vec![101]]), "the second screen's own");
+    assert!(m2.click_at.get(&101).is_some_and(|p| p.x > right.frame.x), "its thumbnail on its own screen");
+    // A switch on the second screen: its job runs against its mirror and its WindowManager.
+    let mut job = plan::switch_job(&m2, 1, |_| None, two.now()).expect("planned");
+    let front1 = m1.current.clone();
+    for _ in 0..60 {
+        read_both(&mut one, &mut two, &mut m1, &mut m2);
+        let pids = two.pids();
+        let next = job.advance(&Ctx { mirror: &m2, input: two.input, screen: &right, pids: &pids, in_flight: false }, two.now());
+        match next {
+            Next::Run(Step::Focus(w)) => {
+                job.ran(&Step::Focus(w), two.focus(w).is_ok());
+                m2.step_began(two.now());
+            }
+            Next::Done(_) => break,
+            Next::Run(other) => panic!("only a focus: {other:?}"),
+            Next::GiveUp(r) => panic!("{r:?}"),
+            Next::Wait(_) => {}
+        }
+    }
+    assert_eq!(two.current(), &[101]);
+    assert!(one.focused.is_empty() && one.posted.is_empty(), "nothing on the main screen");
+    assert_eq!(m1.current, front1);
+}
+
+/// A6: a Desktop not shown is left alone: its stages go away at the change, no number counts
+/// them, a send or a restore of their windows does nothing there (a focus would show that
+/// Desktop), and they come back once their Desktop shows again.
+#[test]
+fn a_desktop_not_shown_is_remembered_and_left_alone() {
+    let (mut f, a) = three();
+    f.new_desktop();
+    let mut a = a;
+    a.desktop_left(f.now());
+    f.open_app(40, &[5]);
+    let mut a = settle(&mut f, &a);
+    assert_eq!(a.current, vec![5]);
+    let mut away: Vec<Vec<u32>> = a.away.iter().map(|(_, g)| sorted(&g.windows)).collect();
+    away.sort();
+    assert_eq!(away, vec![vec![1, 2], vec![3], vec![4]], "the Desktop left's stages, away");
+    assert!(a.strip.is_empty() && a.remembered.is_empty());
+    assert!(plan::switch_job(&a, 1, |_| None, f.now()).is_err(), "no number counts them");
+    assert!(plan::send(&a, 1, 3, |_| None, f.now()).is_err() && plan::new_stage(&a, 1, f.now()).is_err(), "refused: another Desktop");
+    // A restore wanting a window of each Desktop: the one shown done, the other left there.
+    let mut job = restore::plan(&wanting(&[&[1, 2], &[5]], 1), true, f.now()).expect("planned");
+    let d = drive(&mut f, &mut a, &mut job, 6000);
+    let r = d.end.expect("ended").expect("done");
+    assert!(r.could_not.iter().any(|w| w.contains("Desktop not shown")), "{:?}", r.could_not);
+    assert_eq!(f.desktop_jumps, 0, "no focus of a window on another Desktop");
+    assert!(f.posted.is_empty());
+    // A gather of a window there is left too.
+    let mut gather = Job::new(plan::Intent::Merge(1), vec![Goal::Gather { windows: vec![5, 3], app: None, focus_app: false }], f.now());
+    drive(&mut f, &mut a, &mut gather, 3000).end.expect("ended").expect("nothing to gather here");
+    assert_eq!(f.desktop_jumps, 0);
+    // That Desktop shown again: its stages back as they were, the other one's away.
+    f.show_desktop(0);
+    a.desktop_left(f.now());
+    let a = settle(&mut f, &a);
+    assert_eq!(a.current, vec![4]);
+    assert_eq!(a.strip.iter().map(|g| sorted(&g.windows)).collect::<Vec<_>>(), vec![vec![3], vec![1, 2]]);
+    assert_eq!(a.away.iter().map(|(_, g)| g.windows.clone()).collect::<Vec<_>>(), vec![vec![5]]);
+}
+
+/// A full-screen app's Space on the screen: no step runs; given up after a few seconds.
+#[test]
+fn no_step_runs_while_a_full_screen_app_shows() {
+    let (mut f, mut a) = three();
+    a.full_screen = true;
+    let mut job = plan::merge(&a, 2, f.now()).expect("planned");
+    let mut d = Drive::default();
+    for _ in 0..200 {
+        f.advance(50);
+        a = read(&f, &a);
+        let pids = f.pids();
+        match job.advance(&Ctx { mirror: &a, input: f.input, screen: &display(), pids: &pids, in_flight: false }, f.now()) {
+            Next::Run(step) => d.steps.push((0, step)),
+            Next::GiveUp(r) => {
+                d.end = Some(Err(r));
+                break;
+            }
+            Next::Done(r) => panic!("{r:?}"),
+            Next::Wait(_) => {}
+        }
+    }
+    assert!(d.steps.is_empty());
+    let r = d.end.expect("ended").expect_err("given up");
+    assert!(r.given_up.as_deref().is_some_and(|w| w.contains("full-screen")), "{r:?}");
+}

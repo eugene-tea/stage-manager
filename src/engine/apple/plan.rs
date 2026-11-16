@@ -20,6 +20,11 @@
 //! are refused up front with that reason; with "One at a Time" they are tried (unprobed).
 //! - **Open here** (a rule's `current`, `[stages] new_apps_join_current`, Shift held at the
 //!   launch): a newly opened app's windows into the stage in front ([`open_here`]).
+//! - **Restore** (`ctl apple restore`, and by itself after a restart): the saved stages put
+//!   back ([`super::restore`]).
+//!
+//! Only the Desktop shown is acted on: a window of a Desktop not shown (an away group of the
+//! mirror) is refused, since a focus of it would show its Desktop.
 
 use std::collections::BTreeMap;
 
@@ -44,6 +49,8 @@ pub enum Intent {
     New(u32),
     /// Newly opened app `0`'s windows into the stage in front.
     OpenHere(i32),
+    /// The saved stages put back ([`super::restore`]).
+    Restore,
 }
 
 /// One step of a plan.
@@ -146,6 +153,9 @@ pub fn send(a: &Arrangement, n: usize, w: u32, key: impl Fn(&[u32]) -> Option<u3
     let Some((place, _)) = a.where_is(w) else {
         return Err(Refusal(format!("window {w} is in no stage Apple's shows or showed")));
     };
+    if place == Where::Away {
+        return Err(away(w));
+    }
     let Some(target) = key_of(&group.windows, key) else {
         return Err(Refusal(format!("stage {n} has no window")));
     };
@@ -155,7 +165,7 @@ pub fn send(a: &Arrangement, n: usize, w: u32, key: impl Fn(&[u32]) -> Option<u3
     // Back to where the person was: the stage in front when it keeps a window besides `w`.
     let back = match place {
         Where::Current => a.current.iter().copied().find(|x| *x != w),
-        Where::Strip | Where::Remembered => a.current.first().copied(),
+        Where::Strip | Where::Remembered | Where::Away => a.current.first().copied(),
     };
     if let Some(back) = back {
         goals.push(Goal::Front(back));
@@ -168,6 +178,7 @@ pub fn send(a: &Arrangement, n: usize, w: u32, key: impl Fn(&[u32]) -> Option<u3
 pub fn new_stage(a: &Arrangement, w: u32, now: std::time::Instant) -> Result<Job, Refusal> {
     let alone = match a.where_is(w) {
         None => return Err(Refusal(format!("window {w} is in no stage Apple's shows or showed"))),
+        Some((Where::Away, _)) => return Err(away(w)),
         Some((Where::Current, _)) => a.current.len() <= 1,
         Some(_) => a.strip.iter().chain(&a.remembered).any(|g| g.windows == [w]),
     };
@@ -175,6 +186,11 @@ pub fn new_stage(a: &Arrangement, w: u32, now: std::time::Instant) -> Result<Job
         return Err(Refusal(format!("window {w} is alone in its stage already")));
     }
     Ok(Job::new(Intent::New(w), vec![Goal::Out(w)], now))
+}
+
+/// The refusal for window `w` on a Desktop not shown.
+pub fn away(w: u32) -> Refusal {
+    Refusal(format!("window {w} is on a Desktop not shown: nothing is done there"))
 }
 
 /// Newly opened app `pid`'s windows into the stage in front of `a` (asked at its launch,

@@ -453,11 +453,14 @@ pub struct StagesConfig {
     /// own (off by default, Apple's rule); Shift held then gives the app a stage of its own.
     /// Restored windows and the restore window keep Apple's rule.
     pub new_apps_join_current: bool,
+    /// With `[windows] with_apple = "augment"`, after a restart or a new login Apple's stages
+    /// are put back as saved once their windows have reopened (on by default).
+    pub restore_with_apple: bool,
 }
 
 impl Default for StagesConfig {
     fn default() -> Self {
-        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false }
+        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false, restore_with_apple: true }
     }
 }
 
@@ -1103,6 +1106,7 @@ impl Config {
                 names,
                 restore_after_restart: v.flag("stages.restore_after_restart"),
                 new_apps_join_current: v.flag("stages.new_apps_join_current"),
+                restore_with_apple: v.flag("stages.restore_with_apple"),
             },
             restore: RestoreConfig { saved_size: v.flag("restore.saved_size") },
             sugar: SugarConfig {
@@ -1390,6 +1394,13 @@ mod tests {
         let p = parse("[restore]\nsaved_size = false\n");
         assert!(!p.config.restore.saved_size && p.warnings.is_empty(), "{:?}", p.warnings);
         assert!(p.config.model_options(NativeSettings::default(), 5).keep_app_frames, "the frames apps give, as Apple's");
+    }
+
+    #[test]
+    fn restore_with_apple_is_on_by_default_and_can_be_turned_off() {
+        assert!(Config::default().stages.restore_with_apple, "functionality Apple's never built ships on");
+        let p = parse("[stages]\nrestore_with_apple = false\n");
+        assert!(!p.config.stages.restore_with_apple && p.warnings.is_empty(), "{:?}", p.warnings);
     }
 
     #[test]

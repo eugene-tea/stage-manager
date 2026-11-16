@@ -19,6 +19,22 @@
 //! found or gone, focus, mouse-up near the strip and Desktop change; then every 50 ms while
 //! anything moves or a job runs (the list only, on the fast tick); every 2 s at rest,
 //! Accessibility with it.
+//!
+//! **Screens** ([`crate::engine::apple::screens`]): one mirror per screen, each folded from
+//! the windows on it and its own `sm.space`; a step acts on one screen only (the window's, or
+//! the keyboard's: the focused window's screen, the main one with none). The model and
+//! `state-apple.json` follow the main screen; the other screens' stages are mirrored (`ctl
+//! state`'s `apple.screens`), switched, merged and sent on, and logged as seen.
+//! **Desktops**: at a Desktop change every mirror's groups go away
+//! ([`Arrangement::desktop_left`]) and are never acted on until their Desktop shows again.
+//! **Full screen**: a full-screen app's Space on a screen (a window covering it that says so
+//! through Accessibility) stops every step there.
+//!
+//! **Restore** ([`crate::engine::apple::restore`]): `state-apple.json` as it was when the mode
+//! started is kept; `ctl apple restore` puts its stages back; after a restart (a new window
+//! server session) with `[stages] restore_with_apple` on, it runs by itself once the restore
+//! window's windows have shown, and the save waits for it (the saved stages are not written
+//! over by Apple's fresh arrangement meanwhile).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
@@ -41,7 +57,11 @@ use crate::engine::apple::job::{self, Ctx, Job, Next, Report};
 use crate::engine::apple::mirror::{self, Arrangement};
 use crate::engine::apple::plan::{self, Intent, Refusal, Step};
 use crate::engine::apple::points;
-use crate::engine::model::{Display, Model, WindowId, WindowMeta, WindowRole};
+use crate::engine::apple::restore::{self, AutoRestore, Wanted};
+use crate::engine::apple::screens;
+use crate::engine::fullscreen;
+use crate::engine::model::{Display, DisplayId, Model, WindowId, WindowMeta, WindowRole};
+use crate::engine::persist::StateFile;
 use crate::engine::recovery::EngineKind;
 use crate::engine::rules::RuleAction;
 use crate::engine::save_clock::SaveClock;
@@ -52,7 +72,8 @@ use crate::platform::ctl::{AppleTry, Command};
 use crate::platform::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use crate::platform::native_settings::RawSettings;
 use crate::platform::observe::{Observer, WinEvent, WindowKind};
-use crate::platform::{logging, paths, session};
+use crate::platform::ax::AxElement;
+use crate::platform::{apps, logging, paths, session};
 
 /// How often config.toml's modification time is checked (as the controller does).
 const CONFIG_POLL: Duration = Duration::from_secs(1);
@@ -112,6 +133,17 @@ pub struct AppleController {
     triggers: Triggers,
     save: SaveClock,
     seen_times: std::collections::HashMap<u64, u64>,
+    /// The mirrors of the screens besides the main one.
+    others: BTreeMap<DisplayId, Arrangement>,
+    /// Which screen each managed window was on at the last read.
+    screen_of: BTreeMap<u32, DisplayId>,
+    /// WindowManager's `sm.space` frames against the screens, as last logged.
+    spaces_seen: String,
+    /// `state-apple.json` as it was when the mode started: what `ctl apple restore` and the
+    /// restore after a restart put back.
+    saved: Option<StateFile>,
+    /// The restore after a restart, waiting for the windows to show.
+    auto: Option<AutoRestore>,
 }
 
 impl AppleController {
@@ -139,6 +171,21 @@ impl AppleController {
     }
 
     fn with_store(store: ConfigStore, path: &Path, config_error: Option<String>) -> Self {
+        // The stages saved before: read once, before any save of this mode writes over them.
+        let file = std::fs::read_to_string(paths::apple_state_file()).ok().and_then(|t| match StateFile::from_json(&t) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                tracing::warn!("apple mode: {} not read: {e}", paths::apple_state_file().display());
+                None
+            }
+        });
+        let current = session::window_session();
+        let after_restart = file.as_ref().is_some_and(|f| f.session.is_some() && f.session.as_deref() != current);
+        let saved = file.map(|f| f.for_session(current).0);
+        let windows = saved.as_ref().map_or(0, restore::saved_windows);
+        let on = store.config().stages.restore_with_apple;
+        let auto = (after_restart && on && windows > 0).then(|| AutoRestore::new(Instant::now(), apps::login_started()));
+        tracing::info!(saved_windows = windows, after_restart, restore_with_apple = on, waits = auto.is_some(), "apple mode: the stages saved before");
         Self {
             store,
             config_error,
@@ -166,6 +213,11 @@ impl AppleController {
             triggers: Triggers::default(),
             save: SaveClock::default(),
             seen_times: Default::default(),
+            others: BTreeMap::new(),
+            screen_of: BTreeMap::new(),
+            spaces_seen: String::new(),
+            saved,
+            auto,
         }
     }
 
@@ -187,6 +239,29 @@ impl AppleController {
     /// The main screen, as last reported.
     fn screen(&self) -> Option<Display> {
         self.displays.first().copied()
+    }
+
+    /// The screen window `w` is on (the main one when not known).
+    fn screen_of_window(&self, w: Option<u32>) -> Option<DisplayId> {
+        let main = self.screen()?.id;
+        Some(w.and_then(|w| self.screen_of.get(&w).copied()).unwrap_or(main))
+    }
+
+    /// The mirror of screen `id` (the main one's for `None` or an unknown screen).
+    fn mirror_on(&self, id: Option<DisplayId>) -> &Arrangement {
+        match id {
+            Some(d) if self.screen().is_some_and(|m| m.id != d) => self.others.get(&d).unwrap_or(&self.mirror),
+            _ => &self.mirror,
+        }
+    }
+
+    /// [`Self::mirror_on`], to change.
+    fn mirror_on_mut(&mut self, id: Option<DisplayId>) -> &mut Arrangement {
+        let main = self.screen().map(|m| m.id);
+        match id {
+            Some(d) if Some(d) != main && self.others.contains_key(&d) => self.others.get_mut(&d).unwrap_or(&mut self.mirror),
+            _ => &mut self.mirror,
+        }
     }
 
     // ── What the WM thread tells it ─────────────────────────────────────────────────────
@@ -242,9 +317,15 @@ impl AppleController {
         }
     }
 
-    /// A Desktop change: the arrangement is read afresh (the stages of the Desktop left are
-    /// remembered).
+    /// A Desktop change (or a full-screen app's Space coming or going): every screen's groups
+    /// go away with it ([`Arrangement::desktop_left`]), and the arrangement is read afresh.
     pub fn on_space_changed(&mut self, ob: &mut Observer) {
+        let now = Instant::now();
+        self.mirror.desktop_left(now);
+        for m in self.others.values_mut() {
+            m.desktop_left(now);
+        }
+        tracing::debug!(changes = self.mirror.desktop_changes, away = self.mirror.away.len(), "apple mode: a Desktop change: the groups known go away until their Desktop shows again");
         self.watch();
         self.read(ob, true);
     }
@@ -255,6 +336,9 @@ impl AppleController {
         if ob.admits_pid(pid) {
             let bundle = ob.bundle_id(pid).unwrap_or_default().to_string();
             self.arrival(pid, &bundle, Instant::now());
+        }
+        if let Some(a) = self.auto.as_mut() {
+            a.busy(Instant::now());
         }
         self.watch();
         self.read_due = Some(Instant::now());
@@ -296,10 +380,18 @@ impl AppleController {
         if shift {
             self.triggers.consume();
         }
-        let Some(job) = plan::open_here(&self.mirror, pid, now) else {
+        // The screen with the keyboard: a newly opened app shows there.
+        let screen = self.screen_of_window(crate::platform::controller::focused_window());
+        let mirror = self.mirror_on(screen);
+        if mirror.full_screen {
+            tracing::debug!(pid, bundle, "apple mode: a newly opened app to open here, a full-screen app's Space shows: Apple's own");
+            return;
+        }
+        let Some(mut job) = plan::open_here(mirror, pid, now) else {
             tracing::debug!(pid, bundle, "apple mode: a newly opened app to open here, no stage in front: Apple's puts it in front");
             return;
         };
+        job.screen = screen;
         if self.jobs.len() > QUEUE {
             tracing::warn!(pid, bundle, "apple mode: a newly opened app to open here, too many steps waiting: Apple's own");
             return;
@@ -324,6 +416,9 @@ impl AppleController {
         let now = Instant::now();
         self.watch_until = Some(now + WATCH);
         self.mirror.step_began(now);
+        for m in self.others.values_mut() {
+            m.step_began(now);
+        }
     }
 
     /// The displays (the main one first).
@@ -334,6 +429,13 @@ impl AppleController {
         if let Some(m) = self.model.as_mut() {
             let _ = m.set_displays(displays.iter().take(1).copied().collect());
         }
+        // A screen that is the main one now, or gone, keeps no mirror of the others'.
+        self.others.retain(|id, _| displays.iter().skip(1).any(|d| d.id == *id));
+        if self.displays.first().map(|d| d.id) != displays.first().map(|d| d.id) {
+            self.mirror = Arrangement::default();
+            self.others.clear();
+        }
+        tracing::info!(screens = displays.len(), frames = ?displays.iter().map(|d| (d.id.0, d.frame.x, d.frame.y, d.frame.w, d.frame.h)).collect::<Vec<_>>(), "apple mode: the screens, one mirror each");
         self.displays = displays;
         self.read_due = Some(Instant::now());
     }
@@ -387,9 +489,59 @@ impl AppleController {
         if ax_due || self.read_due.is_some_and(|t| now >= t) {
             self.read(ob, ax_due);
         }
+        self.auto_restore(ob, now);
+        // While the restore after a restart waits, Apple's fresh arrangement is not saved over
+        // the stages it is to put back ([`Self::save_now`]).
         if self.save.due(now) {
             self.save_now();
         }
+    }
+
+    /// The restore after a restart: looked at once settled and idle; run once the restore
+    /// window's windows have shown ([`AutoRestore::due`]).
+    fn auto_restore(&mut self, ob: &mut Observer, now: Instant) {
+        let Some(mut auto) = self.auto else { return };
+        if !self.store.config().stages.restore_with_apple {
+            tracing::info!("apple mode: [stages] restore_with_apple turned off: the stages saved before are not put back");
+            self.auto = None;
+            self.save.mark(now);
+            return;
+        }
+        if self.model.is_none() || !self.mirror.settled || self.mirror.full_screen || !self.jobs.is_empty() {
+            return;
+        }
+        let Some(w) = self.wanted(ob) else {
+            self.auto = None;
+            self.save.mark(now);
+            return;
+        };
+        auto.seen(w.matched, w.saved, now);
+        self.auto = Some(auto);
+        let Some(why) = auto.due(now) else { return };
+        self.auto = None;
+        // Saved again from now on: the file says this session.
+        self.save.mark(now);
+        tracing::info!(why, matched = w.matched, saved = w.saved, stages = w.stages.len(), "apple mode: restore after a restart");
+        if restore::in_place(&self.mirror, &w) {
+            tracing::info!("apple mode: restore after a restart: Apple's shows the stages as saved already; nothing to do");
+            return;
+        }
+        if let Err(Refusal(why)) = self.ask(ob, Ask::Restore) {
+            tracing::info!(why, "apple mode: restore after a restart not run");
+        }
+    }
+
+    /// What the stages saved before want of the main screen's windows now ([`restore::wanted`],
+    /// an app's windows kept together under All at Once); `None` with nothing saved.
+    fn wanted(&self, ob: &Observer) -> Option<Wanted> {
+        let file = self.saved.as_ref()?;
+        let space = restore::space(file)?;
+        let screen = self.screen()?;
+        let main: BTreeSet<u32> = self.screen_of.iter().filter(|(_, d)| **d == screen.id).map(|(w, _)| *w).collect();
+        let live: Vec<WindowMeta> = main.iter().filter_map(|id| ob.window(*id)).map(|w| meta_of(ob, w, &screen, &self.mirror)).collect();
+        let mut w = restore::wanted(space, &live, |m| self.mirror.where_is(m.id.0).is_none_or(|(p, _)| p != mirror::Where::Current));
+        restore::keep_apps_together(&mut w, &self.pids, self.settings.app_windows == crate::engine::settings::AppWindows::AllAtOnce);
+        Some(w)
     }
 
     /// The fast tick: the list read every [`mirror::MOTION_READ`] while anything moves or a
@@ -412,7 +564,7 @@ impl AppleController {
             Some("a step of ours in Apple's Stage Manager")
         } else if !self.mirror.settled && self.model.is_some() {
             Some("Apple's Stage Manager settles")
-        } else if self.save.is_dirty() {
+        } else if self.save.is_dirty() && self.auto.is_none() {
             Some("a save is due")
         } else {
             None
@@ -426,8 +578,9 @@ impl AppleController {
 
     // ── The read ────────────────────────────────────────────────────────────────────────
 
-    /// One read of Apple's arrangement (Accessibility too with `with_ax`), folded into the
-    /// mirror; settled, the model follows it and a waiting switch is looked at.
+    /// One read of Apple's arrangement (Accessibility too with `with_ax`): the window list
+    /// split by screen ([`screens::split`]) and folded into each screen's mirror with its own
+    /// `sm.space`; the main screen's, settled, followed by the model; the jobs moved on.
     fn read(&mut self, ob: &mut Observer, with_ax: bool) {
         let now = Instant::now();
         let Some(screen) = self.screen() else { return };
@@ -439,56 +592,97 @@ impl AppleController {
             self.manager = super::strip_ax::manager_pid();
             self.manager_checked = Some(now);
         }
-        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame), displays: &self.displays };
         let listed = desk.listed();
-        let reading = if with_ax { desk.strip(&screen) } else { None };
+        let spaces = if with_ax { desk.strips() } else { None };
         let managed: BTreeSet<u32> = managed(ob, &listed);
         self.pids = managed.iter().filter_map(|id| ob.window(*id).map(|w| (*id, w.pid))).collect();
-        let corrections = self.mirror.corrections;
-        let before = self.mirror.grouping();
-        self.mirror = mirror::fold(&self.mirror, reading.as_ref(), &listed, &managed, &screen, now);
-        if self.mirror.grouping() != before {
-            // What the read saw of each managed window (ids and bounds only, never a title):
-            // what a live run's log needs to tell a misread from Apple's own.
-            let seen: Vec<String> = listed
-                .windows
-                .iter()
-                .enumerate()
-                .filter(|(_, w)| managed.contains(&w.id))
-                .map(|(i, w)| {
-                    let b = w.bounds;
-                    format!("{}@{},{} {}x{}{}{}", w.id, b.x, b.y, b.w, b.h, if mirror::has_twin(&listed, i) { " twin" } else { "" }, if w.onscreen { "" } else { " off" })
-                })
-                .collect();
-            tracing::debug!(
-                current = ?self.mirror.current,
-                strip = ?self.mirror.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(),
-                remembered = ?self.mirror.remembered.iter().map(|g| &g.windows).collect::<Vec<_>>(),
-                in_motion = self.mirror.in_motion,
-                settled = self.mirror.settled,
-                screen = ?(screen.frame.x, screen.frame.y, screen.frame.w, screen.frame.h),
-                seen = ?seen,
-                "apple mode: the mirror's groups changed"
-            );
+        let split = screens::split(&listed, &managed, &self.displays, &self.screen_of);
+        self.screen_of = split.iter().flat_map(|(d, ws)| ws.iter().map(move |w| (*w, *d))).collect();
+        if let Some(spaces) = &spaces {
+            self.log_spaces(spaces);
+        }
+        let displays = self.displays.clone();
+        for d in &displays {
+            let mine = split.get(&d.id).cloned().unwrap_or_default();
+            let reading = spaces.as_ref().and_then(|s| screens::reading_for(s, &displays, d));
+            let prev = if d.id == screen.id { std::mem::take(&mut self.mirror) } else { self.others.remove(&d.id).unwrap_or_default() };
+            let before = prev.grouping();
+            let corrections = prev.corrections;
+            let mut next = mirror::fold(&prev, reading.as_ref(), &listed, &mine, d, now);
+            next.full_screen = full_screen_on(ob, &listed, d);
+            if next.full_screen != prev.full_screen {
+                tracing::info!(screen = d.id.0, full_screen = next.full_screen, "apple mode: a full-screen app's Space {} on this screen", if next.full_screen { "shows: no step runs" } else { "is gone" });
+            }
+            if next.grouping() != before {
+                // What the read saw of each managed window (ids and bounds only, never a title):
+                // what a live run's log needs to tell a misread from Apple's own.
+                let seen: Vec<String> = listed
+                    .windows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, w)| mine.contains(&w.id))
+                    .map(|(i, w)| {
+                        let b = w.bounds;
+                        format!("{}@{},{} {}x{}{}{}", w.id, b.x, b.y, b.w, b.h, if mirror::has_twin(&listed, i) { " twin" } else { "" }, if w.onscreen { "" } else { " off" })
+                    })
+                    .collect();
+                tracing::debug!(
+                    screen = d.id.0,
+                    main = d.id == screen.id,
+                    current = ?next.current,
+                    strip = ?next.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(),
+                    remembered = ?next.remembered.iter().map(|g| &g.windows).collect::<Vec<_>>(),
+                    away = ?next.away.iter().map(|(b, g)| (b, &g.windows)).collect::<Vec<_>>(),
+                    in_motion = next.in_motion,
+                    settled = next.settled,
+                    frame = ?(d.frame.x, d.frame.y, d.frame.w, d.frame.h),
+                    seen = ?seen,
+                    "apple mode: the mirror's groups changed"
+                );
+            }
+            if next.corrections > corrections {
+                tracing::info!(screen = d.id.0, corrections = next.corrections, strip = ?next.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(), "apple mode: the window list grouped the strip otherwise than WindowManager's Accessibility; Accessibility's groups taken");
+            }
+            if d.id == screen.id {
+                self.mirror = next;
+            } else {
+                self.others.insert(d.id, next);
+            }
         }
         if with_ax {
             self.ax_read = Some(now);
         }
         self.read_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        if self.mirror.corrections > corrections {
-            tracing::info!(corrections = self.mirror.corrections, strip = ?self.mirror.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(), "apple mode: the window list grouped the strip otherwise than WindowManager's Accessibility; Accessibility's groups taken");
-        }
         let watching = self.watch_until.is_some_and(|t| now < t);
         if !watching {
             self.watch_until = None;
         }
         let busy = !self.jobs.is_empty() || self.posting.is_some();
-        self.read_due = (!self.mirror.settled || busy || watching).then(|| now + mirror::MOTION_READ);
-        if self.mirror.settled {
-            self.follow(ob, &screen, &managed);
+        let unsettled = !self.mirror.settled || self.others.values().any(|m| !m.settled);
+        self.read_due = (unsettled || busy || watching).then(|| now + mirror::MOTION_READ);
+        if self.mirror.settled && !self.mirror.full_screen {
+            let main = split.get(&screen.id).cloned().unwrap_or_default();
+            self.follow(ob, &screen, &main);
         }
         if busy {
-            self.pump(ob, &screen, now);
+            self.pump(ob, now);
+        }
+    }
+
+    /// What WindowManager's Accessibility lists against the screens, logged when it changes:
+    /// each `sm.space`'s frame (when it has one) and its items' count, and the screens' frames.
+    /// Nothing is assumed about a second screen's layout; this says what is seen.
+    fn log_spaces(&mut self, spaces: &[(Option<crate::engine::geometry::Rect>, mirror::Reading)]) {
+        let seen = format!(
+            "{:?} on {:?}",
+            spaces.iter().map(|(f, r)| (f.map(|f| (f.x, f.y, f.w, f.h)), r.items.len())).collect::<Vec<_>>(),
+            self.displays.iter().map(|d| (d.id.0, d.frame.x, d.frame.y, d.frame.w, d.frame.h)).collect::<Vec<_>>()
+        );
+        let shape = format!("{:?}", spaces.iter().map(|(f, _)| f.map(|f| (f.x, f.y, f.w, f.h))).collect::<Vec<_>>());
+        if shape != self.spaces_seen {
+            tracing::info!(spaces = spaces.len(), screens = self.displays.len(), seen, "apple mode: WindowManager's screens (sm.space: frame, items) against the displays");
+            self.spaces_seen = shape;
         }
     }
 
@@ -525,6 +719,11 @@ impl AppleController {
             .collect();
         let focused = crate::platform::controller::focused_window();
         let done = follow::follow(model, &self.mirror, &metas, focused);
+        if done.added > 0
+            && let Some(a) = self.auto.as_mut()
+        {
+            a.busy(Instant::now());
+        }
         if !done.is_empty() {
             tracing::debug!(added = done.added, removed = done.removed, moved = done.moved, switched = done.switched, "apple mode: the model follows Apple's stages");
             self.save.mark(Instant::now());
@@ -535,7 +734,7 @@ impl AppleController {
 
     /// The jobs moved on at a read: a gesture that landed taken in, a hide's outcome noted,
     /// then the first job advanced against the mirror and its step run, or its end logged.
-    fn pump(&mut self, ob: &Observer, screen: &Display, now: Instant) {
+    fn pump(&mut self, ob: &Observer, now: Instant) {
         if let Some(landed) = post::take_landed() {
             self.gesture_landed(ob, &landed, now);
         }
@@ -546,11 +745,15 @@ impl AppleController {
                 j.hidden = true;
             }
         }
-        // A step at a time: each advance runs at most one.
+        // A step at a time: each advance runs at most one, against its screen's mirror.
+        let Some(main) = self.screen() else { return };
         let Some(job) = self.jobs.front_mut() else { return };
-        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
-        let cx = Ctx { mirror: &self.mirror, input: desk.input(), screen, pids: &self.pids, in_flight: post::in_flight() || self.posting.is_some() };
+        let screen = job.screen.and_then(|id| self.displays.iter().find(|d| d.id == id).copied()).unwrap_or(main);
+        let mirror = if screen.id == main.id { &self.mirror } else { self.others.get(&screen.id).unwrap_or(&self.mirror) };
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(main.frame), displays: &self.displays };
+        let cx = Ctx { mirror, input: desk.input(), screen: &screen, pids: &self.pids, in_flight: post::in_flight() || self.posting.is_some() };
         let next = job.advance(&cx, now);
+        let screen = &screen;
         match next {
             Next::Wait(_) => {}
             Next::Run(step) => {
@@ -563,7 +766,16 @@ impl AppleController {
                     self.last_refusal = Some(e);
                 }
             }
-            Next::Done(report) => self.job_ended(ob, report, now),
+            Next::Done(report) => {
+                // A restore that skipped a stage after a drag that only moved a window.
+                if let Some((w, frame)) = report.set_back
+                    && let Some(tw) = ob.window(w)
+                {
+                    let back = tw.element.set_frame(frame);
+                    tracing::info!(window = w, back = back.is_ok(), "apple mode: the window a drag moved set back to its frame");
+                }
+                self.job_ended(ob, report, now)
+            }
             Next::GiveUp(report) => {
                 if let Some(Step::Focus(w)) = report.undo {
                     tracing::info!(window = w, "apple mode: given up: the newly opened app's stage brought in front, as Apple's own would");
@@ -601,10 +813,13 @@ impl AppleController {
                 focuses = report.focuses,
                 clicks = report.clicks,
                 drags = report.drags,
+                stages = report.stages,
+                gone = ?report.gone,
+                could_not = ?report.could_not,
                 "apple mode: done"
             ),
             Some(why) => {
-                tracing::warn!(intent = ?job.intent, route = report.route, ms = report.ms, hide = ?hide, why, "apple mode: given up");
+                tracing::warn!(intent = ?job.intent, route = report.route, ms = report.ms, hide = ?hide, stages = report.stages, could_not = ?report.could_not, why, "apple mode: given up");
                 self.last_refusal = Some(why.clone());
             }
         }
@@ -614,7 +829,7 @@ impl AppleController {
 
     /// Runs `step` through its route now; the mirror counts in motion from here.
     fn run_step(&mut self, ob: &Observer, screen: &Display, step: &Step, now: Instant) -> Result<(), String> {
-        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
+        let mut desk = Desk { ob, manager: self.manager, screen: self.screen().map(|d| d.frame), displays: &self.displays };
         let route: &dyn Route = match step {
             Step::Focus(_) => &Focus,
             Step::Post(Posted::Clicks { .. }) => &ShiftClick,
@@ -633,7 +848,7 @@ impl AppleController {
             if let Step::Post(p) = step {
                 self.posting = Some(p.clone());
             }
-            self.mirror.step_began(now);
+            self.mirror_on_mut(Some(screen.id)).step_began(now);
             self.watch();
             self.read_due = Some(now + mirror::MOTION_READ);
         }
@@ -667,7 +882,8 @@ impl AppleController {
                 self.last_refusal = Some(why.clone());
             }
         }
-        self.mirror.step_began(now);
+        let screen = self.jobs.front().and_then(|j| j.screen);
+        self.mirror_on_mut(screen).step_began(now);
         self.watch();
     }
 
@@ -689,6 +905,24 @@ impl AppleController {
         }
         let focused = crate::platform::controller::focused_window();
         let window = |id: Option<u32>| id.or(focused).ok_or_else(|| Refusal("no window is focused".into()));
+        // The screen it concerns: the window's for send and new, the keyboard's for the rest
+        // (the focused window's screen, the main one with none); the restore is the main one's.
+        let screen = match ask {
+            Ask::Send(_, id) | Ask::New(id) => self.screen_of_window(id.or(focused)),
+            Ask::Restore => self.screen().map(|d| d.id),
+            Ask::Switch(_) | Ask::Merge(_) => self.screen_of_window(focused),
+        };
+        let mirror = self.mirror_on(screen);
+        if mirror.full_screen {
+            return refused(self, Refusal("a full-screen app's Space shows on that screen: nothing is done there".into()));
+        }
+        let wanted = match ask {
+            Ask::Restore => match self.wanted(ob) {
+                Some(w) => Some(w),
+                None => return refused(self, Refusal("no stages were saved when the Apple mode started (state-apple.json)".into())),
+            },
+            _ => None,
+        };
         let planned = {
             let model = self.model.as_ref();
             let key = |windows: &[u32]| {
@@ -697,38 +931,47 @@ impl AppleController {
                 m.stage(stage)?.key.map(|k| k.0)
             };
             match ask {
-                Ask::Switch(n) => plan::switch_job(&self.mirror, n, key, now),
-                Ask::Merge(n) => plan::merge(&self.mirror, n, now),
+                Ask::Switch(n) => plan::switch_job(mirror, n, key, now),
+                Ask::Merge(n) => plan::merge(mirror, n, now),
                 // Apple's keeps an app's windows in one stage under All at Once: refused up
                 // front, nothing posted (`plan::apart`).
                 Ask::Send(n, id) => window(id).and_then(|w| {
-                    plan::apart(&self.mirror, w, &self.pids, self.settings.app_windows)?;
-                    plan::send(&self.mirror, n, w, key, now)
+                    plan::apart(mirror, w, &self.pids, self.settings.app_windows)?;
+                    plan::send(mirror, n, w, key, now)
                 }),
                 Ask::New(id) => window(id).and_then(|w| {
-                    plan::apart(&self.mirror, w, &self.pids, self.settings.app_windows)?;
-                    plan::new_stage(&self.mirror, w, now)
+                    plan::apart(mirror, w, &self.pids, self.settings.app_windows)?;
+                    plan::new_stage(mirror, w, now)
                 }),
+                Ask::Restore => {
+                    let w = wanted.as_ref().cloned().unwrap_or_default();
+                    tracing::info!(saved = w.saved, matched = w.matched, stages = ?w.stages.iter().map(|t| &t.windows).collect::<Vec<_>>(), front = ?w.front, could_not = ?w.could_not, "apple mode: restore: the saved stages matched to the windows shown");
+                    restore::plan(&w, self.settings.app_windows == crate::engine::settings::AppWindows::AllAtOnce, now)
+                }
             }
         };
-        let job = match planned {
+        let mut job = match planned {
             Ok(j) => j,
             Err(r) => return refused(self, r),
         };
+        job.screen = screen;
         let intent = job.intent;
         let goals = serde_json::to_value(job.goals()).unwrap_or(Value::Null);
         let first = match job.goals().first() {
             Some(job::Goal::Front(w)) => json!({ "route": Focus.name(), "window": w }),
             Some(job::Goal::Gather { .. }) => json!({ "route": ShiftClick.name() }),
             Some(job::Goal::Out(w)) => json!({ "route": Drag.name(), "window": w }),
+            Some(job::Goal::Stage { .. }) => match &wanted {
+                Some(w) => json!({ "saved": w.saved, "matched": w.matched, "stages": w.stages.len(), "could_not": w.could_not }),
+                None => json!({}),
+            },
             None => json!({}),
         };
         let behind = self.jobs.len();
         self.jobs.push_back(job);
-        if let Some(screen) = self.screen() {
-            self.pump(ob, &screen, now);
-        }
-        let mut reply = json!({ "ok": true, "intent": intent, "goals": goals, "behind": behind, "waits_for_settle": !self.mirror.settled });
+        self.pump(ob, now);
+        let settled = self.mirror_on(screen).settled;
+        let mut reply = json!({ "ok": true, "intent": intent, "goals": goals, "behind": behind, "screen": screen.map(|d| d.0), "waits_for_settle": !settled });
         if let (Some(r), Some(f)) = (reply.as_object_mut(), first.as_object()) {
             r.extend(f.clone());
         }
@@ -754,7 +997,7 @@ impl AppleController {
         let Some(screen) = self.screen() else { return json!({ "ok": false, "error": "no screen yet" }) };
         let Some(manager) = self.manager else { return json!({ "ok": false, "error": "WindowManager is not running" }) };
         let now = Instant::now();
-        let mut desk = Desk { ob, manager: Some(manager), screen: Some(screen.frame) };
+        let mut desk = Desk { ob, manager: Some(manager), screen: Some(screen.frame), displays: &self.displays };
         let input = desk.input();
         let point = |w: u32| self.mirror.click_at.get(&w).copied().ok_or(format!("window {w}'s thumbnail shows no part of its own"));
         let t0 = Instant::now();
@@ -818,6 +1061,7 @@ impl AppleController {
             Command::Send(n, id) => asked(self.ask(ob, Ask::Send(n, id))),
             Command::New(id) => asked(self.ask(ob, Ask::New(id))),
             Command::AppleTry(t) => self.try_route(ob, t),
+            Command::AppleRestore => asked(self.ask(ob, Ask::Restore)),
             Command::Reload => {
                 self.reload_config();
                 json!({ "ok": true })
@@ -851,6 +1095,24 @@ impl AppleController {
             "current": self.mirror.current,
             "strip": self.mirror.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(),
             "remembered": self.mirror.remembered.iter().map(|g| &g.windows).collect::<Vec<_>>(),
+            "away": self.mirror.away.iter().map(|(_, g)| &g.windows).collect::<Vec<_>>(),
+            "full_screen": self.mirror.full_screen,
+            "desktop_changes": self.mirror.desktop_changes,
+            "screens": self.displays.iter().skip(1).filter_map(|d| self.others.get(&d.id).map(|m| json!({
+                "id": d.id.0,
+                "frame": d.frame,
+                "settled": m.settled,
+                "full_screen": m.full_screen,
+                "current": m.current,
+                "strip": m.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(),
+                "remembered": m.remembered.iter().map(|g| &g.windows).collect::<Vec<_>>(),
+                "away": m.away.iter().map(|(_, g)| &g.windows).collect::<Vec<_>>(),
+            }))).collect::<Vec<_>>(),
+            "restore": {
+                "saved_windows": self.saved.as_ref().map_or(0, restore::saved_windows),
+                "after_restart_waits": self.auto.is_some(),
+                "after_restart_seen": self.auto.map(|a| { let (m, s) = a.counts(); json!({ "matched": m, "saved": s }) }),
+            },
             "click_at": self.mirror.click_at,
             "pending": self.jobs.iter().map(|j| json!({ "intent": j.intent, "goals": j.goals(), "waits_for": j.waits_for, "age_ms": now.duration_since(j.since).as_millis() as u64, "report": j.report() })).collect::<Vec<_>>(),
             "posting": self.posting,
@@ -918,6 +1180,12 @@ impl AppleController {
     /// Writes `state-apple.json` now (the model as it follows Apple's, in `state.json`'s
     /// format), atomically and durably; `state.json` stays set aside meanwhile.
     pub fn save_now(&mut self) {
+        if self.auto.is_some() {
+            // The restore after a restart still waits: the stages it is to put back stay on disk.
+            tracing::debug!("apple mode: not saved while the restore after a restart waits");
+            self.save.saved();
+            return;
+        }
         let Some(m) = self.model.as_ref() else {
             self.save.saved();
             return;
@@ -983,6 +1251,32 @@ enum Ask {
     Send(usize, Option<u32>),
     /// A window (the focused one when `None`) out to a stage of its own.
     New(Option<u32>),
+    /// The stages saved when the mode started put back.
+    Restore,
+}
+
+/// Window `w` as the model and the restore's matcher see it: its frame the last one seen at
+/// full size when Apple's shows it in the strip (never a thumbnail's).
+fn meta_of(ob: &Observer, w: &crate::platform::observe::TrackedWindow, screen: &Display, a: &Arrangement) -> WindowMeta {
+    WindowMeta {
+        id: WindowId(w.id),
+        pid: w.pid,
+        bundle_id: ob.bundle_id(w.pid).unwrap_or_default().to_string(),
+        title: w.title.clone(),
+        role: WindowRole::Standard,
+        frame: a.full.get(&w.id).copied().unwrap_or(w.frame),
+        display: screen.id,
+    }
+}
+
+/// True when a full-screen app's Space shows on `d`: a window on screen covering most of it
+/// says it is in full screen through Accessibility (the observer's element for a managed
+/// window, its app's window list for another), as the app's own controller tells it.
+fn full_screen_on(ob: &Observer, listed: &mirror::Listed, d: &Display) -> bool {
+    listed.windows.iter().filter(|w| w.onscreen && w.layer == 0 && Some(w.pid) != listed.manager && fullscreen::could_be_fullscreen(w.bounds, d.frame) && d.frame.contains(w.bounds.center())).any(|w| match ob.window(w.id) {
+        Some(t) => t.element.is_fullscreen().unwrap_or(false),
+        None => AxElement::application(w.pid).windows().unwrap_or_default().iter().any(|e| e.window_id().ok() == Some(w.id) && e.is_fullscreen().unwrap_or(false)),
+    })
 }
 
 /// The windows the Apple mode follows: the observer's standard windows the window server

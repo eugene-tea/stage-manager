@@ -31,9 +31,18 @@
 //!   before stand.
 //! - **Settled**: no motion for [`STILL_READS`] reads and at least [`SETTLE`] since the last
 //!   change: what a posted step waits for (A3), and when the model follows.
-//! - **Stages Apple no longer lists** (past the strip's room, on a Desktop not shown) stay as
-//!   remembered groups with their last membership; a window gone from the list leaves its
-//!   group, a window seen again leaves it for what is seen.
+//! - **Stages Apple no longer lists** (past the strip's room) stay as remembered groups with
+//!   their last membership; a window gone from the list leaves its group, a window seen again
+//!   leaves it for what is seen.
+//! - **Other Desktops** ([`Arrangement::desktop_left`]): at a Desktop change every group known
+//!   goes *away*, tagged with the change, since each Desktop has stages of its own and the
+//!   window list cannot tell a stage of another Desktop from one past the strip's room (both
+//!   are listed off screen). Away groups are kept, followed by the model and never acted on:
+//!   no number counts them, no step focuses or clicks a window of theirs (a focus would show
+//!   their Desktop). Once a window of a change's groups is seen again (that Desktop shows
+//!   again), the rest of them are remembered groups of this Desktop once more.
+//! - **Full screen** ([`Arrangement::full_screen`], set by the platform from Accessibility):
+//!   a full-screen app's Space shows on this screen; no step runs there.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -140,9 +149,11 @@ pub enum Where {
     Current,
     /// An item of the strip.
     Strip,
-    /// Not listed any more (past the strip's room, on a Desktop not shown): its last
-    /// membership.
+    /// Not listed any more (past the strip's room): its last membership.
     Remembered,
+    /// On a Desktop not shown (left at a Desktop change): its last membership, never acted
+    /// on.
+    Away,
 }
 
 /// A stage of Apple's: its windows, front to back, and where its item was.
@@ -204,6 +215,13 @@ pub struct Arrangement {
     pub ax_groups: Vec<Vec<u32>>,
     /// When [`Arrangement::ax_groups`] was read.
     pub ax_groups_at: Option<Instant>,
+    /// The groups of Desktops not shown, each with the Desktop change that took it away
+    /// ([`Arrangement::desktop_left`]).
+    pub away: Vec<(u64, Group)>,
+    /// Desktop changes seen ([`Arrangement::desktop_left`]).
+    pub desktop_changes: u64,
+    /// A full-screen app's Space shows on this screen (the platform's reading): no step runs.
+    pub full_screen: bool,
 }
 
 impl Arrangement {
@@ -215,7 +233,33 @@ impl Arrangement {
         if let Some(slot) = self.strip.iter().position(|g| g.windows.contains(&id)) {
             return Some((Where::Strip, Some(slot)));
         }
-        self.remembered.iter().any(|g| g.windows.contains(&id)).then_some((Where::Remembered, None))
+        if self.remembered.iter().any(|g| g.windows.contains(&id)) {
+            return Some((Where::Remembered, None));
+        }
+        self.away.iter().any(|(_, g)| g.windows.contains(&id)).then_some((Where::Away, None))
+    }
+
+    /// True when window `id` is in a group of a Desktop not shown.
+    pub fn is_away(&self, id: u32) -> bool {
+        matches!(self.where_is(id), Some((Where::Away, _)))
+    }
+
+    /// The Desktop shown is left (a Desktop change, a full-screen app's Space coming or
+    /// going): every group known goes away with this change, and the arrangement counts in
+    /// motion for [`SETTLE`]. The next reads out of motion find the groups of the Desktop
+    /// shown afresh; see the module docs.
+    pub fn desktop_left(&mut self, now: Instant) {
+        self.desktop_changes += 1;
+        let batch = self.desktop_changes;
+        let current = (!self.current.is_empty()).then(|| Group { windows: std::mem::take(&mut self.current), frame: Rect::new(0.0, 0.0, 0.0, 0.0) });
+        let left: Vec<Group> = current.into_iter().chain(std::mem::take(&mut self.strip)).chain(std::mem::take(&mut self.remembered)).collect();
+        self.away.extend(left.into_iter().map(|g| (batch, g)));
+        self.click_at.clear();
+        self.title_at.clear();
+        self.ax_groups.clear();
+        self.ax_groups_at = None;
+        self.strip_shown = None;
+        self.step_began(now);
     }
 
     /// Every group: the current stage (when it holds a window), the strip's items top to
@@ -227,6 +271,7 @@ impl Arrangement {
         }
         out.extend(self.strip.iter().map(|g| (Where::Strip, g.windows.as_slice())));
         out.extend(self.remembered.iter().map(|g| (Where::Remembered, g.windows.as_slice())));
+        out.extend(self.away.iter().map(|(_, g)| (Where::Away, g.windows.as_slice())));
         out
     }
 
@@ -245,7 +290,7 @@ impl Arrangement {
             v.sort_unstable();
             v
         };
-        let mut rest: Vec<Vec<u32>> = self.strip.iter().chain(&self.remembered).map(|g| sorted(&g.windows)).collect();
+        let mut rest: Vec<Vec<u32>> = self.strip.iter().chain(&self.remembered).chain(self.away.iter().map(|(_, g)| g)).map(|g| sorted(&g.windows)).collect();
         rest.sort();
         (sorted(&self.current), rest)
     }
@@ -335,6 +380,8 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         ax_groups: prev.ax_groups.clone(),
         ax_groups_at: prev.ax_groups_at,
         full: prev.full.clone(),
+        desktop_changes: prev.desktop_changes,
+        full_screen: prev.full_screen,
         ..Arrangement::default()
     };
     // Closed windows leave what is kept of them.
@@ -348,6 +395,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         next.current = prev.current.iter().copied().filter(|id| listed.has(*id) && managed.contains(id)).collect();
         next.strip = kept(&prev.strip, listed, managed);
         next.remembered = kept(&prev.remembered, listed, managed);
+        next.away = kept_away(&prev.away, listed, managed, &BTreeSet::new());
         next.strip_shown = prev.strip_shown;
     } else {
         for id in &current {
@@ -365,7 +413,19 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         next.click_at = click_points(listed, &thumb_at, &icons, screen);
         next.title_at = title_points(listed, &current_at, screen);
         next.current = current;
-        next.remembered = remembered(prev, &next, listed, managed);
+        // A Desktop shown again: a window of a change's away groups seen now brings the rest of
+        // them back as remembered groups of this Desktop (past the strip's room).
+        let seen: BTreeSet<u32> = next.current.iter().chain(next.strip.iter().flat_map(|g| g.windows.iter())).copied().collect();
+        let back: BTreeSet<u64> = prev.away.iter().filter(|(_, g)| g.windows.iter().any(|w| seen.contains(w))).map(|(b, _)| *b).collect();
+        let mut before = prev.clone();
+        before.remembered.extend(prev.away.iter().filter(|(b, _)| back.contains(b)).map(|(_, g)| g.clone()));
+        next.remembered = remembered(&before, &next, listed, managed);
+        next.away = kept_away(&prev.away, listed, managed, &back);
+        next.away.retain(|(_, g)| !g.windows.is_empty());
+        for (_, g) in &mut next.away {
+            g.windows.retain(|w| !seen.contains(w));
+        }
+        next.away.retain(|(_, g)| !g.windows.is_empty());
     }
 
     // Accessibility on membership: a blank reading is no reading; a reading a second after
@@ -462,6 +522,16 @@ fn kept(groups: &[Group], listed: &Listed, managed: &BTreeSet<u32>) -> Vec<Group
         .iter()
         .map(|g| Group { windows: g.windows.iter().copied().filter(|id| listed.has(*id) && managed.contains(id)).collect(), frame: g.frame })
         .filter(|g| !g.windows.is_empty())
+        .collect()
+}
+
+/// `away` less the windows closed (or no longer managed) and the changes in `back` (their
+/// Desktop shows again); groups left empty go.
+fn kept_away(away: &[(u64, Group)], listed: &Listed, managed: &BTreeSet<u32>, back: &BTreeSet<u64>) -> Vec<(u64, Group)> {
+    away.iter()
+        .filter(|(b, _)| !back.contains(b))
+        .map(|(b, g)| (*b, Group { windows: g.windows.iter().copied().filter(|id| listed.has(*id) && managed.contains(id)).collect(), frame: g.frame }))
+        .filter(|(_, g)| !g.windows.is_empty())
         .collect()
 }
 

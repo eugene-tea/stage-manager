@@ -24,6 +24,21 @@
 //!   shows; one covered all along it is raised first (live 11-16: the fixture windows open at
 //!   one frame, the one to drag under another, the drag's guard refused it twice).
 //!
+//! - [`Goal::Stage`]: a saved stage put back (the restore, [`super::restore`]): a stage of
+//!   exactly its windows still listed, in front at the end when it is the saved active one.
+//!   One of its windows brought in front by focus (the one whose stage holds the fewest
+//!   windows of the other saved stages), each window of another saved stage in front taken out
+//!   by the drag, then the rest gathered by one Shift press. A window of another saved stage
+//!   whose app keeps another window in front stays (under All at Once Apple's would only move
+//!   it): said in the report. A stage that is so already anywhere is left as it is; windows
+//!   gone, and windows on a Desktop not shown, are skipped and said.
+//!
+//! No goal acts on a window of a Desktop not shown (a focus would show its Desktop), and no
+//! step runs while a full-screen app's Space shows on the screen.
+//!
+//! A *lenient* job (the restore) skips a goal it cannot meet, says why in its report, and
+//! goes on with the next; the deadline and the person's own input still end it.
+//!
 //! Whether a goal is met is asked of every read out of motion (the groups are read afresh);
 //! a posted step, and a focus that switches stages, wait for the settle; every posted step
 //! goes through the gate ([`super::gate`]). A step that ran and whose goal is still not met at
@@ -67,6 +82,18 @@ pub enum Goal {
     },
     /// Window `0` out to a stage of its own (the drag).
     Out(u32),
+    /// A saved stage put back (module docs).
+    Stage {
+        /// Its windows, front to back (the key window first).
+        windows: Vec<u32>,
+        /// The windows of the other saved stages: taken out when in front with it.
+        others: Vec<u32>,
+        /// The saved active stage: in front at the end.
+        front: bool,
+        /// "Show windows from an application: All at Once": a window whose app keeps another
+        /// window in front is never dragged out.
+        all_at_once: bool,
+    },
 }
 
 /// What the platform sees, for one advance.
@@ -130,6 +157,14 @@ pub struct Report {
     /// A window to set back to its frame after a give-up: a drag that moved it without
     /// taking it out.
     pub set_back: Option<(u32, Rect)>,
+    /// Saved stages met (the restore).
+    pub stages: u32,
+    /// Windows skipped, gone from the list (the restore).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub gone: Vec<u32>,
+    /// What could not be done and why, each said once (the restore).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub could_not: Vec<String>,
 }
 
 /// The step last run, for the retry count.
@@ -176,15 +211,26 @@ pub struct Job {
     dragged_from: Option<(u32, Rect)>,
     /// The step last asked for and what it waits on, for `ctl state`.
     pub waits_for: &'static str,
+    /// A goal that cannot be met is skipped and said, the job going on (the restore).
+    pub lenient: bool,
+    /// The screen the job acts on (`None`: the main one).
+    pub screen: Option<crate::engine::model::DisplayId>,
 }
 
 impl Job {
     /// A job for `intent` with `goals`, asked at `now`.
     pub fn new(intent: Intent, goals: Vec<Goal>, now: Instant) -> Self {
-        let windows: usize = goals.iter().map(|g| if let Goal::Gather { windows, .. } = g { windows.len() } else { 1 }).sum();
+        let windows: usize = goals
+            .iter()
+            .map(|g| match g {
+                Goal::Gather { windows, .. } | Goal::Stage { windows, .. } => windows.len(),
+                _ => 1,
+            })
+            .sum();
         let deadline = match intent {
             Intent::Switch(_) => Duration::from_millis(3000),
             Intent::OpenHere(_) => FIRST_WINDOW + Duration::from_secs(8),
+            Intent::Restore => Duration::from_secs(6) * goals.len() as u32 + Duration::from_millis(1500) * windows as u32 + gate::STRIP_WAIT,
             _ => Duration::from_secs(6) + Duration::from_millis(1500) * windows as u32 + gate::STRIP_WAIT,
         };
         Self {
@@ -203,6 +249,15 @@ impl Job {
             refused: None,
             dragged_from: None,
             waits_for: "the settle",
+            lenient: false,
+            screen: None,
+        }
+    }
+
+    /// `why` said in the report's `could_not`, once.
+    pub fn note(&mut self, why: String) {
+        if !self.report.could_not.contains(&why) {
+            self.report.could_not.push(why);
         }
     }
 
@@ -241,18 +296,35 @@ impl Job {
         if cx.mirror.in_motion {
             return self.wait(Hold::InMotion.why());
         }
+        if cx.mirror.full_screen {
+            if self.waiting.hold(Hold::FullScreen, now) {
+                let why = format!("{} for {} ms", Hold::FullScreen.why(), self.waiting.waited(now).as_millis());
+                return self.give_up(cx, now, why);
+            }
+            return self.wait(Hold::FullScreen.why());
+        }
         while let Some(goal) = self.goals.first().cloned() {
             match self.need(&goal, cx, now) {
                 Need::Met => {
+                    if matches!(goal, Goal::Stage { .. }) {
+                        self.report.stages += 1;
+                    }
                     self.goals.remove(0);
                     self.last = None;
+                    self.waiting.clear();
                 }
                 Need::Wait(why) => return self.wait(why),
-                Need::Fail(why) => return self.give_up(cx, now, why),
+                Need::Fail(why) => match self.skip(cx, why) {
+                    Ok(()) => continue,
+                    Err(why) => return self.give_up(cx, now, why),
+                },
                 Need::Hold(hold) => {
                     if self.waiting.hold(hold, now) {
                         let why = format!("{} for {} ms", hold.why(), self.waiting.waited(now).as_millis());
-                        return self.give_up(cx, now, why);
+                        match self.skip(cx, why) {
+                            Ok(()) => continue,
+                            Err(why) => return self.give_up(cx, now, why),
+                        }
                     }
                     return self.wait(hold.why());
                 }
@@ -306,47 +378,133 @@ impl Job {
         Next::Wait(why)
     }
 
+    /// A lenient job's goal that cannot be met (`why`) skipped and said: `Ok` to go on with
+    /// the next; any other job's `Err(why)` to give up.
+    fn skip(&mut self, cx: &Ctx, why: String) -> Result<(), String> {
+        if !self.lenient || self.goals.is_empty() {
+            return Err(why);
+        }
+        // A drag Apple's took as a plain move: the window set back (the platform does it at
+        // the end).
+        if let Some((w, frame)) = self.dragged_from.take()
+            && cx.mirror.current.contains(&w)
+            && cx.mirror.frames.get(&w).is_some_and(|f| *f != frame)
+        {
+            self.report.set_back.get_or_insert((w, frame));
+        }
+        let goal = self.goals.remove(0);
+        let what = match &goal {
+            Goal::Stage { windows, .. } => format!("the stage of windows {windows:?}"),
+            other => format!("{other:?}"),
+        };
+        self.note(format!("{what}: {why}"));
+        self.last = None;
+        self.waiting.clear();
+        self.refused = None;
+        Ok(())
+    }
+
     /// What goal `goal` needs now.
     fn need(&mut self, goal: &Goal, cx: &Ctx, now: Instant) -> Need {
         let a = cx.mirror;
         match goal {
             Goal::Front(w) => match a.where_is(*w) {
                 None => Need::Fail(format!("window {w} is in no stage Apple's shows or showed")),
+                Some((Where::Away, _)) => Need::Fail(super::plan::away(*w).0),
                 Some((Where::Current, _)) => Need::Met,
                 Some(_) => Need::Step(Step::Focus(*w)),
             },
             Goal::Out(w) => match a.where_is(*w) {
                 None => Need::Fail(format!("window {w} is in no stage Apple's shows or showed")),
+                Some((Where::Away, _)) => Need::Fail(super::plan::away(*w).0),
                 Some((Where::Current, _)) if a.current.len() <= 1 => Need::Met,
-                Some((Where::Current, _)) => {
-                    let Some(frame) = a.frames.get(w).copied() else { return Need::Fail(format!("window {w} is not listed")) };
-                    let Some(from) = a.title_at.get(w).copied() else {
-                        // Covered all along its title bar: raised first (in the stage in front a
-                        // focus raises it and switches nothing), dragged once the list shows it
-                        // on top.
-                        return Need::Step(Step::Focus(*w));
-                    };
-                    let items: Vec<_> = a.strip.iter().map(|g| g.frame).collect();
-                    let to = points::strip_drop(cx.screen, &items);
-                    // The frame before the first drag: a drag Apple's took as a plain move
-                    // leaves the window moved (live 11-16), set back when the job is given up.
-                    let restore = *self.dragged_from.get_or_insert((*w, a.full.get(w).copied().unwrap_or(frame)));
-                    let restore = restore.1;
-                    Need::Step(Step::Post(Posted::Drag { window: *w, from, to, frame: restore }))
-                }
+                Some((Where::Current, _)) => self.out_of_front(*w, cx),
                 Some(_) => {
                     let alone = a.strip.iter().chain(&a.remembered).any(|g| g.windows == [*w]);
                     if alone { Need::Met } else { Need::Step(Step::Focus(*w)) }
                 }
             },
             Goal::Gather { windows, app, focus_app } => self.gather(windows, *app, *focus_app, cx, now),
+            Goal::Stage { windows, others, front, all_at_once } => self.stage(windows, others, *front, *all_at_once, cx, now),
         }
+    }
+
+    /// Window `w`, in front with others, dragged out to a stage of its own: grabbed where its
+    /// title bar shows, raised first when it is covered all along.
+    fn out_of_front(&mut self, w: u32, cx: &Ctx) -> Need {
+        let a = cx.mirror;
+        let Some(frame) = a.frames.get(&w).copied() else { return Need::Fail(format!("window {w} is not listed")) };
+        let Some(from) = a.title_at.get(&w).copied() else {
+            // Covered all along its title bar: raised first (in the stage in front a focus
+            // raises it and switches nothing), dragged once the list shows it on top.
+            return Need::Step(Step::Focus(w));
+        };
+        let items: Vec<_> = a.strip.iter().map(|g| g.frame).collect();
+        let to = points::strip_drop(cx.screen, &items);
+        // The frame before the first drag: a drag Apple's took as a plain move leaves the
+        // window moved (live 11-16), set back when the job is given up.
+        if self.dragged_from.is_none_or(|(d, _)| d != w) {
+            self.dragged_from = Some((w, a.full.get(&w).copied().unwrap_or(frame)));
+        }
+        let restore = self.dragged_from.map_or(frame, |(_, f)| f);
+        Need::Step(Step::Post(Posted::Drag { window: w, from, to, frame: restore }))
+    }
+
+    /// [`Goal::Stage`]'s need (module docs).
+    fn stage(&mut self, windows: &[u32], others: &[u32], front: bool, all_at_once: bool, cx: &Ctx, now: Instant) -> Need {
+        let a = cx.mirror;
+        let mut t: Vec<u32> = Vec::new();
+        for w in windows {
+            match a.where_is(*w) {
+                None => {
+                    if !self.report.gone.contains(w) {
+                        self.report.gone.push(*w);
+                    }
+                }
+                Some((Where::Away, _)) => self.note(format!("window {w} is on a Desktop not shown: left there")),
+                Some(_) => t.push(*w),
+            }
+        }
+        if t.is_empty() {
+            return Need::Met;
+        }
+        let set: BTreeSet<u32> = t.iter().copied().collect();
+        let same = |g: &[u32]| g.len() == set.len() && g.iter().all(|w| set.contains(w));
+        if same(&a.current) || (!front && a.strip.iter().chain(&a.remembered).any(|g| same(&g.windows))) {
+            return Need::Met;
+        }
+        let others: BTreeSet<u32> = others.iter().copied().filter(|w| !set.contains(w)).collect();
+        if !a.current.iter().any(|w| set.contains(w)) {
+            // In front by a focus: the window whose stage holds the fewest windows of the other
+            // saved stages (of equals, the first: the key window).
+            let cost = |w: u32| a.groups().into_iter().find(|(_, g)| g.contains(&w)).map_or(usize::MAX, |(_, g)| g.iter().filter(|x| others.contains(x)).count());
+            return match t.iter().copied().min_by_key(|w| cost(*w)) {
+                Some(seed) => Need::Step(Step::Focus(seed)),
+                None => Need::Met,
+            };
+        }
+        // Windows of the other saved stages in front: out by the drag, one at a time; under
+        // All at Once one whose app keeps another window in front stays (Apple's would only
+        // move it).
+        let extras: Vec<u32> = a.current.iter().copied().filter(|w| others.contains(w)).collect();
+        let pid = |w: &u32| cx.pids.get(w).copied();
+        let movable = |e: u32| !all_at_once || pid(&e).is_none() || !a.current.iter().any(|x| *x != e && pid(x) == pid(&e));
+        if let Some(e) = extras.iter().copied().find(|e| movable(*e)) {
+            return self.out_of_front(e, cx);
+        }
+        if !extras.is_empty() {
+            self.note(format!(
+                "windows {extras:?} stay with the stage of windows {t:?}: with \"Show windows from an application: All at Once\" Apple's Stage Manager keeps an app's windows together"
+            ));
+        }
+        self.gather(&t, None, false, cx, now)
     }
 
     /// [`Goal::Gather`]'s need.
     fn gather(&mut self, windows: &[u32], app: Option<i32>, focus_app: bool, cx: &Ctx, now: Instant) -> Need {
         let a = cx.mirror;
-        let mut want: Vec<u32> = windows.iter().copied().filter(|w| a.where_is(*w).is_some()).collect();
+        // Windows gone, and windows of a Desktop not shown (a focus would show it), are left.
+        let mut want: Vec<u32> = windows.iter().copied().filter(|w| a.where_is(*w).is_some_and(|(p, _)| p != Where::Away)).collect();
         let mut app_windows: Vec<u32> = Vec::new();
         if let Some(pid) = app {
             // Front to back: the stage in front's order, then the strip's.
@@ -424,7 +582,10 @@ impl Job {
         if let Err(hold) = gated {
             if self.waiting.hold(hold, now) {
                 let why = format!("{} for {} ms", hold.why(), self.waiting.waited(now).as_millis());
-                return self.give_up(cx, now, why);
+                return match self.skip(cx, why) {
+                    Ok(()) => self.wait("the next goal"),
+                    Err(why) => self.give_up(cx, now, why),
+                };
             }
             return self.wait(hold.why());
         }
@@ -439,7 +600,10 @@ impl Job {
                 Some(r) => format!("{} for window {}: not posted in {TRIES} tries ({r})", step_name(&step), key.1),
                 None => format!("{} for window {}: Apple's did not answer after {TRIES} tries", step_name(&step), key.1),
             };
-            return self.give_up(cx, now, why);
+            return match self.skip(cx, why) {
+                Ok(()) => self.wait("the next goal"),
+                Err(why) => self.give_up(cx, now, why),
+            };
         }
         self.refused = None;
         self.last = Some(Ran { key, tries });

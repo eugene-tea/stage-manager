@@ -55,6 +55,8 @@ pub enum Hold {
     StripCovered,
     /// The thumbnail to click shows no part of its own.
     NoPoint,
+    /// A full-screen app's Space shows on the screen: no step runs there.
+    FullScreen,
 }
 
 impl Hold {
@@ -71,6 +73,7 @@ impl Hold {
             Self::InFlight => "a gesture of ours is in flight",
             Self::StripCovered => "Apple's strip is covered",
             Self::NoPoint => "the thumbnail shows no part of its own",
+            Self::FullScreen => "a full-screen app's Space shows",
         }
     }
 
@@ -79,7 +82,7 @@ impl Hold {
     /// person's input [`GATE_WAIT`].
     pub fn limit(self) -> Option<Duration> {
         match self {
-            Self::StripCovered | Self::NoPoint => Some(STRIP_WAIT),
+            Self::StripCovered | Self::NoPoint | Self::FullScreen => Some(STRIP_WAIT),
             Self::InMotion | Self::InFlight => None,
             _ => Some(GATE_WAIT),
         }

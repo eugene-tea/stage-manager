@@ -95,7 +95,8 @@ pub fn follow(m: &mut Model, a: &Arrangement, metas: &BTreeMap<u32, WindowMeta>,
     }
 
     // Each other group: the stage holding most of it that no group took, else a new one.
-    for group in a.strip.iter().chain(&a.remembered) {
+    // A Desktop not shown keeps its stages in the model too (its groups away, never acted on).
+    for group in a.strip.iter().chain(&a.remembered).chain(a.away.iter().map(|(_, g)| g)) {
         let windows: Vec<u32> = group.windows.iter().copied().filter(|id| managed.contains(id)).collect();
         let Some(first) = windows.first().copied() else { continue };
         let target = match most_held(m, &windows, &taken) {

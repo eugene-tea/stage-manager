@@ -11,6 +11,7 @@ use objc2_core_graphics::{CGEventFlags, CGEventSource, CGEventSourceStateID, CGE
 
 use crate::engine::apple::desk::{AppleDesk, InputNow, Landed, Posted};
 use crate::engine::apple::mirror::{Listed, ListedWindow, Reading};
+use crate::engine::apple::screens;
 use crate::engine::geometry::Rect;
 use crate::engine::model::Display;
 use crate::engine::overview::{self, Sighting};
@@ -26,12 +27,23 @@ pub struct Desk<'a> {
     pub manager: Option<i32>,
     /// The main screen's frame (Mission Control is told over it).
     pub screen: Option<Rect>,
+    /// Every screen, the main one first (each `sm.space` is matched to one).
+    pub displays: &'a [Display],
+}
+
+impl Desk<'_> {
+    /// Every screen's strip as WindowManager's Accessibility shows it (`sm.space` by
+    /// `sm.space`, each with its frame when it has one); `None` when it does not answer.
+    pub fn strips(&mut self) -> Option<Vec<(Option<Rect>, Reading)>> {
+        super::strip_ax::read(self.manager?)
+    }
 }
 
 impl AppleDesk for Desk<'_> {
-    /// The first `sm.space`'s strip (the main screen first; one screen until A6).
-    fn strip(&mut self, _display: &Display) -> Option<Reading> {
-        super::strip_ax::read(self.manager?)?.into_iter().next()
+    /// Screen `display`'s `sm.space`'s strip ([`screens::reading_for`]).
+    fn strip(&mut self, display: &Display) -> Option<Reading> {
+        let spaces = self.strips()?;
+        screens::reading_for(&spaces, self.displays, display)
     }
 
     fn listed(&mut self) -> Listed {

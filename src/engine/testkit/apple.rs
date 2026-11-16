@@ -8,8 +8,11 @@
 //! a press mid-motion is ignored, a click on a covered strip lands on nothing of Apple's; a
 //! focus of a window in front raises it within its stage; a drag of a title bar onto the strip
 //! takes the window out to a stage of its own (covered or not), and is not posted when another
-//! window is topmost at the grab point (the gestures' guard). Every focus and posted gesture
-//! is recorded. It implements [`AppleDesk`], so the mirror, following, the jobs
+//! window is topmost at the grab point (the gestures' guard). Other Desktops: a Desktop made
+//! or shown again keeps each Desktop's stages, the windows of the ones not shown listed off
+//! screen; a focus of such a window is counted (macOS would show its Desktop). A second
+//! screen is a second fake shifted right ([`FakeWindowManager::on_screen_at`]), its list
+//! joined to the first's. Every focus and posted gesture is recorded. It implements [`AppleDesk`], so the mirror, following, the jobs
 //! and the routes run against it as against the real desk.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +78,14 @@ pub struct FakeWindowManager {
     pub stack: f64,
     /// How the last gesture ended, until taken.
     landed: Option<Landed>,
+    /// How far right of the main screen's origin this fake's screen is (a second screen).
+    shift: f64,
+    /// WindowManager's icon windows are numbered from here (apart for a second screen).
+    icon_base: u32,
+    /// The Desktops not shown: each one's stage in front and its other stages.
+    desktops: Vec<(Vec<u32>, Vec<Vec<u32>>)>,
+    /// Focuses asked of a window on a Desktop not shown (macOS would have shown it).
+    pub desktop_jumps: u32,
 }
 
 impl Default for FakeWindowManager {
@@ -104,7 +115,42 @@ impl FakeWindowManager {
             stack: 16.0,
             all_at_once: false,
             landed: None,
+            shift: 0.0,
+            icon_base: 9900,
+            desktops: Vec::new(),
+            desktop_jumps: 0,
         }
+    }
+
+    /// The fake's screen `x` points right of the main screen's origin (a second screen; its
+    /// windows numbered apart by the caller), its icon windows numbered from `icon_base`.
+    pub fn on_screen_at(mut self, x: f64, icon_base: u32) -> Self {
+        self.shift = x;
+        self.icon_base = icon_base;
+        self
+    }
+
+    /// A new Desktop shown: the one shown set aside with its stages, the new one empty.
+    pub fn new_desktop(&mut self) {
+        self.change();
+        let left = (std::mem::take(&mut self.current), std::mem::take(&mut self.stages));
+        self.desktops.push(left);
+    }
+
+    /// Desktop `k` of the ones not shown (0: the first set aside) shown again, the one shown
+    /// set aside in its place.
+    pub fn show_desktop(&mut self, k: usize) {
+        self.change();
+        let Some(back) = self.desktops.get_mut(k) else { return };
+        let shown = (std::mem::take(&mut self.current), std::mem::take(&mut self.stages));
+        let (current, stages) = std::mem::replace(back, shown);
+        self.current = current;
+        self.stages = stages;
+    }
+
+    /// True when window `id` is on a Desktop not shown.
+    fn elsewhere(&self, id: u32) -> bool {
+        self.desktops.iter().any(|(c, st)| c.contains(&id) || st.iter().any(|s| s.contains(&id)))
     }
 
     /// The test clock.
@@ -154,7 +200,7 @@ impl FakeWindowManager {
         self.change();
         for (k, id) in ids.iter().enumerate() {
             let k = k as f64;
-            self.windows.insert(*id, (pid, Rect::new(300.0 + 30.0 * k, 120.0 + 30.0 * k, 700.0, 500.0)));
+            self.windows.insert(*id, (pid, Rect::new(self.shift + 300.0 + 30.0 * k, 120.0 + 30.0 * k, 700.0, 500.0)));
         }
         if !self.current.is_empty() {
             self.stages.insert(0, std::mem::take(&mut self.current));
@@ -175,7 +221,7 @@ impl FakeWindowManager {
         self.hidden.insert(pid);
         for (k, id) in ids.iter().enumerate() {
             let k = k as f64;
-            self.windows.insert(*id, (pid, Rect::new(360.0 + 30.0 * k, 160.0 + 30.0 * k, 640.0, 460.0)));
+            self.windows.insert(*id, (pid, Rect::new(self.shift + 360.0 + 30.0 * k, 160.0 + 30.0 * k, 640.0, 460.0)));
         }
         self.stages.insert(0, ids.to_vec());
     }
@@ -186,13 +232,13 @@ impl FakeWindowManager {
         let of_app = |ws: &[u32], windows: &BTreeMap<u32, (i32, Rect)>| ws.iter().any(|w| windows.get(w).is_some_and(|(p, _)| *p == pid));
         if of_app(&self.current, &self.windows) || self.current.is_empty() {
             self.change();
-            self.windows.insert(id, (pid, Rect::new(420.0, 200.0, 600.0, 400.0)));
+            self.windows.insert(id, (pid, Rect::new(self.shift + 420.0, 200.0, 600.0, 400.0)));
             self.current.insert(0, id);
             return;
         }
         if let Some(s) = self.stages.iter().position(|st| of_app(st, &self.windows)) {
             self.change();
-            self.windows.insert(id, (pid, Rect::new(420.0, 200.0, 600.0, 400.0)));
+            self.windows.insert(id, (pid, Rect::new(self.shift + 420.0, 200.0, 600.0, 400.0)));
             self.stages[s].insert(0, id);
             return;
         }
@@ -203,6 +249,10 @@ impl FakeWindowManager {
     /// takes its slot, and its app shows again when hidden. Nothing for a window in front or
     /// unknown.
     pub fn focus_window(&mut self, id: u32) {
+        if self.elsewhere(id) {
+            self.desktop_jumps += 1;
+            return;
+        }
         if let Some((pid, _)) = self.windows.get(&id) {
             self.hidden.remove(pid);
         }
@@ -240,6 +290,11 @@ impl FakeWindowManager {
             st.retain(|w| *w != id);
         }
         self.stages.retain(|st| !st.is_empty());
+        for (c, st) in &mut self.desktops {
+            c.retain(|w| *w != id);
+            st.iter_mut().for_each(|s| s.retain(|w| *w != id));
+            st.retain(|s| !s.is_empty());
+        }
     }
 
     /// The strip shows `room` items; the rest are unlisted.
@@ -277,7 +332,7 @@ impl FakeWindowManager {
     /// The `k`th thumbnail of slot `slot` (the front one first; the next 16 points right, as a
     /// live capture of 11-16 had a stage of two).
     fn thumb(&self, slot: usize, k: usize) -> Rect {
-        let x = if self.covered { HIDDEN_X } else { THUMB.x };
+        let x = self.shift + if self.covered { HIDDEN_X } else { THUMB.x };
         let k = k as f64;
         Rect::new(x + self.stack * k, THUMB.y + SLOT * slot as f64 + self.stack / 4.0 * k, THUMB.w, THUMB.h)
     }
@@ -393,12 +448,20 @@ impl FakeWindowManager {
                 windows.push(app(*id, b, true));
             }
             if moving.is_none() {
-                windows.push(ListedWindow { id: 9900 + slot as u32, pid: MANAGER, layer: 0, bounds: self.icon(slot), onscreen: true });
+                windows.push(ListedWindow { id: self.icon_base + slot as u32, pid: MANAGER, layer: 0, bounds: self.icon(slot), onscreen: true });
             }
         }
         for st in self.stages.iter().skip(self.room) {
             for id in st {
                 windows.push(app(*id, at(*id), false));
+            }
+        }
+        // The Desktops not shown: listed off screen at their frames.
+        for (current, stages) in &self.desktops {
+            for id in current.iter().chain(stages.iter().flatten()) {
+                if let Some(f) = self.frame(*id) {
+                    windows.push(app(*id, f, false));
+                }
             }
         }
         Listed { windows, manager: Some(MANAGER) }

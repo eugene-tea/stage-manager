@@ -209,6 +209,9 @@ pub enum Command {
     Merge(usize),
     /// The Apple mode: one route run once by hand (needs `STAGE_MANAGER_TEST=1`).
     AppleTry(AppleTry),
+    /// The Apple mode: the stages saved when the mode started (`state-apple.json` as it was
+    /// then) put back on Apple's Stage Manager.
+    AppleRestore,
     /// Reveal the desktop (a wallpaper click).
     Reveal,
     /// Bring every parked window back onscreen (the stages stay).
@@ -410,6 +413,7 @@ impl Command {
             ["pin", rest @ ..] if rest.len() <= 1 => Ok(Self::Pin(window_id(rest.first())?)),
             ["merge", n] => Ok(Self::Merge(number(n)?)),
             ["apple", "try", route, target] => AppleTry::parse(route, target).map(Self::AppleTry),
+            ["apple", "restore"] => Ok(Self::AppleRestore),
             ["reveal"] => Ok(Self::Reveal),
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
@@ -987,6 +991,8 @@ mod tests {
         assert_eq!(Command::parse("apple try shift-focus 12"), Ok(Command::AppleTry(AppleTry::ShiftFocus(12))));
         assert!(Command::parse("apple try ax-press first").is_err(), "a window id");
         assert!(Command::parse("apple try teleport 3").is_err());
+        assert_eq!(Command::parse("apple restore"), Ok(Command::AppleRestore));
+        assert!(Command::parse("apple restore now").is_err());
         assert_eq!(Command::parse("reveal"), Ok(Command::Reveal));
         assert_eq!(Command::parse("debug-toggle-strip"), Ok(Command::DebugToggleStrip));
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));

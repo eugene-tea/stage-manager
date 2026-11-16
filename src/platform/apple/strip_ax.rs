@@ -14,6 +14,7 @@ use objc2_app_kit::NSRunningApplication;
 use objc2_foundation::NSString;
 
 use crate::engine::apple::mirror::{Item, Reading};
+use crate::engine::geometry::Rect;
 use crate::platform::ax::{AxElement, AxError, AxResult};
 
 /// WindowManager's bundle id.
@@ -40,9 +41,11 @@ pub fn manager_pid() -> Option<i32> {
     apps.iter().next().map(|a| a.processIdentifier())
 }
 
-/// The strips of every screen (`sm.space`, in WindowManager's order: the main screen first)
-/// of WindowManager `pid`, read now; `None` when WindowManager does not answer.
-pub fn read(pid: i32) -> Option<Vec<Reading>> {
+/// The strips of every screen (`sm.space`, in WindowManager's order: the main screen first),
+/// each with the group's `AXFrame` when it has one (which screen it is:
+/// [`crate::engine::apple::screens::reading_for`]), of WindowManager `pid`, read now; `None`
+/// when WindowManager does not answer.
+pub fn read(pid: i32) -> Option<Vec<(Option<Rect>, Reading)>> {
     let app = AxElement::application(pid);
     let spaces = match app.bounded(STRIP_AX_SECONDS, AxElement::children) {
         Ok(c) => c,
@@ -59,10 +62,11 @@ pub fn read(pid: i32) -> Option<Vec<Reading>> {
             Err(AxError::CANNOT_COMPLETE) => return None,
             Err(_) => continue,
         }
+        let frame = space.bounded(STRIP_AX_SECONDS, |e| e.rect(FRAME)).ok().filter(|r| r.w > 0.0 && r.h > 0.0);
         match strip_of(&space) {
-            Ok(r) => out.push(r),
+            Ok(r) => out.push((frame, r)),
             Err(AxError::CANNOT_COMPLETE) => return None,
-            Err(_) => out.push(Reading::default()),
+            Err(_) => out.push((frame, Reading::default())),
         }
     }
     Some(out)

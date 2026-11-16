@@ -29,6 +29,8 @@ pub mod job;
 pub mod mirror;
 pub mod plan;
 pub mod points;
+pub mod restore;
+pub mod screens;
 #[cfg(test)]
 mod scenarios;
 
