@@ -610,7 +610,11 @@ impl AppleController {
             let before = prev.grouping();
             let corrections = prev.corrections;
             let mut next = mirror::fold(&prev, reading.as_ref(), &listed, &mine, d, now);
-            next.full_screen = full_screen_on(ob, &listed, d);
+            // Asked of Accessibility out of motion only (a big window's every frame would ask it
+            // every 50 ms); in motion the reading before stands.
+            if !next.in_motion {
+                next.full_screen = full_screen_on(ob, &listed, d);
+            }
             if next.full_screen != prev.full_screen {
                 tracing::info!(screen = d.id.0, full_screen = next.full_screen, "apple mode: a full-screen app's Space {} on this screen", if next.full_screen { "shows: no step runs" } else { "is gone" });
             }
