@@ -8934,18 +8934,30 @@ def tab_lookalike():
         return
     t = by_title(s)
     f1, f2 = t["Fixture 1"]["id"], t["Fixture 2"]["id"]
+    # `new` gives Fixture 2 a stage of its own behind; the switch to it hides Fixture 1's.
     do("new", f2)
-    time.sleep(1.0)
     s = state()
     home = by_title(s)["Fixture 1"]["home"]
-    if not check(bool(by_title(s)["Fixture 1"].get("parked")) and not by_title(s)["Fixture 2"].get("parked"),
-                 "tab lookalike setup: Fixture 1's stage hidden, Fixture 2 in front"):
+    do("switch", by_title(s)["Fixture 2"]["home"])
+
+    def switched():
+        s = state(landed=False)
+        bt = by_title(s)
+        ok = s.get("switching") is None and bool(bt.get("Fixture 1", {}).get("parked")) and not bt.get("Fixture 2", {}).get("parked", True)
+        return s if ok else None
+
+    s = wait_until(switched, 5, "the switch to Fixture 2's stage")
+    if not check(s is not None, "tab lookalike setup: Fixture 1's stage hidden, Fixture 2 in front"):
         stop_app()
         stop_fixture()
         return
     wins, _ = fixture_windows([FIX_ID])
     frames = {w["id"]: w["bounds"] for w in wins}
-    check(frames.get(f1) == frames.get(f2), f"tab lookalike setup: Fixture 1 and Fixture 2 at one frame ({frames.get(f1)}, {frames.get(f2)})")
+    # Spaces: Fixture 1 is listed at its own frame (the look of a tab left); Corner: it is in
+    # the park corner, its frame to come back to is the model's.
+    at1 = frames.get(f1) if SPACES else by_title(s)["Fixture 1"].get("restore")
+    check(bool(at1) and bool(frames.get(f2)) and close(at1, frames[f2], 2.0),
+          f"tab lookalike setup: Fixture 1 and Fixture 2 at one frame ({at1}, {frames.get(f2)})")
     selected_before = log_text().count("a window tab was selected")
     os.kill(fixture[0], signal.SIGUSR1)
     s = wait_until(lambda: (lambda s: s if "Fixture 3" in by_title(s) else None)(state()), 5, "Fixture 3 to be managed")
