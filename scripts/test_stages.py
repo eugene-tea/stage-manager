@@ -170,6 +170,9 @@ ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME, STAGE_MANAGER_ONLY=ONLY)
 # every app run and probe as STAGE_MANAGER_ENGINE. Every behaviour check runs on both;
 # what is the park corner's own (its zone, slivers, patch, still, cover) skips under Spaces.
 ENGINE = (os.environ.get("SM_ENGINE") or "corner").strip().lower()
+# The Spaces engine's live landing (STAGE_MANAGER_LANDING=live*): the real window flies the last
+# stretch of a switch itself, so no snapshot stays over it to read at its end.
+LIVE_LANDING = ENGINE == "spaces" and (os.environ.get("STAGE_MANAGER_LANDING") or "").startswith("live")
 SPACES = ENGINE == "spaces"
 if ENGINE != "corner":
     ENV["STAGE_MANAGER_ENGINE"] = ENGINE
@@ -4544,12 +4547,15 @@ def landing_blend_check():
     # The fixture's palette (sRGB): Fixture 2 blue, Fixture 3 green; at rest the box shows the front one.
     palette = {"Fixture 2": (51, 140, 217), "Fixture 3": (64, 179, 89)}
     near = lambda c, n: max(abs(c[i] - palette[n][i]) for i in range(3))
-    check(bool(refs) and all(near(r, front) < near(r, back) for r in refs),
-          f"at rest the box shows {front}'s snapshot ({refs[:3]})")
-    if check(len(fading) >= 2, f"the landing's fade was read in the box ({len(fading)} reads part-way faded)"):
-        worst = max(f[3] for f in fading)
-        check(worst <= LANDING_BLEND_TOLERANCE,
-              f"while it fades, {back} never shows through {front} (largest shift {worst:.0f}, at most {LANDING_BLEND_TOLERANCE})")
+    if LIVE_LANDING and not refs and not fading:
+        skip("the landing's fade read in the box", "live landing: the windows fly the last stretch themselves, no snapshot fades over them")
+    else:
+        check(bool(refs) and all(near(r, front) < near(r, back) for r in refs),
+              f"at rest the box shows {front}'s snapshot ({refs[:3]})")
+        if check(len(fading) >= 2, f"the landing's fade was read in the box ({len(fading)} reads part-way faded)"):
+            worst = max(f[3] for f in fading)
+            check(worst <= LANDING_BLEND_TOLERANCE,
+                  f"while it fades, {back} never shows through {front} (largest shift {worst:.0f}, at most {LANDING_BLEND_TOLERANCE})")
     consistent("the landing of two overlapping windows")
 
 
@@ -4764,7 +4770,9 @@ def phase_glass():
         reads = overlay_opaque_reads(box)
         page = [GLASS_PAGES["Fixture 4"]] * 3
         say(f"    the growing snapshot over its window, last opaque reads: {[[round(v) for v in m[:3]] for m in reads[-3:]]}")
-        if check(bool(reads), "the growing snapshot was read over its window"):
+        if LIVE_LANDING and not reads:
+            skip("the growing snapshot read over its window", "live landing: the window flies the last stretch itself, no snapshot stays over it")
+        elif check(bool(reads), "the growing snapshot was read over its window"):
             check(glass_off(reads[-1], page) <= 3, f"it lands as the window, opaque: {[round(v) for v in reads[-1][:3]]} vs the page {page}")
     time.sleep(1.0)
 
