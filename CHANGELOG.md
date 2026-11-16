@@ -60,6 +60,8 @@
   Desktop, no longer takes the screen to that Desktop and back: while the app switcher
   selects the app, its stage's window is made ready on the Desktop shown, and taken back
   when the selection moves on or the switcher is cancelled.
+  That window is kept off the screen at the display's corner while the switcher shows, so
+  a window passed over in the switcher no longer flickers in and out behind the stage shown.
 
 ## 1.8.5 — 2026-11-12
 
