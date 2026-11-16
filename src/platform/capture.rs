@@ -1073,14 +1073,15 @@ fn fast_part(batch: &[Target], deliver: Deliver) -> FastPart {
     }
     let ids: Vec<u32> = batch.iter().map(|t| t.id).collect();
     let described = super::windows::describe(&ids);
+    let Some(gone) = super::capture_fast::closed(&ids, &described.iter().map(|w| w.id).collect::<Vec<_>>()) else {
+        tracing::debug!(windows = ids.len(), "window pictures: the window server described none of the round's windows; ScreenCaptureKit takes them");
+        return FastPart { left: batch.to_vec(), ..FastPart::default() };
+    };
     let displays = super::desktop::cg_display_bounds();
     let children = super::capture_fast::with_children(&ids);
-    let mut part = FastPart::default();
+    let mut part = FastPart { gone, ..FastPart::default() };
     for t in batch {
-        let Some(w) = described.iter().find(|w| w.id == t.id) else {
-            part.gone.push(t.id);
-            continue;
-        };
+        let Some(w) = described.iter().find(|w| w.id == t.id) else { continue };
         if children.contains(&t.id) {
             tracing::trace!(window = t.id, "window picture: a window of its app over it; ScreenCaptureKit takes it");
             part.left.push(*t);

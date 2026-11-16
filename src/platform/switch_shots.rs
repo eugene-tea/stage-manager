@@ -201,10 +201,15 @@ fn shoot_sck(targets: Vec<Target>, now: &[(u32, Rect)], done: ShotDone) {
 
 /// Takes each of `targets` through the window server ([`super::capture_fast`]) at its frame in
 /// `now`, one after another; each picture, and each window no longer described (closed),
-/// answers `done`. The windows it misses, for ScreenCaptureKit.
+/// answers `done`. The windows it misses, for ScreenCaptureKit; all of them when the window
+/// server described none ([`super::capture_fast::closed`]: a failed read).
 pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDone) -> Vec<Target> {
-    let displays = super::desktop::cg_display_bounds();
     let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+    if super::capture_fast::closed(&ids, &now.iter().map(|(id, _)| *id).collect::<Vec<_>>()).is_none() {
+        tracing::debug!(windows = ids.len(), "switch pictures: the window server described none of the windows; ScreenCaptureKit takes them");
+        return targets.to_vec();
+    }
+    let displays = super::desktop::cg_display_bounds();
     let children = super::capture_fast::with_children(&ids);
     let mut left = Vec::new();
     for t in targets {

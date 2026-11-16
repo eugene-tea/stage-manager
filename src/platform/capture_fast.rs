@@ -287,6 +287,18 @@ pub fn picture(t: Target, frame: Rect, displays: &[Rect]) -> Result<Picture, Mis
     Ok(Picture { image, extent: Extent::NONE })
 }
 
+/// Of `ids`, the windows the window server no longer describes (closed), given those it
+/// described (`described`). `None` when it described none of them: a failed read (its call
+/// answers nothing under load), not every window closed; the caller leaves them all to
+/// ScreenCaptureKit, which tells a closed window from one it cannot take (the review's D-7: the
+/// whole batch was taken as closed, no picture, no retry).
+pub fn closed(ids: &[u32], described: &[u32]) -> Option<Vec<u32>> {
+    if !ids.is_empty() && described.is_empty() {
+        return None;
+    }
+    Some(ids.iter().copied().filter(|id| !described.contains(id)).collect())
+}
+
 /// Of `ids`, the windows with another window of their app on screen over them or reaching out
 /// of them (a popover, a menu, a sheet, a child panel: ScreenCaptureKit's picture carries those,
 /// the window server's call gives the window alone): ScreenCaptureKit takes their pictures, as
@@ -352,6 +364,16 @@ mod tests {
     }
 
     use super::*;
+
+    /// D-7: a description that comes back empty for windows asked is a failed read; a window
+    /// missing from an answer that describes others is closed.
+    #[test]
+    fn an_empty_description_is_a_failed_read_not_every_window_closed() {
+        assert_eq!(closed(&[1, 2, 3], &[]), None, "nothing described");
+        assert_eq!(closed(&[1, 2, 3], &[1, 3]), Some(vec![2]));
+        assert_eq!(closed(&[1, 2], &[2, 1]), Some(vec![]));
+        assert_eq!(closed(&[], &[]), Some(vec![]));
+    }
 
     const SCREEN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
     const RIGHT: Rect = Rect::new(2560.0, 0.0, 1920.0, 1080.0);
