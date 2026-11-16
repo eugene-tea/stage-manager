@@ -37,6 +37,7 @@
 //! the config, and for now an opt-in); the Corner engine is the default.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -266,13 +267,17 @@ pub struct SpacesEngine {
     /// The incoming windows' last stretches ([`landing`]): their own lock, taken before the
     /// state's when both are.
     stretches: Mutex<BTreeMap<u32, landing::Fly>>,
+    /// Set while the stretches' lock stayed busy past its bounded wait for a caller that is
+    /// not a stretch's own thread ([`SpacesEngine::stretches_within`]): later callers do not
+    /// wait again until it is free once more.
+    stretches_busy: AtomicBool,
 }
 
 /// The one Spaces engine of this process: the stage Spaces belong to the process's
 /// window-server connection, so there is one map of them.
 pub fn shared() -> Arc<SpacesEngine> {
     static ENGINE: OnceLock<Arc<SpacesEngine>> = OnceLock::new();
-    ENGINE.get_or_init(|| Arc::new(SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()) })).clone()
+    ENGINE.get_or_init(|| Arc::new(SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) })).clone()
 }
 
 /// The engine the environment asks for: `STAGE_MANAGER_ENGINE=spaces`, honoured only with
@@ -701,7 +706,7 @@ impl SpacesEngine {
     /// a hide puts it back as any hide (its frame set again); [`Self::take_back_window`] puts
     /// it back unshown. A window planned to fly its last stretch is not lent.
     pub(crate) fn lend_window(&self, id: u32, park: Option<LendPark>) -> Lend {
-        if self.stretches().contains_key(&id) {
+        if self.stretches_within("a lend").is_none_or(|l| l.contains_key(&id)) {
             return Lend::default();
         }
         let Some(held) = self.state().held.get(&id).copied() else { return Lend::default() };
@@ -1268,7 +1273,7 @@ impl WindowEngine for SpacesEngine {
     }
 
     fn stretching(&self) -> HashSet<u32> {
-        self.stretches().iter().filter(|(_, f)| !f.stop).map(|(id, _)| *id).collect()
+        self.stretches_within("the stretches asked").map(|l| l.iter().filter(|(_, f)| !f.stop).map(|(id, _)| *id).collect()).unwrap_or_default()
     }
 
     /// True: a hide is one window-server call (~2 ms a window), so the outgoing windows wait
@@ -1402,7 +1407,7 @@ mod tests {
 
     #[test]
     fn an_engine_that_hid_nothing_shows_and_sweeps_without_the_window_server() {
-        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()) };
+        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) };
         assert!(e.show_window(42), "never hidden: nothing to bring out");
         assert_eq!(e.sweep("test", true), Report::default());
         assert!(e.present_off_screen().is_empty());

@@ -53,6 +53,16 @@ const STOP_WAIT: Duration = Duration::from_millis(300);
 /// a call or two at a time).
 const END_WAIT: Duration = Duration::from_millis(50);
 
+/// How long the WM thread (or the strip's) waits for the stretches' lock before it goes on
+/// without it ([`SpacesEngine::stretches_within`]): a stretch holds it for a few window
+/// server calls and at most two read-backs ([`super::READ_BACK`] each), so longer means a
+/// stretch's thread is stuck; a show, a hide or a quit is never held up by it.
+const LOCK_WAIT: Duration = Duration::from_millis(250);
+
+/// The landing Space a hide is told when the stretches could not be asked
+/// ([`SpacesEngine::stop_stretch`]): unknown, so the window goes out of every Space.
+pub(super) const UNKNOWN_SPACE: u64 = 0;
+
 /// Which call sets the landing Spaces' transform: not tried yet, the classic one, the
 /// bridged one ([`SpacesEngine::set_landing_transform`]).
 static TRANSFORM_ROUTE: AtomicU8 = AtomicU8::new(ROUTE_UNTRIED);
@@ -123,6 +133,33 @@ impl SpacesEngine {
         self.stretches.lock().unwrap_or_else(|p| p.into_inner())
     }
 
+    /// The stretches for a caller that is not a stretch's own thread (the WM thread, the
+    /// strip's): `None` when the lock stays busy past [`LOCK_WAIT`] (`what` names the caller
+    /// in the log, once per episode); then no later caller waits until the lock is free once
+    /// more. The caller goes on as when there is no stretch.
+    pub(super) fn stretches_within(&self, what: &str) -> Option<MutexGuard<'_, BTreeMap<u32, Fly>>> {
+        let wait = if self.stretches_busy.load(Ordering::Relaxed) { Duration::ZERO } else { LOCK_WAIT };
+        let by = Instant::now() + wait;
+        loop {
+            match self.stretches.try_lock() {
+                Ok(l) => {
+                    if self.stretches_busy.swap(false, Ordering::Relaxed) {
+                        tracing::info!(what, "spaces engine: the stretches are free again");
+                    }
+                    return Some(l);
+                }
+                Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < by => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    if !self.stretches_busy.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(what, wait_ms = LOCK_WAIT.as_millis() as u64, "spaces engine: the stretches stayed busy (a stretch's thread is stuck); gone on without them");
+                    }
+                    return None;
+                }
+            }
+        }
+    }
+
     /// Sets landing Space `space`'s transform to `m` by the route that works ([`TRANSFORM_ROUTE`]).
     fn set_landing_transform(&self, sky: &Sky, space: u64, m: Affine) {
         match TRANSFORM_ROUTE.load(Ordering::Relaxed) {
@@ -155,7 +192,7 @@ impl SpacesEngine {
             return false;
         }
         {
-            let mut l = self.stretches();
+            let Some(mut l) = self.stretches_within("a stretch planned") else { return false };
             if l.contains_key(&s.window) {
                 return false;
             }
@@ -198,9 +235,8 @@ impl SpacesEngine {
         };
         self.set_landing_transform(sky, space, first);
         let _ = sky.show_hide(Route::Classic, &[space], true);
-        match self.stretches().get_mut(&id) {
-            Some(f) if !f.stop => f.space = space,
-            _ => return self.skip(id, Some(space), "stopped before the handover"),
+        if !self.claim_space(id, space) {
+            return self.skip(id, Some(space), "stopped before the handover");
         }
         sleep_until(first_at);
         // The handover: only while nothing stopped it and the window is still in its stage's
@@ -288,6 +324,24 @@ impl SpacesEngine {
         StretchNote::Landed
     }
 
+    /// Stretch `id`'s landing Space `space`, made, noted; false when the stretch stopped
+    /// meanwhile (a show before the handover) or is gone. The stretches' lock is let go
+    /// before this returns: the caller's [`Self::skip`] takes it again. (Held across the
+    /// skip, as a `match` on the guard holds it, the thread locked itself out for good, the
+    /// stretches' lock with it, and every later call of the WM thread that asks for the
+    /// stretches waited forever: the quit of live 11-15 16:34:32, a show at 16:34:28.815
+    /// had stopped a stretch whose Space was being made.)
+    fn claim_space(&self, id: u32, space: u64) -> bool {
+        let mut l = self.stretches();
+        match l.get_mut(&id) {
+            Some(f) if !f.stop => {
+                f.space = space;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// A stretch that never took over: its Space (if made) ended, its entry gone.
     fn skip(&self, id: u32, space: Option<u64>, why: &'static str) -> StretchNote {
         if let (Some(space), Some(sky)) = (space, self.sky()) {
@@ -327,9 +381,13 @@ impl SpacesEngine {
     /// Window `id`'s stretch stops (a show or a hide of the window is about to go): one not
     /// taken over yet never takes over. The guard holds the stretches while the caller moves
     /// the window when it flies (`Some`: its landing Space, which the caller's move must take
-    /// it out of: every Space, [`ALL_SPACES_MASK`]); `None` when it is not flying.
+    /// it out of: every Space, [`ALL_SPACES_MASK`]); `None` when it is not flying. With the
+    /// stretches stuck ([`Self::stretches_within`]) nothing is held, and a hide is told
+    /// [`UNKNOWN_SPACE`] so that it takes the window out of every Space all the same.
     pub(super) fn stop_stretch(&self, id: u32, flying_too: bool) -> (Option<MutexGuard<'_, BTreeMap<u32, Fly>>>, Option<u64>) {
-        let mut l = self.stretches();
+        let Some(mut l) = self.stretches_within(if flying_too { "a hide" } else { "a show" }) else {
+            return (None, flying_too.then_some(UNKNOWN_SPACE));
+        };
         let Some(f) = l.get_mut(&id) else { return (None, None) };
         match f.phase {
             Phase::Waiting => {
@@ -348,12 +406,13 @@ impl SpacesEngine {
     /// True while window `id` has a stretch planned or flying that has not stopped: until it
     /// lands it is in its stage Space or its landing Space, on no Desktop for macOS.
     pub(super) fn in_flight(&self, id: u32) -> bool {
-        self.stretches().get(&id).is_some_and(|f| !f.stop && !f.ended)
+        self.stretches_within("a window's Desktop asked").is_some_and(|l| l.get(&id).is_some_and(|f| !f.stop && !f.ended))
     }
 
     /// Window `id`'s stretch, when one not taken over yet is no longer wanted.
     pub(super) fn cancel(&self, id: u32) {
-        if let Some(f) = self.stretches().get_mut(&id).filter(|f| f.phase == Phase::Waiting) {
+        let Some(mut l) = self.stretches_within("a stretch cancelled") else { return };
+        if let Some(f) = l.get_mut(&id).filter(|f| f.phase == Phase::Waiting) {
             f.stop = true;
         }
     }
@@ -412,7 +471,12 @@ mod tests {
     }
 
     fn engine() -> SpacesEngine {
-        SpacesEngine { sky: std::sync::OnceLock::new(), state: std::sync::Mutex::new(super::super::State::default()), stretches: std::sync::Mutex::new(BTreeMap::new()) }
+        SpacesEngine {
+            sky: std::sync::OnceLock::new(),
+            state: std::sync::Mutex::new(super::super::State::default()),
+            stretches: std::sync::Mutex::new(BTreeMap::new()),
+            stretches_busy: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     /// A stretch is planned only for a window the engine holds hidden; a show before the
@@ -452,6 +516,58 @@ mod tests {
         e.stretches().insert(2, Fly { phase: Phase::Flying, stop: false, ended: false, space: 900 });
         e.stretches().insert(3, Fly { phase: Phase::Flying, stop: true, ended: false, space: 901 });
         assert_eq!(e.stretching(), [1, 2].into());
+    }
+
+    /// Live 11-15 16:34:28: a show stopped a stretch while its Space was being made; the
+    /// stretch's thread then ended it with the lock still held by its own check and locked
+    /// itself out for good. The check lets the lock go whatever it finds.
+    #[test]
+    fn a_stretch_stopped_while_its_space_is_made_lets_the_lock_go() {
+        let e = engine();
+        e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: true, ended: false, space: 0 });
+        assert!(!e.claim_space(7, 900), "stopped meanwhile: skipped");
+        assert!(e.stretches.try_lock().is_ok(), "the lock is free for the skip that follows");
+        assert!(!e.claim_space(8, 901), "gone: skipped");
+        assert!(e.stretches.try_lock().is_ok());
+        e.stretches().insert(9, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0 });
+        assert!(e.claim_space(9, 902));
+        assert_eq!(e.stretches()[&9].space, 902, "its Space noted");
+        assert!(e.stretches.try_lock().is_ok());
+    }
+
+    /// A quit (a show of every window) while a stretch's thread is stuck holding the
+    /// stretches: the shows and hides go on after a bounded wait, the next ones without
+    /// waiting, and the stretches are asked again once free.
+    #[test]
+    fn a_quit_while_a_stretch_is_stuck_is_never_held_up_by_it() {
+        let e = engine();
+        e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0 });
+        let (held, release) = (std::sync::mpsc::channel::<()>(), std::sync::mpsc::channel::<()>());
+        std::thread::scope(|scope| {
+            let (held_tx, release_rx) = (held.0, release.1);
+            let e = &e;
+            scope.spawn(move || {
+                let _stuck = e.stretches();
+                held_tx.send(()).expect("told");
+                let _ = release_rx.recv_timeout(Duration::from_secs(10));
+            });
+            held.1.recv().expect("the stretch holds the lock");
+            let began = Instant::now();
+            let (guard, space) = e.stop_stretch(7, false);
+            let first = began.elapsed();
+            assert!(guard.is_none() && space.is_none(), "a show goes on as with no stretch");
+            assert!(first >= LOCK_WAIT && first < LOCK_WAIT * 4, "bounded: {first:?}");
+            let again = Instant::now();
+            let (guard, space) = e.stop_stretch(7, true);
+            assert!(guard.is_none());
+            assert_eq!(space, Some(UNKNOWN_SPACE), "a hide takes the window out of every Space");
+            assert!(!e.in_flight(7));
+            assert!(e.stretches_within("a test").is_none());
+            assert!(again.elapsed() < LOCK_WAIT, "no second wait: {:?}", again.elapsed());
+            release.0.send(()).expect("released");
+        });
+        assert!(e.in_flight(7), "free again: asked as before");
+        assert!(!e.stretches_busy.load(Ordering::Relaxed));
     }
 
     /// Waits end at their instant, never before.
