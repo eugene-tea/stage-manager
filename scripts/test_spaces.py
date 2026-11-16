@@ -1327,12 +1327,12 @@ def cmd_tab_cases(d1, d2):
     3. **Held** (one Tab held 400 ms): 0 Space changes, the Fixture stage in front on
        Desktop 1; the app's log says Fixture 1 was put home while the switcher showed, and
        who decided (the prediction at the Tab, the Dock's list once it showed).
-    4. **A quick tap** (⌘ let go ~60 ms after the Tab went down: no switcher list ever): 0
-       Space changes, the Fixture stage in front; the prediction alone decided.
-    5. **Browsing** (round cmdtab-park, the owner's flicker of 11-15): ⌘ held, Tab to the
+    4. **Browsing** (round cmdtab-park, the owner's flicker of 11-15): ⌘ held, Tab to the
        fixture app (its window put home, parked off the screen), 250 ms later Tab on (taken
        back), Escape: the window server sampled every 20 ms never lists the fixture's window on
        screen at its frame, and no Space change.
+    5. **A quick tap** (⌘ let go ~60 ms after the Tab went down: no switcher list ever): 0
+       Space changes, the Fixture stage in front; the prediction alone decided.
     In 3 the window put home is listed parked (the park zone) while the switcher shows, and at
     its frame once its stage is in front.
     Each prints the probe's report: the Dock's switcher as Accessibility showed it, what the
@@ -1505,26 +1505,9 @@ def _cmd_tab_cases(d1, d2):
     by = [m.group(0) for m in (re.search(r'by="[^"]*"', line) for line in lines if "cmd-tab: the switcher selects an app" in line) if m]
     say(f"    who decided the selection: {by or 'no selection line'}")
 
-    # 4. A quick tap: ⌘ let go ~60 ms after the Tab went down (10 ms to its release, 50 held).
-    if not _cmd_tab_setup(d1, d2, "cmd-tab tap"):
-        return
-    t0 = time.time()
-    r = ts.cmd_tab_probe("release", "1", "50")
-    time.sleep(1.0)
-    ts.say_cmd_tab_report(r, "cmd-tab quick tap")
-    check(r.get("ok") and r.get("outcome") == "released", f"cmd-tab tap: ⌘ let go on the fixture app ({r.get('error') or r.get('outcome')})")
-    changes = space_changes_since(t0)
-    x = state()
-    lines = [line for _, line in log_events(t0)]
-    released = [line for line in lines if "⌘ let go with the switcher up" in line]
-    say(f"    quick tap: the release: {released[-1:] or 'not heard'}")
-    check(not changes, f"cmd-tab tap: no Space change after a quick ⌘Tab ({changes})")
-    check(x.get("space") == d1 and x["active"] == stage_holding(x, "Fixture 1"),
-          f"cmd-tab tap: the Fixture stage in front on Desktop 1 ({ts.stage_titles(x)})")
-    check(any("put home while the switcher shows" in line for line in lines),
-          "cmd-tab tap: the app's log says Fixture 1 was put home before ⌘'s release")
-
-    # 5. Browsing: Tab to the fixture app, 250 ms, Tab on, held 300 ms, Escape.
+    # 4. Browsing, before the tap: the run then leaves the fixture app in front as before (a
+    # relaunch later in the run after an Escape here met an open bug: an app activated during a
+    # relaunch's first slide to Desktop 2 took macOS back to Desktop 1, live 11-15). Tab to the fixture app, 250 ms, Tab on, held 300 ms, Escape.
     if not _cmd_tab_setup(d1, d2, "cmd-tab browse"):
         return
     before = {w["id"]: w["bounds"] for w in probe_all()}
@@ -1553,6 +1536,25 @@ def _cmd_tab_cases(d1, d2):
         check(after and before.get(wid) and ts.close(after, before[wid]),
               f"cmd-tab browse: window {wid} back at its frame, hidden ({after and ts.fmt(after)}, "
               f"was {before.get(wid) and ts.fmt(before[wid])})")
+
+    # 5. A quick tap: ⌘ let go ~60 ms after the Tab went down (10 ms to its release, 50 held).
+    if not _cmd_tab_setup(d1, d2, "cmd-tab tap"):
+        return
+    t0 = time.time()
+    r = ts.cmd_tab_probe("release", "1", "50")
+    time.sleep(1.0)
+    ts.say_cmd_tab_report(r, "cmd-tab quick tap")
+    check(r.get("ok") and r.get("outcome") == "released", f"cmd-tab tap: ⌘ let go on the fixture app ({r.get('error') or r.get('outcome')})")
+    changes = space_changes_since(t0)
+    x = state()
+    lines = [line for _, line in log_events(t0)]
+    released = [line for line in lines if "⌘ let go with the switcher up" in line]
+    say(f"    quick tap: the release: {released[-1:] or 'not heard'}")
+    check(not changes, f"cmd-tab tap: no Space change after a quick ⌘Tab ({changes})")
+    check(x.get("space") == d1 and x["active"] == stage_holding(x, "Fixture 1"),
+          f"cmd-tab tap: the Fixture stage in front on Desktop 1 ({ts.stage_titles(x)})")
+    check(any("put home while the switcher shows" in line for line in lines),
+          "cmd-tab tap: the app's log says Fixture 1 was put home before ⌘'s release")
 
 
 def stage_holding(s, title):
