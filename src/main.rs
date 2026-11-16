@@ -192,6 +192,8 @@ mod app {
         settings: RawSettings,
         strip_visible: bool,
         config_error: Option<String>,
+        /// `[windows] with_apple = "augment"` in the config in force.
+        follows_apple: bool,
         last_mark: Option<String>,
         hotkeys: Option<HotkeyConfig>,
         thumbnail_interval_ms: Option<u64>,
@@ -255,6 +257,7 @@ mod app {
                 capture_refused: self.capture_refused,
                 accessibility_blind: self.ax_blind,
                 apple_stage_manager_on: native_settings::apple_stage_manager_enabled(&self.settings),
+                follows_apple: self.follows_apple,
                 config_error: self.config_error.clone(),
                 mark_shown: logging::verbose_now(),
                 last_mark: self.last_mark.clone(),
@@ -344,8 +347,10 @@ mod app {
         fn on_ui(&mut self, update: UiUpdate) {
             match update {
                 UiUpdate::Config { error, config, hotkeys, thumbnail_interval_ms, capture: on } => {
+                    let follows = config.windows.with_apple == stage_manager::engine::stand_down::WithApple::Augment;
                     shell::config_changed(error.clone(), *config);
                     self.config_error = error;
+                    self.follows_apple = follows;
                     capture::set_enabled(on);
                     if self.thumbnail_interval_ms != Some(thumbnail_interval_ms) {
                         strip::set_thumbnail_interval(thumbnail_interval_ms);
@@ -997,6 +1002,7 @@ mod app {
             settings,
             strip_visible: true,
             config_error: None,
+            follows_apple: false,
             last_mark: None,
             hotkeys: None,
             thumbnail_interval_ms: None,

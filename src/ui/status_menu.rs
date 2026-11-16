@@ -135,6 +135,9 @@ pub struct MenuState {
     pub accessibility_blind: bool,
     /// Apple's Stage Manager is on (`GloballyEnabled = 1`).
     pub apple_stage_manager_on: bool,
+    /// Stage Manager follows Apple's while it is on (`[windows] with_apple = "augment"`)
+    /// instead of standing down.
+    pub follows_apple: bool,
     /// config.toml failed to load (the last good config stays in force).
     pub config_error: Option<String>,
     /// Show Mark a Problem (the log is verbose: `[log] level` debug or trace).
@@ -154,6 +157,8 @@ pub enum Item {
     Allow(Approval),
     /// "Turn Off Apple's Stage Manager…", while it is on (we stand down meanwhile).
     AppleWarning,
+    /// "Following Apple's Stage Manager" (disabled), while it is on and followed.
+    AppleFollowed,
     /// The config error (disabled), while there is one.
     ConfigError,
     About,
@@ -170,15 +175,16 @@ pub enum Item {
 /// verbose) and Quit, with separators between the groups.
 pub fn items(state: &MenuState) -> Vec<Item> {
     let mut out = Vec::new();
-    // Not while Apple's Stage Manager is on: ours stands down, and Apple's sees the windows.
-    if state.accessibility_blind && !state.apple_stage_manager_on {
+    // Not while Apple's Stage Manager is on and ours stands down: Apple's sees the windows.
+    // Followed, ours reads them through Accessibility too.
+    if state.accessibility_blind && (!state.apple_stage_manager_on || state.follows_apple) {
         out.push(Item::AxBlind);
     }
     for a in permissions::missing(&state.permissions, state.capture_on, state.capture_refused) {
         out.extend([Item::Needs(a), Item::Allow(a)]);
     }
     if state.apple_stage_manager_on {
-        out.push(Item::AppleWarning);
+        out.push(if state.follows_apple { Item::AppleFollowed } else { Item::AppleWarning });
     }
     if state.config_error.is_some() {
         out.push(Item::ConfigError);
@@ -202,6 +208,7 @@ fn all_items() -> Vec<Item> {
     }
     all.extend([
         Item::AppleWarning,
+        Item::AppleFollowed,
         Item::ConfigError,
         Item::Separator(0),
         Item::About,
@@ -222,6 +229,10 @@ pub const AX_BLIND_LINE: &str = "macOS isn't reporting windows. Log out or resta
 
 /// The menu item while Apple's Stage Manager is on.
 pub const APPLE_ITEM: &str = "Turn Off Apple's Stage Manager";
+
+/// The menu's line while Apple's Stage Manager is on and followed (`[windows] with_apple =
+/// "augment"`): what Stage Manager does instead of standing down.
+pub const APPLE_FOLLOWED_LINE: &str = "Following Apple's Stage Manager";
 
 /// The Mark a Problem item's title: when the last mark went in, if any.
 pub fn mark_title(last: Option<&str>) -> String {
@@ -282,6 +293,7 @@ fn entry(mtm: MainThreadMarker, which: Item, target: &MenuTarget) -> Retained<NS
             item(mtm, &a.allow_title(), Some(action), "", target)
         }
         Item::AppleWarning => item(mtm, APPLE_ITEM, Some(sel!(turnOffAppleStageManager:)), "", target),
+        Item::AppleFollowed => disabled(APPLE_FOLLOWED_LINE),
         Item::ConfigError => disabled(""),
         Item::AxBlind => disabled(AX_BLIND_LINE),
         Item::About => item(mtm, "About Stage Manager", Some(sel!(about:)), "", target),
@@ -403,6 +415,8 @@ mod tests {
         assert_eq!(items(&state(true, true))[0], About, "gone once windows are listed");
         let apple = MenuState { accessibility_blind: true, apple_stage_manager_on: true, ..state(true, true) };
         assert_eq!(items(&apple)[0], AppleWarning, "Apple's Stage Manager on: ours stands down, Apple's sees");
+        let followed = MenuState { follows_apple: true, ..apple };
+        assert_eq!(&items(&followed)[..2], &[AxBlind, AppleFollowed], "followed: ours reads the windows too, and says it follows");
         assert!(AX_BLIND_LINE.chars().count() <= 90, "as short as the config line");
     }
 
@@ -411,7 +425,8 @@ mod tests {
         let all = all_items();
         let blind = MenuState { accessibility_blind: true, config_error: Some("bad".into()), mark_shown: true, ..state(false, false) };
         let apple = MenuState { apple_stage_manager_on: true, mark_shown: true, ..state(false, false) };
-        for s in [blind, apple] {
+        let followed = MenuState { follows_apple: true, accessibility_blind: true, ..apple.clone() };
+        for s in [blind, apple, followed] {
             let shown = items(&s);
             let positions: Vec<usize> = shown.iter().map(|i| all.iter().position(|a| a == i).expect("built")).collect();
             assert!(positions.windows(2).all(|w| w[0] < w[1]), "{shown:?}");

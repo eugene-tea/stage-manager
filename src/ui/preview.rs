@@ -107,9 +107,9 @@ fn make(mtm: MainThreadMarker, which: &str, pane: settings_window::Pane, drawn: 
             VALUES.with(|v| *v.borrow_mut() = Some(values.clone()));
             settings_window::show_with_handler(mtm, values, pane, preview_change)
         }
-        "welcome" => welcome::create(mtm, welcome::rows(&missing, true, false, false), log),
-        "welcome-apple" => welcome::create(mtm, welcome::rows(&missing, true, true, true), log),
-        "welcome-done" => welcome::create(mtm, welcome::rows(&granted, true, false, false), log),
+        "welcome" => welcome::create(mtm, welcome::rows(&missing, true, false, false, false), log),
+        "welcome-apple" => welcome::create(mtm, welcome::rows(&missing, true, true, true, false), log),
+        "welcome-done" => welcome::create(mtm, welcome::rows(&granted, true, false, false, false), log),
         "about" => {
             let w = about::show_and_find(mtm)?;
             if drawn {
