@@ -1828,7 +1828,9 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     if not check(bool(waiting), f"{what}: the app's windows wait in another stage"):
         return False
     before_log = len(log_text())
-    sampler = subprocess.Popen([BIN, "probe-windows", "--every", "20", "--for", "1800", "--focus", *ALL_IDS, OUR_ID],
+    # A Dock click shows an auto-hidden Dock first (~0.9 s before the press, live 11-15), and the
+    # live landing's window flies its last stretch after the unveil: 3 s of looks for it.
+    sampler = subprocess.Popen([BIN, "probe-windows", "--every", "20", "--for", "3000" if how == "dock" else "1800", "--focus", *ALL_IDS, OUR_ID],
                                env=ENV, stdout=subprocess.PIPE, text=True)
     time.sleep(0.15)  # the sampler's first looks are before the activation
     t_sent = time.time()
