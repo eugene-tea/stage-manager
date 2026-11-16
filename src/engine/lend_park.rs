@@ -156,7 +156,7 @@ mod tests {
     use super::*;
     use crate::engine::corner::park_frame_of;
     use crate::engine::corner::park::ParkRequest;
-    use crate::engine::recovery::{Known, ScanDisplays, is_stranded};
+    use crate::engine::recovery::{EngineKind, Known, ScanDisplays, is_stranded};
     use crate::engine::testkit::display;
 
     /// A window as the window server lists it, and every call in order.
@@ -370,7 +370,8 @@ mod tests {
 
     /// After a crash with a parked lend on the Desktop (no stage Space holds it), the
     /// guardian's and the launch's recovery scan find it stranded in the park zone and bring
-    /// it to its registered frame (the model's, never the park).
+    /// it to its registered frame (the model's, never the park); the guardian's watch of a
+    /// Spaces run waits for it there (review A-8: it judged every frame not stranded).
     #[test]
     fn a_parked_lend_is_stranded_for_the_recovery_scan() {
         let d = display();
@@ -378,5 +379,10 @@ mod tests {
         let displays = ScanDisplays::new(d.frame, d.visible, Vec::new(), [d.corner]);
         assert!(is_stranded(a.at, &displays, Known::Registered), "the park frame is stranded");
         assert!(!is_stranded(frame(), &displays, Known::Registered), "its frame is not");
+        let spaces = EngineKind::Spaces;
+        assert!(spaces.stranded(a.at, &displays, Known::Registered), "the Spaces run's watch waits for it at the park");
+        assert!(!spaces.stranded(frame(), &displays, Known::Registered));
+        assert!(!spaces.stranded(a.at, &displays, Known::Managed), "a window it did not register: never by its frame");
+        assert!(!spaces.stranded(a.at, &displays, Known::Unknown));
     }
 }

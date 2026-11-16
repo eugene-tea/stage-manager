@@ -81,6 +81,9 @@
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), a hidden window the
   change to the park corner mid-run could not bring back at once is tried again every two
   seconds; it stayed unseen until Stage Manager quit.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a window waiting at
+  the display's corner for the app switcher is brought back when Stage Manager ends
+  unexpectedly, as with the park corner; it stayed there until the next launch.
 
 ## 1.8.5 — 2026-11-12
 

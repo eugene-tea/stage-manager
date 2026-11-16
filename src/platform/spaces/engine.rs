@@ -196,9 +196,6 @@ struct State {
     health: Health,
     /// The calls a test run makes fail.
     fail: FailMode,
-    /// Stage Spaces of another process, as its parked file names them, each with its
-    /// Desktop (the guardian's: [`WindowEngine::assume`]); swept with this engine's own.
-    foreign: BTreeMap<u64, u64>,
     /// What the incoming windows' last stretches counted ([`landing`]).
     stretch: landing::StretchCounts,
     /// Windows put on their Desktop while still counted hidden ([`SpacesEngine::lend_window`]):
@@ -221,7 +218,6 @@ impl State {
     /// stage Space (lent, minimized), whose entries would outlive the Spaces (review A-11).
     /// The Spaces to end.
     fn end_all(&mut self) -> Vec<u64> {
-        self.foreign.clear();
         self.held.clear();
         self.lent.clear();
         self.new.clear();
@@ -420,16 +416,14 @@ impl SpacesEngine {
             .as_ref()
     }
 
-    /// Every stage Space this engine made, and those another process's file named.
+    /// Every stage Space this engine made.
     fn ours(&self) -> BTreeSet<u64> {
-        let st = self.state();
-        st.stages.values().copied().chain(st.foreign.keys().copied()).collect()
+        self.state().stages.values().copied().collect()
     }
 
-    /// Each stage Space (this engine's and another process's) with its Desktop.
+    /// Each stage Space with its Desktop.
     fn homes(&self) -> BTreeMap<u64, u64> {
-        let st = self.state();
-        st.stages.iter().map(|((desktop, _), space)| (*space, *desktop)).chain(st.foreign.iter().map(|(s, d)| (*s, *d))).collect()
+        self.state().stages.iter().map(|((desktop, _), space)| (*space, *desktop)).collect()
     }
 
     /// True when the test run makes this `call` fail; a one-call mode is used up by it.
@@ -1406,13 +1400,22 @@ impl WindowEngine for SpacesEngine {
         EngineKind::Spaces.stranded(frame, displays, known)
     }
 
-    /// The app's stage Spaces as its file names them: swept with this engine's own. They
-    /// end with the app, so after a crash or a kill they are gone and the sweep finds
-    /// nothing; while the app still holds them (it hangs) the windows come out of them all
-    /// the same (another process can move windows out of a Space, not end it).
+    /// The app's screens as its file names them, as the Corner engine takes them: the
+    /// guardian's recovery scan and watch look for a window parked for ⌘Tab's lend at the
+    /// park corner (the one hidden window of this engine with a frame of its own), and that
+    /// corner sits above a bottom Dock, at the corners and on the screens the app used
+    /// (review A-8, B-3). The app's stage Spaces are not taken: the guardian starts once the
+    /// app has ended, and they ended with it (their windows back on their Desktops).
     fn assume(&self, file: &ParkedFile) {
-        let mut st = self.state();
-        st.foreign = file.spaces.iter().map(|s| (s.space, s.desktop)).collect();
+        match file.visible {
+            Some(v) => safety::assume_visible_frame(v),
+            None => tracing::warn!("guardian: the app left no visible frame; guessing one (a Dock at the bottom may hide a window parked for a lend from the scan)"),
+        }
+        safety::assume_corners(&file.corners);
+        safety::assume_zones(&file.zones);
+        if !file.spaces.is_empty() {
+            tracing::info!(spaces = file.spaces.len(), "guardian: the app's stage Spaces ended with it; their windows are back on their Desktops");
+        }
     }
 
     /// Pictures, as the Corner engine: the windows hide and show in one step behind them.
@@ -1474,14 +1477,14 @@ impl WindowEngine for SpacesEngine {
 
     /// The sweep: a window left in a stage Space with nothing answering for it (at a launch
     /// there is none: an earlier run's Spaces ended with it). Then, when an earlier copy
-    /// left windows registered (`scope.registered`: it crashed with a parked file, likely a
-    /// Corner engine's) or the launch's scan asks again for apps that did not answer, the
-    /// Corner engine's scan: such a copy's windows wait in its park corner, and a Spaces run
-    /// must bring them back the Corner way (this engine leaves nothing there itself, and the
-    /// windows it registers are skipped).
+    /// left windows registered (`scope.registered`: it crashed with a parked file, a Corner
+    /// engine's, or a Spaces engine's with a window parked for ⌘Tab's lend), the launch's
+    /// scan asks again for apps that did not answer, or the guardian scans, the Corner
+    /// engine's scan: such windows wait in a park corner and come back the Corner way (the
+    /// windows this run registers are skipped).
     fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
         let swept = self.sweep_where(why, false, true);
-        if scope.registered.is_empty() && !why.starts_with("launch") {
+        if scope.registered.is_empty() && !why.starts_with("launch") && !why.starts_with("guardian") {
             return (swept, Vec::new());
         }
         let (corner, unanswered) = safety::recovery_scan_with(why, scope);
