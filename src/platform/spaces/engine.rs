@@ -1496,8 +1496,11 @@ impl WindowEngine for SpacesEngine {
         self.take_back_window(id.0)
     }
 
+    /// Also while a show owes the window its frame ([`State::frames`]): it came out of its
+    /// Space away from it (a minimize's dive), so where it is listed is not its frame either.
     fn parked_lend(&self, id: WindowId) -> bool {
-        self.state().parked.contains_key(&id.0)
+        let st = self.state();
+        st.parked.contains_key(&id.0) || st.frames.contains_key(&id.0)
     }
 
     /// Never: no frame says a window is in a stage Space, and the Spaces end with the app.
@@ -1837,6 +1840,7 @@ mod tests {
         e.state().held.insert(NO_WINDOW, Held { space: 836, home: 3 });
         assert!(e.show(WindowId(NO_WINDOW), frame, &dead_element(), ShowHow::Once).is_err());
         assert_eq!(e.owed(), [NO_WINDOW].into(), "listed away from its frame: owed it");
+        assert!(e.parked_lend(WindowId(NO_WINDOW)), "where it is listed is not its frame: its move notices are not the model's");
         e.state().held.remove(&NO_WINDOW);
         assert!(e.retry_owed(true).is_empty(), "gone: nothing owed");
     }
