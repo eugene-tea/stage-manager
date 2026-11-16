@@ -25,7 +25,10 @@
 //! shareable content (every window of the system: ~50 ms on a busy screen, 11-14). The last listing any capture made
 //! (the cards' rounds every 1.5 s, the pointer's prefetch, a switch's) is remembered
 //! ([`remember`]); a switch reuses it when it lists every window asked for at the frame the
-//! window server gives it now, and lists afresh otherwise. Measured: the pictures came with
+//! window server gives it now, and lists afresh otherwise, or when a window has a window of its
+//! app over it (why the window server's call missed it, S6b): its picture is planned from the
+//! app's other windows in the listing (a popover reaching out, [`capture::window_shot`]), which
+//! the frames checked do not cover (the review's D-4). Measured: the pictures came with
 //! the content the windows had at the capture (a listing up to 8 s old, 0 of 40 wrong), 3
 //! windows in ~81 ms instead of ~110 ms.
 
@@ -177,8 +180,8 @@ pub fn shoot(targets: Vec<Target>, done: ShotDone) -> Result<(), &'static str> {
         let (t, n, d) = (targets.clone(), now.clone(), done.clone());
         let spawned = spawn_counted(move || {
             autoreleasepool(|_| {
-                let left = shoot_fast(&t, &n, &d);
-                shoot_sck(left, &n, d);
+                let missed = shoot_fast(&t, &n, &d);
+                shoot_sck(missed.targets, &n, d, missed.children);
             });
         });
         match spawned {
@@ -186,7 +189,7 @@ pub fn shoot(targets: Vec<Target>, done: ShotDone) -> Result<(), &'static str> {
             Err(e) => tracing::debug!("switch pictures: no thread for the window server's capture ({e}); ScreenCaptureKit takes them"),
         }
     }
-    shoot_sck(targets, &now, done);
+    shoot_sck(targets, &now, done, false);
     Ok(())
 }
 
@@ -226,10 +229,17 @@ fn step(closing: bool, children: bool, frame: Option<Rect>) -> Step {
     }
 }
 
+/// The remembered listing to start from: none for windows with a window of their app over them
+/// (`children`: their plan reads the app's other windows from the listing, which [`reusable`]
+/// does not check), else what `reusable` finds.
+fn kept_listing<L>(children: bool, reusable: impl FnOnce() -> Option<L>) -> Option<L> {
+    if children { None } else { reusable() }
+}
+
 /// Takes `targets` through ScreenCaptureKit: from the remembered listing when it lists every
-/// one where the window server has it now (`now`), else from a new listing. Nothing once quit
-/// has begun: each answers none.
-fn shoot_sck(targets: Vec<Target>, now: &[(u32, Rect)], done: ShotDone) {
+/// one where the window server has it now (`now`) and none has a window of its app over it
+/// (`children`), else from a new listing. Nothing once quit has begun: each answers none.
+fn shoot_sck(targets: Vec<Target>, now: &[(u32, Rect)], done: ShotDone, children: bool) {
     if targets.is_empty() {
         return;
     }
@@ -237,7 +247,7 @@ fn shoot_sck(targets: Vec<Target>, now: &[(u32, Rect)], done: ShotDone) {
         targets.iter().for_each(|t| done(t.id, None));
         return;
     }
-    match reusable(&targets, now) {
+    match kept_listing(children, || reusable(&targets, now)) {
         Some(listing) => autoreleasepool(|_| shoot_from(&listing.content, &targets, &done)),
         None => issue(targets, done),
     }
@@ -247,11 +257,11 @@ fn shoot_sck(targets: Vec<Target>, now: &[(u32, Rect)], done: ShotDone) {
 /// `now`, one after another; each picture, and each window no longer described (closed),
 /// answers `done`. The windows it misses, for ScreenCaptureKit; all of them when the window
 /// server described none ([`super::capture_fast::closed`]: a failed read).
-pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDone) -> Vec<Target> {
+pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDone) -> Missed {
     let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
     if super::capture_fast::closed(&ids, &now.iter().map(|(id, _)| *id).collect::<Vec<_>>()).is_none() {
         tracing::debug!(windows = ids.len(), "switch pictures: the window server described none of the windows; ScreenCaptureKit takes them");
-        return targets.to_vec();
+        return Missed { targets: targets.to_vec(), children: false };
     }
     let displays = super::desktop::cg_display_bounds();
     let children = super::capture_fast::with_children(&ids, &displays);
@@ -282,7 +292,15 @@ pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDon
             }
         }
     }
-    left
+    Missed { children: left.iter().any(|t| children.contains(&t.id)), targets: left }
+}
+
+/// The windows [`shoot_fast`] left for ScreenCaptureKit.
+pub(crate) struct Missed {
+    /// The windows.
+    pub targets: Vec<Target>,
+    /// One of them has a window of its app over it: a new listing for them ([`kept_listing`]).
+    pub children: bool,
 }
 
 /// [`shoot`] without its checks, always with a new listing (remembered for the next one).
@@ -402,6 +420,15 @@ mod tests {
         .expect("a thread");
         let seen = rx.recv_timeout(Duration::from_secs(5)).expect("the thread ran");
         assert!(seen >= 1, "in flight while it runs: {seen}");
+    }
+
+    /// D-4: windows with a window of their app over them never start from a remembered listing
+    /// (it is not even looked at); the others do when it fits.
+    #[test]
+    fn a_window_with_a_child_over_it_gets_a_new_listing() {
+        assert_eq!(kept_listing(true, || -> Option<u8> { panic!("not looked at") }), None);
+        assert_eq!(kept_listing(false, || Some(7)), Some(7));
+        assert_eq!(kept_listing(false, || None::<u8>), None);
     }
 
     /// A remembered listing is reused only while every window asked for is where it says,
