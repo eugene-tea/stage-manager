@@ -23,8 +23,13 @@ Phases (all by default, or name them):
           in front by one Shift-click per window, all in one Shift press; timed to the moment
           the window list shows them joined (the job's own "done" printed as info); the
           pointer back where it was.
-  split   `ctl new ID` (the drag onto the strip) takes a window out to a stage of its own;
-          `ctl send N ID` moves one to another stage and comes back; the pointer back.
+  split   `ctl new ID` (the drag onto the strip) takes Alpha's front window out of its stage
+          of two to a stage of its own; `ctl send N ID` moves Bravo to that stage and comes
+          back; the pointer back.
+
+Each phase from switch on sets its own starting arrangement: every fixture alone in a stage
+of its own (one that is not is quit and opened again), never through the routes under test.
+Each fixture window opens at a frame of its own (FRAMES).
   pointer The pointer sampled every millisecond around a Shift-click and a drag: away about a
           frame for the click, back where it was after each. Sets up its own strip stage
           (Charlie opened again) when the phases before left none.
@@ -62,6 +67,14 @@ BASE_ID = "dev.eugene.stagemanager.fixture.apple"
 FIX = {
     name: (f"{BASE_ID}.{name.lower()}", os.path.join(ROOT, "target", f"SM Fixture Apple {name}.app"), n)
     for name, n in (("Alpha", 2), ("Bravo", 1), ("Charlie", 1))
+}
+# Each fixture window at a frame of its own, about 60 points apart ("x,y,w,h" from the
+# visible frame's top-left): windows at one frame stack their thumbnails exactly, and the one
+# behind shows no part of its own (live 11-16); real windows rarely coincide.
+FRAMES = {
+    "Alpha": ["300,40,520,392", "360,100,520,392"],
+    "Bravo": ["420,160,520,392", "480,220,520,392"],
+    "Charlie": ["540,280,520,392"],
 }
 DOMAIN, KEY = "com.apple.WindowManager", "GloballyEnabled"
 FOLLOW_MAX_S = 1.0
@@ -187,6 +200,12 @@ def pointer():
     return (round(p.x, 1), round(p.y, 1))
 
 
+def near(a, b):
+    """The same pointer place within a point: a warp lands on whole points (live 11-16:
+    (1086.8, 576.7) back as (1086.0, 576.0))."""
+    return abs(a[0] - b[0]) <= 1.0 and abs(a[1] - b[1]) <= 1.0
+
+
 # ----- setup ------------------------------------------------------------------------------
 
 
@@ -208,10 +227,19 @@ def write_config(extra=""):
         f.write('[windows]\nwith_apple = "augment"\n' + extra)
 
 
+def open_fixture(name, windows=None):
+    """Fixture `name` opened anew with `windows` windows (its own count by default), each at
+    its own frame."""
+    _, app, n = FIX[name]
+    n = windows or n
+    subprocess.run(["open", "-n", app, "--args", "--windows", str(n), "--title", name,
+                    "--frames", ";".join(FRAMES[name][:n])], check=True)
+
+
 def start():
     write_config()
-    for name, (_, app, n) in FIX.items():
-        subprocess.run(["open", "-n", app, "--args", "--windows", str(n), "--title", name], check=True)
+    for name in FIX:
+        open_fixture(name)
         time.sleep(0.8)
     only = ",".join(b for b, _, _ in FIX.values())
     args = ["open", "-n", APP]
@@ -273,6 +301,7 @@ def others(s):
 
 def phase_switch():
     say("\n== switch: ctl switch N through the focus route ==")
+    separate()
     s = settled_state()
     if not check(s is not None, "the mirror settles before the switches"):
         return
@@ -329,6 +358,38 @@ def quiet_state(timeout=8):
     return wait_until(lambda: (lambda s: s if idle_jobs(s) else None)(ctl("state")), timeout, "no step of ours under way")
 
 
+def groups_of(s):
+    """Every stage of the mirror's: the one in front, then the strip's and the remembered."""
+    a = s.get("apple") or {}
+    return ([a["current"]] if a.get("current") else []) + others(s)
+
+
+def mixed(s):
+    """The fixtures not alone in one stage of their own (sharing one, or split across)."""
+    out = []
+    for name in FIX:
+        mine = set(windows_of(s, name))
+        holding = [g for g in groups_of(s) if mine & set(g)]
+        if mine and not (len(holding) == 1 and set(holding[0]) == mine):
+            out.append(name)
+    return out
+
+
+def separate():
+    """Each fixture in a stage of its own, whatever the phases before left (each phase sets
+    its own starting arrangement): a fixture not alone in one stage is quit and opened again,
+    and Apple's gives a newly opened app a stage of its own. Never through our own routes."""
+    for _ in range(len(FIX) + 1):
+        s = quiet_state()
+        bad = mixed(s) if s else list(FIX)
+        if not bad:
+            return s
+        relaunch(bad[0])
+    s = quiet_state()
+    check(s is not None and not mixed(s), f"each fixture in a stage of its own ({mixed(s) if s else 'no state'})")
+    return s
+
+
 def bring_front(name):
     """Fixture `name`'s stage in front by a plain activation, settled."""
     _, app, n = FIX[name]
@@ -342,6 +403,7 @@ def route_runs(s, route):
 
 def phase_rejected():
     say("\n== rejected: the tripwires (routes tried and rejected still do nothing) ==")
+    separate()
     if not bring_front("Alpha"):
         check(False, "Alpha in front before the tripwires")
         return
@@ -389,13 +451,14 @@ def merge_into_front(n, want, what):
     say(f"  info merge {n}: done at {last.get('ms')} ms, {last.get('clicks')} clicks in {last.get('presses')} presses")
     check(took <= MERGE_MAX_S, f"merge {n}: within about one motion ({took:.2f} s, at most {MERGE_MAX_S} s)")
     p1 = pointer()
-    check(p1 == p0, f"merge {n}: the pointer back where it was ({p0} -> {p1})")
+    check(near(p1, p0), f"merge {n}: the pointer back where it was ({p0} -> {p1})")
     check(not last.get("given_up"), f"merge {n}: done, not given up ({last.get('given_up')})")
     return s, took
 
 
 def phase_merge():
     say("\n== merge: ctl merge N, one Shift press per gather ==")
+    separate()
     if not bring_front("Alpha"):
         check(False, "Alpha in front before the merge")
         return
@@ -425,47 +488,43 @@ def phase_merge():
 
 def phase_split():
     say("\n== split: ctl new ID (the drag), ctl send N ID ==")
+    separate()
+    bring_front("Alpha")
     s = quiet_state()
     if not s:
         check(False, "the mirror settles before the split")
         return
-    if len(s["apple"]["current"]) < 2:
-        # One stage of all three apps is what the merge phase leaves; build it if run alone.
-        bring_front("Alpha")
-        s = quiet_state()
-        for name in ("Bravo", "Charlie"):
-            n = stage_number(s, windows_of(s, name))
-            if n:
-                ctl("merge", n)
-                s = quiet_state(10)
-    current = s["apple"]["current"] if s else []
-    bravo = windows_of(s, "Bravo") if s else []
-    if not check(bravo and bravo[0] in current and len(current) >= 3, f"Bravo in a stage of {len(current)} in front"):
+    alpha, bravo = windows_of(s, "Alpha"), windows_of(s, "Bravo")
+    current = s["apple"]["current"]
+    if not check(len(alpha) == 2 and sorted(current) == alpha and bravo, f"Alpha's stage of two in front ({len(current)} windows)"):
         return
+    w, keep = current[0], current[1]
     drags = route_runs(s, "drag")
     p0 = pointer()
     t0 = time.time()
-    r = ctl("new", bravo[0])
-    check(r.get("ok") and r.get("route") == "drag", f"new {bravo[0]}: the drag ({r})")
-    s = wait_until(lambda: (lambda s: s if bravo[0] not in s["apple"]["current"] and [bravo[0]] in others(s) and idle_jobs(s) else None)(ctl("state")), 6, "Bravo in a stage of its own")
+    r = ctl("new", w)
+    check(r.get("ok") and r.get("route") == "drag", f"new {w}: the drag ({r})")
+    s = wait_until(lambda: (lambda s: s if s["apple"]["current"] == [keep] and [w] in others(s) else None)(ctl("state")), 6, "Alpha's front window in a stage of its own")
     took = time.time() - t0
-    check(s is not None, f"new: Bravo out to a stage of its own ({took:.2f} s)")
-    check(pointer() == p0, f"new: the pointer back where it was ({p0} -> {pointer()})")
-    if s:
-        check(route_runs(s, "drag") == drags + 1, "new: one drag")
-    # Charlie to Bravo's stage and back to the stage in front.
+    check(s is not None, f"new: Alpha's front window out to a stage of its own ({took:.2f} s to the list showing it)")
     s = quiet_state()
-    charlie = windows_of(s, "Charlie") if s else []
-    n = stage_number(s, bravo) if s else None
-    if not check(charlie and n, f"Charlie in front, Bravo's stage is {n}"):
+    last = ((s or {}).get("apple") or {}).get("last") or {}
+    say(f"  info new: done at {last.get('ms')} ms, {last.get('drags')} drags, {last.get('focuses')} focuses; given up: {last.get('given_up')}")
+    p1 = pointer()
+    check(near(p1, p0), f"new: the pointer back where it was ({p0} -> {p1})")
+    if s:
+        check(route_runs(s, "drag") == drags + 1, f"new: one drag ({route_runs(s, 'drag') - drags})")
+    # Bravo, in the strip, to that window's stage, and the stage in front back.
+    n = stage_number(s, [w]) if s else None
+    if not check(n is not None, f"the window taken out is stage {n}"):
         return
-    front_before = sorted(w for w in s["apple"]["current"] if w not in charlie)
     p0 = pointer()
-    r = ctl("send", n, charlie[0])
-    check(r.get("ok"), f"send {n} {charlie[0]}: planned ({r})")
-    s = wait_until(lambda: (lambda s: s if sorted(s["apple"]["current"]) == front_before and sorted(bravo + charlie) in [sorted(g) for g in others(s)] and idle_jobs(s) else None)(ctl("state")), 8, "Charlie with Bravo, the stage in front back")
-    check(s is not None, "send: Charlie joined Bravo's stage, the stage left is in front again")
-    check(pointer() == p0, "send: the pointer back where it was")
+    r = ctl("send", n, bravo[0])
+    check(r.get("ok"), f"send {n} {bravo[0]}: planned ({r})")
+    s = wait_until(lambda: (lambda s: s if s["apple"]["current"] == [keep] and sorted([w, bravo[0]]) in [sorted(g) for g in others(s)] and idle_jobs(s) else None)(ctl("state")), 8, "Bravo with the window taken out, the stage in front back")
+    check(s is not None, "send: Bravo joined the stage of the window taken out, the stage left is in front again")
+    p1 = pointer()
+    check(near(p1, p0), f"send: the pointer back where it was ({p0} -> {p1})")
 
 
 def sample_pointer(stop, out):
@@ -479,9 +538,9 @@ def away(samples, home):
     """The longest spell the pointer was away from `home`, in ms."""
     longest, since = 0.0, None
     for t, p in samples:
-        if p != home and since is None:
+        if not near(p, home) and since is None:
             since = t
-        elif p == home and since is not None:
+        elif near(p, home) and since is not None:
             longest = max(longest, t - since)
             since = None
     if since is not None:
@@ -492,19 +551,13 @@ def away(samples, home):
 def phase_pointer():
     import threading
     say("\n== pointer: back where it was after every posted step ==")
+    separate()
     if not bring_front("Alpha"):
         check(False, "Alpha in front")
         return
     s = quiet_state()
     in_strip = lambda s: next((w for name in ("Bravo", "Charlie") for w in windows_of(s, name) if stage_number(s, [w])), None)
     target = in_strip(s) if s else None
-    if target is None:
-        # The phases before can leave every fixture in one stage (a split given up): Charlie
-        # opened again gets a stage of its own (Apple's own rule), then Alpha's in front.
-        relaunch("Charlie")
-        bring_front("Alpha")
-        s = quiet_state()
-        target = in_strip(s) if s else None
     if not check(target is not None, "a fixture window in the strip to Shift-click"):
         return
     for route in ("shift-click", "drag"):
@@ -524,7 +577,8 @@ def phase_pointer():
         if not check(r.get("ok"), f"{route}: posted ({r})"):
             continue
         gone = away(samples, home)
-        check(pointer() == home, f"{route}: the pointer back where it was ({home} -> {pointer()})")
+        p1 = pointer()
+        check(near(p1, home), f"{route}: the pointer back where it was ({home} -> {p1})")
         limit = 60 if route == "shift-click" else 1500
         check(gone <= limit, f"{route}: the pointer away {gone:.0f} ms (at most {limit})")
         quiet_state()
@@ -541,12 +595,13 @@ def relaunch(name):
     for pid in pids(app):
         os.kill(pid, signal.SIGTERM)
     pid_gone(app)
-    subprocess.run(["open", "-n", app, "--args", "--windows", str(n), "--title", name], check=True)
+    open_fixture(name)
     return wait_until(lambda: (lambda s: s if len(windows_of(s, name)) == n and idle_jobs(s) else None)(ctl("state")), 8, f"{name} open again")
 
 
 def phase_open_here():
     say("\n== open-here: a newly opened app joins the stage in front ==")
+    separate()
     write_config("[stages]\nnew_apps_join_current = true\n")
     check(ctl("reload").get("ok"), "config reloaded with [stages] new_apps_join_current on")
     try:
@@ -559,13 +614,15 @@ def phase_open_here():
                 check(False, f"{name}: Alpha in front before the launch")
                 continue
             s = quiet_state()
-            alpha = windows_of(s, "Alpha")
-            listed0 = {w["id"]: w.get("listed") for w in s["windows"] if w["id"] in alpha}
+            # The stage in front's windows only: the strip's thumbnails shift to make room for
+            # the new one (live 11-16), which is Apple's own.
+            front = s["apple"]["current"]
+            listed0 = {w["id"]: w.get("listed") for w in s["windows"] if w["id"] in front}
             want = sorted(alpha_t for alpha_t in front_titles(s)) + [f"{name} {k}" for k in range(1, windows + 1)]
             want.sort()
             moved = False
             t0 = time.time()
-            subprocess.run(["open", "-n", app, "--args", "--windows", str(windows), "--title", name], check=True)
+            open_fixture(name, windows)
             # Timed to the moment the window list shows one stage (what is seen); the job's
             # own "done" comes after and is printed as info.
             end, joined = time.time() + 10, None
@@ -589,7 +646,7 @@ def phase_open_here():
             check(not last.get("given_up"), f"{name}: not given up ({last.get('given_up')})")
             check(took <= OPEN_HERE_MAX_S, f"{name}: within about {OPEN_HERE_MAX_S:.0f} s ({took:.2f} s)")
             if route == "hide":
-                check(not moved, f"{name}: Alpha's windows never moved (the hide route)")
+                check(not moved, f"{name}: the stage in front's windows never moved (the hide route)")
                 check(last.get("clicks") == windows and last.get("presses") == 1, f"{name}: one Shift-click per window, one press ({last.get('clicks')} in {last.get('presses')})")
     finally:
         write_config()

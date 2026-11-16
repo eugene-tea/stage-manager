@@ -269,7 +269,7 @@ no strip of its own.
   give it a stage of its own. Apple's Stage Manager takes these only from the pointer: Stage
   Manager Shift-clicks a thumbnail in Apple's strip (one click per window, a stage's windows
   in one Shift press) or drags the window's title bar onto the strip. The pointer jumps there and comes back within about a
-  frame for a click, about half a second for a drag. Nothing is posted while you click, drag,
+  frame for a click, about a second for a drag. Nothing is posted while you click, drag,
   move the pointer, type or hold a modifier key, or while Apple's Stage Manager is still
   moving windows; a step that cannot go within a moment is given up and logged.
 - A newly opened app joins the stage in front when a rule says `current`, with
