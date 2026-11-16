@@ -1192,12 +1192,19 @@ fn with_kept(kept: Option<safety::Ours>, now: safety::Ours) -> safety::Ours {
     }
 }
 
+/// The stages saved set aside while Apple's Stage Manager is on ([`paths::set_aside_state`]);
+/// when that fails, dropped as before (no stale `state.json` while Apple's arranges).
 fn drop_saved_stages() {
-    let state = super::paths::state_file();
-    match std::fs::remove_file(&state) {
-        Ok(()) => tracing::info!("saved stages dropped (Apple's Stage Manager arranges the windows now)"),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!("cannot remove {}: {e}", state.display()),
+    let (state, aside) = (super::paths::state_file(), super::paths::stood_down_state_file());
+    match super::paths::set_aside_state(&state, &aside) {
+        Ok(super::paths::SetAside::Nothing) => {}
+        Ok(_) => tracing::info!("saved stages set aside while Apple's Stage Manager arranges the windows: back when it is off"),
+        Err(e) => {
+            tracing::warn!("cannot set {} aside: {e}; dropped", state.display());
+            if let Err(e) = std::fs::remove_file(&state) {
+                tracing::warn!("cannot remove {}: {e}", state.display());
+            }
+        }
     }
 }
 

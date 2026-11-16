@@ -9,9 +9,12 @@
 //! This is the pure part: what to do when the setting is read, as an ordered plan of
 //! [`Task`]s the WM thread (`platform::wm_thread`) carries out.
 //!
-//! - **Saved stages go at the release** ([`Task::DropSavedStages`]), the moment they become
-//!   stale (Apple's arranges the windows from then on): a quit, crash or logout while
-//!   standing down then leaves nothing for the next launch to re-park from.
+//! - **Saved stages go aside at the release** ([`Task::DropSavedStages`]), the moment Apple's
+//!   arranges the windows: a quit, crash or logout while standing down then leaves no
+//!   `state.json` for the next launch to re-park from; the next stages built (the resume, or a
+//!   launch with Apple's off) take them back, each window at its saved frame, unless a newer
+//!   `state.json` was written meanwhile (`platform::paths::bring_back_state`; 11-16, the
+//!   owner's stages of two windows came back as one per app after a look at Apple's).
 //! - **The fresh controller gets the displays and settings** the WM thread last had
 //!   ([`Task::ReplayDisplays`], [`Task::ReplaySettings`]); the main thread only sends them
 //!   when they change, so a controller made later would otherwise guess the display.
@@ -63,7 +66,7 @@ pub enum Task {
     UnparkAll,
     /// Windows still parked are held apart from the controller's registry until back.
     HoldStranded,
-    /// `state.json` is removed: its stages are stale from now on.
+    /// `state.json` is set aside: nothing reads it while Apple's arranges the windows.
     DropSavedStages,
     /// Observation stops; its pending events are dropped.
     StopObserving,

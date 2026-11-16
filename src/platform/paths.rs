@@ -129,6 +129,50 @@ pub fn state_file() -> PathBuf {
     config_dir().join("state.json")
 }
 
+/// `state-stood-down.json`: `state.json` set aside while Apple's Stage Manager is on
+/// ([`set_aside_state`]), back when stages are built again ([`bring_back_state`]).
+pub fn stood_down_state_file() -> PathBuf {
+    config_dir().join("state-stood-down.json")
+}
+
+/// What a set-aside or a bring-back did with the stages saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetAside {
+    /// Nothing to move.
+    Nothing,
+    /// Moved.
+    Moved,
+    /// The copy set aside was older than the `state.json` there: removed.
+    StaleRemoved,
+}
+
+/// `state` set aside as `aside` (Apple's Stage Manager came on): nothing reads it while Apple
+/// arranges the windows, so a quit, crash or logout meanwhile leaves no stale `state.json`;
+/// once Apple's goes off, the stages come back from it, each window at its saved frame
+/// (11-16: the owner turned Apple's on to look at its cards and off again, and every stage
+/// of two windows came back as one stage per app, at the frames Apple's left).
+pub fn set_aside_state(state: &std::path::Path, aside: &std::path::Path) -> std::io::Result<SetAside> {
+    match std::fs::rename(state, aside) {
+        Ok(()) => Ok(SetAside::Moved),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(SetAside::Nothing),
+        Err(e) => Err(e),
+    }
+}
+
+/// The stages set aside ([`set_aside_state`]) back as `state`, when no `state.json` was
+/// written since; one written since wins, and the copy set aside goes.
+pub fn bring_back_state(state: &std::path::Path, aside: &std::path::Path) -> std::io::Result<SetAside> {
+    if !aside.exists() {
+        return Ok(SetAside::Nothing);
+    }
+    if state.exists() {
+        std::fs::remove_file(aside)?;
+        return Ok(SetAside::StaleRemoved);
+    }
+    std::fs::rename(aside, state)?;
+    Ok(SetAside::Moved)
+}
+
 /// `app-state.json`: what the app remembers about itself (see [`crate::app_state`]).
 pub fn app_state_file() -> PathBuf {
     config_dir().join("app-state.json")
@@ -198,5 +242,28 @@ mod tests {
         assert!(app_state_file().ends_with("app-state.json"));
         assert!(clean_exit_marker(42).ends_with(".clean-exit-42"));
         assert!(parked_file(42).ends_with(".parked-42.json"));
+        assert!(stood_down_state_file().ends_with("state-stood-down.json"));
+    }
+
+    #[test]
+    fn stages_set_aside_for_apples_stage_manager_come_back_after_it() {
+        let dir = std::env::temp_dir().join(format!("sm-set-aside-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (state, aside) = (dir.join("state.json"), dir.join("state-stood-down.json"));
+        assert_eq!(set_aside_state(&state, &aside).unwrap(), SetAside::Nothing, "no stages saved yet");
+        std::fs::write(&state, "stages").unwrap();
+        assert_eq!(set_aside_state(&state, &aside).unwrap(), SetAside::Moved);
+        assert!(!state.exists(), "nothing reads stages while Apple's arranges the windows");
+        assert_eq!(bring_back_state(&state, &aside).unwrap(), SetAside::Moved);
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), "stages");
+        assert!(!aside.exists());
+        assert_eq!(bring_back_state(&state, &aside).unwrap(), SetAside::Nothing);
+        // Stages saved since (a quit while standing down, a start with Apple's off): newer.
+        std::fs::write(&aside, "older").unwrap();
+        assert_eq!(bring_back_state(&state, &aside).unwrap(), SetAside::StaleRemoved);
+        assert_eq!(std::fs::read_to_string(&state).unwrap(), "stages");
+        assert!(!aside.exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

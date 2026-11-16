@@ -2608,6 +2608,13 @@ impl Controller {
     /// `restore_after_restart` off (`[stages]`): after a restart nothing waits (1.2.0). The
     /// restore knows the main display's size when saved (saved frames only on that size).
     fn load_state(restore_after_restart: bool) -> Option<(StateFile, Restore)> {
+        // The stages set aside while Apple's Stage Manager was on, back first (`paths`).
+        match paths::bring_back_state(&paths::state_file(), &paths::stood_down_state_file()) {
+            Ok(paths::SetAside::Moved) => tracing::info!("restore: the stages set aside while Apple's Stage Manager was on are back"),
+            Ok(paths::SetAside::StaleRemoved) => tracing::info!("restore: stages set aside while Apple's Stage Manager was on are older than state.json: removed"),
+            Ok(paths::SetAside::Nothing) => {}
+            Err(e) => tracing::warn!("restore: the stages set aside while Apple's Stage Manager was on cannot come back: {e}"),
+        }
         let current = session::window_session();
         match read_state_or_set_aside(&paths::state_file()) {
             Some(mut s) => {
