@@ -958,17 +958,26 @@ impl SpacesEngine {
 
     /// Forgets what is kept for windows that are gone (`alive`: the windows the window
     /// server still lists) and ends the Spaces of stages that are gone (`stage_lives`) once
-    /// no window is in them.
+    /// no window is in them. A launch's watch holds new windows from its own thread, so one
+    /// held after `alive` was read is not in it: a new window is forgotten only when the
+    /// window server, asked now, does not list it either (review A-12: forgotten, it showed
+    /// up to the next tidy late).
     pub fn tidy(&self, alive: &HashSet<u32>, stage_lives: impl Fn(u64) -> bool) {
+        let unlisted: BTreeSet<u32> = self.state().new.iter().copied().filter(|id| !alive.contains(id)).collect();
+        let listed: HashSet<u32> =
+            if unlisted.is_empty() { HashSet::new() } else { windows::describe(&unlisted.iter().copied().collect::<Vec<_>>()).iter().map(|w| w.id).collect() };
         let empty: Vec<((u64, u64), u64)> = {
             let mut st = self.state();
-            st.held.retain(|id, _| alive.contains(id));
-            st.plans.retain(|id, _| alive.contains(id));
-            st.owed.retain(|id| alive.contains(id));
-            st.new.retain(|id| alive.contains(id));
+            // New windows held since the look above are kept as they are.
+            let young: BTreeSet<u32> = st.new.iter().copied().filter(|id| !unlisted.contains(id)).collect();
+            let keep = |id: &u32| alive.contains(id) || listed.contains(id) || young.contains(id);
+            st.held.retain(|id, _| keep(id));
+            st.plans.retain(|id, _| keep(id));
+            st.owed.retain(|id| keep(id));
+            st.new.retain(|id| keep(id));
             let held: BTreeSet<u32> = st.held.keys().copied().collect();
             st.lent.retain(|id| held.contains(id));
-            st.parked.retain(|id, _| alive.contains(id));
+            st.parked.retain(|id, _| keep(id));
             let used: BTreeSet<u64> = st.held.values().map(|h| h.space).collect();
             // The Space where new windows wait stays (a launch's watch may be putting a window
             // into it now); it ends with the others at a bring-back.
@@ -1740,6 +1749,25 @@ mod tests {
         assert!(escaped(&[836, 3], h), "on its Desktop and still listed in the Space: it shows");
         assert!(escaped(&[900], h), "in a Space of its own");
         assert!(!escaped(&[], h), "on no Space: not shown, left alone");
+    }
+
+    /// Review A-12: the tidy's list was read before a launch's watch held a new window: the
+    /// window is kept while the window server lists it when asked, forgotten once it does not.
+    #[test]
+    fn a_new_window_held_after_the_tidys_list_is_kept() {
+        let e = unloaded();
+        // A window the window server lists now (any app's), if there is one here.
+        let listed = windows::every_window_id().into_iter().find(|id| !windows::describe(&[*id]).is_empty());
+        for id in listed.into_iter().chain([NO_WINDOW]) {
+            let mut st = e.state();
+            st.held.insert(id, Held { space: 840, home: 3 });
+            st.new.insert(id);
+        }
+        e.tidy(&HashSet::new(), |_| true);
+        if let Some(id) = listed {
+            assert!(e.waits_new(id) && e.holds(id), "listed when asked: kept");
+        }
+        assert!(!e.waits_new(NO_WINDOW) && !e.holds(NO_WINDOW), "gone: forgotten");
     }
 
     /// A window id the window server lists for no window.

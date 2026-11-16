@@ -77,7 +77,8 @@
   first display's Desktop as its flight ended.
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), two apps opened at
   the same moment (at login, a restored session) no longer leave a new window of one unseen
-  until Stage Manager quits.
+  until Stage Manager quits, and a just-opened app's first window no longer shows up to ten
+  seconds late now and then.
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), a hidden window the
   change to the park corner mid-run could not bring back at once is tried again every two
   seconds; it stayed unseen until Stage Manager quit.
