@@ -40,6 +40,14 @@ Each fixture window opens at a frame of its own (FRAMES).
           list shows one stage, the job's "done" as info, the route that ran, Alpha's windows
           never moving with the hide route); Bravo opened again with two windows: both join,
           in one Shift press.
+  restore `ctl apple restore`: stages set up (Alpha's two windows with Bravo's, Charlie's
+          alone and in front), saved to state-apple.json, Stage Manager quit and opened again
+          (the mode reads the file as it starts; the same session, so nothing is put back by
+          itself), the stages scrambled through Apple's own answers to posted gestures
+          (Alpha's stage in front, Charlie Shift-clicked into it, Bravo dragged out), then
+          `ctl apple restore`: the saved stages again, Charlie's in front (time from the ask
+          to the list showing them, the job's account as info); a second restore moves
+          nothing.
 
 Needs: make dev (the dev copy). Builds the fixture copies Alpha, Bravo and Charlie (their own
 bundle ids, scripts/bundle.sh's FIXTURE_ID and FIXTURE_APP) when stale. Manages only them
@@ -83,7 +91,8 @@ FOLLOW_MAX_S = 1.0
 SWITCH_MAX_S = 1.5
 MERGE_MAX_S = 1.5          # one Shift press and Apple's motion (~0.8 s), a read, ctl's poll
 OPEN_HERE_MAX_S = 3.0      # launch to the first window (~0.9 s), the settle, one press (~0.8 s)
-PHASES = ("mirror", "switch", "rejected", "merge", "split", "pointer", "open-here")
+RESTORE_MAX_S = 8.0        # a drag (~0.9 s) and a press (~0.8 s), a focus, Apple's motions and settles
+PHASES = ("mirror", "switch", "rejected", "merge", "split", "pointer", "open-here", "restore")
 
 HOME = tempfile.mkdtemp(prefix="sm-apple-mode.", dir="/tmp")
 ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME)
@@ -238,11 +247,8 @@ def open_fixture(name, windows=None):
                     "--frames", ";".join(FRAMES[name][:n])], check=True)
 
 
-def start():
-    write_config()
-    for name in FIX:
-        open_fixture(name)
-        time.sleep(0.8)
+def launch_app():
+    """The dev copy opened with the run's home and test environment, answering ctl."""
     only = ",".join(b for b, _, _ in FIX.values())
     args = ["open", "-n", APP]
     for k, v in {"STAGE_MANAGER_HOME": HOME, "STAGE_MANAGER_ONLY": only, "STAGE_MANAGER_NO_PROMPT": "1",
@@ -252,9 +258,22 @@ def start():
     subprocess.run(args, check=True)
     if not wait_until(lambda: ctl("ping").get("ok"), 15, "the app", step=0.2):
         sys.exit("the app did not start")
+
+
+def following(timeout=20):
+    """`ctl state` once the Apple mode follows Apple's (a settled read made)."""
+    return wait_until(lambda: (lambda s: s if s.get("engine", {}).get("kind") == "apple" and s.get("ok") else None)(ctl("state")),
+                      timeout, "the Apple mode following Apple's", step=0.2)
+
+
+def start():
+    write_config()
+    for name in FIX:
+        open_fixture(name)
+        time.sleep(0.8)
+    launch_app()
     set_apple(True)
-    s = wait_until(lambda: (lambda s: s if s.get("engine", {}).get("kind") == "apple" and s.get("ok") else None)(ctl("state")),
-                   20, "the Apple mode following Apple's", step=0.2)
+    s = following()
     check(s is not None, "Apple's on with with_apple = \"augment\": the Apple mode follows it")
     return s
 
@@ -677,6 +696,108 @@ def phase_open_here():
         ctl("reload")
 
 
+def title_groups(s):
+    """The mirror's stages by title: the one in front, then the others sorted."""
+    groups = [titles(s, g) for g in groups_of(s)]
+    front = front_titles(s)
+    return front, sorted(g for g in groups if g != front)
+
+
+def saved_groups():
+    """state-apple.json's shown Desktop by title: the active stage, then the others sorted;
+    None while it is not written."""
+    try:
+        with open(os.path.join(HOME, "state-apple.json"), encoding="utf-8") as f:
+            state = json.load(f)
+    except (OSError, ValueError):
+        return None
+    space = next((sp for sp in state.get("spaces", []) if sp.get("current")), None) or (state.get("spaces") or [None])[0]
+    if not space:
+        return None
+    stages = [sorted(w["title"] for w in st.get("windows", []) if not w.get("pending")) for st in space.get("stages", [])]
+    active = space.get("active_index")
+    front = stages[active] if active is not None and active < len(stages) else []
+    return front, sorted(g for i, g in enumerate(stages) if g and i != active)
+
+
+def relaunch_app():
+    """Stage Manager quit and opened again with the run's home: the Apple mode starts anew and
+    reads state-apple.json as saved (the same window server session: nothing is put back by
+    itself)."""
+    ctl("quit")
+    wait_until(lambda: not ctl("ping").get("ok"), 10, "Stage Manager quit", step=0.2)
+    launch_app()
+    return following()
+
+
+def phase_restore():
+    say("\n== restore: ctl apple restore puts the saved stages back ==")
+    separate()
+    if not bring_front("Alpha"):
+        check(False, "Alpha in front before the setup")
+        return
+    s = quiet_state()
+    bravo, charlie = windows_of(s, "Bravo"), windows_of(s, "Charlie")
+    n = stage_number(s, bravo)
+    if not check(n is not None and charlie, f"Bravo's stage is {n}"):
+        return
+    ctl("merge", n)
+    if not wait_until(lambda: (lambda s: s if sorted(front_titles(s)) == ["Alpha 1", "Alpha 2", "Bravo 1"] and idle_jobs(s) else None)(ctl("state")), 6, "Bravo in Alpha's stage"):
+        check(False, "the setup: Bravo in Alpha's stage")
+        return
+    bring_front("Charlie")
+    want = (["Charlie 1"], [["Alpha 1", "Alpha 2", "Bravo 1"]])
+    s = wait_until(lambda: (lambda s: s if title_groups(s) == want and idle_jobs(s) else None)(ctl("state")), 6, "the stages to save")
+    if not check(s is not None, f"the setup: {want}"):
+        return
+    saved = wait_until(lambda: (lambda g: g if g == want else None)(saved_groups()), 10, "state-apple.json to hold them")
+    if not check(saved is not None, f"state-apple.json holds the stages ({saved_groups()})"):
+        return
+    s = relaunch_app()
+    if not check(s is not None, "Stage Manager opened again follows Apple's"):
+        return
+    s = quiet_state()
+    restore = ((s or {}).get("apple") or {}).get("restore") or {}
+    check(restore.get("saved_windows") == 4 and not restore.get("after_restart_waits"), f"the saved stages read, nothing waiting to restore by itself in the same session ({restore})")
+    # Scrambled through Apple's own answers: Alpha's stage in front, Charlie Shift-clicked in,
+    # Bravo dragged out.
+    bring_front("Alpha")
+    s = quiet_state()
+    ctl("apple", "try", "shift-click", charlie[0])
+    s = wait_until(lambda: (lambda s: s if set(charlie) <= set(s["apple"]["current"]) and idle_jobs(s) else None)(ctl("state")), 5, "Charlie in Alpha's stage")
+    # Raised first (a focus within the stage in front switches nothing), so its title bar shows.
+    ctl("apple", "try", "focus", bravo[0])
+    quiet_state()
+    ctl("apple", "try", "drag", bravo[0])
+    s = wait_until(lambda: (lambda s: s if bravo in others(s) and idle_jobs(s) else None)(ctl("state")), 5, "Bravo out")
+    s = quiet_state()
+    scrambled = title_groups(s) if s else None
+    if not check(scrambled is not None and scrambled != want, f"scrambled: {scrambled}"):
+        return
+    p0 = pointer()
+    t0 = time.time()
+    r = ctl("apple", "restore")
+    if not check(r.get("ok"), f"apple restore: planned ({r})"):
+        return
+    say(f"  info restore: {r.get('matched')} of {r.get('saved')} saved windows matched, {r.get('stages')} stages; could not: {r.get('could_not')}")
+    back = wait_until(lambda: (lambda s: s if title_groups(s) == want else None)(ctl("state")), 15, "the saved stages again")
+    took = time.time() - t0
+    check(back is not None, f"restore: the saved stages again, Charlie's in front ({took:.2f} s to the list showing them)")
+    s = quiet_state(15)
+    last = ((s or {}).get("apple") or {}).get("last") or {}
+    say(f"  info restore: done at {last.get('ms')} ms, {last.get('stages')} stages, {last.get('focuses')} focuses, {last.get('clicks')} clicks in {last.get('presses')} presses, {last.get('drags')} drags; gone {last.get('gone')}; could not {last.get('could_not')}")
+    check(not last.get("given_up"), f"restore: done, not given up ({last.get('given_up')})")
+    check(not last.get("could_not"), f"restore: nothing it could not do ({last.get('could_not')})")
+    check(took <= RESTORE_MAX_S, f"restore: within {RESTORE_MAX_S:.0f} s ({took:.2f} s)")
+    check(near(pointer(), p0), f"restore: the pointer back where it was ({p0} -> {pointer()})")
+    # Again: Apple's shows the stages as saved, nothing moves.
+    r = ctl("apple", "restore")
+    s = quiet_state()
+    last = ((s or {}).get("apple") or {}).get("last") or {}
+    check(r.get("ok") and not (last.get("focuses") or last.get("clicks") or last.get("drags")), f"a second restore moves nothing ({last.get('focuses')} focuses, {last.get('clicks')} clicks, {last.get('drags')} drags)")
+    check(s is not None and title_groups(s) == want, "the stages stay as saved")
+
+
 def main():
     global original
     if os.environ.get("SM_TEST_TOGGLE_APPLE_SM") != "1":
@@ -701,7 +822,7 @@ def main():
     if start() is None:
         return 1
     runs = {"mirror": phase_mirror, "switch": phase_switch, "rejected": phase_rejected, "merge": phase_merge,
-            "split": phase_split, "pointer": phase_pointer, "open-here": phase_open_here}
+            "split": phase_split, "pointer": phase_pointer, "open-here": phase_open_here, "restore": phase_restore}
     for name in PHASES:
         if name in phases:
             runs[name]()
