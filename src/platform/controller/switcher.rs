@@ -25,6 +25,18 @@
 //! release, and the activation (3-12 ms after ⌘'s release) does. Activated, the activation's
 //! switch takes it as after a Dock press; not, it goes back unshown ("no activation came").
 //!
+//! **Parked while lent** (round cmdtab-park): at its full frame the window put home showed
+//! under the front stage, and browsing the switcher made it blink in and out (the owner,
+//! live 11-15). It is moved to its park frame (the Corner engine's geometry: its size at its
+//! display's corner, a sliver at most) while still in its stage Space, then put home; taken
+//! back, it goes into its stage Space first, then its frame is restored
+//! ([`crate::engine::lend_park`]). The log's "put home while the switcher shows" says
+//! `parked` and `park_ms`, "goes back" says `restored`. A park that does not take lends all
+//! the same at the first Tab (a quick ⌘Tab's only chance), and not at a later selection
+//! (logged "could not be parked off the screen"). Its move notices are dropped until its
+//! frame is set again ([`WindowEngine::parked_lend`]); the activation's switch sets the
+//! frame the model asks for.
+//!
 //! Nothing is polled: the Dock is asked at a switcher key and at its own notices. The list
 //! gone (`AXUIElementDestroyed` with the switcher up) starts the activation wait; for the keys
 //! it counts as the release when ⌘'s own release is not heard within
@@ -39,6 +51,7 @@
 //!
 //! [`Model::dock_home`]: crate::engine::model::Model::dock_home
 //! [`WindowEngine::lend_home`]: crate::platform::window_engine::WindowEngine::lend_home
+//! [`WindowEngine::parked_lend`]: crate::platform::window_engine::WindowEngine::parked_lend
 
 use std::time::{Duration, Instant};
 
@@ -46,12 +59,15 @@ use serde_json::{Value, json};
 
 use super::Controller;
 use super::arrival::Lent;
+use crate::engine::corner;
+use crate::engine::lend_park::ParkAsk;
 use crate::engine::model::{AppFacts, WindowId};
 use crate::engine::switcher::{self, Act, Heard, Key, LetGo, Switcher};
 use crate::platform::ctl::CmdTabProbe;
 use crate::platform::input::{self, InputEvent, InputKind};
 use crate::platform::observe::Observer;
 use crate::platform::ax::{AxElement, AxObserver};
+use crate::platform::window_engine::LendPark;
 use crate::platform::{apps, dock, switcher_ax, switcher_probe, windows};
 
 /// The Dock's notices about the switcher (observed on its application element, live 11-15):
@@ -175,8 +191,11 @@ impl Controller {
         let selected = self.switcher.selected.map(|(pid, _)| pid);
         let lent = self.lent.filter(|l| l.switcher.is_some()).map(|l| (l.pid, l.window));
         let acts = switcher::plan(heard, selected, lent, |pid| self.switcher_home(ob, pid));
+        // The first Tab's lend is a quick ⌘Tab's only chance: made even when its park does
+        // not take ([`crate::engine::lend_park::ParkAsk::must`]).
+        let first = matches!(heard, Heard::Selected { first: true, .. });
         for act in acts {
-            self.switcher_act(act, now);
+            self.switcher_act(ob, act, first, now);
         }
         match heard {
             Heard::Released { .. } | Heard::Cancelled => {
@@ -264,23 +283,54 @@ impl Controller {
         m.dock_home(pid, facts)
     }
 
-    /// Carries out one act of the switcher's plan.
-    fn switcher_act(&mut self, act: Act, now: Instant) {
+    /// The park asked for window `window`'s lend (round cmdtab-park): its frame's size at its
+    /// display's park corner ([`corner::park_frame_of`], the Corner engine's geometry and
+    /// request), moved through its element; `must`: lend even when the park does not take.
+    /// `None` when the model or the observer does not know the window (lent unparked then).
+    fn lend_park(&self, ob: &Observer, window: WindowId, must: bool) -> Option<LendPark> {
+        let m = self.model.as_ref()?;
+        let w = m.window(window)?;
+        let display = *m.display(w.meta.display);
+        let element = ob.element(window.0).or_else(|| ob.window(window.0).map(|o| o.element.clone()))?;
+        let at = corner::park_frame_of(w.meta.frame, &display, m.options().park);
+        Some(LendPark { ask: ParkAsk { at, display, frame: w.meta.frame, must }, window: element })
+    }
+
+    /// Carries out one act of the switcher's plan (`first`: the switcher's first selection).
+    fn switcher_act(&mut self, ob: &Observer, act: Act, first: bool, now: Instant) {
         match act {
             Act::Lend { pid, window } => {
                 if let Some(prev) = self.lent.take() {
                     // A Dock press's window still home goes back first.
                     let _ = self.engine.take_back(prev.window);
                 }
-                if self.engine.lend_home(window) {
+                let park = self.lend_park(ob, window, first);
+                let asked = park.is_some();
+                let lend = self.engine.lend_home(window, park);
+                let parked = lend.parked.unwrap_or(false);
+                if lend.home {
                     self.lent = Some(Lent { window, pid, at: now, switcher: Some(LetGo::default()) });
                     tracing::info!(
                         pid,
                         window = window.0,
+                        parked,
+                        park_ms = lend.park_ms,
                         since_tab_ms = self.switcher.opened.map(|t| ms(t, Instant::now())),
                         "cmd-tab: the app's windows here wait off every Desktop and macOS counts one elsewhere: its stage's window is put home while the switcher shows"
                     );
-                    switcher_probe::note("lent", format!("pid={pid} window={}", window.0));
+                    if asked && !parked {
+                        tracing::info!(pid, window = window.0, park_ms = lend.park_ms, "cmd-tab: the window put home could not be parked off the screen (its app did not move it): put home at its frame for the first Tab");
+                    }
+                    switcher_probe::note("lent", format!("pid={pid} window={} parked={parked} park_ms={}", window.0, lend.park_ms));
+                } else if asked && lend.parked == Some(false) {
+                    tracing::info!(
+                        pid,
+                        window = window.0,
+                        parked,
+                        park_ms = lend.park_ms,
+                        "cmd-tab: the app's window here could not be parked off the screen (its app did not move it): nothing put home for this selection; macOS goes where it counts one"
+                    );
+                    switcher_probe::note("not lent", format!("pid={pid} window={} parked=false park_ms={}", window.0, lend.park_ms));
                 } else {
                     tracing::info!(pid, window = window.0, "cmd-tab: the app's window here could not be put home; macOS goes where it counts one");
                 }
@@ -289,8 +339,8 @@ impl Controller {
                 if self.lent.is_some_and(|l| l.window == window) {
                     self.lent = None;
                     let back = self.engine.take_back(window);
-                    tracing::info!(window = window.0, back, why, "cmd-tab: the window put home for the switcher goes back");
-                    switcher_probe::note("taken back", format!("window={} why={why}", window.0));
+                    tracing::info!(window = window.0, back = back.back, restored = ?back.restored, why, "cmd-tab: the window put home for the switcher goes back");
+                    switcher_probe::note("taken back", format!("window={} why={why} restored={:?}", window.0, back.restored));
                 }
             }
             Act::Release { window } => {
@@ -460,9 +510,9 @@ impl Controller {
     /// `STAGE_MANAGER_ONLY` app; the probe also cancels at the release when the Dock names
     /// another.
     pub(super) fn debug_cmd_tab(&mut self, ob: &Observer, probe: CmdTabProbe) -> Value {
-        let (release, tabs, hold_ms, lend) = match probe {
+        let (release, tabs, hold_ms, gap_ms, lend) = match probe {
             CmdTabProbe::Result => return switcher_probe::result(),
-            CmdTabProbe::Start { release, tabs, hold_ms, lend } => (release, tabs, hold_ms, lend),
+            CmdTabProbe::Start { release, tabs, hold_ms, gap_ms, lend } => (release, tabs, hold_ms, gap_ms, lend),
         };
         let (order, running) = self.switcher_order(ob);
         let expected = switcher::predict(&order, running, i32::from(tabs));
@@ -478,7 +528,7 @@ impl Controller {
         }
         let Some(dock) = dock::dock_pid() else { return json!({ "ok": false, "error": "the Dock does not run" }) };
         self.switcher.lend_off = !lend;
-        let req = switcher_probe::Request { release, tabs, hold: Duration::from_millis(hold_ms), expected_test };
+        let req = switcher_probe::Request { release, tabs, hold: Duration::from_millis(hold_ms), gap: Duration::from_millis(gap_ms), expected_test };
         match switcher_probe::start(req, dock, move |pid| tests.contains(&pid)) {
             Ok(()) => json!({
                 "ok": true,

@@ -40,6 +40,36 @@ use crate::ui::strip_model::Transition;
 pub use crate::engine::recovery::EngineKind;
 use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
 
+/// A park asked for a lend ([`WindowEngine::lend_home`], round cmdtab-park).
+#[derive(Debug, Clone)]
+pub struct LendPark {
+    /// The park frame, the display and the fallback frame, and whether to lend when the park
+    /// does not take ([`crate::engine::lend_park::ParkAsk`]).
+    pub ask: crate::engine::lend_park::ParkAsk,
+    /// The window's element: the park's and the restore's moves.
+    pub window: AxElement,
+}
+
+/// What a lend did ([`WindowEngine::lend_home`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Lend {
+    /// On its Desktop now.
+    pub home: bool,
+    /// The park asked: whether it took (`None`: none asked).
+    pub parked: Option<bool>,
+    /// What the park took (its move and read back), in milliseconds.
+    pub park_ms: u64,
+}
+
+/// What a take back did ([`WindowEngine::take_back`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Back {
+    /// Back where the engine hides it.
+    pub back: bool,
+    /// Its frame restored after a park (`None`: it was not parked).
+    pub restored: Option<bool>,
+}
+
 /// How a window is brought to its frame ([`WindowEngine::show`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShowHow {
@@ -161,20 +191,30 @@ pub trait WindowEngine: Send + Sync {
         false
     }
 
-    /// Puts window `id`, hidden by this engine off every Desktop, on its own Desktop at its
-    /// frame for a while, still counted hidden: macOS counts it there from now on when it
-    /// picks a Desktop for its app's activation (a Dock press, or ⌘Tab's switcher selecting
-    /// the app, under the Spaces engine: [`crate::engine::model::Model::dock_home`]). It shows at its old place in the window
-    /// order; the model's show of it later asks nothing more, and [`Self::take_back`] hides it
-    /// again. True when it is on its Desktop now. The Corner engine: false (a parked window is
-    /// on its Desktop already).
-    fn lend_home(&self, _id: WindowId) -> bool {
-        false
+    /// Puts window `id`, hidden by this engine off every Desktop, on its own Desktop for a
+    /// while, still counted hidden: macOS counts it there from now on when it picks a Desktop
+    /// for its app's activation (a Dock press, or ⌘Tab's switcher selecting the app, under the
+    /// Spaces engine: [`crate::engine::model::Model::dock_home`]). With `park` (⌘Tab's
+    /// switcher, round cmdtab-park) the window is moved to its park frame first, while still
+    /// hidden ([`crate::engine::lend_park::lend`]); without (a Dock press) it shows at its
+    /// frame, at its old place in the window order. The model's show of it later brings it to
+    /// its frame; [`Self::take_back`] hides it again. The Corner engine: nothing (a parked
+    /// window is on its Desktop already).
+    fn lend_home(&self, _id: WindowId, _park: Option<LendPark>) -> Lend {
+        Lend::default()
     }
 
     /// Window `id`, put home by [`Self::lend_home`] and still counted hidden, goes back where
-    /// this engine hid it. False when it is not put home any more (shown or hidden since).
-    fn take_back(&self, _id: WindowId) -> bool {
+    /// this engine hid it, its frame restored after a park. `back` false when it is not put
+    /// home any more (shown or hidden since).
+    fn take_back(&self, _id: WindowId) -> Back {
+        Back::default()
+    }
+
+    /// True while window `id` is parked for a lend ([`Self::lend_home`] with a park) and its
+    /// frame not set again: where it is listed is not its frame, so its move notices are not
+    /// the model's (the platform drops them). The Corner engine: never.
+    fn parked_lend(&self, _id: WindowId) -> bool {
         false
     }
 

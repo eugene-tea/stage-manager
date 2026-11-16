@@ -1593,7 +1593,7 @@ impl Controller {
             self.undo_ahead(ob, "the Dock press was no click");
         }
         if let Some(lent) = self.lent.take() {
-            let back = self.engine.take_back(lent.window);
+            let back = self.engine.take_back(lent.window).back;
             tracing::info!(window = lent.window.0, back, "dock: the window put home at the press goes back (the press was no click)");
         }
     }
@@ -1622,8 +1622,8 @@ impl Controller {
             LentStep::NoActivation => {
                 self.lent = None;
                 let back = self.engine.take_back(lent.window);
-                tracing::info!(window = lent.window.0, back, "cmd-tab: the window put home for the switcher goes back: no activation came: the switcher was cancelled");
-                crate::platform::switcher_probe::note("taken back", format!("window={} why=no activation came", lent.window.0));
+                tracing::info!(window = lent.window.0, back = back.back, restored = ?back.restored, "cmd-tab: the window put home for the switcher goes back: no activation came: the switcher was cancelled");
+                crate::platform::switcher_probe::note("taken back", format!("window={} why=no activation came restored={:?}", lent.window.0, back.restored));
             }
             LentStep::Forget => {
                 self.lent = None;
@@ -1632,7 +1632,7 @@ impl Controller {
             LentStep::TakeBack => {
                 self.lent = None;
                 let back = self.engine.take_back(lent.window);
-                tracing::info!(window = lent.window.0, back, "dock: the window put home at the press goes back: its stage did not come in front");
+                tracing::info!(window = lent.window.0, back = back.back, restored = ?back.restored, "dock: the window put home at the press goes back: its stage did not come in front");
             }
         }
     }
@@ -1785,7 +1785,7 @@ impl Controller {
             let _ = self.engine.take_back(prev.window);
         }
         if let Some(home) = m.dock_home(pid, facts) {
-            if self.engine.lend_home(home) {
+            if self.engine.lend_home(home, None).home {
                 self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: None });
                 tracing::info!(
                     bundle,

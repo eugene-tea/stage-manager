@@ -1385,6 +1385,9 @@ impl Controller {
         let shown: Vec<(u32, Display, bool)> = m
             .windows()
             .filter(|w| !w.parked && (m.is_shown_space(w.space) || w.sticky))
+            // Shown by the model while still parked for ⌘Tab's lend (its switch's frame on its
+            // way): where it is is not its frame.
+            .filter(|w| !self.engine.parked_lend(w.meta.id))
             .map(|w| (w.meta.id.0, *m.display(w.meta.display), w.sticky))
             .collect();
         let mut reads = Vec::new();
@@ -2719,6 +2722,9 @@ impl Controller {
                 if aside {
                     tracing::trace!(id, "a move while Show Desktop has the windows aside: not the window's frame");
                 }
+                // Parked for ⌘Tab's lend (round cmdtab-park), or its frame not set again yet:
+                // the park's and the restore's moves are ours, never the window's frame.
+                let aside = aside || self.engine.parked_lend(WindowId(id));
                 if let (Some(m), Some(frame)) = (self.model.as_mut(), frame.filter(|_| !aside))
                     && m.window(WindowId(id)).is_some()
                 {
