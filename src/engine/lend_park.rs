@@ -73,15 +73,18 @@ pub struct Parked {
     pub display: Display,
 }
 
-/// What a lend did.
+/// What a lend did. A park's move, once sent, may still be carried out after it was read
+/// back (the app answers after the bound, or the window server lists it later): so whenever
+/// one was sent its restore is owed, unless the window was seen moved and then back at its
+/// frame (review A-4); a restore is a no-op once the window is listed at its frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LendDone {
     /// On its Desktop now (lent).
     pub home: bool,
     /// The park asked: whether it took (`None`: none asked, a Dock press's lend).
     pub parked: Option<bool>,
-    /// The window parked (also when the lend was not made and the frame could not be
-    /// restored: its frame is still owed).
+    /// Its frame owed: a park was sent (also when the lend was not made and the frame could
+    /// not be seen restored).
     pub owed: Option<Parked>,
 }
 
@@ -111,32 +114,25 @@ pub fn lend(mac: &mut impl LendSteps, park: Option<ParkAsk>) -> LendDone {
     let parked_at = Parked { at: ask.at, frame: before.unwrap_or(ask.frame), display: ask.display };
     let landed = mac.move_to(ask.at);
     let took = landed.is_some_and(|r| ask.display.parks(r));
-    if !took && !ask.must {
-        // Not lent: still hidden in its stage Space; anything the move did is undone there.
-        let owed = match landed {
-            Some(r) if !at_origin(r, parked_at.frame) => match mac.move_to(parked_at.frame) {
-                Some(r) if at_origin(r, parked_at.frame) => None,
-                _ => Some(parked_at),
-            },
-            _ => None,
-        };
-        return LendDone { home: false, parked: Some(false), owed };
-    }
-    let home = mac.put_home();
     let moved = landed.is_some_and(|r| !at_origin(r, parked_at.frame));
-    if !home && moved {
-        // Still in its stage Space: its frame back there, unseen.
-        let restored = mac.move_to(parked_at.frame).is_some_and(|r| at_origin(r, parked_at.frame));
-        return LendDone { home, parked: Some(took), owed: (!restored).then_some(parked_at) };
+    let home = (took || ask.must) && mac.put_home();
+    if home {
+        return LendDone { home, parked: Some(took), owed: Some(parked_at) };
     }
-    LendDone { home, parked: Some(took), owed: moved.then_some(parked_at) }
+    // Not lent (the park did not take, or the window did not go home): still hidden in its
+    // stage Space. A move seen is undone there, unseen; one not seen yet (refused, answered
+    // late, timed out) may still come: owed.
+    let undone = moved && mac.move_to(parked_at.frame).is_some_and(|r| at_origin(r, parked_at.frame));
+    LendDone { home, parked: Some(took), owed: (!undone).then_some(parked_at) }
 }
 
 /// Takes the lent window back: into its stage Space first, then (when it was parked) its
 /// frame restored there, unseen. A window that did not go back keeps its park (restoring it
 /// on the Desktop would show it): its frame stays owed until it hides or shows.
 pub fn take_back(mac: &mut impl LendSteps, parked: Option<Parked>) -> BackDone {
-    let moved_off = parked.is_some_and(|p| mac.listed().is_some_and(|r| !p.display.parks(r)));
+    // Off the park and not at its frame: its app moved it (one listed at its frame never
+    // took the park, its restore owed only in case the move came late).
+    let moved_off = parked.is_some_and(|p| mac.listed().is_some_and(|r| !p.display.parks(r) && !at_origin(r, p.frame)));
     let back = mac.put_back();
     let restored = match parked {
         Some(p) if back => Some(restore(mac, p)),
@@ -170,6 +166,8 @@ mod tests {
         staged: bool,
         /// The app moves its window (false: Accessibility refused or answered late).
         moves: bool,
+        /// Accessibility's call times out: the move is not taken now and nothing is read back.
+        times_out: bool,
         /// The window server takes it home / back.
         homes: bool,
         backs: bool,
@@ -200,6 +198,9 @@ mod tests {
         }
         fn move_to(&mut self, to: Rect) -> Option<Rect> {
             self.calls.push(format!("move {},{} staged={}", to.x, to.y, self.staged));
+            if self.times_out {
+                return None;
+            }
             if self.moves
                 && let Some(r) = self.at.as_mut()
             {
@@ -268,16 +269,19 @@ mod tests {
     /// chance); a later selection gets nothing put home, the window untouched and hidden.
     #[test]
     fn a_park_refused_lends_only_when_the_lend_is_needed_now() {
+        let a = ask(false);
+        let owed = Some(Parked { at: a.at, frame: frame(), display: a.display });
         let mut mac = Fake::new(frame());
         mac.moves = false;
-        let done = lend(&mut mac, Some(ask(false)));
-        assert_eq!(done, LendDone { home: false, parked: Some(false), owed: None });
+        let done = lend(&mut mac, Some(a));
+        assert_eq!(done, LendDone { home: false, parked: Some(false), owed }, "the move may come late: its restore owed");
         assert!(mac.staged && mac.seen.is_empty(), "not lent: still hidden");
         let mut mac = Fake::new(frame());
         mac.moves = false;
         let done = lend(&mut mac, Some(ask(true)));
-        assert_eq!(done, LendDone { home: true, parked: Some(false), owed: None }, "lent at its frame, nothing owed");
-        assert_eq!(take_back(&mut mac, done.owed), BackDone { back: true, restored: None, moved_off: false });
+        assert_eq!(done, LendDone { home: true, parked: Some(false), owed }, "lent at its frame, its restore owed");
+        assert_eq!(take_back(&mut mac, done.owed), BackDone { back: true, restored: Some(true), moved_off: false }, "listed at its frame: restored at once");
+        assert_eq!(mac.calls.iter().filter(|c| c.starts_with("move")).count(), 1, "the restore asked nothing of the app");
     }
 
     /// A park that lands off the park zone (the app re-centred it) and no lend: put back where
@@ -298,7 +302,7 @@ mod tests {
     #[test]
     fn a_dock_press_lend_is_only_home() {
         let mut mac = Fake::new(frame());
-        assert_eq!(lend(&mut mac, None), LendDone { home: true, parked: None, owed: None });
+        assert_eq!(lend(&mut mac, None), LendDone { home: true, parked: None, owed: None }, "no park sent: nothing owed");
         assert_eq!(mac.calls, ["home"]);
         assert_eq!(take_back(&mut mac, None), BackDone { back: true, restored: None, moved_off: false });
     }
@@ -325,9 +329,31 @@ mod tests {
         let mut mac = Fake::new(frame());
         mac.homes = false;
         let done = lend(&mut mac, Some(ask(false)));
-        assert_eq!(done, LendDone { home: false, parked: Some(true), owed: None });
+        assert_eq!(done, LendDone { home: false, parked: Some(true), owed: None }, "seen moved, then seen back: nothing owed");
         assert_eq!(mac.at, Some(frame()));
         assert!(mac.seen.is_empty());
+    }
+
+    /// Review A-4: a park whose Accessibility call times out (the app busy) is carried out
+    /// late, after the lend: its restore is owed, so a take back, a hide or a show sets the
+    /// frame again instead of leaving the window at the park.
+    #[test]
+    fn a_park_that_timed_out_is_owed_its_restore() {
+        let mut mac = Fake::new(frame());
+        mac.times_out = true;
+        let a = ask(true);
+        let done = lend(&mut mac, Some(a));
+        assert_eq!(done, LendDone { home: true, parked: Some(false), owed: Some(Parked { at: a.at, frame: frame(), display: a.display }) });
+        // The app answers now: the window goes to the park.
+        mac.at = Some(a.at);
+        mac.times_out = false;
+        let back = take_back(&mut mac, done.owed);
+        assert_eq!(back.restored, Some(true));
+        assert_eq!(mac.at, Some(frame()), "its frame again");
+        // Not lent (a later Tab), the park timed out: owed all the same.
+        let mut mac = Fake::new(frame());
+        mac.times_out = true;
+        assert!(lend(&mut mac, Some(ask(false))).owed.is_some());
     }
 
     /// The model's frame is the fallback when the window server does not list the window

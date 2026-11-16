@@ -192,8 +192,10 @@ impl SpacesEngine {
     /// Plans window `s.window`'s stretch on a thread of its own (see the module notes); false
     /// when the engine does not hold it in a stage Space or the stretch has no steps.
     pub(super) fn begin_stretch(&self, s: Stretch, done: StretchDone) -> bool {
-        // A window put home for a Dock press shows already: its picture lands on it.
-        if s.steps.is_empty() || !self.holds(s.window) || self.lent(s.window) || self.sky().is_none() {
+        // A window put home for a Dock press shows already: its picture lands on it. One
+        // parked for a lend whose frame is owed is not where its picture flies from (its show
+        // sets the frame: review A-4).
+        if s.steps.is_empty() || !self.holds(s.window) || self.lent(s.window) || self.state().parked.contains_key(&s.window) || self.sky().is_none() {
             return false;
         }
         {

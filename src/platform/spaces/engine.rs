@@ -1264,12 +1264,14 @@ impl WindowEngine for SpacesEngine {
         let was_held = self.holds(id.0);
         let parked = self.state().parked.get(&id.0).map(|p| p.park);
         if let Some(p) = parked
-            && windows::describe(&[id.0]).first().is_some_and(|w| !p.display.parks(w.bounds))
+            && windows::describe(&[id.0]).first().is_some_and(|w| !p.display.parks(w.bounds) && !lend_park::at_origin(w.bounds, p.frame))
         {
             tracing::info!(id = id.0, "spaces engine: a window parked for a lend was moved off the park by its app; shown at its frame");
         }
         let out = if parked.is_some() { self.show_window_only(id.0) } else { self.show_window(id.0) };
-        if out && was_held && listed_at(id.0, frame) {
+        // Where a parked window is listed says nothing: a late move may still take it to the
+        // park, and a window in a transformed Space is reported at its frame (review A-4).
+        if out && was_held && parked.is_none() && listed_at(id.0, frame) {
             self.state().parked.remove(&id.0);
             return Ok(());
         }

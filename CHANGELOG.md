@@ -70,7 +70,8 @@
   itself; the app waited eight seconds and then brought the windows back another way.
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), a window brought
   forward with ⌘Tab no longer stays at the display's corner when its app was busy as its
-  stage came in front: its move to its place is tried again until it is taken.
+  stage came in front: its move to its place is tried again until it is taken. A window
+  the app switcher passed over whose app moved it to the corner late is put back as well.
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), a window brought in
   by a stage change on a second display ends on that display's Desktop. It was put on the
   first display's Desktop as its flight ended.
