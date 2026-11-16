@@ -180,6 +180,25 @@ fn a_stage_of_three_comes_in_one_press_and_the_merge_is_done_once_the_list_shows
     assert!(r.ms <= pressed + SETTLE.as_millis() as u64 + 100, "done {} ms after the press: Apple's motion and a read, no settle after it", r.ms - pressed);
 }
 
+/// Thumbnails stacked exactly (windows at one frame, live 11-16): the one behind shows no
+/// part of its own, so the press takes the front one, and the next press, at the next settle,
+/// the one it uncovered.
+#[test]
+fn a_thumbnail_fully_under_another_is_clicked_by_a_second_press_once_uncovered() {
+    let mut f = FakeWindowManager::new();
+    f.stack = 0.0;
+    f.open_app(10, &[1, 2]);
+    f.open_app(20, &[4]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    assert!(a.click_at.contains_key(&1) && !a.click_at.contains_key(&2), "{:?}", a.click_at);
+    let mut job = plan::merge(&a, 1, f.now()).expect("planned");
+    let d = drive(&mut f, &mut a, &mut job, 6000);
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(presses(&d.steps), vec![vec![1], vec![2]]);
+    assert_eq!((r.clicks, r.presses), (2, 2));
+    assert_eq!(sorted(f.current()), vec![1, 2, 4]);
+}
+
 #[test]
 fn a_click_is_held_back_while_apple_moves_windows() {
     let (mut f, a) = three();
@@ -289,7 +308,32 @@ fn a_drag_takes_a_window_out_to_a_stage_of_its_own() {
     assert!(f.stages().iter().any(|st| st == &vec![1]), "a stage of its own: {:?}", f.stages());
     let Some(Posted::Drag { from, to, .. }) = f.posted.first() else { panic!("a drag") };
     let frame = f.frame(1).expect("framed");
-    assert!(from.y > frame.y && from.y < frame.y + 20.0 && to.x < 40.0, "the title bar onto the strip");
+    assert!(from.y > frame.y && from.y < frame.y + 20.0, "the title bar: {from:?}");
+    // Live 11-16: dropped at the grab's height, above the strip's items, the drag did
+    // nothing; dropped among them it works (the first probe).
+    let item = a.strip[0].frame;
+    assert!(to.x > item.x && to.x < item.max_x() && to.y >= item.y && to.y <= item.max_y(), "among the strip's items: {to:?} in {item:?}");
+}
+
+/// A drag Apple's takes as a plain move leaves the window moved: given up after its tries,
+/// the window is set back to its frame from before the first drag.
+#[test]
+fn a_drag_that_only_moved_the_window_sets_it_back_when_given_up() {
+    let mut f = FakeWindowManager::new();
+    f.open_app(20, &[3]);
+    f.open_app(10, &[1, 2]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    let before = a.frames[&1];
+    f.deaf = true;
+    let mut job = plan::new_stage(&a, 1, f.now()).expect("planned");
+    let d = drive_with(&mut f, &mut a, &mut job, 6000, |f, _| {
+        if !f.posted.is_empty() {
+            f.set_frame(1, Rect::new(-121.0, 87.0, 700.0, 500.0));
+        }
+    });
+    let r = d.end.expect("ended").expect_err("given up");
+    assert_eq!(r.drags, 2);
+    assert_eq!(r.set_back, Some((1, before)));
 }
 
 /// Live 11-16: the fixture windows open at one frame; the window to take out was under

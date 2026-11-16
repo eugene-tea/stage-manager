@@ -68,17 +68,19 @@ fn outside(p: Point, r: Rect) -> f64 {
     (dx * dx + dy * dy).sqrt()
 }
 
-/// How far below a window's top edge its title bar is grabbed: within the title bar of a
-/// standard window (28 points) and the top strip of a unified toolbar, above its controls.
-pub const TITLE_GRAB: f64 = 8.0;
+/// How far below a window's top edge its title bar is grabbed (the drag that worked in the
+/// first probe of 11-16: 14 points, within a standard title bar's 28).
+pub const TITLE_GRAB: f64 = 14.0;
+
+/// How far in from a window's left edge no grab is taken (the traffic lights).
+const BUTTONS: f64 = 80.0;
 
 /// Where window `frame`'s title bar is grabbed for the drag: [`TITLE_GRAB`] below its top,
-/// a third of the way across from its left (clear of the traffic lights at the left, and of
-/// the middle, where a title bar of an app's own draws a search field). Probe 6 (a safe point
-/// for unified toolbars and Electron) is still open: the live check's fixtures have plain
-/// title bars.
+/// across at its middle, as the drag that worked in the first probe of 11-16. Probe 6 (a safe
+/// point for unified toolbars and Electron) is still open: the live check's fixtures have
+/// plain title bars.
 pub fn title_point(frame: Rect) -> Point {
-    let x = frame.x + (frame.w / 3.0).max(90.0_f64.min(frame.w / 2.0));
+    let x = frame.center().x.max(frame.x + BUTTONS.min(frame.w / 2.0));
     Point::new(x, frame.y + TITLE_GRAB)
 }
 
@@ -86,9 +88,8 @@ pub fn title_point(frame: Rect) -> Point {
 /// window listed in front of it (the drag's guard takes the topmost window at the grab point,
 /// live 11-16: three fixture windows at the same frame, the one to drag under another, the
 /// gesture refused twice): [`title_point`] when nothing covers it, else the free point along
-/// the title bar nearest it, clear of the traffic lights at the left and of the middle (where
-/// a title and its document icon sit), within `screen`. `None` when the title bar is covered
-/// all along: the window is raised first.
+/// the title bar nearest it, clear of the traffic lights, within `screen`. `None` when the
+/// title bar is covered all along: the window is raised first.
 pub fn title_free(frame: Rect, over: &[Rect], screen: Rect) -> Option<Point> {
     let want = title_point(frame);
     let y = want.y;
@@ -102,30 +103,40 @@ pub fn title_free(frame: Rect, over: &[Rect], screen: Rect) -> Option<Point> {
     if free(want.x) {
         return Some(want);
     }
-    let lo = frame.x + 80.0_f64.min(frame.w / 2.0);
+    let lo = frame.x + BUTTONS.min(frame.w / 2.0);
     let hi = frame.max_x() - 16.0;
-    let (mid, band) = (frame.center().x, 80.0_f64.min(frame.w / 6.0));
     let mut xs: Vec<f64> = (0..=16).map(|i| lo + (hi - lo) * f64::from(i) / 16.0).collect();
     for o in over {
         xs.extend([o.x - MARGIN - 0.5, o.max_x() + MARGIN + 0.5]);
     }
     xs.into_iter()
-        .filter(|x| (lo..=hi).contains(x) && (x - mid).abs() >= band && free(*x))
+        .filter(|x| (lo..=hi).contains(x) && free(*x))
         .min_by(|a, b| (a - want.x).abs().total_cmp(&(b - want.x).abs()))
         .map(|x| Point::new(x, y))
 }
 
-/// How far in from the screen's left edge a window is dropped onto the strip (the probe's
-/// release at x = 30, 11-16: the window went into a stage of its own with the strip shown or
+/// How far in from the screen's left edge a window is dropped onto a hidden strip (the third
+/// probe's release at x = 30, 11-16: the window went into a stage of its own with the strip
 /// covered).
 pub const DROP_X: f64 = 30.0;
 
-/// Where a window grabbed at `from` is dropped onto screen `screen`'s strip: [`DROP_X`] in
-/// from its left edge, at the grab's height kept within the visible frame.
-pub fn strip_drop(screen: &Display, from: Point) -> Point {
+/// Where a dragged window is dropped onto screen `screen`'s strip, `strip` being the strip's
+/// items as the mirror read them (empty, or hidden off the left edge): the middle of the
+/// items when they show (the drag that worked in the first probe of 11-16 dropped in the
+/// strip's column at the screen's middle height, x = 80, y = 600 of 1440, among the items;
+/// one dropped at the title bar's height, near the top-left corner above them, did nothing,
+/// live 11-16), else [`DROP_X`] in at the visible frame's middle height.
+pub fn strip_drop(screen: &Display, strip: &[Rect]) -> Point {
     let v = screen.visible;
-    let y = from.y.clamp(v.y + 40.0, (v.max_y() - 40.0).max(v.y + 40.0));
-    Point::new(screen.frame.x + DROP_X, y)
+    let shown: Vec<Rect> = strip.iter().filter(|r| r.max_x() > screen.frame.x).copied().collect();
+    let p = match shown.split_first() {
+        Some((first, rest)) => {
+            let all = rest.iter().fold(*first, |u, r| u.union(r));
+            Point::new(all.center().x.clamp(screen.frame.x + DROP_X, screen.frame.x + 120.0), all.center().y)
+        }
+        None => Point::new(screen.frame.x + DROP_X, v.center().y),
+    };
+    Point::new(p.x, p.y.clamp(v.y + 40.0, (v.max_y() - 40.0).max(v.y + 40.0)))
 }
 
 #[cfg(test)]
@@ -169,18 +180,23 @@ mod tests {
     }
 
     #[test]
-    fn the_title_bar_is_grabbed_near_the_top_clear_of_the_buttons_and_dropped_on_the_strip() {
+    fn the_title_bar_is_grabbed_at_its_middle_and_dropped_among_the_strips_items() {
         let f = Rect::new(300.0, 120.0, 700.0, 500.0);
         let p = title_point(f);
-        assert!(p.y > f.y && p.y < f.y + 20.0);
-        assert!(p.x >= f.x + 90.0 && p.x < f.center().x);
+        assert_eq!(p, Point::new(f.center().x, f.y + 14.0), "the probe's grab");
         let narrow = title_point(Rect::new(300.0, 120.0, 120.0, 300.0));
-        assert!(narrow.x <= 360.0 && narrow.x > 300.0, "a narrow window: its middle at most");
+        assert_eq!(narrow.x, 360.0, "a narrow window: its middle");
         let d = display();
-        let drop = strip_drop(&d, p);
-        assert_eq!(drop.x, d.frame.x + DROP_X);
-        assert_eq!(drop.y, p.y);
-        assert!(strip_drop(&d, Point::new(400.0, 2.0)).y >= d.visible.y + 40.0, "kept off the menu bar");
+        // Items shown: their middle, in the strip's column, never the grab's height.
+        let items = [Rect::new(-7.0, 300.0, 170.0, 180.0), Rect::new(-7.0, 700.0, 170.0, 180.0)];
+        let drop = strip_drop(&d, &items);
+        assert!((drop.x - 78.0).abs() < 1.0 && (drop.y - 590.0).abs() < 1.0, "{drop:?}");
+        // None shown (hidden off the left edge, or none): in from the edge, mid-height.
+        let hidden = [Rect::new(-258.0, 300.0, 79.0, 104.0)];
+        for strip in [&hidden[..], &[]] {
+            let drop = strip_drop(&d, strip);
+            assert_eq!(drop, Point::new(d.frame.x + DROP_X, d.visible.center().y));
+        }
     }
 
     #[test]
@@ -189,10 +205,10 @@ mod tests {
         assert_eq!(title_free(f, &[], SCREEN), Some(title_point(f)), "nothing over it: the usual point");
         assert_eq!(title_free(f, &[f], SCREEN), None, "the live run of 11-16: another window at the same frame covers it all");
         // A window over its left half: grabbed right of it, clear of the middle.
-        let left = Rect::new(60.0, 60.0, 300.0, 300.0);
+        let left = Rect::new(60.0, 60.0, 320.0, 300.0);
         let p = title_free(f, &[left], SCREEN).expect("its right part shows");
-        assert!(p.x > left.max_x() + MARGIN && p.x < f.max_x() - 16.0, "{p:?}");
-        assert!((p.x - f.center().x).abs() >= 80.0, "not on the title: {p:?}");
+        assert!(p.x > left.max_x() + MARGIN && p.x <= f.max_x() - 16.0, "{p:?}");
+        assert!(p.x - left.max_x() < 10.0, "the free point nearest the middle: {p:?}");
         assert_eq!(p.y, f.y + TITLE_GRAB);
         // A window lower down leaves the title bar free.
         assert_eq!(title_free(f, &[Rect::new(80.0, 200.0, 520.0, 300.0)], SCREEN), Some(title_point(f)));

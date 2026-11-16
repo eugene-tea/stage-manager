@@ -14,8 +14,11 @@
 //!   11-16: after a merge of three, the pointer stayed at the second click's point). The warp
 //!   back waits until the pointer reads at the point posted (at most [`POINTER_WAIT`]), and
 //!   is checked and made again once if the pointer is not home.
-//! - **The drag**: the left button pressed on the title bar, moved in steps to the strip's
-//!   column, held there [`DRAG_HOLD`], released; the pointer warped back. The person's own
+//! - **The drag**, as the one that worked in the first probe of 11-16: the left button pressed
+//!   on the title bar, [`DRAG_PRESS`], then [`DRAG_STEPS`] moves evenly over [`DRAG_MOVE`] to
+//!   the strip's column, held there [`DRAG_HOLD`], released; the pointer warped back (live
+//!   11-16: a press of 60 ms and 24-point steps 6 ms apart moved the window and took nothing
+//!   out). The person's own
 //!   input ends it at once (their release, the button up, the pointer moved from where the
 //!   drag put it): nothing more is posted, the button goes up where the pointer is, the
 //!   pointer is left to the person, and [`Landed::Interrupted`] tells the WM thread to set the
@@ -45,16 +48,19 @@ use crate::platform::{input, windows};
 /// Between the Shift key-down and the click, and between the click and Shift up (measured).
 pub const SHIFT_LEAD: Duration = Duration::from_millis(12);
 
-/// The drag's press before it moves (the window server takes it as a press on the title bar).
-pub const DRAG_PRESS: Duration = Duration::from_millis(60);
+/// The drag's press before it moves (the window server takes it as a press on the title bar;
+/// the first probe's 120 ms).
+pub const DRAG_PRESS: Duration = Duration::from_millis(120);
 
-/// The drag's step along its path, in points, and the pause after each.
-const DRAG_STEP: f64 = 24.0;
-const DRAG_STEP_PAUSE: Duration = Duration::from_millis(6);
+/// The drag's moves along its path, evenly over [`DRAG_MOVE`] (the first probe's: 30 over
+/// about 500 ms, about 17 ms apart).
+pub const DRAG_STEPS: u32 = 30;
+pub const DRAG_MOVE: Duration = Duration::from_millis(500);
 
-/// How long the drag holds over the strip before the release (the probe held 1.2 s with the
-/// strip covered; the shortest Apple's accepts is still to measure, probe 6).
-pub const DRAG_HOLD: Duration = Duration::from_millis(300);
+/// How long the drag holds over the strip before the release (the first probe's 250 ms; the
+/// third held 1.2 s with the strip covered; the shortest Apple's accepts is still to measure,
+/// probe 6).
+pub const DRAG_HOLD: Duration = Duration::from_millis(250);
 
 /// The pointer this far from where the drag last put it is the person's own move.
 const MOVED: f64 = 4.0;
@@ -318,7 +324,11 @@ fn drag(g: &mut Gesture, window: u32, from: Point, to: Point) -> Landed {
     if any_button_down() {
         return Landed::Refused("a mouse button is down".into());
     }
-    let path = input::segment(from, to, DRAG_STEP);
+    let path: Vec<Point> = (0..=DRAG_STEPS).map(|i| {
+        let t = f64::from(i) / f64::from(DRAG_STEPS);
+        Point::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
+    }).collect();
+    let pause = DRAG_MOVE / DRAG_STEPS;
     if let Err(e) = mouse(CGEventType::LeftMouseDown, from, CGEventFlags::empty()) {
         return Landed::Refused(e);
     }
@@ -343,7 +353,7 @@ fn drag(g: &mut Gesture, window: u32, from: Point, to: Point) -> Landed {
         }
         let _ = mouse(CGEventType::LeftMouseDragged, *p, CGEventFlags::empty());
         last = *p;
-        std::thread::sleep(DRAG_STEP_PAUSE);
+        std::thread::sleep(pause);
     }
     let held = Instant::now();
     while held.elapsed() < DRAG_HOLD {

@@ -572,6 +572,12 @@ impl AppleController {
                 if let Some(pid) = report.unhide {
                     launch_hide::unhide(pid);
                 }
+                if let Some((w, frame)) = report.set_back
+                    && let Some(tw) = ob.window(w)
+                {
+                    let back = tw.element.set_frame(frame);
+                    tracing::info!(window = w, back = back.is_ok(), "apple mode: given up: the window a drag moved set back to its frame");
+                }
                 self.job_ended(ob, report, now);
             }
         }
@@ -756,7 +762,8 @@ impl AppleController {
                 None => Err(format!("window {w} is not listed")),
                 Some(frame) => {
                     let from = self.mirror.title_at.get(&w).copied().unwrap_or_else(|| points::title_point(frame));
-                    let step = Step::Post(Posted::Drag { window: w, from, to: points::strip_drop(&screen, from), frame });
+                    let items: Vec<_> = self.mirror.strip.iter().map(|g| g.frame).collect();
+                    let step = Step::Post(Posted::Drag { window: w, from, to: points::strip_drop(&screen, &items), frame });
                     Drag.can(&step, &self.mirror, &input).map_err(|r| r.0).and_then(|()| Drag.run(&step, &mut desk)).map(|()| {
                         self.posting = if let Step::Post(p) = step { Some(p) } else { None };
                         json!({ "from": from })

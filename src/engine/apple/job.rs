@@ -40,6 +40,7 @@ use super::gate::{self, Hold, Waiting};
 use super::mirror::{Arrangement, Where};
 use super::plan::{Intent, Step};
 use super::points;
+use crate::engine::geometry::Rect;
 use crate::engine::model::Display;
 
 /// Runs of the same step for the same window before the job is given up.
@@ -126,6 +127,9 @@ pub struct Report {
     /// A newly opened app to unhide after a give-up (the hide route took and its window
     /// never came in).
     pub unhide: Option<i32>,
+    /// A window to set back to its frame after a give-up: a drag that moved it without
+    /// taking it out.
+    pub set_back: Option<(u32, Rect)>,
 }
 
 /// The step last run, for the retry count.
@@ -168,6 +172,8 @@ pub struct Job {
     interrupted: Option<String>,
     /// Why the gesture last posted was not (its guard), for the give-up's words.
     refused: Option<String>,
+    /// The window dragged and its frame before the first drag.
+    dragged_from: Option<(u32, Rect)>,
     /// The step last asked for and what it waits on, for `ctl state`.
     pub waits_for: &'static str,
 }
@@ -195,6 +201,7 @@ impl Job {
             focus_pending: None,
             interrupted: None,
             refused: None,
+            dragged_from: None,
             waits_for: "the settle",
         }
     }
@@ -319,8 +326,12 @@ impl Job {
                         // on top.
                         return Need::Step(Step::Focus(*w));
                     };
-                    let to = points::strip_drop(cx.screen, from);
-                    let restore = a.full.get(w).copied().unwrap_or(frame);
+                    let items: Vec<_> = a.strip.iter().map(|g| g.frame).collect();
+                    let to = points::strip_drop(cx.screen, &items);
+                    // The frame before the first drag: a drag Apple's took as a plain move
+                    // leaves the window moved (live 11-16), set back when the job is given up.
+                    let restore = *self.dragged_from.get_or_insert((*w, a.full.get(w).copied().unwrap_or(frame)));
+                    let restore = restore.1;
                     Need::Step(Step::Post(Posted::Drag { window: *w, from, to, frame: restore }))
                 }
                 Some(_) => {
@@ -441,6 +452,12 @@ impl Job {
     fn give_up(&mut self, cx: &Ctx, now: Instant, why: String) -> Next {
         self.report.ms = ms(now, self.since);
         self.report.given_up = Some(why);
+        if let Some((w, frame)) = self.dragged_from
+            && cx.mirror.current.contains(&w)
+            && cx.mirror.frames.get(&w).is_some_and(|f| *f != frame)
+        {
+            self.report.set_back = Some((w, frame));
+        }
         if let Intent::OpenHere(pid) = self.intent {
             let a = cx.mirror;
             let in_front = a.current.iter().any(|w| cx.pids.get(w) == Some(&pid));

@@ -66,6 +66,9 @@ pub struct FakeWindowManager {
     pub ignored_mid_motion: u32,
     /// Apple's answers no posted gesture (a macOS that changed).
     pub deaf: bool,
+    /// How far right each thumbnail of a stage sits from the one in front of it (16 points
+    /// measured; 0 for windows at one frame, whose thumbnails stack exactly).
+    pub stack: f64,
     /// How the last gesture ended, until taken.
     landed: Option<Landed>,
 }
@@ -94,6 +97,7 @@ impl FakeWindowManager {
             interrupt_drags: false,
             ignored_mid_motion: 0,
             deaf: false,
+            stack: 16.0,
             landed: None,
         }
     }
@@ -269,7 +273,8 @@ impl FakeWindowManager {
     /// live capture of 11-16 had a stage of two).
     fn thumb(&self, slot: usize, k: usize) -> Rect {
         let x = if self.covered { HIDDEN_X } else { THUMB.x };
-        Rect::new(x + 16.0 * k as f64, THUMB.y + SLOT * slot as f64 + 4.0 * k as f64, THUMB.w, THUMB.h)
+        let k = k as f64;
+        Rect::new(x + self.stack * k, THUMB.y + SLOT * slot as f64 + self.stack / 4.0 * k, THUMB.w, THUMB.h)
     }
 
     /// Slot `slot`'s icon window.
