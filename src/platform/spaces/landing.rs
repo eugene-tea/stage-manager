@@ -126,6 +126,14 @@ fn affine(m: Affine) -> CGAffineTransform {
     CGAffineTransform { a: m[0], b: m[1], c: m[2], d: m[3], tx: m[4], ty: m[5] }
 }
 
+/// True when a window whose Spaces are `now` is still in its landing Space `space` at the
+/// last step, so it goes home. A hide that could not ask the stretches (a stretch's thread
+/// stuck past [`LOCK_WAIT`]) takes the window out of every Space without stopping its
+/// stretch: moved home then, the hidden window would show (review A-6).
+fn lands_home(now: &[u64], space: u64) -> bool {
+    now.contains(&space)
+}
+
 /// True when two transforms are the same (read back).
 fn same(a: [f64; 6], b: Affine) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
@@ -312,7 +320,7 @@ impl SpacesEngine {
         // Home: the identity (the last step), onto its Desktop as a show puts it, the Space
         // ended.
         let mut l = self.stretches();
-        if l.get(&id).is_none_or(|f| f.stop) {
+        if l.get(&id).is_none_or(|f| f.stop) || !lands_home(&sky.spaces_of(&[id]), space) {
             drop(l);
             return self.stopped(sky, id, space);
         }
@@ -603,6 +611,16 @@ mod tests {
         assert_eq!(e.home_of(5, Some(&fly)), Some(3), "held (hidden again): where it was hidden from");
         assert_eq!(e.home_of(6, Some(&Fly { home: 0, ..fly })), None, "neither known");
         assert_eq!(e.home_of(6, None), None);
+    }
+
+    /// Review A-6: at the last step a window still in its landing Space goes home; one a hide
+    /// took into its stage Space meanwhile (the stretches stuck, the stretch not stopped)
+    /// does not.
+    #[test]
+    fn only_a_window_still_in_its_landing_space_goes_home() {
+        assert!(lands_home(&[900], 900));
+        assert!(!lands_home(&[836], 900), "hidden again in its stage Space: left there");
+        assert!(!lands_home(&[], 900), "in no Space (closed): nothing to move");
     }
 
     /// Waits end at their instant, never before.
