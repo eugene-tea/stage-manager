@@ -198,10 +198,13 @@ impl Sky {
         AnyClass::get(name)
     }
 
-    /// `[[cls alloc] <sel>]` with one object argument, performed and released; the result of
-    /// `-performWithWMBridgeDelegate` (null for an asynchronous operation).
-    pub(crate) fn bridged(&self, class: &CStr, build: impl FnOnce(*mut AnyObject) -> *mut AnyObject) -> Result<*mut AnyObject, String> {
+    /// `[[cls alloc] <init>]` (`build` sends `init` with its arguments), performed and
+    /// released; the result of `-performWithWMBridgeDelegate` (null for an asynchronous
+    /// operation). An error when the class's instances do not answer `init` or the perform
+    /// ([`answers`]).
+    pub(crate) fn bridged(&self, class: &CStr, init: Sel, build: impl FnOnce(*mut AnyObject) -> *mut AnyObject) -> Result<*mut AnyObject, String> {
         let Some(cls) = Self::class(class) else { return Err(format!("{} is missing", class.to_str().unwrap_or("?"))) };
+        answers(cls, init)?;
         if self.msg_send.is_null() {
             return Err("objc_msgSend is missing".into());
         }
@@ -246,7 +249,7 @@ impl Sky {
                     (1, NSDictionary::new())
                 };
                 let ms = self.msg_send;
-                let result = self.bridged(c"SLSBridgedSpaceCreateOperation", |raw| {
+                let result = self.bridged(c"SLSBridgedSpaceCreateOperation", sel!(initWithOptions:values:), |raw| {
                     // SAFETY: `-initWithOptions:values:` (id, SEL, uint32, id) -> id.
                     let init: unsafe extern "C" fn(*mut AnyObject, Sel, u32, *const c_void) -> *mut AnyObject =
                         unsafe { std::mem::transmute(ms) };
@@ -280,7 +283,7 @@ impl Sky {
             }
             Route::Bridged => autoreleasepool(|_| {
                 let ms = self.msg_send;
-                self.bridged(c"SLSBridgedSpaceDestroyOperation", |raw| {
+                self.bridged(c"SLSBridgedSpaceDestroyOperation", sel!(initWithSpaceID:), |raw| {
                     // SAFETY: `-initWithSpaceID:` (id, SEL, uint64) -> id.
                     let init: unsafe extern "C" fn(*mut AnyObject, Sel, u64) -> *mut AnyObject = unsafe { std::mem::transmute(ms) };
                     // SAFETY: as typed.
@@ -300,7 +303,7 @@ impl Sky {
             }
             Route::Bridged => autoreleasepool(|_| {
                 let ms = self.msg_send;
-                self.bridged(c"SLSBridgedSpaceSetAbsoluteLevelOperation", |raw| {
+                self.bridged(c"SLSBridgedSpaceSetAbsoluteLevelOperation", sel!(initWithSpaceID:level:), |raw| {
                     // SAFETY: `-initWithSpaceID:level:` (id, SEL, uint64, int) -> id.
                     let init: unsafe extern "C" fn(*mut AnyObject, Sel, u64, i32) -> *mut AnyObject = unsafe { std::mem::transmute(ms) };
                     // SAFETY: as typed.
@@ -322,7 +325,7 @@ impl Sky {
             Route::Bridged => autoreleasepool(|_| {
                 let class = if show { c"SLSBridgedShowSpacesOperation" } else { c"SLSBridgedHideSpacesOperation" };
                 let send = self.send_obj();
-                self.bridged(class, |raw| {
+                self.bridged(class, sel!(initWithSpaces:), |raw| {
                     // SAFETY: `-initWithSpaces:` (id, SEL, NSArray) -> id; `arr` outlives it.
                     unsafe { send(raw, sel!(initWithSpaces:), Retained::as_ptr(&arr).cast()) }
                 })
@@ -344,7 +347,7 @@ impl Sky {
             }
             Route::Bridged => autoreleasepool(|_| {
                 let ms = self.msg_send;
-                self.bridged(c"SLSBridgedSpaceAddWindowsAndRemoveFromSpacesOperation", |raw| {
+                self.bridged(c"SLSBridgedSpaceAddWindowsAndRemoveFromSpacesOperation", sel!(initWithSpaceID:windows:options:), |raw| {
                     // SAFETY: `-initWithSpaceID:windows:options:` (id, SEL, uint64, NSArray, uint32) -> id.
                     let init: unsafe extern "C" fn(*mut AnyObject, Sel, u64, *const c_void, u32) -> *mut AnyObject =
                         unsafe { std::mem::transmute(ms) };
@@ -373,7 +376,7 @@ impl Sky {
             }
             Route::Bridged => autoreleasepool(|_| {
                 let ms = self.msg_send;
-                self.bridged(c"SLSBridgedMoveWindowsToManagedSpaceOperation", |raw| {
+                self.bridged(c"SLSBridgedMoveWindowsToManagedSpaceOperation", sel!(initWithWindows:spaceID:), |raw| {
                     // SAFETY: `-initWithWindows:spaceID:` (id, SEL, NSArray, uint64) -> id.
                     let init: unsafe extern "C" fn(*mut AnyObject, Sel, *const c_void, u64) -> *mut AnyObject =
                         unsafe { std::mem::transmute(ms) };
@@ -395,7 +398,7 @@ impl Sky {
             }
             Route::Bridged => autoreleasepool(|_| {
                 let ms = self.msg_send;
-                self.bridged(c"SLSBridgedSpaceSetTransformOperation", |raw| {
+                self.bridged(c"SLSBridgedSpaceSetTransformOperation", sel!(initWithSpaceID:transform:options:), |raw| {
                     // SAFETY: `-initWithSpaceID:transform:options:` (id, SEL, uint64,
                     // CGAffineTransform, uint32) -> id.
                     let init: unsafe extern "C" fn(*mut AnyObject, Sel, u64, CGAffineTransform, u32) -> *mut AnyObject =
@@ -407,6 +410,19 @@ impl Sky {
             }),
         }
     }
+}
+
+/// Ok when instances of `cls` answer `init` and `-performWithWMBridgeDelegate`: sent to a
+/// class that does not (a macOS that renamed or dropped one), `objc_msgSend` raises an
+/// Objective-C exception, which unwinds into Rust through an `extern "C"` call and aborts
+/// the app, at every launch's first landing (review A-9).
+pub(crate) fn answers(cls: &AnyClass, init: Sel) -> Result<(), String> {
+    for sel in [init, sel!(performWithWMBridgeDelegate)] {
+        if !cls.responds_to(sel) {
+            return Err(format!("{} does not answer {}", cls.name().to_string_lossy(), sel.name().to_string_lossy()));
+        }
+    }
+    Ok(())
 }
 
 /// `dict[key]`.
@@ -456,5 +472,21 @@ impl Route {
             Self::Classic => "classic",
             Self::Bridged => "bridged",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Review A-9: a class whose instances do not answer the operation's initializer, or the
+    /// perform, is refused before anything is sent (the send would raise and abort).
+    #[test]
+    fn a_class_that_does_not_answer_the_operation_is_refused() {
+        let object = AnyClass::get(c"NSObject").expect("NSObject");
+        let refused = answers(object, sel!(initWithSpaceID:)).expect_err("NSObject has no such initializer");
+        assert!(refused.contains("initWithSpaceID:"), "{refused}");
+        let refused = answers(object, sel!(init)).expect_err("nor the perform");
+        assert!(refused.contains("performWithWMBridgeDelegate"), "{refused}");
     }
 }
