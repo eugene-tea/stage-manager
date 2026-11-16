@@ -1840,6 +1840,120 @@ mod arranged_ahead {
         assert!(cmd_tab(&mac, &mut keys, tab(false), None).is_empty(), "the app in front");
     }
 
+    /// Round cmdtab-park: the window put home for the switcher is parked off the screen
+    /// first, while still in its stage Space, and put back before its frame is restored; the
+    /// model never takes the park for its frame (the echoes of both moves), its saved frame
+    /// stays its own, a kept lend lands at its frame at the activation's switch, and a quit
+    /// with a parked lend brings it back at its frame. The Corner engine lends nothing; the
+    /// model's side holds the same.
+    #[test]
+    fn cmd_tab_parks_the_lent_window_and_the_model_keeps_its_frame() {
+        use crate::engine::corner::park::ParkRequest;
+        use crate::engine::corner::park_frame_of;
+        use crate::engine::lend_park::{self, LendSteps, ParkAsk};
+        use switcher::{Act, Key};
+
+        /// Window 5 of the fake Mac as the lend's calls see it; every call in order.
+        struct Steps<'a> {
+            mac: &'a mut Mac,
+            calls: Vec<&'static str>,
+            /// Frames listed while on its Desktop.
+            seen: Vec<Rect>,
+        }
+        impl Steps<'_> {
+            fn look(&mut self) {
+                if !self.mac.stage_space.contains(&5) {
+                    self.seen.push(self.mac.wins[&5].1);
+                }
+            }
+        }
+        impl LendSteps for Steps<'_> {
+            fn listed(&mut self) -> Option<Rect> {
+                Some(self.mac.wins[&5].1)
+            }
+            fn move_to(&mut self, to: Rect) -> Option<Rect> {
+                self.calls.push(if self.mac.stage_space.contains(&5) { "move, hidden" } else { "move, on the Desktop" });
+                if let Some(w) = self.mac.wins.get_mut(&5) {
+                    w.1 = macos_places(Rect { w: w.1.w, h: w.1.h, ..to });
+                }
+                self.look();
+                self.listed()
+            }
+            fn put_home(&mut self) -> bool {
+                self.calls.push("home");
+                self.mac.stage_space.remove(&5);
+                self.look();
+                true
+            }
+            fn put_back(&mut self) -> bool {
+                self.calls.push("back");
+                self.mac.stage_space.insert(5);
+                true
+            }
+        }
+
+        let mut mac = mail_waiting_here_and_shown_elsewhere();
+        let spaces = mac.m.options().engine == EngineKind::Spaces;
+        let own = mac.m.window(w(5)).expect("managed").meta.frame;
+        let restore = mac.m.window(w(5)).expect("managed").restore;
+        let d = *mac.m.display(MAIN);
+        let at = park_frame_of(own, &d, ParkRequest::default());
+        let ask = ParkAsk { at, display: d, frame: own, must: true };
+        let mut keys = switcher::Switcher::default();
+        let acts = cmd_tab(&mac, &mut keys, tab(false), None);
+        assert_eq!(acts.is_empty(), !spaces, "only the Spaces engine puts a window home: {acts:?}");
+        if spaces {
+            assert_eq!(acts, vec![Act::Lend { pid: 40, window: w(5) }]);
+            let mut steps = Steps { mac: &mut mac, calls: Vec::new(), seen: Vec::new() };
+            let done = lend_park::lend(&mut steps, Some(ask));
+            assert_eq!((done.home, done.parked), (true, Some(true)));
+            assert_eq!(steps.calls, ["move, hidden", "home"], "parked while hidden, then home");
+            assert!(steps.seen.iter().all(|r| d.parks(*r)), "seen only parked: {:?}", steps.seen);
+            let parked = done.owed;
+            // Tab on (chat): back first, then its frame, unseen.
+            let acts = cmd_tab(&mac, &mut keys, tab(false), Some((40, w(5))));
+            assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher's selection moved on" }]);
+            let mut steps = Steps { mac: &mut mac, calls: Vec::new(), seen: Vec::new() };
+            let back = lend_park::take_back(&mut steps, parked);
+            assert_eq!((back.back, back.restored), (true, Some(true)));
+            assert_eq!(steps.calls, ["back", "move, hidden"], "back into its stage Space, then its frame");
+            assert!(steps.seen.is_empty(), "never on its Desktop at its frame");
+            assert_eq!(mac.wins[&5].1, own, "at its frame again");
+            // ⇧Tab back on Mail: lent and parked again.
+            assert_eq!(cmd_tab(&mac, &mut keys, tab(true), None), vec![Act::Lend { pid: 40, window: w(5) }]);
+            let mut steps = Steps { mac: &mut mac, calls: Vec::new(), seen: Vec::new() };
+            assert!(lend_park::lend(&mut steps, Some(ask)).owed.is_some(), "parked again");
+        }
+        // The echoes of the park (and of a restore): the model, which still counts the window
+        // hidden, never takes them for its frame.
+        let listed = mac.wins[&5].1;
+        mac.m.window_frame_changed(w(5), at);
+        mac.m.window_frame_settled(w(5), listed);
+        assert_eq!(mac.m.window(w(5)).map(|x| (x.meta.frame, x.restore)), Some((own, restore)), "the model's frame untouched");
+        let file = mac.m.to_state();
+        let saved: Vec<Rect> = file
+            .spaces
+            .iter()
+            .flat_map(|sp| sp.stages.iter())
+            .flat_map(|st| st.windows.iter())
+            .filter(|x| x.title == "Inbox")
+            .map(|x| x.frame)
+            .collect();
+        assert_eq!(saved, vec![restore], "state.json holds its own frame");
+        // Quit with the lend parked: the bring-back sets its frame.
+        let quit = mac.m.clone().unpark_all();
+        assert!(quit.contains(&Action::SetFrame { id: w(5), frame: restore }), "{quit:?}");
+        // ⌘ let go on Mail, its activation: the switch shows it at its frame.
+        cmd_tab(&mac, &mut keys, Key::Command(false), spaces.then_some((40, w(5))));
+        let obs = Observation { focused: Some(w(6)), ..mac.obs() };
+        let a = mac.m.app_activated(40, &obs);
+        assert!(a.contains(&Action::SetFrame { id: w(5), frame: restore }), "the switch asks for its frame: {a:?}");
+        mac.run(a);
+        assert_eq!(mac.m.stage_of(w(5)), mac.m.main_active_stage(), "Mail's stage here in front");
+        assert_eq!(mac.wins[&5].1, macos_places(restore), "landed at its frame, not the park");
+        assert_eq!(mac.shown, 0);
+    }
+
     #[test]
     fn a_dock_click_arranges_the_desktop_the_slide_shows_and_the_arrival_confirms_it() {
         let mut mac = mail_parked_on_desktop_1();

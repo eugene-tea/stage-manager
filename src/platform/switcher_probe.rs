@@ -48,6 +48,8 @@ pub struct Request {
     pub tabs: u8,
     /// From the last Tab's release to Escape or ⌘'s release.
     pub hold: Duration,
+    /// From one Tab's release to the next Tab.
+    pub gap: Duration,
     /// The app the controller predicts for `tabs` Tabs is a `STAGE_MANAGER_ONLY` app.
     pub expected_test: bool,
 }
@@ -65,6 +67,8 @@ const SAMPLES_MS: [u64; 7] = [15, 40, 80, 150, 250, 400, 700];
 #[derive(Debug)]
 struct Report {
     started: Instant,
+    /// `started` as seconds since 1970, for samples taken by another process.
+    started_epoch: f64,
     request: Request,
     events: Vec<Value>,
     samples: Vec<Value>,
@@ -105,6 +109,8 @@ pub fn result() -> Value {
         "release": r.request.release,
         "tabs": r.request.tabs,
         "hold_ms": r.request.hold.as_millis() as u64,
+        "gap_ms": r.request.gap.as_millis() as u64,
+        "started_epoch": r.started_epoch,
         "released_ms": r.released_ms,
         "outcome": r.outcome,
         "events": r.events,
@@ -129,7 +135,7 @@ pub fn start(req: Request, dock: i32, allowed: impl Fn(i32) -> bool + Send + 'st
     if posting() {
         return Err("a probe is still running".into());
     }
-    let req = Request { hold: req.hold.min(HOLD_MAX), tabs: req.tabs.clamp(1, 9), ..req };
+    let req = Request { hold: req.hold.min(HOLD_MAX), gap: req.gap.min(HOLD_MAX), tabs: req.tabs.clamp(1, 9), ..req };
     std::thread::Builder::new()
         .name("test-cmd-tab".into())
         .spawn(move || run(req, dock, allowed))
@@ -187,13 +193,14 @@ unsafe extern "C-unwind" fn tap_callback(_proxy: CGEventTapProxy, kind: CGEventT
 
 fn run(req: Request, dock: i32, allowed: impl Fn(i32) -> bool) {
     // The tap first: it is on before the ⌘ goes down (the dump below takes longer than it).
-    let length = Duration::from_millis(30 + 60 * u64::from(req.tabs) + 300) + req.hold + Duration::from_millis(800);
+    let length = Duration::from_millis(30 + 60 * u64::from(req.tabs) + 300) + req.gap * u32::from(req.tabs) + req.hold + Duration::from_millis(800);
     let _ = std::thread::Builder::new().name("test-cmd-tab-tap".into()).spawn(move || watch_with_tap(length));
     let dump_before = switcher_ax::dump(dock, 3);
     std::thread::sleep(Duration::from_millis(30));
     if let Ok(mut guard) = REPORT.lock() {
         *guard = Some(Report {
             started: Instant::now(),
+            started_epoch: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64()),
             request: req,
             events: Vec::new(),
             samples: Vec::new(),
@@ -246,7 +253,7 @@ fn run(req: Request, dock: i32, allowed: impl Fn(i32) -> bool) {
         posted(&format!("Tab {i}"));
         sample(format!("Tab {i}"));
         if i < req.tabs {
-            std::thread::sleep(Duration::from_millis(40));
+            std::thread::sleep(req.gap);
         }
     }
     let last_tab = Instant::now();

@@ -15,7 +15,7 @@
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
 //! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
-//! prediction sees it, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [nolend]` posts ⌘Tab
+//! prediction sees it, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
 //! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
 //! as the Dock shows it (its items' titles, the one selected), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
@@ -77,8 +77,8 @@ use crate::engine::geometry::{Point, Rect};
 use crate::engine::handoff::{self, Offer, Trust};
 
 /// `debug-cmd-tab`: a posted ⌘Tab ([`crate::platform::switcher_probe`]), or the last one's
-/// report: `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [nolend]` (1 Tab and 300 ms by
-/// default), `debug-cmd-tab result`.
+/// report: `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` (1 Tab, 300 ms
+/// held, Tabs 40 ms apart by default), `debug-cmd-tab result`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CmdTabProbe {
     /// Post one.
@@ -89,6 +89,9 @@ pub enum CmdTabProbe {
         tabs: u8,
         /// From the last Tab to Escape or ⌘'s release (ms, at most 5000).
         hold_ms: u64,
+        /// Between one Tab's release and the next Tab (ms, at most 2000; round cmdtab-park:
+        /// a person browsing the switcher tabs every ~200 ms).
+        gap_ms: u64,
         /// Put the selected app's window home as the switcher shows (`nolend`: macOS's own
         /// way, measured).
         lend: bool,
@@ -109,16 +112,17 @@ impl CmdTabProbe {
             numbers => (true, numbers),
         };
         let number = |w: &str| w.parse::<u64>().map_err(|_| format!("expected a number, got {w:?}"));
-        let (tabs, hold_ms) = match numbers {
-            [] => (1, 300),
-            [tabs] => (number(tabs)?, 300),
-            [tabs, hold] => (number(tabs)?, number(hold)?),
-            _ => return Err("debug-cmd-tab takes cancel|release [TABS] [HOLD_MS] [nolend]".into()),
+        let (tabs, hold_ms, gap_ms) = match numbers {
+            [] => (1, 300, 40),
+            [tabs] => (number(tabs)?, 300, 40),
+            [tabs, hold] => (number(tabs)?, number(hold)?, 40),
+            [tabs, hold, gap] => (number(tabs)?, number(hold)?, number(gap)?),
+            _ => return Err("debug-cmd-tab takes cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]".into()),
         };
-        if !(1..=9).contains(&tabs) || hold_ms > 5000 {
-            return Err("debug-cmd-tab: 1-9 Tabs, a hold of at most 5000 ms".into());
+        if !(1..=9).contains(&tabs) || hold_ms > 5000 || gap_ms > 2000 {
+            return Err("debug-cmd-tab: 1-9 Tabs, a hold of at most 5000 ms, Tabs at most 2000 ms apart".into());
         }
-        Ok(Self::Start { release, tabs: tabs as u8, hold_ms, lend })
+        Ok(Self::Start { release, tabs: tabs as u8, hold_ms, gap_ms, lend })
     }
 }
 
@@ -997,15 +1001,15 @@ mod tests {
         assert!(Command::parse("debug-dock-click dev.example.app fake").is_err());
         assert_eq!(
             Command::parse("debug-cmd-tab cancel"),
-            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 1, hold_ms: 300, lend: true }))
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 1, hold_ms: 300, gap_ms: 40, lend: true }))
         );
         assert_eq!(
             Command::parse("debug-cmd-tab release 2 40 nolend"),
-            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 2, hold_ms: 40, lend: false }))
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 2, hold_ms: 40, gap_ms: 40, lend: false }))
         );
         assert_eq!(
             Command::parse("debug-cmd-tab release 1 0"),
-            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 1, hold_ms: 0, lend: true }))
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 1, hold_ms: 0, gap_ms: 40, lend: true }))
         );
         assert_eq!(Command::parse("debug-cmd-tab result"), Ok(Command::DebugCmdTab(CmdTabProbe::Result)));
         assert_eq!(Command::parse("debug-switcher"), Ok(Command::DebugSwitcher));
@@ -1014,7 +1018,13 @@ mod tests {
         assert!(Command::parse("debug-cmd-tab press").is_err());
         assert!(Command::parse("debug-cmd-tab cancel 0").is_err(), "no Tab");
         assert!(Command::parse("debug-cmd-tab cancel 1 9000").is_err(), "held too long");
-        assert!(Command::parse("debug-cmd-tab cancel 1 300 40").is_err());
+        assert_eq!(
+            Command::parse("debug-cmd-tab cancel 2 300 250"),
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 2, hold_ms: 300, gap_ms: 250, lend: true })),
+            "browsing: Tabs 250 ms apart"
+        );
+        assert!(Command::parse("debug-cmd-tab cancel 2 300 3000").is_err(), "Tabs too far apart");
+        assert!(Command::parse("debug-cmd-tab cancel 1 300 40 7").is_err());
         assert!(Command::parse("debug-dock-click").is_err());
         assert!(Command::parse("debug-click 60 70 alt").is_err());
         assert_eq!(Command::parse("space"), Ok(Command::Space));

@@ -785,6 +785,12 @@ def run():
     else:
         check(yes("Does the strip on Desktop 2 show only Bravo or Fixture 3 (no Fixture 1, 2 or Alpha)?"), "strip on Desktop 2 (by eye)")
 
+    if os.environ.get("SM_CMDTAB_ONLY"):
+        # The ⌘Tab steps alone, N times (round cmdtab-park): SM_CMDTAB_ONLY=N.
+        for i in range(int(os.environ.get("SM_CMDTAB_ONLY") or 1)):
+            say(f"\n== ⌘Tab home, round {i + 1} ==")
+            cmd_tab_cases(d1, d2)
+        return
     say("\n== a card click on Desktop 2 never changes the Desktop ==")
     vis = s["display"]["visible"]
     x, y = vis["x"] + 70, vis["y"] + vis["h"] / 2
@@ -1321,8 +1327,14 @@ def cmd_tab_cases(d1, d2):
     3. **Held** (one Tab held 400 ms): 0 Space changes, the Fixture stage in front on
        Desktop 1; the app's log says Fixture 1 was put home while the switcher showed, and
        who decided (the prediction at the Tab, the Dock's list once it showed).
-    4. **A quick tap** (⌘ let go ~60 ms after the Tab went down: no switcher list ever): 0
+    4. **Browsing** (round cmdtab-park, the owner's flicker of 11-15): ⌘ held, Tab to the
+       fixture app (its window put home, parked off the screen), 250 ms later Tab on (taken
+       back), Escape: the window server sampled every 20 ms never lists the fixture's window on
+       screen at its frame, and no Space change.
+    5. **A quick tap** (⌘ let go ~60 ms after the Tab went down: no switcher list ever): 0
        Space changes, the Fixture stage in front; the prediction alone decided.
+    In 3 the window put home is listed parked (the park zone) while the switcher shows, and at
+    its frame once its stage is in front.
     Each prints the probe's report: the Dock's switcher as Accessibility showed it, what the
     input monitor heard, what the probe's event tap saw."""
     if not AUTO or not ts.SPACES:
@@ -1374,6 +1386,55 @@ def _cmd_tab_setup(d1, d2, label):
     return True
 
 
+def _frames_sampler(ms):
+    """The window server sampled every 20 ms for `ms` (the fixture app's windows), from now."""
+    p = subprocess.Popen([ts.BIN, "probe-windows", "--every", "20", "--for", str(ms), ts.FIX_ID],
+                         env=ts.ENV, stdout=subprocess.PIPE, text=True)
+    time.sleep(0.1)  # its first look is before the keys
+    return p
+
+
+def _sampled(p, label):
+    """The sampler's samples and display (None when it failed: reported)."""
+    try:
+        out, _ = p.communicate(timeout=15)
+        reply = json.loads(out)
+        return reply["samples"], reply["display"]
+    except Exception as e:  # noqa: BLE001 - a sampler that failed is reported, not fatal
+        p.kill()
+        check(False, f"{label}: the window server was sampled ({e})")
+        return None, None
+
+
+def _lent_window(r):
+    """The window the probe's report says was put home first, its time (s since 1970) and
+    whether it was parked; (None, None, None) when none was."""
+    for ev in r.get("events", []):
+        if ev["kind"] == "lent":
+            m = re.search(r"window=(\d+)", ev["what"])
+            if m:
+                return int(m.group(1)), r.get("started_epoch", 0) + ev["ms"] / 1000, "parked=true" in ev["what"]
+    return None, None, None
+
+
+def _seen_at_frame(samples, wid, display, since, until):
+    """Samples from `since` to `until` (s since 1970) where window `wid` is on screen out of
+    the park zone (seen at a frame of its own), and those where it is on screen parked."""
+    shown, parked = [], []
+    for sm in samples:
+        if not since <= sm["t"] <= until:
+            continue
+        for w in sm["windows"]:
+            if w["id"] == wid and w["onscreen"]:
+                (parked if ts.is_parked(w["bounds"], display) else shown).append((round(sm["t"] - since, 3), ts.fmt(w["bounds"])))
+    return shown, parked
+
+
+def _listed_frame(wid):
+    w = next((w for w in probe_all() if w["id"] == wid), None)
+    return w and w["bounds"]
+
+
 def _cmd_tab_cases(d1, d2):
     # 1. Escape before ⌘'s release.
     if not _cmd_tab_setup(d1, d2, "cmd-tab escape"):
@@ -1413,10 +1474,25 @@ def _cmd_tab_cases(d1, d2):
     # 3. Held 400 ms.
     if not _cmd_tab_setup(d1, d2, "cmd-tab held"):
         return
+    before = {w["id"]: w["bounds"] for w in probe_all()}
+    sampler = _frames_sampler(2500)
     t0 = time.time()
     r = ts.cmd_tab_probe("release", "1", "400")
     time.sleep(1.0)
     ts.say_cmd_tab_report(r, "cmd-tab held 400 ms")
+    samples, display = _sampled(sampler, "cmd-tab held")
+    wid, lent_at, parked = _lent_window(r)
+    if samples and wid and r.get("released_ms") is not None:
+        released_at = r.get("started_epoch", 0) + r["released_ms"] / 1000
+        shown, seen_parked = _seen_at_frame(samples, wid, display, lent_at + 0.03, released_at - 0.01)
+        say(f"    held: window {wid} put home (parked={parked}); on screen while the switcher showed: "
+            f"parked {len(seen_parked)} sample(s), at a frame of its own {shown[:4]}")
+        check(not shown and seen_parked,
+              f"cmd-tab held: while the switcher shows, the window put home is listed parked, not at its frame ({shown[:4]})")
+        after = _listed_frame(wid)
+        check(after and before.get(wid) and ts.close(after, before[wid]),
+              f"cmd-tab held: after the switch window {wid} sits at its frame ({after and ts.fmt(after)}, "
+              f"was {before.get(wid) and ts.fmt(before[wid])})")
     check(r.get("ok") and r.get("outcome") == "released", f"cmd-tab held: ⌘ let go on the fixture app ({r.get('error') or r.get('outcome')})")
     changes = space_changes_since(t0)
     x = state()
@@ -1429,7 +1505,39 @@ def _cmd_tab_cases(d1, d2):
     by = [m.group(0) for m in (re.search(r'by="[^"]*"', line) for line in lines if "cmd-tab: the switcher selects an app" in line) if m]
     say(f"    who decided the selection: {by or 'no selection line'}")
 
-    # 4. A quick tap: ⌘ let go ~60 ms after the Tab went down (10 ms to its release, 50 held).
+    # 4. Browsing, before the tap: the run then leaves the fixture app in front as before (a
+    # relaunch later in the run after an Escape here met an open bug: an app activated during a
+    # relaunch's first slide to Desktop 2 took macOS back to Desktop 1, live 11-15). Tab to the fixture app, 250 ms, Tab on, held 300 ms, Escape.
+    if not _cmd_tab_setup(d1, d2, "cmd-tab browse"):
+        return
+    before = {w["id"]: w["bounds"] for w in probe_all()}
+    sampler = _frames_sampler(3000)
+    t0 = time.time()
+    r = ts.cmd_tab_probe("cancel", "2", "300", "250")
+    ts.say_cmd_tab_report(r, "cmd-tab browse (Tab, 250 ms, Tab, Escape)")
+    samples, display = _sampled(sampler, "cmd-tab browse")
+    changes = space_changes_since(t0)
+    x = state()
+    check(not changes, f"cmd-tab browse: no Space change ({changes})")
+    check(x.get("space") == d1 and x["active"] == stage_holding(x, "Alpha 1")
+          and any(w["title"] == "Fixture 1" and w["parked"] for w in x["windows"]),
+          f"cmd-tab browse: Alpha's stage still in front, Fixture 1 hidden ({ts.stage_titles(x)})")
+    wid, lent_at, parked = _lent_window(r)
+    lines = [line for _, line in log_events(t0)]
+    say(f"    browse: put home {wid} (parked={parked}); "
+        f"back: {[line[line.find('restored'):][:20] for line in lines if 'the window put home for the switcher goes back' in line]}")
+    if check(wid is not None, "cmd-tab browse: the fixture's window was put home at the first Tab") and samples:
+        shown, seen_parked = _seen_at_frame(samples, wid, display, 0, float("inf"))
+        check(not shown, f"cmd-tab browse: the fixture's window never on screen at its frame ({len(shown)} sample(s): {shown[:4]})")
+        say(f"    browse: listed parked on screen in {len(seen_parked)} sample(s)")
+        check(any("goes back" in line and "restored=Some(true)" in line for line in lines),
+              "cmd-tab browse: taken back with its frame restored (log)")
+        after = _listed_frame(wid)
+        check(after and before.get(wid) and ts.close(after, before[wid]),
+              f"cmd-tab browse: window {wid} back at its frame, hidden ({after and ts.fmt(after)}, "
+              f"was {before.get(wid) and ts.fmt(before[wid])})")
+
+    # 5. A quick tap: ⌘ let go ~60 ms after the Tab went down (10 ms to its release, 50 held).
     if not _cmd_tab_setup(d1, d2, "cmd-tab tap"):
         return
     t0 = time.time()
