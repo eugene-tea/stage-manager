@@ -159,17 +159,22 @@ the classic call, which needs no bridge), `window_engine::fall_back` installs th
 engine and records why, the controller takes the new engine, the model's answers follow
 (`Model::set_engine`), the parked file is written again, and the windows the model counts
 hidden on a Desktop shown are parked (those on another Desktop when it shows, as always).
-`ctl debug-engine-fail next|hide|show|all` (test only) drives it in the live suite's
-`engine` phase.
+What the bring-back could not bring out is swept again from the tick every two seconds until
+no window is held or owed and no stage Space is left, and a failed Spaces engine holds no new
+window for a launch's watch. `ctl debug-engine-fail next|hide|show|all` (test only) drives it
+in the live suite's `engine` phase.
 
 Quit, a crash (the guardian), a logout and a stand-down use the same `bring_all_back`
 whichever engine runs. Each choice and fallback is logged with its reason. The parked file
-of a Spaces run names its stage Spaces with their Desktops (`ParkedFile::spaces`): the
-guardian's engine takes them as its own (`assume`) and its sweep moves windows out of them
-if the app still holds them; after a crash they are gone already. A Spaces run's recovery
-scan also runs the Corner scan when an earlier copy left registered windows, so a Corner
-run that crashed with windows in the park corner is brought back the Corner way under
-Spaces (the launch scan is the Corner one under either engine).
+of a Spaces run names its stage Spaces with their Desktops (`ParkedFile::spaces`), only for
+the log: the guardian starts once the app has ended, and they ended with it. Its engine takes
+the app's screens from the file as the Corner engine's does (`assume`: the visible frame, the
+corners, the other screens' zones), since a window parked at the corner for ⌘Tab's lend stays
+there when the app ends; a registered window there is stranded by the park-zone rule under
+either engine. A Spaces run's recovery scan also runs the Corner scan when an earlier copy
+left registered windows, and in the guardian, so a Corner run that crashed with windows in
+the park corner, or a lend's park, is brought back the Corner way under Spaces (the launch
+scan is the Corner one under either engine).
 
 In the code so far (the seam, Corner only): the model emits `Action::Hide { id }` and never a
 park frame, and asks every question about where hidden windows are through one door
@@ -220,13 +225,16 @@ the mask that takes it out of every kind of Space, then the frame through Access
 when the window is not already at it (a hide does not move a window, so most shows ask the
 app nothing, and a frozen app's window hides and shows all the same). The stage Space is
 never shown. A hidden window keeps its frame and is listed off screen, so
-no frame says "hidden" (`is_hidden` and `stranded` answer false) and the trait has one more
+no frame says "hidden" (`is_hidden` answers false, `stranded` too but for a registered window
+at the park corner of ⌘Tab's lend) and the trait has one more
 question, `present_off_screen`: the windows hidden on a Desktop that shows, which every count
 of a Desktop's windows adds to the on-screen list (a window gone from the screen left its
 Desktop; a hidden one did not). No return code is trusted: after every hide and show the
 window's Spaces are read back, a miss is logged and counted (`ctl state`, `engine`), a show
-that left a window hidden is owed and tried again by the tick, and about once a second the
-upkeep checks that the windows the model counts hidden are the ones in stage Spaces, and
+that left a window hidden is owed and tried again by the tick (so is the frame a show asked
+of a window parked for ⌘Tab's lend that it did not take), and about once a second the
+upkeep checks, by the window server's word, that the windows the model counts hidden are the
+ones in stage Spaces, and
 every few seconds lets out any window found in a stage Space that the engine does not hold.
 Two things the window server does not say for a window in a stage Space, so the shared code
 asks otherwise: a window its app closed without a notice is listed exactly as before, so the
@@ -357,7 +365,8 @@ A parked window that never returns is the worst bug.
    window). A stand-down (Apple's Stage Manager turned on) ends with the same check; the
    windows it could not bring back are looked for again at each Desktop change, the
    windows parked since left alone.
-3. **Panic hook** unparks (`try_lock`, falls back to the scan).
+3. **Panic hook** unparks (`try_lock`, falls back to the scan; the Spaces engine's sweep
+   waits at most 100 ms for its state and is skipped when the panicking thread holds it).
 4. **SIGTERM/SIGINT/SIGHUP** through a self-pipe to a watcher thread that unparks and exits.
 5. **Guardian** (`stage-manager --guardian <pid>`), restarted if it dies while the app runs:
    when the parent dies without its clean-exit marker it runs the recovery scan, then waits
