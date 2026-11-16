@@ -27,6 +27,13 @@ gate; A4: where a newly opened app goes).
 | The round trip | "Open here" when the hide came too late: the stage pushed into the strip put back with the new app's | The window list to see the old stage land in the strip, then a Shift-click per window of it, then the new app's window focused | About 1 s, visible (out, then back in), longer for a stage of several windows | The strip covered; the old stage past the strip's room (brought in front by focus first, then the rest clicked back) | `engine/apple/job.rs` (`Goal::Gather`) | Probe 11-16: window at about 285 ms, the old stage in the strip at about 1 s; `scripts/test_apple.py open-here` says which route ran |
 | The edge reveal | Shows a hidden strip | The pointer resting at the screen's left edge | About 2 s of the pointer at the edge | A single posted move or a quick sweep does not reveal | not built (decided 11-16: wait for the strip to show instead) | Probe 11-16 |
 
+**Apple's rule for an app's windows.** With "Show windows from an application: All at Once"
+(`AppWindowGroupingBehavior = 1`, the default) Apple's never splits one app's windows into
+two stages: a drag of one window while another of its app stays only moves it, from every
+drop point tried (the fifth probe, 11-16; the drags that worked took out another app's
+window). Send and New for such a window are refused up front with that reason, nothing
+posted (`engine/apple/plan.rs`, `apart`); under "One at a Time" they are tried (unprobed).
+
 ### The gate
 
 Every posted step waits for the gate (`engine/apple/gate.rs`): no mouse button down; no ⌘, ⌥

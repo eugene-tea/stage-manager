@@ -272,6 +272,10 @@ no strip of its own.
   frame for a click, about a second for a drag. Nothing is posted while you click, drag,
   move the pointer, type or hold a modifier key, or while Apple's Stage Manager is still
   moving windows; a step that cannot go within a moment is given up and logged.
+- With "Show windows from an application: All at Once" (System Settings, Desktop & Dock),
+  Apple's Stage Manager keeps an app's windows in one stage: a window whose app has another
+  window in its stage cannot be sent to another stage or given one of its own, and the
+  hotkey or `ctl` says so.
 - A newly opened app joins the stage in front when a rule says `current`, with
   `[stages] new_apps_join_current` on, or when Shift is held as it opens
   (`[sugar] shift_brings_here`). Stage Manager hides the app as it launches, so Apple's

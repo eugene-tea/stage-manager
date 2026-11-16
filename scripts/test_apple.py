@@ -23,9 +23,11 @@ Phases (all by default, or name them):
           in front by one Shift-click per window, all in one Shift press; timed to the moment
           the window list shows them joined (the job's own "done" printed as info); the
           pointer back where it was.
-  split   `ctl new ID` (the drag onto the strip) takes Alpha's front window out of its stage
-          of two to a stage of its own; `ctl send N ID` moves Bravo to that stage and comes
-          back; the pointer back.
+  split   Under All at Once (AppWindowGroupingBehavior 1, read only) `ctl new` for a window
+          of Alpha's, its sibling staying, is refused with the reason and posts nothing
+          (Apple's keeps an app's windows in one stage); Bravo merged into Alpha's stage is
+          taken out by `ctl new ID` (the drag onto the strip); `ctl send N ID` moves Charlie
+          to Bravo's stage and comes back; the pointer back.
 
 Each phase from switch on sets its own starting arrangement: every fixture alone in a stage
 of its own (one that is not is quit and opened again), never through the routes under test.
@@ -486,6 +488,13 @@ def phase_merge():
         check(last.get("presses") == 1, f"merge {n}: in one Shift press ({last.get('presses')})")
 
 
+def all_at_once():
+    """Apple's "Show windows from an application" is All at Once (`AppWindowGroupingBehavior`
+    1, the default when absent). Read only."""
+    r = subprocess.run(["defaults", "read", DOMAIN, "AppWindowGroupingBehavior"], capture_output=True, text=True)
+    return r.returncode != 0 or r.stdout.strip() != "0"
+
+
 def phase_split():
     say("\n== split: ctl new ID (the drag), ctl send N ID ==")
     separate()
@@ -494,19 +503,34 @@ def phase_split():
     if not s:
         check(False, "the mirror settles before the split")
         return
-    alpha, bravo = windows_of(s, "Alpha"), windows_of(s, "Bravo")
-    current = s["apple"]["current"]
-    if not check(len(alpha) == 2 and sorted(current) == alpha and bravo, f"Alpha's stage of two in front ({len(current)} windows)"):
+    alpha, bravo, charlie = windows_of(s, "Alpha"), windows_of(s, "Bravo"), windows_of(s, "Charlie")
+    # Under All at Once Apple's keeps an app's windows in one stage (the fifth probe of 11-16):
+    # a window of Alpha's, its sibling staying, is refused up front, nothing posted.
+    if all_at_once():
+        drags = route_runs(s, "drag")
+        r = ctl("new", s["apple"]["current"][0])
+        check(not r.get("ok") and "All at Once" in (r.get("error") or ""), f"new: a window whose app's other window stays is refused, the reason said ({r.get('error')})")
+        s = quiet_state()
+        check(s is not None and route_runs(s, "drag") == drags, "new: nothing posted for it")
+    else:
+        say("  info One at a Time: the same-app refusal does not apply")
+    # Bravo into Alpha's stage (one Shift press), then out again by the drag: another app's
+    # window.
+    n = stage_number(s, bravo)
+    if not check(n is not None, f"Bravo's stage is {n}"):
         return
-    w, keep = current[0], current[1]
+    ctl("merge", n)
+    s = wait_until(lambda: (lambda s: s if sorted(s["apple"]["current"]) == sorted(alpha + bravo) and idle_jobs(s) else None)(ctl("state")), 6, "Bravo in Alpha's stage")
+    if not check(s is not None, "Bravo merged into Alpha's stage before the drag"):
+        return
     drags = route_runs(s, "drag")
     p0 = pointer()
     t0 = time.time()
-    r = ctl("new", w)
-    check(r.get("ok") and r.get("route") == "drag", f"new {w}: the drag ({r})")
-    s = wait_until(lambda: (lambda s: s if s["apple"]["current"] == [keep] and [w] in others(s) else None)(ctl("state")), 6, "Alpha's front window in a stage of its own")
+    r = ctl("new", bravo[0])
+    check(r.get("ok") and r.get("route") == "drag", f"new {bravo[0]}: the drag ({r})")
+    s = wait_until(lambda: (lambda s: s if sorted(s["apple"]["current"]) == alpha and bravo in others(s) else None)(ctl("state")), 6, "Bravo in a stage of its own")
     took = time.time() - t0
-    check(s is not None, f"new: Alpha's front window out to a stage of its own ({took:.2f} s to the list showing it)")
+    check(s is not None, f"new: Bravo out to a stage of its own ({took:.2f} s to the list showing it)")
     s = quiet_state()
     last = ((s or {}).get("apple") or {}).get("last") or {}
     say(f"  info new: done at {last.get('ms')} ms, {last.get('drags')} drags, {last.get('focuses')} focuses; given up: {last.get('given_up')}")
@@ -514,15 +538,15 @@ def phase_split():
     check(near(p1, p0), f"new: the pointer back where it was ({p0} -> {p1})")
     if s:
         check(route_runs(s, "drag") == drags + 1, f"new: one drag ({route_runs(s, 'drag') - drags})")
-    # Bravo, in the strip, to that window's stage, and the stage in front back.
-    n = stage_number(s, [w]) if s else None
-    if not check(n is not None, f"the window taken out is stage {n}"):
+    # Charlie, in the strip, to Bravo's stage, and Alpha's stage in front again.
+    n = stage_number(s, bravo) if s else None
+    if not check(n is not None and charlie, f"Bravo's stage of its own is stage {n}"):
         return
     p0 = pointer()
-    r = ctl("send", n, bravo[0])
-    check(r.get("ok"), f"send {n} {bravo[0]}: planned ({r})")
-    s = wait_until(lambda: (lambda s: s if s["apple"]["current"] == [keep] and sorted([w, bravo[0]]) in [sorted(g) for g in others(s)] and idle_jobs(s) else None)(ctl("state")), 8, "Bravo with the window taken out, the stage in front back")
-    check(s is not None, "send: Bravo joined the stage of the window taken out, the stage left is in front again")
+    r = ctl("send", n, charlie[0])
+    check(r.get("ok"), f"send {n} {charlie[0]}: planned ({r})")
+    s = wait_until(lambda: (lambda s: s if sorted(s["apple"]["current"]) == alpha and sorted(bravo + charlie) in [sorted(g) for g in others(s)] and idle_jobs(s) else None)(ctl("state")), 8, "Charlie with Bravo, Alpha's stage in front again")
+    check(s is not None, "send: Charlie joined Bravo's stage, the stage left is in front again")
     p1 = pointer()
     check(near(p1, p0), f"send: the pointer back where it was ({p0} -> {p1})")
 
