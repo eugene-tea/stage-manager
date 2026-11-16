@@ -96,6 +96,11 @@
   copy using the park corner left there (it stopped unexpectedly, or was an earlier version)
   come out of the corner when their Desktop shows, as does a window an app reopens at a
   corner frame it saved then. They stayed in the corner as slivers counted shown.
+- With macOS's Spaces keeping the hidden windows and the windows themselves flying the end
+  of a stage change (both test opt-ins), overlapping windows of the stage coming in keep
+  their order as they fly and land: the window behind lands first and no longer ends on top
+  of the one in front. Two overlapping windows of two apps flickered, trading places, as
+  they flew in.
 
 ## 1.8.5 — 2026-11-12
 

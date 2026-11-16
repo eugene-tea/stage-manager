@@ -34,6 +34,7 @@ use super::ax::{AxElement, AxResult};
 use super::safety::{Ours, Report, ScanScope};
 use crate::engine::engine_choice::{self, Asked, Choice, ConfigEngine};
 use crate::engine::geometry::Rect;
+use crate::engine::landing_order;
 use crate::engine::model::{Display, Model, WindowId};
 use crate::ui::landing_math::Affine;
 use crate::ui::strip_model::Transition;
@@ -105,6 +106,11 @@ pub struct Stretch {
     pub frame: Rect,
     /// Each step: when, and the transform then ([`crate::ui::landing_math::stretch`]).
     pub steps: Vec<(Instant, Affine)>,
+    /// Its place among the switch's stretches, 0 the front ([`landing_order::ranks`]).
+    pub rank: usize,
+    /// The switch's stretches flying together (round landing-order: shown, stepped and
+    /// landed back to front); `None` when it flies alone.
+    pub convoy: Option<Arc<landing_order::Convoy>>,
 }
 
 /// What became of a [`Stretch`], told from the landing's own thread.

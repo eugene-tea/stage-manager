@@ -22,6 +22,15 @@
 //! other Space ([`SpacesEngine::stop_stretch`]); a bring-back ends every stretch first
 //! ([`SpacesEngine::end_stretches`]).
 //!
+//! **Several at once** (round landing-order): a switch's stretches fly as one convoy
+//! ([`landing_order`]), ranked by the stage's order: each landing Space is shown after those
+//! behind it, sets each step's transform a millisecond or so after them, and its window goes
+//! onto its Desktop only once the windows behind it have (bounded waits, never on a window in
+//! front). Live 11-15, two overlapping windows of two apps traded places while they flew and
+//! the one behind, landing last, was listed on top until the switch's focus. The level the
+//! Spaces are made with is logged once a run; the test switch's
+//! `STAGE_MANAGER_LANDING_LEVEL=ranked` gives them levels by rank instead.
+//!
 //! **The transform's route.** The stills of S4 set it with the bridged call on a bridged
 //! Space; this Space is a classic one (it must end with us), so the classic call is tried
 //! first and read back once; if the read-back differs, the bridged call is used for the rest
@@ -37,6 +46,7 @@ use objc2_core_foundation::CGAffineTransform;
 
 use super::super::ffi::{ALL_SPACES_MASK, Route, Sky, answers};
 use super::{SpacesEngine, hidden_in, shared};
+use crate::engine::landing_order::{self, Leg, LevelMode, Waited};
 use crate::platform::window_engine::{Stretch, StretchDone, StretchNote};
 use crate::platform::windows;
 use crate::ui::landing_math::{Affine, IDENTITY};
@@ -148,6 +158,20 @@ fn same(a: [f64; 6], b: Affine) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-4)
 }
 
+/// The landing Spaces' level ([`LevelMode`]): the test switch's
+/// [`landing_order::LEVEL_ENV`], read once; a stretch flies only in a test or review run.
+fn level_mode() -> LevelMode {
+    static M: std::sync::OnceLock<LevelMode> = std::sync::OnceLock::new();
+    *M.get_or_init(|| {
+        let gated = crate::ui::landing_math::Landing::current().live().is_some();
+        let mode = LevelMode::from(gated, std::env::var(landing_order::LEVEL_ENV).ok().as_deref());
+        if mode != LevelMode::AsMade {
+            tracing::info!(mode = mode.name(), "spaces engine: the landing Spaces are given levels by rank");
+        }
+        mode
+    })
+}
+
 impl SpacesEngine {
     /// The stretches, behind their own lock (taken before the state's when both are, never
     /// the other way).
@@ -204,6 +228,24 @@ impl SpacesEngine {
         }
     }
 
+    /// Gives landing Space `space` (window `id`'s, rank `rank` of `count`) its level when the
+    /// test switch asks for one ([`landing_order::level`]); the level it was made with is
+    /// logged once a run (what the window server gives a classic Space by default).
+    fn set_landing_level(sky: &Sky, id: u32, space: u64, rank: usize, count: usize) {
+        static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let mode = level_mode();
+        let made = sky.get_level(space);
+        let want = landing_order::level(mode, rank, count);
+        let set = want.map(|level| sky.set_level(Route::Classic, space, level));
+        let now = if want.is_some() { sky.get_level(space) } else { made };
+        if !SAID.swap(true, Ordering::Relaxed) {
+            tracing::info!(id, space, ?made, mode = mode.name(), "spaces engine: the landing Spaces are made at this level");
+        }
+        if want.is_some() {
+            tracing::debug!(id, space, rank, count, ?made, ?want, ?set, readback = ?now, "spaces engine: a landing Space's level set by its rank");
+        }
+    }
+
     /// True when this Mac's SkyLight has what a last stretch needs ([`can_land`]): asked once.
     pub(super) fn landing_calls(&self) -> bool {
         static CAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -242,6 +284,8 @@ impl SpacesEngine {
             unsafe { libc::pthread_set_qos_class_self_np(libc::qos_class_t::QOS_CLASS_USER_INTERACTIVE, 0) };
             let engine = shared();
             let note = engine.fly(&s, &done);
+            // However it ended, nothing in front waits for it any more.
+            Self::gone(&s);
             {
                 let mut st = engine.state();
                 match note {
@@ -273,14 +317,28 @@ impl SpacesEngine {
         if !self.set_landing_transform(sky, space, first) {
             return self.skip(id, Some(space), "its Space's transform could not be set");
         }
+        let count = s.convoy.as_ref().map_or(1, |c| c.count());
+        Self::set_landing_level(sky, id, space, s.rank, count);
+        // Shown back to front: the Spaces behind it first (round landing-order).
+        if let Some(c) = &s.convoy {
+            let waited = c.wait_behind(s.rank, Leg::Shown, Instant::now() + landing_order::SHOW_WAIT, || false);
+            if !matches!(waited, Waited::Ready(d) if d < Duration::from_millis(1)) {
+                tracing::debug!(id, space, rank = s.rank, ?waited, "spaces engine: a landing Space waited for those behind it to show");
+            }
+        }
         if let Err(e) = sky.show_hide(Route::Classic, &[space], true) {
             tracing::debug!(id, space, "spaces engine: a landing Space could not be shown: {e}");
             return self.skip(id, Some(space), "its Space could not be shown");
         }
+        if let Some(c) = &s.convoy {
+            c.mark(s.rank, Leg::Shown);
+        }
+        // Within each step the front's transform follows those behind it.
+        let lag = landing_order::stagger(s.rank, count);
         if !self.claim_space(id, space) {
             return self.skip(id, Some(space), "stopped before the handover");
         }
-        sleep_until(first_at);
+        sleep_until(first_at + lag);
         // The handover: only while nothing stopped it and the window is still in its stage's
         // Space (the controller has not shown or hidden it meanwhile).
         let took = {
@@ -332,7 +390,7 @@ impl SpacesEngine {
         // The rest of the path.
         let mut stopped = false;
         for &(at, m) in s.steps.iter().skip(1) {
-            sleep_until(at);
+            sleep_until(at + lag);
             let l = self.stretches();
             if l.get(&id).is_none_or(|f| f.stop) {
                 stopped = true;
@@ -341,13 +399,26 @@ impl SpacesEngine {
             self.set_landing_transform(sky, space, m);
         }
         if stopped {
+            Self::gone(s);
             return self.stopped(sky, id, space);
+        }
+        // Landed back to front: a window goes onto its Desktop (listed on top there) only
+        // once the windows behind it have; it waits at its frame, at the identity.
+        if let Some(c) = &s.convoy {
+            let waited = c.wait_behind(s.rank, Leg::Gone, Instant::now() + landing_order::LAND_WAIT, || self.stretches().get(&id).is_none_or(|f| f.stop));
+            match waited {
+                Waited::Ready(d) if d < Duration::from_millis(1) => {}
+                Waited::Ready(d) => tracing::debug!(id, rank = s.rank, waited_ms = d.as_millis() as u64, "spaces engine: a window waited at its frame for the windows behind it to land"),
+                Waited::TimedOut => tracing::debug!(id, rank = s.rank, wait_ms = landing_order::LAND_WAIT.as_millis() as u64, "spaces engine: a window behind still flew; this one lands first"),
+                Waited::Stopped => {}
+            }
         }
         // Home: the identity (the last step), onto its Desktop as a show puts it, the Space
         // ended.
         let mut l = self.stretches();
         if l.get(&id).is_none_or(|f| f.stop) || !lands_home(&sky.spaces_of(&[id]), space) {
             drop(l);
+            Self::gone(s);
             return self.stopped(sky, id, space);
         }
         self.set_landing_transform(sky, space, IDENTITY);
@@ -357,6 +428,8 @@ impl SpacesEngine {
         if let Some(home) = home {
             let _ = sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK);
         }
+        // Onto its Desktop: the window in front may follow.
+        Self::gone(s);
         let (out, listed) = self.read_back(sky, id, |now| !now.contains(&space));
         windows::set_transformed(id, None);
         let _ = sky.destroy(Route::Classic, space);
@@ -367,6 +440,14 @@ impl SpacesEngine {
         }
         tracing::debug!(id, ?home, "spaces engine: the window landed on its Desktop");
         StretchNote::Landed
+    }
+
+    /// Stretch `s` lands no more in its landing Space (on its Desktop, stopped or skipped):
+    /// the windows in front of it no longer wait for it ([`landing_order::Convoy`]).
+    fn gone(s: &Stretch) {
+        if let Some(c) = &s.convoy {
+            c.mark(s.rank, Leg::Gone);
+        }
     }
 
     /// Stretch `id`'s landing Space `space`, made, noted; false when the stretch stopped
@@ -541,7 +622,7 @@ mod tests {
     #[test]
     fn a_stretch_stops_for_a_show_or_a_hide() {
         let e = engine();
-        let s = Stretch { window: 7, frame: crate::engine::geometry::Rect::new(0.0, 0.0, 800.0, 600.0), steps: vec![(Instant::now(), IDENTITY)] };
+        let s = Stretch { window: 7, frame: crate::engine::geometry::Rect::new(0.0, 0.0, 800.0, 600.0), steps: vec![(Instant::now(), IDENTITY)], rank: 0, convoy: None };
         let done: StretchDone = std::sync::Arc::new(|_, _| {});
         assert!(!e.begin_stretch(s, done), "not hidden by the engine: nothing planned");
         e.stretches().insert(7, Fly { phase: Phase::Waiting, stop: false, ended: false, space: 0, home: 0 });

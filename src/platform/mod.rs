@@ -44,6 +44,7 @@ pub mod permissions;
 pub mod safety;
 pub mod self_capture;
 pub mod session;
+pub mod pixels_probe;
 pub mod settle_probe;
 pub mod shadow_probe;
 pub mod shadow_profile;

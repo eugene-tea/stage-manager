@@ -18,6 +18,10 @@
 #                                          # stage's pictures fly (round sm-landing; SM_LANDING_SWITCHES=n,
 #   scripts/test-stages.sh landing-abort   # a window flying its last stretch cut short, quit, killed (SM_ENGINE=spaces, STAGE_MANAGER_LANDING=live*)
 #                                          # STAGE_MANAGER_LANDING=pictures|ordered|live|live-early|live-late)
+#   scripts/test-stages.sh landing-order   # two overlapping windows of two apps keep their order as they
+#                                          # land: the overlap's pixels and the window list every 10 ms
+#                                          # (round landing-order; SM_LANDING_ORDER_SWITCHES=n; with
+#                                          # STAGE_MANAGER_LANDING_LEVEL=ranked the landing Spaces get levels)
 #   scripts/test-stages.sh behave          # an app's front window on arrival; a card dropped
 #                                          # on the other screen (round parity-behave)
 #   scripts/test-stages.sh screens         # two screens (skipped with one): ⌘-Tab to a card on the other
