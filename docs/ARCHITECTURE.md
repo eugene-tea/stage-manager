@@ -251,7 +251,8 @@ the window server first, one call a window and no listing (`SLSHWCaptureWindowLi
 window within the displays, on screen or in a stage Space; `CGWindowListCreateImage` for one
 partly off every display, a parked window), and ScreenCaptureKit only for a window that
 source misses (the call missing, nothing handed back, a picture that cannot be the window),
-for every picture when the first one of a call came back blank, and for a window's look read
+for every picture of a call while it rests (its pictures of three windows came back blank
+before any was the window: 30 min, then it is tried again), and for a window's look read
 from its shadow (every window of a round with no reading, a few at most and one listing, else
 one a round, each window's every 20 s at most; and after each switch lands, for its windows
 with none). Card thumbnails are taken at

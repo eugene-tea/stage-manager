@@ -22,8 +22,10 @@
 //! here when a smaller one was asked for (a card's thumbnail). The caller falls back to
 //! ScreenCaptureKit ([`super::capture`]) for any window this source misses: the symbol missing,
 //! the call handing back nothing, or a picture that cannot be the window (empty, the wrong
-//! shape, or see-through all over). A route whose first picture of the run comes back blank is
-//! not used again in this run (logged once). `STAGE_MANAGER_CAPTURE_SCK` (honoured only with
+//! shape, or see-through all over). A route whose pictures of [`BLANK_STRIKES`] different
+//! windows come back blank before any is the window rests for [`OFF_FOR`], then is tried again
+//! (logged once); once one picture was the window, it is never turned off in that run.
+//! `STAGE_MANAGER_CAPTURE_SCK` (honoured only with
 //! `STAGE_MANAGER_ONLY`, a test run) turns this source off: every picture through
 //! ScreenCaptureKit, as before 1.9.
 //!
@@ -33,8 +35,9 @@
 //! call makes macOS ask).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
@@ -83,23 +86,81 @@ impl Route {
         }
     }
 
-    fn state(self) -> &'static AtomicU8 {
-        match self {
-            Route::Fast => &FAST_STATE,
-            Route::Whole => &WHOLE_STATE,
+    fn health(self) -> MutexGuard<'static, Health> {
+        let m = match self {
+            Route::Fast => &FAST_HEALTH,
+            Route::Whole => &WHOLE_HEALTH,
+        };
+        m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Blank pictures of this many different windows rest a route that has not brought the window
+/// yet (the review's D-3: one blank first picture, a window still being
+/// restored at login, turned the route off until the next launch).
+pub const BLANK_STRIKES: usize = 3;
+/// How long a route rests after [`BLANK_STRIKES`] before it is tried again.
+pub const OFF_FOR: Duration = Duration::from_secs(30 * 60);
+
+/// What this run knows of a route: whether a picture was the window yet, the windows whose
+/// pictures came back blank since, and a rest.
+#[derive(Debug, Default)]
+pub struct Health {
+    works: bool,
+    /// Different windows whose pictures came back blank (none was the window yet).
+    blanks: Vec<u32>,
+    /// Resting until then.
+    off_until: Option<Instant>,
+}
+
+impl Health {
+    /// True unless the route rests at `now`; a rest over starts the count afresh.
+    pub fn usable(&mut self, now: Instant) -> bool {
+        match self.off_until {
+            Some(until) if now < until => false,
+            Some(_) => {
+                self.off_until = None;
+                self.blanks.clear();
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// Window `id`'s picture came back blank: true when this rests the route (from `now`).
+    pub fn blank(&mut self, id: u32, now: Instant) -> bool {
+        if self.works {
+            return false;
+        }
+        if !self.blanks.contains(&id) {
+            self.blanks.push(id);
+        }
+        if self.blanks.len() < BLANK_STRIKES {
+            return false;
+        }
+        self.blanks.clear();
+        self.off_until = Some(now + OFF_FOR);
+        true
+    }
+
+    /// A picture was the window: true for the route's first in this run.
+    pub fn good(&mut self) -> bool {
+        !std::mem::replace(&mut self.works, true)
+    }
+
+    fn word(&self) -> &'static str {
+        match (self.works, self.off_until) {
+            (true, _) => "works",
+            (false, Some(_)) => "off",
+            (false, None) => "untried",
         }
     }
 }
 
-/// A route not tried yet in this run.
-const UNTRIED: u8 = 0;
-/// A route whose first picture was the window.
-const WORKS: u8 = 1;
-/// A route not used in this run (its first picture came back blank).
-const OFF: u8 = 2;
-
-static FAST_STATE: AtomicU8 = AtomicU8::new(UNTRIED);
-static WHOLE_STATE: AtomicU8 = AtomicU8::new(UNTRIED);
+static FAST_HEALTH: Mutex<Health> = Mutex::new(Health { works: false, blanks: Vec::new(), off_until: None });
+static WHOLE_HEALTH: Mutex<Health> = Mutex::new(Health { works: false, blanks: Vec::new(), off_until: None });
+/// A route's rest was logged at info once; later ones at debug.
+static REST_SAID: AtomicBool = AtomicBool::new(false);
 
 /// The calls, loaded once; each `None` when this macOS does not export it.
 struct Calls {
@@ -154,22 +215,18 @@ fn forced_by(asked: bool, only: bool) -> bool {
 }
 
 /// True when this source may take pictures at all in this run (not forced off, the calls
-/// loaded, a route not turned off).
+/// loaded, a route not resting).
 pub fn enabled() -> bool {
     !forced_off() && calls().is_some_and(|c| (c.hw.is_some() && usable(Route::Fast)) || (c.list_image.is_some() && usable(Route::Whole)))
 }
 
 fn usable(route: Route) -> bool {
-    route.state().load(Ordering::Relaxed) != OFF
+    route.health().usable(Instant::now())
 }
 
 /// What this source says of itself, for the ctl dump.
 pub fn status() -> serde_json::Value {
-    let word = |r: Route| match r.state().load(Ordering::Relaxed) {
-        WORKS => "works",
-        OFF => "off",
-        _ => "untried",
-    };
+    let word = |r: Route| r.health().word();
     serde_json::json!({
         "forced_off": forced_off(),
         "fast": calls().and_then(|c| c.hw).map(|_| word(Route::Fast)).unwrap_or("missing"),
@@ -180,7 +237,7 @@ pub fn status() -> serde_json::Value {
 /// Why a window has no picture from this source: the caller takes it through ScreenCaptureKit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Miss {
-    /// The source is off, or the call for this window's route is missing or turned off.
+    /// The source is off, or the call for this window's route is missing or resting.
     Unavailable,
     /// The call handed back nothing.
     Nothing,
@@ -271,15 +328,21 @@ pub fn picture(t: Target, frame: Rect, displays: &[Rect]) -> Result<Picture, Mis
     let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
     let blank = w == 0 || h == 0 || see_through(&alphas(&image, w, h));
     if blank || !fits_window(w, h, frame) {
-        // The route's first picture of the run blank: not used again in this run.
-        if blank && route.state().compare_exchange(UNTRIED, OFF, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-            tracing::info!(route = route.as_str(), w, h, "window pictures: the first picture of this call came back blank; ScreenCaptureKit takes those pictures in this run");
+        // Blank pictures of a few windows before any was the window: the route rests.
+        if blank && route.health().blank(t.id, Instant::now()) {
+            let strikes = BLANK_STRIKES;
+            let rest_min = OFF_FOR.as_secs() / 60;
+            if REST_SAID.swap(true, Ordering::Relaxed) {
+                tracing::debug!(route = route.as_str(), strikes, rest_min, "window pictures: this call's pictures still come back blank; ScreenCaptureKit takes them for a while");
+            } else {
+                tracing::info!(route = route.as_str(), w, h, strikes, rest_min, "window pictures: this call's pictures of a few windows came back blank; ScreenCaptureKit takes them for a while, then the call is tried again");
+            }
         } else {
             tracing::debug!(window = t.id, route = route.as_str(), w, h, frame = ?frame, blank, "window picture: not the window; ScreenCaptureKit takes it");
         }
         return Err(Miss::NotTheWindow);
     }
-    if route.state().compare_exchange(UNTRIED, WORKS, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+    if route.health().good() {
         tracing::info!(route = route.as_str(), w, h, "window pictures: taken straight from the window server, no listing");
     }
     let (fw, fh) = capture_frame::fit_to_content((t.width, t.height), (w as f64, h as f64));
@@ -390,6 +453,31 @@ mod tests {
     }
 
     use super::*;
+
+    /// D-3: blank pictures rest a route only when a few different windows' come back so, and
+    /// only for a while; once a picture was the window, never.
+    #[test]
+    fn a_route_rests_only_after_blank_pictures_of_a_few_windows() {
+        let t0 = Instant::now();
+        let mut h = Health::default();
+        assert!(!h.blank(1, t0), "one window still being drawn at login");
+        assert!(!h.blank(1, t0), "the same window again");
+        assert!(!h.blank(2, t0));
+        assert!(h.usable(t0));
+        assert!(h.blank(3, t0), "a third window: the route rests");
+        assert!(!h.usable(t0 + OFF_FOR - Duration::from_secs(1)));
+        assert!(h.usable(t0 + OFF_FOR), "tried again after the rest");
+        assert!(!h.blank(4, t0 + OFF_FOR), "the count starts afresh");
+        let mut good = Health::default();
+        good.blank(1, t0);
+        good.blank(2, t0);
+        assert!(good.good(), "the first good picture");
+        assert!(!good.good());
+        for id in 3..10 {
+            assert!(!good.blank(id, t0), "a route that brought the window is never rested");
+        }
+        assert!(good.usable(t0) && good.word() == "works");
+    }
 
     /// D-7: a description that comes back empty for windows asked is a failed read; a window
     /// missing from an answer that describes others is closed.
