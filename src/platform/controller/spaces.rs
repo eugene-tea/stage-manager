@@ -40,12 +40,15 @@ pub(super) struct SpacesUpkeep {
     /// Windows left at a lend's park whose show did not take its frame, with their registry
     /// entries: kept registered while the engine owes the frame ([`Controller::show_failed`]).
     pub(super) frames_owed: BTreeMap<u32, ParkedEntry>,
+    /// After a fallback from this engine: what it left in its stage Spaces is swept again
+    /// until nothing is left ([`Controller::check_engine`]).
+    pub(super) left_behind: bool,
 }
 
 impl SpacesUpkeep {
     /// Nothing kept.
     pub(super) fn new() -> Self {
-        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None, frames_owed: BTreeMap::new() }
+        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None, frames_owed: BTreeMap::new(), left_behind: false }
     }
 }
 

@@ -79,6 +79,10 @@ const PARK_READ_BACK: Duration = Duration::from_millis(20);
 /// ([`SpacesEngine::retry_owed`]): the pace at which the Corner engine retries a restore.
 const FRAME_RETRY: Duration = Duration::from_secs(1);
 
+/// How often what this engine left in its stage Spaces is swept again once the Corner engine
+/// runs instead ([`SpacesEngine::sweep_left_behind`]).
+const AFTERLIFE_EVERY: Duration = Duration::from_secs(2);
+
 /// The stage key of a window the model names no stage for (a child read before its parent).
 const NO_STAGE: u64 = 0;
 
@@ -200,6 +204,9 @@ struct State {
     /// Windows put on their Desktop while still counted hidden ([`SpacesEngine::lend_window`]):
     /// each also in `held`, with the stage Space it goes back to.
     lent: BTreeSet<u32>,
+    /// When what the engine left behind after a fallback was last swept
+    /// ([`SpacesEngine::sweep_left_behind`]).
+    afterlife: Option<Instant>,
     /// Windows parked for a lend whose frame is not set again yet (round cmdtab-park,
     /// [`lend_park`]): lent and parked, taken back with the restore owed, or shown with the
     /// show's frame owed. Their move notices are not the model's
@@ -1130,9 +1137,53 @@ impl SpacesEngine {
         sky.active_space().filter(|s| shown.contains(s)).or(shown.first().copied())
     }
 
+    /// True while the engine may hold another app's new window: not once its checks failed
+    /// (the controller falls back to the Corner engine, and a launch's watch started before
+    /// would hold a window into a Space nothing drives any more: review A-5).
+    fn holds_new_windows(&self) -> bool {
+        self.state().health.failed().is_none()
+    }
+
+    /// True while a window or a Space of this engine is left: a window held, a show owed, a
+    /// stage Space not ended.
+    pub fn left_behind(&self) -> bool {
+        let st = self.state();
+        !st.held.is_empty() || !st.owed.is_empty() || !st.stages.is_empty()
+    }
+
+    /// The Corner engine runs now (a fallback): what this engine left behind, when its
+    /// bring-back could not bring everything out (a window server that refuses both routes,
+    /// a launch's watch that held a window just after), is swept again about every
+    /// [`AFTERLIFE_EVERY`] until nothing is left; nothing else drives this engine any more
+    /// (review A-5). True while something is left.
+    pub fn sweep_left_behind(&self) -> bool {
+        if !self.left_behind() {
+            return false;
+        }
+        let now = Instant::now();
+        {
+            let mut st = self.state();
+            if st.afterlife.is_some_and(|t| now.duration_since(t) < AFTERLIFE_EVERY) {
+                return true;
+            }
+            st.afterlife = Some(now);
+        }
+        let report = self.sweep("after the fallback", true);
+        let left = self.left_behind();
+        if left {
+            tracing::warn!(back = report.restored, failed = report.failed, "spaces engine: windows still left in stage Spaces after the fallback; swept again shortly");
+        } else {
+            tracing::info!(back = report.restored, "spaces engine: nothing is left in a stage Space after the fallback");
+        }
+        left
+    }
+
     /// The Space where a just-opened app's new windows wait, made now when there is none (a
     /// launch's watch makes it at the launch notice, ahead of the first window).
     pub(crate) fn prepare_new(&self) -> Option<u64> {
+        if !self.holds_new_windows() {
+            return None;
+        }
         let sky = self.sky()?;
         let home = Self::desktop_for_new(sky)?;
         self.stage_space(sky, home, NEW_STAGE)
@@ -1144,6 +1195,9 @@ impl SpacesEngine {
     /// ([`Self::let_new`], or a hide into its stage's Space). True when the window server
     /// lists it there.
     pub(crate) fn hold_new(&self, id: u32) -> bool {
+        if !self.holds_new_windows() {
+            return false;
+        }
         let Some(sky) = self.sky() else { return false };
         let Some(home) = Self::desktop_for_new(sky) else { return false };
         let Some(space) = self.stage_space(sky, home, NEW_STAGE) else { return false };
@@ -1556,6 +1610,25 @@ mod tests {
         st.owed.insert(13);
         assert_eq!(st.end_all(), vec![836]);
         assert!(st.stages.is_empty() && st.held.is_empty() && st.lent.is_empty() && st.new.is_empty() && st.owed.is_empty());
+    }
+
+    /// Review A-5: once the engine failed, a launch's watch started before holds no new window
+    /// (nothing drives the engine after the fallback); what it left behind is swept again,
+    /// paced, until nothing is left.
+    #[test]
+    fn a_failed_engine_holds_no_new_window_and_sweeps_what_it_left() {
+        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) };
+        e.state().health.fail("a test".into());
+        assert!(!e.hold_new(NO_WINDOW) && e.prepare_new().is_none());
+        assert!(e.sky.get().is_none(), "nothing asked of the window server");
+        assert!(!e.sweep_left_behind(), "nothing left: nothing swept");
+        e.state().owed.insert(NO_WINDOW);
+        let _ = e.sky.set(None);
+        assert!(e.sweep_left_behind(), "a show owed: still left");
+        assert!(e.state().afterlife.is_some(), "swept");
+        let at = e.state().afterlife;
+        assert!(e.sweep_left_behind());
+        assert_eq!(e.state().afterlife, at, "not again within its pace");
     }
 
     /// A window id the window server lists for no window.
