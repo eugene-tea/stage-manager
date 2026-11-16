@@ -48,7 +48,7 @@ restore() {
     defaults delete "$DOMAIN" "$KEY" 2>/dev/null || true
   fi
   echo "restored $DOMAIN $KEY to ${ORIGINAL:-<absent>}"
-  rm -rf "$HOME_DIR"
+  if [ "$code" = 0 ]; then rm -rf "$HOME_DIR"; else echo "kept for its log: $HOME_DIR"; fi
   exit "$code"
 }
 trap restore EXIT
@@ -56,6 +56,8 @@ trap 'exit 130' INT TERM HUP
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 json() { python3 -I -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
+# `ctl state` exits non-zero when it answers "not managing" (standing down): read it all the same.
+state_now() { "$BIN" ctl state || true; }
 
 defaults write "$DOMAIN" "$KEY" -bool false
 open -n "$FIXTURE" --env FIXTURE_WINDOWS=2
@@ -64,33 +66,42 @@ open -n "$APP" --env STAGE_MANAGER_HOME="$HOME_DIR" --env STAGE_MANAGER_ONLY="$F
   --env STAGE_MANAGER_NO_PROMPT=1 --env STAGE_MANAGER_TEST=1 --env SM_TEST_TOGGLE_APPLE_SM=1
 for _ in $(seq 1 50); do "$BIN" ctl ping >/dev/null 2>&1 && break; sleep 0.2; done
 sleep 3
-"$BIN" ctl state | json 'd["ok"]' | grep -q True || fail "not managing at start"
+state_now | json 'd["ok"]' | grep -q True || fail "not managing at start"
 
 # Park something: the focused fixture window to a new stage leaves the other parked.
 "$BIN" ctl new >/dev/null || fail "ctl new"
 sleep 2
-PARKED="$("$BIN" ctl state | json 'sum(1 for w in d.get("windows", []) if w.get("parked"))')"
+PARKED="$(state_now | json 'sum(1 for w in d.get("windows", []) if w.get("parked"))')"
 [ "${PARKED:-0}" -ge 1 ] || fail "nothing parked before the toggle"
 echo "parked before: $PARKED"
 # The stages as Apple's comes on: two of the one app (a fresh start would make one).
-STAGES_BEFORE="$("$BIN" ctl state | json 'sum(1 for st in d["stages"] if st["windows"])')"
+STAGES_BEFORE="$(state_now | json 'sum(1 for st in d["stages"] if st["windows"])')"
 echo "stages before: $STAGES_BEFORE"
 
 defaults write "$DOMAIN" "$KEY" -bool true
-sleep 4
+# The app reads the setting once a second; a write from `defaults` reaches it within a few.
+for _ in $(seq 1 40); do
+  state_now | json 'not d.get("ok") or not any(st["windows"] for st in d.get("stages", []))' | grep -q True && break
+  sleep 0.25
+done
 "$BIN" ctl ping | json 'd["apple_stage_manager_on"]' | grep -q True || fail "the app did not see Apple's Stage Manager on"
-"$BIN" ctl state | json 'd["ok"]' | grep -q False || fail "still managing while Apple's is on"
+# Standing down: no stage holds a window (the fresh controller has its displays already, so
+# `ctl state` answers, with nothing in it).
+state_now | json 'not d.get("ok") or not any(st["windows"] for st in d.get("stages", []))' | grep -q True || { state_now | head -c 600; echo; fail "still managing while Apple's is on"; }
 LEFT="$("$BIN" probe-windows "$FIX_ID" | json 'sum(1 for w in d["windows"] if w["layer"]==0 and w["bounds"]["x"] > d["display"]["w"] - 100)')"
 [ "${LEFT:-1}" = "0" ] || fail "$LEFT fixture windows still parked after standing down"
 echo "stood down: every window back"
 
 defaults write "$DOMAIN" "$KEY" -bool false
-sleep 4
-"$BIN" ctl state | json 'd["ok"]' | grep -q True || fail "not managing again after Apple's went off"
+for _ in $(seq 1 40); do
+  state_now | json 'd["ok"]' | grep -q True && break
+  sleep 0.25
+done
+state_now | json 'd["ok"]' | grep -q True || fail "not managing again after Apple's went off"
 echo "resumed: managing again"
 # The stages set aside come back (11-16: they came back as one stage per app).
 for _ in $(seq 1 20); do
-  STAGES_AFTER="$("$BIN" ctl state | json 'sum(1 for st in d["stages"] if st["windows"])')"
+  STAGES_AFTER="$(state_now | json 'sum(1 for st in d["stages"] if st["windows"])')"
   [ "$STAGES_AFTER" = "$STAGES_BEFORE" ] && break
   sleep 0.3
 done
