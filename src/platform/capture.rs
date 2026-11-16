@@ -358,6 +358,10 @@ struct Shared {
     retry_at: HashMap<u32, Instant>,
     /// Failed captures in a row per window since its last picture (at most [`RETRIES`] retried).
     tries: HashMap<u32, u8>,
+    /// Windows asked again ([`Capturer::recapture`]) since the running round took its batch:
+    /// that round's end does not mark them captured, so the next round takes them (the review's
+    /// D-6: a card's key look asked mid-round was lost, no timer took it later).
+    again: HashSet<u32>,
     shutdown: bool,
 }
 
@@ -367,6 +371,25 @@ const RETRY_AFTER: Duration = Duration::from_secs(3);
 const RETRIES: u8 = 2;
 
 impl Shared {
+    /// Windows `ids` are taken again at the next round, even when a round running now has them.
+    fn ask_again(&mut self, ids: &[u32]) {
+        self.captured.retain(|id| !ids.contains(id));
+        self.again.extend(ids);
+    }
+
+    /// A round takes its batch: what was asked again before is in it.
+    fn round_started(&mut self) {
+        self.again.clear();
+    }
+
+    /// A round of `batch` ended: its retries, and its windows marked captured, but those asked
+    /// again while it ran ([`Shared::ask_again`]).
+    fn round_done(&mut self, batch: &[Target], result: &RoundResult, now: Instant) {
+        self.schedule_retries(batch, result, now);
+        let again = std::mem::take(&mut self.again);
+        self.captured.extend(result.done.iter().filter(|id| !again.contains(id)));
+    }
+
     /// After a round of `batch`: the windows that failed (no picture, not known closed, not
     /// refused) are taken again after [`RETRY_AFTER`], [`RETRIES`] times at most, while the
     /// interval is longer than that.
@@ -469,7 +492,7 @@ impl Capturer {
     pub fn recapture(&self, ids: &[u32]) {
         let (lock, cv) = &*self.shared;
         if let Ok(mut s) = lock.lock() {
-            s.captured.retain(|id| !ids.contains(id));
+            s.ask_again(ids);
             cv.notify_all();
         }
     }
@@ -587,6 +610,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                                     s.force = false;
                                     last_full = Some(Instant::now());
                                 }
+                                s.round_started();
                                 break (want, Permit::All);
                             }
                             // Alone: the round after it captures the rest.
@@ -595,6 +619,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                                     probed.clear();
                                 }
                                 let at = probe_pick(&want, &probed);
+                                s.round_started();
                                 break (vec![want[at]], Permit::Probe);
                             }
                             Permit::Wait => {}
@@ -647,8 +672,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
             wake_all();
         }
         if let Ok(mut s) = lock.lock() {
-            s.schedule_retries(&batch, &result, Instant::now());
-            s.captured.extend(result.done);
+            s.round_done(&batch, &result, Instant::now());
         }
     }
 }
@@ -1537,6 +1561,26 @@ mod tests {
         let mut timed = Shared { interval: Duration::from_millis(1500), ..Shared::default() };
         timed.schedule_retries(&batch, &result(vec![], vec![]), t0);
         assert!(timed.retry_at.is_empty(), "the timer takes it again anyway");
+    }
+
+    /// D-6: a window asked again while a round runs (a card's key look, 180 ms after the click's
+    /// round began) is taken again by the next round; one asked before the round took its batch
+    /// was in it.
+    #[test]
+    fn a_window_asked_again_during_a_round_is_taken_again() {
+        let t = |id| Target { id, width: 10, height: 10 };
+        let batch = [t(1), t(2)];
+        let done = RoundResult { done: vec![1, 2], outcome: Outcome::Captured, timed_out: false, paced: Some(true), ok: vec![1, 2], gone: vec![] };
+        let mut s = Shared { interval: NO_TIMER, targets: batch.to_vec(), ..Shared::default() };
+        s.round_started();
+        s.ask_again(&[2]);
+        s.round_done(&batch, &done, Instant::now());
+        assert!(s.captured.contains(&1));
+        assert!(!s.captured.contains(&2), "asked again mid-round: due at the next round");
+        s.ask_again(&[1]);
+        s.round_started();
+        s.round_done(&batch, &done, Instant::now());
+        assert!(s.captured.contains(&1) && s.captured.contains(&2), "asked before the round: its picture counts");
     }
 
     #[test]
