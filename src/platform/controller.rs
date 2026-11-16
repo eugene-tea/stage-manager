@@ -1140,6 +1140,15 @@ fn kept_ready(strip_visible: bool, windows: Vec<CardWindow>) -> Vec<CardWindow> 
     if strip_visible { windows } else { Vec::new() }
 }
 
+/// Notes in `shown` that our own batch set window `id`'s frame at `now`, forgetting the
+/// windows noted [`SLIDE_CARRY`] or longer ago ([`Controller::slide_carried`] reads what is
+/// left). Pruned only at a Space change before (the review of 1.9, B-8), the map kept every
+/// window ever shown on a Mac with one Desktop.
+fn note_shown_by_us(shown: &mut HashMap<u32, Instant>, id: u32, now: Instant) {
+    shown.retain(|_, at| now.saturating_duration_since(*at) < SLIDE_CARRY);
+    shown.insert(id, now);
+}
+
 /// The strip's card count on a display with `visible` frame.
 pub fn strip_capacity(visible: Rect, config: &Config) -> usize {
     capacity_for(visible.size(), &config.strip.capacity, &config.style)
@@ -1696,7 +1705,7 @@ impl Controller {
                 }
             };
             if matches!(action, Action::SetFrame { .. }) {
-                self.shown_by_us.insert(id, now);
+                note_shown_by_us(&mut self.shown_by_us, id, now);
             }
             // Where a hide puts the window (asked once: a write tried again asks the same).
             let park = match action {
@@ -7121,6 +7130,22 @@ mod tests {
         assert!(read_state_or_set_aside(&path).is_some());
         assert!(path.exists());
         assert_eq!(std::fs::read_to_string(&aside).ok().as_deref(), Some("{ not json"), "untouched");
+    }
+
+    /// The review of 1.9, B-8: the windows our batches showed are kept only for the slide
+    /// carry's time, also with no Space change ever (one Desktop).
+    #[test]
+    fn the_windows_shown_by_us_are_kept_only_for_the_slide_carry() {
+        let t0 = Instant::now();
+        let mut shown = HashMap::new();
+        for i in 0..100 {
+            note_shown_by_us(&mut shown, i, t0 + Duration::from_millis(u64::from(i) * 100));
+        }
+        let last = t0 + Duration::from_millis(9_900);
+        let kept: BTreeSet<u32> = shown.keys().copied().collect();
+        let carried = SLIDE_CARRY.as_millis() as u32 / 100;
+        assert_eq!(kept, (100 - carried..100).collect(), "only those within the carry of the last");
+        assert!(shown.values().all(|at| last.saturating_duration_since(*at) < SLIDE_CARRY));
     }
 
     /// 11-09 10:00:03: an activation as Show Desktop closed read a window at its pushed-aside
