@@ -55,7 +55,8 @@ impl SpacesUpkeep {
 impl Controller {
     /// The tick's last step under the Spaces engine: a show the window server did not carry
     /// out is tried again; a window the model counts hidden on a Desktop shown that is not
-    /// in a stage Space is hidden again (a few times, then said once); a window the model
+    /// in its stage Space (by the window server's word) is hidden again (a few times, then
+    /// said once); a window the model
     /// shows that a stage Space still holds is let out; every few seconds the engine's map is
     /// tidied ([`TIDY_EVERY`]). Not while the two may differ for a
     /// reason: a switch's windows waiting behind their pictures, a Space change settling, an
@@ -83,6 +84,9 @@ impl Controller {
         let owed = spaces.retry_owed(false);
         self.spaces.frames_owed.retain(|id, _| owed.contains(id));
         let shown: Vec<SpaceId> = m.displays().iter().map(|d| m.current_space(d.id)).collect();
+        // What the engine holds checked against the window server first: a window taken out
+        // of its stage Space by anything but the engine is hidden again below.
+        let _ = spaces.forget_escaped();
         let held = spaces.held();
         let hidden: Vec<u32> =
             m.windows().filter(|w| w.parked && shown.contains(&w.space) && w.home != Home::Pinned).map(|w| w.meta.id.0).collect();

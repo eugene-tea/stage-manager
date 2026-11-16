@@ -368,6 +368,14 @@ fn hidden_in(now: &[u64], space: u64) -> bool {
     now == [space]
 }
 
+/// True when a window held in `h`'s stage Space is on a Space (`now`) but no longer hidden
+/// there alone: something but this engine took it out (a stretch's last step, an
+/// un-minimize, a Space ended under it), and it shows. A window on no Space (minimized,
+/// ordered out) is not.
+fn escaped(now: &[u64], h: Held) -> bool {
+    !now.is_empty() && !hidden_in(now, h.space)
+}
+
 /// True when `now` (a window's Spaces) names none of `ours`: the window is out of every
 /// stage Space.
 fn out_of(now: &[u64], ours: &BTreeSet<u64>) -> bool {
@@ -1110,6 +1118,38 @@ impl SpacesEngine {
         out
     }
 
+    /// The windows held on a Desktop shown that the window server no longer lists hidden in
+    /// their stage Space ([`escaped`]), forgotten as held, so that the tick, which compares
+    /// what the model counts hidden with what this engine holds, hides them again (review
+    /// A-7: `held` is only what the engine last read back). Windows lent, waiting as new or
+    /// flying their last stretch are where they are on purpose. The windows forgotten.
+    pub fn forget_escaped(&self) -> Vec<u32> {
+        let held: Vec<(u32, Held)> = {
+            let st = self.state();
+            st.held.iter().filter(|(id, _)| !st.lent.contains(id) && !st.new.contains(id)).map(|(id, h)| (*id, *h)).collect()
+        };
+        if held.is_empty() {
+            return Vec::new();
+        }
+        let Some(sky) = self.sky() else { return Vec::new() };
+        let (_, shown) = Self::desktops(sky);
+        let flying = self.stretching();
+        let out: Vec<u32> = held
+            .into_iter()
+            .filter(|(id, h)| shown.contains(&h.home) && !flying.contains(id) && escaped(&sky.spaces_of(&[*id]), *h))
+            .map(|(id, _)| id)
+            .collect();
+        if !out.is_empty() {
+            let mut st = self.state();
+            for id in &out {
+                st.held.remove(id);
+            }
+            drop(st);
+            tracing::info!(windows = ?out, "spaces engine: windows held were out of their stage Space (not by this engine): no longer held");
+        }
+        out
+    }
+
     /// The windows hidden on a Desktop that shows now: present there, though the window
     /// server lists them off screen ([`WindowEngine::present_off_screen`]). Each one's Space
     /// is read from the window server: a window its app ordered out (closed, with or without
@@ -1687,6 +1727,19 @@ mod tests {
         assert!(swept.is_none() && briefly.is_none(), "no sweep with the state held");
         assert!(took < STATE_WAIT * 4, "bounded: {took:?}");
         assert_eq!(e.sweep_bounded("quit", true), Some(Report::default()), "free: swept as before");
+    }
+
+    /// Review A-7: a window held that the window server lists elsewhere, or in its stage
+    /// Space and on a Desktop too, has escaped (the tick hides it again); one hidden alone in
+    /// its Space, or on no Space (minimized, ordered out), has not.
+    #[test]
+    fn a_window_out_of_its_stage_space_has_escaped() {
+        let h = Held { space: 836, home: 3 };
+        assert!(!escaped(&[836], h));
+        assert!(escaped(&[3], h), "on its Desktop");
+        assert!(escaped(&[836, 3], h), "on its Desktop and still listed in the Space: it shows");
+        assert!(escaped(&[900], h), "in a Space of its own");
+        assert!(!escaped(&[], h), "on no Space: not shown, left alone");
     }
 
     /// A window id the window server lists for no window.
