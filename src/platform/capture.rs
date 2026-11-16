@@ -59,7 +59,10 @@
 //!   `STAGE_MANAGER_NO_CAPTURE`); until the config says so, nothing is captured.
 //! - Every capturer of the process shares one [`Gate`]: the first capture goes alone, and a
 //!   capture refused as user-declined stops them all for a long backoff (logged once);
-//!   [`retry_now`] (the user asked for access) probes again at once.
+//!   [`retry_now`] (the user asked for access) probes again at once. The gate hears
+//!   ScreenCaptureKit only (the review's D-1): the probe goes through it, never the window
+//!   server, whose pictures prove nothing of the alert; a refusal of a look's still, a
+//!   desktop still or a round counts, each once.
 //! - The one still that is not of a window, the desktop in the park corner for a switch's
 //!   cover ([`capture_desktop`], round 8L3), follows the same rules and goes only once the
 //!   gate is open (window captures already worked): it never asks and is never the probe.
@@ -157,6 +160,15 @@ static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
 static LAST_DONE_MS: AtomicU64 = AtomicU64::new(0);
 /// Images delivered since launch.
 pub(crate) static IMAGES: AtomicU64 = AtomicU64::new(0);
+/// Listings of ScreenCaptureKit's shareable content asked since launch ([`listing_asked`]): the
+/// cost the window server's pictures avoid, for the ctl dump (a live check reads it at rest).
+static LISTINGS: AtomicU64 = AtomicU64::new(0);
+
+/// A listing of the shareable content is asked now (counted for the ctl dump).
+pub(crate) fn listing_asked() {
+    LISTINGS.fetch_add(1, Ordering::Relaxed);
+}
+
 static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 /// The one gate of the process: every capturer asks it before a round.
 static GATE: LazyLock<Mutex<Gate>> = LazyLock::new(|| Mutex::new(Gate::default()));
@@ -260,6 +272,16 @@ pub fn retry_now() {
     wake_all();
 }
 
+/// True once quit has begun ([`begin_shutdown`]): nothing more is issued.
+pub(crate) fn closing() -> bool {
+    CLOSING.load(Ordering::SeqCst)
+}
+
+/// Captures issued and not answered yet (what [`quiesce`] waits for).
+pub(crate) fn in_flight() -> usize {
+    IN_FLIGHT.load(Ordering::SeqCst)
+}
+
 /// Quit has begun: no capture is issued from now on (those in flight finish).
 pub fn begin_shutdown() {
     CLOSING.store(true, Ordering::SeqCst);
@@ -272,11 +294,11 @@ pub fn begin_shutdown() {
 pub fn quiesce(timeout: Duration) {
     begin_shutdown();
     let start = Instant::now();
-    let pending = IN_FLIGHT.load(Ordering::SeqCst);
-    while IN_FLIGHT.load(Ordering::SeqCst) > 0 && start.elapsed() < timeout {
+    let pending = in_flight();
+    while in_flight() > 0 && start.elapsed() < timeout {
         std::thread::sleep(Duration::from_millis(10));
     }
-    let left = IN_FLIGHT.load(Ordering::SeqCst);
+    let left = in_flight();
     let last = LAST_DONE_MS.load(Ordering::SeqCst);
     if last > 0 {
         let since = EPOCH.elapsed().saturating_sub(Duration::from_millis(last));
@@ -303,6 +325,7 @@ pub fn status() -> serde_json::Value {
         "pace": pace().describe(),
         "in_flight": IN_FLIGHT.load(Ordering::SeqCst),
         "images": IMAGES.load(Ordering::SeqCst),
+        "listings": LISTINGS.load(Ordering::Relaxed),
         "window_server": super::capture_fast::status(),
     })
 }
@@ -358,6 +381,10 @@ struct Shared {
     retry_at: HashMap<u32, Instant>,
     /// Failed captures in a row per window since its last picture (at most [`RETRIES`] retried).
     tries: HashMap<u32, u8>,
+    /// Windows asked again ([`Capturer::recapture`]) since the running round took its batch:
+    /// that round's end does not mark them captured, so the next round takes them (the review's
+    /// D-6: a card's key look asked mid-round was lost, no timer took it later).
+    again: HashSet<u32>,
     shutdown: bool,
 }
 
@@ -367,6 +394,25 @@ const RETRY_AFTER: Duration = Duration::from_secs(3);
 const RETRIES: u8 = 2;
 
 impl Shared {
+    /// Windows `ids` are taken again at the next round, even when a round running now has them.
+    fn ask_again(&mut self, ids: &[u32]) {
+        self.captured.retain(|id| !ids.contains(id));
+        self.again.extend(ids);
+    }
+
+    /// A round takes its batch: what was asked again before is in it.
+    fn round_started(&mut self) {
+        self.again.clear();
+    }
+
+    /// A round of `batch` ended: its retries, and its windows marked captured, but those asked
+    /// again while it ran ([`Shared::ask_again`]).
+    fn round_done(&mut self, batch: &[Target], result: &RoundResult, now: Instant) {
+        self.schedule_retries(batch, result, now);
+        let again = std::mem::take(&mut self.again);
+        self.captured.extend(result.done.iter().filter(|id| !again.contains(id)));
+    }
+
     /// After a round of `batch`: the windows that failed (no picture, not known closed, not
     /// refused) are taken again after [`RETRY_AFTER`], [`RETRIES`] times at most, while the
     /// interval is longer than that.
@@ -469,7 +515,7 @@ impl Capturer {
     pub fn recapture(&self, ids: &[u32]) {
         let (lock, cv) = &*self.shared;
         if let Ok(mut s) = lock.lock() {
-            s.captured.retain(|id| !ids.contains(id));
+            s.ask_again(ids);
             cv.notify_all();
         }
     }
@@ -519,6 +565,7 @@ fn request_access() {
             tracing::info!("ScreenCaptureKit access request: {}", e.localizedDescription());
         }
     });
+    listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
 }
@@ -587,6 +634,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                                     s.force = false;
                                     last_full = Some(Instant::now());
                                 }
+                                s.round_started();
                                 break (want, Permit::All);
                             }
                             // Alone: the round after it captures the rest.
@@ -595,6 +643,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                                     probed.clear();
                                 }
                                 let at = probe_pick(&want, &probed);
+                                s.round_started();
                                 break (vec![want[at]], Permit::Probe);
                             }
                             Permit::Wait => {}
@@ -611,7 +660,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
             }
         };
         round_no += 1;
-        let result = autoreleasepool(|_| capture_round(round_no, &batch, deliver, &mut outcomes));
+        let result = autoreleasepool(|_| capture_round(round_no, &batch, deliver, &mut outcomes, permit));
         if result.timed_out {
             // Loud for the first of a streak only: the pace logs the back-off once.
             if pace().failed_in_a_row() == 0 {
@@ -647,8 +696,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
             wake_all();
         }
         if let Ok(mut s) = lock.lock() {
-            s.schedule_retries(&batch, &result, Instant::now());
-            s.captured.extend(result.done);
+            s.round_done(&batch, &result, Instant::now());
         }
     }
 }
@@ -952,13 +1000,16 @@ fn probe_look(filter: &SCContentFilter, id: u32, size_pt: (f64, f64), generation
         unsafe { config.setIncludeChildWindows(false) };
     }
     let flight = InFlight::issue();
-    let on_image = RcBlock::new(move |image: *mut CGImage, _error: *mut NSError| {
+    let on_image = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
         let _answered = &flight;
         let _background = &clear;
         if let Some(ptr) = NonNull::new(image) {
             // SAFETY: SCK hands a valid CGImage for the duration of the block.
             let image = unsafe { ptr.as_ref() };
             sink(id, generation, image, size_pt);
+        // SAFETY: SCK passes a valid NSError or null.
+        } else if unsafe { error.as_ref() }.is_some_and(declined) {
+            heard_declined("a still of a window's look");
         }
     });
     // SAFETY: filter, configuration and handler are valid; SCK copies the block.
@@ -1005,10 +1056,16 @@ pub fn read_looks(ids: &[u32]) {
 fn look_listed(ids: &[(u32, u64)], sink: LookSink, exclude_desktop: bool) {
     let ids = ids.to_vec();
     let flight = InFlight::issue();
-    let handler = RcBlock::new(move |content: *mut SCShareableContent, _error: *mut NSError| {
+    let handler = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
         let _answered = &flight;
-        // SAFETY: SCK passes a valid object or null.
-        let Some(content) = (unsafe { content.as_ref() }) else { return };
+        // SAFETY: SCK passes a valid object or null for each argument.
+        let Some(content) = (unsafe { content.as_ref() }) else {
+            // SAFETY: as above.
+            if unsafe { error.as_ref() }.is_some_and(declined) {
+                heard_declined("the listing for a window's look");
+            }
+            return;
+        };
         if CLOSING.load(Ordering::SeqCst) {
             return;
         }
@@ -1023,6 +1080,7 @@ fn look_listed(ids: &[(u32, u64)], sink: LookSink, exclude_desktop: bool) {
             probe_look(&filter, *id, (frame.w, frame.h), *generation, sink);
         }
     });
+    listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(exclude_desktop, false, &handler);
@@ -1049,14 +1107,15 @@ fn fast_part(batch: &[Target], deliver: Deliver) -> FastPart {
     }
     let ids: Vec<u32> = batch.iter().map(|t| t.id).collect();
     let described = super::windows::describe(&ids);
+    let Some(gone) = super::capture_fast::closed(&ids, &described.iter().map(|w| w.id).collect::<Vec<_>>()) else {
+        tracing::debug!(windows = ids.len(), "window pictures: the window server described none of the round's windows; ScreenCaptureKit takes them");
+        return FastPart { left: batch.to_vec(), ..FastPart::default() };
+    };
     let displays = super::desktop::cg_display_bounds();
-    let children = super::capture_fast::with_children(&ids);
-    let mut part = FastPart::default();
+    let children = super::capture_fast::with_children(&ids, &displays);
+    let mut part = FastPart { gone, ..FastPart::default() };
     for t in batch {
-        let Some(w) = described.iter().find(|w| w.id == t.id) else {
-            part.gone.push(t.id);
-            continue;
-        };
+        let Some(w) = described.iter().find(|w| w.id == t.id) else { continue };
         if children.contains(&t.id) {
             tracing::trace!(window = t.id, "window picture: a window of its app over it; ScreenCaptureKit takes it");
             part.left.push(*t);
@@ -1082,11 +1141,27 @@ fn fast_part(batch: &[Target], deliver: Deliver) -> FastPart {
     part
 }
 
-/// Captures `batch` once: through the window server where it can ([`fast_part`]), the rest
-/// through ScreenCaptureKit ([`sck_round`]: a listing of the shareable content first). Returns
-/// what [`sck_round`] returns, for the whole batch.
-fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut HashMap<u32, bool>) -> RoundResult {
-    let fast = fast_part(batch, deliver);
+/// True when a round under `permit` asks the window server first: a full round. The probe goes
+/// through ScreenCaptureKit alone, so the gate opens (and recovers after a refusal) on
+/// ScreenCaptureKit's own answer, as the alert it guards against is ScreenCaptureKit's: one
+/// such capture a launch and one a retry after a refusal.
+fn takes_fast(permit: Permit) -> bool {
+    permit == Permit::All
+}
+
+/// What a round tells the gate: what ScreenCaptureKit answered (`sck`), nothing when it took
+/// no part. A picture from the window server opens nothing (the review's D-1: it opened the
+/// gate, and after a refusal it reset the backoff, so the rest never grew past 10 minutes).
+fn gate_outcome(sck: Option<Outcome>) -> Outcome {
+    sck.unwrap_or(Outcome::Inconclusive)
+}
+
+/// Captures `batch` once: through the window server where it can ([`fast_part`], a full round
+/// only: [`takes_fast`]), the rest through ScreenCaptureKit ([`sck_round`]: a listing of the
+/// shareable content first). Returns what [`sck_round`] returns, for the whole batch, its
+/// outcome ScreenCaptureKit's alone ([`gate_outcome`]).
+fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut HashMap<u32, bool>, permit: Permit) -> RoundResult {
+    let fast = if takes_fast(permit) { fast_part(batch, deliver) } else { FastPart { left: batch.to_vec(), ..FastPart::default() } };
     let took: Vec<Target> = batch.iter().filter(|t| !fast.left.contains(t)).copied().collect();
     if !took.is_empty() && !CLOSING.load(Ordering::SeqCst) {
         let gone: HashMap<u32, String> = fast.gone.iter().map(|id| (*id, "the window server no longer describes it".to_string())).collect();
@@ -1102,18 +1177,16 @@ fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut 
     let took_some = !fast.handled.is_empty();
     if fast.left.is_empty() {
         tracing::trace!(round, captured = fast.handled.len(), requested = batch.len(), "capture round, the window server's capture alone");
-        let outcome = if took_some { Outcome::Captured } else { Outcome::Inconclusive };
-        return RoundResult { done, outcome, timed_out: false, paced: took_some.then_some(true), ok: fast.handled, gone: fast.gone };
+        return RoundResult { done, outcome: gate_outcome(None), timed_out: false, paced: took_some.then_some(true), ok: fast.handled, gone: fast.gone };
     }
-    let mut result = sck_round(round, &fast.left, deliver, outcomes, looks.is_empty());
+    // A probe's capture goes alone: no look's still beside it.
+    let mut result = sck_round(round, &fast.left, deliver, outcomes, takes_fast(permit) && looks.is_empty());
+    result.outcome = gate_outcome(Some(result.outcome));
     result.done.extend(done);
     result.ok.extend(&fast.handled);
     result.gone.extend(&fast.gone);
-    if took_some && result.outcome != Outcome::Declined {
-        result.outcome = Outcome::Captured;
-        if !CLOSING.load(Ordering::SeqCst) {
-            result.paced = Some(true);
-        }
+    if took_some && result.outcome != Outcome::Declined && !CLOSING.load(Ordering::SeqCst) {
+        result.paced = Some(true);
     }
     result
 }
@@ -1221,6 +1294,7 @@ fn sck_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut Hash
         }
         let _ = content_tx.send(Msg::Issued { round, n: issued });
     });
+    listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block.
     unsafe {
         SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
@@ -1384,7 +1458,7 @@ pub fn capture_desktop(display_id: u32, region: Rect, done: DesktopDone) -> Resu
         let (content, error) = unsafe { (content.as_ref(), error.as_ref()) };
         let Some(content) = content else {
             if error.is_some_and(declined) {
-                desktop_declined();
+                heard_declined("a capture of the desktop");
             }
             let why = error.map(|e| e.localizedDescription().to_string()).unwrap_or_default();
             finish(&done, Err(format!("no shareable content: {why}")));
@@ -1453,7 +1527,7 @@ pub fn capture_desktop(display_id: u32, region: Rect, done: DesktopDone) -> Resu
                     // SAFETY: SCK passes a valid NSError or null.
                     let error = unsafe { error.as_ref() };
                     if error.is_some_and(declined) {
-                        desktop_declined();
+                        heard_declined("a capture of the desktop");
                     }
                     counters::bump(Count::CaptureFailed);
                     let why = error.map_or_else(|| "no image".to_string(), |e| e.localizedDescription().to_string());
@@ -1464,6 +1538,7 @@ pub fn capture_desktop(display_id: u32, region: Rect, done: DesktopDone) -> Resu
         // SAFETY: filter, configuration and handler are valid; SCK copies the block.
         unsafe { SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(&filter, &config, Some(&on_image)) };
     });
+    listing_asked();
     // SAFETY: the handler matches the documented signature; SCK copies the block. Desktop
     // windows are listed (only they are included in the still).
     unsafe {
@@ -1472,13 +1547,15 @@ pub fn capture_desktop(display_id: u32, region: Rect, done: DesktopDone) -> Resu
     Ok(())
 }
 
-/// macOS refused a desktop still as user-declined: every capturer rests ([`Gate`]).
-fn desktop_declined() {
+/// macOS refused `what`, a capture outside a round (a desktop still, a look's listing or
+/// still), as user-declined: every capturer rests ([`Gate`]; a refusal heard already changes
+/// nothing).
+fn heard_declined(what: &'static str) {
     let change = gate().finished(Outcome::Declined, Instant::now());
     if let Change::Refused(rest) | Change::RefusedAgain(rest) = change {
-        tracing::warn!(retry_in_s = rest.as_secs(), "macOS refused a capture of the desktop (not permitted); window captures rest");
+        tracing::warn!(retry_in_s = rest.as_secs(), "macOS refused {what} (not permitted); window captures rest");
+        wake_all();
     }
-    wake_all();
 }
 
 #[cfg(test)]
@@ -1537,6 +1614,50 @@ mod tests {
         let mut timed = Shared { interval: Duration::from_millis(1500), ..Shared::default() };
         timed.schedule_retries(&batch, &result(vec![], vec![]), t0);
         assert!(timed.retry_at.is_empty(), "the timer takes it again anyway");
+    }
+
+    /// D-6: a window asked again while a round runs (a card's key look, 180 ms after the click's
+    /// round began) is taken again by the next round; one asked before the round took its batch
+    /// was in it.
+    #[test]
+    fn a_window_asked_again_during_a_round_is_taken_again() {
+        let t = |id| Target { id, width: 10, height: 10 };
+        let batch = [t(1), t(2)];
+        let done = RoundResult { done: vec![1, 2], outcome: Outcome::Captured, timed_out: false, paced: Some(true), ok: vec![1, 2], gone: vec![] };
+        let mut s = Shared { interval: NO_TIMER, targets: batch.to_vec(), ..Shared::default() };
+        s.round_started();
+        s.ask_again(&[2]);
+        s.round_done(&batch, &done, Instant::now());
+        assert!(s.captured.contains(&1));
+        assert!(!s.captured.contains(&2), "asked again mid-round: due at the next round");
+        s.ask_again(&[1]);
+        s.round_started();
+        s.round_done(&batch, &done, Instant::now());
+        assert!(s.captured.contains(&1) && s.captured.contains(&2), "asked before the round: its picture counts");
+    }
+
+    /// D-1: the gate hears ScreenCaptureKit alone. The probe never goes the window server's way;
+    /// a round the window server took alone neither opens the gate nor, after a refusal,
+    /// recovers it, so the retry probe's own answer decides and the rest grows.
+    #[test]
+    fn the_gate_opens_only_on_screencapturekits_answer() {
+        use super::super::capture_gate::{BACKOFF_MIN, State};
+        assert!(!takes_fast(Permit::Probe), "the probe goes through ScreenCaptureKit");
+        assert!(takes_fast(Permit::All));
+        let now = Instant::now();
+        let mut g = Gate::default();
+        assert_eq!(g.permit(now), Permit::Probe);
+        assert_eq!(g.finished(gate_outcome(None), now), Change::None);
+        assert_eq!(g.state(), State::Untried, "a window-server picture opens nothing");
+        g.permit(now);
+        assert_eq!(g.finished(gate_outcome(Some(Outcome::Declined)), now), Change::Refused(BACKOFF_MIN));
+        let later = now + BACKOFF_MIN;
+        assert_eq!(g.permit(later), Permit::Probe);
+        assert_eq!(g.finished(gate_outcome(None), later), Change::None, "no recovery on the window server's word");
+        assert!(g.refused());
+        assert_eq!(g.permit(later), Permit::Probe);
+        assert_eq!(g.finished(gate_outcome(Some(Outcome::Declined)), later), Change::RefusedAgain(BACKOFF_MIN * 2), "the rest grows");
+        assert_eq!(gate_outcome(Some(Outcome::Captured)), Outcome::Captured);
     }
 
     #[test]

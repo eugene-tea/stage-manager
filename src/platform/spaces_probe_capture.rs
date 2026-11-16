@@ -138,7 +138,7 @@ fn shoot_with(targets: &[Target], kept: Option<&Kept>) -> (f64, Vec<Answer>) {
     if FAST.load(Ordering::SeqCst) {
         let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
         let now: Vec<(u32, crate::engine::geometry::Rect)> = windows::describe(&ids).iter().map(|w| (w.id, w.bounds)).collect();
-        for t in switch_shots::shoot_fast(targets, &now, &done) {
+        for t in switch_shots::shoot_fast(targets, &now, &done).targets {
             done(t.id, None);
         }
     } else {

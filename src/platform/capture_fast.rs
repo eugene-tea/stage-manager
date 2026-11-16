@@ -22,8 +22,10 @@
 //! here when a smaller one was asked for (a card's thumbnail). The caller falls back to
 //! ScreenCaptureKit ([`super::capture`]) for any window this source misses: the symbol missing,
 //! the call handing back nothing, or a picture that cannot be the window (empty, the wrong
-//! shape, or see-through all over). A route whose first picture of the run comes back blank is
-//! not used again in this run (logged once). `STAGE_MANAGER_CAPTURE_SCK` (honoured only with
+//! shape, or see-through all over). A route whose pictures of [`BLANK_STRIKES`] different
+//! windows come back blank before any is the window rests for [`OFF_FOR`], then is tried again
+//! (logged once); once one picture was the window, it is never turned off in that run.
+//! `STAGE_MANAGER_CAPTURE_SCK` (honoured only with
 //! `STAGE_MANAGER_ONLY`, a test run) turns this source off: every picture through
 //! ScreenCaptureKit, as before 1.9.
 //!
@@ -33,8 +35,9 @@
 //! call makes macOS ask).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{LazyLock, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex, MutexGuard, OnceLock};
+use std::time::{Duration, Instant};
 
 use objc2::rc::Retained;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
@@ -83,23 +86,81 @@ impl Route {
         }
     }
 
-    fn state(self) -> &'static AtomicU8 {
-        match self {
-            Route::Fast => &FAST_STATE,
-            Route::Whole => &WHOLE_STATE,
+    fn health(self) -> MutexGuard<'static, Health> {
+        let m = match self {
+            Route::Fast => &FAST_HEALTH,
+            Route::Whole => &WHOLE_HEALTH,
+        };
+        m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Blank pictures of this many different windows rest a route that has not brought the window
+/// yet (the review's D-3: one blank first picture, a window still being
+/// restored at login, turned the route off until the next launch).
+pub const BLANK_STRIKES: usize = 3;
+/// How long a route rests after [`BLANK_STRIKES`] before it is tried again.
+pub const OFF_FOR: Duration = Duration::from_secs(30 * 60);
+
+/// What this run knows of a route: whether a picture was the window yet, the windows whose
+/// pictures came back blank since, and a rest.
+#[derive(Debug, Default)]
+pub struct Health {
+    works: bool,
+    /// Different windows whose pictures came back blank (none was the window yet).
+    blanks: Vec<u32>,
+    /// Resting until then.
+    off_until: Option<Instant>,
+}
+
+impl Health {
+    /// True unless the route rests at `now`; a rest over starts the count afresh.
+    pub fn usable(&mut self, now: Instant) -> bool {
+        match self.off_until {
+            Some(until) if now < until => false,
+            Some(_) => {
+                self.off_until = None;
+                self.blanks.clear();
+                true
+            }
+            None => true,
+        }
+    }
+
+    /// Window `id`'s picture came back blank: true when this rests the route (from `now`).
+    pub fn blank(&mut self, id: u32, now: Instant) -> bool {
+        if self.works {
+            return false;
+        }
+        if !self.blanks.contains(&id) {
+            self.blanks.push(id);
+        }
+        if self.blanks.len() < BLANK_STRIKES {
+            return false;
+        }
+        self.blanks.clear();
+        self.off_until = Some(now + OFF_FOR);
+        true
+    }
+
+    /// A picture was the window: true for the route's first in this run.
+    pub fn good(&mut self) -> bool {
+        !std::mem::replace(&mut self.works, true)
+    }
+
+    fn word(&self) -> &'static str {
+        match (self.works, self.off_until) {
+            (true, _) => "works",
+            (false, Some(_)) => "off",
+            (false, None) => "untried",
         }
     }
 }
 
-/// A route not tried yet in this run.
-const UNTRIED: u8 = 0;
-/// A route whose first picture was the window.
-const WORKS: u8 = 1;
-/// A route not used in this run (its first picture came back blank).
-const OFF: u8 = 2;
-
-static FAST_STATE: AtomicU8 = AtomicU8::new(UNTRIED);
-static WHOLE_STATE: AtomicU8 = AtomicU8::new(UNTRIED);
+static FAST_HEALTH: Mutex<Health> = Mutex::new(Health { works: false, blanks: Vec::new(), off_until: None });
+static WHOLE_HEALTH: Mutex<Health> = Mutex::new(Health { works: false, blanks: Vec::new(), off_until: None });
+/// A route's rest was logged at info once; later ones at debug.
+static REST_SAID: AtomicBool = AtomicBool::new(false);
 
 /// The calls, loaded once; each `None` when this macOS does not export it.
 struct Calls {
@@ -154,22 +215,18 @@ fn forced_by(asked: bool, only: bool) -> bool {
 }
 
 /// True when this source may take pictures at all in this run (not forced off, the calls
-/// loaded, a route not turned off).
+/// loaded, a route not resting).
 pub fn enabled() -> bool {
     !forced_off() && calls().is_some_and(|c| (c.hw.is_some() && usable(Route::Fast)) || (c.list_image.is_some() && usable(Route::Whole)))
 }
 
 fn usable(route: Route) -> bool {
-    route.state().load(Ordering::Relaxed) != OFF
+    route.health().usable(Instant::now())
 }
 
 /// What this source says of itself, for the ctl dump.
 pub fn status() -> serde_json::Value {
-    let word = |r: Route| match r.state().load(Ordering::Relaxed) {
-        WORKS => "works",
-        OFF => "off",
-        _ => "untried",
-    };
+    let word = |r: Route| r.health().word();
     serde_json::json!({
         "forced_off": forced_off(),
         "fast": calls().and_then(|c| c.hw).map(|_| word(Route::Fast)).unwrap_or("missing"),
@@ -180,7 +237,7 @@ pub fn status() -> serde_json::Value {
 /// Why a window has no picture from this source: the caller takes it through ScreenCaptureKit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Miss {
-    /// The source is off, or the call for this window's route is missing or turned off.
+    /// The source is off, or the call for this window's route is missing or resting.
     Unavailable,
     /// The call handed back nothing.
     Nothing,
@@ -271,15 +328,21 @@ pub fn picture(t: Target, frame: Rect, displays: &[Rect]) -> Result<Picture, Mis
     let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
     let blank = w == 0 || h == 0 || see_through(&alphas(&image, w, h));
     if blank || !fits_window(w, h, frame) {
-        // The route's first picture of the run blank: not used again in this run.
-        if blank && route.state().compare_exchange(UNTRIED, OFF, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
-            tracing::info!(route = route.as_str(), w, h, "window pictures: the first picture of this call came back blank; ScreenCaptureKit takes those pictures in this run");
+        // Blank pictures of a few windows before any was the window: the route rests.
+        if blank && route.health().blank(t.id, Instant::now()) {
+            let strikes = BLANK_STRIKES;
+            let rest_min = OFF_FOR.as_secs() / 60;
+            if REST_SAID.swap(true, Ordering::Relaxed) {
+                tracing::debug!(route = route.as_str(), strikes, rest_min, "window pictures: this call's pictures still come back blank; ScreenCaptureKit takes them for a while");
+            } else {
+                tracing::info!(route = route.as_str(), w, h, strikes, rest_min, "window pictures: this call's pictures of a few windows came back blank; ScreenCaptureKit takes them for a while, then the call is tried again");
+            }
         } else {
             tracing::debug!(window = t.id, route = route.as_str(), w, h, frame = ?frame, blank, "window picture: not the window; ScreenCaptureKit takes it");
         }
         return Err(Miss::NotTheWindow);
     }
-    if route.state().compare_exchange(UNTRIED, WORKS, Ordering::Relaxed, Ordering::Relaxed).is_ok() {
+    if route.health().good() {
         tracing::info!(route = route.as_str(), w, h, "window pictures: taken straight from the window server, no listing");
     }
     let (fw, fh) = capture_frame::fit_to_content((t.width, t.height), (w as f64, h as f64));
@@ -287,23 +350,51 @@ pub fn picture(t: Target, frame: Rect, displays: &[Rect]) -> Result<Picture, Mis
     Ok(Picture { image, extent: Extent::NONE })
 }
 
+/// Of `ids`, the windows the window server no longer describes (closed), given those it
+/// described (`described`). `None` when it described none of them: a failed read (its call
+/// answers nothing under load), not every window closed; the caller leaves them all to
+/// ScreenCaptureKit, which tells a closed window from one it cannot take (the review's D-7: the
+/// whole batch was taken as closed, no picture, no retry).
+pub fn closed(ids: &[u32], described: &[u32]) -> Option<Vec<u32>> {
+    if !ids.is_empty() && described.is_empty() {
+        return None;
+    }
+    Some(ids.iter().copied().filter(|id| !described.contains(id)).collect())
+}
+
 /// Of `ids`, the windows with another window of their app on screen over them or reaching out
 /// of them (a popover, a menu, a sheet, a child panel: ScreenCaptureKit's picture carries those,
 /// the window server's call gives the window alone): ScreenCaptureKit takes their pictures, as
-/// before (live 11-14: a card lost its popup). One query of the windows on screen.
-pub fn with_children(ids: &[u32]) -> std::collections::HashSet<u32> {
+/// before (live 11-14: a card lost its popup). One query of the windows on screen; `displays`
+/// as for [`route_for`].
+pub fn with_children(ids: &[u32], displays: &[Rect]) -> std::collections::HashSet<u32> {
     if ids.is_empty() {
         return Default::default();
     }
     let on = super::windows::on_screen();
-    ids.iter().copied().filter(|id| on.iter().find(|w| w.id == *id).is_some_and(|w| has_child_over(w.id, w.pid, w.bounds, &on))).collect()
+    ids.iter().copied().filter(|id| on.iter().find(|w| w.id == *id).is_some_and(|w| has_child_over(w.id, w.pid, w.bounds, &on, displays))).collect()
 }
 
+/// An overlap thinner than this (points) on a side is no child over the window: the sliver of a
+/// parked window left on screen by macOS (a point or two at the park corner).
+const SLIVER: f64 = 4.0;
+
 /// True when a window of `pid` other than `id`, on screen and not see-through, overlaps
-/// `frame` (`on`: the windows on screen). A same-app window merely overlapping counts too: the
-/// slower picture is right either way.
-pub fn has_child_over(id: u32, pid: i32, frame: Rect, on: &[super::windows::CgWindow]) -> bool {
-    on.iter().any(|w| w.id != id && w.pid == pid && w.alpha > 0.0 && w.bounds.intersect(&frame).is_some_and(|i| i.w >= 1.0 && i.h >= 1.0))
+/// `frame` (`on`: the windows on screen) by more than a [`SLIVER`]. A same-app window merely
+/// overlapping counts too: the slower picture is right either way. A window partly off every
+/// display ([`Route::Whole`]: parked by the Corner engine, which lists it on screen at its full
+/// frame in the corner, or pushed past a screen's edge) is no child: a popover, a menu or a
+/// sheet lies on the displays (the review's D-2: under the Corner engine an app's parked
+/// windows counted as each other's children, and a maximized window as a parked one's, through
+/// their corner, so the active stage went through ScreenCaptureKit every 2 s at rest).
+pub fn has_child_over(id: u32, pid: i32, frame: Rect, on: &[super::windows::CgWindow], displays: &[Rect]) -> bool {
+    on.iter().any(|w| {
+        w.id != id
+            && w.pid == pid
+            && w.alpha > 0.0
+            && route_for(w.bounds, displays) == Route::Fast
+            && w.bounds.intersect(&frame).is_some_and(|i| i.w >= SLIVER && i.h >= SLIVER)
+    })
 }
 
 /// True when a picture of `have` pixels is worth drawing smaller to `want` (a card's thumbnail
@@ -330,28 +421,73 @@ fn first_image(list: &NSArray) -> Option<CFRetained<CGImage>> {
 
 #[cfg(test)]
 mod tests {
+    fn listed(id: u32, pid: i32, bounds: Rect, alpha: f64) -> crate::platform::windows::CgWindow {
+        crate::platform::windows::CgWindow { id, pid, owner: String::new(), name: None, layer: 0, bounds, onscreen: true, alpha }
+    }
+
     #[test]
     fn a_window_of_its_app_over_it_sends_the_picture_to_screencapturekit() {
-        let w = |id: u32, pid: i32, x: f64, alpha: f64| crate::platform::windows::CgWindow {
-            id,
-            pid,
-            owner: String::new(),
-            name: None,
-            layer: 0,
-            bounds: Rect::new(x, 141.0, 276.0, 298.0),
-            onscreen: true,
-            alpha,
-        };
+        let w = |id: u32, pid: i32, x: f64, alpha: f64| listed(id, pid, Rect::new(x, 141.0, 276.0, 298.0), alpha);
         let frame = Rect::new(80.0, 78.0, 520.0, 392.0);
-        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 1.0)]), "a popup reaching out of it");
-        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 100.0, 1.0)]), "a sheet inside it");
-        assert!(!super::has_child_over(1, 7, frame, &[w(2, 8, 500.0, 1.0)]), "another app's window");
-        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 0.0)]), "a see-through one");
-        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 900.0, 1.0)]), "one beside it");
-        assert!(!super::has_child_over(1, 7, frame, &[w(1, 7, 80.0, 1.0)]), "itself");
+        let d = [SCREEN];
+        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 1.0)], &d), "a popup reaching out of it");
+        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 100.0, 1.0)], &d), "a sheet inside it");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 8, 500.0, 1.0)], &d), "another app's window");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 0.0)], &d), "a see-through one");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 900.0, 1.0)], &d), "one beside it");
+        assert!(!super::has_child_over(1, 7, frame, &[w(1, 7, 80.0, 1.0)], &d), "itself");
+    }
+
+    /// D-2, the Corner engine: an app's parked windows sit listed on screen at their full frames
+    /// in the park corner; they are no children of each other, nor of the app's maximized window
+    /// whose corner they reach, and the parked window's sliver under a shown one is none either.
+    #[test]
+    fn parked_windows_of_one_app_are_no_children() {
+        let d = [SCREEN];
+        let parked = |id| listed(id, 7, Rect::new(2559.0, 1408.0, 1000.0 + f64::from(id), 640.0), 1.0);
+        let maximized = Rect::new(0.0, 25.0, 2560.0, 1415.0);
+        assert!(!has_child_over(1, 7, parked(1).bounds, &[parked(1), parked(2)], &d), "two parked windows of the app");
+        assert!(!has_child_over(3, 7, maximized, &[parked(1)], &d), "the maximized window and a parked one");
+        assert!(!has_child_over(1, 7, parked(1).bounds, &[listed(3, 7, maximized, 1.0)], &d), "a parked window's sliver under the maximized one");
+        assert!(has_child_over(3, 7, maximized, &[listed(4, 7, Rect::new(2300.0, 1200.0, 240.0, 200.0), 1.0)], &d), "a popover in its corner still counts");
     }
 
     use super::*;
+
+    /// D-3: blank pictures rest a route only when a few different windows' come back so, and
+    /// only for a while; once a picture was the window, never.
+    #[test]
+    fn a_route_rests_only_after_blank_pictures_of_a_few_windows() {
+        let t0 = Instant::now();
+        let mut h = Health::default();
+        assert!(!h.blank(1, t0), "one window still being drawn at login");
+        assert!(!h.blank(1, t0), "the same window again");
+        assert!(!h.blank(2, t0));
+        assert!(h.usable(t0));
+        assert!(h.blank(3, t0), "a third window: the route rests");
+        assert!(!h.usable(t0 + OFF_FOR - Duration::from_secs(1)));
+        assert!(h.usable(t0 + OFF_FOR), "tried again after the rest");
+        assert!(!h.blank(4, t0 + OFF_FOR), "the count starts afresh");
+        let mut good = Health::default();
+        good.blank(1, t0);
+        good.blank(2, t0);
+        assert!(good.good(), "the first good picture");
+        assert!(!good.good());
+        for id in 3..10 {
+            assert!(!good.blank(id, t0), "a route that brought the window is never rested");
+        }
+        assert!(good.usable(t0) && good.word() == "works");
+    }
+
+    /// D-7: a description that comes back empty for windows asked is a failed read; a window
+    /// missing from an answer that describes others is closed.
+    #[test]
+    fn an_empty_description_is_a_failed_read_not_every_window_closed() {
+        assert_eq!(closed(&[1, 2, 3], &[]), None, "nothing described");
+        assert_eq!(closed(&[1, 2, 3], &[1, 3]), Some(vec![2]));
+        assert_eq!(closed(&[1, 2], &[2, 1]), Some(vec![]));
+        assert_eq!(closed(&[], &[]), Some(vec![]));
+    }
 
     const SCREEN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
     const RIGHT: Rect = Rect::new(2560.0, 0.0, 1920.0, 1080.0);
