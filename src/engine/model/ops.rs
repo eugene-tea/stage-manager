@@ -196,8 +196,9 @@ impl Model {
             });
         let visible = self.display(display).visible;
         // Born in the park zone: an app that saved its own frame while the window was parked
-        // at its quit; the frame it had then, kept a day, else centered below (W2).
-        let born = if self.listed_hidden(display, meta.frame) {
+        // at its quit; the frame it had then, kept a day, else centered below (W2). Under the
+        // Spaces engine too: a Corner run before may have parked it there (C-2).
+        let born = if self.found_parked(display, meta.frame) {
             self.take_quit_frame(&meta.bundle_id, &meta.title).unwrap_or(meta.frame)
         } else {
             meta.frame

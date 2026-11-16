@@ -40,6 +40,16 @@
 //! hidden (round tab-quit): a group parked in the corner whose other tab is selected shows
 //! that tab at the park spot (a sliver on screen), the tab left off screen at the same frame;
 //! the tab selected is then hidden with its stage and goes back to the group's frame.
+//!
+//! **Under an engine that hides off screen** (the review of 1.9, C-1): the Spaces engine's
+//! hidden window is listed off screen at its own frame, the tab left's look, so a new window
+//! its app opens at that frame (a screen-filling window, a cascade clamped to the screen, a
+//! fit) showed the signature of a tab switch: it vanished into the hidden stage and the
+//! hidden window came out. There the tab left must also be gone from its app's Accessibility
+//! list, as a tab ordered out is ([`tabs_selected`]'s `still_listed`); a window in a stage
+//! Space stays listed there (measured for the launch hold's Space, `probe-spaces sources
+//! --hold-ms`). Under the Corner engine a hidden window is a sliver on screen, so off screen
+//! is evidence already.
 
 use super::geometry::Rect;
 
@@ -123,7 +133,17 @@ pub struct TabSelected {
 /// last frame, and the tab selected takes its group's frame, which is that same frame: the
 /// signature of a tab switch, read from one listing. Two candidates for one place, or one
 /// window in two places, say nothing (left to the usual checks).
-pub fn tabs_selected(listed: &[TabListed], held: &[u32], managed: impl Fn(u32) -> bool) -> Vec<TabSelected> {
+///
+/// `still_listed(left)`, asked only of a tab left whose place is taken: true when its app's
+/// Accessibility list still names it (a tab ordered out never is), or the app does not
+/// answer; then nothing is told. The caller asks it of a window the engine hides off screen
+/// at its own frame (module docs), and answers false for any other.
+pub fn tabs_selected(
+    listed: &[TabListed],
+    held: &[u32],
+    managed: impl Fn(u32) -> bool,
+    mut still_listed: impl FnMut(&TabListed) -> bool,
+) -> Vec<TabSelected> {
     let mut out: Vec<TabSelected> = Vec::new();
     for &id in held {
         let Some(left) = listed.iter().find(|w| w.id == id && w.layer == 0) else { continue };
@@ -134,6 +154,9 @@ pub fn tabs_selected(listed: &[TabListed], held: &[u32], managed: impl Fn(u32) -
             .iter()
             .filter(|s| s.id != id && s.pid == left.pid && s.layer == 0 && s.onscreen && !managed(s.id) && same_place(s.bounds, left.bounds));
         let (Some(selected), None) = (places.next(), places.next()) else { continue };
+        if still_listed(left) {
+            continue;
+        }
         out.push(TabSelected { left: id, selected: selected.id });
     }
     // A window selected for two tabs that left: neither is told.
@@ -301,33 +324,33 @@ mod tests {
     fn a_tab_selected_takes_the_place_of_the_managed_tab_it_hides() {
         let l = terminal_11_15(true);
         let managed = |id: u32| id == 213;
-        assert_eq!(tabs_selected(&l, &[213], managed), vec![TabSelected { left: 213, selected: 212 }]);
+        assert_eq!(tabs_selected(&l, &[213], managed, |_| false), vec![TabSelected { left: 213, selected: 212 }]);
         // Selected back: 212, now the managed one, leaves; 213 takes its place again.
         let l = terminal_11_15(false);
-        assert_eq!(tabs_selected(&l, &[212], |id| id == 212), vec![TabSelected { left: 212, selected: 213 }]);
+        assert_eq!(tabs_selected(&l, &[212], |id| id == 212, |_| false), vec![TabSelected { left: 212, selected: 213 }]);
     }
 
     #[test]
     fn a_managed_window_still_on_screen_or_without_a_window_in_its_place_is_no_tab_switch() {
         let l = terminal_11_15(false);
-        assert!(tabs_selected(&l, &[213], |id| id == 213).is_empty(), "213 still shows");
+        assert!(tabs_selected(&l, &[213], |id| id == 213, |_| false).is_empty(), "213 still shows");
         // 213 off screen (moved to another Desktop), nothing at its frame: no tab.
         let l = vec![win(213, 864.0, 215.0, 1406.0, 985.0, false), win(214, 774.0, 179.0, 1406.0, 985.0, true)];
-        assert!(tabs_selected(&l, &[213], |id| id == 213).is_empty(), "same size elsewhere is not its place");
+        assert!(tabs_selected(&l, &[213], |id| id == 213, |_| false).is_empty(), "same size elsewhere is not its place");
     }
 
     #[test]
     fn a_managed_window_in_the_place_another_apps_window_or_a_panel_says_nothing() {
         let l = terminal_11_15(true);
-        assert!(tabs_selected(&l, &[213], |id| id == 213 || id == 212).is_empty(), "212 managed already");
+        assert!(tabs_selected(&l, &[213], |id| id == 213 || id == 212, |_| false).is_empty(), "212 managed already");
         let mut other = win(212, 864.0, 215.0, 1406.0, 985.0, true);
         other.pid = 7;
         let l = vec![win(213, 864.0, 215.0, 1406.0, 985.0, false), other];
-        assert!(tabs_selected(&l, &[213], |id| id == 213).is_empty(), "another app's window");
+        assert!(tabs_selected(&l, &[213], |id| id == 213, |_| false).is_empty(), "another app's window");
         let mut panel = win(212, 864.0, 215.0, 1406.0, 985.0, true);
         panel.layer = 3;
         let l = vec![win(213, 864.0, 215.0, 1406.0, 985.0, false), panel];
-        assert!(tabs_selected(&l, &[213], |id| id == 213).is_empty(), "not a layer-0 window");
+        assert!(tabs_selected(&l, &[213], |id| id == 213, |_| false).is_empty(), "not a layer-0 window");
     }
 
     #[test]
@@ -337,13 +360,13 @@ mod tests {
             win(212, 864.0, 215.0, 1406.0, 985.0, true),
             win(211, 865.0, 216.0, 1406.0, 985.0, true),
         ];
-        assert!(tabs_selected(&l, &[213], |id| id == 213).is_empty(), "two windows in its place");
+        assert!(tabs_selected(&l, &[213], |id| id == 213, |_| false).is_empty(), "two windows in its place");
         let l = vec![
             win(213, 864.0, 215.0, 1406.0, 985.0, false),
             win(215, 864.0, 215.0, 1406.0, 985.0, false),
             win(212, 864.0, 215.0, 1406.0, 985.0, true),
         ];
-        assert!(tabs_selected(&l, &[213, 215], |id| id == 213 || id == 215).is_empty(), "one window for two places");
+        assert!(tabs_selected(&l, &[213, 215], |id| id == 213 || id == 215, |_| false).is_empty(), "one window for two places");
     }
 
     /// Round tab-quit (the safety drill after the tabs phase, 11-15): the fixture's group
@@ -356,9 +379,30 @@ mod tests {
         let spot = |id, onscreen| win(id, 2559.0, 1408.0, 520.0, 392.0, onscreen);
         let before = vec![spot(52016, true), spot(52018, false), spot(52019, false), win(52017, 190.0, 148.0, 560.0, 422.0, true)];
         let managed = |id| id == 52016 || id == 52017;
-        assert!(tabs_selected(&before, &[52016, 52017], managed).is_empty(), "the parked tab is still the selected one");
+        assert!(tabs_selected(&before, &[52016, 52017], managed, |_| false).is_empty(), "the parked tab is still the selected one");
         let after = vec![spot(52018, true), spot(52016, false), spot(52019, false), win(52017, 190.0, 148.0, 560.0, 422.0, true)];
-        assert_eq!(tabs_selected(&after, &[52016, 52017], managed), vec![TabSelected { left: 52016, selected: 52018 }]);
+        assert_eq!(tabs_selected(&after, &[52016, 52017], managed, |_| false), vec![TabSelected { left: 52016, selected: 52018 }]);
+    }
+
+    /// The review of 1.9, C-1: under the Spaces engine a hidden stage's window (A) is listed
+    /// off screen at its own frame, the screen-filling one, and a new window of its app (B,
+    /// Command-N, the cascade clamped to the screen) opens on screen at that frame. Its app
+    /// still lists A through Accessibility: no tab was selected, B is a new window. A real tab
+    /// switch there (A ordered out, no longer listed) is still told.
+    #[test]
+    fn a_new_window_at_a_hidden_windows_frame_is_no_tab_while_its_app_still_lists_the_hidden_one() {
+        let full = |id, onscreen| win(id, 0.0, 30.0, 2560.0, 1410.0, onscreen);
+        // A hidden in a stage Space; C, managed, shown in front at the same frame; B new.
+        let l = vec![full(1, false), full(3, true), full(2, true)];
+        let managed = |id| id == 1 || id == 3;
+        let mut asked = Vec::new();
+        let still = |t: &TabListed| {
+            asked.push(t.id);
+            true
+        };
+        assert!(tabs_selected(&l, &[1, 3], managed, still).is_empty(), "A still listed: B is a new window");
+        assert_eq!(asked, vec![1], "asked only of the window whose place is taken");
+        assert_eq!(tabs_selected(&l, &[1, 3], managed, |_| false), vec![TabSelected { left: 1, selected: 2 }], "A ordered out: a tab");
     }
 
     #[test]

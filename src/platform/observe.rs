@@ -550,6 +550,12 @@ impl Observer {
         self.apps.contains_key(&pid)
     }
 
+    /// When app `pid` launched, if this observer heard its launch notice (not an app running
+    /// at its start, nor one first known by an activation).
+    pub fn launched_at(&self, pid: i32) -> Option<Instant> {
+        self.known.get(&pid).filter(|(_, how)| *how == "launched").map(|(at, _)| *at)
+    }
+
     /// When the last regular app launched, if one did since this observer started.
     pub fn last_launch(&self) -> Option<Instant> {
         self.last_launch

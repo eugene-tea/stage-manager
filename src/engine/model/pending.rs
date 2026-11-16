@@ -749,7 +749,7 @@ impl Model {
         actions: &mut Vec<Action>,
     ) -> Placed {
         let display: DisplayId = self.known_display(meta.display);
-        let live_parked = self.listed_out_of_sight(display, meta.frame);
+        let live_parked = self.found_out_of_sight(display, meta.frame);
         let sure = grade.confident();
         // Saved frames only on the screen of the saved size they were saved on; there a live
         // frame in a park zone takes the saved one even from a doubtful match. On another it

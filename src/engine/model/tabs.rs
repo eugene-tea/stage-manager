@@ -217,6 +217,40 @@ mod tests {
         assert!(a.contains(&Action::SetFrame { id: w(13), frame: group }), "back in front at the group's frame: {a:?}");
     }
 
+    /// The review of 1.9, C-1: Mail's stage hidden, Mail opens a new window (14) on screen at
+    /// the frame its hidden window (12) has. The Spaces engine lists 12 off screen there, the
+    /// look of a tab left; Mail still lists 12 through Accessibility, so 14 is a new window,
+    /// never hidden into Mail's stage in 12's place. The Corner engine lists 12 as a sliver at
+    /// the park spot: no place is taken, nothing to ask. Once 12 is ordered out (a tab), it is
+    /// a tab selected under either engine.
+    #[test]
+    fn a_new_window_at_a_hidden_windows_frame_is_no_tab_selected() {
+        use crate::engine::hidden_tab::{TabListed, TabSelected, tabs_selected};
+        let (m, mut d) = desk();
+        assert!(m.window(w(12)).expect("managed").parked, "Mail's stage is hidden");
+        let frame = d.frames[&w(12)];
+        let new = WindowMeta { frame, ..meta(14, 12, "com.example.mail") };
+        d.open(&new);
+        let pid = |id: WindowId| if id == w(14) { 12 } else { m.window(id).map_or(0, |x| x.meta.pid) };
+        let listed: Vec<TabListed> = d
+            .frames
+            .iter()
+            .map(|(id, f)| TabListed { id: id.0, pid: pid(*id), layer: 0, onscreen: !d.stage_space.contains(id), bounds: *f })
+            .collect();
+        let held: Vec<u32> = m.windows().map(|x| x.meta.id.0).collect();
+        let managed = |id: u32| m.window(WindowId(id)).is_some();
+        // As the controller asks: only of a window hidden off screen at its own frame.
+        let mail_lists = [12, 14];
+        let found = tabs_selected(&listed, &held, managed, |l| m.hidden_at_own_frame(WindowId(l.id)) && mail_lists.contains(&l.id));
+        assert!(found.is_empty(), "a new window, no tab selected: {found:?}");
+        assert_eq!(m.hidden_at_own_frame(w(12)), engine() == Some(EngineKind::Spaces));
+        assert!(!m.hidden_at_own_frame(w(1)), "a shown window never");
+        // 12 ordered out as a tab (its app no longer lists it): told, where its look matches.
+        let found = tabs_selected(&listed, &held, managed, |_| false);
+        let expect = if engine() == Some(EngineKind::Spaces) { vec![TabSelected { left: 12, selected: 14 }] } else { Vec::new() };
+        assert_eq!(found, expect);
+    }
+
     #[test]
     fn a_child_of_the_hidden_tab_leaves_with_it() {
         let (mut m, mut d) = desk();

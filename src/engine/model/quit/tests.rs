@@ -441,10 +441,11 @@ fn an_app_launched_in_the_restore_window_keeps_its_minute() {
 }
 }
 
-corner_nuance! {
+both_engines! {
 /// W2 (the review of 10-29): Chat saves its own window frames. Its window was parked
 /// when it quit, so it wrote the park frame, and an hour later it reopens the window in the
-/// corner. The window takes the frame it had at the quit (by app and title, else the app's
+/// corner. Under the Spaces engine too (the review of 1.9, C-2): the park frame was saved
+/// under a Corner run before (an upgrade, a fallback), and the window was born a sliver. The window takes the frame it had at the quit (by app and title, else the app's
 /// only one left), not the center; once, and not past a day.
 #[test]
 fn an_app_reopening_its_window_in_the_corner_gets_its_frame_back_within_a_day() {

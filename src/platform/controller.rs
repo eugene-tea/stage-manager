@@ -202,6 +202,10 @@ const CONFIG_POLL: Duration = Duration::from_secs(1);
 /// the stage shown for up to a second before its own stage came (11-13: 925 ms).
 const FRESH_LOOK: Duration = Duration::from_millis(1500);
 
+/// A window of an app launched this recently, found off screen, is looked at as a new one
+/// ([`looks_soon`]): a heavy app's first window can show seconds after its launch notice.
+const FRESH_APP: Duration = Duration::from_secs(10);
+
 /// How long the Dock's bar as read for the inert-slivers tap is trusted ([`Controller::refresh_dock_bar`]).
 const DOCK_BAR_FRESH: Duration = Duration::from_secs(2);
 /// A window un-minimized on its way to the strip is parked again when its un-minimize ends
@@ -251,6 +255,16 @@ struct ScreenWatch {
     /// Windows of its Desktop missing from the screen for no visible reason, by the checks
     /// in a row ([`SPACE_CHECKS`]).
     absent: HashMap<u32, u32>,
+}
+
+impl ScreenWatch {
+    /// True while this screen's checks wait on the tick ([`Controller::tick_waits`]), as the
+    /// main screen's do: windows counted missing towards a second look, a full-screen
+    /// transition waited out, an overview showing or just closed. Left out before (the review
+    /// of 1.9, B-10), another screen's second look came a rest later each time.
+    fn waits(&self, now: Instant) -> bool {
+        !self.absent.is_empty() || self.settle.waiting(now) || self.overview.showing_or_expected(now) || self.overview.freezes(now)
+    }
 }
 
 /// What another screen's window list shows ([`Controller::other_screen_seen`]).
@@ -1140,6 +1154,26 @@ fn kept_ready(strip_visible: bool, windows: Vec<CardWindow>) -> Vec<CardWindow> 
     if strip_visible { windows } else { Vec::new() }
 }
 
+/// True when a window found off screen may be about to show, so the fast tick looks at it
+/// ([`FRESH_LOOK`]): the window server does not list it yet or lists it with no frame yet (a
+/// new window is listed off screen at 0x0 from its creation until it first shows, `probe-spaces
+/// sources`), or its app launched within [`FRESH_APP`] (`launched_ago`). A window of another
+/// Desktop, a minimized one or one of a hidden app is listed at its frame: an app's rescan at
+/// its activation finds such windows, and each kept the fast tick reading the whole window
+/// list every 20 ms for 1.5 s (the review of 1.9, B-7); the once-a-second check offers them.
+fn looks_soon(listed: Option<Rect>, launched_ago: Option<Duration>) -> bool {
+    listed.is_none_or(|b| b.is_degenerate()) || launched_ago.is_some_and(|d| d < FRESH_APP)
+}
+
+/// Notes in `shown` that our own batch set window `id`'s frame at `now`, forgetting the
+/// windows noted [`SLIDE_CARRY`] or longer ago ([`Controller::slide_carried`] reads what is
+/// left). Pruned only at a Space change before (the review of 1.9, B-8), the map kept every
+/// window ever shown on a Mac with one Desktop.
+fn note_shown_by_us(shown: &mut HashMap<u32, Instant>, id: u32, now: Instant) {
+    shown.retain(|_, at| now.saturating_duration_since(*at) < SLIDE_CARRY);
+    shown.insert(id, now);
+}
+
 /// The strip's card count on a display with `visible` frame.
 pub fn strip_capacity(visible: Rect, config: &Config) -> usize {
     capacity_for(visible.size(), &config.strip.capacity, &config.style)
@@ -1172,13 +1206,23 @@ impl Controller {
                 Some(e.to_string())
             }
         };
+        let this = Self::with_store(store, &path, config_error);
+        logging::apply_config(&this.store.config().log);
+        this.notify_config();
+        this
+    }
+
+    /// The controller around config `store`, read from `path` (`config_error`: why it could
+    /// not be), nothing logged or told yet: [`Self::new`] does that; a test builds one on a
+    /// scratch file.
+    fn with_store(store: ConfigStore, path: &Path, config_error: Option<String>) -> Self {
         let style = Arc::new(store.config().strip_style());
         let mut echoes = Echoes::default();
         echoes.set_window(Duration::from_millis(store.config().windows.focus_echo_ms));
-        let this = Self {
+        Self {
             style,
             model: None,
-            config_mtime: mtime(&path),
+            config_mtime: mtime(path),
             store,
             config_error,
             config_checked: Instant::now(),
@@ -1268,10 +1312,7 @@ impl Controller {
             absent_due: None,
             front_after_restore: false,
             focus_after_restore: false,
-        };
-        logging::apply_config(&this.store.config().log);
-        this.notify_config();
-        this
+        }
     }
 
     fn notify_config(&self) {
@@ -1696,7 +1737,7 @@ impl Controller {
                 }
             };
             if matches!(action, Action::SetFrame { .. }) {
-                self.shown_by_us.insert(id, now);
+                note_shown_by_us(&mut self.shown_by_us, id, now);
             }
             // Where a hide puts the window (asked once: a write tried again asks the same).
             let park = match action {
@@ -5085,10 +5126,15 @@ impl Controller {
         }
     }
 
-    /// Window `id`, just found and not listed on screen yet, is looked at on every fast tick
-    /// for [`FRESH_LOOK`] from its first wait (a later offer never lengthens it).
-    fn look_soon(&mut self, id: u32) {
-        self.fresh_unplaced.entry(id).or_insert_with(|| Instant::now() + FRESH_LOOK);
+    /// Window `id`, just found and not listed on screen yet (`listed`: its frame in the
+    /// window server's list, if there), is looked at on every fast tick for [`FRESH_LOOK`]
+    /// from its first wait (a later offer never lengthens it) when it may be about to show
+    /// ([`looks_soon`]).
+    fn look_soon(&mut self, ob: &Observer, id: u32, listed: Option<Rect>) {
+        let launched = ob.window(id).and_then(|w| ob.launched_at(w.pid)).map(|at| at.elapsed());
+        if looks_soon(listed, launched) {
+            self.fresh_unplaced.entry(id).or_insert_with(|| Instant::now() + FRESH_LOOK);
+        }
     }
 
     /// The fast tick's look at windows of [`Self::look_soon`]: those listed on a managed
@@ -5164,12 +5210,13 @@ impl Controller {
         // (round displays-2), so a full-screen app on one screen never stops windows arriving
         // on another. A Space change settling holds every screen (the arrival places it).
         let screen = list.iter().find(|w| w.id == id).map(|w| w.bounds).map(|b| self.display_at(b));
+        let listed = list.iter().find(|w| w.id == id).map(|w| w.bounds);
         let Some(screen) = screen.and_then(|s| self.managed_displays().into_iter().find(|d| d.id == s)) else {
             if self.unplaced.insert(id) {
                 tracing::debug!(id, "window not on screen; it is placed once it shows");
             }
             self.new_window_waits(id);
-            self.look_soon(id);
+            self.look_soon(ob, id, listed);
             return;
         };
         let is_main = screen.id == self.main_display_id();
@@ -5180,7 +5227,7 @@ impl Controller {
             }
             self.new_window_waits(id);
             if !frozen {
-                self.look_soon(id);
+                self.look_soon(ob, id, listed);
             }
             return;
         }
@@ -6146,6 +6193,7 @@ impl Controller {
             (self.unminimizing.values().any(|at| now.duration_since(*at) < UNMINIMIZE_MAX), "an un-minimize"),
             (self.fresh_waiting(), "a new window"),
             (self.ax_sees_nothing(), "Accessibility lists no window"),
+            (self.screens.values().any(|w| w.waits(now)), "another screen's checks"),
         ];
         if let Some((_, why)) = waits.into_iter().find(|(w, _)| *w) {
             return Some(why);
@@ -7121,6 +7169,105 @@ mod tests {
         assert!(read_state_or_set_aside(&path).is_some());
         assert!(path.exists());
         assert_eq!(std::fs::read_to_string(&aside).ok().as_deref(), Some("{ not json"), "untouched");
+    }
+
+    /// A controller on a scratch config file, as [`Controller::new`] builds one, nothing told.
+    fn scratch() -> (Controller, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let (store, _) = ConfigStore::open(path.clone());
+        (Controller::with_store(store, &path, None), dir)
+    }
+
+    /// The review of 1.9, B-11: the tick's scenarios pace a clock with waits the test returns,
+    /// so a duty the controller leaves out of its own waits failed nothing (B-10 was one).
+    /// Here each duty's field is set in turn on a fresh controller, and the controller's own
+    /// [`Controller::tick_waits`] must name it. The fields whose types need a whole switch or
+    /// press to build (a press or a drag, an arrangement made ahead, a held focus, the stale
+    /// handles, the foreign windows) are left to the scenarios.
+    #[test]
+    fn each_duty_that_waits_on_the_tick_keeps_it_brisk() {
+        use crate::engine::fullscreen::Seen;
+        use crate::engine::overview::Overview;
+        let now = Instant::now();
+        type Set = fn(&mut Controller, Instant);
+        let cases: Vec<(&str, Set)> = vec![
+            ("the launch's stages wait", |c, now| c.build_wait = Some((session::Blind::AxSilent, now))),
+            ("the restore window is open", |c, now| c.settling = Some(Settling::new(now, None))),
+            ("a switch", |c, now| c.phase.feed(phase::Event::SwitchSent { id: 1, max: Duration::from_secs(1) }, now)),
+            ("a Space change settles", |c, now| c.phase.feed(phase::Event::SpaceChanged, now)),
+            ("a save is due", |c, now| c.save.mark(now)),
+            ("the strip is presented", |c, _| c.strip_dirty = true),
+            ("a press or a drag", |c, _| c.focus_after_press = Some(1)),
+            ("after the restore", |c, _| c.front_after_restore = true),
+            ("after the restore", |c, _| c.focus_after_restore = true),
+            ("the restore's deadlines", |c, now| c.absent_due = Some(now)),
+            ("the restore's deadlines", |c, now| c.rematch_until = Some(now)),
+            ("an overview", |c, now| {
+                c.overview.see(Some(Overview::ShowDesktop), now);
+            }),
+            ("an overview", |c, now| c.macos_reveal_at = Some(now)),
+            ("windows counted missing", |c, _| {
+                c.absent.insert(1, 1);
+            }),
+            ("an un-minimize", |c, now| {
+                c.unminimizing.insert(1, now);
+            }),
+            ("a new window", |c, now| {
+                c.fresh_unplaced.insert(1, now + FRESH_LOOK);
+            }),
+            // Another screen's checks (B-10).
+            ("another screen's checks", |c, _| {
+                c.screens.entry(2).or_default().absent.insert(1, 1);
+            }),
+            ("another screen's checks", |c, now| {
+                c.screens.entry(2).or_default().settle.step(Seen::Transition, now);
+            }),
+            ("another screen's checks", |c, now| {
+                c.screens.entry(2).or_default().overview.see(Some(Overview::MissionControl), now);
+            }),
+        ];
+        let (fresh, _dir) = scratch();
+        let idle = fresh.tick_waits(now);
+        assert!(idle.is_none() || idle == Some("the mouse button is down"), "a fresh controller waits on nothing: {idle:?}");
+        for (why, set) in cases {
+            let (mut c, _dir) = scratch();
+            set(&mut c, now);
+            assert_eq!(c.tick_waits(now), Some(why));
+        }
+        // A screen with nothing waiting keeps nothing brisk.
+        let (mut c, _dir) = scratch();
+        c.screens.entry(2).or_default();
+        let idle = c.tick_waits(now);
+        assert!(idle.is_none() || idle == Some("the mouse button is down"), "{idle:?}");
+    }
+
+    /// The review of 1.9, B-7: the fast tick looks at a window found off screen only when it
+    /// may be about to show.
+    #[test]
+    fn only_a_window_that_may_be_about_to_show_is_looked_at_on_the_fast_tick() {
+        let at = Rect::new(300.0, 200.0, 800.0, 600.0);
+        assert!(looks_soon(None, None), "not listed yet: a new window");
+        assert!(looks_soon(Some(Rect::new(0.0, 0.0, 0.0, 0.0)), None), "listed with no frame yet: a new window");
+        assert!(looks_soon(Some(at), Some(Duration::from_secs(2))), "a just-opened app's window");
+        assert!(!looks_soon(Some(at), None), "another Desktop's, a minimized one, a hidden app's: at its frame");
+        assert!(!looks_soon(Some(at), Some(FRESH_APP)), "an app launched long ago");
+    }
+
+    /// The review of 1.9, B-8: the windows our batches showed are kept only for the slide
+    /// carry's time, also with no Space change ever (one Desktop).
+    #[test]
+    fn the_windows_shown_by_us_are_kept_only_for_the_slide_carry() {
+        let t0 = Instant::now();
+        let mut shown = HashMap::new();
+        for i in 0..100 {
+            note_shown_by_us(&mut shown, i, t0 + Duration::from_millis(u64::from(i) * 100));
+        }
+        let last = t0 + Duration::from_millis(9_900);
+        let kept: BTreeSet<u32> = shown.keys().copied().collect();
+        let carried = SLIDE_CARRY.as_millis() as u32 / 100;
+        assert_eq!(kept, (100 - carried..100).collect(), "only those within the carry of the last");
+        assert!(shown.values().all(|at| last.saturating_duration_since(*at) < SLIDE_CARRY));
     }
 
     /// 11-09 10:00:03: an activation as Show Desktop closed read a window at its pushed-aside

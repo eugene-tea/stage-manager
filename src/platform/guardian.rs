@@ -54,6 +54,7 @@ use std::time::{Duration, Instant};
 use super::ax::AxElement;
 use super::safety::{self, guarded};
 use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, session, window_engine, windows};
+use crate::engine::geometry::Rect;
 use crate::engine::guard_watch::{Event, LockSeen, Look, Release, Watch, Waiting};
 use crate::engine::handoff::{Answer, Offering};
 use crate::engine::hidden_tab::Candidate;
@@ -620,6 +621,10 @@ pub(crate) fn reach(
     // Each app's enhanced UI off once for all the windows brought back (round enhanced-ui).
     let _quiet = enhanced_ui::Batch::open();
     let engine = window_engine::current();
+    // Whether a window is still away is the watch's engine's to say (the app's watch of taken
+    // windows asks the park corner's, the review of 1.9, C-3); the scan is the running one's.
+    let kind = w.engine();
+    let stranded = |f: Rect, x: &Waiting| kind.stranded(f, displays, x.known());
     let mut scanned: Vec<Waiting> = Vec::new();
     for x in windows {
         let a = attempts.entry(x.id).or_default();
@@ -636,7 +641,7 @@ pub(crate) fn reach(
             }
         };
         match element.frame() {
-            Ok(f) if !engine.stranded(f, displays, x.known()) => {
+            Ok(f) if !stranded(f, &x) => {
                 if let Some(e) = w.read_through_ax(x.id, f, false, displays) {
                     log(&e);
                     continue;
@@ -652,7 +657,7 @@ pub(crate) fn reach(
         match Watch::restore_frame(&x, displays) {
             Some(frame) => match element.set_frame(frame) {
                 Ok(()) => match element.frame() {
-                    Ok(f) if !engine.stranded(f, displays, x.known()) => {
+                    Ok(f) if !stranded(f, &x) => {
                         tracing::warn!(id = x.id, pid = x.pid, to = %f, "{who}: its Desktop shows; window brought back");
                         if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
                             log(&e);
@@ -673,7 +678,7 @@ pub(crate) fn reach(
     tracing::info!(restored = r.restored, failed = r.failed, "{who}: scanned the shown Desktop");
     for x in scanned {
         match safety::ax_window(x.pid, x.id).and_then(|e| e.frame().map_err(|e| format!("its frame cannot be read ({e})"))) {
-            Ok(f) if !engine.stranded(f, displays, x.known()) => {
+            Ok(f) if !stranded(f, &x) => {
                 if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
                     log(&e);
                 }

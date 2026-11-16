@@ -20,13 +20,25 @@
 //!   record or restore. The Corner engine keeps restore frames out of its park zone; an
 //!   engine that hides without moving has no such place.
 //!
-//! And one answer the engine gives about a window the model hid: where it left it
-//! ([`Model::frame_left`]); and two about macOS: whether it brings another app in front when
+//! - **A window first seen** ([`Model::found_parked`], [`Model::found_out_of_sight`],
+//!   [`Model::safe_restore`]): a frame seen for a window the model does not know yet (a
+//!   launch, a Desktop shown for the first time since, a window born), or a saved frame
+//!   about to be recorded. Under either engine the park corner's geometry answers: no window
+//!   of a Spaces run is ever there, but a Corner copy's may be (one that crashed, or fell back
+//!   to the Corner engine, before this run) and an app may reopen a window at a park frame it
+//!   saved under one; counted shown there, it stayed a sliver in the corner, and its stage
+//!   showed it back at that frame (the review of 1.9, C-2). A known window is never asked:
+//!   the Spaces answers for known windows stand.
+//!
+//! And two answers the engine gives about a window the model hid: where it left it
+//! ([`Model::frame_left`]), and whether it is listed off screen at its own frame there
+//! ([`Model::hidden_at_own_frame`]); and two about macOS: whether it brings another app in front when
 //! the app in front quits ([`Model::macos_fronts_after_quit`]), and whether it counts a hidden
 //! window on its Desktop at an app's activation ([`Model::macos_counts_hidden`]).
 
 use super::{Display, DisplayId, Model, WindowId, WindowMeta, WindowState};
 use crate::engine::{corner, spaces};
+use crate::engine::corner::park::clamp_to_visible;
 use crate::engine::geometry::Rect;
 use crate::engine::recovery::EngineKind;
 
@@ -149,6 +161,49 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::macos_counts_hidden(),
             EngineKind::Spaces => spaces::macos_counts_hidden(),
+        }
+    }
+
+    /// True when a window the model does not know yet, first seen at `listed` on `display`,
+    /// is in the park corner's zone: hidden there by a Corner copy, or reopened there by its
+    /// app. The Corner engine's test under either engine (module docs, "A window first seen").
+    pub(crate) fn found_parked(&self, display: DisplayId, listed: Rect) -> bool {
+        corner::is_hidden(self.display(display), listed)
+    }
+
+    /// True when a window the model does not know yet (or has just put in from a saved entry),
+    /// listed at `listed` on `display`, is out of sight at the park corner: in its zone or only
+    /// a piece showing there. The Corner engine's test under either engine (module docs, "A
+    /// window first seen").
+    pub(crate) fn found_out_of_sight(&self, display: DisplayId, listed: Rect) -> bool {
+        corner::out_of_sight(self.display(display), listed)
+    }
+
+    /// A restore frame that is safe to record for a new window: `frame`, a centered one if
+    /// `frame` is unusable (degenerate, or in the park corner's zone), brought on screen if it
+    /// shows only a piece at the park corner. The Corner engine's geometry under either engine
+    /// (module docs, "A window first seen"): under the Corner engine its own answers, under
+    /// Spaces a frame a Corner copy left.
+    pub(crate) fn safe_restore(&self, frame: Rect, display: DisplayId) -> Rect {
+        let d = self.display(display);
+        if frame.is_degenerate() || corner::no_restore(d, frame) {
+            clamp_to_visible(frame, d.visible)
+        } else if corner::shows_a_piece(d, frame) {
+            corner::within_reach(d, frame)
+        } else {
+            frame
+        }
+    }
+
+    /// True when window `id` is hidden by an engine that leaves a hidden window listed off
+    /// screen at its own frame (the Spaces engine's stage Space), so that look says nothing
+    /// of a tab ordered out ([`crate::engine::hidden_tab::tabs_selected`], the review of 1.9,
+    /// C-1). The Corner engine's hidden window is a sliver on screen: off screen, it is not
+    /// where the engine left it.
+    pub fn hidden_at_own_frame(&self, id: WindowId) -> bool {
+        match self.options.engine {
+            EngineKind::Corner => false,
+            EngineKind::Spaces => spaces::hidden_by_record(self.windows.get(&id)),
         }
     }
 

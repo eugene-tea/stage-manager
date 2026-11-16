@@ -88,6 +88,14 @@
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), a press on the Dock
   that is no click (or whose release went unseen) while the app switcher shows no longer
   undoes what ⌘Tab made ready: the app chosen took the screen to its other Desktop.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a new window opened
+  exactly where a hidden window of its app sits (a window filling the screen, say) stays
+  where it opened. It was taken for a window tab selected: it went into the hidden window's
+  stage, and the hidden window came out on the Desktop.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), windows an earlier
+  copy using the park corner left there (it stopped unexpectedly, or was an earlier version)
+  come out of the corner when their Desktop shows, as does a window an app reopens at a
+  corner frame it saved then. They stayed in the corner as slivers counted shown.
 
 ## 1.8.5 — 2026-11-12
 
