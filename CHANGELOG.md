@@ -101,6 +101,20 @@
   their order as they fly and land: the window behind lands first and no longer ends on top
   of the one in front. Two overlapping windows of two apps flickered, trading places, as
   they flew in.
+- With macOS's Spaces keeping the hidden windows and the windows themselves flying the end
+  of a stage change (both test opt-ins), a window of the stage coming in no longer shows in
+  front of the window it belongs behind for a moment as they land: the window in front takes
+  over from its picture only after the ones behind it, and where the window in front belongs
+  to an app with a window on another Desktop, or a window is added with a Shift-click to a
+  stage where another app's window stands, the windows land behind their pictures and the
+  pictures go once the order is right.
+- Card pictures follow a change between light and dark appearance: every card's pictures
+  are taken again shortly after the change, and again a few seconds later for apps that
+  redraw late. Cards kept the old appearance until the pointer reached them or their stage
+  was shown.
+- Stages come back after Apple's Stage Manager has been turned on and off again: they are
+  set aside while Apple's arranges the windows, and each window goes back to its stage and
+  its saved frame. Every stage came back as one stage per app, at the frames Apple's left.
 
 ## 1.8.5 — 2026-11-12
 
