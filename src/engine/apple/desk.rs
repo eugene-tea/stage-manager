@@ -77,8 +77,10 @@ pub enum Posted {
 }
 
 /// Between two Shift-clicks of one press (the probe of 11-16 that brought a stage of two in
-/// with one Shift press).
-pub const CLICK_GAP: std::time::Duration = std::time::Duration::from_millis(50);
+/// with one Shift press, 50 ms apart). Short enough that every click lands before Apple lays
+/// out the strip item again around the thumbnails left: live 11-16 15:20:35, a stage of three
+/// clicked 50 ms apart, the third click (100 ms in) missed its thumbnail, already moved.
+pub const CLICK_GAP: std::time::Duration = std::time::Duration::from_millis(15);
 
 impl Posted {
     /// One Shift-click on window `window`'s thumbnail at `at`.
