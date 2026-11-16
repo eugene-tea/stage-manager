@@ -965,9 +965,10 @@ impl WmState {
         self.stand_down.released(held == 0 && !leftovers);
     }
 
-    /// Apple's Stage Manager went off: carries out [`resume_plan`] (a fresh start).
+    /// Apple's Stage Manager went off: carries out [`resume_plan`] (the stages set aside come back
+    /// as the fresh controller loads `state.json`).
     fn resume(&mut self) {
-        tracing::info!("Apple's Stage Manager is off: starting fresh from the windows on screen");
+        tracing::info!("Apple's Stage Manager is off: managing again, the stages set aside taken back (else fresh from the windows on screen)");
         for task in resume_plan(self.stand_down.stranded()) {
             match task {
                 Task::RetryHeld => {
