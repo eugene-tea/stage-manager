@@ -8,7 +8,8 @@
 //! button selected (under 1 ms). The list comes ~180 ms after the first Tab. [`read`] looks
 //! for a Dock child whose role or subrole names a switcher, takes the selection from
 //! `AXSelectedChildren` (else the item whose `AXSelected` is true), and names its app by
-//! `AXURL` when an item has one, else by its title matched to one running app under its own
+//! `AXURL` when an item has one, else by its title matched to one running regular app (the
+//! switcher lists no other; an Info.plist read only for those) under its own
 //! name, its bundle's file name (what the switcher shows: "Visual Studio Code" for the app
 //! named "Code") or its Info.plist's names (the caller may map its place in the order
 //! instead, [`Read::index`]). [`dump`] and [`list`]
@@ -17,7 +18,7 @@
 //! Every call runs at [`SWITCHER_AX_SECONDS`]; the first call the Dock leaves unanswered ends
 //! the read.
 
-use objc2_app_kit::NSWorkspace;
+use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
 use objc2_foundation::{NSBundle, NSString};
 use serde_json::{Value, json};
 
@@ -154,7 +155,7 @@ fn selection(list: &AxElement) -> AxResult<Read> {
 }
 
 /// The running app an item names: its bundle path (`AXURL`), else its title as exactly one
-/// running app's name.
+/// running regular app's name ([`named_by_title`]).
 fn app_of(path: Option<&str>, title: Option<&str>) -> (Option<i32>, &'static str) {
     if let Some(path) = path
         && let Some(pid) = dock::running_by_path().get(path.trim_end_matches('/')).copied()
@@ -162,39 +163,44 @@ fn app_of(path: Option<&str>, title: Option<&str>) -> (Option<i32>, &'static str
         return (Some(pid), "url");
     }
     if let Some(title) = title {
-        let apps = NSWorkspace::sharedWorkspace().runningApplications();
-        // The cheap names first (the app's own name, its bundle's file name); the bundle's
-        // Info.plist names only when they name none.
-        let cheap: Vec<AppNames> = apps
-            .iter()
-            .map(|a| {
-                let mut names: Vec<String> = a.localizedName().map(|n| n.to_string()).into_iter().collect();
-                names.extend(a.bundleURL().and_then(|u| u.path()).and_then(|p| file_name(&p.to_string())));
-                AppNames { pid: a.processIdentifier(), names }
-            })
-            .collect();
-        if let Some(pid) = only_named(&cheap, title) {
-            return (Some(pid), "title");
-        }
-        let full: Vec<AppNames> = apps
-            .iter()
-            .zip(cheap)
-            .map(|(a, mut n)| {
-                if let Some(bundle) = a.bundleURL().and_then(|u| NSBundle::bundleWithURL(&u)) {
-                    for key in ["CFBundleDisplayName", "CFBundleName"] {
-                        if let Some(v) = bundle.objectForInfoDictionaryKey(&NSString::from_str(key)).and_then(|v| v.downcast::<NSString>().ok()) {
-                            n.names.push(v.to_string());
-                        }
-                    }
-                }
-                n
-            })
-            .collect();
-        if let Some(pid) = only_named(&full, title) {
+        let apps: Vec<_> = NSWorkspace::sharedWorkspace().runningApplications().iter().collect();
+        let regular = |a: &objc2::rc::Retained<NSRunningApplication>| a.activationPolicy() == NSApplicationActivationPolicy::Regular;
+        let cheap = |a: &objc2::rc::Retained<NSRunningApplication>| {
+            let mut names: Vec<String> = a.localizedName().map(|n| n.to_string()).into_iter().collect();
+            names.extend(a.bundleURL().and_then(|u| u.path()).and_then(|p| file_name(&p.to_string())));
+            AppNames { pid: a.processIdentifier(), names }
+        };
+        let plist = |a: &objc2::rc::Retained<NSRunningApplication>| {
+            let Some(bundle) = a.bundleURL().and_then(|u| NSBundle::bundleWithURL(&u)) else { return Vec::new() };
+            ["CFBundleDisplayName", "CFBundleName"]
+                .iter()
+                .filter_map(|key| bundle.objectForInfoDictionaryKey(&NSString::from_str(key)).and_then(|v| v.downcast::<NSString>().ok()))
+                .map(|v| v.to_string())
+                .collect()
+        };
+        if let Some(pid) = named_by_title(&apps, title, regular, cheap, plist) {
             return (Some(pid), "title");
         }
     }
     (None, "unmatched")
+}
+
+/// The one app of `apps` shown as `title`, of those the switcher lists (`listed`: the regular
+/// apps, never an agent or a helper): by the cheap names first (`cheap`: the app's own name, its
+/// bundle's file name), its Info.plist's names (`plist`: a bundle opened, read on the WM thread
+/// before the lend) only when those name none or several, and then only for the apps listed
+/// (the review's B-9: every running application's bundle was opened at each Tab whose title
+/// named no app by its cheap names).
+fn named_by_title<A>(apps: &[A], title: &str, listed: impl Fn(&A) -> bool, cheap: impl Fn(&A) -> AppNames, plist: impl Fn(&A) -> Vec<String>) -> Option<i32> {
+    let apps: Vec<&A> = apps.iter().filter(|a| listed(a)).collect();
+    let mut names: Vec<AppNames> = apps.iter().map(|a| cheap(a)).collect();
+    if let Some(pid) = only_named(&names, title) {
+        return Some(pid);
+    }
+    for (a, n) in apps.iter().zip(names.iter_mut()) {
+        n.names.extend(plist(a));
+    }
+    only_named(&names, title)
 }
 
 /// The names a running app may show under in the switcher: its own (`localizedName`: "Code"),
@@ -341,6 +347,36 @@ mod tests {
         assert_eq!(only_named(&apps, "SM Fixture Stages"), Some(20));
         assert_eq!(only_named(&apps, "SM Fixture"), None, "two fixtures share their own name");
         assert_eq!(only_named(&apps, "Mail"), Some(40), "one app under two equal names is one app");
+    }
+
+    /// B-9: only the apps the switcher lists are named, and their Info.plist names are read only
+    /// when the cheap names name none: an agent never has its bundle opened.
+    #[test]
+    fn a_title_reads_bundles_only_of_the_apps_the_switcher_lists() {
+        struct Fake {
+            pid: i32,
+            regular: bool,
+            names: &'static [&'static str],
+            plist: &'static [&'static str],
+        }
+        let fake = |pid, regular, names, plist| Fake { pid, regular, names, plist };
+        let mut apps = vec![fake(10, true, &["Code", "Visual Studio Code"][..], &["Code"][..]), fake(20, true, &["Mail"], &["Mail"]), fake(30, true, &["Pages"], &["Pages Écrire"])];
+        apps.extend((100..160).map(|pid| fake(pid, false, &["Helper"], &["Mail"])));
+        apps.push(fake(200, false, &["Code"], &["Code"]));
+        let opened = std::cell::Cell::new(0);
+        let name = |title: &str| {
+            opened.set(0);
+            named_by_title(&apps, title, |a| a.regular, |a| app(a.pid, a.names), |a| {
+                opened.set(opened.get() + 1);
+                a.plist.iter().map(|n| n.to_string()).collect()
+            })
+        };
+        assert_eq!(name("Mail"), Some(20), "the agents' Mail of their Info.plist does not count");
+        assert_eq!(opened.get(), 0, "named by the cheap names: no bundle opened");
+        assert_eq!(name("Code"), Some(10), "an agent of the same name is not in the switcher");
+        assert_eq!(name("Pages Écrire"), Some(30), "an Info.plist name");
+        assert_eq!(opened.get(), 3, "only the three regular apps' bundles");
+        assert_eq!(name("Nothing"), None);
     }
 
     #[test]
