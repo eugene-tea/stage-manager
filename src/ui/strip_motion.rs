@@ -1298,6 +1298,7 @@ impl Strip {
         // The stretches first, then their ranks among them (round landing-order): they fly
         // together, shown, stepped and landed back to front.
         let mut planned: Vec<(Stretch, [f64; 3])> = Vec::new();
+        let mut candidates = Vec::new();
         for &w in windows {
             let Some(frame) = r.arrived.iter().find(|(a, _)| *a == w).map(|(_, f)| *f) else { continue };
             let Some((flown, flight_started)) = r.ghosts.iter().find(|g| g.window == w).and_then(|g| g.flown()) else { continue };
@@ -1311,9 +1312,31 @@ impl Strip {
             };
             // The controller shows the window at the unveil: a handover after it never comes.
             let handover = flight_started + Duration::from_secs_f64(at);
-            if r.unveil_at.is_some_and(|u| handover + Duration::from_secs_f64(STRETCH_BEFORE_UNVEIL) >= u) {
+            let unveils_first = |h: Instant| r.unveil_at.is_some_and(|u| h + Duration::from_secs_f64(STRETCH_BEFORE_UNVEIL) >= u);
+            if unveils_first(handover) {
                 tracing::debug!(id, window = w, handover_ms = (at * 1000.0).round() as u64, "transition: the unveil comes before the stretch would; its picture lands");
                 continue;
+            }
+            candidates.push((w, frame, flown, flight_started, at));
+        }
+        // Handed over back to front (`landing_order::handovers_back_first`): a window waits
+        // for those behind it to take over, unless that wait would meet the unveil.
+        let ids: Vec<u32> = candidates.iter().map(|c| c.0).collect();
+        let ranks = landing_order::ranks(&r.order, &ids);
+        let clock = candidates.iter().map(|c| c.3).min();
+        let own: Vec<(usize, f64)> = candidates
+            .iter()
+            .zip(&ranks)
+            .map(|(c, (_, rank))| (*rank, clock.map_or(c.4, |k| c.3.duration_since(k).as_secs_f64() + c.4)))
+            .collect();
+        let moved = landing_order::handovers_back_first(&own);
+        for ((w, frame, flown, flight_started, own_at), later) in candidates.into_iter().zip(moved) {
+            let since_clock = clock.map_or(0.0, |k| flight_started.duration_since(k).as_secs_f64());
+            let later_at = (later - since_clock).max(own_at);
+            let unveils_first = |a: f64| r.unveil_at.is_some_and(|u| flight_started + Duration::from_secs_f64(a + STRETCH_BEFORE_UNVEIL) >= u);
+            let at = if later_at > own_at && !unveils_first(later_at) { later_at } else { own_at };
+            if at > own_at {
+                tracing::debug!(id, window = w, own_ms = (own_at * 1000.0).round() as u64, handover_ms = (at * 1000.0).round() as u64, "transition: the window takes over after the windows behind it");
             }
             let steps: Vec<(Instant, landing_math::Affine)> = landing_math::stretch(&flown, origin, frame, at, STRETCH_STEP)
                 .into_iter()

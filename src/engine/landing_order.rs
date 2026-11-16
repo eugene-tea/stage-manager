@@ -16,6 +16,11 @@
 //!   nothing can wait in a circle).
 //! - **Shown back to front**: a landing Space is shown once the Spaces behind it are
 //!   ([`SHOW_WAIT`] at most).
+//! - **Handed over back to front** ([`handovers_back_first`]): a window takes over from its
+//!   picture no earlier than every window behind it. The pictures fly above every window, so
+//!   a picture behind still flying when the front window took over was drawn over it until
+//!   its own window took over under it (11-16 10:43:04, Messages at .653, Telegram's picture
+//!   over it until .669: one frame of Telegram in front, the "rapid flip").
 //! - **Front set last at each step** ([`stagger`]): within a step the front window's
 //!   transform follows those behind it by a millisecond or so, never the other way.
 //! - **Landed back to front**: a window goes onto its Desktop (where it is listed on top)
@@ -172,6 +177,13 @@ pub fn ranks(order: &[u32], flying: &[u32]) -> Vec<(u32, usize)> {
     flying.iter().map(|w| (*w, rank_of(*w))).collect()
 }
 
+/// The handover instants of a convoy's windows, each given as (its rank, its own instant in
+/// seconds on one clock): each moved no earlier than the latest of those behind it (a higher
+/// rank), in the order given ([`handovers_back_first`] in the module notes).
+pub fn handovers_back_first(own: &[(usize, f64)]) -> Vec<f64> {
+    own.iter().map(|&(rank, at)| own.iter().filter(|(r, _)| *r >= rank).map(|(_, a)| *a).fold(at, f64::max)).collect()
+}
+
 /// How much later than the back one stretch `rank` of `count` sets each step's transform:
 /// the front last, [`STAGGER`] a rank, [`STAGGER_MAX`] in all; nothing for one alone.
 pub fn stagger(rank: usize, count: usize) -> Duration {
@@ -236,6 +248,16 @@ mod tests {
 
     /// Ranks follow the stage's order front to back, whatever order the windows are planned
     /// in; a window the order does not name goes behind; one alone is the front.
+    /// 11-16 10:43:04: Messages (rank 0) would take over at 390 ms, Telegram behind it
+    /// (rank 1) at 408 ms; Messages waits for it. One behind already earlier changes nothing.
+    #[test]
+    fn the_front_takes_over_no_earlier_than_those_behind() {
+        assert_eq!(handovers_back_first(&[(1, 0.408), (0, 0.390)]), [0.408, 0.408]);
+        assert_eq!(handovers_back_first(&[(0, 0.500), (1, 0.400)]), [0.500, 0.400]);
+        assert_eq!(handovers_back_first(&[(2, 0.3), (0, 0.1), (1, 0.2)]), [0.3, 0.3, 0.3]);
+        assert_eq!(handovers_back_first(&[(0, 0.4)]), [0.4], "one alone");
+    }
+
     #[test]
     fn ranks_follow_the_stage_order() {
         assert_eq!(ranks(&[114, 21102], &[21102, 114]), vec![(21102, 1), (114, 0)]);
