@@ -9115,7 +9115,10 @@ def phase_landing_merge():
         ran += 1
         # Bravo's colour is the phase's "front" one, Alpha's the "back" one.
         first, after, before, last = order_reads(px.get("samples", []))
-        shown = [x for x in (listed or []) if any(w["id"] == joins and w.get("onscreen") for w in x.get("windows", []))]
+        # Once Bravo is at its own frame: under the park corner it is listed on screen as a
+        # sliver in the corner before it comes in, under Alpha by right.
+        near = lambda b: b and all(abs(b[k] - fb[k]) <= 3 for k in ("x", "y", "w", "h"))  # noqa: E731
+        shown = [x for x in (listed or []) if any(w["id"] == joins and w.get("onscreen") and near(w.get("bounds")) for w in x.get("windows", []))]
         sw = order_list_swaps(shown, joins, stay)
         ghosts = [g for g in ((y.get("last_transition") or {}).get("ghosts") or []) if not g.get("outgoing")]
         took = {g["window"] for g in ghosts if g.get("stretch_ms") is not None}
@@ -9135,7 +9138,7 @@ def phase_landing_merge():
     check(not unseen, "landing merge: Bravo's colour read in the overlap every round" + (f" (never: {'; '.join(unseen)})" if unseen else ""))
     check(not bad_px, "landing merge: no read of Alpha's colour in the overlap once Bravo's showed" + (f" ({'; '.join(bad_px[:4])})" if bad_px else ""))
     check(not bad_last, "landing merge: the overlap shows Bravo at the end" + (f" ({'; '.join(bad_last[:4])})" if bad_last else ""))
-    check(not swaps, "landing merge: the window list never puts Alpha above Bravo once Bravo shows" + (f" ({'; '.join(swaps[:4])})" if swaps else ""))
+    check(not swaps, "landing merge: the window list never puts Alpha above Bravo once Bravo is at its frame" + (f" ({'; '.join(swaps[:4])})" if swaps else ""))
     if LIVE_LANDING:
         say(f"  Bravo flew its last stretch itself in {flew} of {ran} rounds")
     consistent("landing merge")
