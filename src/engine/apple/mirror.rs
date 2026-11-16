@@ -5,9 +5,11 @@
 //!
 //! 1. **The window list** ([`Listed`]), the fast mirror. Apple animates the real windows, so
 //!    their listed bounds move every frame and are final when the motion ends. WindowManager
-//!    keeps a layer-0 window of its own exactly over every strip thumbnail (the same bounds as
-//!    the window it shows) and one per app icon (66x82): a strip window is a managed window
-//!    whose bounds equal a WindowManager window's; an item is the thumbnails nearest one icon.
+//!    keeps a layer-0 window of its own exactly over every strip thumbnail, listed right above
+//!    it with the same bounds (its twin), and one per app icon (66x82 at x = -7): a strip
+//!    window is a managed window with a twin ([`has_twin`]); a window of the stage in front
+//!    has none. No column or size is asked (the stage in front sits at x = 221 on a laptop
+//!    screen, live 11-16). An item is the thumbnails nearest one icon.
 //! 2. **WindowManager's Accessibility** ([`Reading`]: `sm.strip`'s items with `AXWindowsIDs`
 //!    and `AXFrame`), the check on the list's grouping. It catches up about 785 ms after a
 //!    change and reads empty for about 650 ms of it: an empty reading is no reading. Where the
@@ -15,8 +17,7 @@
 //!
 //! Rules of [`fold`]:
 //!
-//! - **Current stage**: managed full-size windows on screen with no WindowManager window over
-//!   them, front to back.
+//! - **Current stage**: managed windows on screen with no twin, front to back.
 //! - **In motion**: any managed window's bounds differ from the read before, or a step of
 //!   ours or an event that may change the arrangement (an activation, a window found or
 //!   gone) came less than [`SETTLE`] ago ([`Arrangement::step_began`]): Apple's motion starts
@@ -37,7 +38,7 @@ use serde::Serialize;
 use crate::engine::geometry::Rect;
 use crate::engine::model::Display;
 
-use super::{in_strip_column, thumbnail_sized};
+use super::thumbnail_sized;
 
 /// How long a change keeps the arrangement unsettled: Apple's motion, about 700 ms
 /// (a recording of 11-16: a focus at .305, motion from .404 to about .900; clicks before
@@ -255,25 +256,34 @@ fn icon_sized(r: Rect) -> bool {
     (r.w - ICON.0).abs() <= 2.0 && (r.h - ICON.1).abs() <= 2.0
 }
 
+/// True when the window listed at `i` has a twin: the window listed right above it is one of
+/// WindowManager's layer-0 windows with the same bounds (within a point). Every strip
+/// thumbnail has one; a window of the stage in front never does (live 11-16).
+pub fn has_twin(listed: &Listed, i: usize) -> bool {
+    let Some(w) = listed.windows.get(i) else { return false };
+    i.checked_sub(1).and_then(|j| listed.windows.get(j)).is_some_and(|above| Some(above.pid) == listed.manager && above.layer == 0 && same(above.bounds, w.bounds))
+}
+
+/// True when `r` is thumbnail-sized and wholly left of the screen: the strip hidden, its
+/// thumbnails listed off the left edge (x = -258 measured), with or without their twins.
+fn off_left(screen: &Display, r: Rect) -> bool {
+    thumbnail_sized(r) && r.max_x() <= screen.frame.x
+}
+
 /// The next arrangement from the one before (`prev`), a reading of Accessibility (`reading`,
 /// `None` when not read this time), the window list (`listed`) and the windows the app
 /// manages (`managed`), on screen `screen`, at `now`. See the module docs for the rules.
 pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, managed: &BTreeSet<u32>, screen: &Display, now: Instant) -> Arrangement {
-    let manager: Vec<&ListedWindow> = listed.manager_windows().collect();
-    let icons: Vec<Rect> = manager.iter().map(|w| w.bounds).filter(|b| icon_sized(*b)).collect();
-    let overlays: Vec<Rect> = manager.iter().map(|w| w.bounds).filter(|b| !icon_sized(*b)).collect();
+    let icons: Vec<Rect> = listed.manager_windows().map(|w| w.bounds).filter(|b| icon_sized(*b)).collect();
 
     let mut frames = BTreeMap::new();
     let mut current = Vec::new();
     let mut thumbs: Vec<(u32, Rect)> = Vec::new();
-    for w in listed.windows.iter().filter(|w| managed.contains(&w.id)) {
-        if frames.insert(w.id, w.bounds).is_some() {
+    for (i, w) in listed.windows.iter().enumerate() {
+        if !managed.contains(&w.id) || frames.insert(w.id, w.bounds).is_some() {
             continue;
         }
-        let under_overlay = overlays.iter().any(|o| same(*o, w.bounds));
-        // Off the left edge, thumbnail-sized: the strip hidden (its stand-ins may not follow).
-        let off_left = thumbnail_sized(w.bounds) && w.bounds.max_x() <= screen.frame.x;
-        if under_overlay || off_left {
+        if has_twin(listed, i) || off_left(screen, w.bounds) {
             thumbs.push((w.id, w.bounds));
         } else if w.onscreen && !w.bounds.is_degenerate() && w.bounds.intersect(&screen.frame).is_some_and(|r| r.w > 0.0 && r.h > 0.0) {
             current.push(w.id);
@@ -324,7 +334,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         }
         next.strip_shown = match thumbs.is_empty() {
             true => None,
-            false => Some(thumbs.iter().any(|(_, b)| in_strip_column(screen, *b))),
+            false => Some(thumbs.iter().any(|(_, b)| b.max_x() > screen.frame.x)),
         };
         next.strip = items(&thumbs, &icons);
         next.current = current;
@@ -680,6 +690,43 @@ mod tests {
         let mut front = b.current.clone();
         front.sort_unstable();
         assert_eq!(front, vec![73, 74], "the groups read before stand");
+    }
+
+    /// Live 11-16 (bf510a8): the stage in front sits at x = 221 on the laptop screen, where
+    /// a strip column took it for strip content and the mirror read no stage in front. Only a
+    /// twin listed right above makes a strip window: a WindowManager window of the same bounds
+    /// elsewhere in the list (another app's item, a stand-in below) does not, nor does the
+    /// place or the size.
+    #[test]
+    fn only_a_twin_right_above_makes_a_strip_window_never_a_place_on_screen() {
+        let laptop = Display { frame: Rect::new(0.0, 0.0, 1512.0, 982.0), visible: Rect::new(0.0, 33.0, 1512.0, 949.0), ..display() };
+        let wide = Display { frame: Rect::new(0.0, 0.0, 1800.0, 1169.0), visible: Rect::new(0.0, 39.0, 1800.0, 1130.0), ..display() };
+        let managed: BTreeSet<u32> = [73, 74, 80, 86].into();
+        let t0 = Instant::now();
+        for screen in [laptop, wide] {
+            let a = fold(&Arrangement::default(), None, &captured(CAPTURE[1]), &managed, &screen, t0);
+            let mut front = a.current.clone();
+            front.sort_unstable();
+            assert_eq!(front, vec![73, 74], "alpha at x = 221 is in front on a {} pt screen", screen.frame.w);
+        }
+        let w = |id: u32, pid: i32, x: f64, y: f64, ww: f64, h: f64| ListedWindow { id, pid, layer: 0, bounds: Rect::new(x, y, ww, h), onscreen: true };
+        let list = Listed {
+            windows: vec![
+                w(80, 2, 80.0, 87.0, 520.0, 392.0),
+                // A WindowManager window of the same bounds, but below it: no twin.
+                w(1000, 99, 80.0, 87.0, 520.0, 392.0),
+                // A small window of the stage in front, inside where thumbnails sit.
+                w(86, 3, 20.0, 300.0, 150.0, 120.0),
+                w(1001, 99, -7.0, 600.0, 66.0, 82.0),
+                w(1002, 99, 15.0, 575.0, 87.0, 97.0),
+                w(73, 1, 15.0, 575.0, 87.0, 97.0),
+            ],
+            manager: Some(99),
+        };
+        let a = fold(&Arrangement::default(), None, &list, &managed, &laptop, t0);
+        assert_eq!(a.current, vec![80, 86], "no twin right above: in front, wherever and however small");
+        assert_eq!(a.strip.iter().map(|g| g.windows.clone()).collect::<Vec<_>>(), vec![vec![73]]);
+        assert!(has_twin(&list, 5) && !has_twin(&list, 0) && !has_twin(&list, 2));
     }
 
     #[test]

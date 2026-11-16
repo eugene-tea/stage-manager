@@ -13,8 +13,9 @@
 //! the strip hides (x = -258). Such a frame is a hiding place, never the user's: no frame
 //! the model records or saves is ever a thumbnail's.
 //!
-//! - **Is this listed window hidden now?** When it is listed at thumbnail size in the strip
-//!   column ([`is_hidden`]), or wholly off the left edge.
+//! - **Is this listed window hidden now?** By a frame alone only when it is thumbnail-sized
+//!   and wholly off the left edge (the strip hidden, [`is_hidden`]); a known window, when the
+//!   model followed it into the strip ([`hidden_by_record`]).
 //! - **May a window be brought back here?** Anywhere within reach but a thumbnail's place.
 //! - **Where does a hide leave it?** This app never hides: the model's parked flag is what
 //!   Apple's strip holds, and the window's last frame is kept.
@@ -28,28 +29,21 @@ use super::corner::park::reach_in;
 use super::geometry::Rect;
 use super::model::{Display, WindowState};
 
-/// How far right of the screen's visible left edge Apple's strip column reaches, in points:
-/// its thumbnails sit at x = 15 to 32, up to 162 pt wide, its app icons at x = -7 (live
-/// 11-16, a 1512x982 pt screen). Generous: a full-size window never fits inside it.
-pub const STRIP_COLUMN: f64 = 260.0;
-
 /// The largest side of a strip thumbnail, in points (79x104 to 162x174 measured).
 pub const THUMBNAIL_MAX: f64 = 240.0;
 
-/// True when `listed`, on display `d`, is a strip thumbnail's place: thumbnail-sized and
-/// inside the strip column, or wholly left of the screen (the strip hidden).
+/// True when `listed`, on display `d`, is a hidden strip's thumbnail: thumbnail-sized and
+/// wholly left of the screen. A thumbnail of a strip that shows is told by its twin in the
+/// window list ([`mirror::has_twin`]), never by a place on screen: the stage in front can sit
+/// where the thumbnails are (x = 221 on a laptop screen, live 11-16), so no frame on screen
+/// is a hiding place by itself.
 pub fn is_hidden(d: &Display, listed: Rect) -> bool {
-    thumbnail_sized(listed) && (in_strip_column(d, listed) || listed.max_x() <= d.frame.x)
+    thumbnail_sized(listed) && listed.max_x() <= d.frame.x
 }
 
 /// True when `r` is no bigger than a strip thumbnail on either side.
 pub fn thumbnail_sized(r: Rect) -> bool {
     r.w > 0.0 && r.h > 0.0 && r.w <= THUMBNAIL_MAX && r.h <= THUMBNAIL_MAX
-}
-
-/// True when `r` lies inside display `d`'s strip column.
-pub fn in_strip_column(d: &Display, r: Rect) -> bool {
-    r.x >= d.frame.x && r.max_x() <= d.visible.x + STRIP_COLUMN
 }
 
 /// [`is_hidden`]: a thumbnail is out of the user's sight in the sense the model asks.
@@ -110,20 +104,19 @@ mod tests {
     use crate::engine::testkit::display;
 
     #[test]
-    fn a_thumbnail_in_the_strip_column_or_off_the_left_edge_is_hidden_a_window_is_not() {
+    fn by_its_frame_alone_only_a_thumbnail_off_the_left_edge_is_hidden() {
         let d = display();
-        assert!(is_hidden(&d, Rect::new(15.0, 300.0, 79.0, 104.0)), "a thumbnail as measured");
+        assert!(!is_hidden(&d, Rect::new(15.0, 300.0, 79.0, 104.0)), "a thumbnail on screen is told by its twin, not its place");
         assert!(is_hidden(&d, Rect::new(-258.0, 300.0, 79.0, 104.0)), "the strip hidden");
+        assert!(!is_hidden(&d, Rect::new(221.0, 87.0, 520.0, 392.0)), "the stage in front on a laptop screen");
         assert!(!is_hidden(&d, Rect::new(15.0, 300.0, 600.0, 400.0)), "a full-size window at the left");
-        assert!(!is_hidden(&d, Rect::new(700.0, 300.0, 79.0, 104.0)), "a small window in the main area");
         assert!(!is_hidden(&d, Rect::new(-50.0, 300.0, 600.0, 400.0)), "a window pushed past the left edge");
     }
 
     #[test]
-    fn no_restore_frame_is_a_thumbnails_and_within_reach_leaves_the_column() {
+    fn no_restore_frame_is_a_hidden_thumbnails_and_a_window_in_reach_stays() {
         let d = display();
-        let thumb = Rect::new(15.0, 300.0, 79.0, 104.0);
-        assert!(no_restore(&d, thumb));
+        assert!(no_restore(&d, Rect::new(-258.0, 300.0, 79.0, 104.0)));
         assert!(!no_restore(&d, Rect::new(200.0, 100.0, 800.0, 600.0)));
         let window = Rect::new(300.0, 100.0, 800.0, 600.0);
         assert_eq!(within_reach(&d, window), window, "a window in reach stays");

@@ -45,8 +45,8 @@ impl WindowEngine for AppleEngine {
         Ok(())
     }
 
-    /// Listed at thumbnail size in Apple's strip column, or off the left edge (the strip
-    /// hidden): [`apple::is_hidden`].
+    /// Thumbnail-sized and off the left edge (the strip hidden): [`apple::is_hidden`]. A
+    /// thumbnail on screen is told by its twin in the window list, never by its frame.
     fn is_hidden(&self, d: &Display, listed: Rect) -> bool {
         apple::is_hidden(d, listed)
     }
@@ -132,7 +132,8 @@ mod tests {
         assert_eq!(e.kind(), EngineKind::Apple);
         assert_eq!(e.kind().name(), "apple");
         let d = display();
-        assert!(e.is_hidden(&d, Rect::new(15.0, 300.0, 79.0, 104.0)));
+        assert!(e.is_hidden(&d, Rect::new(-258.0, 300.0, 79.0, 104.0)), "the strip hidden");
+        assert!(!e.is_hidden(&d, Rect::new(221.0, 87.0, 520.0, 392.0)), "the stage in front on a laptop screen");
         assert!(!e.is_hidden(&d, Rect::new(300.0, 100.0, 800.0, 600.0)));
         assert!(e.present_off_screen().is_empty());
         assert!(e.health().is_none());

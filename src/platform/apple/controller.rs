@@ -350,7 +350,32 @@ impl AppleController {
         let reading = if with_ax { desk.strip(&screen) } else { None };
         let managed: BTreeSet<u32> = managed(ob, &listed);
         let misses = self.mirror.misses;
+        let before = self.mirror.grouping();
         self.mirror = mirror::fold(&self.mirror, reading.as_ref(), &listed, &managed, &screen, now);
+        if self.mirror.grouping() != before {
+            // What the read saw of each managed window (ids and bounds only, never a title):
+            // what a live run's log needs to tell a misread from Apple's own.
+            let seen: Vec<String> = listed
+                .windows
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| managed.contains(&w.id))
+                .map(|(i, w)| {
+                    let b = w.bounds;
+                    format!("{}@{},{} {}x{}{}{}", w.id, b.x, b.y, b.w, b.h, if mirror::has_twin(&listed, i) { " twin" } else { "" }, if w.onscreen { "" } else { " off" })
+                })
+                .collect();
+            tracing::debug!(
+                current = ?self.mirror.current,
+                strip = ?self.mirror.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(),
+                remembered = ?self.mirror.remembered.iter().map(|g| &g.windows).collect::<Vec<_>>(),
+                in_motion = self.mirror.in_motion,
+                settled = self.mirror.settled,
+                screen = ?(screen.frame.x, screen.frame.y, screen.frame.w, screen.frame.h),
+                seen = ?seen,
+                "apple mode: the mirror's groups changed"
+            );
+        }
         if with_ax {
             self.ax_read = Some(now);
         }
