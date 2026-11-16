@@ -257,6 +257,16 @@ struct ScreenWatch {
     absent: HashMap<u32, u32>,
 }
 
+impl ScreenWatch {
+    /// True while this screen's checks wait on the tick ([`Controller::tick_waits`]), as the
+    /// main screen's do: windows counted missing towards a second look, a full-screen
+    /// transition waited out, an overview showing or just closed. Left out before (the review
+    /// of 1.9, B-10), another screen's second look came a rest later each time.
+    fn waits(&self, now: Instant) -> bool {
+        !self.absent.is_empty() || self.settle.waiting(now) || self.overview.showing_or_expected(now) || self.overview.freezes(now)
+    }
+}
+
 /// What another screen's window list shows ([`Controller::other_screen_seen`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OtherSeen {
@@ -1196,13 +1206,23 @@ impl Controller {
                 Some(e.to_string())
             }
         };
+        let this = Self::with_store(store, &path, config_error);
+        logging::apply_config(&this.store.config().log);
+        this.notify_config();
+        this
+    }
+
+    /// The controller around config `store`, read from `path` (`config_error`: why it could
+    /// not be), nothing logged or told yet: [`Self::new`] does that; a test builds one on a
+    /// scratch file.
+    fn with_store(store: ConfigStore, path: &Path, config_error: Option<String>) -> Self {
         let style = Arc::new(store.config().strip_style());
         let mut echoes = Echoes::default();
         echoes.set_window(Duration::from_millis(store.config().windows.focus_echo_ms));
-        let this = Self {
+        Self {
             style,
             model: None,
-            config_mtime: mtime(&path),
+            config_mtime: mtime(path),
             store,
             config_error,
             config_checked: Instant::now(),
@@ -1292,10 +1312,7 @@ impl Controller {
             absent_due: None,
             front_after_restore: false,
             focus_after_restore: false,
-        };
-        logging::apply_config(&this.store.config().log);
-        this.notify_config();
-        this
+        }
     }
 
     fn notify_config(&self) {
@@ -6176,6 +6193,7 @@ impl Controller {
             (self.unminimizing.values().any(|at| now.duration_since(*at) < UNMINIMIZE_MAX), "an un-minimize"),
             (self.fresh_waiting(), "a new window"),
             (self.ax_sees_nothing(), "Accessibility lists no window"),
+            (self.screens.values().any(|w| w.waits(now)), "another screen's checks"),
         ];
         if let Some((_, why)) = waits.into_iter().find(|(w, _)| *w) {
             return Some(why);
@@ -7151,6 +7169,76 @@ mod tests {
         assert!(read_state_or_set_aside(&path).is_some());
         assert!(path.exists());
         assert_eq!(std::fs::read_to_string(&aside).ok().as_deref(), Some("{ not json"), "untouched");
+    }
+
+    /// A controller on a scratch config file, as [`Controller::new`] builds one, nothing told.
+    fn scratch() -> (Controller, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let (store, _) = ConfigStore::open(path.clone());
+        (Controller::with_store(store, &path, None), dir)
+    }
+
+    /// The review of 1.9, B-11: the tick's scenarios pace a clock with waits the test returns,
+    /// so a duty the controller leaves out of its own waits failed nothing (B-10 was one).
+    /// Here each duty's field is set in turn on a fresh controller, and the controller's own
+    /// [`Controller::tick_waits`] must name it. The fields whose types need a whole switch or
+    /// press to build (a press or a drag, an arrangement made ahead, a held focus, the stale
+    /// handles, the foreign windows) are left to the scenarios.
+    #[test]
+    fn each_duty_that_waits_on_the_tick_keeps_it_brisk() {
+        use crate::engine::fullscreen::Seen;
+        use crate::engine::overview::Overview;
+        let now = Instant::now();
+        let cases: Vec<(&str, fn(&mut Controller, Instant))> = vec![
+            ("the launch's stages wait", |c, now| c.build_wait = Some((session::Blind::AxSilent, now))),
+            ("the restore window is open", |c, now| c.settling = Some(Settling::new(now, None))),
+            ("a switch", |c, now| c.phase.feed(phase::Event::SwitchSent { id: 1, max: Duration::from_secs(1) }, now)),
+            ("a Space change settles", |c, now| c.phase.feed(phase::Event::SpaceChanged, now)),
+            ("a save is due", |c, now| c.save.mark(now)),
+            ("the strip is presented", |c, _| c.strip_dirty = true),
+            ("a press or a drag", |c, _| c.focus_after_press = Some(1)),
+            ("after the restore", |c, _| c.front_after_restore = true),
+            ("after the restore", |c, _| c.focus_after_restore = true),
+            ("the restore's deadlines", |c, now| c.absent_due = Some(now)),
+            ("the restore's deadlines", |c, now| c.rematch_until = Some(now)),
+            ("an overview", |c, now| {
+                c.overview.see(Some(Overview::ShowDesktop), now);
+            }),
+            ("an overview", |c, now| c.macos_reveal_at = Some(now)),
+            ("windows counted missing", |c, _| {
+                c.absent.insert(1, 1);
+            }),
+            ("an un-minimize", |c, now| {
+                c.unminimizing.insert(1, now);
+            }),
+            ("a new window", |c, now| {
+                c.fresh_unplaced.insert(1, now + FRESH_LOOK);
+            }),
+            // Another screen's checks (B-10).
+            ("another screen's checks", |c, _| {
+                c.screens.entry(2).or_default().absent.insert(1, 1);
+            }),
+            ("another screen's checks", |c, now| {
+                c.screens.entry(2).or_default().settle.step(Seen::Transition, now);
+            }),
+            ("another screen's checks", |c, now| {
+                c.screens.entry(2).or_default().overview.see(Some(Overview::MissionControl), now);
+            }),
+        ];
+        let (fresh, _dir) = scratch();
+        let idle = fresh.tick_waits(now);
+        assert!(idle.is_none() || idle == Some("the mouse button is down"), "a fresh controller waits on nothing: {idle:?}");
+        for (why, set) in cases {
+            let (mut c, _dir) = scratch();
+            set(&mut c, now);
+            assert_eq!(c.tick_waits(now), Some(why));
+        }
+        // A screen with nothing waiting keeps nothing brisk.
+        let (mut c, _dir) = scratch();
+        c.screens.entry(2).or_default();
+        let idle = c.tick_waits(now);
+        assert!(idle.is_none() || idle == Some("the mouse button is down"), "{idle:?}");
     }
 
     /// The review of 1.9, B-7: the fast tick looks at a window found off screen only when it
