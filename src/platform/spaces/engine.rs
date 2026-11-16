@@ -472,16 +472,23 @@ impl SpacesEngine {
         (all, shown)
     }
 
-    /// The Space of `stage` on Desktop `home`, made now when there is none.
+    /// The Space of `stage` on Desktop `home`, made now when there is none. Made with the
+    /// state's lock let go (a window-server call), so two launch watches may make one for the
+    /// same key at once: the first noted is kept and the other ended ([`Self::claim_stage`]).
     fn stage_space(&self, sky: &Sky, home: u64, stage: u64) -> Option<u64> {
         if let Some(space) = self.state().stages.get(&(home, stage)) {
             return Some(*space);
         }
         match sky.create(Route::Classic, false) {
             Ok(space) if space != 0 => {
-                tracing::debug!(space, desktop = home, stage, "spaces engine: a Space made for a stage");
-                self.state().stages.insert((home, stage), space);
-                Some(space)
+                let (kept, lost) = self.claim_stage((home, stage), space);
+                if lost {
+                    let _ = sky.destroy(Route::Classic, space);
+                    tracing::debug!(space, kept, desktop = home, stage, "spaces engine: a stage's Space made twice at once: the later one ended");
+                } else {
+                    tracing::debug!(space, desktop = home, stage, "spaces engine: a Space made for a stage");
+                }
+                Some(kept)
             }
             Ok(_) => {
                 tracing::warn!(desktop = home, stage, "spaces engine: the window server made no Space");
@@ -494,6 +501,14 @@ impl SpacesEngine {
                 None
             }
         }
+    }
+
+    /// Space `made` noted for (Desktop, stage) `key` unless another was noted meanwhile: the
+    /// Space kept, and true when `made` lost (the caller ends it: a Space no map names holds
+    /// windows nothing answers for, review A-3).
+    fn claim_stage(&self, key: (u64, u64), made: u64) -> (u64, bool) {
+        let kept = *self.state().stages.entry(key).or_insert(made);
+        (kept, kept != made)
     }
 
     /// Reads window `id`'s Spaces until `done` says so or [`READ_BACK`] is over; whether it
@@ -1497,6 +1512,17 @@ mod tests {
         let sky = OnceLock::new();
         let _ = sky.set(None);
         SpacesEngine { sky, state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) }
+    }
+
+    /// Review A-3: two launch watches make the Space for new windows at once; the first noted
+    /// is kept for both, the other is ended, never put in its place.
+    #[test]
+    fn a_stage_space_made_twice_keeps_the_first() {
+        let e = unloaded();
+        assert_eq!(e.claim_stage((3, NEW_STAGE), 840), (840, false));
+        assert_eq!(e.claim_stage((3, NEW_STAGE), 841), (840, true), "the later one loses");
+        assert_eq!(e.ours(), [840].into());
+        assert_eq!(e.claim_stage((4, NEW_STAGE), 842), (842, false), "another Desktop's: its own");
     }
 
     /// A window id the window server lists for no window.

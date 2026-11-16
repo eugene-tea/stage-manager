@@ -74,6 +74,9 @@
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), a window brought in
   by a stage change on a second display ends on that display's Desktop. It was put on the
   first display's Desktop as its flight ended.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), two apps opened at
+  the same moment (at login, a restored session) no longer leave a new window of one unseen
+  until Stage Manager quits.
 
 ## 1.8.5 — 2026-11-12
 
