@@ -62,6 +62,12 @@
   when the selection moves on or the switcher is cancelled.
   That window is kept off the screen at the display's corner while the switcher shows, so
   a window passed over in the switcher no longer flickers in and out behind the stage shown.
+- Just after the app is started, the first switch to another Desktop stays there: the app
+  macOS brings forward as that Desktop slides in was taken for an app of the Desktop being
+  left, its stage there was brought forward, and the screen slid back.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), Quit is answered in
+  its usual time after a stage change whose window was shown before it could fly its last stretch
+  itself; the app waited eight seconds and then brought the windows back another way.
 
 ## 1.8.5 — 2026-11-12
 

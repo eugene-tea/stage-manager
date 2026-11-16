@@ -1179,6 +1179,112 @@ mod slide_activation {
     }
     }
 
+    /// Live 11-15 16:34:28 (the suite's relaunch): the app relaunched on Desktop 1 in the same
+    /// window server session, so the saved window ids still hold; Desktop 2 waits for its
+    /// first visit and none of its windows is known. Desktop 1 shows the browser's stage, the
+    /// editor's window 1 waits in its own; the editor's window 3 and the chat are on Desktop 2.
+    fn relaunched_on_desktop_1() -> Mac {
+        let mut mac = two_desktops();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        mac.focused = Some(w(4));
+        mac.go(1);
+        mac.focused = Some(w(2));
+        mac.go(0);
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        mac.click(browser);
+        let saved = StateFile::from_json(&mac.m.to_state().to_json().expect("encodes")).expect("parses");
+        let mut again = Mac::new();
+        again.m.restore_spaces(saved.spaces);
+        for (id, (desk, _, meta)) in &mac.wins {
+            again.put(desk.expect("on one Desktop"), *id, meta.pid, &meta.bundle_id, &meta.title);
+        }
+        again.focused = Some(w(2));
+        again.go(0);
+        assert_eq!(again.m.unvisited_saved_spaces(), 1, "Desktop 2 waits for its first visit");
+        assert!(again.m.window(w(3)).is_none() && again.m.window(w(4)).is_none(), "Desktop 2's windows are not known yet");
+        assert!(again.parked(1) && !again.parked(2), "Desktop 1: the browser's stage in front, the editor's waits");
+        again.elsewhere.clear();
+        again
+    }
+
+    both_engines! {
+    #[test]
+    fn after_a_relaunch_the_first_slide_to_a_desktop_not_visited_holds_the_activation() {
+        let mut mac = relaunched_on_desktop_1();
+        let d1 = mac.space();
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        // ⌃←: Desktop 2 slides in from the left, Desktop 1's windows slide out to the right.
+        // macOS activates Desktop 2's front app, the editor, before the Space change notice.
+        let three = Rect::new(-900.0, 80.0, 600.0, 400.0);
+        let four = Rect::new(-500.0, 120.0, 520.0, 392.0);
+        let list = listed(&mac, 1240.0, &[(3, three), (4, four)]);
+        assert!(slide_listed(&mac.m, &list), "Desktop 2's saved windows on screen: a slide");
+        let why = activation(&mut mac, &mut replay, 10, &list, Some(3), t0);
+        assert_eq!(why, Some(Wait::Slides));
+        assert!(mac.parked(1) && !mac.parked(2), "nothing switched on Desktop 1");
+        assert_eq!(mac.m.active_stage_in(d1), Some(browser));
+        assert_eq!(mac.focused, Some(w(2)), "nothing focused there");
+        assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
+        // The Space change: Desktop 2 shows; its stages are rebuilt from the file, the held
+        // activation replayed there.
+        mac.shown = 1;
+        mac.focused = Some(w(3));
+        mac.arrive();
+        assert_eq!(mac.m.unvisited_saved_spaces(), 0, "Desktop 2 visited");
+        let held = replay.take(t0 + Duration::from_millis(400));
+        let obs = mac.obs();
+        let a = mac.m.bring_focus_forward(Some(w(3)), held, &obs);
+        mac.run(a);
+        assert!(!mac.parked(3), "the editor's window shows on Desktop 2");
+        assert!(mac.elsewhere.is_empty(), "Desktop 1 never touched: {:?}", mac.elsewhere);
+        assert_eq!(mac.m.active_stage_in(d1), Some(browser), "Desktop 1 as it was left");
+        assert!(mac.parked(1) && !mac.parked(2));
+    }
+
+    #[test]
+    fn after_a_relaunch_a_focused_window_saved_on_a_desktop_not_visited_holds_the_activation() {
+        // The activation before the list shows the slide: the app's focused window, a window
+        // the file names on Desktop 2, says where it goes.
+        let mut mac = relaunched_on_desktop_1();
+        assert!(asks_focus(&mac.m, 10), "the editor has a window saved on Desktop 2");
+        assert!(!asks_focus(&mac.m, 20), "the browser has none");
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        let list = listed(&mac, 0.0, &[]);
+        assert!(!slide_listed(&mac.m, &list), "no slide listed yet");
+        let why = activation(&mut mac, &mut replay, 10, &list, Some(3), t0);
+        assert_eq!(why, Some(Wait::FocusElsewhere(w(3))));
+        assert!(mac.parked(1) && !mac.parked(2) && mac.elsewhere.is_empty(), "nothing switched on Desktop 1");
+    }
+
+    #[test]
+    fn after_a_relaunch_an_activation_for_a_stage_here_still_switches_at_once() {
+        // The editor activated for its stage on Desktop 1 (a Dock click, ⌘Tab): its focused
+        // window is window 1, or AX names none; no slide listed. Switched at once, as before.
+        for ax in [Some(1), None] {
+            let mut mac = relaunched_on_desktop_1();
+            let t0 = Instant::now();
+            let mut replay = FocusReplay::default();
+            let list = listed(&mac, 0.0, &[]);
+            let why = activation(&mut mac, &mut replay, 10, &list, ax, t0);
+            assert_eq!(why, None, "AX {ax:?}");
+            assert!(!mac.parked(1) && mac.parked(2), "the editor's stage on Desktop 1 (AX {ax:?})");
+            assert_eq!(replay.peek(t0), None, "nothing held");
+            assert!(mac.elsewhere.is_empty());
+        }
+        // A window not known and named by no saved Desktop (one just opened) is no slide; nor
+        // is a saved Desktop's window once the model knows it.
+        let mac = relaunched_on_desktop_1();
+        let new = Rect::new(300.0, 200.0, 500.0, 400.0);
+        assert!(!slide_listed(&mac.m, &listed(&mac, 0.0, &[(77, new)])));
+        assert!(!mac.m.saved_on_unvisited_desktop(w(1), MAIN), "known: Desktop 1's");
+        assert!(mac.m.saved_on_unvisited_desktop(w(3), MAIN));
+    }
+    }
+
     corner_nuance! {
     #[test]
     fn the_desktop_being_lefts_parked_windows_slid_together_are_a_slide() {
