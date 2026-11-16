@@ -22,6 +22,9 @@
 #                                          # land: the overlap's pixels and the window list every 10 ms
 #                                          # (round landing-order; SM_LANDING_ORDER_SWITCHES=n; with
 #                                          # STAGE_MANAGER_LANDING_LEVEL=ranked the landing Spaces get levels)
+#   scripts/test-stages.sh landing-merge   # a shift-clicked card's window lands in front of the stage's
+#                                          # window it overlaps: pixels and the window list every 10 ms
+#                                          # (round landing-merge; SM_LANDING_MERGE_ROUNDS=n)
 #   scripts/test-stages.sh behave          # an app's front window on arrival; a card dropped
 #                                          # on the other screen (round parity-behave)
 #   scripts/test-stages.sh screens         # two screens (skipped with one): ⌘-Tab to a card on the other

@@ -9029,6 +9029,120 @@ def phase_landing_order():
     all_onscreen("landing order: quit")
 
 
+def phase_landing_merge():
+    """Round landing-merge (live 11-16: a shift-click on Terminal's card brought its window into
+    VS Code's stage, and once the motion ended Terminal dropped behind VS Code: the window
+    flew in front in its landing Space and landed on the Desktop under VS Code's, the order
+    macOS kept for both). Alpha's window (flat red) alone in the stage shown; Bravo's (flat
+    blue), overlapping it, alone in a stage of its own. SM_LANDING_MERGE_ROUNDS rounds
+    (default 4): Bravo's card shift-clicked while the overlap's pixels are read every 10 ms
+    with only the two windows captured and the window list every 10 ms, then Bravo sent to a
+    new stage again. Bravo joins in front (`a shift-click brings the card's front window ...
+    in front`). It fails on a read of Alpha's colour once Bravo's has shown, on a last read
+    that is not Bravo's, and on a list sample with both on screen and Alpha above Bravo after
+    Bravo first showed."""
+    variant = os.environ.get("STAGE_MANAGER_LANDING") or "pictures"
+    say(f"\n== landing merge: a shift-clicked card's window lands in front of the stage's ({ENGINE}, {variant}) ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config(CONFIG_BACKDROP)
+    hexed = lambda c: "".join(f"{v:02x}" for v in c)  # noqa: E731
+    start_fixture(1, "--colors", "808080", "--no-label", "--frames", "60,600,400,260")
+    start_extra_args("a", 1, "--colors", hexed(ORDER_BACK), "--no-label", "--frames", "420,140,700,520")
+    start_extra_args("b", 1, "--colors", hexed(ORDER_FRONT), "--no-label", "--frames", "640,280,700,520")
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "landing merge: app up with Fixture 1, Alpha's and Bravo's windows"):
+        return
+    of = lambda x, k: next((w for w in x["windows"] if w["bundle_id"] == EXTRA[k][0] and w["role"] == "standard"), None)  # noqa: E731
+    a, b = of(s, "a"), of(s, "b")
+    if not check(a is not None and b is not None, "landing merge: Alpha's and Bravo's windows are managed"):
+        return
+    stay, joins = a["id"], b["id"]
+
+    def card_at(number):
+        c = next((c for c in (state().get("strip_cards") or []) if c["number"] == number), None)
+        if c is None or card_under_window(state(), c["frame"]):
+            return None
+        f = c["frame"]
+        return f["x"] + f["w"] / 2, f["y"] + f["h"] / 2
+
+    rounds = int(os.environ.get("SM_LANDING_MERGE_ROUNDS") or 4)
+    bad_px, bad_last, unseen, swaps, flew, ran = [], [], [], [], 0, 0
+    for i in range(rounds):
+        x = state()
+        home = lambda y, w: next((v["home"] for v in y["windows"] if v["id"] == w), None)  # noqa: E731
+        if home(x, joins) == home(x, stay):
+            do("new", joins)
+            x = wait_state(lambda y: home(y, joins) != home(y, stay), "Bravo in a stage of its own") or state()
+        if x["active"] != home(x, stay):
+            do("switch", home(x, stay))
+            x = wait_state(lambda y: y["active"] == home(y, stay) and y.get("switching") is None, "Alpha's stage in front") or state()
+        time.sleep(1.0)
+        wins, _ = fixture_windows([EXTRA["a"][0], EXTRA["b"][0]])
+        z = {w["id"]: w for w in wins}
+        if not check(stay in z and home(x, joins) != home(x, stay), f"landing merge round {i + 1}: Alpha shown alone, Bravo in its own stage"):
+            continue
+        fa = z[stay]["bounds"]
+        fb = next(v["restore"] for v in x["windows"] if v["id"] == joins)
+        ox, oy = max(fa["x"], fb["x"]), max(fa["y"], fb["y"])
+        ow, oh = min(fa["x"] + fa["w"], fb["x"] + fb["w"]) - ox, min(fa["y"] + fa["h"], fb["y"] + fb["h"]) - oy
+        if not check(ow > 120 and oh > 120, f"landing merge round {i + 1}: the two windows overlap ({ow:.0f} x {oh:.0f})"):
+            continue
+        box = f"{ox + ow / 2 - 12:.0f},{oy + oh / 2 - 12:.0f},24,24"
+        at = card_at(home(x, joins))
+        if at is None:
+            skip(f"landing merge round {i + 1}", "Bravo's card is under a window")
+            continue
+        sampler = subprocess.Popen([BIN, "probe-windows", "--every", "10", "--for", "1900", "--focus", EXTRA["a"][0], EXTRA["b"][0]],
+                                   env=ENV, stdout=subprocess.PIPE, text=True)
+        time.sleep(0.15)
+        r = subprocess.run([BIN, "probe-spaces", "pixels", "--rect", box, "--windows", f"{joins},{stay}", "--every", "10", "--for", "1500",
+                            "--then", BIN, "ctl", "debug-click", f"{at[0]:.1f}", f"{at[1]:.1f}", "shift"], env=ENV, capture_output=True, text=True, timeout=30)
+        try:
+            px = json.loads(r.stdout.strip().splitlines()[-1])
+        except (ValueError, IndexError):
+            px = {"ok": False, "error": (r.stdout + r.stderr)[-200:]}
+        try:
+            out, _ = sampler.communicate(timeout=10)
+            listed = json.loads(out).get("samples", [])
+        except Exception as e:  # noqa: BLE001 - a sampler that failed is reported, not fatal
+            sampler.kill()
+            listed = None
+            check(False, f"landing merge round {i + 1}: the window server was sampled ({e})")
+        y = wait_state(lambda y: home(y, joins) == home(y, stay) and y.get("switching") is None, "Bravo in Alpha's stage", timeout=5)
+        if not check(px.get("ok") and y is not None, f"landing merge round {i + 1}: merged, the overlap read ({px.get('error', 'ok')})"):
+            continue
+        ran += 1
+        # Bravo's colour is the phase's "front" one, Alpha's the "back" one.
+        first, after, before, last = order_reads(px.get("samples", []))
+        shown = [x for x in (listed or []) if any(w["id"] == joins and w.get("onscreen") for w in x.get("windows", []))]
+        sw = order_list_swaps(shown, joins, stay)
+        ghosts = [g for g in ((y.get("last_transition") or {}).get("ghosts") or []) if not g.get("outgoing")]
+        took = {g["window"] for g in ghosts if g.get("stretch_ms") is not None}
+        flew += 1 if joins in took else 0
+        say(f"  round {i + 1}: {px.get('answered')} of {px.get('asked')} reads, Bravo first read at {first} ms, Alpha reads after it "
+            f"{len(after)} {after[:5]}, last {last}; list samples with Alpha on top {len(sw)} of {len(shown)}; flew {sorted(took)}")
+        if first is None:
+            unseen.append(f"round {i + 1}")
+        if after:
+            bad_px.append(f"round {i + 1}: {len(after)} at {', '.join(f'{t:.0f}' for t in after[:5])} ms (Bravo from {first:.0f} ms)")
+        if first is not None and last != "front":
+            bad_last.append(f"round {i + 1}: {last}")
+        if sw:
+            swaps.append(f"round {i + 1}: {len(sw)} samples")
+        time.sleep(0.8)
+    check(ran >= max(1, rounds - 1), f"landing merge: {ran} of {rounds} shift-clicks read")
+    check(not unseen, "landing merge: Bravo's colour read in the overlap every round" + (f" (never: {'; '.join(unseen)})" if unseen else ""))
+    check(not bad_px, "landing merge: no read of Alpha's colour in the overlap once Bravo's showed" + (f" ({'; '.join(bad_px[:4])})" if bad_px else ""))
+    check(not bad_last, "landing merge: the overlap shows Bravo at the end" + (f" ({'; '.join(bad_last[:4])})" if bad_last else ""))
+    check(not swaps, "landing merge: the window list never puts Alpha above Bravo once Bravo shows" + (f" ({'; '.join(swaps[:4])})" if swaps else ""))
+    if LIVE_LANDING:
+        say(f"  Bravo flew its last stretch itself in {flew} of {ran} rounds")
+    consistent("landing merge")
+    stop_app()
+    all_onscreen("landing merge: quit")
+
+
 def phase_tabs():
     """Round tab-lost (11-15: a Terminal tab selected again stayed on the Desktop under the
     stage switched to). A tab group in a stage (the fixture's NSWindow tabbing: Fixture 1
@@ -9299,7 +9413,7 @@ def main():
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
-             "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order,
+             "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe}[p]()
     finally:
         stop_app()
