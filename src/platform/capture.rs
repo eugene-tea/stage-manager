@@ -285,11 +285,11 @@ pub fn begin_shutdown() {
 pub fn quiesce(timeout: Duration) {
     begin_shutdown();
     let start = Instant::now();
-    let pending = IN_FLIGHT.load(Ordering::SeqCst);
-    while IN_FLIGHT.load(Ordering::SeqCst) > 0 && start.elapsed() < timeout {
+    let pending = in_flight();
+    while in_flight() > 0 && start.elapsed() < timeout {
         std::thread::sleep(Duration::from_millis(10));
     }
-    let left = IN_FLIGHT.load(Ordering::SeqCst);
+    let left = in_flight();
     let last = LAST_DONE_MS.load(Ordering::SeqCst);
     if last > 0 {
         let since = EPOCH.elapsed().saturating_sub(Duration::from_millis(last));
