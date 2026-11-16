@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::ffi::{ALL_SPACES_MASK, Route, Sky};
+use crate::engine::busy_apps::{Backoff, BusyApps, Reply};
 use crate::engine::engine_choice::Health;
 use crate::engine::geometry::Rect;
 use crate::engine::leftovers;
@@ -74,10 +75,6 @@ const PARK_AX_SECONDS: f32 = 0.1;
 /// How long a park's or a restore's move waits for the window server to list the window
 /// moved (the app moves it as it answers; a frame or so).
 const PARK_READ_BACK: Duration = Duration::from_millis(20);
-
-/// How often a frame a show owes a window is tried again ([`SpacesEngine::retry_owed`]): the
-/// pace at which the Corner engine retries a restore.
-const FRAME_RETRY: Duration = Duration::from_secs(1);
 
 /// How long a bring-back of the panic or abort paths waits for the state's lock before it
 /// goes on without the sweep ([`SpacesEngine::state_free_within`]): the state is held for a
@@ -121,8 +118,10 @@ struct OwedFrame {
     frame: Rect,
     /// The window's element.
     element: AxElement,
-    /// When it was last tried.
-    tried: Instant,
+    /// Its app (read from the element, no message sent), for the busy apps' pace.
+    pid: Option<i32>,
+    /// When it is tried again: backing off while its app does not answer.
+    backoff: Backoff,
 }
 
 /// What the engine counts, for `ctl state` and the checks while running.
@@ -907,9 +906,10 @@ impl SpacesEngine {
     }
 
     /// The shows that left a window hidden, tried again, and the frames shows owe
-    /// ([`State::frames`], each about once every [`FRAME_RETRY`], all of them with `force`: a
-    /// quit); the windows still owed one.
-    pub fn retry_owed(&self, force: bool) -> BTreeSet<u32> {
+    /// ([`State::frames`], each at its [`Backoff`]'s pace, never while its app is in `busy`;
+    /// all of them once with `force`: a quit); the windows still owed one. `busy`: the
+    /// controller's apps that did not answer, which these tries add to.
+    pub fn retry_owed(&self, force: bool, busy: &mut BusyApps) -> BTreeSet<u32> {
         let owed: Vec<u32> = self.state().owed.iter().copied().collect();
         for id in owed {
             if windows::describe(&[id]).is_empty() {
@@ -921,43 +921,48 @@ impl SpacesEngine {
                 tracing::info!(id, "spaces engine: a window owed its show is back");
             }
         }
-        self.retry_frames(force);
+        self.retry_frames(force, busy, Instant::now(), |id| !windows::describe(&[id]).is_empty(), |f| f.element.set_frame(f.frame));
         self.owed()
     }
 
-    /// The frames shows owe, set again through each window's element; forgotten once taken
-    /// (a lend's park with it), or when the window is gone.
-    fn retry_frames(&self, force: bool) {
-        let now = Instant::now();
+    /// The frames shows owe, set again through each window's element (`set`) when due
+    /// ([`Backoff::due`]); forgotten once taken (a lend's park with it), or when the window is
+    /// no longer `listed`.
+    fn retry_frames(&self, force: bool, busy: &mut BusyApps, now: Instant, listed: impl Fn(u32) -> bool, set: impl Fn(&OwedFrame) -> AxResult<()>) {
         let due: Vec<(u32, OwedFrame)> = {
-            let st = self.state();
+            let mut st = self.state();
+            let held: BTreeSet<u32> = st.held.keys().copied().collect();
             st.frames
-                .iter()
-                .filter(|(id, f)| !st.held.contains_key(id) && (force || now.duration_since(f.tried) >= FRAME_RETRY))
-                .map(|(id, f)| (*id, f.clone()))
+                .iter_mut()
+                .filter_map(|(id, f)| (!held.contains(id) && f.backoff.due(f.pid, busy, force, now)).then(|| (*id, f.clone())))
                 .collect()
         };
         for (id, owed) in due {
-            if windows::describe(&[id]).is_empty() {
+            if !listed(id) {
                 let mut st = self.state();
                 st.frames.remove(&id);
                 st.parked.remove(&id);
                 tracing::debug!(id, "spaces engine: a window owed the frame its show asked is gone: nothing is owed");
                 continue;
             }
-            let framed = owed.element.set_frame(owed.frame);
+            let framed = set(&owed);
             let mut st = self.state();
             match framed {
                 Ok(()) => {
                     st.frames.remove(&id);
                     st.parked.remove(&id);
+                    if let Some(pid) = owed.pid {
+                        busy.note(pid, Reply::No, now);
+                    }
                     tracing::info!(id, "spaces engine: a window took the frame its show asked, tried again");
                 }
                 Err(e) => {
+                    let reply = if e == AxError::CANNOT_COMPLETE { Reply::TimedOut } else { Reply::CannotTell };
                     if let Some(f) = st.frames.get_mut(&id) {
-                        f.tried = Instant::now();
+                        f.backoff.failed(owed.pid, reply, busy, now);
                     }
-                    tracing::debug!(id, "spaces engine: a window still does not take the frame its show asked: {e}");
+                    let wait_s = st.frames.get(&id).map(|f| f.backoff.wait.as_secs());
+                    tracing::debug!(id, ?reply, ?wait_s, "spaces engine: a window still does not take the frame its show asked: {e}");
                 }
             }
         }
@@ -1457,7 +1462,7 @@ impl WindowEngine for SpacesEngine {
                 tracing::debug!(id = id.0, "spaces engine: a window parked for a lend shown at its frame");
             }
         } else if away {
-            st.frames.insert(id.0, OwedFrame { frame, element: window.clone(), tried: Instant::now() });
+            st.frames.insert(id.0, OwedFrame { frame, element: window.clone(), pid: window.pid().ok(), backoff: Backoff::new(Instant::now()) });
             tracing::warn!(id = id.0, parked = parked.is_some(), "spaces engine: a window came out of its Space away from the frame its show asked and did not take it: owed, tried again");
         }
         framed
@@ -1826,8 +1831,9 @@ mod tests {
         assert_eq!(e.owed(), [NO_WINDOW].into(), "owed the frame");
         assert!(e.parked_lend(WindowId(NO_WINDOW)), "still at the park: its move notices are not the model's");
         assert_eq!(e.state().frames[&NO_WINDOW].frame, frame);
-        assert_eq!(e.retry_owed(false), [NO_WINDOW].into(), "tried a moment ago: not yet again");
-        assert!(e.retry_owed(true).is_empty(), "tried again at once with force: the window is gone, nothing is owed");
+        let mut busy = BusyApps::default();
+        assert_eq!(e.retry_owed(false, &mut busy), [NO_WINDOW].into(), "owed a moment ago: not tried yet");
+        assert!(e.retry_owed(true, &mut busy).is_empty(), "tried again at once with force: the window is gone, nothing is owed");
         assert!(!e.parked_lend(WindowId(NO_WINDOW)), "the park forgotten with it");
     }
 
@@ -1842,6 +1848,35 @@ mod tests {
         assert_eq!(e.owed(), [NO_WINDOW].into(), "listed away from its frame: owed it");
         assert!(e.parked_lend(WindowId(NO_WINDOW)), "where it is listed is not its frame: its move notices are not the model's");
         e.state().held.remove(&NO_WINDOW);
-        assert!(e.retry_owed(true).is_empty(), "gone: nothing owed");
+        assert!(e.retry_owed(true, &mut BusyApps::default()).is_empty(), "gone: nothing owed");
+    }
+
+    /// The coordinator's follow-up: a frame owed to a window of an app that never answers,
+    /// retried from a tick every 250 ms for a simulated minute, costs a handful of
+    /// Accessibility calls, never one while the app is busy; a quit tries it once all the
+    /// same; once the app answers, it is taken and forgotten.
+    #[test]
+    fn a_frame_owed_to_a_hung_app_costs_few_calls_a_minute() {
+        let e = unloaded();
+        let frame = Rect::new(300.0, 120.0, 1100.0, 800.0);
+        let t0 = Instant::now();
+        let owed = OwedFrame { frame, element: dead_element(), pid: Some(4242), backoff: Backoff::new(t0) };
+        e.state().frames.insert(NO_WINDOW, owed);
+        let mut busy = BusyApps::default();
+        let calls = std::cell::Cell::new(0);
+        let hung = |_: &OwedFrame| {
+            calls.set(calls.get() + 1);
+            Err(AxError::CANNOT_COMPLETE)
+        };
+        for tick in 0..240u64 {
+            e.retry_frames(false, &mut busy, t0 + Duration::from_millis(250 * tick), |_| true, hung);
+        }
+        assert!(calls.get() <= 6, "a minute of a hung app: {} calls", calls.get());
+        assert!(busy.not_answering(4242), "the app is known busy to the controller too");
+        let before = calls.get();
+        e.retry_frames(true, &mut busy, t0 + Duration::from_secs(60), |_| true, hung);
+        assert_eq!(calls.get(), before + 1, "a quit tries it once");
+        e.retry_frames(true, &mut busy, t0 + Duration::from_secs(61), |_| true, |_| Ok(()));
+        assert!(e.owed().is_empty() && !busy.not_answering(4242), "taken: forgotten, the app answering again");
     }
 }

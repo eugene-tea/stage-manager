@@ -284,7 +284,7 @@ impl Controller {
             EngineKind::Corner => self.retry_unrestored(ob, force),
             EngineKind::Spaces => {
                 let _ = ob;
-                let owed = crate::platform::spaces::engine::shared().retry_owed(force);
+                let owed = crate::platform::spaces::engine::shared().retry_owed(force, &mut self.busy_apps.borrow_mut());
                 self.spaces.frames_owed.retain(|id, _| owed.contains(id));
             }
         }
@@ -314,7 +314,7 @@ impl Controller {
             EngineKind::Corner => self.account_unrestored(ob),
             EngineKind::Spaces => {
                 let _ = ob;
-                let owed = crate::platform::spaces::engine::shared().retry_owed(true);
+                let owed = crate::platform::spaces::engine::shared().retry_owed(true, &mut self.busy_apps.borrow_mut());
                 self.spaces.frames_owed.retain(|id, _| owed.contains(id));
                 owed.len()
             }

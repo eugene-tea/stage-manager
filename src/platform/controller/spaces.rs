@@ -82,7 +82,7 @@ impl Controller {
         {
             return;
         }
-        let owed = spaces.retry_owed(false);
+        let owed = spaces.retry_owed(false, &mut self.busy_apps.borrow_mut());
         self.spaces.frames_owed.retain(|id, _| owed.contains(id));
         let shown: Vec<SpaceId> = m.displays().iter().map(|d| m.current_space(d.id)).collect();
         // What the engine holds checked against the window server first: a window taken out
