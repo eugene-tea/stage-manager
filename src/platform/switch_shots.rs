@@ -210,7 +210,7 @@ pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDon
         return targets.to_vec();
     }
     let displays = super::desktop::cg_display_bounds();
-    let children = super::capture_fast::with_children(&ids);
+    let children = super::capture_fast::with_children(&ids, &displays);
     let mut left = Vec::new();
     for t in targets {
         if children.contains(&t.id) {

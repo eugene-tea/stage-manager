@@ -1078,7 +1078,7 @@ fn fast_part(batch: &[Target], deliver: Deliver) -> FastPart {
         return FastPart { left: batch.to_vec(), ..FastPart::default() };
     };
     let displays = super::desktop::cg_display_bounds();
-    let children = super::capture_fast::with_children(&ids);
+    let children = super::capture_fast::with_children(&ids, &displays);
     let mut part = FastPart { gone, ..FastPart::default() };
     for t in batch {
         let Some(w) = described.iter().find(|w| w.id == t.id) else { continue };

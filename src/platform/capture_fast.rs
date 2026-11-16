@@ -302,20 +302,36 @@ pub fn closed(ids: &[u32], described: &[u32]) -> Option<Vec<u32>> {
 /// Of `ids`, the windows with another window of their app on screen over them or reaching out
 /// of them (a popover, a menu, a sheet, a child panel: ScreenCaptureKit's picture carries those,
 /// the window server's call gives the window alone): ScreenCaptureKit takes their pictures, as
-/// before (live 11-14: a card lost its popup). One query of the windows on screen.
-pub fn with_children(ids: &[u32]) -> std::collections::HashSet<u32> {
+/// before (live 11-14: a card lost its popup). One query of the windows on screen; `displays`
+/// as for [`route_for`].
+pub fn with_children(ids: &[u32], displays: &[Rect]) -> std::collections::HashSet<u32> {
     if ids.is_empty() {
         return Default::default();
     }
     let on = super::windows::on_screen();
-    ids.iter().copied().filter(|id| on.iter().find(|w| w.id == *id).is_some_and(|w| has_child_over(w.id, w.pid, w.bounds, &on))).collect()
+    ids.iter().copied().filter(|id| on.iter().find(|w| w.id == *id).is_some_and(|w| has_child_over(w.id, w.pid, w.bounds, &on, displays))).collect()
 }
 
+/// An overlap thinner than this (points) on a side is no child over the window: the sliver of a
+/// parked window left on screen by macOS (a point or two at the park corner).
+const SLIVER: f64 = 4.0;
+
 /// True when a window of `pid` other than `id`, on screen and not see-through, overlaps
-/// `frame` (`on`: the windows on screen). A same-app window merely overlapping counts too: the
-/// slower picture is right either way.
-pub fn has_child_over(id: u32, pid: i32, frame: Rect, on: &[super::windows::CgWindow]) -> bool {
-    on.iter().any(|w| w.id != id && w.pid == pid && w.alpha > 0.0 && w.bounds.intersect(&frame).is_some_and(|i| i.w >= 1.0 && i.h >= 1.0))
+/// `frame` (`on`: the windows on screen) by more than a [`SLIVER`]. A same-app window merely
+/// overlapping counts too: the slower picture is right either way. A window partly off every
+/// display ([`Route::Whole`]: parked by the Corner engine, which lists it on screen at its full
+/// frame in the corner, or pushed past a screen's edge) is no child: a popover, a menu or a
+/// sheet lies on the displays (the review's D-2: under the Corner engine an app's parked
+/// windows counted as each other's children, and a maximized window as a parked one's, through
+/// their corner, so the active stage went through ScreenCaptureKit every 2 s at rest).
+pub fn has_child_over(id: u32, pid: i32, frame: Rect, on: &[super::windows::CgWindow], displays: &[Rect]) -> bool {
+    on.iter().any(|w| {
+        w.id != id
+            && w.pid == pid
+            && w.alpha > 0.0
+            && route_for(w.bounds, displays) == Route::Fast
+            && w.bounds.intersect(&frame).is_some_and(|i| i.w >= SLIVER && i.h >= SLIVER)
+    })
 }
 
 /// True when a picture of `have` pixels is worth drawing smaller to `want` (a card's thumbnail
@@ -342,25 +358,35 @@ fn first_image(list: &NSArray) -> Option<CFRetained<CGImage>> {
 
 #[cfg(test)]
 mod tests {
+    fn listed(id: u32, pid: i32, bounds: Rect, alpha: f64) -> crate::platform::windows::CgWindow {
+        crate::platform::windows::CgWindow { id, pid, owner: String::new(), name: None, layer: 0, bounds, onscreen: true, alpha }
+    }
+
     #[test]
     fn a_window_of_its_app_over_it_sends_the_picture_to_screencapturekit() {
-        let w = |id: u32, pid: i32, x: f64, alpha: f64| crate::platform::windows::CgWindow {
-            id,
-            pid,
-            owner: String::new(),
-            name: None,
-            layer: 0,
-            bounds: Rect::new(x, 141.0, 276.0, 298.0),
-            onscreen: true,
-            alpha,
-        };
+        let w = |id: u32, pid: i32, x: f64, alpha: f64| listed(id, pid, Rect::new(x, 141.0, 276.0, 298.0), alpha);
         let frame = Rect::new(80.0, 78.0, 520.0, 392.0);
-        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 1.0)]), "a popup reaching out of it");
-        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 100.0, 1.0)]), "a sheet inside it");
-        assert!(!super::has_child_over(1, 7, frame, &[w(2, 8, 500.0, 1.0)]), "another app's window");
-        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 0.0)]), "a see-through one");
-        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 900.0, 1.0)]), "one beside it");
-        assert!(!super::has_child_over(1, 7, frame, &[w(1, 7, 80.0, 1.0)]), "itself");
+        let d = [SCREEN];
+        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 1.0)], &d), "a popup reaching out of it");
+        assert!(super::has_child_over(1, 7, frame, &[w(2, 7, 100.0, 1.0)], &d), "a sheet inside it");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 8, 500.0, 1.0)], &d), "another app's window");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 500.0, 0.0)], &d), "a see-through one");
+        assert!(!super::has_child_over(1, 7, frame, &[w(2, 7, 900.0, 1.0)], &d), "one beside it");
+        assert!(!super::has_child_over(1, 7, frame, &[w(1, 7, 80.0, 1.0)], &d), "itself");
+    }
+
+    /// D-2, the Corner engine: an app's parked windows sit listed on screen at their full frames
+    /// in the park corner; they are no children of each other, nor of the app's maximized window
+    /// whose corner they reach, and the parked window's sliver under a shown one is none either.
+    #[test]
+    fn parked_windows_of_one_app_are_no_children() {
+        let d = [SCREEN];
+        let parked = |id| listed(id, 7, Rect::new(2559.0, 1408.0, 1000.0 + f64::from(id), 640.0), 1.0);
+        let maximized = Rect::new(0.0, 25.0, 2560.0, 1415.0);
+        assert!(!has_child_over(1, 7, parked(1).bounds, &[parked(1), parked(2)], &d), "two parked windows of the app");
+        assert!(!has_child_over(3, 7, maximized, &[parked(1)], &d), "the maximized window and a parked one");
+        assert!(!has_child_over(1, 7, parked(1).bounds, &[listed(3, 7, maximized, 1.0)], &d), "a parked window's sliver under the maximized one");
+        assert!(has_child_over(3, 7, maximized, &[listed(4, 7, Rect::new(2300.0, 1200.0, 240.0, 200.0), 1.0)], &d), "a popover in its corner still counts");
     }
 
     use super::*;
