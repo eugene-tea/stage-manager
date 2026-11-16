@@ -7190,7 +7190,8 @@ mod tests {
         use crate::engine::fullscreen::Seen;
         use crate::engine::overview::Overview;
         let now = Instant::now();
-        let cases: Vec<(&str, fn(&mut Controller, Instant))> = vec![
+        type Set = fn(&mut Controller, Instant);
+        let cases: Vec<(&str, Set)> = vec![
             ("the launch's stages wait", |c, now| c.build_wait = Some((session::Blind::AxSilent, now))),
             ("the restore window is open", |c, now| c.settling = Some(Settling::new(now, None))),
             ("a switch", |c, now| c.phase.feed(phase::Event::SwitchSent { id: 1, max: Duration::from_secs(1) }, now)),
