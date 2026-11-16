@@ -68,6 +68,10 @@
 - With macOS's Spaces keeping the hidden windows (still a test opt-in), Quit is answered in
   its usual time after a stage change whose window was shown before it could fly its last stretch
   itself; the app waited eight seconds and then brought the windows back another way.
+- With macOS's Spaces keeping the hidden windows (still a test opt-in), a new window opened
+  exactly where a hidden window of its app sits (a window filling the screen, say) stays
+  where it opened. It was taken for a window tab selected: it went into the hidden window's
+  stage, and the hidden window came out on the Desktop.
 
 ## 1.8.5 — 2026-11-12
 

@@ -18,8 +18,14 @@
 //! before its unpark ([`Controller::unpark_all`]): a tab selected a moment before is put
 //! back at its group's frame, not left in the corner for the leftovers check.
 //!
+//! Under the Spaces engine a hidden window is listed off screen at its own frame, the tab
+//! left's look: a new window opened at a hidden window's frame was taken for its tab selected
+//! (the review of 1.9, C-1). There the tab left must also be gone from its app's
+//! Accessibility list ([`hidden_tab::tabs_selected`]).
+//!
 //! [`Model::tab_selected`]: crate::engine::model::Model::tab_selected
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::Controller;
@@ -27,7 +33,7 @@ use crate::platform::window_engine::EngineKind;
 use crate::engine::busy_apps::Reply;
 use crate::engine::hidden_tab::{self, TabListed};
 use crate::engine::model::{WindowId, WindowRole};
-use crate::platform::hidden_tabs::tab_listed;
+use crate::platform::hidden_tabs::{ax_window_ids, tab_listed};
 use crate::platform::observe::Observer;
 use crate::platform::windows::{self, CgWindow};
 
@@ -59,7 +65,22 @@ impl Controller {
             return false;
         }
         let listed: Vec<TabListed> = list.iter().map(tab_listed).collect();
-        let found = hidden_tab::tabs_selected(&listed, &held, |id| m.window(WindowId(id)).is_some());
+        // A window hidden off screen at its own frame (the Spaces engine) looks like a tab
+        // left: its app's list must no longer name it (the review of 1.9, C-1), read only for
+        // a window whose place a window of its app takes, once per app.
+        let mut ax: HashMap<i32, Option<Vec<u32>>> = HashMap::new();
+        let still_listed = |left: &TabListed| {
+            if !m.hidden_at_own_frame(WindowId(left.id)) {
+                return false;
+            }
+            let ids = ax.entry(left.pid).or_insert_with(|| ax_window_ids(left.pid));
+            let still = ids.as_ref().is_none_or(|ids| ids.contains(&left.id));
+            if still {
+                tracing::debug!(id = left.id, pid = left.pid, "a window of its app at a hidden window's frame, but the app still lists the hidden one: a new window, no tab selected");
+            }
+            still
+        };
+        let found = hidden_tab::tabs_selected(&listed, &held, |id| m.window(WindowId(id)).is_some(), still_listed);
         if found.is_empty() {
             return false;
         }

@@ -8808,6 +8808,58 @@ def phase_tabs():
     stop_app()
     all_onscreen("tabs", never_ours=(tab,) if tab else ())
     stop_fixture()
+    tab_lookalike()
+
+
+def tab_lookalike():
+    """The review of 1.9, C-1: a new window opened at the frame of a hidden window of its app
+    is no tab selected. Under the Spaces engine the hidden window is listed off screen at its
+    own frame, the look of a tab left; its app still lists it through Accessibility, so the new
+    window stays a new window and the hidden one stays in its stage. Fixture 1 and Fixture 2 at
+    one frame, Fixture 2 in a stage of its own in front; SIGUSR1 opens Fixture 3 at that frame."""
+    say("\n== tabs: a new window at a hidden window's frame is no tab selected ==")
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    frame = "420,140,900,600"
+    start_fixture(2, "--frames", ";".join([frame] * 3))
+    fixture = pids_of(FIX_EXE)
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None and bool(fixture), "tab lookalike setup: the app manages the fixture's two windows"):
+        stop_app()
+        stop_fixture()
+        return
+    t = by_title(s)
+    f1, f2 = t["Fixture 1"]["id"], t["Fixture 2"]["id"]
+    do("new", f2)
+    time.sleep(1.0)
+    s = state()
+    home = by_title(s)["Fixture 1"]["home"]
+    if not check(bool(by_title(s)["Fixture 1"].get("parked")) and not by_title(s)["Fixture 2"].get("parked"),
+                 "tab lookalike setup: Fixture 1's stage hidden, Fixture 2 in front"):
+        stop_app()
+        stop_fixture()
+        return
+    wins, _ = fixture_windows([FIX_ID])
+    frames = {w["id"]: w["bounds"] for w in wins}
+    check(frames.get(f1) == frames.get(f2), f"tab lookalike setup: Fixture 1 and Fixture 2 at one frame ({frames.get(f1)}, {frames.get(f2)})")
+    selected_before = log_text().count("a window tab was selected")
+    os.kill(fixture[0], signal.SIGUSR1)
+    s = wait_until(lambda: (lambda s: s if "Fixture 3" in by_title(s) else None)(state()), 5, "Fixture 3 to be managed")
+    time.sleep(2.5)
+    s = state()
+    bt = by_title(s)
+    check("Fixture 3" in bt and not bt["Fixture 3"].get("parked"), "tab lookalike: the new window (Fixture 3) is managed and shown")
+    check("Fixture 1" in bt and bt["Fixture 1"]["home"] == home and bool(bt["Fixture 1"].get("parked")),
+          "tab lookalike: the hidden window (Fixture 1) stays hidden in its stage")
+    check(log_text().count("a window tab was selected") == selected_before, "tab lookalike: no tab selected in the log")
+    wins, d = fixture_windows([FIX_ID])
+    w1 = next((w for w in wins if w["id"] == f1), None)
+    check(w1 is not None and (not w1["onscreen"] or tucked(w1, d)), "tab lookalike: Fixture 1 is not on screen")
+    stop_app()
+    all_onscreen("tab lookalike")
+    stop_fixture()
 
 
 def cmd_tab_probe(*words, wait=8.0):

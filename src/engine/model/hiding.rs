@@ -20,8 +20,9 @@
 //!   record or restore. The Corner engine keeps restore frames out of its park zone; an
 //!   engine that hides without moving has no such place.
 //!
-//! And one answer the engine gives about a window the model hid: where it left it
-//! ([`Model::frame_left`]); and two about macOS: whether it brings another app in front when
+//! And two answers the engine gives about a window the model hid: where it left it
+//! ([`Model::frame_left`]), and whether it is listed off screen at its own frame there
+//! ([`Model::hidden_at_own_frame`]); and two about macOS: whether it brings another app in front when
 //! the app in front quits ([`Model::macos_fronts_after_quit`]), and whether it counts a hidden
 //! window on its Desktop at an app's activation ([`Model::macos_counts_hidden`]).
 
@@ -149,6 +150,18 @@ impl Model {
         match self.options.engine {
             EngineKind::Corner => corner::macos_counts_hidden(),
             EngineKind::Spaces => spaces::macos_counts_hidden(),
+        }
+    }
+
+    /// True when window `id` is hidden by an engine that leaves a hidden window listed off
+    /// screen at its own frame (the Spaces engine's stage Space), so that look says nothing
+    /// of a tab ordered out ([`crate::engine::hidden_tab::tabs_selected`], the review of 1.9,
+    /// C-1). The Corner engine's hidden window is a sliver on screen: off screen, it is not
+    /// where the engine left it.
+    pub fn hidden_at_own_frame(&self, id: WindowId) -> bool {
+        match self.options.engine {
+            EngineKind::Corner => false,
+            EngineKind::Spaces => spaces::hidden_by_record(self.windows.get(&id)),
         }
     }
 
