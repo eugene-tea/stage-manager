@@ -9,7 +9,8 @@
 //!   and its watch own them from then on. Refused while the app quits: the old guardian keeps
 //!   them;
 //! - [`TakenWatch`]: the app's watch of the windows it took, on the WM thread, by the
-//!   guardian's own rules ([`Watch::registered_only`], [`guardian::reach_shown`]): a window
+//!   guardian's own rules ([`Watch::taken`], [`guardian::reach_shown`]), by the park corner
+//!   whichever engine runs (a crashed copy's stage Spaces end with it): a window
 //!   seen back, gone, or in the model now is let go; one whose Desktop shows while it is still
 //!   parked is brought back to the frame it was taken with, as the guardian would have. One
 //!   whose app no longer runs, or that the window server's complete list no longer has, is
@@ -24,7 +25,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::guardian::{self, Attempts};
-use super::{ctl, safety, session, window_engine, windows};
+use super::{ctl, safety, session, windows};
 use crate::engine::guard_watch::{Event, LockSeen, Release, Watch};
 use crate::engine::handoff::{Answer, Offer, TakenDrops, Trust, answer_from_reply, vet};
 use crate::engine::recovery::Registered;
@@ -132,7 +133,9 @@ impl TakenWatch {
             self.attempts.clear();
             return;
         }
-        let w = self.watch.get_or_insert_with(|| Watch::registered_only(&[]).run_by(window_engine::current().kind()));
+        // By the park corner whichever engine runs: the copy that hid them is gone, and its
+        // stage Spaces with it (the review of 1.9, C-3).
+        let w = self.watch.get_or_insert_with(Watch::taken);
         let held: BTreeSet<u32> = taken.iter().map(|r| r.id).collect();
         // Another path saw to these (the quit's leftovers check, a hidden tab judged).
         let gone: Vec<u32> = w.waiting().map(|x| x.id).filter(|id| !held.contains(id)).collect();

@@ -313,6 +313,22 @@ impl Watch {
         Self { engine, ..self }
     }
 
+    /// The app's watch over the windows it takes from an old guardian (round 8N): registered
+    /// only ([`Self::registered_only`]), judged by the park corner whichever engine runs. The
+    /// crashed copy that hid them is gone, and its stage Spaces with it (the window server ends
+    /// them with their process), so the one place a taken window can still be hidden away is a
+    /// park corner. Run by the engine that runs (the review of 1.9, C-3), a Spaces run let a
+    /// Corner copy's window still in the corner go as "read back" the moment its Desktop
+    /// showed, and nothing brought it out.
+    pub fn taken() -> Self {
+        Self::registered_only(&[]).run_by(EngineKind::Corner)
+    }
+
+    /// The engine whose hidden windows are watched ([`Self::run_by`]).
+    pub fn engine(&self) -> EngineKind {
+        self.engine
+    }
+
     /// Adds a registered window (taken later); false when it is registered already.
     pub fn add(&mut self, r: Registered) -> bool {
         if self.is_registered(r.id) {
@@ -1025,6 +1041,29 @@ mod tests {
         assert!(w.shown().is_empty() && !w.shows(), "on screen outside the park zone: never reached");
         assert_eq!(pass(&mut w, t0, 3000, &on_desktop_2(ordinary)), None);
         assert!(matches!(pass(&mut w, t0, 4000, &on_desktop_2(ordinary)), Some(Release::SeenBack { .. })), "let go unmoved");
+    }
+
+    /// The review of 1.9, C-3: a Spaces run takes a Corner copy's window parked on Desktop 2.
+    /// Desktop 2 shows with the window still in the park corner: the taken watch keeps it,
+    /// shown, to be brought back (a frame read there lets nothing go), whichever engine runs.
+    /// A watch run by the Spaces engine let it go as read back.
+    #[test]
+    fn a_taken_window_still_in_the_corner_waits_whichever_engine_runs() {
+        let t0 = Instant::now();
+        let mut w = Watch::taken();
+        assert_eq!(w.engine(), EngineKind::Corner);
+        w.add(reg()[0]);
+        pass(&mut w, t0, 0, &on_desktop_1());
+        assert_eq!(pass(&mut w, t0, 1500, &on_desktop_2(parked())), None);
+        assert_eq!(pass(&mut w, t0, 4000, &on_desktop_2(parked())), None, "never seen back in the corner");
+        assert_eq!(w.shown().len(), 1, "shown in the corner: to be brought back");
+        assert!(w.read_through_ax(1, parked(), false, &displays()).is_none(), "read in the corner: still away");
+        assert!(matches!(w.read_through_ax(1, RESTORE, true, &displays()), Some(Event::LetGo { why: Release::BroughtBack { .. }, .. })));
+        // The defect: the same watch run by the Spaces engine.
+        let mut spaces = Watch::registered_only(&[]).run_by(EngineKind::Spaces);
+        spaces.add(reg()[0]);
+        pass(&mut spaces, t0, 0, &on_desktop_1());
+        assert!(matches!(spaces.read_through_ax(1, parked(), false, &displays()), Some(Event::LetGo { why: Release::ReadBack { .. }, .. })));
     }
 
     /// Review M3 (1.1.0): Stage Manager running again is no reason to stop watching. A new app

@@ -783,6 +783,7 @@ def phase_safety():
 
     drill_away()
     drill_handoff()
+    drill_handoff_to_spaces()
 
     say("-- drill: kill -9 of the app and the guardian (the next launch restores)")
     start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
@@ -1349,6 +1350,68 @@ def drill_handoff():
           "handoff: C's quit is clean (its guardian has nothing to do)")
     check(not pids_of(f"stage-manager --guardian {c}$"), "handoff: no guardian is left waiting")
     all_onscreen("handoff drill")
+
+
+def drill_handoff_to_spaces():
+    """The review of 1.9, C-2 and C-3: a Corner copy dies with a window parked on a Desktop not
+    shown (emulated as in drill_handoff), and the next launch runs the Spaces engine. Its taken
+    watch judges the window by the park corner, not by the engine that runs (no frame says
+    hidden under Spaces): when its Desktop shows with the window still in the corner it is
+    brought back, never let go as "read back" there; and a window the Spaces model meets in the
+    corner is not counted shown at the park frame. Run in the Corner suite (A is a Corner copy,
+    B is started with STAGE_MANAGER_ENGINE=spaces)."""
+    say("-- drill: a Corner copy's guardian hands its watch to a Spaces run (review 1.9, C-2/C-3)")
+    if corner_only("a Corner copy's window parked in the corner, handed to a Spaces run"):
+        return
+    start_app(1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    ensure_something_parked()
+    time.sleep(1.0)
+    fixture = pids_of(FIX_EXE)
+    parked_ids = [w["id"] for w in state()["windows"] if w["parked"] and w["role"] == "standard"]
+    if not check(bool(fixture) and bool(parked_ids), "handoff to Spaces setup: a parked fixture window"):
+        return
+    a = app_pid()
+    guards_a = guardian_pids(a)
+
+    def listed(ids):
+        wins, _ = fixture_windows([FIX_ID])
+        return [w for w in wins if w["id"] in ids]
+
+    os.kill(a, signal.SIGSTOP)
+    os.kill(fixture[0], signal.SIGWINCH)
+    away = wait_until(lambda: (lambda ws: ws if ws and not any(w["onscreen"] for w in ws) else None)(listed(parked_ids)), 3,
+                      "the parked windows to leave the screen")
+    os.kill(a, signal.SIGKILL)
+    wait_gone(a)
+    if not check(away is not None, "handoff to Spaces: the parked windows are off screen (their Desktop not shown)"):
+        os.kill(fixture[0], signal.SIGINFO)
+        return
+    time.sleep(2.0)
+    start_app(1, extra_env={"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_ENGINE": "spaces"}, fresh_log=False)
+    b = app_pid()
+    for g in guards_a:
+        wait_gone(g, 15)
+    check((ctl("state").get("engine") or {}).get("kind") == "spaces", "handoff to Spaces: B runs the Spaces engine")
+    check(set(parked_ids) <= set(ctl("state").get("taken") or []), "handoff to Spaces: B took the window")
+    mark = len(log_text())
+    # Its Desktop shows: the window is ordered in where it was, in the park corner.
+    os.kill(fixture[0], signal.SIGINFO)
+    _, d = fixture_windows([FIX_ID])
+    back = wait_until(lambda: (lambda ws: ws if ws and all(w["onscreen"] and not is_parked(w["bounds"], d) for w in ws) else None)(listed(parked_ids)),
+                      6, "the window to come out of the corner")
+    check(back is not None, f"handoff to Spaces: the window comes out of the park corner once its Desktop shows ({[w['bounds'] for w in listed(parked_ids)]})")
+    time.sleep(1.5)
+    ws = listed(parked_ids)
+    check(bool(ws) and not any(is_parked(w["bounds"], d) for w in ws), "handoff to Spaces: it stays out of the corner")
+    after = log_text()[mark:]
+    for line in [line for line in after.splitlines() if "taken watch" in line or "brought back" in line][-6:]:
+        say(f"    log: {line[-200:]}")
+    guards_b = guardian_pids(b)
+    ctl("quit")
+    wait_gone(b)
+    for g in guards_b:
+        wait_gone(g, 15)
+    all_onscreen("handoff to Spaces drill")
 
 
 CONFIG_M4 = f"""
