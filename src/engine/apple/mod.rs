@@ -3,8 +3,10 @@
 //! arranges the windows; this app hides nothing, reads what Apple's shows ([`mirror`]), and
 //! keeps its own model in step with it ([`follow`]), so the model's stages, `ctl state`, the
 //! hotkeys and the saved stages (`state-apple.json`) work on Apple's stages. A step of its own
-//! (a switch) goes through a route ([`plan`]) Apple's answers to; the mirror then says what
-//! happened, and the model follows that, whatever was planned.
+//! (a switch, a merge, a window sent, a newly opened app brought here) is planned ([`plan`])
+//! into a [`job`] that runs one route at a time, each posted one through the [`gate`]; the
+//! mirror then says what happened, and the job and the model follow that, whatever was
+//! planned.
 //!
 //! This module also answers the model's door (`model/hiding.rs`) for
 //! [`EngineKind::Apple`](super::recovery::EngineKind::Apple): Apple's strip shows the real
@@ -22,8 +24,13 @@
 
 pub mod desk;
 pub mod follow;
+pub mod gate;
+pub mod job;
 pub mod mirror;
 pub mod plan;
+pub mod points;
+#[cfg(test)]
+mod scenarios;
 
 use super::corner::park::reach_in;
 use super::geometry::Rect;

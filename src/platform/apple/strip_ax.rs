@@ -4,7 +4,8 @@
 //! `AXFrame` and `AXWindowsIDs` (the `CGWindowID`s of that stage). Only the items the strip shows are listed; the current
 //! stage is not; after every change the strip reads empty for about 650 ms. The items'
 //! titles and descriptions (window titles) are never read, stored or logged. Their actions
-//! (`AXPress`, `AXAddToStage`) return success and do nothing: never used here.
+//! (`AXPress`, `AXAddToStage`) return success and do nothing: used only by the tripwires
+//! (`routes/rejected.rs`, `ctl apple try`), through [`perform`].
 //!
 //! Modelled on [`super::super::switcher_ax`]: every call bounded by [`STRIP_AX_SECONDS`], the
 //! first call left unanswered ends the read.
@@ -88,4 +89,32 @@ fn strip_of(space: &AxElement) -> AxResult<Reading> {
         return Ok(Reading { items });
     }
     Ok(Reading::default())
+}
+
+/// Performs Accessibility action `action` on the item of the main screen's strip of
+/// WindowManager `pid` whose `AXWindowsIDs` hold window `window` (the tripwires only:
+/// `AXPress`, `AXAddToStage` returned success and did nothing on 11-16).
+pub fn perform(pid: i32, window: u32, action: &str) -> Result<(), String> {
+    let t = STRIP_AX_SECONDS;
+    let app = AxElement::application(pid);
+    let spaces = app.bounded(t, AxElement::children).map_err(|e| format!("WindowManager did not answer: {e}"))?;
+    for space in spaces {
+        if identified(&space).ok().as_deref() != Some(SPACE_ID) {
+            continue;
+        }
+        for child in space.bounded(t, AxElement::children).map_err(|e| e.to_string())? {
+            if identified(&child).ok().as_deref() != Some(STRIP_ID) {
+                continue;
+            }
+            for item in child.bounded(t, AxElement::children).map_err(|e| e.to_string())? {
+                let ids = item.bounded(t, |e| e.numbers(WINDOWS_IDS)).unwrap_or_default();
+                if ids.iter().any(|n| u32::try_from(*n).ok() == Some(window)) {
+                    return item.bounded(t, |e| e.perform_action(action)).map_err(|e| format!("{action}: {e}"));
+                }
+            }
+            return Err(format!("no strip item holds window {window} (Accessibility reads empty for about 650 ms after a change)"));
+        }
+        return Err("the screen's group has no strip".into());
+    }
+    Err("WindowManager lists no screen".into())
 }

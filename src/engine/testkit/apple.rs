@@ -1,16 +1,20 @@
 //! A fake WindowManager for the Apple mode's tests ([`FakeWindowManager`]): stages, the
 //! strip's room, Apple's motion and the 650 ms blank of its Accessibility on a test clock, a
-//! covered strip, and Apple's answers (a focus switches to the window's stage, a new app
-//! takes a stage of its own); every posted gesture recorded. It implements
-//! [`AppleDesk`], so the mirror, following and the routes run against it as against the
-//! real desk.
+//! covered strip, the person's input, and Apple's answers as measured on 11-16: a focus
+//! switches to the window's stage; a new app takes a stage of its own, or, hidden at its
+//! launch, goes into the strip with the stage in front left as it is; a Shift-click on a
+//! visible part of a thumbnail adds that window alone to the stage in front, a click mid-motion
+//! is ignored, a click on a covered strip lands on nothing of Apple's; a drag of a title bar
+//! onto the strip takes the window out to a stage of its own (covered or not). Every focus and
+//! posted gesture is recorded. It implements [`AppleDesk`], so the mirror, following, the jobs
+//! and the routes run against it as against the real desk.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use crate::engine::apple::desk::{AppleDesk, InputNow, Posted};
+use crate::engine::apple::desk::{AppleDesk, InputNow, Landed, Posted};
 use crate::engine::apple::mirror::{Item, Listed, ListedWindow, Reading, SETTLE};
-use crate::engine::geometry::Rect;
+use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::Display;
 
 /// WindowManager's pid in the fake.
@@ -49,6 +53,18 @@ pub struct FakeWindowManager {
     pub focused: Vec<u32>,
     /// Every gesture posted, in order.
     pub posted: Vec<Posted>,
+    /// The person's input as the gate reads it (idle unless a test says otherwise).
+    pub input: InputNow,
+    /// Apps hidden (at their launch).
+    pub hidden: BTreeSet<i32>,
+    /// The person's own input ends every drag midway.
+    pub interrupt_drags: bool,
+    /// Posted clicks Apple's ignored because they came mid-motion.
+    pub ignored_mid_motion: u32,
+    /// Apple's answers no posted gesture (a macOS that changed).
+    pub deaf: bool,
+    /// How the last gesture ended, until taken.
+    landed: Option<Landed>,
 }
 
 impl Default for FakeWindowManager {
@@ -60,7 +76,23 @@ impl Default for FakeWindowManager {
 impl FakeWindowManager {
     /// No window yet; a strip of room 4, shown.
     pub fn new() -> Self {
-        Self { clock: Instant::now(), windows: BTreeMap::new(), current: Vec::new(), stages: Vec::new(), room: 4, covered: false, changed: None, focused: Vec::new(), posted: Vec::new() }
+        Self {
+            clock: Instant::now(),
+            windows: BTreeMap::new(),
+            current: Vec::new(),
+            stages: Vec::new(),
+            room: 4,
+            covered: false,
+            changed: None,
+            focused: Vec::new(),
+            posted: Vec::new(),
+            input: InputNow::idle(),
+            hidden: BTreeSet::new(),
+            interrupt_drags: false,
+            ignored_mid_motion: 0,
+            deaf: false,
+            landed: None,
+        }
     }
 
     /// The test clock.
@@ -88,6 +120,11 @@ impl FakeWindowManager {
         &self.stages
     }
 
+    /// Each window's app.
+    pub fn pids(&self) -> BTreeMap<u32, i32> {
+        self.windows.iter().map(|(id, (pid, _))| (*id, *pid)).collect()
+    }
+
     /// Window `id`'s full-size frame.
     pub fn frame(&self, id: u32) -> Option<Rect> {
         self.windows.get(&id).map(|(_, f)| *f)
@@ -113,9 +150,50 @@ impl FakeWindowManager {
         self.current = ids.to_vec();
     }
 
+    /// App `pid` opens windows `ids` and was hidden at its launch (`hide_took`): Apple's
+    /// keeps the stage in front and puts the app's in the strip, on top (probe 3, 11-16).
+    /// Without the hide it is [`FakeWindowManager::open_app`] (the stage in front pushed into
+    /// the strip).
+    pub fn launch(&mut self, pid: i32, ids: &[u32], hide_took: bool) {
+        if !hide_took || self.current.is_empty() {
+            self.open_app(pid, ids);
+            return;
+        }
+        self.change();
+        self.hidden.insert(pid);
+        for (k, id) in ids.iter().enumerate() {
+            let k = k as f64;
+            self.windows.insert(*id, (pid, Rect::new(360.0 + 30.0 * k, 160.0 + 30.0 * k, 640.0, 460.0)));
+        }
+        self.stages.insert(0, ids.to_vec());
+    }
+
+    /// App `pid` opens one more window `id`: into the stage in front when the app has a
+    /// window there (or a stage of the app's own, else a new stage in front).
+    pub fn open_window(&mut self, pid: i32, id: u32) {
+        let of_app = |ws: &[u32], windows: &BTreeMap<u32, (i32, Rect)>| ws.iter().any(|w| windows.get(w).is_some_and(|(p, _)| *p == pid));
+        if of_app(&self.current, &self.windows) || self.current.is_empty() {
+            self.change();
+            self.windows.insert(id, (pid, Rect::new(420.0, 200.0, 600.0, 400.0)));
+            self.current.insert(0, id);
+            return;
+        }
+        if let Some(s) = self.stages.iter().position(|st| of_app(st, &self.windows)) {
+            self.change();
+            self.windows.insert(id, (pid, Rect::new(420.0, 200.0, 600.0, 400.0)));
+            self.stages[s].insert(0, id);
+            return;
+        }
+        self.open_app(pid, &[id]);
+    }
+
     /// Apple's answer to a focus of window `id`: its stage comes in front, the stage left
-    /// takes its slot. Nothing for a window in front or unknown.
+    /// takes its slot, and its app shows again when hidden. Nothing for a window in front or
+    /// unknown.
     pub fn focus_window(&mut self, id: u32) {
+        if let Some((pid, _)) = self.windows.get(&id) {
+            self.hidden.remove(pid);
+        }
         let Some(s) = self.stages.iter().position(|st| st.contains(&id)) else { return };
         self.change();
         let mut target = self.stages.remove(s);
@@ -170,16 +248,79 @@ impl FakeWindowManager {
         out
     }
 
-    /// The `k`th thumbnail of slot `slot`.
+    /// The `k`th thumbnail of slot `slot` (the front one first; the next 16 points right, as a
+    /// live capture of 11-16 had a stage of two).
     fn thumb(&self, slot: usize, k: usize) -> Rect {
         let x = if self.covered { HIDDEN_X } else { THUMB.x };
-        Rect::new(x + 4.0 * k as f64, THUMB.y + SLOT * slot as f64 + 6.0 * k as f64, THUMB.w, THUMB.h)
+        Rect::new(x + 16.0 * k as f64, THUMB.y + SLOT * slot as f64 + 4.0 * k as f64, THUMB.w, THUMB.h)
     }
 
     /// Slot `slot`'s icon window.
     fn icon(&self, slot: usize) -> Rect {
         let t = self.thumb(slot, 0);
         Rect::new(t.x + 40.0, t.y + 50.0, 66.0, 82.0)
+    }
+
+    /// What a press at `at` lands on in the list now: the strip window whose thumbnail (or
+    /// its twin) is topmost there, `None` for anything else (a window in front, an icon,
+    /// nothing).
+    fn thumbnail_at(&self, at: Point) -> Option<u32> {
+        let top = self.listed().windows.into_iter().find(|w| w.onscreen && w.bounds.contains(at))?;
+        let id = if top.pid == MANAGER { top.id.checked_sub(9000).filter(|id| self.windows.contains_key(id))? } else { top.id };
+        self.stages.iter().take(self.room).any(|st| st.contains(&id)).then_some(id)
+    }
+
+    /// Apple's answer to a Shift-click on window `id`'s thumbnail: that window alone joins the
+    /// stage in front (its app shown again), its stage keeps the rest.
+    fn add_to_front(&mut self, id: u32) {
+        let Some(s) = self.stages.iter().position(|st| st.contains(&id)) else { return };
+        self.change();
+        self.stages[s].retain(|w| *w != id);
+        self.stages.retain(|st| !st.is_empty());
+        self.current.insert(0, id);
+        if let Some((pid, _)) = self.windows.get(&id) {
+            self.hidden.remove(pid);
+        }
+    }
+
+    /// Apple's answer to a drag of `id` (in front) onto the strip: it leaves for a stage of
+    /// its own, on top of the strip.
+    fn take_out(&mut self, id: u32) {
+        if !self.current.contains(&id) {
+            return;
+        }
+        self.change();
+        self.current.retain(|w| *w != id);
+        self.stages.insert(0, vec![id]);
+    }
+
+    /// Apple's answer to gesture `posted` (see the module docs).
+    fn answer(&mut self, posted: &Posted) -> Landed {
+        if self.deaf {
+            return Landed::Posted;
+        }
+        match *posted {
+            Posted::Click { at, .. } => {
+                if self.moving().is_some() {
+                    self.ignored_mid_motion += 1;
+                    return Landed::Posted;
+                }
+                if let Some(id) = self.thumbnail_at(at) {
+                    self.add_to_front(id);
+                }
+                Landed::Posted
+            }
+            Posted::Drag { window, from, to, .. } => {
+                if self.interrupt_drags {
+                    return Landed::Interrupted("a left mouse-up came".into());
+                }
+                let grabbed = self.frame(window).is_some_and(|f| from.y >= f.y && from.y < f.y + 28.0 && from.x >= f.x && from.x < f.max_x());
+                if grabbed && to.x < THUMB.max_x() && self.moving().is_none() {
+                    self.take_out(window);
+                }
+                Landed::Posted
+            }
+        }
     }
 
     /// True while Apple's motion of the last change runs.
@@ -254,7 +395,7 @@ impl AppleDesk for FakeWindowManager {
     }
 
     fn input(&mut self) -> InputNow {
-        InputNow { pointer_still_ms: 1000, key_idle_ms: 1000, ..InputNow::default() }
+        self.input
     }
 
     fn focus(&mut self, window: u32) -> Result<(), String> {
@@ -268,6 +409,12 @@ impl AppleDesk for FakeWindowManager {
 
     fn post(&mut self, posted: &Posted) -> Result<(), String> {
         self.posted.push(*posted);
+        let landed = self.answer(posted);
+        self.landed = Some(landed);
         Ok(())
+    }
+
+    fn landed(&mut self) -> Option<Landed> {
+        self.landed.take()
     }
 }

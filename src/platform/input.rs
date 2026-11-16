@@ -242,6 +242,12 @@ pub fn since_last_press() -> Duration {
 /// none until its own release, so one seen while it runs is the user's ([`drag`]).
 static LEFT_UPS: AtomicU64 = AtomicU64::new(0);
 
+/// Left mouse-ups the monitor has seen so far (any thread): one more since a press of ours
+/// is the person's release ([`drag`], the Apple mode's drag route).
+pub fn left_ups() -> u64 {
+    LEFT_UPS.load(Ordering::Relaxed)
+}
+
 /// True while the left mouse button is down (any thread).
 pub fn left_button_down() -> bool {
     CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)

@@ -35,10 +35,10 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use crate::engine::geometry::Rect;
+use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::Display;
 
-use super::thumbnail_sized;
+use super::{points, thumbnail_sized};
 
 /// How long a change keeps the arrangement unsettled: Apple's motion, about 700 ms
 /// (a recording of 11-16: a focus at .305, motion from .404 to about .900; clicks before
@@ -168,6 +168,9 @@ pub struct Arrangement {
     pub settled: bool,
     /// Every managed window's listed bounds at this read.
     pub frames: BTreeMap<u32, Rect>,
+    /// Where each strip window's thumbnail shows a part of its own, on screen, at this read
+    /// (none in motion): the point a Shift-click on it presses ([`points::visible_point`]).
+    pub click_at: BTreeMap<u32, Point>,
     /// Each window's bounds when last seen at full size in the current stage: the frame the
     /// model records, never a thumbnail's.
     pub full: BTreeMap<u32, Rect>,
@@ -279,12 +282,14 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
     let mut frames = BTreeMap::new();
     let mut current = Vec::new();
     let mut thumbs: Vec<(u32, Rect)> = Vec::new();
+    let mut thumb_at: Vec<(u32, usize)> = Vec::new();
     for (i, w) in listed.windows.iter().enumerate() {
         if !managed.contains(&w.id) || frames.insert(w.id, w.bounds).is_some() {
             continue;
         }
         if has_twin(listed, i) || off_left(screen, w.bounds) {
             thumbs.push((w.id, w.bounds));
+            thumb_at.push((w.id, i));
         } else if w.onscreen && !w.bounds.is_degenerate() && w.bounds.intersect(&screen.frame).is_some_and(|r| r.w > 0.0 && r.h > 0.0) {
             current.push(w.id);
         }
@@ -337,6 +342,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
             false => Some(thumbs.iter().any(|(_, b)| b.max_x() > screen.frame.x)),
         };
         next.strip = items(&thumbs, &icons);
+        next.click_at = click_points(listed, &thumb_at, &icons, screen);
         next.current = current;
         next.remembered = remembered(prev, &next, listed, managed);
     }
@@ -356,6 +362,26 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         }
     }
     next
+}
+
+/// Where each strip window (`thumbs`: its id and its place in `listed`) shows a part of its
+/// own: what covers it is every window listed in front of it on screen but its own twin
+/// (the click target, listed right above it with its bounds), and every app icon.
+fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen: &Display) -> BTreeMap<u32, Point> {
+    let mut out = BTreeMap::new();
+    for &(id, i) in thumbs {
+        let Some(w) = listed.windows.get(i) else { continue };
+        if !w.onscreen {
+            continue;
+        }
+        let twin = has_twin(listed, i).then(|| i - 1);
+        let mut over: Vec<Rect> = listed.windows[..i].iter().enumerate().filter(|(j, o)| o.onscreen && Some(*j) != twin).map(|(_, o)| o.bounds).collect();
+        over.extend(icons.iter().copied());
+        if let Some(p) = points::visible_point(w.bounds, &over, screen.frame) {
+            out.insert(id, p);
+        }
+    }
+    out
 }
 
 /// `groups` less the windows closed (or no longer managed); groups left empty go.

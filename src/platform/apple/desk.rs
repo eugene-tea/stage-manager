@@ -1,15 +1,22 @@
 //! The real desk of the Apple mode ([`Desk`], an [`AppleDesk`]): WindowManager's
 //! Accessibility through [`super::strip_ax`], the window server's list (the tick's shared
-//! read, [`windows::wake_list`]), and the focus route's calls (raise, main, app frontmost:
-//! the controller's own [`ax_focus`]). WM thread only. Posted gestures come with A3: refused
-//! here until then.
+//! read, [`windows::wake_list`]), the person's input from the hardware's own state, the focus
+//! route's calls (raise, main, app frontmost: the controller's own [`ax_focus`]; an app hidden
+//! at its launch shown again first), and the posted gestures ([`super::post`], each on a
+//! thread of its own). WM thread only.
 
-use crate::engine::apple::desk::{AppleDesk, InputNow, Posted};
+use std::time::Duration;
+
+use objc2_core_graphics::{CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventType, CGMouseButton};
+
+use crate::engine::apple::desk::{AppleDesk, InputNow, Landed, Posted};
 use crate::engine::apple::mirror::{Listed, ListedWindow, Reading};
+use crate::engine::geometry::Rect;
 use crate::engine::model::Display;
+use crate::engine::overview::{self, Sighting};
 use crate::platform::controller::ax_focus;
 use crate::platform::observe::Observer;
-use crate::platform::{input, windows};
+use crate::platform::{session, windows};
 
 /// The desk as seen through `ob` (the observer's window elements) and WindowManager `manager`.
 pub struct Desk<'a> {
@@ -17,6 +24,8 @@ pub struct Desk<'a> {
     pub ob: &'a Observer,
     /// WindowManager's pid, when it runs.
     pub manager: Option<i32>,
+    /// The main screen's frame (Mission Control is told over it).
+    pub screen: Option<Rect>,
 }
 
 impl AppleDesk for Desk<'_> {
@@ -33,18 +42,51 @@ impl AppleDesk for Desk<'_> {
         }
     }
 
-    /// The button only, until the gate (A3) needs the rest.
+    /// The person's input from the hardware's own state (a posted event of ours never
+    /// counts): the buttons (any source: a press of ours in flight holds too), ⌘ ⌥ ⌃ and Shift,
+    /// how long since the pointer and the keys last moved, the lock, Mission Control.
     fn input(&mut self) -> InputNow {
-        InputNow { button_down: input::left_button_down(), ..InputNow::default() }
+        let hid = CGEventSourceStateID::HIDSystemState;
+        let flags = CGEventSource::flags_state(hid);
+        let since = |kinds: &[CGEventType]| -> u64 {
+            let secs = kinds.iter().map(|k| CGEventSource::seconds_since_last_event_type(hid, *k)).fold(f64::INFINITY, f64::min);
+            Duration::try_from_secs_f64(secs.max(0.0)).map_or(u64::MAX, |d| d.as_millis() as u64)
+        };
+        let button_down = [CGMouseButton::Left, CGMouseButton::Right, CGMouseButton::Center]
+            .into_iter()
+            .any(|b| CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, b));
+        let overview = self.screen.is_some_and(|screen| {
+            let list = windows::wake_list();
+            let sightings = list.iter().map(|w| Sighting { owner: &w.owner, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen });
+            overview::overview_in(sightings, screen).overview.is_some()
+        });
+        InputNow {
+            button_down,
+            command_keys: flags.intersects(CGEventFlags::MaskCommand | CGEventFlags::MaskAlternate | CGEventFlags::MaskControl),
+            shift: flags.contains(CGEventFlags::MaskShift),
+            pointer_still_ms: since(&[CGEventType::MouseMoved, CGEventType::LeftMouseDragged, CGEventType::RightMouseDragged, CGEventType::OtherMouseDragged, CGEventType::ScrollWheel]),
+            key_idle_ms: since(&[CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged]),
+            locked: session::screen_locked(),
+            overview,
+        }
     }
 
     /// Raised, made main, its app frontmost ([`ax_focus`]): Apple's brings its stage in front.
+    /// An app hidden (at its launch, by the hide route) is shown again first.
     fn focus(&mut self, window: u32) -> Result<(), String> {
         let w = self.ob.window(window).ok_or(format!("window {window} is not observed"))?;
+        if super::launch_hide::is_hidden(w.pid) {
+            super::launch_hide::unhide(w.pid);
+        }
         ax_focus(&w.element, w.pid).map_err(|e| format!("window {window}: {e}"))
     }
 
-    fn post(&mut self, _posted: &Posted) -> Result<(), String> {
-        Err("posted gestures are not built yet in the Apple mode".into())
+    /// Starts the gesture on a thread of its own ([`super::post::start`]).
+    fn post(&mut self, posted: &Posted) -> Result<(), String> {
+        super::post::start(*posted, self.manager)
+    }
+
+    fn landed(&mut self) -> Option<Landed> {
+        super::post::take_landed()
     }
 }

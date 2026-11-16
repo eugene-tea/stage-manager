@@ -1,16 +1,25 @@
 //! What a step of ours does in the Apple mode: an [`Intent`] against the mirror gives the
-//! [`Step`]s a route carries out, or a [`Refusal`] with its reason. Apple's answers; after
-//! every step the mirror is read again and the model follows what is there, whether the step
-//! did what was planned or not.
+//! goals a [`Job`] meets one step at a time ([`super::job`]), or a [`Refusal`] with its
+//! reason. Apple's answers; after every step the mirror is read again and the job goes on from
+//! what is there, whether the step did what was planned or not.
 //!
-//! A2 plans the switch: the focus route (raise, main, app frontmost) needs only a known window
-//! of the stage, works with the strip hidden and for a stage no longer listed, and moves no
-//! pointer. The posted routes (bring here, send out) come with A3.
+//! - **Switch** (`ctl switch N`, the switch hotkeys): the focus route on the stage's key
+//!   window. It needs only a known window of the stage, works with the strip hidden and for a
+//!   stage no longer listed, and moves no pointer.
+//! - **Merge** (`ctl merge N`): stage N's windows into the stage in front, a Shift-click on
+//!   each one's thumbnail (a Shift-click adds only the window clicked).
+//! - **Send** (`ctl send N`, the send hotkeys): a window to stage N: stage N brought in front,
+//!   the window Shift-clicked in from the strip, the stage left brought back in front.
+//! - **New** (`ctl new`, the new-stage hotkey): a window out to a stage of its own, a drag of
+//!   its title bar onto the strip.
+//! - **Open here** (a rule's `current`, `[stages] new_apps_join_current`, Shift held at the
+//!   launch): a newly opened app's windows into the stage in front ([`open_here`]).
 
 use serde::Serialize;
 
 use super::desk::Posted;
-use super::mirror::Arrangement;
+use super::job::{Goal, Job};
+use super::mirror::{Arrangement, Where};
 
 /// What was asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -18,16 +27,25 @@ use super::mirror::Arrangement;
 pub enum Intent {
     /// Stage N in front (1-based: the strip's slots top to bottom, then the remembered ones).
     Switch(usize),
+    /// Stage N's windows into the stage in front.
+    Merge(usize),
+    /// Window `1` to stage N `0`.
+    Send(usize, u32),
+    /// Window `0` out to a stage of its own.
+    New(u32),
+    /// Newly opened app `0`'s windows into the stage in front.
+    OpenHere(i32),
 }
 
 /// One step of a plan.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Step {
     /// Window focused (the focus route).
     Focus(u32),
-    /// A gesture posted (A3).
+    /// A gesture posted (the Shift-click and drag routes).
     Post(Posted),
-    /// Wait until the strip shows item `slot` (A3).
+    /// Wait until the strip shows item `slot`.
     AwaitStrip(usize),
     /// Wait until the arrangement is settled.
     AwaitSettle,
@@ -37,15 +55,26 @@ pub enum Step {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Refusal(pub String);
 
+/// Stage `n` of `a`, or the refusal naming how many there are.
+fn stage(a: &Arrangement, n: usize) -> Result<&super::mirror::Group, Refusal> {
+    a.by_number(n).ok_or_else(|| {
+        let count = a.strip.len() + a.remembered.len();
+        Refusal(format!("no stage {n}: Apple's shows {count} besides the one in front"))
+    })
+}
+
+/// The window of `windows` to focus for its stage: `key`'s (the model's key window) when it
+/// is one of them, else the front one.
+fn key_of(windows: &[u32], key: impl Fn(&[u32]) -> Option<u32>) -> Option<u32> {
+    key(windows).filter(|w| windows.contains(w)).or_else(|| windows.first().copied())
+}
+
 /// The plan for switching to stage `n` of arrangement `a`: focus its key window (`key`: the
 /// one the model remembers of the group's windows, else its front one), once the arrangement
 /// is settled. Stage `n` in front already, or none: refused.
 pub fn switch(a: &Arrangement, n: usize, key: impl Fn(&[u32]) -> Option<u32>) -> Result<Vec<Step>, Refusal> {
-    let Some(group) = a.by_number(n) else {
-        let count = a.strip.len() + a.remembered.len();
-        return Err(Refusal(format!("no stage {n}: Apple's shows {count} besides the one in front")));
-    };
-    let Some(window) = key(&group.windows).filter(|w| group.windows.contains(w)).or_else(|| group.windows.first().copied()) else {
+    let group = stage(a, n)?;
+    let Some(window) = key_of(&group.windows, key) else {
         return Err(Refusal(format!("stage {n} has no window")));
     };
     let mut steps = Vec::new();
@@ -54,6 +83,79 @@ pub fn switch(a: &Arrangement, n: usize, key: impl Fn(&[u32]) -> Option<u32>) ->
     }
     steps.push(Step::Focus(window));
     Ok(steps)
+}
+
+/// The switch to stage `n` as a job: its key window in front.
+pub fn switch_job(a: &Arrangement, n: usize, key: impl Fn(&[u32]) -> Option<u32>, now: std::time::Instant) -> Result<Job, Refusal> {
+    let steps = switch(a, n, key)?;
+    let Some(Step::Focus(window)) = steps.last().copied() else { return Err(Refusal("no focus planned".into())) };
+    Ok(Job::new(Intent::Switch(n), vec![Goal::Front(window)], now))
+}
+
+/// Stage `n`'s windows into the stage in front: a Shift-click on each, front to back. A stage
+/// not listed (past the strip's room) is brought in front first and the stage left
+/// Shift-clicked back.
+pub fn merge(a: &Arrangement, n: usize, now: std::time::Instant) -> Result<Job, Refusal> {
+    let group = stage(a, n)?;
+    if a.current.is_empty() {
+        return Err(Refusal("no stage in front to merge into: switch to it instead".into()));
+    }
+    let mut windows = a.current.clone();
+    windows.extend(group.windows.iter().copied());
+    Ok(Job::new(Intent::Merge(n), vec![Goal::Gather { windows, app: None, focus_app: false }], now))
+}
+
+/// Window `w` to stage `n`: stage `n` brought in front (its key window, `key`), `w`
+/// Shift-clicked in from the strip, then the stage `w` left brought back in front (when it
+/// keeps a window).
+pub fn send(a: &Arrangement, n: usize, w: u32, key: impl Fn(&[u32]) -> Option<u32>, now: std::time::Instant) -> Result<Job, Refusal> {
+    let group = stage(a, n)?;
+    if group.windows.contains(&w) {
+        return Err(Refusal(format!("window {w} is in stage {n} already")));
+    }
+    let Some((place, _)) = a.where_is(w) else {
+        return Err(Refusal(format!("window {w} is in no stage Apple's shows or showed")));
+    };
+    let Some(target) = key_of(&group.windows, key) else {
+        return Err(Refusal(format!("stage {n} has no window")));
+    };
+    let mut windows = group.windows.clone();
+    windows.push(w);
+    let mut goals = vec![Goal::Front(target), Goal::Gather { windows, app: None, focus_app: false }];
+    // Back to where the person was: the stage in front when it keeps a window besides `w`.
+    let back = match place {
+        Where::Current => a.current.iter().copied().find(|x| *x != w),
+        Where::Strip | Where::Remembered => a.current.first().copied(),
+    };
+    if let Some(back) = back {
+        goals.push(Goal::Front(back));
+    }
+    Ok(Job::new(Intent::Send(n, w), goals, now))
+}
+
+/// Window `w` out to a stage of its own: brought in front when it is not, then its title bar
+/// dragged onto the strip. A window alone in its stage already: refused.
+pub fn new_stage(a: &Arrangement, w: u32, now: std::time::Instant) -> Result<Job, Refusal> {
+    let alone = match a.where_is(w) {
+        None => return Err(Refusal(format!("window {w} is in no stage Apple's shows or showed"))),
+        Some((Where::Current, _)) => a.current.len() <= 1,
+        Some(_) => a.strip.iter().chain(&a.remembered).any(|g| g.windows == [w]),
+    };
+    if alone {
+        return Err(Refusal(format!("window {w} is alone in its stage already")));
+    }
+    Ok(Job::new(Intent::New(w), vec![Goal::Out(w)], now))
+}
+
+/// Newly opened app `pid`'s windows into the stage in front of `a` (asked at its launch,
+/// before its first window): the stage in front's windows kept there and every window of the
+/// app gathered in as it shows, the app's front window focused at the end. `None` with no
+/// stage in front (Apple's own then puts the app in front, as asked).
+pub fn open_here(a: &Arrangement, pid: i32, now: std::time::Instant) -> Option<Job> {
+    if a.current.is_empty() {
+        return None;
+    }
+    Some(Job::new(Intent::OpenHere(pid), vec![Goal::Gather { windows: a.current.clone(), app: Some(pid), focus_app: true }], now))
 }
 
 #[cfg(test)]

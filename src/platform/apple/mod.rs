@@ -9,5 +9,7 @@
 pub mod controller;
 pub mod desk;
 pub mod engine;
+pub mod launch_hide;
+pub mod post;
 pub mod routes;
 pub mod strip_ax;

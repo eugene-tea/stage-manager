@@ -689,6 +689,17 @@ impl Observer {
         }
     }
 
+    /// True when app `app` is one the app may manage (not ours, not macOS's own, on the
+    /// `STAGE_MANAGER_ONLY` list when there is one).
+    pub fn admits(&self, app: &AppInfo) -> bool {
+        self.allowed(app)
+    }
+
+    /// [`Observer::admits`] for app `pid` as last reported (false for a pid not known).
+    pub fn admits_pid(&self, pid: i32) -> bool {
+        self.apps.get(&pid).is_some_and(|a| self.allowed(a))
+    }
+
     fn allowed(&self, app: &AppInfo) -> bool {
         app_allowed(self.only.as_ref(), self.own_pid, app.pid, app.bundle_id.as_deref())
     }
@@ -1362,6 +1373,9 @@ impl Observer {
     /// Handles an NSWorkspace event.
     pub fn on_app_event(&mut self, event: AppEvent, callback: Callback) {
         match event {
+            // Only the Apple mode acts on it (the WM thread hands it on); the launch notice
+            // comes next.
+            AppEvent::WillLaunch(app) => tracing::debug!(pid = app.pid, bundle = app.bundle_or_unknown(), "app about to launch"),
             AppEvent::Launched(app) => {
                 self.log_app("app launched", &app);
                 let now = Instant::now();

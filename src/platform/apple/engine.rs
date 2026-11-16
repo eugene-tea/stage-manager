@@ -83,8 +83,10 @@ impl WindowEngine for AppleEngine {
     }
 
     /// Nothing of ours is away but the registry's held windows (a release's), brought back
-    /// as the Corner engine does; true with none.
+    /// as the Corner engine does; true with none. First, a posted gesture still in flight is
+    /// ended (Shift up, the button up, the pointer back: quit, a signal, the panic hook).
     fn bring_all_back(&self, why: &str) -> bool {
+        super::post::end_in_flight(why);
         if safety::registry_len() == 0 {
             return true;
         }

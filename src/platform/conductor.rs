@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use super::apple::controller::AppleController;
+use super::apps::AppInfo;
 use super::controller::Controller;
 use super::ctl::Command;
 use super::input::InputEvent;
@@ -117,7 +118,16 @@ impl Conductor {
     pub fn app_launched(&mut self, ob: &Observer, pid: i32) {
         match self {
             Self::Ours(c) => c.app_launched(ob, pid),
-            Self::Apples(a) => a.app_launched(),
+            Self::Apples(a) => a.app_launched(ob, pid),
+        }
+    }
+
+    /// An app about to launch (the Apple mode's "open here" hides it this early; ours waits
+    /// for its windows).
+    pub fn app_will_launch(&mut self, ob: &Observer, app: &AppInfo) {
+        match self {
+            Self::Ours(_) => {}
+            Self::Apples(a) => a.app_will_launch(ob, app),
         }
     }
 

@@ -1,9 +1,12 @@
 //! The Apple mode's routes: each a way of getting Apple's Stage Manager to do one thing, one
-//! file each behind [`Route`] (docs/STRATEGIES.md, "Routes inside Apple mode"). A2 has the
-//! focus route ([`focus::Focus`]); the posted ones (Shift-click, drag) and the rejected ones
-//! kept as tripwires come with A3.
+//! file each behind [`Route`] (docs/STRATEGIES.md, "Routes inside Apple mode"): the focus
+//! route ([`focus::Focus`]), the posted Shift-click ([`shift_click::ShiftClick`]) and drag
+//! ([`drag::Drag`]), and the routes tried and rejected, kept as tripwires ([`rejected`]).
 
+pub mod drag;
 pub mod focus;
+pub mod rejected;
+pub mod shift_click;
 
 use serde::Serialize;
 

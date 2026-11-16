@@ -6571,6 +6571,7 @@ impl Controller {
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }
+            Command::AppleTry(t) => json!({ "ok": false, "error": format!("apple try {} works only while Apple's Stage Manager is on with [windows] with_apple = \"augment\"", t.name()) }),
             Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugEngineFail(_) | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugPointerBack

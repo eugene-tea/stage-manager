@@ -617,6 +617,13 @@ impl WmState {
                     AppEvent::Launched(app) => Some(app.pid),
                     _ => None,
                 };
+                // An app about to launch: the Apple mode may hide it at once (open here).
+                if let AppEvent::WillLaunch(app) = &event
+                    && self.arranging()
+                    && self.observer.admits(app)
+                {
+                    self.conductor.app_will_launch(&self.observer, app);
+                }
                 self.observer.on_app_event(event, ax_callback);
                 // A just-opened app: the engine may hold its new windows until placed.
                 if let Some(pid) = launched

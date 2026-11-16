@@ -5,33 +5,51 @@
 //! It arranges nothing itself. It reads Apple's arrangement (the window list at every read,
 //! WindowManager's Accessibility as the slow check: [`crate::engine::apple::mirror`]), keeps
 //! the app's model in step with it once it is settled ([`crate::engine::apple::follow`]),
-//! saves that model to `state-apple.json`, and carries out the switch through the focus
-//! route (`ctl switch N`, the switch hotkeys: [`crate::engine::apple::plan`]). Apple's posts
-//! no Accessibility notices, so it polls: a read at every activation, window found or gone,
-//! focus, mouse-up near the strip and Desktop change; then every 50 ms while anything moves
-//! (the list only, on the fast tick); every 2 s at rest, Accessibility with it.
+//! saves that model to `state-apple.json`, and carries out its own steps as jobs
+//! ([`crate::engine::apple::job`], planned by [`crate::engine::apple::plan`]), one at a time,
+//! each step through its route: `ctl switch N` and the switch hotkeys by the focus route,
+//! `ctl merge N` by a Shift-click per window, `ctl send N` and the send hotkeys by a switch,
+//! a Shift-click and a switch back, `ctl new` and the new-stage hotkey by the drag; and "open
+//! here" for a newly opened app (a rule's `current`, `[stages] new_apps_join_current`, Shift
+//! held at the launch, `[sugar] shift_brings_here`): the app hidden at its launch
+//! ([`super::launch_hide`]) so Apple's keeps the stage in front, its window Shift-clicked in
+//! from the strip, then focused; the round trip when the hide came too late.
+//!
+//! Apple's posts no Accessibility notices, so it polls: a read at every activation, window
+//! found or gone, focus, mouse-up near the strip and Desktop change; then every 50 ms while
+//! anything moves or a job runs (the list only, on the fast tick); every 2 s at rest,
+//! Accessibility with it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{Value, json};
 
 use super::desk::Desk;
+use super::launch_hide::{self, HideOutcome, Hiding};
+use super::routes::drag::Drag;
 use super::routes::focus::Focus;
+use super::routes::rejected;
+use super::routes::shift_click::ShiftClick;
 use super::routes::{Route, RouteStats};
+use super::post;
 use crate::config::{ConfigStore, HotkeyCommand};
-use crate::engine::apple::desk::AppleDesk;
+use crate::engine::apple::desk::{AppleDesk, Landed, Posted};
 use crate::engine::apple::follow;
+use crate::engine::apple::job::{self, Ctx, Job, Next, Report};
 use crate::engine::apple::mirror::{self, Arrangement};
 use crate::engine::apple::plan::{self, Intent, Refusal, Step};
+use crate::engine::apple::points;
 use crate::engine::model::{Display, Model, WindowId, WindowMeta, WindowRole};
 use crate::engine::recovery::EngineKind;
+use crate::engine::rules::RuleAction;
 use crate::engine::save_clock::SaveClock;
 use crate::engine::settings::NativeSettings;
 use crate::engine::stand_down::WithApple;
-use crate::platform::ctl::Command;
-use crate::platform::input::{InputEvent, InputKind};
+use crate::platform::apps::AppInfo;
+use crate::platform::ctl::{AppleTry, Command};
+use crate::platform::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use crate::platform::native_settings::RawSettings;
 use crate::platform::observe::{Observer, WinEvent, WindowKind};
 use crate::platform::{logging, paths, session};
@@ -45,30 +63,12 @@ const MANAGER_CHECK: Duration = Duration::from_secs(10);
 /// A mouse-up this close to the screen's left edge may have changed Apple's strip.
 const NEAR_STRIP: f64 = 300.0;
 
-/// A switch not seen done is tried once more after the next settle, then given up.
-const SWITCH_TRIES: u32 = 2;
-
-/// A switch waiting longer than this for a settle is given up.
-const SWITCH_WAIT: Duration = Duration::from_millis(1500);
+/// Jobs waiting behind the one under way, at most.
+const QUEUE: usize = 4;
 
 /// How long reads go on at the motion's pace after an event that may change Apple's
 /// arrangement: its motion starts about 100 ms after the cause and runs about 600 ms.
 const WATCH: Duration = Duration::from_millis(1200);
-
-/// An intent carried out, or waiting for the arrangement to settle.
-#[derive(Debug, Clone)]
-struct Pending {
-    /// What was asked.
-    intent: Intent,
-    /// The window the focus route focuses.
-    window: u32,
-    /// Focuses run so far.
-    tries: u32,
-    /// What it waits for (`ctl state`).
-    waits_for: &'static str,
-    /// When it was asked.
-    since: Instant,
-}
 
 /// The Apple mode's conductor. WM thread only.
 pub struct AppleController {
@@ -95,9 +95,21 @@ pub struct AppleController {
     read_ms: f64,
     manager: Option<i32>,
     manager_checked: Option<Instant>,
-    pending: Option<Pending>,
-    focus_stats: RouteStats,
+    /// The steps of ours under way, the first one running.
+    jobs: VecDeque<Job>,
+    /// The gesture posted and not landed yet.
+    posting: Option<Posted>,
+    /// Newly opened apps being hidden at their launch, by pid.
+    hidings: BTreeMap<i32, Hiding>,
+    /// Each managed window's app, at the last read.
+    pids: BTreeMap<u32, i32>,
+    /// Each route's counts.
+    stats: BTreeMap<&'static str, RouteStats>,
     last_refusal: Option<String>,
+    /// The last job's account.
+    last_report: Option<Report>,
+    /// The person's latest action, for Shift held at a launch (`[sugar] shift_brings_here`).
+    triggers: Triggers,
     save: SaveClock,
     seen_times: std::collections::HashMap<u64, u64>,
 }
@@ -122,7 +134,7 @@ impl AppleController {
         };
         let this = Self::with_store(store, &path, config_error);
         crate::platform::controller::notify_config(this.store.config(), this.config_error.clone());
-        tracing::info!("apple mode: following Apple's Stage Manager (its stages read into the model; switches through the focus route)");
+        tracing::info!("apple mode: following Apple's Stage Manager (its stages read into the model; its own steps through the focus, Shift-click and drag routes)");
         this
     }
 
@@ -144,9 +156,14 @@ impl AppleController {
             read_ms: 0.0,
             manager: None,
             manager_checked: None,
-            pending: None,
-            focus_stats: RouteStats::default(),
+            jobs: VecDeque::new(),
+            posting: None,
+            hidings: BTreeMap::new(),
+            pids: BTreeMap::new(),
+            stats: BTreeMap::new(),
             last_refusal: None,
+            last_report: None,
+            triggers: Triggers::default(),
             save: SaveClock::default(),
             seen_times: Default::default(),
         }
@@ -187,8 +204,19 @@ impl AppleController {
         }
     }
 
-    /// Input in another app: a mouse-up near the strip may have changed it.
+    /// Input in another app: the person's latest action is kept for Shift at a launch (a
+    /// gesture of ours and its echoes never count), and a mouse-up near the strip may have
+    /// changed it.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent) {
+        let now = Instant::now();
+        if event.kind != InputKind::CommandKey && !post::echo(now) {
+            let mods = Modifiers { shift: event.shift, cmd: event.cmd };
+            if event.kind == InputKind::MouseUp {
+                self.triggers.record_release(now, mods);
+            } else {
+                self.triggers.record(now, mods);
+            }
+        }
         let near = self.screen().is_some_and(|d| event.at.x < d.frame.x + NEAR_STRIP);
         if event.kind == InputKind::MouseUp && near {
             self.watch();
@@ -196,17 +224,21 @@ impl AppleController {
         }
     }
 
-    /// A hotkey: switch to stage N through the focus route; the others are not in this mode
-    /// yet (said once in the log).
+    /// A hotkey: switch to stage N (the focus route), send the focused window to stage N or
+    /// to a stage of its own (the posted routes); the pin and the strip are not in this mode
+    /// (said in the log).
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
-        match command {
-            HotkeyCommand::SwitchTo(n) => {
-                let r = self.switch(ob, n);
-                if let Err(Refusal(why)) = r {
-                    tracing::info!(n, why, "apple mode: the switch hotkey did nothing");
-                }
+        let asked = match command {
+            HotkeyCommand::SwitchTo(n) => self.ask(ob, Ask::Switch(n)),
+            HotkeyCommand::SendTo(n) => self.ask(ob, Ask::Send(n, None)),
+            HotkeyCommand::NewStage => self.ask(ob, Ask::New(None)),
+            other => {
+                tracing::info!(?other, "apple mode: this hotkey does nothing while Apple's Stage Manager arranges the windows");
+                return;
             }
-            other => tracing::info!(?other, "apple mode: this hotkey does nothing while Apple's Stage Manager arranges the windows"),
+        };
+        if let Err(Refusal(why)) = asked {
+            tracing::info!(?command, why, "apple mode: the hotkey did nothing");
         }
     }
 
@@ -217,10 +249,71 @@ impl AppleController {
         self.read(ob, true);
     }
 
-    /// An app just opened: its stage shows soon.
-    pub fn app_launched(&mut self) {
+    /// An app just opened: its stage shows soon; a newly opened app the rules want here is
+    /// hidden now if the will-launch notice did not start that already.
+    pub fn app_launched(&mut self, ob: &Observer, pid: i32) {
+        if ob.admits_pid(pid) {
+            let bundle = ob.bundle_id(pid).unwrap_or_default().to_string();
+            self.arrival(pid, &bundle, Instant::now());
+        }
         self.watch();
         self.read_due = Some(Instant::now());
+    }
+
+    /// An app about to launch: a newly opened app the rules want here is hidden at once.
+    pub fn app_will_launch(&mut self, _ob: &Observer, app: &AppInfo) {
+        self.arrival(app.pid, app.bundle_or_unknown(), Instant::now());
+        self.read_due = Some(Instant::now());
+    }
+
+    /// Newly opened app `pid` (`bundle`): "open here" when a rule's `current`,
+    /// `[stages] new_apps_join_current` or Shift held (`[sugar] shift_brings_here`) asks for
+    /// the stage in front, as the app's own mode decides for a newly opened app's first window
+    /// (`Decision::for_new_window`; a rule's title pattern is matched against no title, the
+    /// app having no window yet). With no stage in front, or Apple's own rule asked, nothing.
+    fn arrival(&mut self, pid: i32, bundle: &str, now: Instant) {
+        if self.hidings.contains_key(&pid) || self.jobs.iter().any(|j| j.intent == Intent::OpenHere(pid)) {
+            return;
+        }
+        if self.model.as_ref().is_some_and(|m| !m.app_is_new(pid)) {
+            return;
+        }
+        let config = self.store.config();
+        let decision = config.rules.decide(bundle, "");
+        let sugar = &config.sugar;
+        let shift = sugar.shift_brings_here
+            && decision.action.shift_counts()
+            && self.triggers.shift_here(now, Duration::from_millis(sugar.launch_window_ms), input::live_modifiers());
+        let (decision, effect) = decision.for_new_window(true, config.stages.new_apps_join_current, shift);
+        let here = decision.action == RuleAction::Current || decision.new_app_joins_current;
+        if !here {
+            if shift {
+                tracing::info!(pid, bundle, ?effect, "apple mode: Shift held at the launch: the newly opened app gets a stage of its own (Apple's)");
+                self.triggers.consume();
+            }
+            return;
+        }
+        if shift {
+            self.triggers.consume();
+        }
+        let Some(job) = plan::open_here(&self.mirror, pid, now) else {
+            tracing::debug!(pid, bundle, "apple mode: a newly opened app to open here, no stage in front: Apple's puts it in front");
+            return;
+        };
+        if self.jobs.len() > QUEUE {
+            tracing::warn!(pid, bundle, "apple mode: a newly opened app to open here, too many steps waiting: Apple's own");
+            return;
+        }
+        match launch_hide::start(pid) {
+            Ok(h) => {
+                self.hidings.insert(pid, h);
+            }
+            Err(e) => tracing::warn!(pid, "apple mode: {e}; the round trip instead"),
+        }
+        let why = if shift { "Shift held" } else if decision.action == RuleAction::Current { "a rule's current" } else { "[stages] new_apps_join_current" };
+        tracing::info!(pid, bundle, why, "apple mode: a newly opened app opens here: hidden at its launch, then brought into the stage in front");
+        self.jobs.push_back(job);
+        self.watch();
     }
 
     /// Reads at the motion's pace for [`WATCH`] from now: Apple's motion follows its cause.
@@ -299,23 +392,24 @@ impl AppleController {
         }
     }
 
-    /// The fast tick: the list read every [`mirror::MOTION_READ`] while anything moves.
+    /// The fast tick: the list read every [`mirror::MOTION_READ`] while anything moves or a
+    /// job runs.
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         let now = Instant::now();
-        if self.read_due.is_some_and(|t| now >= t) {
+        if self.read_due.is_some_and(|t| now >= t) || (self.read_due.is_none() && !self.jobs.is_empty()) {
             self.read(ob, false);
         }
     }
 
-    /// True while a read is due soon (in motion, not yet settled, a switch waiting).
+    /// True while a read is due soon (in motion, not yet settled, a job under way).
     pub fn wants_fast_tick(&self) -> bool {
-        self.read_due.is_some()
+        self.read_due.is_some() || !self.jobs.is_empty() || self.posting.is_some()
     }
 
     /// Why the tick stays brisk for this mode.
     pub fn tick_waits(&self) -> Option<&'static str> {
-        if self.pending.is_some() {
-            Some("a switch in Apple's Stage Manager")
+        if !self.jobs.is_empty() || self.posting.is_some() {
+            Some("a step of ours in Apple's Stage Manager")
         } else if !self.mirror.settled && self.model.is_some() {
             Some("Apple's Stage Manager settles")
         } else if self.save.is_dirty() {
@@ -345,10 +439,11 @@ impl AppleController {
             self.manager = super::strip_ax::manager_pid();
             self.manager_checked = Some(now);
         }
-        let mut desk = Desk { ob, manager: self.manager };
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
         let listed = desk.listed();
         let reading = if with_ax { desk.strip(&screen) } else { None };
         let managed: BTreeSet<u32> = managed(ob, &listed);
+        self.pids = managed.iter().filter_map(|id| ob.window(*id).map(|w| (*id, w.pid))).collect();
         let misses = self.mirror.misses;
         let before = self.mirror.grouping();
         self.mirror = mirror::fold(&self.mirror, reading.as_ref(), &listed, &managed, &screen, now);
@@ -387,10 +482,13 @@ impl AppleController {
         if !watching {
             self.watch_until = None;
         }
-        self.read_due = (!self.mirror.settled || self.pending.is_some() || watching).then(|| now + mirror::MOTION_READ);
+        let busy = !self.jobs.is_empty() || self.posting.is_some();
+        self.read_due = (!self.mirror.settled || busy || watching).then(|| now + mirror::MOTION_READ);
         if self.mirror.settled {
             self.follow(ob, &screen, &managed);
-            self.after_settle(ob, now);
+        }
+        if busy {
+            self.pump(ob, &screen, now);
         }
     }
 
@@ -435,100 +533,275 @@ impl AppleController {
         self.followed_ids = managed.clone();
     }
 
-    /// A settled read with a switch waiting: run it, or see it done, or try once more, or
-    /// give it up.
-    fn after_settle(&mut self, ob: &Observer, now: Instant) {
-        let Some(mut p) = self.pending.take() else { return };
-        if p.tries > 0 && self.mirror.current.contains(&p.window) {
-            tracing::info!(window = p.window, tries = p.tries, ms = now.duration_since(p.since).as_millis() as u64, "apple mode: switched");
-            return;
+    /// The jobs moved on at a read: a gesture that landed taken in, a hide's outcome noted,
+    /// then the first job advanced against the mirror and its step run, or its end logged.
+    fn pump(&mut self, ob: &Observer, screen: &Display, now: Instant) {
+        if let Some(landed) = post::take_landed() {
+            self.gesture_landed(ob, &landed, now);
         }
-        if p.tries >= SWITCH_TRIES || now.duration_since(p.since) > SWITCH_WAIT + mirror::SETTLE * SWITCH_TRIES {
-            let why = format!("{:?}: window {} not in front after {} tries", p.intent, p.window, p.tries);
-            tracing::warn!(why, "apple mode: a switch given up");
-            self.focus_stats.refused += 1;
-            self.last_refusal = Some(why);
-            return;
-        }
-        match self.run_focus(ob, p.window, now) {
-            Ok(()) => {
-                p.tries += 1;
-                p.waits_for = "the window in front";
-                self.pending = Some(p);
+        for j in self.jobs.iter_mut() {
+            if let Intent::OpenHere(pid) = j.intent
+                && let Some(HideOutcome::Hidden { .. }) = self.hidings.get(&pid).and_then(Hiding::outcome)
+            {
+                j.hidden = true;
             }
-            Err(Refusal(why)) => {
-                self.focus_stats.refused += 1;
-                self.last_refusal = Some(why);
+        }
+        // A step at a time: each advance runs at most one.
+        let Some(job) = self.jobs.front_mut() else { return };
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
+        let cx = Ctx { mirror: &self.mirror, input: desk.input(), screen, pids: &self.pids, in_flight: post::in_flight() || self.posting.is_some() };
+        let next = job.advance(&cx, now);
+        match next {
+            Next::Wait(_) => {}
+            Next::Run(step) => {
+                let ran = self.run_step(ob, screen, &step, now);
+                if let Some(job) = self.jobs.front_mut() {
+                    job.ran(&step, ran.is_ok());
+                }
+                if let Err(e) = ran {
+                    tracing::info!(step = job::step_name(&step), error = e, "apple mode: a step did not run; tried again at the next settle");
+                    self.last_refusal = Some(e);
+                }
+            }
+            Next::Done(report) => self.job_ended(ob, report, now),
+            Next::GiveUp(report) => {
+                if let Some(Step::Focus(w)) = report.undo {
+                    tracing::info!(window = w, "apple mode: given up: the newly opened app's stage brought in front, as Apple's own would");
+                    let _ = self.run_step(ob, screen, &Step::Focus(w), now);
+                }
+                if let Some(pid) = report.unhide {
+                    launch_hide::unhide(pid);
+                }
+                self.job_ended(ob, report, now);
             }
         }
     }
 
-    /// The focus route for `window` now; the mirror counts in motion from here.
-    fn run_focus(&mut self, ob: &Observer, window: u32, now: Instant) -> Result<(), Refusal> {
-        let step = Step::Focus(window);
-        let mut desk = Desk { ob, manager: self.manager };
-        let input = desk.input();
-        Focus.can(&step, &self.mirror, &input)?;
+    /// The first job ended with `report`: logged (the route and its times), counted, the next
+    /// one started at the next read.
+    fn job_ended(&mut self, _ob: &Observer, report: Report, now: Instant) {
+        let Some(job) = self.jobs.pop_front() else { return };
+        let hide = match job.intent {
+            Intent::OpenHere(pid) => self.hidings.remove(&pid).and_then(|h| h.outcome()),
+            _ => None,
+        };
+        match &report.given_up {
+            None => tracing::info!(
+                intent = ?job.intent,
+                route = report.route,
+                ms = report.ms,
+                first_window_ms = report.first_window_ms,
+                hide = ?hide,
+                focuses = report.focuses,
+                clicks = report.clicks,
+                drags = report.drags,
+                "apple mode: done"
+            ),
+            Some(why) => {
+                tracing::warn!(intent = ?job.intent, route = report.route, ms = report.ms, hide = ?hide, why, "apple mode: given up");
+                self.last_refusal = Some(why.clone());
+            }
+        }
+        self.last_report = Some(report);
+        self.read_due = Some(now + mirror::MOTION_READ);
+    }
+
+    /// Runs `step` through its route now; the mirror counts in motion from here.
+    fn run_step(&mut self, ob: &Observer, screen: &Display, step: &Step, now: Instant) -> Result<(), String> {
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
+        let route: &dyn Route = match step {
+            Step::Focus(_) => &Focus,
+            Step::Post(Posted::Click { .. }) => &ShiftClick,
+            Step::Post(Posted::Drag { .. }) => &Drag,
+            Step::AwaitSettle | Step::AwaitStrip(_) => return Ok(()),
+        };
         let t0 = Instant::now();
-        let ran = Focus.run(&step, &mut desk);
-        self.focus_stats.last_ms = t0.elapsed().as_millis() as u64;
-        match ran {
-            Ok(()) => {
-                self.focus_stats.runs += 1;
-                self.mirror.step_began(now);
-                self.watch();
-                self.read_due = Some(now + mirror::MOTION_READ);
-                Ok(())
-            }
-            Err(e) => Err(Refusal(e)),
+        let ran = route.run(step, &mut desk);
+        let stats = self.stats.entry(route.name()).or_default();
+        stats.last_ms = t0.elapsed().as_millis() as u64;
+        match &ran {
+            Ok(()) => stats.runs += 1,
+            Err(_) => stats.refused += 1,
         }
+        if ran.is_ok() {
+            if let Step::Post(p) = step {
+                self.posting = Some(*p);
+            }
+            self.mirror.step_began(now);
+            self.watch();
+            self.read_due = Some(now + mirror::MOTION_READ);
+        }
+        ran
     }
 
-    /// Switches to stage `n` (the strip's slots, then the remembered stages) through the
-    /// focus route: at once when settled, else after the settle.
-    fn switch(&mut self, ob: &mut Observer, n: usize) -> Result<Value, Refusal> {
-        let now = Instant::now();
-        let key = |windows: &[u32]| {
-            let m = self.model.as_ref()?;
-            let stage = m.stage_of(WindowId(*windows.first()?))?;
-            m.stage(stage)?.key.map(|k| k.0)
-        };
-        let steps = match plan::switch(&self.mirror, n, key) {
-            Ok(s) => s,
-            Err(r) => {
-                self.focus_stats.refused += 1;
-                self.last_refusal = Some(r.0.clone());
-                return Err(r);
-            }
-        };
-        let Some(Step::Focus(window)) = steps.last().copied() else { return Err(Refusal("no focus planned".into())) };
-        let waits = steps.contains(&Step::AwaitSettle);
-        let mut pending = Pending { intent: Intent::Switch(n), window, tries: 0, waits_for: "the settle", since: now };
-        if !waits {
-            if let Err(r) = self.run_focus(ob, window, now) {
-                self.focus_stats.refused += 1;
-                self.last_refusal = Some(r.0.clone());
-                return Err(r);
-            }
-            pending.tries = 1;
-            pending.waits_for = "the window in front";
+    /// The gesture in flight landed: the job told; the person's own input ending a drag sets
+    /// the window's frame back; a gesture not posted counted as refused.
+    fn gesture_landed(&mut self, ob: &Observer, landed: &Landed, now: Instant) {
+        let posted = self.posting.take();
+        if let Some(job) = self.jobs.front_mut() {
+            job.landed(landed);
         }
-        self.pending = Some(pending);
-        self.read_due.get_or_insert(now + mirror::MOTION_READ);
-        Ok(json!({ "ok": true, "route": Focus.name(), "window": window, "waits_for_settle": waits, "ms": self.focus_stats.last_ms }))
+        match landed {
+            Landed::Posted => {}
+            Landed::Refused(why) => {
+                let name = match posted {
+                    Some(Posted::Drag { .. }) => Drag.name(),
+                    _ => ShiftClick.name(),
+                };
+                self.stats.entry(name).or_default().refused += 1;
+                self.last_refusal = Some(why.clone());
+            }
+            Landed::Interrupted(why) => {
+                if let Some(Posted::Drag { window, frame, .. }) = posted
+                    && let Some(w) = ob.window(window)
+                {
+                    let back = w.element.set_frame(frame);
+                    tracing::info!(window, why, back = back.is_ok(), "apple mode: the drag was ended by the person's own input; the window's frame set back");
+                }
+                self.last_refusal = Some(why.clone());
+            }
+        }
+        self.mirror.step_began(now);
+        self.watch();
+    }
+
+    /// Asks for `ask`: planned against the mirror into a job, queued, and run at once when
+    /// it can (the first and settled).
+    fn ask(&mut self, ob: &mut Observer, ask: Ask) -> Result<Value, Refusal> {
+        let now = Instant::now();
+        let refused = |this: &mut Self, r: Refusal| {
+            this.stats.entry("plan").or_default().refused += 1;
+            this.last_refusal = Some(r.0.clone());
+            Err(r)
+        };
+        if self.model.is_none() {
+            return refused(self, Refusal("not following Apple's Stage Manager yet (no settled read)".into()));
+        }
+        if self.jobs.len() > QUEUE {
+            return refused(self, Refusal(format!("{} steps of ours are waiting already", self.jobs.len())));
+        }
+        let focused = crate::platform::controller::focused_window();
+        let window = |id: Option<u32>| id.or(focused).ok_or_else(|| Refusal("no window is focused".into()));
+        let planned = {
+            let model = self.model.as_ref();
+            let key = |windows: &[u32]| {
+                let m = model?;
+                let stage = m.stage_of(WindowId(*windows.first()?))?;
+                m.stage(stage)?.key.map(|k| k.0)
+            };
+            match ask {
+                Ask::Switch(n) => plan::switch_job(&self.mirror, n, key, now),
+                Ask::Merge(n) => plan::merge(&self.mirror, n, now),
+                Ask::Send(n, id) => window(id).and_then(|w| plan::send(&self.mirror, n, w, key, now)),
+                Ask::New(id) => window(id).and_then(|w| plan::new_stage(&self.mirror, w, now)),
+            }
+        };
+        let job = match planned {
+            Ok(j) => j,
+            Err(r) => return refused(self, r),
+        };
+        let intent = job.intent;
+        let goals = serde_json::to_value(job.goals()).unwrap_or(Value::Null);
+        let first = match job.goals().first() {
+            Some(job::Goal::Front(w)) => json!({ "route": Focus.name(), "window": w }),
+            Some(job::Goal::Gather { .. }) => json!({ "route": ShiftClick.name() }),
+            Some(job::Goal::Out(w)) => json!({ "route": Drag.name(), "window": w }),
+            None => json!({}),
+        };
+        let behind = self.jobs.len();
+        self.jobs.push_back(job);
+        if let Some(screen) = self.screen() {
+            self.pump(ob, &screen, now);
+        }
+        let mut reply = json!({ "ok": true, "intent": intent, "goals": goals, "behind": behind, "waits_for_settle": !self.mirror.settled });
+        if let (Some(r), Some(f)) = (reply.as_object_mut(), first.as_object()) {
+            r.extend(f.clone());
+        }
+        Ok(reply)
+    }
+
+    /// A tripwire's Accessibility action on the strip item holding window `w` (one the mode
+    /// follows: never an item of an app it does not manage).
+    fn ax_try(&self, manager: i32, w: u32, action: &str) -> Result<Value, String> {
+        if self.mirror.where_is(w).map(|(p, _)| p) != Some(mirror::Where::Strip) {
+            return Err(format!("window {w} is not in Apple's strip"));
+        }
+        rejected::ax_action(manager, w, action).map(|()| json!({ "window": w }))
+    }
+
+    /// `ctl apple try`: one route run once by hand, the live check's diagnostics and
+    /// tripwires (needs `STAGE_MANAGER_TEST=1`). Nothing waits for a settle or retries; the
+    /// check reads the mirror afterwards.
+    fn try_route(&mut self, ob: &Observer, t: AppleTry) -> Value {
+        if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+            return json!({ "ok": false, "error": "apple try needs STAGE_MANAGER_TEST=1" });
+        }
+        let Some(screen) = self.screen() else { return json!({ "ok": false, "error": "no screen yet" }) };
+        let Some(manager) = self.manager else { return json!({ "ok": false, "error": "WindowManager is not running" }) };
+        let now = Instant::now();
+        let mut desk = Desk { ob, manager: Some(manager), screen: Some(screen.frame) };
+        let input = desk.input();
+        let point = |w: u32| self.mirror.click_at.get(&w).copied().ok_or(format!("window {w}'s thumbnail shows no part of its own"));
+        let t0 = Instant::now();
+        let ran: Result<Value, String> = match t {
+            AppleTry::Focus(w) => Focus.can(&Step::Focus(w), &self.mirror, &input).map_err(|r| r.0).and_then(|()| Focus.run(&Step::Focus(w), &mut desk)).map(|()| json!({})),
+            AppleTry::ShiftClick(w) => point(w).and_then(|at| {
+                let step = Step::Post(Posted::Click { window: w, at, own_shift: !input.shift });
+                ShiftClick.can(&step, &self.mirror, &input).map_err(|r| r.0)?;
+                ShiftClick.run(&step, &mut desk)?;
+                self.posting = if let Step::Post(p) = step { Some(p) } else { None };
+                Ok(json!({ "at": at }))
+            }),
+            AppleTry::Drag(w) => match self.mirror.frames.get(&w).copied() {
+                None => Err(format!("window {w} is not listed")),
+                Some(frame) => {
+                    let from = points::title_point(frame);
+                    let step = Step::Post(Posted::Drag { window: w, from, to: points::strip_drop(&screen, from), frame });
+                    Drag.can(&step, &self.mirror, &input).map_err(|r| r.0).and_then(|()| Drag.run(&step, &mut desk)).map(|()| {
+                        self.posting = if let Step::Post(p) = step { Some(p) } else { None };
+                        json!({ "from": from })
+                    })
+                }
+            },
+            AppleTry::AxPress(w) => self.ax_try(manager, w, "AXPress"),
+            AppleTry::AxAddToStage(w) => self.ax_try(manager, w, "AXAddToStage"),
+            AppleTry::PidClick(w) => point(w).and_then(|at| rejected::pid_click(manager, at).map(|()| json!({ "at": at }))),
+            AppleTry::ShiftFocus(w) => match ob.window(w) {
+                Some(tw) => rejected::shift_focus(&tw.element, tw.pid).map(|()| json!({})),
+                None => Err(format!("window {w} is not observed")),
+            },
+        };
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        tracing::info!(route = t.name(), ok = ran.is_ok(), ms, "apple mode: a route tried by hand");
+        self.mirror.step_began(now);
+        self.watch();
+        self.read_due = Some(now + mirror::MOTION_READ);
+        match ran {
+            Ok(mut v) => {
+                if let Some(o) = v.as_object_mut() {
+                    o.insert("ok".into(), json!(true));
+                    o.insert("route".into(), json!(t.name()));
+                    o.insert("ms".into(), json!((ms * 10.0).round() / 10.0));
+                }
+                v
+            }
+            Err(e) => json!({ "ok": false, "route": t.name(), "error": e }),
+        }
     }
 
     // ── ctl ─────────────────────────────────────────────────────────────────────────────
 
-    /// A ctl command in this mode: `state`, `switch` and `reload`; the rest answer that they
-    /// do nothing here.
+    /// A ctl command in this mode: `state`, `switch`, `merge`, `send`, `new`, `apple try` and
+    /// `reload`; the rest answer that they do nothing here.
     pub fn ctl(&mut self, ob: &mut Observer, cmd: Command) -> Value {
+        let asked = |r: Result<Value, Refusal>| r.unwrap_or_else(|Refusal(e)| json!({ "ok": false, "error": e }));
         match cmd {
             Command::State => self.state_json(),
-            Command::Switch(n) => match self.switch(ob, n) {
-                Ok(v) => v,
-                Err(Refusal(e)) => json!({ "ok": false, "error": e }),
-            },
+            Command::Switch(n) => asked(self.ask(ob, Ask::Switch(n))),
+            Command::Merge(n) => asked(self.ask(ob, Ask::Merge(n))),
+            Command::Send(n, id) => asked(self.ask(ob, Ask::Send(n, id))),
+            Command::New(id) => asked(self.ask(ob, Ask::New(id))),
+            Command::AppleTry(t) => self.try_route(ob, t),
             Command::Reload => {
                 self.reload_config();
                 json!({ "ok": true })
@@ -562,8 +835,16 @@ impl AppleController {
             "current": self.mirror.current,
             "strip": self.mirror.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(),
             "remembered": self.mirror.remembered.iter().map(|g| &g.windows).collect::<Vec<_>>(),
-            "pending": self.pending.iter().map(|p| json!({ "intent": p.intent, "window": p.window, "tries": p.tries, "waits_for": p.waits_for })).collect::<Vec<_>>(),
-            "routes": { "focus": self.focus_stats },
+            "click_at": self.mirror.click_at,
+            "pending": self.jobs.iter().map(|j| json!({ "intent": j.intent, "goals": j.goals(), "waits_for": j.waits_for, "age_ms": now.duration_since(j.since).as_millis() as u64, "report": j.report() })).collect::<Vec<_>>(),
+            "posting": self.posting,
+            "hiding": self.hidings.values().map(|h| json!({ "pid": h.pid, "age_ms": now.duration_since(h.since).as_millis() as u64, "outcome": h.outcome() })).collect::<Vec<_>>(),
+            "routes": {
+                "focus": self.stats.get("focus").copied().unwrap_or_default(),
+                "shift_click": self.stats.get("shift_click").copied().unwrap_or_default(),
+                "drag": self.stats.get("drag").copied().unwrap_or_default(),
+            },
+            "last": self.last_report,
             "last_refusal": self.last_refusal,
         });
         let Some(m) = &self.model else {
@@ -657,6 +938,35 @@ impl Default for AppleController {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// The mode ending (Apple's turned off, a quit) mid-step leaves nothing of ours behind: a
+/// gesture in flight is ended, and a newly opened app hidden at its launch whose window never
+/// came in is shown again.
+impl Drop for AppleController {
+    fn drop(&mut self) {
+        post::end_in_flight("the Apple mode ended");
+        for h in self.hidings.values() {
+            h.cancel();
+            if matches!(h.outcome(), Some(HideOutcome::Hidden { .. })) {
+                tracing::info!(pid = h.pid, "apple mode: ended mid-step: an app hidden at its launch shown again");
+                launch_hide::unhide(h.pid);
+            }
+        }
+    }
+}
+
+/// What a ctl command or a hotkey asks of the Apple mode.
+#[derive(Debug, Clone, Copy)]
+enum Ask {
+    /// Stage N in front.
+    Switch(usize),
+    /// Stage N's windows into the stage in front.
+    Merge(usize),
+    /// A window (the focused one when `None`) to stage N.
+    Send(usize, Option<u32>),
+    /// A window (the focused one when `None`) out to a stage of its own.
+    New(Option<u32>),
 }
 
 /// The windows the Apple mode follows: the observer's standard windows the window server
