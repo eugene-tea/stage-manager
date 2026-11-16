@@ -208,6 +208,21 @@ struct State {
     parked: BTreeMap<u32, ParkedLend>,
 }
 
+impl State {
+    /// Every window is out of the stage Spaces (a bring-back that ends them): nothing is
+    /// held, lent, waiting as new or owed any more, also for windows the sweep found in no
+    /// stage Space (lent, minimized), whose entries would outlive the Spaces (review A-11).
+    /// The Spaces to end.
+    fn end_all(&mut self) -> Vec<u64> {
+        self.foreign.clear();
+        self.held.clear();
+        self.lent.clear();
+        self.new.clear();
+        self.owed.clear();
+        std::mem::take(&mut self.stages).into_values().collect()
+    }
+}
+
 /// One window's lend and take back calls ([`LendSteps`]): the window server's add and read
 /// back, and the moves through the window's element.
 struct Steps<'a> {
@@ -1027,8 +1042,7 @@ impl SpacesEngine {
             left.retain(|id| !rescued.contains(id));
         }
         if end && left.is_empty() {
-            self.state().foreign.clear();
-            let spaces: Vec<u64> = std::mem::take(&mut self.state().stages).into_values().collect();
+            let spaces = self.state().end_all();
             for space in &spaces {
                 let _ = sky.destroy(Route::Classic, *space);
             }
@@ -1525,6 +1539,23 @@ mod tests {
         assert_eq!(e.claim_stage((3, NEW_STAGE), 841), (840, true), "the later one loses");
         assert_eq!(e.ours(), [840].into());
         assert_eq!(e.claim_stage((4, NEW_STAGE), 842), (842, false), "another Desktop's: its own");
+    }
+
+    /// Review A-11: a bring-back that ends the stage Spaces forgets every window it held,
+    /// also those it found in no Space (lent, minimized): a stand-down then arranging again
+    /// starts from nothing.
+    #[test]
+    fn ending_the_stage_spaces_forgets_every_window_held() {
+        let e = unloaded();
+        let mut st = e.state();
+        st.stages.insert((3, 1), 836);
+        st.held.insert(10, Held { space: 836, home: 3 });
+        st.held.insert(11, Held { space: 836, home: 3 });
+        st.lent.insert(11);
+        st.new.insert(12);
+        st.owed.insert(13);
+        assert_eq!(st.end_all(), vec![836]);
+        assert!(st.stages.is_empty() && st.held.is_empty() && st.lent.is_empty() && st.new.is_empty() && st.owed.is_empty());
     }
 
     /// A window id the window server lists for no window.
