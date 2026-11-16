@@ -286,7 +286,7 @@ def phase_mirror():
         stage = next((st for st in s["stages"] if st["id"] == active), None)
         check(stage is not None and titles(s, stage["windows"]) == want, f"{name}: the model's stage in front holds its windows")
         check(all(st.get("where") in ("current", "strip", "remembered") for st in s["stages"]), "every stage says where Apple's shows it")
-        check(s["apple"]["list_vs_ax_misses"] == 0, f"the list and Accessibility agree ({s['apple']['list_vs_ax_misses']} misses)")
+        check(s["apple"]["ax_corrections"] == 0, f"the list groups the strip as Accessibility does ({s['apple']['ax_corrections']} corrections)")
 
 
 def settled_state(timeout=5):

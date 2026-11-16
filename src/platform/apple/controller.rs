@@ -444,7 +444,7 @@ impl AppleController {
         let reading = if with_ax { desk.strip(&screen) } else { None };
         let managed: BTreeSet<u32> = managed(ob, &listed);
         self.pids = managed.iter().filter_map(|id| ob.window(*id).map(|w| (*id, w.pid))).collect();
-        let misses = self.mirror.misses;
+        let corrections = self.mirror.corrections;
         let before = self.mirror.grouping();
         self.mirror = mirror::fold(&self.mirror, reading.as_ref(), &listed, &managed, &screen, now);
         if self.mirror.grouping() != before {
@@ -475,8 +475,8 @@ impl AppleController {
             self.ax_read = Some(now);
         }
         self.read_ms = t0.elapsed().as_secs_f64() * 1000.0;
-        if self.mirror.misses > misses {
-            tracing::info!(misses = self.mirror.misses, "apple mode: the window list and WindowManager's Accessibility disagree on the strip's groups; the list wins");
+        if self.mirror.corrections > corrections {
+            tracing::info!(corrections = self.mirror.corrections, strip = ?self.mirror.strip.iter().map(|g| &g.windows).collect::<Vec<_>>(), "apple mode: the window list grouped the strip otherwise than WindowManager's Accessibility; Accessibility's groups taken");
         }
         let watching = self.watch_until.is_some_and(|t| now < t);
         if !watching {
@@ -844,7 +844,7 @@ impl AppleController {
             "age_ms": self.mirror.read_at.map(|t| now.duration_since(t).as_millis() as u64),
             "read_ms": (self.read_ms * 10.0).round() / 10.0,
             "in_motion": self.mirror.in_motion,
-            "list_vs_ax_misses": self.mirror.misses,
+            "ax_corrections": self.mirror.corrections,
             "ax_age_ms": self.mirror.ax_at.map(|t| now.duration_since(t).as_millis() as u64),
             "strip_shown": self.mirror.strip_shown,
             "manager": self.manager,

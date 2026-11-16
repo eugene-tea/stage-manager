@@ -9,11 +9,16 @@
 //!    it with the same bounds (its twin), and one per app icon (66x82 at x = -7): a strip
 //!    window is a managed window with a twin ([`has_twin`]); a window of the stage in front
 //!    has none. No column or size is asked (the stage in front sits at x = 221 on a laptop
-//!    screen, live 11-16). An item is the thumbnails nearest one icon.
+//!    screen, live 11-16). An item is the thumbnails that overlap (a stage's windows are drawn
+//!    stacked, 16-30 points apart), never the thumbnails nearest one icon: a stage of two
+//!    apps has an icon for each, and was read as two stages (live 11-16).
 //! 2. **WindowManager's Accessibility** ([`Reading`]: `sm.strip`'s items with `AXWindowsIDs`
-//!    and `AXFrame`), the check on the list's grouping. It catches up about 785 ms after a
-//!    change and reads empty for about 650 ms of it: an empty reading is no reading. Where the
-//!    two disagree after a second settled, the list wins and the disagreement is counted.
+//!    and `AXFrame`), the word on membership. It catches up about 785 ms after a change and
+//!    reads empty for about 650 ms of it: an empty reading is no reading. A reading taken a
+//!    second after the settle, with no change since, decides which strip windows make one
+//!    stage until the next change ([`Arrangement::ax_groups`]); the list still gives the
+//!    places, the twins, the motion and the stage in front. A list that groups otherwise is
+//!    corrected, and the correction counted.
 //!
 //! Rules of [`fold`]:
 //!
@@ -48,8 +53,8 @@ pub const SETTLE: Duration = Duration::from_millis(700);
 /// Reads in a row with no bounds changed before the arrangement counts settled.
 pub const STILL_READS: u32 = 2;
 
-/// How long the arrangement is settled before a disagreement with Accessibility counts
-/// (Accessibility catches up about 785 ms after a change).
+/// How long the arrangement is settled before Accessibility's reading is trusted with the
+/// strip's groups (it catches up about 785 ms after a change).
 pub const AX_TRUST: Duration = Duration::from_secs(1);
 
 /// The read's pace while in motion (the window list only, on the fast tick).
@@ -189,10 +194,16 @@ pub struct Arrangement {
     pub step_at: Option<Instant>,
     /// The last Accessibility reading that was not blank.
     pub ax_at: Option<Instant>,
-    /// Disagreements of the list with Accessibility counted (each spell once).
-    pub misses: u64,
-    /// The list and Accessibility disagree now (settled a second).
+    /// Times the list's grouping of the strip was corrected by Accessibility's (each spell
+    /// once).
+    pub corrections: u64,
+    /// The list's grouping differs from Accessibility's now (corrected).
     pub disagree: bool,
+    /// The strip's stages as the last trusted Accessibility reading had them (managed windows
+    /// only), and when it was read: they decide the strip's groups until the next change.
+    pub ax_groups: Vec<Vec<u32>>,
+    /// When [`Arrangement::ax_groups`] was read.
+    pub ax_groups_at: Option<Instant>,
 }
 
 impl Arrangement {
@@ -319,8 +330,10 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         read_at: Some(now),
         step_at: prev.step_at,
         ax_at: prev.ax_at,
-        misses: prev.misses,
+        corrections: prev.corrections,
         disagree: prev.disagree,
+        ax_groups: prev.ax_groups.clone(),
+        ax_groups_at: prev.ax_groups_at,
         full: prev.full.clone(),
         ..Arrangement::default()
     };
@@ -355,21 +368,57 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         next.remembered = remembered(prev, &next, listed, managed);
     }
 
-    // The check against Accessibility: a blank reading is no reading.
+    // Accessibility on membership: a blank reading is no reading; a reading a second after
+    // the settle is trusted until the next change.
+    let last_change = changed_at.max(next.step_at);
     if let Some(r) = reading.filter(|r| !r.is_blank()) {
         next.ax_at = Some(now);
-        let settled_long = next.settled && changed_at.is_none_or(|t| now.saturating_duration_since(t) >= SETTLE + AX_TRUST);
-        let agree = same_groups(&next.strip, r, managed);
-        if agree {
-            next.disagree = false;
-        } else if settled_long {
+        let trusted = next.settled && last_change.is_none_or(|t| now.saturating_duration_since(t) >= SETTLE + AX_TRUST);
+        if trusted {
+            next.ax_groups = r.items.iter().map(|i| i.windows.iter().copied().filter(|id| managed.contains(id)).collect::<Vec<u32>>()).filter(|g| !g.is_empty()).collect();
+            next.ax_groups_at = Some(now);
+        }
+    }
+    let ax_fresh = next.ax_groups_at.is_some_and(|at| last_change.is_none_or(|t| at > t));
+    if !in_motion && ax_fresh {
+        let corrected = by_ax(&next.strip, &next.ax_groups);
+        if corrected != next.strip {
             if !next.disagree {
-                next.misses += 1;
+                next.corrections += 1;
             }
             next.disagree = true;
+            next.strip = corrected;
+        } else {
+            next.disagree = false;
         }
     }
     next
+}
+
+/// The list's strip items (`strip`) regrouped as Accessibility's `ax` has the stages: each
+/// Accessibility stage's windows that the list shows in the strip make one item, in the list's
+/// order, its frame the union of theirs; a strip window Accessibility has in no stage keeps the
+/// list's item. Top to bottom.
+fn by_ax(strip: &[Group], ax: &[Vec<u32>]) -> Vec<Group> {
+    let order: Vec<u32> = strip.iter().flat_map(|g| g.windows.iter().copied()).collect();
+    let frame_of = |id: u32| strip.iter().find(|g| g.windows.contains(&id)).map(|g| g.frame);
+    let mut out: Vec<Group> = Vec::new();
+    let mut placed: BTreeSet<u32> = BTreeSet::new();
+    for item in ax {
+        let windows: Vec<u32> = order.iter().copied().filter(|id| item.contains(id)).collect();
+        let Some(first) = windows.first().and_then(|id| frame_of(*id)) else { continue };
+        let frame = windows.iter().filter_map(|id| frame_of(*id)).fold(first, |u, f| u.union(&f));
+        placed.extend(windows.iter().copied());
+        out.push(Group { windows, frame });
+    }
+    for g in strip {
+        let windows: Vec<u32> = g.windows.iter().copied().filter(|id| !placed.contains(id)).collect();
+        if !windows.is_empty() {
+            out.push(Group { windows, frame: g.frame });
+        }
+    }
+    out.sort_by(|a, b| a.frame.y.total_cmp(&b.frame.y));
+    out
 }
 
 /// Where each strip window (`thumbs`: its id and its place in `listed`) shows a part of its
@@ -417,48 +466,45 @@ fn kept(groups: &[Group], listed: &Listed, managed: &BTreeSet<u32>) -> Vec<Group
 }
 
 /// The strip's items from its thumbnails (`thumbs`, front to back) and WindowManager's icon
-/// windows (`icons`): each thumbnail goes with the icon nearest it; with no icon, thumbnails
-/// that overlap make one item. Top to bottom.
+/// windows (`icons`): thumbnails that overlap, directly or through another, make one item (a
+/// stage's windows are drawn stacked; a stage of two apps has two icons, so the icon nearest a
+/// thumbnail says nothing of its stage: live 11-16); each item's frame takes in the icons that
+/// overlap its thumbnails most. Top to bottom.
 fn items(thumbs: &[(u32, Rect)], icons: &[Rect]) -> Vec<Group> {
-    let mut groups: Vec<Group> = Vec::new();
-    if !icons.is_empty() {
-        let mut by_icon: BTreeMap<usize, Group> = BTreeMap::new();
-        for (id, b) in thumbs {
-            let c = b.center();
-            let nearest = icons
-                .iter()
-                .enumerate()
-                .min_by(|(_, x), (_, y)| {
-                    let d = |r: &Rect| (r.center().x - c.x).powi(2) + (r.center().y - c.y).powi(2);
-                    d(x).total_cmp(&d(y))
-                })
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            let g = by_icon.entry(nearest).or_insert_with(|| Group { windows: Vec::new(), frame: icons[nearest] });
-            g.windows.push(*id);
-            g.frame = g.frame.union(b);
-        }
-        groups.extend(by_icon.into_values());
-    } else {
-        for (id, b) in thumbs {
-            let joined: Vec<usize> = groups.iter().enumerate().filter(|(_, g)| g.frame.intersect(b).is_some_and(|r| r.w > 0.0 && r.h > 0.0)).map(|(i, _)| i).collect();
-            match joined.as_slice() {
-                [] => groups.push(Group { windows: vec![*id], frame: *b }),
-                [first, rest @ ..] => {
-                    let first = *first;
-                    for &i in rest.iter().rev() {
-                        let g = groups.remove(i);
-                        groups[first].windows.extend(g.windows);
-                        groups[first].frame = groups[first].frame.union(&g.frame);
-                    }
-                    groups[first].windows.push(*id);
-                    groups[first].frame = groups[first].frame.union(b);
+    let mut groups: Vec<(Group, Rect)> = Vec::new();
+    for (id, b) in thumbs {
+        let joined: Vec<usize> = groups.iter().enumerate().filter(|(_, (_, t))| overlap(t, b) > 0.0).map(|(i, _)| i).collect();
+        match joined.as_slice() {
+            [] => groups.push((Group { windows: vec![*id], frame: *b }, *b)),
+            [first, rest @ ..] => {
+                let first = *first;
+                for &i in rest.iter().rev() {
+                    let (g, t) = groups.remove(i);
+                    groups[first].0.windows.extend(g.windows);
+                    groups[first].1 = groups[first].1.union(&t);
                 }
+                groups[first].0.windows.push(*id);
+                groups[first].1 = groups[first].1.union(b);
             }
         }
     }
-    groups.sort_by(|a, b| a.frame.y.total_cmp(&b.frame.y));
-    groups
+    let mut out: Vec<Group> = groups.into_iter().map(|(mut g, t)| {
+        g.frame = t;
+        g
+    }).collect();
+    for icon in icons {
+        let best = out.iter().enumerate().map(|(i, g)| (i, overlap(&g.frame, icon))).filter(|(_, a)| *a > 0.0).max_by(|a, b| a.1.total_cmp(&b.1));
+        if let Some((i, _)) = best {
+            out[i].frame = out[i].frame.union(icon);
+        }
+    }
+    out.sort_by(|a, b| a.frame.y.total_cmp(&b.frame.y));
+    out
+}
+
+/// The area `a` and `b` share.
+fn overlap(a: &Rect, b: &Rect) -> f64 {
+    a.intersect(b).map_or(0.0, |r| r.w.max(0.0) * r.h.max(0.0))
 }
 
 /// The groups Apple no longer lists: what `prev` had (its remembered groups, then its strip
@@ -479,21 +525,6 @@ fn remembered(prev: &Arrangement, next: &Arrangement, listed: &Listed, managed: 
         }
     }
     out
-}
-
-/// True when the list's strip items and Accessibility's (`r`) hold the same windows in the
-/// same groups, counting only the managed windows.
-fn same_groups(strip: &[Group], r: &Reading, managed: &BTreeSet<u32>) -> bool {
-    let norm = |ws: &mut dyn Iterator<Item = u32>| {
-        let mut v: Vec<u32> = ws.filter(|id| managed.contains(id)).collect();
-        v.sort_unstable();
-        v
-    };
-    let mut list: Vec<Vec<u32>> = strip.iter().map(|g| norm(&mut g.windows.iter().copied())).filter(|v| !v.is_empty()).collect();
-    let mut ax: Vec<Vec<u32>> = r.items.iter().map(|i| norm(&mut i.windows.iter().copied())).filter(|v| !v.is_empty()).collect();
-    list.sort();
-    ax.sort();
-    list == ax
 }
 
 #[cfg(test)]
@@ -572,30 +603,87 @@ mod tests {
     }
 
     #[test]
-    fn the_blank_accessibility_read_is_no_reading_and_a_settled_disagreement_counts_once() {
+    fn the_blank_accessibility_read_is_no_reading_and_a_trusted_one_corrects_the_groups_once() {
         let (mut f, a) = start();
         f.focus_window(3);
         f.advance(100);
         assert!(f.reading().is_blank(), "the fake rebuilds the strip for 650 ms");
         let b = fold(&a, Some(&f.reading()), &f.listed(), &managed(&f), &display(), f.now());
-        assert_eq!(b.misses, 0);
+        assert_eq!(b.corrections, 0);
         let b = settle(&mut f, b);
         f.advance(1100);
         let b = fold(&b, Some(&f.reading()), &f.listed(), &managed(&f), &display(), f.now());
-        assert_eq!(b.misses, 0, "they agree");
-        assert!(b.ax_at == Some(f.now()));
-        // Accessibility says otherwise for a while: one miss for the spell, the list wins.
-        let wrong = Reading { items: vec![Item { frame: Rect::new(0.0, 0.0, 1.0, 1.0), windows: vec![1, 2, 4] }] };
+        assert_eq!(b.corrections, 0, "they agree");
+        assert!(b.ax_at == Some(f.now()) && b.ax_groups_at == Some(f.now()), "trusted a second after the settle");
+        // Accessibility groups the strip otherwise: its groups taken, one correction for the
+        // spell, kept on the reads without Accessibility until the next change.
+        let mut wrong = f.reading();
+        let all: Vec<u32> = wrong.items.iter().flat_map(|i| i.windows.clone()).collect();
+        wrong.items = vec![Item { frame: Rect::new(0.0, 0.0, 1.0, 1.0), windows: all.clone() }];
         f.advance(50);
         let c = fold(&b, Some(&wrong), &f.listed(), &managed(&f), &display(), f.now());
         f.advance(50);
-        let c = fold(&c, Some(&wrong), &f.listed(), &managed(&f), &display(), f.now());
-        assert_eq!(c.misses, 1);
+        let c = fold(&c, None, &f.listed(), &managed(&f), &display(), f.now());
+        assert_eq!(c.corrections, 1);
         assert!(c.disagree);
-        assert_eq!(c.strip, b.strip, "the list wins");
+        let mut one = c.strip.iter().flat_map(|g| g.windows.clone()).collect::<Vec<_>>();
+        one.sort_unstable();
+        let mut want = all;
+        want.sort_unstable();
+        assert_eq!((c.strip.len(), one), (1, want), "Accessibility's groups");
+        assert_eq!(c.current, b.current, "the stage in front is the list's");
         f.advance(50);
         let d = fold(&c, Some(&f.reading()), &f.listed(), &managed(&f), &display(), f.now());
-        assert!(!d.disagree && d.misses == 1);
+        assert!(!d.disagree && d.corrections == 1);
+        assert_eq!(d.strip, b.strip);
+        // A change: the trusted reading no longer decides.
+        let mut e = d.clone();
+        e.step_began(f.now());
+        e.ax_groups = vec![all_ids(&d)];
+        f.advance(800);
+        let e = fold(&e, None, &f.listed(), &managed(&f), &display(), f.now());
+        assert_eq!(e.strip, b.strip, "a reading from before a change is not taken");
+    }
+
+    fn all_ids(a: &Arrangement) -> Vec<u32> {
+        a.strip.iter().flat_map(|g| g.windows.clone()).collect()
+    }
+
+    /// Live 11-16 (bb58705): Charlie sent to Bravo's stage, then Alpha's in front: the strip's
+    /// one item of two apps, its thumbnails overlapping, was read as two stages (each thumbnail
+    /// nearest an icon of its own app), and the list won against Accessibility's one item.
+    #[test]
+    fn a_stage_of_two_apps_in_the_strip_reads_as_one_by_its_overlapping_thumbnails() {
+        let screen = Display { frame: Rect::new(0.0, 0.0, 1800.0, 1169.0), visible: Rect::new(0.0, 39.0, 1800.0, 1130.0), ..display() };
+        let managed: BTreeSet<u32> = [78904, 78903, 78892, 78886].into();
+        let w = |id: u32, pid: i32, x: f64, y: f64, ww: f64, h: f64| ListedWindow { id, pid, layer: 0, bounds: Rect::new(x, y, ww, h), onscreen: true };
+        let list = Listed {
+            windows: vec![
+                w(78904, 1, 360.0, 107.0, 520.0, 424.0),
+                w(78903, 1, 300.0, 47.0, 520.0, 424.0),
+                w(9001, 99, 44.0, 258.0, 68.0, 94.0),
+                w(78892, 3, 44.0, 258.0, 68.0, 94.0),
+                w(9002, 99, 16.0, 243.0, 69.0, 96.0),
+                w(78886, 2, 16.0, 243.0, 69.0, 96.0),
+                // An icon for each app of the item, each nearest one thumbnail.
+                w(9003, 99, -7.0, 250.0, 66.0, 82.0),
+                w(9004, 99, 46.0, 275.0, 66.0, 82.0),
+            ],
+            manager: Some(99),
+        };
+        let t0 = Instant::now();
+        let mut a = fold(&Arrangement::default(), None, &list, &managed, &screen, t0);
+        for ms in [800, 850, 2000] {
+            a = fold(&a, None, &list, &managed, &screen, t0 + Duration::from_millis(ms));
+        }
+        assert_eq!(a.current, vec![78904, 78903]);
+        assert_eq!(a.strip.iter().map(|g| g.windows.clone()).collect::<Vec<_>>(), vec![vec![78892, 78886]], "one stage");
+        let r = Reading { items: vec![Item { frame: Rect::new(-7.0, 243.0, 120.0, 114.0), windows: vec![78892, 78886] }] };
+        let b = fold(&a, Some(&r), &list, &managed, &screen, t0 + Duration::from_millis(2100));
+        assert!(!b.disagree && b.corrections == 0, "the list and Accessibility agree");
+        // Had the list split it, Accessibility's item puts it together again.
+        let split = Arrangement { strip: vec![Group { windows: vec![78886], frame: Rect::new(16.0, 243.0, 69.0, 96.0) }, Group { windows: vec![78892], frame: Rect::new(44.0, 258.0, 68.0, 94.0) }], ..b.clone() };
+        assert_eq!(by_ax(&split.strip, &[vec![78892, 78886]]).iter().map(|g| g.windows.clone()).collect::<Vec<_>>(), vec![vec![78886, 78892]]);
     }
 
     #[test]
@@ -702,7 +790,7 @@ mod tests {
         // The capture's Accessibility after bravo's activation: the same two items.
         let r = Reading { items: vec![Item { frame: Rect::new(15.0, 575.0, 87.0, 97.0), windows: vec![74, 73] }, Item { frame: Rect::new(15.0, 872.0, 87.0, 116.0), windows: vec![86] }] };
         let b = fold(&a, Some(&r), &captured(CAPTURE[2]), &managed, &screen, t0 + Duration::from_secs(9));
-        assert!(!b.disagree && b.misses == 0, "the list and Accessibility agree");
+        assert!(!b.disagree && b.corrections == 0, "the list and Accessibility agree");
     }
 
     /// Live 11-16: a read in the moment after an activation, before Apple's motion starts,
