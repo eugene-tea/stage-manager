@@ -154,7 +154,7 @@ pub struct CardStyle {
     pub spread_step: f64,
     /// ...plus this share of how much narrower the right one is.
     pub spread_narrow: f64,
-    /// A third window on the second's side: this share of its own step from the front one.
+    /// A third window: on the second's side, this share of its own width in from the second.
     pub spread_third: f64,
     /// The windows lined up this far down each (0 top, 1 bottom).
     pub spread_line: f64,
@@ -163,7 +163,7 @@ pub struct CardStyle {
     pub spread_raise_third: f64,
     /// The card's windows, top to bottom, held this tall...
     pub spread_height: f64,
-    /// ...never shrunk below this share of the plain scale.
+    /// ...never smaller than this many card points per point of the window.
     pub spread_min_scale: f64,
     /// `card_layout = "spread_covered"`: a window showing less than this share of itself on
     /// the stacked card spreads the card.

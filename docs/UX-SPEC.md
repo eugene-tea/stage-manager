@@ -101,38 +101,41 @@ screen) is left off: the card shows the window alone. So is a popup over a windo
 macOS's capture does not place (a calendar's event popup reaching past the window's top):
 never a fill around a window on a card.
 
-**Apple's spread** (measured 11-16 on the laptop through the window list, which lists each
-strip picture at its bounds: six cards of two and three fixture windows of different apps;
-`ui::card_spread`). Apple does not draw the windows' real layout: two windows 856 pt apart
-on the screen came out 27 pt apart, a 500 × 432 window centred in a 1000 × 732 one came out
-beside it. Its rule, fitted to all six within 2 pt: the front window anchors the card and
-every other window goes to the side of it its middle sits on (level: left, as above). Of two
-windows side by side, the right one's left edge sits 0.25 of the left one's width (before
-the turn) right of the left one's, plus 0.65 of how much narrower the right one is
-(`[cards] spread_step`, `spread_narrow`): equal windows step 25 to 30 pt and the one behind
-shows about half of itself (its side and its top); a window half as wide as the one beside
-it comes out beside it, its left edge at the other's far edge; a much wider one on the right
-steps only a quarter of the narrow one (14 pt for a 1400 × 1032 window behind a 400 × 332
-one). On a card of three (600 × 482 in front, two 900 × 682 behind, both left of it) the
-second window takes its full step (55 pt) and the third 0.65 of its own (37 pt), between the
-two and behind both (`spread_third`; 11-09's card of three read 0.29 on a 5K still: not
-settled). The windows line up 85 % of the way down each (`spread_line`), the second 12 pt
-up, the third 19 (`spread_raise`, `spread_raise_third`): the front window lowest, whatever
-the real heights. One scale for every window, their sizes relative to each other kept: the
-card's windows span 102 pt top to bottom (100 to 104 measured, `spread_height`; 0.92 to 1.19
-of the plain scale), never below 0.875 of the plain scale (`spread_min_scale`: a 1400 × 1032
-window behind a small one drew 127 pt tall, 0.865, where 102 pt would need 0.69). Two windows
-of one app keep their 16 pt step at their own size (11-16: 94 × 131 and 95 × 131). Apple's
-card of an editor over a terminal (11-16, a screenshot) put the terminal right of the editor
-at 0.76 of the editor's turned width; the rule gives 0.75 for a window 0.69 as wide. Ours
-draws the spread with `[strip] card_layout = "apple"`. The default stays `"stacked"`, the
-11-09 offsets above, where a window behind a wider one can hide entirely (the same editor
-and terminal: the terminal hardly showed), until the owner picks; `"spread_covered"` stacks
-a card unless a window would show less than 30 % of itself on it (`spread_covered_share`,
-sampled on the card as drawn), then spreads it. Left open (Known gaps): a fourth window,
-a third window on the other side, two windows of one app among others, and the height: the
-window list put these cards at 100 to 104 pt where 11-09's stills read 96 for the 5K card of
-two.
+**Apple's spread** (measured 11-16 through the window list, which lists each strip picture
+at its bounds: eleven cards of two and three fixture windows of different apps, six on the
+laptop, five on a 2560 × 1440 display; `ui::card_spread`). Apple does not draw the windows'
+real layout: two windows 856 pt apart on the screen came out 27 pt apart, a 500 × 432 window
+centred in a 1000 × 732 one came out beside it. Its rule, fitted to all eleven within 3 pt:
+the front window anchors the card and the second goes to the side of it its middle sits on
+(level: left, as above). Of two windows side by side, the right one's left edge sits 0.25 of
+the left one's width (before the turn) right of the left one's, plus 0.65 of how much
+narrower the right one is (`[cards] spread_step`, `spread_narrow`): equal windows step 25 to
+30 pt and the one behind shows about half of itself (its side and its top); a window half as
+wide as the one beside it comes out beside it, its left edge at the other's far edge; a much
+wider one on the right steps only a quarter of the narrow one (14 pt for a 1400 × 1032
+window behind a 400 × 332 one). A third window goes to the second's side whichever side of
+the front window it sits on, 0.165 of its own width in from the second (`spread_third`:
+17 and 18 pt with the front window narrower, 16 with three equal windows; one card had the
+third right of the front window on the screen and Apple still drew it on the second's left).
+The windows line up 85 % of the way down each (`spread_line`), the second 13 pt up (12 to
+15 read, `spread_raise`), the third 19 (`spread_raise_third`): the front window lowest,
+whatever the real heights. One scale for every window, their sizes relative to each other
+kept: the card's windows span 102 pt top to bottom (100 to 104 read, `spread_height`; two
+400 × 332 windows grew to 87 and 88 pt), never below 0.124 card points per point of the window
+(`spread_min_scale`: 1400 × 1032 and 1400 × 1064 windows drew 127 and 131 pt tall). The
+scale is the window's own, not the screen's: "side" read the same to the point on the laptop
+and on the 2560 × 1440 display (90 pt windows, 25 pt step, 12 pt up), where the cards' plain
+scale is 161 pt over the visible height. Two windows of one app keep their 16 pt step at their
+own size (11-16: 94 × 131 and 95 × 131). Apple's card of an editor over a terminal (11-16, a
+screenshot) put the terminal right of the editor at 0.76 of the editor's turned width; the
+rule gives 0.75 for a window 0.69 as wide. Ours draws the spread with `[strip] card_layout =
+"apple"`. The default stays `"stacked"`, the 11-09 offsets above, where a window behind a
+wider one can hide entirely (the same editor and terminal: the terminal hardly showed), until
+the owner picks; `"spread_covered"` stacks a card unless a window would show less than 30 %
+of itself on it (`spread_covered_share`, sampled on the card as drawn), then spreads it. Left
+open (Known gaps): a fourth window, two windows of one app among others, and the 96 pt that
+11-09's stills read for a card of two on the 5K display where the window list reads 102 on
+both screens.
 
 **Cards let the wallpaper through**, as Apple's do (measured): each window's picture is
 drawn at 78 % over a flat colour of its own,
@@ -1088,16 +1091,17 @@ set to move its cursor with the mouse pointer.
 - Apple's auto-hide comes either about 0.1 s or about 1.1 s after the pointer leaves the
   strip (six runs, 11-09, no difference found between them); ours waits 500 ms.
 - Not measured yet on Apple's: a card of four or more apps, which side a third app's window takes when it sits on the
-  other side of the front window from the second app's (stacked: the second's side; the
-  spread: its own side, a full step out). How far the other app's window peeks out is
+  other side of the front window from the second app's (stacked and the spread alike: the
+  second's side; the spread measured so 11-16). How far the other app's window peeks out is
   measured for the spread (11-16, `card_layout = "apple"`); stacked, the default, it is
   always the fixture's 42 and 15 pt, on its side of the screen.
-- The spread (`card_layout = "apple"`) still to measure: the third window's step (0.65 of its
-  own on the 11-16 laptop card, 0.29 on 11-09's 5K still), a card of two windows of one app
+- The spread (`card_layout = "apple"`) still to measure: a card of two windows of one app
   and one of another (ours spreads every window by its place in front-to-back order), the
-  most windows a card shows (ours: `max_windows` 3), and whether the window list's boxes
-  run about 6 % larger than the drawn glass (cards of 100 to 104 pt through the window list,
-  96 on 11-09's stills) or the height differs by screen.
+  most windows a card shows (ours: `max_windows` 3), what makes the raise 12 on some cards and
+  15 on others, and the window list against the drawn glass: the list reads a card of two at
+  102 pt on both screens (11-16), 11-09's stills read 96 on the 5K, so the screen is ruled out
+  and either the list's boxes run about 6 % larger than the glass or the stills were read
+  short; a still and the window list of one card at once decide it.
 - Where Apple places a window moved to another Desktop is unverified. Ours places it as a
   window of its app opening there: in that app's most recent stage on that Desktop, else a
   stage of its own, shown in front. Several apps moved at once get a stage each; the front

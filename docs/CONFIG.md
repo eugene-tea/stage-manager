@@ -94,12 +94,12 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `cards.third_app_dy` | `24.0` | number, -300 to 300 | ...and this far up, behind the others at the top (Apple's, measured: about 1.6 times the second's). |
 | `cards.spread_step` | `0.25` | number, 0 to 2 | With card_layout = "apple": each window's left edge sits this share of the width of the window left of it further right (Apple's, measured on the laptop's window list: 0.25). |
 | `cards.spread_narrow` | `0.65` | number, 0 to 2 | ...plus this share of how much narrower the right one is, so a small window comes out beside a big one (Apple's: 0.65). |
-| `cards.spread_third` | `0.65` | number, 0 to 2 | A third window on the second's side of the front one: this share of its own step (Apple's: 0.65; between the two, one card measured). |
+| `cards.spread_third` | `0.165` | number, 0 to 2 | A third window goes to the second's side, this share of its own width in from the second, toward the front one (Apple's: 0.165). |
 | `cards.spread_line` | `0.85` | number, 0 to 1 | The windows are lined up this far down each, 0 their tops, 1 their bottoms (Apple's: 0.85)... |
-| `cards.spread_raise` | `12.0` | number, -300 to 300 | ...the window behind the front one raised this far (Apple's: 12)... |
+| `cards.spread_raise` | `13.0` | number, -300 to 300 | ...the window behind the front one raised this far (Apple's: 12 to 15)... |
 | `cards.spread_raise_third` | `19.0` | number, -300 to 300 | ...and the third this far (Apple's: 19). |
 | `cards.spread_height` | `102.0` | number, 10 to 1000 | The spread card's windows, top to bottom, are scaled together to this height (Apple's, on its window list: 100 to 104)... |
-| `cards.spread_min_scale` | `0.875` | number, 0.1 to 1 | ...never below this share of the plain scale (Apple's: 0.87 to 0.88 for big windows). |
+| `cards.spread_min_scale` | `0.124` | number, 0.01 to 1 | ...never smaller than this many card points per point of the window (Apple's, the same on a laptop and a 2560 × 1440 display: 0.124). |
 | `cards.spread_covered_share` | `0.3` | number, 0 to 1 | With card_layout = "spread_covered": a window showing less than this share of itself on the stacked card spreads the card. |
 | `cards.hover_scale` | `1.11` | number, 1 to 2 | The card under the pointer grows by this factor, about its center (Apple's, measured on a card of one window: 1.11). |
 | `cards.hover_ms` | `400` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, in milliseconds: a spring, 99 % there by then, half way at a quarter of it (Apple's, measured: about 400). |

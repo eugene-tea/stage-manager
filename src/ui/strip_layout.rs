@@ -130,7 +130,7 @@ impl Metrics {
                 raise: c.spread_raise * k,
                 raise_third: c.spread_raise_third * k,
                 height: c.spread_height * k,
-                min_scale: c.spread_min_scale,
+                min_scale: c.spread_min_scale * k,
             },
             covered_share: c.spread_covered_share,
             tilt: c.tilt.or(auto_tilt).to_radians(),
@@ -540,12 +540,14 @@ pub fn arrange_card(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<
     }
 }
 
-/// [`arrange_card`] spread as Apple's ([`card_spread::arrange`]): every window at the plain
-/// scale times one factor, each on its side of the front window (`behind_scale` not used).
+/// [`arrange_card`] spread as Apple's ([`card_spread::arrange`]): every window at one scale of
+/// its own size (not the screen's plain scale: Apple's spread card was the same on the laptop
+/// and a 2560 × 1440 display, 11-16), on the second window's side (`behind_scale` not used).
 fn arrange_spread(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<ThumbSlot>) {
     let windows = &card.windows[..card.windows.len().min(m.max_windows)];
     let Some(front) = windows.first() else { return arrange_stacked(card, m, scale) };
-    let plain: Vec<Size> = windows.iter().map(|w| m.plain_size(&w.frame)).collect();
+    let own = |f: &Rect| if f.w > 1.0 && f.h > 1.0 { Size::new(f.w, f.h) } else { Size::new(800.0, 600.0) };
+    let plain: Vec<Size> = windows.iter().map(|w| own(&w.frame)).collect();
     let sides: Vec<f64> = windows.iter().map(|w| second_app_side(&front.frame, &w.frame)).collect();
     let rects = card_spread::arrange(&plain, &sides, &m.spread, m.max_width);
     let max_x = rects.iter().map(|r| r.max_x()).fold(0.0, f64::max);
@@ -1471,19 +1473,48 @@ mod tests {
         ("tiny-front", &[(1, Rect::new(500.0, 298.0, 400.0, 332.0), (0.0, 86.0, 42.0)), (2, Rect::new(244.0, 98.0, 1400.0, 1032.0), (14.0, 0.0, 127.0))]),
     ];
 
+    /// The same, measured 11-16 on a 2560 × 1440 display (visible height 1410): a third window
+    /// right of the front one on the screen, three equal windows, two small ones, two big ones,
+    /// and "side" again (the laptop's card to the point).
+    const APPLE_1116_WIDE: &[Layout] = &[
+        (
+            "third-other-side",
+            &[
+                (3, Rect::new(700.0, 446.0, 600.0, 514.0), (54.0, 40.0, 65.0)),
+                (2, Rect::new(244.0, 296.0, 900.0, 714.0), (0.0, 6.0, 89.0)),
+                (1, Rect::new(1000.0, 146.0, 900.0, 714.0), (17.0, 0.0, 88.0)),
+            ],
+        ),
+        (
+            "third-equal",
+            &[
+                (3, Rect::new(844.0, 296.0, 700.0, 664.0), (22.0, 18.0, 84.0)),
+                (2, Rect::new(544.0, 246.0, 700.0, 664.0), (0.0, 6.0, 84.0)),
+                (1, Rect::new(244.0, 196.0, 700.0, 664.0), (16.0, 0.0, 83.0)),
+            ],
+        ),
+        ("small-grow", &[(2, Rect::new(800.0, 398.0, 400.0, 332.0), (29.0, 15.0, 88.0)), (1, Rect::new(300.0, 298.0, 400.0, 332.0), (0.0, 0.0, 87.0))]),
+        ("scale-floor", &[(2, Rect::new(300.0, 96.0, 1400.0, 1064.0), (42.0, 15.0, 131.0)), (1, Rect::new(244.0, 96.0, 1400.0, 1064.0), (0.0, 0.0, 130.0))]),
+        ("side", &[(2, Rect::new(800.0, 248.0, 700.0, 632.0), (25.0, 12.0, 91.0)), (1, Rect::new(244.0, 198.0, 700.0, 632.0), (0.0, 0.0, 90.0))]),
+    ];
+
     fn fixture_card(windows: &[(i32, Rect, (f64, f64, f64))]) -> CardSnapshot {
         card_at(1, &windows.iter().map(|&(pid, f, _)| (pid as u32, pid, f)).collect::<Vec<_>>())
     }
 
     #[test]
-    fn apple_spreads_the_six_measured_cards_where_apple_drew_them() {
-        let m = laptop_with(CardArrangement::Apple);
-        for (name, windows) in APPLE_1116 {
-            let (_, t) = arrange_card(&fixture_card(windows), &m, 1.0);
-            for (slot, &(pid, _, (x, y, h))) in t.iter().zip(windows.iter()) {
-                let r = slot.rect;
-                assert_eq!(slot.pid, pid);
-                assert!((r.x - x).abs() < 2.0 && (r.y - y).abs() < 2.0 && (r.h - h).abs() < 2.0, "{name}, pid {pid}: {r:?} against Apple's ({x}, {y}, h {h})");
+    fn apple_spreads_the_eleven_measured_cards_where_apple_drew_them() {
+        let wide = Metrics::new(&StripStyle { card_layout: CardArrangement::Apple, ..StripStyle::default() }, Size::new(2560.0, 1410.0), 1.0, 690.0);
+        for (m, set) in [(laptop_with(CardArrangement::Apple), APPLE_1116), (wide, APPLE_1116_WIDE)] {
+            for (name, windows) in set {
+                let (_, t) = arrange_card(&fixture_card(windows), &m, 1.0);
+                for (slot, &(pid, _, (x, y, h))) in t.iter().zip(windows.iter()) {
+                    let r = slot.rect;
+                    assert_eq!(slot.pid, pid);
+                    // Within 3 pt (the window list rounds to the point; the raise read 12 to
+                    // 15 where the rule takes 13).
+                    assert!((r.x - x).abs() <= 3.0 && (r.y - y).abs() <= 3.0 && (r.h - h).abs() <= 3.0, "{name}, pid {pid}: {r:?} against Apple's ({x}, {y}, h {h})");
+                }
             }
         }
     }
