@@ -45,13 +45,21 @@ struct Drive {
 
 /// Drives `job` over `f` for at most `max_ms`, `each` called before every read (a test's own
 /// change at a given time). Stops when the job ends.
-fn drive_with(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, max_ms: u64, mut each: impl FnMut(&mut FakeWindowManager, u64)) -> Drive {
+fn drive_with(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, max_ms: u64, each: impl FnMut(&mut FakeWindowManager, u64)) -> Drive {
+    drive_every(f, a, job, max_ms, 50, each)
+}
+
+/// The platform's read while a job runs (the fast cadence).
+const FAST: u64 = 25;
+
+/// [`drive_with`] reading every `every` ms.
+fn drive_every(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, max_ms: u64, every: u64, mut each: impl FnMut(&mut FakeWindowManager, u64)) -> Drive {
     let mut d = Drive::default();
     let start = f.now();
     let front: Vec<u32> = a.current.clone();
     let frames0 = a.frames.clone();
-    for _ in 0..max_ms / 50 {
-        f.advance(50);
+    for _ in 0..max_ms / every {
+        f.advance(every);
         let t = f.now().duration_since(start).as_millis() as u64;
         each(f, t);
         *a = read(f, a);
@@ -565,11 +573,16 @@ fn a_reopened_window_with_a_reused_id_read_as_a_dialog_while_hidden_still_comes_
     let mut a = settle(&mut f, &a);
     let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
     job.hide_took(f.now());
-    let d = drive_with(&mut f, &mut a, &mut job, 6000, |f, t| {
-        if t == 50 {
+    // When its thumbnail's twin is first listed (Apple's motion into the strip over).
+    let mut twin: Option<u64> = None;
+    let d = drive_every(&mut f, &mut a, &mut job, 6000, FAST, |f, t| {
+        if t == 25 {
             // The same id again, read as a dialog while the app is hidden.
             f.loose.insert(5);
             f.reopen(40, 5, true);
+        }
+        if twin.is_none() && f.listed().windows.iter().any(|w| w.id == 9005) {
+            twin = Some(t);
         }
     });
     let r = d.end.expect("ended").expect("done");
@@ -577,12 +590,44 @@ fn a_reopened_window_with_a_reused_id_read_as_a_dialog_while_hidden_still_comes_
     let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
     assert_eq!(kinds, vec!["unhide", "shift_click", "focus"], "{:?}", d.steps);
     let unhide = times(&d.steps, "unhide")[0];
-    assert!((super::job::REOPEN_UNHIDE.as_millis() as u64..=super::job::REOPEN_UNHIDE.as_millis() as u64 + 100).contains(&unhide), "shown again {unhide} ms in");
+    assert!(unhide <= 300, "shown again {unhide} ms after the hide took");
+    let (twin, click) = (twin.expect("its twin listed"), times(&d.steps, "shift_click")[0]);
+    assert!(click >= twin && click - twin <= 100, "pressed {} ms after its twin came", click - twin);
     assert_eq!(presses(&d.steps), vec![vec![5]], "its thumbnail, by its pid, in one press");
     assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)), "focused last");
+    let focus = times(&d.steps, "focus")[0];
+    assert!(focus - click <= super::job::PRESS_AGAIN.as_millis() as u64 + 100, "focused {} ms after the press", focus - click);
     assert_eq!(sorted(f.current()), vec![4, 5]);
     assert!(d.moved_in_front.is_empty(), "the stage in front never moved: {:?}", d.moved_in_front);
     assert!(r.given_up.is_none() && f.unhidden == vec![40]);
+}
+
+/// A launch under a rule's `current` of an app that makes no window while hidden (Reminders,
+/// live 11-16: given up after 10 s): shown again without activating it a moment after the hide
+/// took, never waiting for a first window, then its thumbnail taken in by its pid as a running
+/// app's is.
+#[test]
+fn a_launch_that_makes_no_window_while_hidden_is_shown_again_and_its_thumbnail_taken_in() {
+    let (mut f, mut a) = three();
+    let mut job = plan::open_here(&a, 40, f.now()).expect("a stage in front");
+    f.launch_windowless(40, &[5]);
+    job.hide_took(f.now());
+    let mut twin: Option<u64> = None;
+    let d = drive_every(&mut f, &mut a, &mut job, 6000, FAST, |f, t| {
+        if twin.is_none() && f.listed().windows.iter().any(|w| w.id == 9005) {
+            twin = Some(t);
+        }
+    });
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("hide"));
+    let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
+    assert_eq!(kinds, vec!["unhide", "shift_click", "focus"], "{:?}", d.steps);
+    assert!(times(&d.steps, "unhide")[0] <= 300);
+    let (twin, click) = (twin.expect("its twin listed"), times(&d.steps, "shift_click")[0]);
+    assert!(click - twin <= 100, "pressed {} ms after its twin came", click - twin);
+    assert_eq!(sorted(f.current()), vec![4, 5]);
+    assert!(d.moved_in_front.is_empty());
+    assert!(r.ms < 2500, "done in {} ms", r.ms);
 }
 
 /// The fallback: the window showed before the hide took, Apple's switched to the app's stage
@@ -657,7 +702,7 @@ fn a_running_app_hidden_at_its_activation_that_reopens_no_window_is_activated_ag
     let d = drive(&mut f, &mut a, &mut job, 6000);
     let r = d.end.expect("ended").expect_err("given up");
     assert_eq!((r.unhide, r.activate), (Some(40), Some(40)), "{r:?}");
-    let wait = (super::job::REOPEN_UNHIDE + super::job::REOPEN_THUMB).as_millis() as u64;
+    let wait = (super::job::UNHIDE_AFTER + super::job::REOPEN_THUMB).as_millis() as u64;
     assert!(r.ms >= wait && r.ms <= wait + 200, "given up {} ms in", r.ms);
     assert_eq!(f.unhidden, vec![40], "shown again, not activated, before the give-up");
     assert!(f.posted.is_empty());

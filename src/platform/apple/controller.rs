@@ -13,7 +13,8 @@
 //! here" for a newly opened app (a rule's `current`, `[stages] new_apps_join_current`, Shift
 //! held at the launch, `[sugar] shift_brings_here`): the app hidden at its launch
 //! ([`super::launch_hide`]) so Apple's keeps the stage in front, its window Shift-clicked in
-//! from the strip, then focused; the round trip when the hide came too late. A running app
+//! from the strip, then focused (shown again without activating first when nothing of it
+//! shows a moment after the hide); the round trip when the hide came too late. A running app
 //! with no window, activated where the same rules want its next window (a Dock click, `open`,
 //! ⌘Tab: it reopens one), the same way: hidden at its activation, shown again without
 //! activating a moment later (Apple's puts its window into the strip), every thumbnail of its
@@ -21,7 +22,8 @@
 //!
 //! Apple's posts no Accessibility notices, so it polls: a read at every activation, window
 //! found or gone, focus, mouse-up near the strip and Desktop change; then every 50 ms while
-//! anything moves or a job runs (the list only, on the fast tick); every 2 s at rest,
+//! anything moves (the list only, on the fast tick), every 25 ms while a job runs, the job's
+//! own moment (the unhide's) kept to the read; every 2 s at rest,
 //! Accessibility with it.
 //!
 //! **Screens** ([`crate::engine::apple::screens`]): one mirror per screen, each folded from
@@ -95,6 +97,12 @@ const QUEUE: usize = 4;
 /// arrangement: its motion starts about 100 ms after the cause and runs about 600 ms.
 const WATCH: Duration = Duration::from_millis(1200);
 
+/// The read's pace while a job runs: an app hidden by us is taken in by its own windows at
+/// rest for two reads ([`crate::engine::apple::job::STILL_FOR`]), so a read costs the route
+/// its pace twice (live 11-16 at the motion's pace and the settle: 3 s to a Shift press that
+/// Apple's could take in 0.5 s).
+const JOB_READ: Duration = Duration::from_millis(25);
+
 /// A launch's own activation comes within this of its launch notice: the launch's route
 /// decides for it ([`AppleController::app_activated`] leaves it).
 const LAUNCH_ACTIVATION: Duration = Duration::from_secs(3);
@@ -152,6 +160,9 @@ pub struct AppleController {
     saved: Option<StateFile>,
     /// The restore after a restart, waiting for the windows to show.
     auto: Option<AutoRestore>,
+    /// What the first job waits for and since when, logged when it changes (a slow run says
+    /// why).
+    job_wait: Option<(&'static str, Instant)>,
 }
 
 impl AppleController {
@@ -207,6 +218,7 @@ impl AppleController {
             followed_ids: BTreeSet::new(),
             read_due: Some(Instant::now()),
             watch_until: None,
+            job_wait: None,
             ax_read: None,
             read_ms: 0.0,
             manager: None,
@@ -622,18 +634,6 @@ impl AppleController {
             return;
         }
         let t0 = Instant::now();
-        // An app hidden at its activation: the window it reopens may come with no notice the
-        // observer hears; its window list is asked at each read until one is tracked.
-        let quiet: Vec<i32> = self
-            .jobs
-            .iter()
-            .filter(|j| j.reopen && j.hidden)
-            .filter_map(|j| if let Intent::OpenHere(pid) = j.intent { Some(pid) } else { None })
-            .filter(|pid| !ob.windows().values().any(|w| w.pid == *pid))
-            .collect();
-        for pid in quiet {
-            ob.track_app_windows(pid, "window found (reopened while its app is hidden)");
-        }
         if self.manager_checked.is_none_or(|t| now.duration_since(t) >= MANAGER_CHECK) || self.manager.is_none() {
             self.manager = super::strip_ax::manager_pid();
             self.manager_checked = Some(now);
@@ -710,7 +710,13 @@ impl AppleController {
         }
         let busy = !self.jobs.is_empty() || self.posting.is_some();
         let unsettled = !self.mirror.settled || self.others.values().any(|m| !m.settled);
-        self.read_due = (unsettled || busy || watching).then(|| now + mirror::MOTION_READ);
+        self.read_due = if busy {
+            // The job's own moment (the unhide's) when it comes before the next read.
+            let next = now + JOB_READ;
+            Some(self.jobs.front().and_then(Job::due).filter(|d| *d > now && *d < next).unwrap_or(next))
+        } else {
+            (unsettled || watching).then(|| now + mirror::MOTION_READ)
+        };
         if self.mirror.settled && !self.mirror.full_screen {
             let main = split.get(&screen.id).cloned().unwrap_or_default();
             self.follow(ob, &screen, &main);
@@ -790,9 +796,11 @@ impl AppleController {
         }
         for j in self.jobs.iter_mut() {
             if let Intent::OpenHere(pid) = j.intent
-                && let Some(HideOutcome::Hidden { .. }) = self.hidings.get(&pid).and_then(Hiding::outcome)
+                && let Some(h) = self.hidings.get(&pid)
+                && let Some(HideOutcome::Hidden { ms, .. }) = h.outcome()
             {
-                j.hide_took(now);
+                // When it took, not when this read heard of it: the unhide counts from there.
+                j.hide_took((h.since + Duration::from_millis(ms)).min(now));
             }
         }
         // A step at a time: each advance runs at most one, against its screen's mirror.
@@ -804,6 +812,7 @@ impl AppleController {
         let cx = Ctx { mirror, input: desk.input(), screen: &screen, pids: &self.pids, in_flight: post::in_flight() || self.posting.is_some() };
         let next = job.advance(&cx, now);
         let screen = &screen;
+        self.log_wait(if let Next::Wait(why) = &next { Some(*why) } else { None }, now);
         match next {
             Next::Wait(_) => {}
             Next::Run(step) => {
@@ -846,6 +855,21 @@ impl AppleController {
                 }
                 self.job_ended(ob, report, now);
             }
+        }
+    }
+
+    /// What the first job waits for now (`why`, `None` once it acts or ends), logged at debug
+    /// when it changes, with how long the wait before lasted: a slow run explains itself.
+    fn log_wait(&mut self, why: Option<&'static str>, now: Instant) {
+        if self.job_wait.map(|(w, _)| w) == why {
+            return;
+        }
+        if let Some((was, since)) = self.job_wait.take() {
+            tracing::debug!(waited = was, ms = now.saturating_duration_since(since).as_millis() as u64, "apple mode: the step waited");
+        }
+        if let Some(why) = why {
+            tracing::debug!(waits = why, "apple mode: the step waits");
+            self.job_wait = Some((why, now));
         }
     }
 

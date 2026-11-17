@@ -19,16 +19,19 @@
 //!   the strip and its windows are Shift-clicked back after the settle). The goal is met at
 //!   the first read that shows every window in the stage in front, settled or not; a newly
 //!   opened app's front window is focused then and there, and the job ends with that focus.
-//!   A running app's reopened window ([`Job::reopen`], the app hidden at its activation)
-//!   shows nowhere while the app is hidden: [`REOPEN_UNHIDE`] after the hide took the app is
-//!   shown again without activating it ([`Step::Unhide`]), Apple's puts the window into the
-//!   strip, and every thumbnail of the app's pid is Shift-clicked in, in one press, then
-//!   focused (the sixth probe of 11-16). The window is never waited for by its id: such an app
-//!   reopens the window it ordered out (an id seen before), and while it is hidden
-//!   Accessibility may give it another subrole (`AXDialog`, live 11-16), so the app's windows
-//!   are taken from the window list by pid ([`super::mirror::Arrangement::loose`]). No
-//!   thumbnail of the app [`REOPEN_THUMB`] after the unhide: the app activated, as the person
-//!   asked.
+//!   **An app hidden by us** at its launch or activation ([`Job::hidden`]) is taken in ahead
+//!   of the settle ([`Job::pickup`]): by its pid, never by a window's id (a running app
+//!   reopens the window it ordered out, an id seen before, read as `AXDialog` while hidden,
+//!   live 11-16), from every window of it the list shows ([`super::mirror::Arrangement::seen`]).
+//!   Nothing of it shows: [`UNHIDE_AFTER`] after the hide took (a launch: as soon as a window
+//!   of it is known, if sooner) it is shown again without activating it ([`Step::Unhide`]), and
+//!   Apple's puts its window into the strip (some apps make none while hidden: Reminders, live
+//!   11-16). Its thumbnails, each with a twin and at rest for [`STILL_FOR`] reads, are
+//!   Shift-clicked in, in one press; its windows in front at rest are focused; the rest of the
+//!   arrangement may still move (the stage in front does not). No thumbnail [`REOPEN_THUMB`]
+//!   after the unhide (a running app) or [`FIRST_WINDOW`] after the ask (a launch): given up,
+//!   the app activated, as the person asked. The stage in front left meanwhile (a window shown
+//!   before the hide took): the round trip, after the settle.
 //! - [`Goal::Out`]: a window out to a stage of its own, by a drag of its title bar onto the
 //!   strip (it works with the strip covered, a probe of 11-16), grabbed where the title bar
 //!   shows; one covered all along it is raised first (live 11-16: the fixture windows open at
@@ -62,7 +65,7 @@ use serde::Serialize;
 
 use super::desk::{InputNow, Landed, Posted, Press};
 use super::gate::{self, Hold, Waiting};
-use super::mirror::{Arrangement, Loose, Where};
+use super::mirror::{Arrangement, Seen, Where};
 use super::plan::{Intent, Step};
 use super::points;
 use crate::engine::geometry::Rect;
@@ -78,14 +81,22 @@ pub const FIRST_WINDOW: Duration = Duration::from_secs(10);
 /// about 50 ms after the activation): a ⌘Tab to an app that opens none is not held up longer.
 pub const REOPEN_WINDOW: Duration = Duration::from_secs(3);
 
-/// How long after the hide at its activation took a running app is shown again (without
-/// activating it): time for it to order its window in (live 11-16: Activity Monitor's came
-/// 24 ms after the hide took).
-pub const REOPEN_UNHIDE: Duration = Duration::from_millis(275);
+/// How long after the hide took an app hidden by us is shown again (without activating it):
+/// time for it to order its window in (live 11-16: Activity Monitor's came 24 ms after the
+/// hide took).
+pub const UNHIDE_AFTER: Duration = Duration::from_millis(275);
 
-/// How long after that unhide a thumbnail of the app may take to show in the strip (Apple's
-/// motion into the strip is about 700 ms): none by then, the app is activated.
+/// How long after that unhide a running app's thumbnail may take to show in the strip (the
+/// probe: about 0.5 s): none by then, the app is activated.
 pub const REOPEN_THUMB: Duration = Duration::from_millis(1500);
+
+/// Reads in a row an app window keeps its bounds before it counts at rest (out of Apple's
+/// motion): two fast reads.
+pub const STILL_FOR: u32 = 2;
+
+/// After a Shift press on an app's thumbnails, how long before they are pressed again (Apple's
+/// add motion starts about 100 ms after the click and runs about 600 ms).
+pub const PRESS_AGAIN: Duration = Duration::from_millis(700);
 
 /// What a job is to bring about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -182,8 +193,8 @@ pub struct Report {
     /// A newly opened app to unhide after a give-up (the hide route took and its window
     /// never came in).
     pub unhide: Option<i32>,
-    /// An app to activate after a give-up: hidden at its activation, it reopened no window
-    /// (the activation the person asked for, given back).
+    /// An app to activate after a give-up: hidden at its launch or activation, nothing of it
+    /// came in (the activation the person asked for, given back).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activate: Option<i32>,
     /// A window to set back to its frame after a give-up: a drag that moved it without
@@ -240,6 +251,8 @@ pub struct Job {
     unhidden: bool,
     /// When the unhide was asked.
     unhide_at: Option<Instant>,
+    /// When the app's thumbnails were last pressed ([`Job::pickup`]).
+    pressed_at: Option<Instant>,
     /// The app's windows seen so far.
     app_seen: BTreeSet<u32>,
     focused_app: bool,
@@ -287,6 +300,7 @@ impl Job {
             reopen: false,
             unhidden: false,
             unhide_at: None,
+            pressed_at: None,
             app_seen: BTreeSet::new(),
             focused_app: false,
             focus_pending: None,
@@ -306,6 +320,12 @@ impl Job {
             self.hidden = true;
             self.hidden_at = Some(now);
         }
+    }
+
+    /// When the job next wants an advance whatever the reads: the unhide's moment
+    /// ([`UNHIDE_AFTER`] after the hide took), while it is to come.
+    pub fn due(&self) -> Option<Instant> {
+        if self.hidden && !self.unhidden && matches!(self.intent, Intent::OpenHere(_)) { self.hidden_at.map(|t| t + UNHIDE_AFTER) } else { None }
     }
 
     /// `why` said in the report's `could_not`, once.
@@ -339,6 +359,10 @@ impl Job {
         if now.saturating_duration_since(self.since) > self.deadline {
             let why = format!("not done in {} s", self.deadline.as_secs());
             return self.give_up(cx, now, why);
+        }
+        // An app hidden by us: taken in by its pid, ahead of the settle.
+        if let Some(next) = self.pickup(cx, now) {
+            return next;
         }
         // The settle and a gesture in flight are the mirror's own waits: they never count
         // toward the person's (the job's deadline bounds them).
@@ -555,66 +579,31 @@ impl Job {
         self.gather(&t, None, false, cx, now)
     }
 
-    /// [`Goal::Gather`]'s need.
+    /// [`Goal::Gather`]'s need, after the settle (an app hidden by us is taken in ahead of it:
+    /// [`Job::pickup`]).
     fn gather(&mut self, windows: &[u32], app: Option<i32>, focus_app: bool, cx: &Ctx, now: Instant) -> Need {
         let a = cx.mirror;
         // Windows gone, and windows of a Desktop not shown (a focus would show it), are left.
         let mut want: Vec<u32> = windows.iter().copied().filter(|w| a.where_is(*w).is_some_and(|(p, _)| p != Where::Away)).collect();
         let mut app_windows: Vec<u32> = Vec::new();
-        // A reopened app shown again: its windows the app does not manage, by its pid, whatever
-        // their ids or subroles (module docs).
-        let mut loose: BTreeMap<u32, Loose> = BTreeMap::new();
         if let Some(pid) = app {
             // Front to back: the stage in front's order, then the strip's.
             let order = a.current.iter().chain(a.strip.iter().flat_map(|g| g.windows.iter())).chain(a.remembered.iter().flat_map(|g| g.windows.iter()));
             app_windows = order.copied().filter(|w| cx.pids.get(w) == Some(&pid)).collect();
-            if self.reopen && self.unhidden {
-                // A window of the app still in Apple's motion into the strip has no twin yet:
-                // neither in front nor a thumbnail until it rests.
-                if a.loose.iter().any(|(_, l)| l.pid == pid && !l.still) {
-                    return Need::Wait("the app's window into the strip");
-                }
-                for (w, l) in a.loose.iter().filter(|(_, l)| l.pid == pid) {
-                    loose.insert(*w, *l);
-                    if !app_windows.contains(w) {
-                        app_windows.push(*w);
-                    }
-                }
-            }
             for w in &app_windows {
                 if self.app_seen.insert(*w) {
                     self.report.first_window_ms.get_or_insert(ms(now, self.since));
                 }
             }
             if app_windows.is_empty() {
-                if self.reopen && self.hidden {
-                    if !self.unhidden {
-                        // Shown again without activating it once it has had time to order its
-                        // window in: Apple's puts the window into the strip. Never waited for by
-                        // its id (an id seen before, a dialog's subrole while hidden).
-                        if self.hidden_at.is_some_and(|t| now.saturating_duration_since(t) >= REOPEN_UNHIDE) {
-                            self.unhide_at = Some(now);
-                            self.report.unhide_ms.get_or_insert(ms(now, self.since));
-                            return Need::Step(Step::Unhide(pid));
-                        }
-                        return Need::Wait("the app to order its window in");
-                    }
-                    if self.unhide_at.is_some_and(|t| now.saturating_duration_since(t) > REOPEN_THUMB) {
-                        return Need::Fail(format!("app {pid} showed no thumbnail in {} ms of its unhide: activated", REOPEN_THUMB.as_millis()));
-                    }
-                    return Need::Wait("the app's thumbnail");
-                }
                 let first = if self.reopen { REOPEN_WINDOW } else { FIRST_WINDOW };
                 if now.saturating_duration_since(self.since) > first {
                     return Need::Fail(format!("app {pid} showed no window in {} s", first.as_secs()));
                 }
                 return Need::Wait("the app's first window");
             }
-        }
-        let in_front = |w: &u32| a.current.contains(w) || loose.get(w).is_some_and(|l| !l.thumb);
-        if app.is_some() {
             if self.report.route.is_none() {
-                let app_in_front = app_windows.iter().any(in_front);
+                let app_in_front = app_windows.iter().any(|w| a.current.contains(w));
                 let before_in_front = want.iter().all(|w| a.current.contains(w));
                 self.report.route = Some(match (app_in_front && !before_in_front, self.reopen) {
                     (true, _) => "round_trip",
@@ -628,12 +617,12 @@ impl Job {
                 }
             }
         }
-        let missing: BTreeSet<u32> = want.iter().copied().filter(|w| !in_front(w)).collect();
+        let missing: BTreeSet<u32> = want.iter().copied().filter(|w| !a.current.contains(w)).collect();
         if missing.is_empty() {
             // Every window in front at this read: the app's front window focused at once (a
             // window of the stage in front: it switches nothing, no settle waited).
             if focus_app && !self.focused_app {
-                let front = app_windows.iter().copied().find(in_front).or_else(|| want.first().copied());
+                let front = app_windows.iter().copied().find(|w| a.current.contains(w)).or_else(|| want.first().copied());
                 if let Some(front) = front {
                     self.focus_pending = Some(front);
                     return Need::Step(Step::Focus(front));
@@ -642,19 +631,11 @@ impl Job {
             return Need::Met;
         }
         // Every window that shows a point of its own at this read, in one Shift press: front
-        // to back within each item, the items top to bottom, a reopened app's own thumbnails
-        // last. Each point was taken with the windows listed in front of it counted (the
-        // gather's own not clicked yet too): the clicks before it in the press take those
-        // away, never onto it.
-        let in_strip: Vec<u32> = a
-            .strip
-            .iter()
-            .flat_map(|g| g.windows.iter().copied())
-            .chain(loose.iter().filter(|(_, l)| l.thumb).map(|(w, _)| *w))
-            .filter(|w| missing.contains(w))
-            .collect();
-        let at = |w: &u32| a.click_at.get(w).copied().or_else(|| loose.get(w).and_then(|l| l.click_at));
-        let presses: Vec<Press> = in_strip.iter().filter_map(|w| at(w).map(|at| Press { window: *w, at })).collect();
+        // to back within each item, the items top to bottom. Each point was taken with the
+        // windows listed in front of it counted (the gather's own not clicked yet too): the
+        // clicks before it in the press take those away, never onto it.
+        let in_strip: Vec<u32> = a.strip.iter().flat_map(|g| g.windows.iter().copied()).filter(|w| missing.contains(w)).collect();
+        let presses: Vec<Press> = in_strip.iter().filter_map(|w| a.click_at.get(w).map(|at| Press { window: *w, at: *at })).collect();
         if !presses.is_empty() {
             return Need::Step(Step::Post(Posted::Clicks { presses, own_shift: true }));
         }
@@ -667,6 +648,101 @@ impl Job {
             Some(w) => Need::Step(Step::Focus(w)),
             None => Need::Met,
         }
+    }
+
+    /// An app hidden by us at its launch or activation, taken in ahead of the settle (module
+    /// docs): `None` hands the job to the goals after the settle (not hidden, a full-screen
+    /// app's Space, or the stage in front left: the round trip).
+    fn pickup(&mut self, cx: &Ctx, now: Instant) -> Option<Next> {
+        let Intent::OpenHere(pid) = self.intent else { return None };
+        let Some(Goal::Gather { windows, app: Some(_), focus_app }) = self.goals.first().cloned() else { return None };
+        let a = cx.mirror;
+        if !self.hidden || a.full_screen {
+            return None;
+        }
+        let mine: Vec<(u32, Seen)> = a.seen_of(pid).collect();
+        for (w, _) in &mine {
+            if self.app_seen.insert(*w) {
+                self.report.first_window_ms.get_or_insert(ms(now, self.since));
+            }
+        }
+        // The stage in front left (a window of the app shown before the hide took): the round
+        // trip, after the settle.
+        let left = windows.iter().any(|w| a.seen.iter().any(|(id, s)| id == w && s.thumb));
+        if left {
+            return None;
+        }
+        if cx.in_flight {
+            return Some(self.wait(Hold::InFlight.why()));
+        }
+        let thumbs: Vec<(u32, Seen)> = mine.iter().filter(|(_, s)| s.thumb).copied().collect();
+        let front: Vec<(u32, Seen)> = mine.iter().filter(|(_, s)| s.full).copied().collect();
+        if !self.unhidden && thumbs.is_empty() {
+            if !front.is_empty() {
+                return None;
+            }
+            // Nothing of it shows: shown again once it has had time to order its window in (a
+            // launch: as soon as a window of it is known).
+            let due = self.hidden_at.is_some_and(|t| now >= t + UNHIDE_AFTER);
+            if due || (!self.reopen && cx.pids.values().any(|p| *p == pid)) {
+                self.unhide_at = Some(now);
+                self.report.unhide_ms.get_or_insert(ms(now, self.since));
+                return Some(self.try_step_ahead(Step::Unhide(pid), cx, now));
+            }
+            return Some(self.wait("the app to order its window in"));
+        }
+        if !thumbs.is_empty() {
+            if self.pressed_at.is_some_and(|t| now.saturating_duration_since(t) < PRESS_AGAIN) {
+                return Some(self.wait("Apple's add motion"));
+            }
+            if thumbs.iter().any(|(_, s)| s.still < STILL_FOR) {
+                return Some(self.wait("the app's thumbnail to rest"));
+            }
+            // Every thumbnail of the app in one Shift press, front to back.
+            let presses: Vec<Press> = thumbs.iter().filter_map(|(w, s)| s.click_at.map(|at| Press { window: *w, at })).collect();
+            if presses.is_empty() {
+                let hold = if thumbs.iter().any(|(_, s)| s.bounds.max_x() <= cx.screen.frame.x) { Hold::StripCovered } else { Hold::NoPoint };
+                if self.waiting.hold(hold, now) {
+                    let why = format!("{} for {} ms", hold.why(), self.waiting.waited(now).as_millis());
+                    return Some(self.give_up(cx, now, why));
+                }
+                return Some(self.wait(hold.why()));
+            }
+            self.report.route.get_or_insert(if self.reopen { "hide_activation" } else { "hide" });
+            let next = self.try_step_ahead(Step::Post(Posted::Clicks { presses, own_shift: true }), cx, now);
+            if matches!(next, Next::Run(_)) {
+                self.pressed_at = Some(now);
+            }
+            return Some(next);
+        }
+        if !front.is_empty() {
+            // In the stage in front: focused once at rest (a window there switches nothing).
+            if front.iter().any(|(_, s)| s.still < STILL_FOR) {
+                return Some(self.wait("the app's window into the stage in front"));
+            }
+            if focus_app && !self.focused_app {
+                let w = front[0].0;
+                self.focus_pending = Some(w);
+                return Some(self.try_step_ahead(Step::Focus(w), cx, now));
+            }
+            self.goals.remove(0);
+            self.last = None;
+            self.waiting.clear();
+            if self.goals.is_empty() {
+                self.report.ms = ms(now, self.since);
+                return Some(Next::Done(self.report.clone()));
+            }
+            return None;
+        }
+        // Shown again, nothing of it shows yet.
+        let (limit, words) = match self.reopen {
+            true => (self.unhide_at.map(|t| t + REOPEN_THUMB), format!("app {pid} showed no thumbnail in {} ms of its unhide: activated", REOPEN_THUMB.as_millis())),
+            false => (Some(self.since + FIRST_WINDOW), format!("app {pid} showed no window in {} s: activated", FIRST_WINDOW.as_secs())),
+        };
+        if limit.is_some_and(|l| now > l) {
+            return Some(self.give_up(cx, now, words));
+        }
+        Some(self.wait("the app's thumbnail"))
     }
 
     /// `step` through the gate and the retry count.
@@ -694,6 +770,11 @@ impl Job {
             }
             return self.wait(hold.why());
         }
+        self.counted(step, cx, now)
+    }
+
+    /// `step`, gated already, through the retry count.
+    fn counted(&mut self, step: Step, cx: &Ctx, now: Instant) -> Next {
         self.waiting.clear();
         let key = step_key(&step);
         let tries = match self.last {
@@ -716,6 +797,28 @@ impl Job {
         Next::Run(step)
     }
 
+    /// `step` through the person's side of the gate and the retry count, with no settle waited
+    /// ([`Job::pickup`]: the app's own windows at rest are enough).
+    fn try_step_ahead(&mut self, mut step: Step, cx: &Ctx, now: Instant) -> Next {
+        let gated = match &mut step {
+            Step::Focus(_) => gate::focus_gate(&cx.input, cx.in_flight),
+            Step::Post(posted) => gate::gate(&cx.input, true, cx.in_flight).map(|go| {
+                if let Posted::Clicks { own_shift, .. } = posted {
+                    *own_shift = go.own_shift;
+                }
+            }),
+            Step::Unhide(_) | Step::AwaitSettle | Step::AwaitStrip(_) => Ok(()),
+        };
+        if let Err(hold) = gated {
+            if self.waiting.hold(hold, now) {
+                let why = format!("{} for {} ms", hold.why(), self.waiting.waited(now).as_millis());
+                return self.give_up(cx, now, why);
+            }
+            return self.wait(hold.why());
+        }
+        self.counted(step, cx, now)
+    }
+
     /// The job given up at `now` for `why`: for "open here", what leaves Apple's own
     /// arrangement (the app's stage brought in front, or the app unhidden).
     fn give_up(&mut self, cx: &Ctx, now: Instant, why: String) -> Next {
@@ -729,16 +832,15 @@ impl Job {
         }
         if let Intent::OpenHere(pid) = self.intent {
             let a = cx.mirror;
-            let in_front = a.current.iter().any(|w| cx.pids.get(w) == Some(&pid)) || (self.unhidden && a.loose.iter().any(|(_, l)| l.pid == pid && l.still && !l.thumb));
+            let in_front = a.current.iter().any(|w| cx.pids.get(w) == Some(&pid)) || a.seen_of(pid).any(|(_, s)| s.full && s.still >= STILL_FOR);
             let waiting = a.strip.iter().chain(&a.remembered).flat_map(|g| g.windows.iter()).copied().find(|w| cx.pids.get(w) == Some(&pid));
             if !in_front {
                 self.report.undo = waiting.map(Step::Focus);
                 if self.hidden && waiting.is_none() {
                     self.report.unhide = Some(pid);
-                    // Hidden at its activation: the activation the person asked for, given back.
-                    if self.reopen {
-                        self.report.activate = Some(pid);
-                    }
+                    // Hidden at its launch or activation: the activation the person asked for,
+                    // given back.
+                    self.report.activate = Some(pid);
                 }
             }
         }

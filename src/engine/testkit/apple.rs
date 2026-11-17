@@ -99,6 +99,9 @@ pub struct FakeWindowManager {
     /// hidden reads `AXDialog`, live 11-16): listed as any other, never in
     /// [`FakeWindowManager::window_ids`] nor [`FakeWindowManager::pids`].
     pub loose: BTreeSet<u32>,
+    /// Windows an app hidden at its launch makes only once it is shown again (Reminders, live
+    /// 11-16).
+    on_show: BTreeMap<i32, Vec<u32>>,
 }
 
 impl Default for FakeWindowManager {
@@ -135,6 +138,7 @@ impl FakeWindowManager {
             shown_nowhere: Vec::new(),
             unhidden: Vec::new(),
             loose: BTreeSet::new(),
+            on_show: BTreeMap::new(),
         }
     }
 
@@ -242,6 +246,13 @@ impl FakeWindowManager {
         self.stages.insert(0, ids.to_vec());
     }
 
+    /// App `pid`, hidden at its launch, makes windows `ids` only once it is shown again (none
+    /// while hidden: Reminders, live 11-16); they go into the strip as a reopened window's do.
+    pub fn launch_windowless(&mut self, pid: i32, ids: &[u32]) {
+        self.hidden.insert(pid);
+        self.on_show.insert(pid, ids.to_vec());
+    }
+
     /// Running app `pid`, with no window, reopens window `id` at its activation, the app
     /// hidden at that activation (`hide_took`): the window shows nowhere until the app is shown
     /// again ([`FakeWindowManager::show_app`]), the stage in front never moving (the sixth probe
@@ -259,7 +270,13 @@ impl FakeWindowManager {
     /// App `pid` shown again without activating it: the windows it reopened while hidden go
     /// into the strip as a stage of their own, on top; the stage in front stays.
     pub fn show_app(&mut self, pid: i32) {
-        self.hidden.remove(&pid);
+        if !self.hidden.remove(&pid) {
+            return;
+        }
+        for id in self.on_show.remove(&pid).unwrap_or_default() {
+            self.windows.insert(id, (pid, Rect::new(self.shift + 360.0, 160.0, 640.0, 460.0)));
+            self.shown_nowhere.push(id);
+        }
         let ids: Vec<u32> = self.shown_nowhere.iter().copied().filter(|w| self.windows.get(w).is_some_and(|(p, _)| *p == pid)).collect();
         if ids.is_empty() {
             return;

@@ -10,8 +10,8 @@
 //! window here ([`Moment::Activation`], the sixth probe of 11-16: an app reopening a window at
 //! its activation, hidden at its did-activate notice, retried every 2 ms, took about when the
 //! window came; Apple's did not switch, the window showed nowhere, and `unhide()` without
-//! activating put it into the strip). Showing it again is the job's step (`Step::Unhide`),
-//! once the window exists.
+//! activating put it into the strip). Showing it again is the job's step (`Step::Unhide`), a
+//! moment after the hide took, for a launch too when nothing of it shows in the strip yet.
 //!
 //! On a thread of its own, polling every [`POLL`] for at most [`HIDE_WAIT`]: only an app with
 //! the regular activation policy is ever hidden (a menu bar app or a helper never is), and
