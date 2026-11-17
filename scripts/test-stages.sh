@@ -31,6 +31,8 @@
 #                                          # screen, full screen there, Mission Control (PLAN live checks 3-5)
 #   scripts/test-stages.sh glass           # the cards' glass (captures on): white, grey and black
 #                                          # cards and a switch's snapshots against the model
+#   scripts/test-stages.sh cards           # [strip] card_layout: stacked, apple and spread_covered
+#                                          # cards of the three fixture apps against Apple's 11-16 layouts
 #   SM_ENGINE=spaces scripts/test-stages.sh cmdtab-probe    # ⌘Tab posted, Escape before ⌘'s release (nothing activated):
 #                                          # does the Dock show the switcher's selection, what the input
 #                                          # monitor and an event tap see (round cmd-tab; not a default phase)

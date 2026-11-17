@@ -4678,6 +4678,129 @@ def hover_glass_check(window, name, page):
     return True
 
 
+# Apple's cards of the three fixture apps (a Alpha, b Bravo, c Charlie), measured 11-16 on the
+# laptop through the window list: each window's frame on the screen, the stacking back to front,
+# and where Apple drew each window on the card, front window first: its left edge and top from
+# the card's leftmost left edge and highest top, and its height (`[strip] card_layout =
+# "apple"` must draw them there). "hidden" is not Apple's: a wide window over a narrower one
+# that the stacked card hides entirely (the 11-16 editor over a terminal), the one layout of
+# these that "spread_covered" spreads.
+CARD_LAYOUTS = [
+    ("inside", {"a": (300, 148, 1000, 732), "b": (550, 298, 500, 432)}, "ab", [(77, 44, 56), (0, 0, 95)]),
+    ("side", {"a": (244, 198, 700, 632), "b": (800, 248, 700, 632)}, "ab", [(25, 12, 90), (0, 0, 90)]),
+    ("behind", {"a": (300, 148, 1000, 732), "b": (400, 198, 1000, 732)}, "ba", [(0, 12, 92), (30, 0, 92)]),
+    ("apart", {"a": (244, 98, 600, 532), "b": (1100, 598, 600, 532)}, "ab", [(27, 13, 89), (0, 0, 90)]),
+    ("three", {"a": (300, 148, 900, 682), "b": (500, 298, 900, 682), "c": (700, 448, 600, 482)}, "abc", [(55, 40, 61), (0, 7, 88), (18, 0, 88)]),
+    ("tiny-front", {"a": (500, 298, 400, 332), "b": (244, 98, 1400, 1032)}, "ba", [(0, 86, 42), (14, 0, 127)]),
+    ("hidden", {"a": (200, 150, 1400, 900), "b": (700, 350, 700, 500)}, "ba", None),
+]
+# The stacked card's left edges (front window first), the 11-09 fixed offsets: the window
+# behind 42 pt to its side, a third 12 pt from the front window toward the second's side.
+CARD_STACKED_X = {"inside": [42, 0], "side": [42, 0], "behind": [0, 42], "apart": [42, 0], "three": [42, 0, 30], "tiny-front": [0, 42], "hidden": [0, 42]}
+
+
+def card_pictures(ids):
+    """The strip's card of exactly the windows `ids` as drawn (`ctl debug-strip`): window id ->
+    (left edge x, top, height) from the card's leftmost left edge and highest top. Each
+    window's left edge is its plane's turn axis, at depth 0: the perspective moves it not."""
+    r = ctl("debug-strip")
+    for c in r.get("cards") or []:
+        planes = c.get("planes") or []
+        if sorted(p["window"] for p in planes) != sorted(ids):
+            continue
+        got = {}
+        for p in planes:
+            top, bottom = p["left_edge"]
+            pt = lambda q: (q["x"], q["y"]) if isinstance(q, dict) else (q[0], q[1])
+            (x, y0), (_, y1) = pt(top), pt(bottom)
+            got[p["window"]] = (x, y0, y1 - y0)
+        x0 = min(v[0] for v in got.values())
+        t0 = min(v[1] for v in got.values())
+        return {k: (v[0] - x0, v[1] - t0, v[2]) for k, v in got.items()}
+    return None
+
+
+def phase_cards():
+    say("\n== cards: [strip] card_layout stacked, apple, spread_covered on Apple's measured layouts ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config('[strip]\ncard_layout = "stacked"\n')
+    start_fixture(1)
+    for k in "abc":
+        start_extra(k, 1)
+    try:
+        s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+        if not check(s is not None, "app up with the fixture and three fixture apps"):
+            return
+        vis = s["display"]["visible"]
+        # Apple's numbers are the laptop's (1130 pt of visible height): elsewhere the scale
+        # floor may not bind as it did there, so they are read loosely.
+        tol = 2.5 if abs(vis["h"] - 1130) < 2 else 6.0
+        if tol > 2.5:
+            say(f"  note: visible height {vis['h']:.0f} pt, not the laptop's 1130: Apple's numbers within {tol} pt")
+        t = by_title(s)
+        hold = t["Fixture 1"]["id"]
+        wid = {k: t[f"{EXTRA[k][3]} 1"]["id"] for k in "abc"}
+        holder = next(st["number"] for st in s["stages"] if hold in st["windows"])
+        for name, frames, back_to_front, apple in CARD_LAYOUTS:
+            say(f"-- {name}")
+            s = state()
+            ids = [wid[k] for k in back_to_front]
+            target = next(st["number"] for st in s["stages"] if ids[0] in st["windows"])
+            for i in ids[1:]:
+                do("send", target, i)
+            # A fixture app not in this layout waits in the holder's stage, clear of the strip.
+            for k in "abc":
+                if k not in frames:
+                    do("send", holder, wid[k])
+            do("switch", target)
+            time.sleep(0.8)
+            for k, (x, y, w, h) in frames.items():
+                # The frames as measured on the laptop, whose visible frame starts at y = 39.
+                ctl("debug-frame", wid[k], vis["x"] + x, vis["y"] + y - 39, w, h)
+            for k in back_to_front:
+                activate(k)
+                time.sleep(0.5)
+            s = wait_state(lambda x: next((st["windows"][:len(ids)] for st in x["stages"] if st["number"] == target), None) == ids[::-1],
+                           f"{name}: the stage's order front to back")
+            if not check(s is not None, f"{name}: the stage holds {back_to_front[::-1]} front to back"):
+                continue
+            do("switch", holder)
+            time.sleep(0.8)
+            # The holder's windows stay clear of the strip so the cards stay shown.
+            for i in [hold] + [wid[k] for k in "abc" if k not in frames]:
+                ctl("debug-frame", i, vis["x"] + 1000, vis["y"] + 300, 600, 400)
+            time.sleep(1.0)
+            front_first = ids[::-1]
+            read = {}
+            for layout in ("stacked", "apple", "spread_covered"):
+                set_config_live(f'[strip]\ncard_layout = "{layout}"\n')
+                time.sleep(0.8)
+                got = card_pictures(ids)
+                if not check(got is not None, f"{name}, {layout}: its card is drawn"):
+                    continue
+                read[layout] = [got[i] for i in front_first]
+            if len(read) < 3:
+                continue
+            xs = [round(v[0], 1) for v in read["stacked"]]
+            check(all(abs(a - b) <= 1.0 for a, b in zip(xs, CARD_STACKED_X[name])),
+                  f"{name}, stacked: left edges {xs} at the fixed offsets {CARD_STACKED_X[name]}")
+            if apple:
+                off = [max(abs(g[j] - a[j]) for j in range(3)) for g, a in zip(read["apple"], apple)]
+                check(max(off) <= tol, f"{name}, apple: {[tuple(round(c, 1) for c in g) for g in read['apple']]} against Apple's {apple} (worst {max(off):.1f} pt)")
+            same = lambda a, b: all(abs(p - q) <= 0.5 for u, v in zip(a, b) for p, q in zip(u, v))
+            want = "apple" if name == "hidden" else "stacked"
+            check(same(read["spread_covered"], read[want]), f"{name}, spread_covered: drawn as {want} ({read['spread_covered']})")
+            if name == "hidden":
+                check(read["apple"][1][0] > read["stacked"][1][0] + 20,
+                      f"hidden, apple: the window behind comes out from under the front one ({read['apple'][1][0]:.0f} pt against {read['stacked'][1][0]:.0f} stacked)")
+            consistent(f"cards {name}")
+    finally:
+        stop_app()
+        all_onscreen("cards quit")
+        stop_all_fixtures()
+        write_config(None)
+
 def phase_glass():
     """Round card-glass (11-03): the strip's cards let the wallpaper through, as Apple's do.
     Flat white, grey and black fixture windows as cards: each card's middle, read back from
@@ -9415,7 +9538,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
+             "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe}[p]()
     finally:

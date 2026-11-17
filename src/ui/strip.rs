@@ -2657,8 +2657,9 @@ impl Strip {
                         let glass = l.glass.iter().find(|(w, _)| w == id).and_then(|(_, g)| g.as_ref()).map(|g| {
                             serde_json::json!({ "under": g.rgb.map(|c| (c * 255.0 * 100.0).round() / 100.0), "opacity": g.opacity, "image_opacity": image.opacity() })
                         });
-                        // `opacity`: the plane's own (a window lifted off the card fades).
-                        serde_json::json!({ "window": id, "plane": in_root(plane), "opacity": plane.opacity(), "image": in_root(image), "shows": shows(image), "glass": glass })
+                        // `opacity`: the plane's own (a window lifted off the card fades);
+                        // `left_edge`: its top and bottom, global (the card-layout check).
+                        serde_json::json!({ "window": id, "plane": in_root(plane), "left_edge": left_edge(plane), "opacity": plane.opacity(), "image": in_root(image), "shows": shows(image), "glass": glass })
                     })
                     .collect();
                 Some(serde_json::json!({
