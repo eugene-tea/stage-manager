@@ -23,6 +23,10 @@
 //! Rules of [`fold`]:
 //!
 //! - **Current stage**: managed windows on screen with no twin, front to back.
+//! - **Windows Apple draws no thumbnail of**: an item shows three; a stage's fourth window
+//!   and on is listed off screen, thumbnail-sized, within the item (live 11-17: a stage of
+//!   four, its fourth at 69x63 inside the item's thumbnails). It belongs to that item, at its
+//!   back, with no point of its own ([`undrawn`]), never a stage of its own.
 //! - **In motion**: any managed window's bounds differ from the read before, or a step of
 //!   ours or an event that may change the arrangement (an activation, a window found or
 //!   gone) came less than [`SETTLE`] ago ([`Arrangement::step_began`]): Apple's motion starts
@@ -172,6 +176,22 @@ pub struct Group {
     pub frame: Rect,
 }
 
+/// A window listed in front of a thumbnail that shows no part of its own, or an app icon
+/// over it ([`Arrangement::covered`]): what the log says when a press waits on one.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct Cover {
+    /// The covering window (0 for an app icon).
+    pub id: u32,
+    /// Its process.
+    pub pid: i32,
+    /// WindowManager's own.
+    pub manager: bool,
+    /// Its layer.
+    pub layer: i64,
+    /// Its bounds.
+    pub bounds: Rect,
+}
+
 /// An app's window as the window list shows it at one read ([`Arrangement::seen`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Seen {
@@ -251,6 +271,10 @@ pub struct Arrangement {
     /// Every app window on this screen, managed or not, front to back, read at every read (in
     /// motion too): what "open here" takes an app's windows in by ([`Seen`]).
     pub seen: Vec<(u32, Seen)>,
+    /// What covers each thumbnail on screen that shows no part of its own at this read (a
+    /// strip window's out of motion, an app window's by its pid at every read): said in the
+    /// log when a press waits on one, so a live run tells what was over it.
+    pub covered: BTreeMap<u32, Vec<Cover>>,
 }
 
 impl Arrangement {
@@ -337,6 +361,14 @@ impl Arrangement {
         self.settled = false;
     }
 
+    /// At rest: out of motion (nothing begun less than [`SETTLE`] ago, no bounds changed since
+    /// the read before) for [`STILL_READS`] reads, the [`SETTLE`] after the last frame of
+    /// motion not waited (that is for a click's point to be final; a focus aims at nothing on
+    /// screen).
+    pub fn at_rest(&self) -> bool {
+        !self.in_motion && self.still_reads >= STILL_READS
+    }
+
     /// When the next read is due after this one: soon while in motion or not yet settled,
     /// at rest otherwise.
     pub fn next_read(&self) -> Duration {
@@ -379,16 +411,20 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
     let mut thumbs: Vec<(u32, Rect)> = Vec::new();
     let mut thumb_at: Vec<(u32, usize)> = Vec::new();
     let mut current_at: Vec<(u32, usize)> = Vec::new();
+    let mut hidden_thumbs: Vec<(u32, Rect)> = Vec::new();
     for (i, w) in listed.windows.iter().enumerate() {
         if !managed.contains(&w.id) || frames.insert(w.id, w.bounds).is_some() {
             continue;
         }
+        let on_screen = w.bounds.intersect(&screen.frame).is_some_and(|r| r.w > 0.0 && r.h > 0.0);
         if has_twin(listed, i) || off_left(screen, w.bounds) {
             thumbs.push((w.id, w.bounds));
             thumb_at.push((w.id, i));
-        } else if w.onscreen && !w.bounds.is_degenerate() && w.bounds.intersect(&screen.frame).is_some_and(|r| r.w > 0.0 && r.h > 0.0) {
+        } else if w.onscreen && !w.bounds.is_degenerate() && on_screen {
             current.push(w.id);
             current_at.push((w.id, i));
+        } else if !w.onscreen && thumbnail_sized(w.bounds) && on_screen {
+            hidden_thumbs.push((w.id, w.bounds));
         }
     }
 
@@ -406,7 +442,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         }
     }
     let seen_thumbs: Vec<(u32, usize)> = seen_at.iter().filter(|(_, _, t)| *t).map(|(id, i, _)| (*id, *i)).collect();
-    let seen_points = click_points(listed, &seen_thumbs, &icons, screen);
+    let (seen_points, seen_covered) = click_points(listed, &seen_thumbs, &icons, screen);
     let seen: Vec<(u32, Seen)> = seen_at
         .iter()
         .filter_map(|&(id, i, thumb)| {
@@ -442,6 +478,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         desktop_changes: prev.desktop_changes,
         full_screen: prev.full_screen,
         seen,
+        covered: seen_covered,
         ..Arrangement::default()
     };
     // Closed windows leave what is kept of them.
@@ -470,7 +507,10 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
             false => Some(thumbs.iter().any(|(_, b)| b.max_x() > screen.frame.x)),
         };
         next.strip = items(&thumbs, &icons);
-        next.click_at = click_points(listed, &thumb_at, &icons, screen);
+        undrawn(&mut next.strip, &hidden_thumbs);
+        let (points, covered) = click_points(listed, &thumb_at, &icons, screen);
+        next.click_at = points;
+        next.covered.extend(covered);
         next.title_at = title_points(listed, &current_at, screen);
         next.current = current;
         // A Desktop shown again: a window of a change's away groups seen now brings the rest of
@@ -543,22 +583,49 @@ fn by_ax(strip: &[Group], ax: &[Vec<u32>]) -> Vec<Group> {
 
 /// Where each strip window (`thumbs`: its id and its place in `listed`) shows a part of its
 /// own: what covers it is every window listed in front of it on screen but its own twin
-/// (the click target, listed right above it with its bounds), and every app icon.
-fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen: &Display) -> BTreeMap<u32, Point> {
+/// (the click target, listed right above it with its bounds), and every app icon. With the
+/// points, what covers each one that shows none ([`Cover`]).
+fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen: &Display) -> (BTreeMap<u32, Point>, BTreeMap<u32, Vec<Cover>>) {
     let mut out = BTreeMap::new();
+    let mut covered = BTreeMap::new();
     for &(id, i) in thumbs {
         let Some(w) = listed.windows.get(i) else { continue };
         if !w.onscreen {
             continue;
         }
         let twin = has_twin(listed, i).then(|| i - 1);
-        let mut over: Vec<Rect> = listed.windows[..i].iter().enumerate().filter(|(j, o)| o.onscreen && Some(*j) != twin).map(|(_, o)| o.bounds).collect();
+        let in_front: Vec<&ListedWindow> = listed.windows[..i].iter().enumerate().filter(|(j, o)| o.onscreen && Some(*j) != twin).map(|(_, o)| o).collect();
+        let mut over: Vec<Rect> = in_front.iter().map(|o| o.bounds).collect();
         over.extend(icons.iter().copied());
-        if let Some(p) = points::visible_point(w.bounds, &over, screen.frame) {
-            out.insert(id, p);
+        match points::visible_point(w.bounds, &over, screen.frame) {
+            Some(p) => {
+                out.insert(id, p);
+            }
+            None => {
+                let meets = |r: &Rect| r.intersect(&w.bounds).is_some_and(|x| x.w > 0.0 && x.h > 0.0);
+                let mut by: Vec<Cover> = in_front
+                    .iter()
+                    .filter(|o| meets(&o.bounds))
+                    .map(|o| Cover { id: o.id, pid: o.pid, manager: Some(o.pid) == listed.manager, layer: o.layer, bounds: o.bounds })
+                    .collect();
+                by.extend(icons.iter().filter(|r| meets(r)).map(|r| Cover { id: 0, pid: listed.manager.unwrap_or(0), manager: true, layer: 0, bounds: *r }));
+                covered.insert(id, by);
+            }
         }
     }
-    out
+    (out, covered)
+}
+
+/// Windows Apple draws no thumbnail of (`hidden`: managed, listed off screen, thumbnail-sized,
+/// on this screen) put in the strip item whose thumbnails they lie within, at its back (module
+/// docs). One within no item is left out (a stage past the strip's room, or a window shown
+/// nowhere).
+fn undrawn(strip: &mut [Group], hidden: &[(u32, Rect)]) {
+    for (id, b) in hidden {
+        if let Some(g) = strip.iter_mut().filter(|g| overlap(&g.frame, b) > 0.0).max_by(|x, y| overlap(&x.frame, b).total_cmp(&overlap(&y.frame, b))) {
+            g.windows.push(*id);
+        }
+    }
 }
 
 /// Where each window of the stage in front (`current`: its id and its place in `listed`)

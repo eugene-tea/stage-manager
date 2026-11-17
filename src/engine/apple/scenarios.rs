@@ -10,7 +10,7 @@ use super::gate::{GATE_WAIT, STRIP_WAIT};
 use super::job::{Ctx, Job, Next, Report};
 use super::mirror::{Arrangement, SETTLE, fold};
 use super::plan::{self, Step};
-use crate::engine::apple::desk::Posted;
+use crate::engine::apple::desk::{Posted, Press};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::testkit::apple::FakeWindowManager;
 use crate::engine::testkit::display;
@@ -155,16 +155,17 @@ fn the_mirror_finds_a_part_of_its_own_on_each_thumbnail_of_a_stage_of_two() {
 
 /// The fourth probe of 11-16: a stage of two settled in the strip, both thumbnails
 /// Shift-clicked within one Shift press, both joined; no settle waited between them (live
-/// 11-16 before: a stage of three took 3.9 s, a settle after each click).
+/// 11-16 before: a stage of three took 3.9 s, a settle after each click). Back to front: each
+/// lands on top, so the two keep their order over the stage in front.
 #[test]
-fn a_stage_of_two_is_brought_here_in_one_shift_press_front_to_back() {
+fn a_stage_of_two_is_brought_here_in_one_shift_press_back_to_front() {
     let (mut f, mut a) = three();
     let mut job = plan::merge(&a, 2, f.now()).expect("stage 2 is Alpha's");
     let d = drive(&mut f, &mut a, &mut job, 6000);
     let report = d.end.expect("ended").expect("done");
-    assert_eq!(presses(&d.steps), vec![vec![1, 2]], "one press, a Shift-click per window, the front one first");
+    assert_eq!(presses(&d.steps), vec![vec![2, 1]], "one press, a Shift-click per window, the back one first");
     assert_eq!((report.clicks, report.presses), (2, 1));
-    assert_eq!(sorted(f.current()), vec![1, 2, 4]);
+    assert_eq!(f.current(), &[1, 2, 4], "the two in their order, on top");
     assert_eq!(f.ignored_mid_motion, 0, "no click mid-motion");
     assert!(matches!(f.posted[..], [Posted::Clicks { own_shift: true, .. }]), "a Shift of ours around the press: {:?}", f.posted);
 }
@@ -183,8 +184,8 @@ fn a_stage_of_three_comes_in_one_press_and_the_merge_is_done_once_the_list_shows
     let mut job = plan::merge(&a, 1, f.now()).expect("stage 1 is the app's of three");
     let d = drive(&mut f, &mut a, &mut job, 6000);
     let r = d.end.expect("ended").expect("done");
-    assert_eq!(presses(&d.steps), vec![vec![1, 2, 3]]);
-    assert_eq!(sorted(f.current()), vec![1, 2, 3, 4]);
+    assert_eq!(presses(&d.steps), vec![vec![3, 2, 1]], "back to front");
+    assert_eq!(f.current(), &[1, 2, 3, 4], "in their order, on top");
     let pressed = d.steps[0].0;
     assert!(r.ms <= pressed + SETTLE.as_millis() as u64 + 100, "done {} ms after the press: Apple's motion and a read, no settle after it", r.ms - pressed);
 }
@@ -475,9 +476,12 @@ fn a_new_app_whose_hide_came_too_late_comes_back_by_the_round_trip() {
     let d = drive(&mut f, &mut a, &mut job, 6000);
     let r = d.end.expect("ended").expect("done");
     assert_eq!(r.route, Some("round_trip"));
-    assert_eq!(clicks(&d.steps), vec![4], "the stage pushed into the strip Shift-clicked back");
+    let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
+    assert_eq!(kinds, vec!["focus", "shift_click", "focus"], "{:?}", d.steps);
+    assert_eq!(d.steps[0].1, Step::Focus(4), "the stage pushed into the strip brought back by a switch");
+    assert_eq!(clicks(&d.steps), vec![5], "then the app's window Shift-clicked in");
     assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)));
-    assert_eq!(sorted(f.current()), vec![4, 5]);
+    assert_eq!(f.current(), &[5, 4], "the app on top of the stage");
 }
 
 #[test]
@@ -631,8 +635,9 @@ fn a_launch_that_makes_no_window_while_hidden_is_shown_again_and_its_thumbnail_t
 }
 
 /// The fallback: the window showed before the hide took, Apple's switched to the app's stage
-/// (the stage in front into the strip); after the settle the stage that left comes back in
-/// one Shift press, all its windows, so the result is one stage with both.
+/// (the stage in front into the strip); after the settle the stage that left comes back by a
+/// switch, all its windows in their order, and the app's window, in the strip now, in one
+/// Shift press, so the result is one stage with both, the app on top.
 #[test]
 fn a_running_apps_window_shown_before_the_hide_took_comes_back_by_the_round_trip() {
     let mut f = FakeWindowManager::new();
@@ -647,17 +652,18 @@ fn a_running_apps_window_shown_before_the_hide_took_comes_back_by_the_round_trip
     let d = drive(&mut f, &mut a, &mut job, 6000);
     let r = d.end.expect("ended").expect("done");
     assert_eq!(r.route, Some("round_trip"));
-    assert_eq!(presses(&d.steps), vec![vec![1, 2]], "the stage that left, all its windows in one press");
+    assert_eq!(d.steps[0].1, Step::Focus(1), "the stage that left brought back by a switch to its front window");
+    assert_eq!(presses(&d.steps), vec![vec![5]], "the app's window in one press");
     assert!(f.unhidden.is_empty(), "nothing hidden, nothing shown again");
     assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)));
-    assert_eq!(sorted(f.current()), vec![1, 2, 5], "one stage with both");
+    assert_eq!(f.current(), &[5, 1, 2], "one stage with both, in its order, the app on top");
 }
 
 /// Finder (live 11-16): never hidden (it owns the Desktop; hidden, its stage read empty), or
 /// its window showed before the hide took (`TooLate`). It reuses the window it ordered out,
 /// an id seen before and never tracked anew as a standard window, so no first window is ever
-/// recognised: the app's window in front is taken by its pid, the stage that left gathered
-/// back in one Shift press, the window focused.
+/// recognised: the app's window in front is taken by its pid, the stage that left brought
+/// back by a switch, the window Shift-clicked in from the strip by its pid, then focused.
 #[test]
 fn finders_reused_window_shown_before_any_hide_comes_back_by_the_round_trip_by_its_pid() {
     let (mut f, a) = three();
@@ -677,11 +683,147 @@ fn finders_reused_window_shown_before_any_hide_comes_back_by_the_round_trip_by_i
     let r = d.end.expect("ended").expect("done");
     assert_eq!(r.route, Some("round_trip"));
     assert!(r.round_trip_why.is_some_and(|w| w.contains("before it was hidden")), "{r:?}");
-    assert_eq!(presses(&d.steps), vec![vec![4]], "the stage that left, in one press");
+    assert_eq!(d.steps[0].1, Step::Focus(4), "the stage that left brought back by a switch");
+    assert_eq!(presses(&d.steps), vec![vec![5]], "the app's window by its pid, in one press");
     assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)));
-    assert_eq!(sorted(f.current()), vec![4, 5], "one stage with both");
+    assert_eq!(f.current(), &[5, 4], "one stage with both");
     assert!(f.unhidden.is_empty());
     assert!(r.ms < 3000, "done in {} ms", r.ms);
+}
+
+/// Apple's draws three thumbnails an item (live 11-17): a stage's fourth window is listed off
+/// screen within the item. It is of that item, at its back, with no point of its own, never a
+/// stage of its own (the mirror had it as a remembered stage, counted by the hotkeys).
+#[test]
+fn a_window_apple_draws_no_thumbnail_of_is_of_its_item_not_a_stage_of_its_own() {
+    let mut f = FakeWindowManager::new();
+    f.open_app(10, &[1, 2, 3, 4]);
+    f.open_app(20, &[5]);
+    let a = settle(&mut f, &Arrangement::default());
+    assert_eq!(a.strip.iter().map(|g| g.windows.clone()).collect::<Vec<_>>(), vec![vec![1, 2, 3, 4]], "front to back, the undrawn one at the back");
+    assert!(a.remembered.is_empty(), "{:?}", a.remembered);
+    assert!(a.click_at.contains_key(&3) && !a.click_at.contains_key(&4), "{:?}", a.click_at);
+    assert!(a.by_number(2).is_none(), "one stage to count");
+}
+
+/// The owner's smoke test of 11-17 (Activity Monitor under a `current` rule): a stage of four
+/// in front, its fourth window drawn in no thumbnail once in the strip; the new app's window
+/// showed before any hide, so Apple's switched to it. The stage comes back whole by one
+/// switch to its front window, in its order, the undrawn one with it, and the app's window in
+/// one Shift press, on top (live: three presses, 7.3 s, and the stage came back reversed).
+#[test]
+fn a_stage_of_four_left_for_a_new_app_comes_back_whole_in_its_order_with_the_app_on_top() {
+    let mut f = FakeWindowManager::new();
+    f.open_app(20, &[5]);
+    f.open_app(10, &[1, 2, 3, 4]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    let mut job = plan::open_here(&a, 40, f.now()).expect("a stage in front");
+    a.step_began(f.now());
+    f.launch(40, &[9], false);
+    let d = drive_every(&mut f, &mut a, &mut job, 6000, FAST, |_, _| {});
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("round_trip"));
+    let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
+    assert_eq!(kinds, vec!["focus", "shift_click", "focus"], "{:?}", d.steps);
+    assert_eq!(d.steps[0].1, Step::Focus(1), "the stage that left, by a switch to its front window");
+    assert_eq!(presses(&d.steps), vec![vec![9]], "one press: the app's window alone");
+    assert_eq!((r.clicks, r.presses), (1, 1));
+    assert_eq!(f.current(), &[9, 1, 2, 3, 4], "the stage in its order, the app on top");
+    assert!(r.ms < 3000, "done in {} ms", r.ms);
+}
+
+/// Live 11-17: a press of three clicked front to back, the third click missed a thumbnail
+/// Apple's had laid out again around the ones taken. Clicked back to front, the ones still to
+/// click are in front, where the relayout leaves them, and each lands on top: one press, the
+/// stage in its order.
+#[test]
+fn a_press_goes_back_to_front_so_apples_relayout_moves_no_thumbnail_still_to_click() {
+    let mut f = FakeWindowManager::new();
+    f.relayout = true;
+    f.open_app(10, &[1, 2, 3]);
+    f.open_app(20, &[4]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    // Front to back, as before: the item laid out again after the first click moves the rest.
+    let mut before = f.clone();
+    let front_to_back: Vec<Press> = [1, 2, 3].iter().map(|w| Press { window: *w, at: a.click_at[w] }).collect();
+    before.post(&Posted::Clicks { presses: front_to_back, own_shift: true }).expect("posted");
+    assert_ne!(sorted(before.current()), vec![1, 2, 3, 4], "a click missed: {:?}", before.stages());
+    let mut job = plan::merge(&a, 1, f.now()).expect("planned");
+    let d = drive(&mut f, &mut a, &mut job, 6000);
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(presses(&d.steps), vec![vec![3, 2, 1]]);
+    assert_eq!(r.presses, 1);
+    assert_eq!(f.current(), &[1, 2, 3, 4], "in their order, on top");
+}
+
+/// The owner's smoke test of 11-17: Activity Monitor's window, shown again into the strip,
+/// came in front by itself (no step of ours ran) before it was pressed, and Apple's switched to
+/// it. The round trip goes at the settle by one switch back, no thumbnail of the stage that
+/// left waited for, then the app's window in one press, on top.
+#[test]
+fn an_app_in_front_by_itself_once_shown_again_goes_by_one_switch_back() {
+    let mut f = FakeWindowManager::new();
+    f.open_app(20, &[3]);
+    f.open_app(10, &[1, 2]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
+    job.hide_took(f.now());
+    let mut came: Option<u64> = None;
+    let d = drive_every(&mut f, &mut a, &mut job, 8000, FAST, |f, t| {
+        if t == 25 {
+            f.reopen(40, 5, true);
+        }
+        // Its thumbnail listed with its twin: the app comes in front by itself.
+        if came.is_none() && f.listed().windows.iter().any(|w| w.id == 9005) {
+            came = Some(t);
+            f.focus_window(5);
+        }
+    });
+    let r = d.end.expect("ended").expect("done");
+    let came = came.expect("it came in front");
+    let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
+    assert_eq!(kinds, vec!["unhide", "focus", "shift_click", "focus"], "{:?}", d.steps);
+    assert_eq!(d.steps[1].1, Step::Focus(1), "the stage that left, by a switch");
+    assert!(d.steps[1].0 - came <= SETTLE.as_millis() as u64 + 150, "switched back {} ms after Apple's switch", d.steps[1].0 - came);
+    assert_eq!(presses(&d.steps), vec![vec![5]]);
+    assert_eq!(f.current(), &[5, 1, 2], "the stage in its order, the app on top");
+    assert!(r.round_trip_why.is_some_and(|w| w.contains("by itself")), "{r:?}");
+    assert!(r.ms - came <= 2600, "done {} ms after the app came in front", r.ms - came);
+}
+
+/// The owner's smoke test of 11-17: the hide at Activity Monitor's activation was called off
+/// as too late (its window had shown, 44 ms), yet the app hid a moment on; shown again at once,
+/// Apple's put its window into the strip. That is the hide route: the thumbnail taken in once
+/// it rests, the whole arrangement's settle never waited for (live: 955 ms waited for it).
+#[test]
+fn a_hide_called_off_that_took_late_is_the_hide_route_taken_in_ahead_of_the_settle() {
+    let mut f = FakeWindowManager::new();
+    f.open_app(20, &[3]);
+    f.open_app(10, &[1, 2]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
+    a.step_began(f.now());
+    // It hid all the same; the platform shows it again at once.
+    f.reopen(40, 5, true);
+    job.hid_late(f.now());
+    f.show_app(40);
+    let mut twin: Option<u64> = None;
+    let d = drive_every(&mut f, &mut a, &mut job, 6000, FAST, |f, t| {
+        if twin.is_none() && f.listed().windows.iter().any(|w| w.id == 9005) {
+            twin = Some(t);
+        }
+        // A window of the stage in front moves all along: the arrangement never settles.
+        f.set_frame(2, Rect::new(330.0 + (t / 25) as f64, 150.0, 700.0, 500.0));
+    });
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("hide_activation"));
+    let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
+    assert_eq!(kinds, vec!["shift_click", "focus"], "shown again by the platform, not by a step: {:?}", d.steps);
+    let (twin, click) = (twin.expect("its twin listed"), times(&d.steps, "shift_click")[0]);
+    assert!(click >= twin && click - twin <= 100, "pressed {} ms after its twin came", click - twin);
+    assert!(!a.settled, "never settled");
+    assert_eq!(f.current(), &[5, 1, 2]);
+    assert!(r.unhide_ms.is_some());
 }
 
 /// Every give-up of "open here" shows the app again as well as activating it: a `hide()`

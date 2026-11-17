@@ -14,7 +14,8 @@
 //! held at the launch, `[sugar] shift_brings_here`): the app hidden at its launch
 //! ([`super::launch_hide`]) so Apple's keeps the stage in front, its window Shift-clicked in
 //! from the strip, then focused (shown again without activating first when nothing of it
-//! shows a moment after the hide); the round trip when the hide came too late. A running app
+//! shows a moment after the hide); the round trip when the hide came too late (the stage
+//! that left brought back by one focus, the app's windows then Shift-clicked in). A running app
 //! with no window, activated where the same rules want its next window (a Dock click, `open`,
 //! ⌘Tab: it reopens one), the same way: hidden at its activation, shown again without
 //! activating a moment later (Apple's puts its window into the strip), every thumbnail of its
@@ -59,6 +60,7 @@ use super::post;
 use crate::config::{ConfigStore, HotkeyCommand};
 use crate::engine::apple::desk::{AppleDesk, Landed, Posted};
 use crate::engine::apple::follow;
+use crate::engine::apple::gate;
 use crate::engine::apple::job::{self, Ctx, Job, Next, Report};
 use crate::engine::apple::mirror::{self, Arrangement};
 use crate::engine::apple::plan::{self, Intent, Refusal, Step};
@@ -378,6 +380,19 @@ impl AppleController {
     /// stage, as it should), nor for one launched just now (the launch's own route).
     pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
         let (pid, now) = (app.pid, Instant::now());
+        // The app opened here activated again while its job runs (live 11-17: Activity
+        // Monitor, 1.3 s after its window landed in the strip, no step of ours between):
+        // whether the person had just clicked tells their click from the app's own.
+        if let Some(job) = self.jobs.iter().find(|j| j.intent == Intent::OpenHere(pid)) {
+            tracing::info!(
+                pid,
+                waits_for = job.waits_for,
+                job_ms = now.saturating_duration_since(job.since).as_millis() as u64,
+                last_click_ms = since_last_click_ms(),
+                focuses_of_ours = job.report().focuses,
+                "apple mode: the app opened here activated again while its job runs"
+            );
+        }
         if ob.launched_at(pid).is_some_and(|t| now.saturating_duration_since(t) < LAUNCH_ACTIVATION) {
             return;
         }
@@ -810,14 +825,17 @@ impl AppleController {
                 j.hide_took((h.since + Duration::from_millis(ms)).min(now));
             }
             // Not hidden by the hide (a window showed first, or it timed out), yet a `hide()`
-            // asked before may take late: the app shown again, the round trip goes on.
+            // asked before may take late: the app shown again at once, and Apple's puts its
+            // window into the strip (live 11-17): the hide route from here, its thumbnail
+            // taken in ahead of the settle ([`Job::hid_late`]).
             if let Intent::OpenHere(pid) = j.intent
-                && !j.hidden
+                && (!j.hidden || j.late)
                 && let Some(HideOutcome::TooLate { .. } | HideOutcome::TimedOut { .. }) = self.hidings.get(&pid).and_then(Hiding::outcome)
                 && launch_hide::is_hidden(pid)
             {
-                tracing::info!(pid, "apple mode: the app hid after its hide was called off: shown again");
+                tracing::info!(pid, "apple mode: the app hid after its hide was called off: shown again, its window taken in from the strip");
                 launch_hide::unhide(pid);
+                j.hid_late(now);
             }
         }
         // A step at a time: each advance runs at most one, against its screen's mirror.
@@ -828,6 +846,13 @@ impl AppleController {
         let mut desk = Desk { ob, manager: self.manager, screen: Some(main.frame), displays: &self.displays };
         let cx = Ctx { mirror, input: desk.input(), screen: &screen, pids: &self.pids, in_flight: post::in_flight() || self.posting.is_some() };
         let next = job.advance(&cx, now);
+        // A press waiting on a thumbnail that shows no part of its own: what covers it, and
+        // where the pointer is, said once as the wait begins (live 11-17: 1.4 s waited so, the
+        // cause not in the log).
+        let no_point = gate::Hold::NoPoint.why();
+        if matches!(&next, Next::Wait(w) if *w == no_point) && self.job_wait.map(|(w, _)| w) != Some(no_point) {
+            tracing::debug!(covered = ?mirror.covered, pointer = ?input::pointer(), manager = ?self.manager, "apple mode: what covers the thumbnails that show no part of their own");
+        }
         let screen = &screen;
         self.log_wait(if let Next::Wait(why) = &next { Some(*why) } else { None }, now);
         match next {
@@ -1394,6 +1419,14 @@ fn full_screen_on(ob: &Observer, listed: &mirror::Listed, d: &Display) -> bool {
 
 /// The windows the Apple mode follows: the observer's standard windows the window server
 /// lists (a window minimized is Apple's to put in the strip).
+/// How long ago the person last pressed the left button (the hardware's own state; a posted
+/// click of ours counts too), in ms.
+fn since_last_click_ms() -> u64 {
+    use objc2_core_graphics::{CGEventSource, CGEventSourceStateID, CGEventType};
+    let secs = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::HIDSystemState, CGEventType::LeftMouseDown);
+    Duration::try_from_secs_f64(secs.max(0.0)).map_or(u64::MAX, |d| d.as_millis() as u64)
+}
+
 fn managed(ob: &Observer, listed: &mirror::Listed) -> BTreeSet<u32> {
     ob.windows().values().filter(|w| w.kind == WindowKind::Standard && listed.has(w.id)).map(|w| w.id).collect()
 }

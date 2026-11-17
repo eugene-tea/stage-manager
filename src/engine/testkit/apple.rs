@@ -9,7 +9,10 @@
 //! does; a Shift-click on a
 //! visible part of a thumbnail adds that window alone to the stage in front, every click of
 //! one Shift press landing on what the strip showed at the press (the fourth probe of 11-16),
-//! a press mid-motion is ignored, a click on a covered strip lands on nothing of Apple's; a
+//! a press mid-motion is ignored, a click on a covered strip lands on nothing of Apple's (with
+//! [`FakeWindowManager::relayout`], each click lands on the item as Apple's lays it out again
+//! around the thumbnails left by the clicks before); an item draws three thumbnails, a
+//! stage's fourth window and on listed off screen within it (live 11-17); a
 //! focus of a window in front raises it within its stage; a drag of a title bar onto the strip
 //! takes the window out to a stage of its own (covered or not), and is not posted when another
 //! window is topmost at the grab point (the gestures' guard). Other Desktops: a Desktop made
@@ -80,6 +83,13 @@ pub struct FakeWindowManager {
     /// How far right each thumbnail of a stage sits from the one in front of it (16 points
     /// measured; 0 for windows at one frame, whose thumbnails stack exactly).
     pub stack: f64,
+    /// How many thumbnails an item draws (three, live 11-17): a stage's windows past it are
+    /// listed off screen within the item, with no twin.
+    pub item_room: usize,
+    /// Each click of a press lands on the item as laid out again around the thumbnails the
+    /// clicks before it took (live 11-17: the third click of a press missed a thumbnail Apple's
+    /// had moved); off, every click lands on what the strip showed at the press.
+    pub relayout: bool,
     /// How the last gesture ended, until taken.
     landed: Option<Landed>,
     /// How far right of the main screen's origin this fake's screen is (a second screen).
@@ -129,6 +139,8 @@ impl FakeWindowManager {
             ignored_mid_motion: 0,
             deaf: false,
             stack: 16.0,
+            item_room: 3,
+            relayout: false,
             all_at_once: false,
             landed: None,
             shift: 0.0,
@@ -385,9 +397,10 @@ impl FakeWindowManager {
         }
         for (slot, st) in self.stages.iter().enumerate() {
             for (k, id) in st.iter().enumerate() {
-                let r = match slot < self.room {
-                    true => self.thumb(slot, k),
-                    false => self.frame(*id).unwrap_or(THUMB),
+                let r = match (slot < self.room, k < self.item_room) {
+                    (true, true) => self.thumb(slot, k),
+                    (true, false) => self.undrawn(slot),
+                    (false, _) => self.frame(*id).unwrap_or(THUMB),
                 };
                 out.insert(*id, r);
             }
@@ -401,6 +414,31 @@ impl FakeWindowManager {
         let x = self.shift + if self.covered { HIDDEN_X } else { THUMB.x };
         let k = k as f64;
         Rect::new(x + self.stack * k, THUMB.y + SLOT * slot as f64 + self.stack / 4.0 * k, THUMB.w, THUMB.h)
+    }
+
+    /// Where slot `slot`'s windows past [`FakeWindowManager::item_room`] are listed, off screen:
+    /// thumbnail-sized, within the item's front thumbnail (live 11-17: 69x63 inside the item).
+    fn undrawn(&self, slot: usize) -> Rect {
+        let t = self.thumb(slot, 0);
+        Rect::new(t.x, t.y + t.h / 3.0, 60.0, 60.0)
+    }
+
+    /// What a click at `at` lands on with the strip as laid out now, its motion not waited for
+    /// ([`FakeWindowManager::relayout`]): the drawn thumbnails of each listed slot front to
+    /// back, then its icon, as [`FakeWindowManager::listed`] orders them.
+    fn thumbnail_at_rest(&self, at: Point) -> Option<u32> {
+        if self.covered {
+            return None;
+        }
+        for (slot, st) in self.stages.iter().enumerate().take(self.room) {
+            if let Some(id) = st.iter().take(self.item_room).enumerate().find(|(k, _)| self.thumb(slot, *k).contains(at)).map(|(_, id)| *id) {
+                return Some(id);
+            }
+            if self.icon(slot).contains(at) {
+                return None;
+            }
+        }
+        None
     }
 
     /// Slot `slot`'s icon window.
@@ -451,6 +489,14 @@ impl FakeWindowManager {
             Posted::Clicks { presses, .. } => {
                 if self.moving().is_some() {
                     self.ignored_mid_motion += presses.len() as u32;
+                    return Landed::Posted;
+                }
+                if self.relayout {
+                    for p in presses {
+                        if let Some(id) = self.thumbnail_at_rest(p.at) {
+                            self.add_to_front(id);
+                        }
+                    }
                     return Landed::Posted;
                 }
                 // Every click of the press lands on what the strip showed at its start: Apple's
@@ -506,8 +552,13 @@ impl FakeWindowManager {
             windows.push(app(*id, at(*id), true));
         }
         for (slot, st) in self.stages.iter().enumerate().filter(|(s, _)| *s < self.room) {
-            for id in st {
+            for (k, id) in st.iter().enumerate() {
                 let b = at(*id);
+                if k >= self.item_room {
+                    // No thumbnail drawn: listed off screen within the item, no twin.
+                    windows.push(app(*id, b, false));
+                    continue;
+                }
                 if moving.is_none() {
                     windows.push(ListedWindow { id: 9000 + id, pid: MANAGER, layer: 0, bounds: b, onscreen: true });
                 }

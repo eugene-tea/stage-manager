@@ -12,13 +12,21 @@
 //! - [`Goal::Gather`]: windows (and, for a newly opened app, every window of the app as it
 //!   shows) in the stage in front, by a Shift-click per window on its thumbnail (a
 //!   Shift-click adds only the window clicked, a probe of 11-16), every window that shows a
-//!   point of its own at one settled read clicked in one Shift press, front to back (the
-//!   fourth probe of 11-16: a stage of two, both clicked 50 ms apart, both joined); a window
-//!   fully under the ones clicked is clicked at the next settle. A window whose stage is not
-//!   listed is brought in front by a focus first (the round trip: the stage in front goes to
-//!   the strip and its windows are Shift-clicked back after the settle). The goal is met at
-//!   the first read that shows every window in the stage in front, settled or not; a newly
-//!   opened app's front window is focused then and there, and the job ends with that focus.
+//!   point of its own at one settled read clicked in one Shift press (the fourth probe of
+//!   11-16: a stage of two, both clicked 50 ms apart, both joined), **back to front** within
+//!   each item: each click lands its window on top, so the windows keep the order they had,
+//!   and the back one, whose part of its own is the smallest, is clicked while the item is
+//!   still as read (live 11-17: clicked front to back, a stage came back reversed, and the
+//!   third click missed a sliver Apple's relayout had moved). A window fully under the others,
+//!   or one Apple draws no thumbnail of (an item shows three), is clicked at the next settle.
+//!   **The stage that was in front left** (a newly opened app in front: Apple's switched to
+//!   its stage) is brought back whole by one focus of its front window, never Shift-clicked
+//!   back window by window: Apple's own switch puts back its windows in their order, the ones
+//!   it draws no thumbnail of too, and the app's stage goes to the strip, whose windows are
+//!   then Shift-clicked in (the round trip). A window whose stage is not listed is brought in
+//!   front by a focus first. The goal is met at the first read that shows every window in
+//!   the stage in front, settled or not; a newly opened app's front window is focused then
+//!   and there, and the job ends with that focus.
 //!   **An app hidden by us** at its launch or activation ([`Job::hidden`]) is taken in ahead
 //!   of the settle ([`Job::pickup`]): by its pid, never by a window's id (a running app
 //!   reopens the window it ordered out, an id seen before, read as `AXDialog` while hidden,
@@ -31,7 +39,10 @@
 //!   arrangement may still move (the stage in front does not). No thumbnail [`REOPEN_THUMB`]
 //!   after the unhide (a running app) or [`FIRST_WINDOW`] after the ask (a launch): given up,
 //!   the app activated, as the person asked. The stage in front left meanwhile (a window shown
-//!   before the hide took): the round trip, after the settle.
+//!   before the hide took, or the app in front by itself): the round trip, after the settle,
+//!   whose switch back leaves the app's windows in the strip, taken in the same way, ahead of
+//!   the settle. A hide called off as too late that took all the same ([`Job::hid_late`]) is
+//!   this route: the app is shown again at once and its thumbnail taken in.
 //! - [`Goal::Out`]: a window out to a stage of its own, by a drag of its title bar onto the
 //!   strip (it works with the strip covered, a probe of 11-16), grabbed where the title bar
 //!   shows; one covered all along it is raised first (live 11-16: the fixture windows open at
@@ -250,8 +261,16 @@ pub struct Job {
     /// A running app with no window, activated: hidden at its activation, shown again once
     /// its reopened window exists ([`super::plan::reopen_here`]).
     pub reopen: bool,
-    /// The app was shown again ([`Step::Unhide`] ran).
+    /// The app was shown again ([`Step::Unhide`] ran, or the platform did at a late hide).
     unhidden: bool,
+    /// A hide called off as too late took all the same ([`Job::hid_late`]).
+    pub late: bool,
+    /// The stage that was in front was brought back by a focus (the round trip): the app's
+    /// windows it left in the strip are taken in ahead of the settle ([`Job::pickup`]).
+    back: bool,
+    /// The step asked is the round trip's switch back: at rest is enough for it
+    /// ([`Arrangement::at_rest`]), the settle not waited.
+    switch_back: bool,
     /// When the unhide was asked.
     unhide_at: Option<Instant>,
     /// When the app's thumbnails were last pressed ([`Job::pickup`]).
@@ -302,6 +321,9 @@ impl Job {
             hidden_at: None,
             reopen: false,
             unhidden: false,
+            late: false,
+            back: false,
+            switch_back: false,
             unhide_at: None,
             pressed_at: None,
             app_seen: BTreeSet::new(),
@@ -323,6 +345,23 @@ impl Job {
             self.hidden = true;
             self.hidden_at = Some(now);
         }
+    }
+
+    /// A hide called off as too late (a window of the app showed first) took all the same at
+    /// `now`, and the platform showed the app again at once (live 11-17: Activity Monitor hid
+    /// 35 ms after its hide was called off, and Apple's put its window into the strip): the
+    /// hide route from here, its thumbnail taken in ahead of the settle, as an app shown
+    /// again by [`Step::Unhide`].
+    pub fn hid_late(&mut self, now: Instant) {
+        if self.hidden {
+            return;
+        }
+        self.hidden = true;
+        self.late = true;
+        self.hidden_at = Some(now);
+        self.unhidden = true;
+        self.unhide_at = Some(now);
+        self.report.unhide_ms.get_or_insert(ms(now, self.since));
     }
 
     /// When the job next wants an advance whatever the reads: the unhide's moment
@@ -425,6 +464,12 @@ impl Job {
         match step {
             Step::Focus(w) => {
                 self.report.focuses += 1;
+                // The stage that was in front brought back (the round trip's switch back).
+                if let Some(Goal::Gather { windows, app: Some(_), .. }) = self.goals.first()
+                    && windows.contains(w)
+                {
+                    self.back = true;
+                }
                 if self.focus_pending == Some(*w) {
                     self.focused_app = true;
                     // Every window was in front when the focus was asked: the gather is met,
@@ -588,7 +633,11 @@ impl Job {
         let a = cx.mirror;
         // Windows gone, and windows of a Desktop not shown (a focus would show it), are left.
         let mut want: Vec<u32> = windows.iter().copied().filter(|w| a.where_is(*w).is_some_and(|(p, _)| p != Where::Away)).collect();
+        // The windows to keep, front to back (the stage in front at the ask, for "open here").
+        let base = want.clone();
         let mut app_windows: Vec<u32> = Vec::new();
+        // The app's windows the window list shows by its pid, front to back.
+        let mut pid_order: Vec<u32> = Vec::new();
         // The app's windows the app does not manage, by its pid, whatever their ids or
         // subroles (a reused id, never tracked anew: Finder, live 11-16): at full size in front,
         // or a thumbnail with its point.
@@ -600,6 +649,7 @@ impl Job {
             for (w, seen) in a.seen_of(pid).filter(|(w, s)| (s.full || s.thumb) && !cx.pids.contains_key(w)) {
                 by_pid.insert(w, seen);
                 app_windows.push(w);
+                pid_order.push(w);
             }
             for w in &app_windows {
                 if self.app_seen.insert(*w) {
@@ -645,15 +695,27 @@ impl Job {
             }
             return Need::Met;
         }
-        // Every window that shows a point of its own at this read, in one Shift press: front
-        // to back within each item, the items top to bottom. Each point was taken with the
-        // windows listed in front of it counted (the gather's own not clicked yet too): the
-        // clicks before it in the press take those away, never onto it.
+        // The stage that was in front left (Apple's switched to the app's stage): brought back
+        // whole by a focus of its front window. Apple's own switch puts back its windows in
+        // their order, the ones it draws no thumbnail of too, and sends the app's stage to the
+        // strip; the app's windows are then Shift-clicked in (live 11-17: a stage of four
+        // Shift-clicked back took three presses, 7.3 s, and came back reversed).
+        if let Some(front) = base.first().copied()
+            && !base.iter().any(|w| a.current.contains(w))
+        {
+            self.switch_back = app.is_some();
+            return Need::Step(Step::Focus(front));
+        }
+        // Every window that shows a point of its own at this read, in one Shift press: back
+        // to front within each item (each lands on top: the order kept; the back one, whose
+        // part of its own is the smallest, clicked while the item is as read), the items top
+        // to bottom. Each point was taken with the windows listed in front of it counted (the
+        // gather's own not clicked yet too).
         let in_strip: Vec<u32> = a
             .strip
             .iter()
-            .flat_map(|g| g.windows.iter().copied())
-            .chain(by_pid.iter().filter(|(_, s)| s.thumb).map(|(w, _)| *w))
+            .flat_map(|g| g.windows.iter().rev().copied())
+            .chain(pid_order.iter().rev().copied().filter(|w| by_pid.get(w).is_some_and(|s| s.thumb)))
             .filter(|w| missing.contains(w))
             .collect();
         let at = |w: &u32| a.click_at.get(w).copied().or_else(|| by_pid.get(w).and_then(|s| s.click_at));
@@ -672,14 +734,15 @@ impl Job {
         }
     }
 
-    /// An app hidden by us at its launch or activation, taken in ahead of the settle (module
-    /// docs): `None` hands the job to the goals after the settle (not hidden, a full-screen
-    /// app's Space, or the stage in front left: the round trip).
+    /// An app hidden by us at its launch or activation, or one the round trip's switch back
+    /// left in the strip, taken in ahead of the settle (module docs): `None` hands the job to
+    /// the goals after the settle (neither, a full-screen app's Space, or the stage in front
+    /// left: the round trip).
     fn pickup(&mut self, cx: &Ctx, now: Instant) -> Option<Next> {
         let Intent::OpenHere(pid) = self.intent else { return None };
         let Some(Goal::Gather { windows, app: Some(_), focus_app }) = self.goals.first().cloned() else { return None };
         let a = cx.mirror;
-        if !self.hidden || a.full_screen {
+        if !(self.hidden || self.back) || a.full_screen {
             return None;
         }
         let mine: Vec<(u32, Seen)> = a.seen_of(pid).collect();
@@ -703,7 +766,7 @@ impl Job {
         }
         let thumbs: Vec<(u32, Seen)> = mine.iter().filter(|(_, s)| s.thumb).copied().collect();
         let front: Vec<(u32, Seen)> = mine.iter().filter(|(_, s)| s.full).copied().collect();
-        if !self.unhidden && thumbs.is_empty() {
+        if self.hidden && !self.unhidden && thumbs.is_empty() {
             if !front.is_empty() {
                 return None;
             }
@@ -724,8 +787,8 @@ impl Job {
             if thumbs.iter().any(|(_, s)| s.still < STILL_FOR) {
                 return Some(self.wait("the app's thumbnail to rest"));
             }
-            // Every thumbnail of the app in one Shift press, front to back.
-            let presses: Vec<Press> = thumbs.iter().filter_map(|(w, s)| s.click_at.map(|at| Press { window: *w, at })).collect();
+            // Every thumbnail of the app in one Shift press, back to front (the order kept).
+            let presses: Vec<Press> = thumbs.iter().rev().filter_map(|(w, s)| s.click_at.map(|at| Press { window: *w, at })).collect();
             if presses.is_empty() {
                 let hold = if thumbs.iter().any(|(_, s)| s.bounds.max_x() <= cx.screen.frame.x) { Hold::StripCovered } else { Hold::NoPoint };
                 if self.waiting.hold(hold, now) {
@@ -760,12 +823,18 @@ impl Job {
             }
             return None;
         }
+        // Nothing of it shows after the switch back: the goals after the settle say.
+        if !self.hidden {
+            return None;
+        }
         // Shown again, nothing of it shows yet.
         let (limit, words) = match self.reopen {
             true => (self.unhide_at.map(|t| t + REOPEN_THUMB), format!("app {pid} showed no thumbnail in {} ms of its unhide: activated", REOPEN_THUMB.as_millis())),
             false => (Some(self.since + FIRST_WINDOW), format!("app {pid} showed no window in {} s: activated", FIRST_WINDOW.as_secs())),
         };
-        if limit.is_some_and(|l| now > l) {
+        // Once a window of it showed (the round trip's switch back sends it to the strip
+        // anew), the job's deadline alone bounds the wait.
+        if self.app_seen.is_empty() && limit.is_some_and(|l| now > l) {
             return Some(self.give_up(cx, now, words));
         }
         Some(self.wait("the app's thumbnail"))
@@ -773,10 +842,13 @@ impl Job {
 
     /// `step` through the gate and the retry count.
     fn try_step(&mut self, mut step: Step, cx: &Ctx, now: Instant) -> Next {
+        // The round trip's switch back goes once at rest: a focus aims at nothing on screen, so
+        // the settle's wait after the last frame of Apple's motion is not its own.
+        let rest_enough = std::mem::take(&mut self.switch_back) && cx.mirror.at_rest();
         let gated = match &mut step {
             // A focus that switches stages waits for the settle; one in the stage in front (a
             // raise, the newly opened app's focus) goes at once.
-            Step::Focus(w) if !cx.mirror.settled && !cx.mirror.current.contains(w) => Err(Hold::InMotion),
+            Step::Focus(w) if !cx.mirror.settled && !rest_enough && !cx.mirror.current.contains(w) => Err(Hold::InMotion),
             Step::Focus(_) => gate::focus_gate(&cx.input, cx.in_flight),
             Step::Post(posted) => gate::gate(&cx.input, cx.mirror.settled, cx.in_flight).map(|go| {
                 if let Posted::Clicks { own_shift, .. } = posted {

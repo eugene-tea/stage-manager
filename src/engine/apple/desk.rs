@@ -57,7 +57,8 @@ pub enum Posted {
     /// `own_shift` false), each click with no hold and the pointer warped back at once, the
     /// next [`CLICK_GAP`] later, Shift up about 12 ms after the last.
     Clicks {
-        /// The clicks, in order (front to back within an item, the items top to bottom).
+        /// The clicks, in order (back to front within an item, the items top to bottom: each
+        /// lands its window on top, so the windows keep their order).
         presses: Vec<Press>,
         /// A Shift key-down and key-up of ours around them.
         own_shift: bool,

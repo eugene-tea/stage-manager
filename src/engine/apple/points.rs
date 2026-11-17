@@ -6,8 +6,8 @@
 //! one, a live capture of 11-16: 85x97 at x = 32 over 87x97 at x = 15) or under its app icon
 //! (66x82 at x = -7) still shows a part of its own; a click there takes that window alone
 //! (a Shift-click adds only the window clicked). One fully under the others has no point of
-//! its own: the routes click front to back, each click taking the front one away and
-//! uncovering the next.
+//! its own: it is clicked at the next settle, once the clicks of the press before took the
+//! ones over it away (a press goes back to front: the job's docs).
 
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::Display;

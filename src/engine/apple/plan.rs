@@ -113,7 +113,7 @@ pub fn switch_job(a: &Arrangement, n: usize, key: impl Fn(&[u32]) -> Option<u32>
     Ok(Job::new(Intent::Switch(n), vec![Goal::Front(window)], now))
 }
 
-/// Stage `n`'s windows into the stage in front: a Shift-click on each, front to back. A stage
+/// Stage `n`'s windows into the stage in front: a Shift-click on each, back to front. A stage
 /// not listed (past the strip's room) is brought in front first and the stage left
 /// Shift-clicked back.
 pub fn merge(a: &Arrangement, n: usize, now: std::time::Instant) -> Result<Job, Refusal> {
