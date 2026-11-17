@@ -439,6 +439,13 @@ impl AppleController {
             tracing::warn!(pid, bundle, "apple mode: a newly opened app to open here, too many steps waiting: Apple's own");
             return;
         }
+        if !plan::may_hide(bundle) {
+            // Hiding it would hide the Desktop with it (Finder, live 11-16: an empty stage).
+            tracing::info!(pid, bundle, "apple mode: never hidden (it owns the Desktop): the round trip once its window shows");
+            self.jobs.push_back(job);
+            self.watch();
+            return;
+        }
         match launch_hide::start(pid, moment) {
             Ok(h) => {
                 self.hidings.insert(pid, h);
@@ -802,6 +809,16 @@ impl AppleController {
                 // When it took, not when this read heard of it: the unhide counts from there.
                 j.hide_took((h.since + Duration::from_millis(ms)).min(now));
             }
+            // Not hidden by the hide (a window showed first, or it timed out), yet a `hide()`
+            // asked before may take late: the app shown again, the round trip goes on.
+            if let Intent::OpenHere(pid) = j.intent
+                && !j.hidden
+                && let Some(HideOutcome::TooLate { .. } | HideOutcome::TimedOut { .. }) = self.hidings.get(&pid).and_then(Hiding::outcome)
+                && launch_hide::is_hidden(pid)
+            {
+                tracing::info!(pid, "apple mode: the app hid after its hide was called off: shown again");
+                launch_hide::unhide(pid);
+            }
         }
         // A step at a time: each advance runs at most one, against its screen's mirror.
         let Some(main) = self.screen() else { return };
@@ -840,7 +857,10 @@ impl AppleController {
                     tracing::info!(window = w, "apple mode: given up: the newly opened app's stage brought in front, as Apple's own would");
                     let _ = self.run_step(ob, screen, &Step::Focus(w), now);
                 }
-                if let Some(pid) = report.unhide {
+                if let Some(pid) = report.unhide
+                    && launch_hide::is_hidden(pid)
+                {
+                    tracing::info!(pid, "apple mode: given up: the app shown again");
                     launch_hide::unhide(pid);
                 }
                 if let Some(pid) = report.activate {
@@ -881,10 +901,14 @@ impl AppleController {
             Intent::OpenHere(pid) => self.hidings.remove(&pid).and_then(|h| h.outcome()),
             _ => None,
         };
+        if let Some(why) = report.round_trip_why {
+            tracing::info!(intent = ?job.intent, "apple mode: {why}");
+        }
         match &report.given_up {
             None => tracing::info!(
                 intent = ?job.intent,
                 route = report.route,
+                round_trip = report.round_trip_why,
                 ms = report.ms,
                 first_window_ms = report.first_window_ms,
                 unhide_ms = report.unhide_ms,

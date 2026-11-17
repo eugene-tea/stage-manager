@@ -653,6 +653,53 @@ fn a_running_apps_window_shown_before_the_hide_took_comes_back_by_the_round_trip
     assert_eq!(sorted(f.current()), vec![1, 2, 5], "one stage with both");
 }
 
+/// Finder (live 11-16): never hidden (it owns the Desktop; hidden, its stage read empty), or
+/// its window showed before the hide took (`TooLate`). It reuses the window it ordered out,
+/// an id seen before and never tracked anew as a standard window, so no first window is ever
+/// recognised: the app's window in front is taken by its pid, the stage that left gathered
+/// back in one Shift press, the window focused.
+#[test]
+fn finders_reused_window_shown_before_any_hide_comes_back_by_the_round_trip_by_its_pid() {
+    let (mut f, a) = three();
+    f.open_app(40, &[5]);
+    let a = settle(&mut f, &a);
+    f.focus_window(4);
+    let a = settle(&mut f, &a);
+    f.close(5);
+    let mut a = settle(&mut f, &a);
+    assert!(!plan::may_hide("com.apple.finder"));
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
+    // Never hidden: the window shows at once, Apple's switches to a stage of its own.
+    a.step_began(f.now());
+    f.loose.insert(5);
+    f.reopen(40, 5, false);
+    let d = drive_every(&mut f, &mut a, &mut job, 6000, FAST, |_, _| {});
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("round_trip"));
+    assert!(r.round_trip_why.is_some_and(|w| w.contains("before it was hidden")), "{r:?}");
+    assert_eq!(presses(&d.steps), vec![vec![4]], "the stage that left, in one press");
+    assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)));
+    assert_eq!(sorted(f.current()), vec![4, 5], "one stage with both");
+    assert!(f.unhidden.is_empty());
+    assert!(r.ms < 3000, "done in {} ms", r.ms);
+}
+
+/// Every give-up of "open here" shows the app again as well as activating it: a `hide()`
+/// asked before may take after the job knew of it (Finder, live 11-16, left hidden).
+#[test]
+fn every_give_up_of_open_here_shows_the_app_again_and_activates_it() {
+    let (mut f, mut a) = three();
+    // Not hidden by the job's account (the hide came too late), and nothing of it ever shows.
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("planned");
+    let r = drive(&mut f, &mut a, &mut job, 6000).end.expect("ended").expect_err("given up");
+    assert_eq!((r.unhide, r.activate), (Some(40), Some(40)), "{r:?}");
+    // A launch hidden by us that never shows a window: the same.
+    let mut job = plan::open_here(&a, 41, f.now()).expect("planned");
+    job.hide_took(f.now());
+    let r = drive(&mut f, &mut a, &mut job, 20_000).end.expect("ended").expect_err("given up");
+    assert_eq!((r.unhide, r.activate), (Some(41), Some(41)), "{r:?}");
+}
+
 /// An app with a window in some stage: no job, nothing hidden; Apple's activation switches to
 /// that stage, as it should.
 #[test]

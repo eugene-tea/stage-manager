@@ -175,6 +175,9 @@ pub struct Report {
     pub ms: u64,
     /// From the ask to the newly opened app's first window seen, in ms.
     pub first_window_ms: Option<u64>,
+    /// Why the round trip ran, said plainly in the log.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round_trip_why: Option<&'static str>,
     /// From the ask to the app shown again (the hide at its activation), in ms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unhide_ms: Option<u64>,
@@ -190,8 +193,8 @@ pub struct Report {
     pub given_up: Option<String>,
     /// Run after a give-up to leave Apple's own arrangement.
     pub undo: Option<Step>,
-    /// A newly opened app to unhide after a give-up (the hide route took and its window
-    /// never came in).
+    /// The app to unhide after a give-up of "open here": always (a hide asked may take after
+    /// the job knew of it).
     pub unhide: Option<i32>,
     /// An app to activate after a give-up: hidden at its launch or activation, nothing of it
     /// came in (the activation the person asked for, given back).
@@ -586,10 +589,18 @@ impl Job {
         // Windows gone, and windows of a Desktop not shown (a focus would show it), are left.
         let mut want: Vec<u32> = windows.iter().copied().filter(|w| a.where_is(*w).is_some_and(|(p, _)| p != Where::Away)).collect();
         let mut app_windows: Vec<u32> = Vec::new();
+        // The app's windows the app does not manage, by its pid, whatever their ids or
+        // subroles (a reused id, never tracked anew: Finder, live 11-16): at full size in front,
+        // or a thumbnail with its point.
+        let mut by_pid: BTreeMap<u32, Seen> = BTreeMap::new();
         if let Some(pid) = app {
             // Front to back: the stage in front's order, then the strip's.
             let order = a.current.iter().chain(a.strip.iter().flat_map(|g| g.windows.iter())).chain(a.remembered.iter().flat_map(|g| g.windows.iter()));
             app_windows = order.copied().filter(|w| cx.pids.get(w) == Some(&pid)).collect();
+            for (w, seen) in a.seen_of(pid).filter(|(w, s)| (s.full || s.thumb) && !cx.pids.contains_key(w)) {
+                by_pid.insert(w, seen);
+                app_windows.push(w);
+            }
             for w in &app_windows {
                 if self.app_seen.insert(*w) {
                     self.report.first_window_ms.get_or_insert(ms(now, self.since));
@@ -603,13 +614,16 @@ impl Job {
                 return Need::Wait("the app's first window");
             }
             if self.report.route.is_none() {
-                let app_in_front = app_windows.iter().any(|w| a.current.contains(w));
+                let app_in_front = app_windows.iter().any(|w| a.current.contains(w) || by_pid.get(w).is_some_and(|s| s.full));
                 let before_in_front = want.iter().all(|w| a.current.contains(w));
                 self.report.route = Some(match (app_in_front && !before_in_front, self.reopen) {
                     (true, _) => "round_trip",
                     (false, true) => "hide_activation",
                     (false, false) => "hide",
                 });
+                if app_in_front && !before_in_front && !self.hidden {
+                    self.report.round_trip_why.get_or_insert("a window of the app showed before it was hidden: the round trip");
+                }
             }
             for w in &app_windows {
                 if !want.contains(w) {
@@ -617,12 +631,13 @@ impl Job {
                 }
             }
         }
-        let missing: BTreeSet<u32> = want.iter().copied().filter(|w| !a.current.contains(w)).collect();
+        let in_front = |w: &u32| a.current.contains(w) || by_pid.get(w).is_some_and(|s| s.full);
+        let missing: BTreeSet<u32> = want.iter().copied().filter(|w| !in_front(w)).collect();
         if missing.is_empty() {
             // Every window in front at this read: the app's front window focused at once (a
             // window of the stage in front: it switches nothing, no settle waited).
             if focus_app && !self.focused_app {
-                let front = app_windows.iter().copied().find(|w| a.current.contains(w)).or_else(|| want.first().copied());
+                let front = app_windows.iter().copied().find(in_front).or_else(|| want.first().copied());
                 if let Some(front) = front {
                     self.focus_pending = Some(front);
                     return Need::Step(Step::Focus(front));
@@ -634,8 +649,15 @@ impl Job {
         // to back within each item, the items top to bottom. Each point was taken with the
         // windows listed in front of it counted (the gather's own not clicked yet too): the
         // clicks before it in the press take those away, never onto it.
-        let in_strip: Vec<u32> = a.strip.iter().flat_map(|g| g.windows.iter().copied()).filter(|w| missing.contains(w)).collect();
-        let presses: Vec<Press> = in_strip.iter().filter_map(|w| a.click_at.get(w).map(|at| Press { window: *w, at: *at })).collect();
+        let in_strip: Vec<u32> = a
+            .strip
+            .iter()
+            .flat_map(|g| g.windows.iter().copied())
+            .chain(by_pid.iter().filter(|(_, s)| s.thumb).map(|(w, _)| *w))
+            .filter(|w| missing.contains(w))
+            .collect();
+        let at = |w: &u32| a.click_at.get(w).copied().or_else(|| by_pid.get(w).and_then(|s| s.click_at));
+        let presses: Vec<Press> = in_strip.iter().filter_map(|w| at(w).map(|at| Press { window: *w, at })).collect();
         if !presses.is_empty() {
             return Need::Step(Step::Post(Posted::Clicks { presses, own_shift: true }));
         }
@@ -670,6 +692,10 @@ impl Job {
         // trip, after the settle.
         let left = windows.iter().any(|w| a.seen.iter().any(|(id, s)| id == w && s.thumb));
         if left {
+            if self.unhidden {
+                // Some apps activate themselves when shown again (1Password, live 11-16).
+                self.report.round_trip_why.get_or_insert("the app came in front by itself after its unhide: the round trip");
+            }
             return None;
         }
         if cx.in_flight {
@@ -834,12 +860,13 @@ impl Job {
             let a = cx.mirror;
             let in_front = a.current.iter().any(|w| cx.pids.get(w) == Some(&pid)) || a.seen_of(pid).any(|(_, s)| s.full && s.still >= STILL_FOR);
             let waiting = a.strip.iter().chain(&a.remembered).flat_map(|g| g.windows.iter()).copied().find(|w| cx.pids.get(w) == Some(&pid));
+            // Shown again whatever happened (a hide asked may take after the job knew of it:
+            // Finder, live 11-16, left hidden with its stage empty).
+            self.report.unhide = Some(pid);
             if !in_front {
                 self.report.undo = waiting.map(Step::Focus);
-                if self.hidden && waiting.is_none() {
-                    self.report.unhide = Some(pid);
-                    // Hidden at its launch or activation: the activation the person asked for,
-                    // given back.
+                if waiting.is_none() {
+                    // The activation the person asked for, given back.
                     self.report.activate = Some(pid);
                 }
             }

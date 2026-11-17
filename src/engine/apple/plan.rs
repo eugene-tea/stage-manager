@@ -209,6 +209,16 @@ pub fn open_here(a: &Arrangement, pid: i32, now: std::time::Instant) -> Option<J
     Some(Job::new(Intent::OpenHere(pid), vec![Goal::Gather { windows: a.current.clone(), app: Some(pid), focus_app: true }], now))
 }
 
+/// Apps never hidden for "open here" (they go by the round trip): Finder owns the Desktop, and
+/// hiding it hides the Desktop too; its reopened window never showed and Apple's stage read
+/// empty (live 11-16).
+pub const NEVER_HIDDEN: &[&str] = &["com.apple.finder"];
+
+/// True when app `bundle` may be hidden at its launch or activation for "open here".
+pub fn may_hide(bundle: &str) -> bool {
+    !NEVER_HIDDEN.iter().any(|b| b.eq_ignore_ascii_case(bundle))
+}
+
 /// Running app `pid` activated (a Dock click, `open`, ⌘Tab) where the rules want its next
 /// window in the stage in front: [`open_here`]'s goal, for a job that hides the app at its
 /// activation and shows it again a moment later ([`Job::reopen`]). `None`
@@ -243,6 +253,14 @@ mod tests {
         assert_eq!(switch(&a, 3, |_| None), Ok(vec![Step::Focus(7)]), "a remembered stage: focus needs only a known window");
         assert!(switch(&a, 4, |_| None).is_err());
         assert!(switch(&a, 0, |_| None).is_err());
+    }
+
+    #[test]
+    fn finder_is_never_hidden_for_open_here() {
+        assert!(!may_hide("com.apple.finder"));
+        assert!(!may_hide("com.apple.Finder"));
+        assert!(may_hide("com.apple.ActivityMonitor"));
+        assert!(may_hide("com.1password.1password"));
     }
 
     #[test]

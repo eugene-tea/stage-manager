@@ -290,7 +290,9 @@ no strip of its own.
   as it activates, shown again a moment later, so its window lands in Apple's strip,
   then Shift-clicked in and brought forward. An app with a window in any stage is left to
   Apple's Stage Manager, which brings that stage to the front. An app that opens no window
-  is shown again and activated about two seconds later.
+  is shown again and activated about two seconds later. Finder is never hidden (hiding it
+  hides the desktop too): its window takes a stage of its own for a moment, then the stage
+  that was in front joins it.
 - After a restart or a new login, Apple's stages are put back as they were saved
   (`[stages] restore_with_apple`, on by default), once the reopened windows have shown: a
   window of each stage is brought to the front, the stage's other windows are Shift-clicked
