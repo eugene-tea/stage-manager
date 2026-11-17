@@ -721,9 +721,15 @@ def phase_open_running():
         charlie = pids(app)
         if not check(len(charlie) == 1, f"one Charlie process ({charlie})"):
             return
-        os.kill(charlie[0], signal.SIGURG)
-        if not check(wait_until(lambda: (lambda s: s if not windows_of(s, "Charlie") and idle_jobs(s) else None)(ctl("state")), 8, "Charlie with no window") is not None,
-                     "Charlie running with no window (SIGURG closed it)"):
+        # SIGURG closes the last window opened; a window it left (live 11-16: the first one
+        # stayed) gets another, up to three.
+        closed = None
+        for _ in range(3):
+            os.kill(charlie[0], signal.SIGURG)
+            closed = wait_until(lambda: (lambda s: s if not windows_of(s, "Charlie") and idle_jobs(s) else None)(ctl("state")), 3, "Charlie with no window")
+            if closed is not None:
+                break
+        if not check(closed is not None, "Charlie running with no window (SIGURG closed it)"):
             return
         write_config(f'[[rule]]\napp = "{bundle}"\naction = "current"\n')
         check(ctl("reload").get("ok"), "config reloaded with a current rule for Charlie")
