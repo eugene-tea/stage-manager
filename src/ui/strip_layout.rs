@@ -22,6 +22,9 @@
 //!   window held at `min_height` (the card as a whole is), the front window (the stage's
 //!   last used) in front, a second app's windows `second_app_dx` toward the side they sit on
 //!   on the screen and `second_app_dy` up, so the card stays about a single card's size.
+//! - **Spread** (`[strip] card_layout = "apple"`, measured 11-16): a card of several apps
+//!   steps each window out by a share of the one beside it instead ([`crate::ui::card_spread`]);
+//!   `"spread_covered"` only when a window would show less than `spread_covered_share`.
 //! - **Icon.** Centered `center_dx` right of the card's leftmost window's left edge and
 //!   `center_dy` down from the card's bottom.
 //!

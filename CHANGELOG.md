@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- New setting `[strip] card_layout` (`"stacked"`, `"apple"` or `"spread_covered"`, applied
+  when the config file is saved). It chooses how a card of several apps places its windows:
+  `"stacked"`, the default, at the fixed offsets as before, where a window behind a wider one
+  can hide; `"apple"` spreads them as Apple's strip does (fitted to cards measured on
+  Apple's), so the window behind stays readable; `"spread_covered"` spreads only a card
+  where a window would show less than 30 % of itself. The `[cards] spread_*` keys hold the
+  spread's measured numbers.
 - A window tab selected (Terminal, Finder, any app with window tabs) belongs to the stage
   of its tab group: it takes the place of the tab it hides, and goes with its stage when
   another stage is chosen. A tab selected was let go with no stage, and selected again it

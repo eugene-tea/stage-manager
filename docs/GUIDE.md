@@ -85,6 +85,12 @@ them opaque); the card under the pointer turns solid as it grows (`[cards]
 hover_window_opacity`, set to the same value as `window_opacity` to keep it see-through).
 A card still waiting for a window's picture (at launch) is faint glass until the picture
 fades in (`[cards] empty_opacity`, `fade_ms`).
+A card of several apps stacks its windows at small fixed offsets, so a window behind a wider
+one can hide behind it. `[strip] card_layout = "apple"` spreads them as Apple's strip does:
+each window steps out from the one beside it, a narrower one further, so the one behind
+stays readable; `"spread_covered"` spreads only a card where a window would show less than
+30 % of itself (`[cards] spread_covered_share`). The strip redraws as soon as the config file
+is saved, so the three can be compared in turn.
 The strip sits below your windows: a window over the cards covers them, and when a window
 covers their left edge too (about 20 points from the screen's edge), the strip slides away. Rest the
 pointer at the left edge of the screen to bring it back.
