@@ -86,6 +86,12 @@ UX-SPEC, "Known gaps".
   its card shows grey tiles (11-16); Apple's keeps them playing. Option, the owner's call: a
   hidden call window (or the apps the config names) stays on its Desktop, parked in the
   corner as the Corner engine does.
+- **The strip revealed at the edge, flat (Apple's, 11-16).** With the strip hidden (a window
+  over its column), a pointer at the left edge brings Apple's strip in with its cards flat,
+  facing the viewer, and larger than in the tilted strip; ours slides the tilted strip back.
+  Record Apple's (a capture of the reveal: the cards' pose, size, spacing, shadow, the slide
+  in and out and its timing, and what a card does when the pointer leaves), then match it,
+  pose as well as speed (track the cards' corners frame by frame, not only the timing).
 - **Card pictures: spread like Apple's, as switchable variants.** Ours follow the windows'
   real layout, so a window mostly behind another hardly shows (VS Code over Terminal, 11-16);
   Apple's spreads them. Variants for the owner to compare from the menu: the real layout,
