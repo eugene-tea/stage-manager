@@ -15,7 +15,7 @@
   hidden as it launches, so Apple's Stage Manager keeps the stage in front, then brought in.
   The same goes for a running app with no window that opens one as it is activated (a Dock
   click on Notes or Activity Monitor): it is hidden as it activates, shown again a moment
-  later, and brought in. Finder is never hidden. When the app's window shows before the
+  later, and brought in. Finder is left to Apple's Stage Manager. When the app's window shows before the
   hide takes, the stage that was in front comes back as it was, its windows in their order
   and in one go, with the app's window on top.
 - New setting `[stages] restore_with_apple`, on by default. With `[windows] with_apple =

@@ -490,10 +490,10 @@ impl AppleController {
             return;
         }
         if !plan::may_hide(bundle) {
-            // Hiding it would hide the Desktop with it (Finder, live 11-16: an empty stage).
-            tracing::info!(pid, bundle, "apple mode: never hidden (it owns the Desktop): the round trip once its window shows");
-            self.jobs.push_back(job);
-            self.watch();
+            // Hiding it would hide the Desktop with it (Finder, live 11-16: an empty stage), and
+            // the round trip in its place reads as Apple's switching to Finder's stage and back
+            // (the owner, 11-17: "Finder goes too far in breaking that feel"): Apple's own.
+            tracing::info!(pid, bundle, "apple mode: never hidden (it owns the Desktop): Apple's own, its window in a stage of its own");
             return;
         }
         match launch_hide::start(pid, moment) {

@@ -287,13 +287,13 @@ no strip of its own.
   or its recent apps hidden) the click waits for the strip to show, a few seconds at most;
   then the app is left in a stage of its own, as Apple's Stage Manager puts it.
 - The same goes for an app that is already running with no window and opens one as it is
-  activated (a Dock click on Finder, Notes or Activity Monitor, `open`, ⌘Tab): it is hidden
+  activated (a Dock click on Notes or Activity Monitor, `open`, ⌘Tab): it is hidden
   as it activates, shown again a moment later, so its window lands in Apple's strip,
   then Shift-clicked in and brought forward. An app with a window in any stage is left to
   Apple's Stage Manager, which brings that stage to the front. An app that opens no window
-  is shown again and activated about two seconds later. Finder is never hidden (hiding it
-  hides the desktop too): its window takes a stage of its own for a moment, then the stage
-  that was in front comes back and the window joins it.
+  is shown again and activated about two seconds later. Finder is left to Apple's Stage
+  Manager (hiding it hides the desktop too): its new window takes a stage of its own, as
+  in Apple's.
 - After a restart or a new login, Apple's stages are put back as they were saved
   (`[stages] restore_with_apple`, on by default), once the reopened windows have shown: a
   window of each stage is brought to the front, the stage's other windows are Shift-clicked
