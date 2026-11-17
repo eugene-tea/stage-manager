@@ -306,9 +306,11 @@ pub const KEYS: &[KeyDef] = &[
     // [reveal]
     k("reveal", "edge_width", f(0.0, 100.0), "2.0", "The pointer within this many points of the left edge counts as at the edge."),
     k("reveal", "delay_ms", i(0, 10_000), "130",
-        "Resting at the left edge this long brings a hidden strip back (Apple's slide starts about 180 ms after the pointer reaches the edge; the poll and the drawing take the rest)."),
+        "Resting at the left edge this long brings a hidden strip back; a move starts the rest again (Apple's slide starts about 180 ms after the pointer comes to rest there; the poll and the drawing take the rest)."),
     k("reveal", "hide_delay_ms", i(0, 10_000), "500", "A strip brought back hides again this long after the pointer leaves it."),
     k("reveal", "poll_ms", i(10, 1000), "30", "How often the pointer is checked while it rests at the edge or the strip is brought back."),
+    k("reveal", "flat", Kind::Bool, "true",
+        "A strip brought back at the left edge shows its cards flat, facing the viewer, and turns them back as it slides away, as Apple's does; false keeps them turned."),
     k("reveal", "edge_tab", Kind::Bool, "false", "Show a slim tab at the left edge while a window hides the strip (an extension)."),
     k("reveal", "launch_reveal", Kind::Bool, "false", "Show a covered strip for a moment at launch (an extension)."),
     k("reveal", "launch_reveal_ms", i(0, 60_000), "3000", "How long that launch showing lasts."),
@@ -604,6 +606,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-42.toml"),
     include_str!("legacy/default-43.toml"),
     include_str!("legacy/default-44.toml"),
+    include_str!("legacy/default-45.toml"),
 ];
 
 #[cfg(test)]

@@ -201,6 +201,8 @@ pub struct RevealStyle {
     pub delay_ms: u64,
     pub hide_delay_ms: u64,
     pub poll_ms: u64,
+    /// A strip brought back at the edge shows its cards flat (Apple's, recorded 11-16).
+    pub flat: bool,
     pub edge_tab: bool,
     pub launch_reveal: bool,
     pub launch_reveal_ms: u64,
@@ -1030,6 +1032,7 @@ impl Config {
                     delay_ms: v.uint("reveal.delay_ms"),
                     hide_delay_ms: v.uint("reveal.hide_delay_ms"),
                     poll_ms: v.uint("reveal.poll_ms"),
+                    flat: v.flag("reveal.flat"),
                     edge_tab: v.flag("reveal.edge_tab"),
                     launch_reveal: v.flag("reveal.launch_reveal"),
                     launch_reveal_ms: v.uint("reveal.launch_reveal_ms"),
@@ -1451,6 +1454,7 @@ mod tests {
         assert_eq!((d.appear_ms, d.window_grab_x, d.window_grab_y), (100, 96.0, 100.0), "Apple's card dragged out, measured 11-09");
         let r = &c.style.reveal;
         assert_eq!((r.delay_ms, r.poll_ms), (130, 30), "Apple's edge reveal, measured 11-09");
+        assert!(r.flat, "a strip brought back at the edge shows its cards flat, as Apple's (recorded 11-16)");
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "the owner's laptop");
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
     }

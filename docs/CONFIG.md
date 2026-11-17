@@ -118,9 +118,10 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `motion.slide_mass` | `1.0` | number, 0.01 to 100 | Spring mass of the slide. |
 | `motion.slide_distance` | `286.0` | number, 0 to 3000 | How far left the cards slide when the strip hides; further when the widest card needs it to leave the screen. |
 | `reveal.edge_width` | `2.0` | number, 0 to 100 | The pointer within this many points of the left edge counts as at the edge. |
-| `reveal.delay_ms` | `130` | whole number, 0 to 10000 | Resting at the left edge this long brings a hidden strip back (Apple's slide starts about 180 ms after the pointer reaches the edge; the poll and the drawing take the rest). |
+| `reveal.delay_ms` | `130` | whole number, 0 to 10000 | Resting at the left edge this long brings a hidden strip back; a move starts the rest again (Apple's slide starts about 180 ms after the pointer comes to rest there; the poll and the drawing take the rest). |
 | `reveal.hide_delay_ms` | `500` | whole number, 0 to 10000 | A strip brought back hides again this long after the pointer leaves it. |
 | `reveal.poll_ms` | `30` | whole number, 10 to 1000 | How often the pointer is checked while it rests at the edge or the strip is brought back. |
+| `reveal.flat` | `true` | true or false | A strip brought back at the left edge shows its cards flat, facing the viewer, and turns them back as it slides away, as Apple's does; false keeps them turned. |
 | `reveal.edge_tab` | `false` | true or false | Show a slim tab at the left edge while a window hides the strip (an extension). |
 | `reveal.launch_reveal` | `false` | true or false | Show a covered strip for a moment at launch (an extension). |
 | `reveal.launch_reveal_ms` | `3000` | whole number, 0 to 60000 | How long that launch showing lasts. |

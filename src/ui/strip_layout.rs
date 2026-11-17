@@ -125,6 +125,13 @@ impl Metrics {
         }
     }
 
+    /// The same metrics with no turn: the strip brought back at the left edge draws its cards
+    /// flat, facing the viewer, at the size they have before the turn (Apple's, recorded 11-16:
+    /// [`crate::ui::edge_flat`]). Every projection then is the plane itself.
+    pub fn flat(&self) -> Metrics {
+        Metrics { tilt: 0.0, ..self.clone() }
+    }
+
     /// A window's thumbnail before the turn: the window scaled by `full_height / visible
     /// height`, at least `min_height` tall, at most `max_width` wide (aspect kept).
     pub fn thumb_size(&self, frame: &Rect) -> Size {
@@ -269,7 +276,14 @@ impl Metrics {
     /// `hover_scale` times the widest card; dragged within the column it follows the pointer,
     /// pressed at its left edge at the most, up to the column's right edge, so its right part
     /// reaches that span past the column. Shadows add theirs. Never wider than the screen.
+    /// The cards drawn flat (the strip brought back at the edge, [`Metrics::flat`]) reach
+    /// further than turned ones, so the panel has room for them in either pose.
     pub fn panel_width(&self) -> f64 {
+        self.panel_width_posed().max(self.flat().panel_width_posed())
+    }
+
+    /// [`Metrics::panel_width`] for the cards in this pose only.
+    fn panel_width_posed(&self) -> f64 {
         let (left, right) = (self.card_left(), self.card_right());
         let grow = self.hover_scale.max(1.0);
         let span = (right - left).max(0.0) * grow;
@@ -759,11 +773,14 @@ mod tests {
 
     #[test]
     fn the_panel_has_room_for_the_widest_card_grown_and_dragged_to_the_columns_edge() {
-        for m in [laptop(), five_k()] {
+        // Turned, and flat as the strip brought back at the edge draws it, in one panel.
+        for (m, panel) in [laptop(), five_k()].into_iter().flat_map(|m| {
+            let panel = m.panel_width();
+            [(m.flat(), panel), (m, panel)]
+        }) {
             let l = widest(&m);
             let rest = l.bounds(&m);
             assert!(rest.max_x() > m.width, "the second app's window reaches past the column ({} > {})", rest.max_x(), m.width);
-            let panel = m.panel_width();
             let hovered = grown(&l, &m, m.hover_scale);
             assert!(hovered.max_x() + m.shadow <= panel, "grown under the pointer: {} in {panel}", hovered.max_x());
             // Drawn grown, each window about its own middle: within that bound.
