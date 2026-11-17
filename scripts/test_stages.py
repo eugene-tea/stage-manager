@@ -4733,14 +4733,10 @@ def phase_cards():
         if not check(s is not None, "app up with the fixture and three fixture apps"):
             return
         vis = s["display"]["visible"]
-        # Apple's numbers are the laptop's (1130 pt of visible height). On another screen the
-        # plain scale differs (161 pt over its visible height) and the scale floor binds where
-        # it did not there: Apple's card is compared scaled to ours by the tallest window's
-        # height (the fixed 12 and 19 pt raises do not scale: within 4 pt).
-        laptop = abs(vis["h"] - 1130) < 2
-        tol = 2.5 if laptop else 4.0
-        if not laptop:
-            say(f"  note: visible height {vis['h']:.0f} pt, not the laptop's 1130: Apple's cards scaled to ours, within {tol} pt")
+        # Apple's spread card is the same on every screen (11-16: "side" on the laptop and on a
+        # 2560 x 1440 display, to the point), so its numbers hold here whatever the screen;
+        # within 3 pt (the window list rounds to the point, the raise read 12 to 15).
+        tol = 3.0
         t = by_title(s)
         hold = t["Fixture 1"]["id"]
         wid = {k: t[f"{EXTRA[k][3]} 1"]["id"] for k in "abc"}
@@ -4757,28 +4753,32 @@ def phase_cards():
                 if k not in frames:
                     do("send", holder, wid[k])
             do("switch", target)
-            time.sleep(0.8)
-            for k, (x, y, w, h) in frames.items():
-                # The frames as measured on the laptop, whose visible frame starts at y = 39.
-                ctl("debug-frame", wid[k], vis["x"] + x, vis["y"] + y - 39, w, h)
-            # The stacking: each app activated back to front. A switch focuses the stage's
-            # remembered window again a moment after it lands (and activations just after our
-            # own action are taken as its echo), which can undo an activation made too soon
-            # (live 11-16: Bravo came back in front after Alpha's): wait the switch out, then
-            # activate, and go round again until the stage's order is the one asked.
-            in_order = lambda x: next((st["windows"][:len(ids)] for st in x["stages"] if st["number"] == target), None) == ids[::-1]
-            s = None
-            for _ in range(4):
-                time.sleep(1.5)
+            wait_state(lambda x: x["active"] == target and x.get("switching") is None, f"{name}: its stage in front")
+            time.sleep(1.0)
+            # The stacking: each window framed back to front, as the landing-order phase does
+            # (`debug-frame` without `only` raises the window it frames). An app activated with
+            # `open` focuses no window (live 11-16: the activations came, the order never moved),
+            # so the first window opened stayed in front. The frames are the laptop's as
+            # measured, whose visible frame starts at y = 39.
+            on_top = None
+            for _ in range(3):
                 for k in back_to_front:
-                    activate(k)
+                    x, y, w, h = frames[k]
+                    ctl("debug-frame", wid[k], vis["x"] + x, vis["y"] + y - 39, w, h)
                     time.sleep(0.9)
-                s = wait_state(in_order, f"{name}: the stage's order front to back", timeout=3)
-                if s is not None:
+                wins, _ = fixture_windows([EXTRA[k][0] for k in back_to_front])
+                z = {w["id"]: w["z"] for w in wins}
+                on_top = [z.get(i) for i in ids]
+                if None not in on_top and all(a > b for a, b in zip(on_top, on_top[1:])):
                     break
-            if not check(s is not None, f"{name}: the stage holds {back_to_front[::-1]} front to back"):
+                on_top = None
+            if not check(on_top is not None, f"{name}: on screen {back_to_front[::-1]} front to back ({[z.get(i) for i in ids]})"):
                 continue
             do("switch", holder)
+            in_order = lambda x: next((st["windows"][:len(ids)] for st in x["stages"] if st["number"] == target), None) == ids[::-1]
+            s = wait_state(in_order, f"{name}: the card's order front to back", timeout=3)
+            if not check(s is not None, f"{name}: its card holds {back_to_front[::-1]} front to back"):
+                continue
             time.sleep(0.8)
             # The holder's windows stay clear of the strip so the cards stay shown.
             for i in [hold] + [wid[k] for k in "abc" if k not in frames]:
@@ -4799,11 +4799,6 @@ def phase_cards():
             check(all(abs(a - b) <= 1.0 for a, b in zip(xs, CARD_STACKED_X[name])),
                   f"{name}, stacked: left edges {xs} at the fixed offsets {CARD_STACKED_X[name]}")
             if apple:
-                tall = max(range(len(apple)), key=lambda j: apple[j][2])
-                r = read["apple"][tall][2] / apple[tall][2]
-                if laptop:
-                    check(abs(r - 1) < 0.03, f"{name}, apple: the tallest window as tall as Apple's ({read['apple'][tall][2]:.1f} pt against {apple[tall][2]})")
-                apple = [(a[0] * r, a[1] * r, a[2] * r) for a in apple]
                 off = [max(abs(g[j] - a[j]) for j in range(3)) for g, a in zip(read["apple"], apple)]
                 check(max(off) <= tol, f"{name}, apple: {[tuple(round(c, 1) for c in g) for g in read['apple']]} against Apple's {[tuple(round(c, 1) for c in a) for a in apple]} (worst {max(off):.1f} pt)")
             same = lambda a, b: all(abs(p - q) <= 0.5 for u, v in zip(a, b) for p, q in zip(u, v))
