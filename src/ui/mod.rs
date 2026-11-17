@@ -10,6 +10,7 @@ pub mod card_glass;
 pub mod corner_patch;
 pub mod corner_settle;
 pub mod display_options;
+pub mod edge_flat;
 pub mod form;
 pub mod glass_math;
 pub mod glyph;
