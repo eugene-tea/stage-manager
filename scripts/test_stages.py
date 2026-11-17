@@ -4703,7 +4703,7 @@ def card_pictures(ids):
     """The strip's card of exactly the windows `ids` as drawn (`ctl debug-strip`): window id ->
     (left edge x, top, height) from the card's leftmost left edge and highest top. Each
     window's left edge is its plane's turn axis, at depth 0: the perspective moves it not."""
-    r = ctl("debug-strip")
+    r = ctl("debug-strip").get("strip") or {}
     for c in r.get("cards") or []:
         planes = c.get("planes") or []
         if sorted(p["window"] for p in planes) != sorted(ids):
@@ -4733,11 +4733,14 @@ def phase_cards():
         if not check(s is not None, "app up with the fixture and three fixture apps"):
             return
         vis = s["display"]["visible"]
-        # Apple's numbers are the laptop's (1130 pt of visible height): elsewhere the scale
-        # floor may not bind as it did there, so they are read loosely.
-        tol = 2.5 if abs(vis["h"] - 1130) < 2 else 6.0
-        if tol > 2.5:
-            say(f"  note: visible height {vis['h']:.0f} pt, not the laptop's 1130: Apple's numbers within {tol} pt")
+        # Apple's numbers are the laptop's (1130 pt of visible height). On another screen the
+        # plain scale differs (161 pt over its visible height) and the scale floor binds where
+        # it did not there: Apple's card is compared scaled to ours by the tallest window's
+        # height (the fixed 12 and 19 pt raises do not scale: within 4 pt).
+        laptop = abs(vis["h"] - 1130) < 2
+        tol = 2.5 if laptop else 4.0
+        if not laptop:
+            say(f"  note: visible height {vis['h']:.0f} pt, not the laptop's 1130: Apple's cards scaled to ours, within {tol} pt")
         t = by_title(s)
         hold = t["Fixture 1"]["id"]
         wid = {k: t[f"{EXTRA[k][3]} 1"]["id"] for k in "abc"}
@@ -4758,11 +4761,21 @@ def phase_cards():
             for k, (x, y, w, h) in frames.items():
                 # The frames as measured on the laptop, whose visible frame starts at y = 39.
                 ctl("debug-frame", wid[k], vis["x"] + x, vis["y"] + y - 39, w, h)
-            for k in back_to_front:
-                activate(k)
-                time.sleep(0.5)
-            s = wait_state(lambda x: next((st["windows"][:len(ids)] for st in x["stages"] if st["number"] == target), None) == ids[::-1],
-                           f"{name}: the stage's order front to back")
+            # The stacking: each app activated back to front. A switch focuses the stage's
+            # remembered window again a moment after it lands (and activations just after our
+            # own action are taken as its echo), which can undo an activation made too soon
+            # (live 11-16: Bravo came back in front after Alpha's): wait the switch out, then
+            # activate, and go round again until the stage's order is the one asked.
+            in_order = lambda x: next((st["windows"][:len(ids)] for st in x["stages"] if st["number"] == target), None) == ids[::-1]
+            s = None
+            for _ in range(4):
+                time.sleep(1.5)
+                for k in back_to_front:
+                    activate(k)
+                    time.sleep(0.9)
+                s = wait_state(in_order, f"{name}: the stage's order front to back", timeout=3)
+                if s is not None:
+                    break
             if not check(s is not None, f"{name}: the stage holds {back_to_front[::-1]} front to back"):
                 continue
             do("switch", holder)
@@ -4786,8 +4799,13 @@ def phase_cards():
             check(all(abs(a - b) <= 1.0 for a, b in zip(xs, CARD_STACKED_X[name])),
                   f"{name}, stacked: left edges {xs} at the fixed offsets {CARD_STACKED_X[name]}")
             if apple:
+                tall = max(range(len(apple)), key=lambda j: apple[j][2])
+                r = read["apple"][tall][2] / apple[tall][2]
+                if laptop:
+                    check(abs(r - 1) < 0.03, f"{name}, apple: the tallest window as tall as Apple's ({read['apple'][tall][2]:.1f} pt against {apple[tall][2]})")
+                apple = [(a[0] * r, a[1] * r, a[2] * r) for a in apple]
                 off = [max(abs(g[j] - a[j]) for j in range(3)) for g, a in zip(read["apple"], apple)]
-                check(max(off) <= tol, f"{name}, apple: {[tuple(round(c, 1) for c in g) for g in read['apple']]} against Apple's {apple} (worst {max(off):.1f} pt)")
+                check(max(off) <= tol, f"{name}, apple: {[tuple(round(c, 1) for c in g) for g in read['apple']]} against Apple's {[tuple(round(c, 1) for c in a) for a in apple]} (worst {max(off):.1f} pt)")
             same = lambda a, b: all(abs(p - q) <= 0.5 for u, v in zip(a, b) for p, q in zip(u, v))
             want = "apple" if name == "hidden" else "stacked"
             check(same(read["spread_covered"], read[want]), f"{name}, spread_covered: drawn as {want} ({read['spread_covered']})")
