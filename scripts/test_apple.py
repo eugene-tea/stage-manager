@@ -20,7 +20,8 @@ Phases (all by default, or name them):
           add. A red here means a macOS update made a rejected route work: see
           docs/STRATEGIES.md, "Tried and rejected".
   merge   `ctl merge N`: Bravo's stage of one, then a stage of three, brought into the stage
-          in front by one Shift-click per window, all in one Shift press; timed to the moment
+          in front by one Shift-click per window, all in one Shift press, back to front (the
+          stage of three keeps its order over Charlie's window); timed to the moment
           the window list shows them joined (the job's own "done" printed as info); the
           pointer back where it was.
   split   Under All at Once (AppWindowGroupingBehavior 1, read only) `ctl new` for a window
@@ -48,6 +49,18 @@ Each fixture window opens at a frame of its own (FRAMES).
           to the list showing one stage, the job's route and times as info), Alpha's windows
           never leaving the stage in front nor moving with the hide route. Charlie opened
           again as it was at the end.
+  roundtrip-order The round trip keeps the stage's order (live 11-17: a stage of four came
+          back reversed in three presses): Bravo merged into Alpha's stage, a stage of three
+          whose order front to back is read then; Charlie running with no window, opened with
+          --reopen (it opens a window at once at a reopen, as Activity Monitor does, before the
+          hide at the activation can take) and a `current` rule for it; `open` of Charlie:
+          Apple's switches to its window, the stage of three goes to the strip and comes back by
+          one switch (the focus route), Charlie's window Shift-clicked in by one press, on top.
+          Checked: the stage in front at the end is Charlie's window then the three in the order
+          read before; one Shift-click in one press; the time from the `open` to the list showing
+          it; the job's route and times as info. When the hide wins the race (route
+          hide_activation) the order and Charlie on top are checked all the same. Charlie
+          opened again as it was at the end.
   restore `ctl apple restore`: stages set up (Alpha's two windows with Bravo's, Charlie's
           alone and in front), saved to state-apple.json, Stage Manager quit and opened again
           (the mode reads the file as it starts; the same session, so nothing is put back by
@@ -101,7 +114,9 @@ MERGE_MAX_S = 1.5          # one Shift press and Apple's motion (~0.8 s), a read
 OPEN_HERE_MAX_S = 3.0      # launch to the first window (~0.9 s), the settle, one press (~0.8 s)
 OPEN_RUNNING_MAX_S = 3.5   # the hide (~1.1 s), the unhide into the strip (~0.7 s), one press (~0.8 s)
 RESTORE_MAX_S = 8.0        # a drag (~0.9 s) and a press (~0.8 s), a focus, Apple's motions and settles
-PHASES = ("mirror", "switch", "rejected", "merge", "split", "pointer", "open-here", "open-running", "restore")
+ROUNDTRIP_MAX_S = 3.5      # Apple's switch (~0.7 s), the switch back (~0.7 s), one press (~0.7 s), reads
+PHASES = ("mirror", "switch", "rejected", "merge", "split", "pointer", "open-here", "open-running",
+          "roundtrip-order", "restore")
 
 HOME = tempfile.mkdtemp(prefix="sm-apple-mode.", dir="/tmp")
 ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME)
@@ -501,7 +516,7 @@ def phase_merge():
     if s:
         last = s["apple"].get("last") or {}
         check(last.get("clicks") == 1, f"merge {n}: one Shift-click ({last.get('clicks')})")
-    # A stage of three into Charlie's: three clicks, front to back, in one press.
+    # A stage of three into Charlie's: three clicks, back to front, in one press.
     if not bring_front("Charlie"):
         check(False, "Charlie in front before the second merge")
         return
@@ -509,11 +524,15 @@ def phase_merge():
     n = stage_number(s, alpha + bravo)
     if not check(n is not None, f"Alpha's and Bravo's stage of three is stage {n}"):
         return
+    order = list(others(s)[n - 1])
     s, _ = merge_into_front(n, sorted(["Alpha 1", "Alpha 2", "Bravo 1", "Charlie 1"]), "a stage of three brought in")
     if s:
         last = s["apple"].get("last") or {}
         check(last.get("clicks") == 3, f"merge {n}: three Shift-clicks ({last.get('clicks')})")
         check(last.get("presses") == 1, f"merge {n}: in one Shift press ({last.get('presses')})")
+        # Clicked back to front, each landing on top: the three in their order, over Charlie.
+        front = s["apple"]["current"]
+        check(front[:3] == order, f"merge {n}: the three in the order they had ({titles_in_order(s, order)} -> {titles_in_order(s, front)})")
 
 
 def all_at_once():
@@ -779,6 +798,99 @@ def phase_open_running():
         relaunch("Charlie")
 
 
+def titles_in_order(s, ids):
+    """The titles of `ids`, in their order."""
+    by_id = {w["id"]: w["title"] for w in s.get("windows", [])}
+    return [by_id.get(i, str(i)) for i in ids]
+
+
+def charlie_without_a_window(extra=()):
+    """Charlie quit and opened again with no hang on SIGURG (and `extra`), its window then
+    closed by SIGURG (up to three times: live 11-16, the first close left one): its pid and the
+    time it was opened, or None."""
+    _, app, _ = FIX["Charlie"]
+    for pid in pids(app):
+        os.kill(pid, signal.SIGTERM)
+    pid_gone(app)
+    open_fixture("Charlie", extra=("--hang-ms", "0", *extra))
+    launched = time.time()
+    if not check(wait_until(lambda: windows_of(ctl("state"), "Charlie"), 8, "Charlie's window") is not None, "Charlie open"):
+        return None
+    charlie = pids(app)
+    if not check(len(charlie) == 1, f"one Charlie process ({charlie})"):
+        return None
+    closed = None
+    for _ in range(3):
+        os.kill(charlie[0], signal.SIGURG)
+        closed = wait_until(lambda: (lambda s: s if not windows_of(s, "Charlie") and idle_jobs(s) else None)(ctl("state")), 3, "Charlie with no window")
+        if closed is not None:
+            break
+    if not check(closed is not None, "Charlie running with no window (SIGURG closed it)"):
+        return None
+    return charlie[0], launched
+
+
+def phase_roundtrip_order():
+    say("\n== roundtrip-order: the stage that left comes back in its order, the app on top ==")
+    separate()
+    bundle, app, _ = FIX["Charlie"]
+    try:
+        got = charlie_without_a_window(("--reopen",))
+        if got is None:
+            return
+        _, launched = got
+        write_config(f'[[rule]]\napp = "{bundle}"\naction = "current"\n')
+        check(ctl("reload").get("ok"), "config reloaded with a current rule for Charlie")
+        # A stage of three: Bravo merged into Alpha's (the merge route, not the one under test).
+        if not check(bring_front("Alpha") is not None, "Alpha in front"):
+            return
+        s = quiet_state()
+        n = stage_number(s, windows_of(s, "Bravo"))
+        if not check(n is not None and ctl("merge", n).get("ok"), f"Bravo merged into Alpha's stage (stage {n})"):
+            return
+        three = sorted(["Alpha 1", "Alpha 2", "Bravo 1"])
+        s = wait_until(lambda: (lambda s: s if front_titles(s) == three and idle_jobs(s) else None)(ctl("state")), 8, "a stage of three in front")
+        if not check(s is not None, "a stage of three in front"):
+            return
+        order = list(s["apple"]["current"])
+        say(f"  info the stage's order, front to back: {titles_in_order(s, order)}")
+        # A launch's own activation is the launch's to decide (3 s): this one comes later.
+        time.sleep(max(0.0, launched + 4.0 - time.time()))
+        s = quiet_state()
+        t0 = time.time()
+        subprocess.run(["open", app], check=True)
+        end, joined = time.time() + 10, None
+        while time.time() < end:
+            s = ctl("state")
+            current = (s.get("apple") or {}).get("current") or []
+            mine = windows_of(s, "Charlie")
+            if mine and all(w in current for w in mine + order) and idle_jobs(s):
+                joined = s
+                break
+            time.sleep(0.05)
+        took = time.time() - t0
+        if not check(joined is not None, f"Charlie's window joined the stage of three ({took:.2f} s from the open to the list showing it)"):
+            return
+        last = (joined.get("apple") or {}).get("last") or {}
+        route = last.get("route")
+        say(f"  info route {route} ({last.get('round_trip_why')}), done at {last.get('ms')} ms, first window at "
+            f"{last.get('first_window_ms')} ms, {last.get('focuses')} focuses, {last.get('clicks')} clicks in {last.get('presses')} presses")
+        check(not last.get("given_up"), f"not given up ({last.get('given_up')})")
+        front = joined["apple"]["current"]
+        mine = windows_of(joined, "Charlie")
+        check(front[:1] == mine[:1] and front[1:] == order,
+              f"Charlie's window on top, the three in the order they had ({titles_in_order(joined, order)} -> {titles_in_order(joined, front)})")
+        check(last.get("clicks") == 1 and last.get("presses") == 1, f"one Shift-click in one press ({last.get('clicks')} in {last.get('presses')})")
+        if route == "round_trip":
+            check(took <= ROUNDTRIP_MAX_S, f"within about {ROUNDTRIP_MAX_S:.1f} s ({took:.2f} s)")
+        else:
+            say(f"  info the hide won the race (route {route}): the round trip did not run this time")
+    finally:
+        write_config()
+        ctl("reload")
+        relaunch("Charlie")
+
+
 def title_groups(s):
     """The mirror's stages by title: the one in front, then the others sorted."""
     groups = [titles(s, g) for g in groups_of(s)]
@@ -906,7 +1018,7 @@ def main():
         return 1
     runs = {"mirror": phase_mirror, "switch": phase_switch, "rejected": phase_rejected, "merge": phase_merge,
             "split": phase_split, "pointer": phase_pointer, "open-here": phase_open_here,
-            "open-running": phase_open_running, "restore": phase_restore}
+            "open-running": phase_open_running, "roundtrip-order": phase_roundtrip_order, "restore": phase_restore}
     for name in PHASES:
         if name in phases:
             runs[name]()

@@ -98,6 +98,11 @@
 //                                      corner (round enhanced-ui)
 //   --enhanced-ui-file F | FIXTURE_ENHANCED_UI_FILE=F  every value the attribute takes is
 //                                      appended to F ("<unix time> on|off"), the first at launch
+//   --reopen     | FIXTURE_REOPEN=1    a reopen (`open` or a Dock click on the app running) with
+//                                      no window shown opens one more standard window at once,
+//                                      key and in front, as Activity Monitor reopens its own:
+//                                      the window shows as the app activates, before a hide at
+//                                      the activation can take (live 11-17)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -151,6 +156,7 @@ struct Options {
     var enhancedUI = false
     var enhancedUIFile: String? = nil
     var frameClock: String? = nil
+    var reopen = false
 
     static func parseColors(_ text: String) -> [NSColor] {
         text.split(separator: ",").compactMap { part in
@@ -204,6 +210,7 @@ struct Options {
         if env["FIXTURE_ENHANCED_UI"] == "1" { o.enhancedUI = true }
         if let f = env["FIXTURE_ENHANCED_UI_FILE"], !f.isEmpty { o.enhancedUIFile = f }
         if let f = env["FIXTURE_FRAME_CLOCK"], !f.isEmpty { o.frameClock = f }
+        if env["FIXTURE_REOPEN"] == "1" { o.reopen = true }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -233,6 +240,7 @@ struct Options {
             case "--enhanced-ui": o.enhancedUI = true
             case "--enhanced-ui-file": if let f = args.next() { o.enhancedUIFile = f }
             case "--frame-clock": if let f = args.next() { o.frameClock = f }
+            case "--reopen": o.reopen = true
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -873,6 +881,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// `--reopen`: with no window shown, one more opens at once, key and in front.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard options.reopen, !flag else { return true }
+        let area = NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        makeWindow(opened, area: area).makeKeyAndOrderFront(nil)
+        return false
+    }
 }
 
 let app = FixtureApplication.shared
