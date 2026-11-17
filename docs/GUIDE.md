@@ -281,8 +281,9 @@ no strip of its own.
   (`[sugar] shift_brings_here`). Stage Manager hides the app as it launches, so Apple's
   Stage Manager keeps the stage in front and puts the app's window in the strip, then
   Shift-clicks it in and brings it forward. If the window shows before the hide takes,
-  Apple's Stage Manager has already switched: the stage left is Shift-clicked back, a
-  visible round trip of about a second. While Apple's strip is covered (a window over it,
+  Apple's Stage Manager has already switched: the stage left is brought back to the front
+  as it was, every window in its order, and the app's window is Shift-clicked onto it, a
+  visible round trip of about two seconds. While Apple's strip is covered (a window over it,
   or its recent apps hidden) the click waits for the strip to show, a few seconds at most;
   then the app is left in a stage of its own, as Apple's Stage Manager puts it.
 - The same goes for an app that is already running with no window and opens one as it is
@@ -292,7 +293,7 @@ no strip of its own.
   Apple's Stage Manager, which brings that stage to the front. An app that opens no window
   is shown again and activated about two seconds later. Finder is never hidden (hiding it
   hides the desktop too): its window takes a stage of its own for a moment, then the stage
-  that was in front joins it.
+  that was in front comes back and the window joins it.
 - After a restart or a new login, Apple's stages are put back as they were saved
   (`[stages] restore_with_apple`, on by default), once the reopened windows have shown: a
   window of each stage is brought to the front, the stage's other windows are Shift-clicked
