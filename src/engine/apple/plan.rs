@@ -211,7 +211,7 @@ pub fn open_here(a: &Arrangement, pid: i32, now: std::time::Instant) -> Option<J
 
 /// Running app `pid` activated (a Dock click, `open`, ⌘Tab) where the rules want its next
 /// window in the stage in front: [`open_here`]'s goal, for a job that hides the app at its
-/// activation and shows it again once its reopened window exists ([`Job::reopen`]). `None`
+/// activation and shows it again a moment later ([`Job::reopen`]). `None`
 /// when the app has a window already (`pids`: each known window's app; Apple's activation
 /// then switches to its stage, as it should), or with no stage in front.
 pub fn reopen_here(a: &Arrangement, pid: i32, pids: &BTreeMap<u32, i32>, now: std::time::Instant) -> Option<Job> {

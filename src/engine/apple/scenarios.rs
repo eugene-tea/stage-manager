@@ -548,6 +548,43 @@ fn a_running_apps_reopened_window_comes_in_hidden_at_its_activation_and_the_stag
     assert!(r.first_window_ms.is_some());
 }
 
+/// The owner's smoke test of 11-16 (Activity Monitor, Finder): the app reopens the window it
+/// ordered out, an id seen before, and while the app is hidden Accessibility reads it as a
+/// dialog, so the app manages no window of its own. The app is shown again a moment after the
+/// hide took, never waiting for a window it can recognise; the thumbnail of its pid is
+/// Shift-clicked in, whatever its id or subrole, then focused. The stage in front never moves.
+#[test]
+fn a_reopened_window_with_a_reused_id_read_as_a_dialog_while_hidden_still_comes_in() {
+    let (mut f, a) = three();
+    // Delta's window 5 was open once, then ordered out: the app runs with no window.
+    f.open_app(40, &[5]);
+    let a = settle(&mut f, &a);
+    f.focus_window(4);
+    let a = settle(&mut f, &a);
+    f.close(5);
+    let mut a = settle(&mut f, &a);
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
+    job.hide_took(f.now());
+    let d = drive_with(&mut f, &mut a, &mut job, 6000, |f, t| {
+        if t == 50 {
+            // The same id again, read as a dialog while the app is hidden.
+            f.loose.insert(5);
+            f.reopen(40, 5, true);
+        }
+    });
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("hide_activation"));
+    let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
+    assert_eq!(kinds, vec!["unhide", "shift_click", "focus"], "{:?}", d.steps);
+    let unhide = times(&d.steps, "unhide")[0];
+    assert!((super::job::REOPEN_UNHIDE.as_millis() as u64..=super::job::REOPEN_UNHIDE.as_millis() as u64 + 100).contains(&unhide), "shown again {unhide} ms in");
+    assert_eq!(presses(&d.steps), vec![vec![5]], "its thumbnail, by its pid, in one press");
+    assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)), "focused last");
+    assert_eq!(sorted(f.current()), vec![4, 5]);
+    assert!(d.moved_in_front.is_empty(), "the stage in front never moved: {:?}", d.moved_in_front);
+    assert!(r.given_up.is_none() && f.unhidden == vec![40]);
+}
+
 /// The fallback: the window showed before the hide took, Apple's switched to the app's stage
 /// (the stage in front into the strip); after the settle the stage that left comes back in
 /// one Shift press, all its windows, so the result is one stage with both.
@@ -610,7 +647,8 @@ fn shift_held_at_a_running_apps_activation_brings_its_window_here_with_the_perso
 }
 
 /// A ⌘Tab (under a rule) to a running app that reopens no window: hidden at its activation,
-/// it is shown again and activated a second after the hide, as the person asked.
+/// shown again a moment later, and activated once no thumbnail of it shows, as the person
+/// asked.
 #[test]
 fn a_running_app_hidden_at_its_activation_that_reopens_no_window_is_activated_again() {
     let (mut f, mut a) = three();
@@ -619,7 +657,9 @@ fn a_running_app_hidden_at_its_activation_that_reopens_no_window_is_activated_ag
     let d = drive(&mut f, &mut a, &mut job, 6000);
     let r = d.end.expect("ended").expect_err("given up");
     assert_eq!((r.unhide, r.activate), (Some(40), Some(40)), "{r:?}");
-    assert!(r.ms <= super::job::REOPEN_WAIT.as_millis() as u64 + 200, "given up {} ms in", r.ms);
+    let wait = (super::job::REOPEN_UNHIDE + super::job::REOPEN_THUMB).as_millis() as u64;
+    assert!(r.ms >= wait && r.ms <= wait + 200, "given up {} ms in", r.ms);
+    assert_eq!(f.unhidden, vec![40], "shown again, not activated, before the give-up");
     assert!(f.posted.is_empty());
 }
 

@@ -16,8 +16,8 @@
 //! from the strip, then focused; the round trip when the hide came too late. A running app
 //! with no window, activated where the same rules want its next window (a Dock click, `open`,
 //! ⌘Tab: it reopens one), the same way: hidden at its activation, shown again without
-//! activating once its window exists (Apple's puts it into the strip), Shift-clicked in, then
-//! focused ([`Self::app_activated`]).
+//! activating a moment later (Apple's puts its window into the strip), every thumbnail of its
+//! pid Shift-clicked in, then focused ([`Self::app_activated`]).
 //!
 //! Apple's posts no Accessibility notices, so it polls: a read at every activation, window
 //! found or gone, focus, mouse-up near the strip and Desktop change; then every 50 ms while
@@ -835,7 +835,7 @@ impl AppleController {
                     launch_hide::unhide(pid);
                 }
                 if let Some(pid) = report.activate {
-                    tracing::info!(pid, "apple mode: given up: the app hidden at its activation reopened no window; activated, as asked");
+                    tracing::info!(pid, "apple mode: given up: the app hidden at its activation shown again and activated, as asked");
                     launch_hide::activate(pid);
                 }
                 if let Some((w, frame)) = report.set_back

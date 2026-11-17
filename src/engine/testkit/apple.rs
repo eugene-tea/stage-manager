@@ -95,6 +95,10 @@ pub struct FakeWindowManager {
     shown_nowhere: Vec<u32>,
     /// Every app shown again by an unhide, in order.
     pub unhidden: Vec<i32>,
+    /// Windows the observer does not take as standard (a window reopened while its app is
+    /// hidden reads `AXDialog`, live 11-16): listed as any other, never in
+    /// [`FakeWindowManager::window_ids`] nor [`FakeWindowManager::pids`].
+    pub loose: BTreeSet<u32>,
 }
 
 impl Default for FakeWindowManager {
@@ -130,6 +134,7 @@ impl FakeWindowManager {
             desktop_jumps: 0,
             shown_nowhere: Vec::new(),
             unhidden: Vec::new(),
+            loose: BTreeSet::new(),
         }
     }
 
@@ -174,9 +179,9 @@ impl FakeWindowManager {
         self.clock += Duration::from_millis(ms);
     }
 
-    /// Every window.
+    /// Every window the observer takes as standard (the Apple mode's managed ones).
     pub fn window_ids(&self) -> BTreeSet<u32> {
-        self.windows.keys().copied().collect()
+        self.windows.keys().copied().filter(|id| !self.loose.contains(id)).collect()
     }
 
     /// The current stage, front to back.
@@ -189,9 +194,9 @@ impl FakeWindowManager {
         &self.stages
     }
 
-    /// Each window's app.
+    /// Each such window's app.
     pub fn pids(&self) -> BTreeMap<u32, i32> {
-        self.windows.iter().map(|(id, (pid, _))| (*id, *pid)).collect()
+        self.windows.iter().filter(|(id, _)| !self.loose.contains(id)).map(|(id, (pid, _))| (*id, *pid)).collect()
     }
 
     /// Window `id`'s full-size frame.

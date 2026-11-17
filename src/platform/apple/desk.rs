@@ -89,9 +89,15 @@ impl AppleDesk for Desk<'_> {
     }
 
     /// Raised, made main, its app frontmost ([`ax_focus`]): Apple's brings its stage in front.
-    /// An app hidden (at its launch, by the hide route) is shown again first.
+    /// An app hidden (at its launch, by the hide route) is shown again first. A window the
+    /// observer does not track (a running app's reopened window, taken in by its pid): its app
+    /// activated, found by the window list.
     fn focus(&mut self, window: u32) -> Result<(), String> {
-        let w = self.ob.window(window).ok_or(format!("window {window} is not observed"))?;
+        let Some(w) = self.ob.window(window) else {
+            let pid = windows::wake_list().iter().find(|w| w.id == window).map(|w| w.pid).ok_or(format!("window {window} is not observed nor listed"))?;
+            super::launch_hide::activate(pid);
+            return Ok(());
+        };
         if super::launch_hide::is_hidden(w.pid) {
             super::launch_hide::unhide(w.pid);
         }

@@ -43,6 +43,11 @@
 //!   again), the rest of them are remembered groups of this Desktop once more.
 //! - **Full screen** ([`Arrangement::full_screen`], set by the platform from Accessibility):
 //!   a full-screen app's Space shows on this screen; no step runs there.
+//! - **Loose windows** ([`Arrangement::loose`]): an app's layer-0 windows the app does not
+//!   manage, each with its pid, a thumbnail (a twin over it) or on screen at full size, and
+//!   still or not against the read before; they make no group and no motion. A running app's
+//!   reopened window is taken in by them (live 11-16: an id seen before, read as `AXDialog`
+//!   while its app was hidden).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -166,6 +171,26 @@ pub struct Group {
     pub frame: Rect,
 }
 
+/// An app's window the app does not manage (not a standard window to the observer: a
+/// window reopened while its app is hidden reads `AXDialog` to Accessibility, live 11-16),
+/// as the window list shows it at one read.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Loose {
+    /// Its process.
+    pub pid: i32,
+    /// Its listed bounds.
+    pub bounds: Rect,
+    /// Listed at the same bounds at the read before: not in Apple's motion (its twin comes
+    /// once the motion ends; a window flying into the strip has none and is not in front).
+    pub still: bool,
+    /// A strip thumbnail (a WindowManager twin over it, or listed off the left edge); else a
+    /// window on screen at full size.
+    pub thumb: bool,
+    /// Where its thumbnail shows a part of its own ([`Arrangement::click_at`]'s rule; none in
+    /// motion).
+    pub click_at: Option<Point>,
+}
+
 /// Apple's arrangement on one screen as last read ([`fold`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Arrangement {
@@ -222,6 +247,10 @@ pub struct Arrangement {
     pub desktop_changes: u64,
     /// A full-screen app's Space shows on this screen (the platform's reading): no step runs.
     pub full_screen: bool,
+    /// The windows on this screen the app does not manage, front to back:
+    /// a running app's reopened window is taken in by its pid, whatever its id or subrole
+    /// ([`super::job::Job::reopen`]).
+    pub loose: Vec<(u32, Loose)>,
 }
 
 impl Arrangement {
@@ -345,8 +374,20 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
     let mut thumbs: Vec<(u32, Rect)> = Vec::new();
     let mut thumb_at: Vec<(u32, usize)> = Vec::new();
     let mut current_at: Vec<(u32, usize)> = Vec::new();
+    let mut loose: Vec<(u32, usize, bool)> = Vec::new();
     for (i, w) in listed.windows.iter().enumerate() {
-        if !managed.contains(&w.id) || frames.insert(w.id, w.bounds).is_some() {
+        if !managed.contains(&w.id) {
+            if w.layer == 0 && Some(w.pid) != listed.manager && !loose.iter().any(|(id, _, _)| *id == w.id) {
+                let on = w.onscreen && w.bounds.intersect(&screen.frame).is_some_and(|r| r.w > 0.0 && r.h > 0.0);
+                if (has_twin(listed, i) && on) || off_left(screen, w.bounds) {
+                    loose.push((w.id, i, true));
+                } else if on && !w.bounds.is_degenerate() {
+                    loose.push((w.id, i, false));
+                }
+            }
+            continue;
+        }
+        if frames.insert(w.id, w.bounds).is_some() {
             continue;
         }
         if has_twin(listed, i) || off_left(screen, w.bounds) {
@@ -384,6 +425,7 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         full_screen: prev.full_screen,
         ..Arrangement::default()
     };
+    let mut loose_at = BTreeMap::new();
     // Closed windows leave what is kept of them.
     next.full.retain(|id, _| listed.has(*id) && managed.contains(id));
 
@@ -411,6 +453,8 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         };
         next.strip = items(&thumbs, &icons);
         next.click_at = click_points(listed, &thumb_at, &icons, screen);
+        let loose_thumbs: Vec<(u32, usize)> = loose.iter().filter(|(_, _, t)| *t).map(|(id, i, _)| (*id, *i)).collect();
+        loose_at = click_points(listed, &loose_thumbs, &icons, screen);
         next.title_at = title_points(listed, &current_at, screen);
         next.current = current;
         // A Desktop shown again: a window of a change's away groups seen now brings the rest of
@@ -427,6 +471,18 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         }
         next.away.retain(|(_, g)| !g.windows.is_empty());
     }
+
+    // Windows the app does not manage, read in motion too (their stillness is read against the
+    // read before); their points out of motion only.
+    next.loose = loose
+        .iter()
+        .filter_map(|&(id, i, thumb)| {
+            let w = listed.windows.get(i)?;
+            let still = prev.loose.iter().any(|(p, l)| *p == id && same(l.bounds, w.bounds));
+            let click_at = if still { loose_at.get(&id).copied() } else { None };
+            Some((id, Loose { pid: w.pid, bounds: w.bounds, still, thumb, click_at }))
+        })
+        .collect();
 
     // Accessibility on membership: a blank reading is no reading; a reading a second after
     // the settle is trusted until the next change.
