@@ -144,8 +144,7 @@ flight's eye (the display's middle, 1.17 display widths in front, as a switch's 
 goes from the flat card to the turned one off the screen, its size, turn and height on the
 slide's spring (ω 17.0 and 17.2 read) and its sideways place trailing the spring by
 0.3 · p (1 − p) (0.26 to 0.33 by fit). Seen so, a card first widens as its far side goes back
-toward the eye's middle (the 130.7 pt card 139 to 140 pt wide 50 to 100 ms in, its far edge
-up to 7 pt shorter) and then narrows to the turned card (`ui::edge_flat`). That draws the
+toward the eye's middle (the 130.7 pt card 139 to 140 pt wide 30 to 90 ms in) and then narrows to the turned card (`ui::edge_flat`). That draws the
 three cards of both recorded hides within 0.6 pt rms (2.6 at worst) at each frame's best
 progress; a turn about the left edge on the slide, seen through the strip's eye, misses them
 by 7.2 pt rms (18 at worst): it cannot draw a card wider than flat. Ours draws the revealed
