@@ -2720,6 +2720,10 @@ def others_at(rect, above=False, display=None):
         except (json.JSONDecodeError, AttributeError):
             pass
     def counts(w):
+        # A window listed with no bounds (a system window on an external display, live 11-16:
+        # its x read null) is nobody's to keep clear of.
+        if any(w["bounds"].get(k) is None for k in ("x", "y", "w", "h")):
+            return False
         if w["layer"] == 0:
             return True
         return above and w["layer"] > 0 and not (display and contains(w["bounds"], display, 2.0))
