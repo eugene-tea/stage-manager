@@ -753,8 +753,27 @@ impl Job {
         }
         // The stage in front left (a window of the app shown before the hide took): the round
         // trip, after the settle.
-        let left = windows.iter().any(|w| a.seen.iter().any(|(id, s)| id == w && s.thumb));
+        // Read as a thumbnail, or in a strip item at the mirror's last grouping.
+        let left = windows.iter().any(|w| {
+            !a.current.contains(w) && (a.seen.iter().any(|(id, s)| id == w && s.thumb) || a.strip.iter().chain(&a.remembered).any(|g| g.windows.contains(w)))
+        });
         if left {
+            // Hidden all the same (Apple switched at the activation itself, before the hide
+            // took: live 11-17, Contacts running with no window, the stage in front to the
+            // strip and an empty one in front, the job then waiting 3 s for a window of an app
+            // still hidden): shown again when due, so its window comes for the round trip.
+            if self.hidden && !self.unhidden {
+                if cx.in_flight {
+                    return Some(self.wait(Hold::InFlight.why()));
+                }
+                if self.hidden_at.is_some_and(|t| now >= t + UNHIDE_AFTER) {
+                    self.unhide_at = Some(now);
+                    self.report.unhide_ms.get_or_insert(ms(now, self.since));
+                    self.report.round_trip_why.get_or_insert("Apple switched at the activation, before the hide took: shown again, the round trip");
+                    return Some(self.try_step_ahead(Step::Unhide(pid), cx, now));
+                }
+                return Some(self.wait("the app to order its window in"));
+            }
             if self.unhidden {
                 // Some apps activate themselves when shown again (1Password, live 11-16).
                 self.report.round_trip_why.get_or_insert("the app came in front by itself after its unhide: the round trip");
@@ -774,6 +793,9 @@ impl Job {
             // launch: as soon as a window of it is known).
             let due = self.hidden_at.is_some_and(|t| now >= t + UNHIDE_AFTER);
             if due || (!self.reopen && cx.pids.values().any(|p| *p == pid)) {
+                if !windows.iter().all(|w| a.seen.iter().any(|(id, s)| id == w && s.full)) {
+                    self.report.round_trip_why.get_or_insert("Apple switched at the activation, before the hide took: shown again, the round trip");
+                }
                 self.unhide_at = Some(now);
                 self.report.unhide_ms.get_or_insert(ms(now, self.since));
                 return Some(self.try_step_ahead(Step::Unhide(pid), cx, now));
@@ -805,6 +827,12 @@ impl Job {
             return Some(next);
         }
         if !front.is_empty() {
+            // Not with the stage it was asked into (Apple's switched at the activation itself,
+            // the stage in front leaving at once, live 11-17): the round trip after the settle.
+            if !windows.iter().all(|w| a.seen.iter().any(|(id, s)| id == w && s.full)) {
+                self.report.round_trip_why.get_or_insert("the app came in front by itself after its unhide: the round trip");
+                return None;
+            }
             // In the stage in front: focused once at rest (a window there switches nothing).
             if front.iter().any(|(_, s)| s.still < STILL_FOR) {
                 return Some(self.wait("the app's window into the stage in front"));

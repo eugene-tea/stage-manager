@@ -274,9 +274,26 @@ impl FakeWindowManager {
             self.open_app(pid, &[id]);
             return;
         }
+        self.reopen_hidden(pid, id);
+    }
+
+    /// Running app `pid` reopens window `id` while hidden, whatever shows in front: the
+    /// window shows nowhere until the app is shown again.
+    pub fn reopen_hidden(&mut self, pid: i32, id: u32) {
         self.hidden.insert(pid);
         self.windows.insert(id, (pid, Rect::new(self.shift + 360.0, 160.0, 640.0, 460.0)));
         self.shown_nowhere.push(id);
+    }
+
+    /// Apple's switches at an app's activation before any window of it shows (live 11-17,
+    /// Contacts running with no window): the stage in front into the strip, none in front.
+    pub fn switch_to_empty(&mut self) {
+        if self.current.is_empty() {
+            return;
+        }
+        self.change();
+        let left = std::mem::take(&mut self.current);
+        self.stages.insert(0, left);
     }
 
     /// App `pid` shown again without activating it: the windows it reopened while hidden go

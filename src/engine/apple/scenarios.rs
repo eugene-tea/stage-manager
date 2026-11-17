@@ -659,6 +659,33 @@ fn a_running_apps_window_shown_before_the_hide_took_comes_back_by_the_round_trip
     assert_eq!(f.current(), &[5, 1, 2], "one stage with both, in its order, the app on top");
 }
 
+/// Live 11-17 (Contacts, running with no window, a `current` rule): Apple's switched at the
+/// activation itself, the stage in front into the strip and none in front, and the hide took
+/// after. The app is shown again all the same, its window comes in front, and the round trip
+/// brings the stage that left back with the app's window on top; never a 3 s wait for a window
+/// of an app still hidden.
+#[test]
+fn a_running_app_apple_switched_to_before_the_hide_took_is_shown_again_for_the_round_trip() {
+    let (mut f, mut a) = three();
+    let before = f.current().to_vec();
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
+    a.step_began(f.now());
+    f.switch_to_empty();
+    job.hide_took(f.now());
+    f.reopen_hidden(40, 5);
+    let d = drive_every(&mut f, &mut a, &mut job, 6000, FAST, |_, _| {});
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("round_trip"), "{r:?}");
+    assert!(r.round_trip_why.is_some(), "{r:?}");
+    assert_eq!(f.unhidden, vec![40], "shown again, once");
+    assert!(times(&d.steps, "unhide")[0] <= 400, "{:?}", d.steps);
+    assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)), "{:?}", d.steps);
+    let mut want = before.clone();
+    want.insert(0, 5);
+    assert_eq!(f.current(), want.as_slice(), "one stage with both, in its order, the app on top");
+    assert!(r.ms < 3000, "done in {} ms", r.ms);
+}
+
 /// Finder (live 11-16): never hidden (it owns the Desktop; hidden, its stage read empty), or
 /// its window showed before the hide took (`TooLate`). It reuses the window it ordered out,
 /// an id seen before and never tracked anew as a standard window, so no first window is ever
