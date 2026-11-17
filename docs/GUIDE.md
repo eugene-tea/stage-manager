@@ -285,6 +285,12 @@ no strip of its own.
   visible round trip of about a second. While Apple's strip is covered (a window over it,
   or its recent apps hidden) the click waits for the strip to show, a few seconds at most;
   then the app is left in a stage of its own, as Apple's Stage Manager puts it.
+- The same goes for an app that is already running with no window and opens one as it is
+  activated (a Dock click on Finder, Notes or Activity Monitor, `open`, ⌘Tab): it is hidden
+  as it activates, shown again once its window exists, so its window lands in Apple's strip,
+  then Shift-clicked in and brought forward. An app with a window in any stage is left to
+  Apple's Stage Manager, which brings that stage to the front. An app that opens no window
+  is shown again and activated about a second later.
 - After a restart or a new login, Apple's stages are put back as they were saved
   (`[stages] restore_with_apple`, on by default), once the reopened windows have shown: a
   window of each stage is brought to the front, the stage's other windows are Shift-clicked

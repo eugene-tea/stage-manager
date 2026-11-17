@@ -40,6 +40,14 @@ Each fixture window opens at a frame of its own (FRAMES).
           list shows one stage, the job's "done" as info, the route that ran, Alpha's windows
           never moving with the hide route); Bravo opened again with two windows: both join,
           in one Shift press.
+  open-running A running app's reopened window: Charlie opened with no hang on SIGURG, its
+          window closed (SIGURG), so it runs with no window; a `current` rule for it in the
+          scratch config; Alpha in front; `open` of Charlie (an activation of the running
+          app) and SIGUSR1 at once (a window ordered front about 50 ms after it, as an app
+          reopening its window does): the window joins Alpha's stage (time from the `open`
+          to the list showing one stage, the job's route and times as info), Alpha's windows
+          never leaving the stage in front nor moving with the hide route. Charlie opened
+          again as it was at the end.
   restore `ctl apple restore`: stages set up (Alpha's two windows with Bravo's, Charlie's
           alone and in front), saved to state-apple.json, Stage Manager quit and opened again
           (the mode reads the file as it starts; the same session, so nothing is put back by
@@ -91,8 +99,9 @@ FOLLOW_MAX_S = 1.0
 SWITCH_MAX_S = 1.5
 MERGE_MAX_S = 1.5          # one Shift press and Apple's motion (~0.8 s), a read, ctl's poll
 OPEN_HERE_MAX_S = 3.0      # launch to the first window (~0.9 s), the settle, one press (~0.8 s)
+OPEN_RUNNING_MAX_S = 3.5   # the hide (~1.1 s), the unhide into the strip (~0.7 s), one press (~0.8 s)
 RESTORE_MAX_S = 8.0        # a drag (~0.9 s) and a press (~0.8 s), a focus, Apple's motions and settles
-PHASES = ("mirror", "switch", "rejected", "merge", "split", "pointer", "open-here", "restore")
+PHASES = ("mirror", "switch", "rejected", "merge", "split", "pointer", "open-here", "open-running", "restore")
 
 HOME = tempfile.mkdtemp(prefix="sm-apple-mode.", dir="/tmp")
 ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME)
@@ -238,13 +247,13 @@ def write_config(extra=""):
         f.write('[windows]\nwith_apple = "augment"\n' + extra)
 
 
-def open_fixture(name, windows=None):
+def open_fixture(name, windows=None, extra=()):
     """Fixture `name` opened anew with `windows` windows (its own count by default), each at
-    its own frame."""
+    its own frame, with the fixture's `extra` arguments."""
     _, app, n = FIX[name]
     n = windows or n
     subprocess.run(["open", "-n", app, "--args", "--windows", str(n), "--title", name,
-                    "--frames", ";".join(FRAMES[name][:n])], check=True)
+                    "--frames", ";".join(FRAMES[name][:n]), *extra], check=True)
 
 
 def launch_app():
@@ -696,6 +705,74 @@ def phase_open_here():
         ctl("reload")
 
 
+def phase_open_running():
+    say("\n== open-running: a running app's reopened window joins the stage in front ==")
+    separate()
+    bundle, app, _ = FIX["Charlie"]
+    try:
+        # Charlie running with no window: opened with no hang on SIGURG, its window closed.
+        for pid in pids(app):
+            os.kill(pid, signal.SIGTERM)
+        pid_gone(app)
+        open_fixture("Charlie", extra=("--hang-ms", "0"))
+        launched = time.time()
+        if not check(wait_until(lambda: windows_of(ctl("state"), "Charlie"), 8, "Charlie's window") is not None, "Charlie open"):
+            return
+        charlie = pids(app)
+        if not check(len(charlie) == 1, f"one Charlie process ({charlie})"):
+            return
+        os.kill(charlie[0], signal.SIGURG)
+        if not check(wait_until(lambda: (lambda s: s if not windows_of(s, "Charlie") and idle_jobs(s) else None)(ctl("state")), 8, "Charlie with no window") is not None,
+                     "Charlie running with no window (SIGURG closed it)"):
+            return
+        write_config(f'[[rule]]\napp = "{bundle}"\naction = "current"\n')
+        check(ctl("reload").get("ok"), "config reloaded with a current rule for Charlie")
+        if not check(bring_front("Alpha") is not None, "Alpha in front before the activation"):
+            return
+        # A launch's own activation is the launch's to decide (3 s): this one comes later.
+        time.sleep(max(0.0, launched + 4.0 - time.time()))
+        s = quiet_state()
+        front = list(s["apple"]["current"])
+        listed0 = {w["id"]: w.get("listed") for w in s["windows"] if w["id"] in front}
+        moved, left = False, False
+        t0 = time.time()
+        subprocess.run(["open", app], check=True)
+        time.sleep(0.05)
+        os.kill(charlie[0], signal.SIGUSR1)
+        end, joined = time.time() + 10, None
+        while time.time() < end:
+            s = ctl("state")
+            current = (s.get("apple") or {}).get("current") or []
+            for w in s.get("windows", []):
+                if w["id"] in listed0 and w.get("listed") != listed0[w["id"]]:
+                    moved = True
+            if any(w not in current for w in front):
+                left = True
+            mine = windows_of(s, "Charlie")
+            if mine and all(w in current for w in mine + front):
+                joined = s
+                break
+            time.sleep(0.05)
+        took = time.time() - t0
+        if not check(joined is not None, f"Charlie's reopened window joined Alpha's stage ({took:.2f} s from the open to the list showing it)"):
+            return
+        s = quiet_state()
+        last = ((s or {}).get("apple") or {}).get("last") or {}
+        route = last.get("route")
+        say(f"  info route {route}, done at {last.get('ms')} ms, first window at {last.get('first_window_ms')} ms, "
+            f"shown again at {last.get('unhide_ms')} ms, {last.get('clicks')} clicks in {last.get('presses')} presses")
+        check(route in ("hide_activation", "round_trip"), f"the route said ({route})")
+        check(not last.get("given_up"), f"not given up ({last.get('given_up')})")
+        check(took <= OPEN_RUNNING_MAX_S, f"within about {OPEN_RUNNING_MAX_S:.1f} s ({took:.2f} s)")
+        if route == "hide_activation":
+            check(not left and not moved, f"the stage in front never moved (left {left}, moved {moved})")
+            check(last.get("clicks") == 1 and last.get("presses") == 1, f"one Shift-click ({last.get('clicks')} in {last.get('presses')})")
+    finally:
+        write_config()
+        ctl("reload")
+        relaunch("Charlie")
+
+
 def title_groups(s):
     """The mirror's stages by title: the one in front, then the others sorted."""
     groups = [titles(s, g) for g in groups_of(s)]
@@ -822,7 +899,8 @@ def main():
     if start() is None:
         return 1
     runs = {"mirror": phase_mirror, "switch": phase_switch, "rejected": phase_rejected, "merge": phase_merge,
-            "split": phase_split, "pointer": phase_pointer, "open-here": phase_open_here, "restore": phase_restore}
+            "split": phase_split, "pointer": phase_pointer, "open-here": phase_open_here,
+            "open-running": phase_open_running, "restore": phase_restore}
     for name in PHASES:
         if name in phases:
             runs[name]()

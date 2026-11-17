@@ -95,6 +95,10 @@ const QUEUE: usize = 4;
 /// arrangement: its motion starts about 100 ms after the cause and runs about 600 ms.
 const WATCH: Duration = Duration::from_millis(1200);
 
+/// A launch's own activation comes within this of its launch notice: the launch's route
+/// decides for it ([`AppleController::app_activated`] leaves it).
+const LAUNCH_ACTIVATION: Duration = Duration::from_secs(3);
+
 /// The Apple mode's conductor. WM thread only.
 pub struct AppleController {
     store: ConfigStore,
@@ -362,7 +366,7 @@ impl AppleController {
     /// stage, as it should), nor for one launched just now (the launch's own route).
     pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
         let (pid, now) = (app.pid, Instant::now());
-        if ob.launched_at(pid).is_some_and(|t| now.saturating_duration_since(t) < job::FIRST_WINDOW) {
+        if ob.launched_at(pid).is_some_and(|t| now.saturating_duration_since(t) < LAUNCH_ACTIVATION) {
             return;
         }
         if self.pids.values().any(|p| *p == pid) || ob.windows().values().any(|w| w.pid == pid) {

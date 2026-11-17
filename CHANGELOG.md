@@ -13,6 +13,9 @@
   user clicks, types or holds a key. A newly opened app that a rule's `current`,
   `[stages] new_apps_join_current` or Shift wants in the stage in front joins it: the app is
   hidden as it launches, so Apple's Stage Manager keeps the stage in front, then brought in.
+  The same goes for a running app with no window that opens one as it is activated (a Dock
+  click on Finder, Notes or Activity Monitor): it is hidden as it activates, shown again
+  once its window exists, and brought in.
 - New setting `[stages] restore_with_apple`, on by default. With `[windows] with_apple =
   "augment"`, Apple's stages are put back as saved after a restart or a new login, once the
   reopened windows have shown; under "All at Once" an app's windows stay in one stage.
