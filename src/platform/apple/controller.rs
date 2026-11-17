@@ -109,6 +109,14 @@ const JOB_READ: Duration = Duration::from_millis(25);
 /// decides for it ([`AppleController::app_activated`] leaves it).
 const LAUNCH_ACTIVATION: Duration = Duration::from_secs(3);
 
+/// How long after our own activation of an app, or our hide of another taking, an app's
+/// did-activate notice is taken as ours, not the person's ([`AppleController::app_activated`]).
+const OWN_ACTIVATION: Duration = Duration::from_millis(1500);
+
+/// How long after our hide of an app took another app's activation is taken as macOS handing
+/// it the focus (live 11-17: Finder, 13 ms after Contacts was hidden).
+const HANDED_OVER: Duration = Duration::from_millis(500);
+
 /// The Apple mode's conductor. WM thread only.
 pub struct AppleController {
     store: ConfigStore,
@@ -140,6 +148,9 @@ pub struct AppleController {
     posting: Option<Posted>,
     /// Newly opened apps being hidden at their launch, by pid.
     hidings: BTreeMap<i32, Hiding>,
+    /// Apps we activated ourselves (a give-up's activation given back), and when: their
+    /// did-activate notice starts nothing ([`AppleController::app_activated`]).
+    activated_by_us: BTreeMap<i32, Instant>,
     /// Each managed window's app, at the last read.
     pids: BTreeMap<u32, i32>,
     /// Each route's counts.
@@ -228,6 +239,7 @@ impl AppleController {
             jobs: VecDeque::new(),
             posting: None,
             hidings: BTreeMap::new(),
+            activated_by_us: BTreeMap::new(),
             pids: BTreeMap::new(),
             stats: BTreeMap::new(),
             last_refusal: None,
@@ -397,6 +409,29 @@ impl AppleController {
             return;
         }
         if self.pids.values().any(|p| *p == pid) || ob.windows().values().any(|w| w.pid == pid) {
+            return;
+        }
+        // Not the person's activation (live 11-17, Contacts opened here: its hide handed the
+        // focus to Finder, which has a `current` rule and no window; the job waited 3 s for a
+        // window, gave up by activating Finder, whose activation started the job again, six
+        // times over until the person clicked another app): an app we activated ourselves, or
+        // one macOS made active as our hide of another app took.
+        self.activated_by_us.retain(|_, t| now.saturating_duration_since(*t) < OWN_ACTIVATION);
+        if self.activated_by_us.contains_key(&pid) {
+            tracing::debug!(pid, "apple mode: an app activated by us: nothing started");
+            return;
+        }
+        // A hide under way counts too: its notice may come before the hide's thread says so.
+        let handed_over = self.hidings.values().any(|h| {
+            h.pid != pid
+                && match h.outcome() {
+                    None => true,
+                    Some(launch_hide::HideOutcome::Hidden { ms, .. }) => now.saturating_duration_since(h.since + Duration::from_millis(ms)) < HANDED_OVER,
+                    Some(_) => false,
+                }
+        });
+        if handed_over {
+            tracing::debug!(pid, "apple mode: an app made active as our hide of another took: nothing started");
             return;
         }
         self.arrival(pid, app.bundle_or_unknown(), Moment::Activation, now);
@@ -888,8 +923,13 @@ impl AppleController {
                     tracing::info!(pid, "apple mode: given up: the app shown again");
                     launch_hide::unhide(pid);
                 }
-                if let Some(pid) = report.activate {
+                // Given back only to an app we hid: one never hidden (Finder, it owns the
+                // Desktop) is active already, and activating it again only began another job.
+                if let Some(pid) = report.activate
+                    && self.hidings.contains_key(&pid)
+                {
                     tracing::info!(pid, "apple mode: given up: the app hidden at its activation shown again and activated, as asked");
+                    self.activated_by_us.insert(pid, now);
                     launch_hide::activate(pid);
                 }
                 if let Some((w, frame)) = report.set_back
