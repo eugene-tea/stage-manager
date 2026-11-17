@@ -41,6 +41,14 @@ fn lerp(a: f64, b: f64, p: f64) -> f64 {
     a + (b - a) * p
 }
 
+/// Whether the cards turn flat as the strip's visibility changes from `was_shown` to `shown`:
+/// only a strip coming into view, brought back at the edge (`by_edge`: the pointer's rest, the
+/// edge tab, the launch announce; not a window dragged over it), with `[reveal] flat` on. The
+/// strip turns them flat before its slide starts, both in one commit.
+pub fn turns_flat(was_shown: bool, shown: bool, by_edge: bool, flat_on: bool) -> bool {
+    !was_shown && shown && by_edge && flat_on
+}
+
 /// The pose of a revealed card's window when the hide's spring has covered `p` of the way,
 /// from `flat` (the card as revealed) to `turned` (the card off the screen, turned), both
 /// seen through the flight's eye: size, turn and height on the spring, the sideways place
@@ -228,6 +236,15 @@ mod tests {
         // A hide that starts while the strip still slides in starts where it is drawn.
         let mid = hide_keyframes(base, TILT, -100.0, -286.0, (strip, flight), s, 0.42);
         assert_eq!(mid.first().map(|k| k.1), Some(base));
+    }
+
+    #[test]
+    fn only_a_strip_coming_into_view_at_the_edge_turns_flat() {
+        assert!(turns_flat(false, true, true, true));
+        assert!(!turns_flat(true, true, true, true), "already in view (a card click's carry-over): stays turned");
+        assert!(!turns_flat(false, true, false, true), "shown for a window dragged over it: turned");
+        assert!(!turns_flat(false, true, true, false), "[reveal] flat = false");
+        assert!(!turns_flat(true, false, true, true), "hiding");
     }
 
     #[test]

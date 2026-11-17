@@ -2697,6 +2697,9 @@ impl Strip {
 
     /// See [`probe`].
     fn probe(&self) -> serde_json::Value {
+        // What this run loop turn changed is committed first, so the drawn state read below
+        // matches the model it is reported with (`shown`, `flat`).
+        CATransaction::flush();
         let g = self.geometry.global;
         let root = &self.pane.root;
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
@@ -4220,10 +4223,17 @@ impl Strip {
             tracing::debug!(shown, ?mode, "strip visibility");
             // Brought back at the edge, Apple's cards turn flat at once, still off the screen,
             // then slide in (recorded 11-16).
-            if shown && decision.shown && mode == Mode::EdgeOnly && !drop_over && self.style.reveal.flat {
+            let flat = edge_flat::turns_flat(self.pane.shown, shown, decision.shown && mode == Mode::EdgeOnly && !drop_over, self.style.reveal.flat);
+            if flat {
                 self.pose_now(true);
             }
             self.slide(shown, true);
+            if flat {
+                // The flat pose and the slide's first frame go out in one commit, now: left to
+                // the run loop's end, a `ctl debug-strip` answered in between read the cards
+                // still turned at their hidden place (live 11-17, one sample of 160).
+                CATransaction::flush();
+            }
             self.update_targets();
         } else if self.flat && mode != Mode::EdgeOnly {
             // Nothing hides the strip any more (the window moved off it, the user's toggle):
