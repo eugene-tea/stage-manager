@@ -44,7 +44,10 @@ slid away when it was dragged on to 15 pt, its cards starting at 16 pt; the poin
 was not measured; a laptop's windows nearly fill the screen, so there it goes more often).
 Each screen's strip follows its own front stage. Resting the pointer at the left edge brings
 it back: Apple's starts sliding in about 180 ms after the pointer gets there (measured), ours
-rests 130 ms and checks the pointer every 30 ms (`[reveal] delay_ms`, `poll_ms`). Each card
+rests 130 ms and checks the pointer every 30 ms (`[reveal] delay_ms`, `poll_ms`). It has to
+rest: a move of a point or more starts the rest again (recorded 11-16: a pointer posted a
+point to and fro at the edge left Apple's strip hidden until it stood still), so a pointer
+passing along the edge never brings it. Brought back, its cards are flat (below). Each card
 draws the stage's windows at one scale, turned in perspective toward the middle of the
 screen, with the app icon on its bottom-left corner. The number of cards depends on the
 screen height: 5 on a laptop, 6 on a 5K screen.
@@ -121,6 +124,38 @@ together. Apple's turns solid on the growth's own curve (measured: the windows' 
 card's edge fit the same spring, ω 16.8 and 16.6). The wallpaper is drawn from its file,
 as the clean corner's is; where it cannot be (a shuffle, an unreadable picture), the cards are
 opaque.
+
+**The strip brought back at the edge is flat** (recorded 11-16 on a 2560 × 1440 pt display:
+Apple's strip hidden behind a window over its column, three fixture windows each a stage of
+its own, the pointer rested at the left edge for about 3 s and then moved away, three
+rounds; every window's bounds read every 8 to 30 ms; `scripts/measure-edge-reveal.py` reads
+the recordings). Hidden, Apple's cards wait off the screen turned as in the strip, their left
+edges at −260 pt (a 900 × 668 pt window's card 94 × 104 pt there: the turn seen from the
+strip's eye, which stays put while the cards slide, as before). Brought back, the cards turn
+**flat at once**, still off the screen, facing the viewer at the size the strip draws them
+before the turn: the window's own proportions, 97 pt tall for these small windows (130.7,
+128.6 and 133.2 pt wide for 900 × 668, 700 × 528 and 1000 × 728 pt windows; read 129 to 132).
+They slide in flat from −260 to 16 pt on a critically damped spring starting within 10 ms
+of the turn (ω 15.7 and 16.6 read, 99 % about 420 ms later; ours is the slide's, ω 16.8),
+their places down the column unchanged. The app icons stay on the cards' corners (the
+owner's screenshot of Apple's revealed strip, 11-16). Hiding (the pointer gone, after the
+leave delay), each card slides out turning back: its window's pose, seen through the
+flight's eye (the display's middle, 1.17 display widths in front, as a switch's snapshot),
+goes from the flat card to the turned one off the screen, its size, turn and height on the
+slide's spring (ω 17.0 and 17.2 read) and its sideways place trailing the spring by
+0.3 · p (1 − p) (0.26 to 0.33 by fit). Seen so, a card first widens as its far side goes back
+toward the eye's middle (the 130.7 pt card 139 to 140 pt wide 50 to 100 ms in, its far edge
+up to 7 pt shorter) and then narrows to the turned card (`ui::edge_flat`). That draws the
+three cards of both recorded hides within 0.6 pt rms (2.6 at worst) at each frame's best
+progress; a turn about the left edge on the slide, seen through the strip's eye, misses them
+by 7.2 pt rms (18 at worst): it cannot draw a card wider than flat. Ours draws the revealed
+strip with no turn (every hit test too) and, hiding, turns each plane back on keyframes of
+that pose under the usual slide, ending on the turned card it draws at rest; it hides its
+cards 271 pt left on the 5K display (`[motion] slide_distance` 286 from x 15) where Apple's
+went to −260 with these narrow cards. Not recorded: Apple's with "Show recent apps" off (ours
+draws its edge reveal flat too), a revealed strip a window then moves off (ours turns the
+cards back in place on the slide's spring), a revealed card's hover, and the shadows.
+`[reveal] flat = false` keeps the cards turned.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot
@@ -406,7 +441,8 @@ screen).
 | Windows shrinking into the strip: the stage you leave, the desktop reveal, ⌘M, a window dropped on the strip | the same spring; sideways motion, width and the turn trailing it |
 | Cards gliding to new slots | spring, 99 % at about 375 ms |
 | The strip sliding out and in | spring, 99 % at about 400 ms, 286 pt |
-| The edge reveal | starts about 180 ms after the pointer reaches the left edge |
+| The edge reveal | starts about 180 ms after the pointer comes to rest at the left edge; the cards turn flat at once and slide in on the slide's spring |
+| The revealed strip hiding | the slide's spring; each card turning back on it, its sideways place trailing it (below) |
 | Hover | grows 11 % on a spring, half way at about 100 ms, 99 % at about 400 ms, its windows turning solid on the same curve |
 | Press | eases to 0.987 of its size in about 100 ms |
 | A card dragged out | its window as it leaves the strip: turned as the card at first, flat on the growing spring; slides under the pointer in about 100 ms (smoothstep) |

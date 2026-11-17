@@ -87,7 +87,9 @@ A card still waiting for a window's picture (at launch) is faint glass until the
 fades in (`[cards] empty_opacity`, `fade_ms`).
 The strip sits below your windows: a window over the cards covers them, and when a window
 covers their left edge too (about 20 points from the screen's edge), the strip slides away. Rest the
-pointer at the left edge of the screen to bring it back.
+pointer at the left edge of the screen to bring it back (it comes once the pointer stands still
+there). It comes in with its cards flat, facing the screen, and they turn back as it slides away
+again, as Apple's do (`[reveal] flat = false` keeps them turned).
 
 ### Switching
 

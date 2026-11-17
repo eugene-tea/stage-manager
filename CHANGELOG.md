@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- The strip brought back at the left edge shows its cards flat, facing the screen, at the
+  size they have before the turn, and turns them back as it slides away, as Apple's does
+  (`[reveal] flat`; false keeps them turned). It comes once the pointer rests at the edge: a
+  pointer still moving there no longer brings it.
 - A window tab selected (Terminal, Finder, any app with window tabs) belongs to the stage
   of its tab group: it takes the place of the tab it hides, and goes with its stage when
   another stage is chosen. A tab selected was let go with no stage, and selected again it
