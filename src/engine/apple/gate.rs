@@ -31,6 +31,13 @@ pub const GATE_WAIT: Duration = Duration::from_millis(1500);
 /// How long a Shift-click waits for a covered strip to show, then it is given up.
 pub const STRIP_WAIT: Duration = Duration::from_secs(4);
 
+/// How long a thumbnail with no part of its own to press is waited on, the strip showing
+/// (live 11-17: Calculator's small thumbnail at the strip's foot under its icon and Safari's
+/// item, the strip at rest for 4 s with no change; a probe found neither the icon nor the
+/// tilted card's corners under it take a click). Apple's relayout after an add comes well
+/// within it; past it the app is given its own stage sooner.
+pub const NO_POINT_WAIT: Duration = Duration::from_millis(1500);
+
 /// Why a step is held back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,7 +89,8 @@ impl Hold {
     /// person's input [`GATE_WAIT`].
     pub fn limit(self) -> Option<Duration> {
         match self {
-            Self::StripCovered | Self::NoPoint | Self::FullScreen => Some(STRIP_WAIT),
+            Self::StripCovered | Self::FullScreen => Some(STRIP_WAIT),
+            Self::NoPoint => Some(NO_POINT_WAIT),
             Self::InMotion | Self::InFlight => None,
             _ => Some(GATE_WAIT),
         }
