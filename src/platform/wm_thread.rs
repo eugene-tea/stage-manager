@@ -624,6 +624,14 @@ impl WmState {
                 {
                     self.conductor.app_will_launch(&self.observer, app);
                 }
+                // An app activated: the Apple mode may hide a running app with no window at
+                // once, before the window it reopens shows.
+                if let AppEvent::Activated(app, _) = &event
+                    && self.arranging()
+                    && self.observer.admits(app)
+                {
+                    self.conductor.app_activated(&self.observer, app);
+                }
                 self.observer.on_app_event(event, ax_callback);
                 // A just-opened app: the engine may hold its new windows until placed.
                 if let Some(pid) = launched

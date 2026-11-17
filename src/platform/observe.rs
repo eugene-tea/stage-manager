@@ -1168,13 +1168,19 @@ impl Observer {
     /// reporting them as [`WinEvent::Found`]: the caller places them (a window tab selected,
     /// which its app announces with no notification: round tab-lost). Logged at info each.
     pub fn rescan_app_now(&mut self, pid: i32) -> Vec<u32> {
+        self.track_app_windows(pid, "window found (a tab selected)")
+    }
+
+    /// [`Observer::rescan_app_now`] with the log's words `why` (the Apple mode: a window
+    /// reopened while its app is hidden).
+    pub fn track_app_windows(&mut self, pid: i32, why: &'static str) -> Vec<u32> {
         if !self.observing {
             return Vec::new();
         }
         let cg = cg_lookup();
         let ids = self.rescan_app_quietly(pid, &cg);
         for &id in &ids {
-            self.log_window("window found (a tab selected)", id);
+            self.log_window(why, id);
         }
         ids
     }

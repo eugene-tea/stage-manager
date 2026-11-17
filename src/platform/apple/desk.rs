@@ -106,4 +106,11 @@ impl AppleDesk for Desk<'_> {
     fn landed(&mut self) -> Option<Landed> {
         super::post::take_landed()
     }
+
+    /// `unhide()` with no activation ([`super::launch_hide::unhide`]): it answers false and
+    /// still shows the app (the sixth probe of 11-16).
+    fn unhide(&mut self, pid: i32) -> Result<(), String> {
+        super::launch_hide::unhide(pid);
+        Ok(())
+    }
 }

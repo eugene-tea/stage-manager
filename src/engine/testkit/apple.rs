@@ -2,7 +2,11 @@
 //! strip's room, Apple's motion and the 650 ms blank of its Accessibility on a test clock, a
 //! covered strip, the person's input, and Apple's answers as measured on 11-16: a focus
 //! switches to the window's stage; a new app takes a stage of its own, or, hidden at its
-//! launch, goes into the strip with the stage in front left as it is; a Shift-click on a
+//! launch, goes into the strip with the stage in front left as it is; a running app's window
+//! reopened while it is hidden (at its activation) shows nowhere, listed off screen, until the
+//! app is shown again without activating it, then goes into the strip, the stage in front left
+//! as it is (the sixth probe of 11-16), and reopened with no hide switches as a new app's
+//! does; a Shift-click on a
 //! visible part of a thumbnail adds that window alone to the stage in front, every click of
 //! one Shift press landing on what the strip showed at the press (the fourth probe of 11-16),
 //! a press mid-motion is ignored, a click on a covered strip lands on nothing of Apple's; a
@@ -86,6 +90,11 @@ pub struct FakeWindowManager {
     desktops: Vec<(Vec<u32>, Vec<Vec<u32>>)>,
     /// Focuses asked of a window on a Desktop not shown (macOS would have shown it).
     pub desktop_jumps: u32,
+    /// Windows a hidden app reopened: in no stage, listed off screen at their frames, until
+    /// the app shows again.
+    shown_nowhere: Vec<u32>,
+    /// Every app shown again by an unhide, in order.
+    pub unhidden: Vec<i32>,
 }
 
 impl Default for FakeWindowManager {
@@ -119,6 +128,8 @@ impl FakeWindowManager {
             icon_base: 9900,
             desktops: Vec::new(),
             desktop_jumps: 0,
+            shown_nowhere: Vec::new(),
+            unhidden: Vec::new(),
         }
     }
 
@@ -226,6 +237,37 @@ impl FakeWindowManager {
         self.stages.insert(0, ids.to_vec());
     }
 
+    /// Running app `pid`, with no window, reopens window `id` at its activation, the app
+    /// hidden at that activation (`hide_took`): the window shows nowhere until the app is shown
+    /// again ([`FakeWindowManager::show_app`]), the stage in front never moving (the sixth probe
+    /// of 11-16). Without the hide Apple's switches to it as to a new app's stage.
+    pub fn reopen(&mut self, pid: i32, id: u32, hide_took: bool) {
+        if !hide_took || self.current.is_empty() {
+            self.open_app(pid, &[id]);
+            return;
+        }
+        self.hidden.insert(pid);
+        self.windows.insert(id, (pid, Rect::new(self.shift + 360.0, 160.0, 640.0, 460.0)));
+        self.shown_nowhere.push(id);
+    }
+
+    /// App `pid` shown again without activating it: the windows it reopened while hidden go
+    /// into the strip as a stage of their own, on top; the stage in front stays.
+    pub fn show_app(&mut self, pid: i32) {
+        self.hidden.remove(&pid);
+        let ids: Vec<u32> = self.shown_nowhere.iter().copied().filter(|w| self.windows.get(w).is_some_and(|(p, _)| *p == pid)).collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.change();
+        self.shown_nowhere.retain(|w| !ids.contains(w));
+        if self.current.is_empty() {
+            self.current = ids;
+        } else {
+            self.stages.insert(0, ids);
+        }
+    }
+
     /// App `pid` opens one more window `id`: into the stage in front when the app has a
     /// window there (or a stage of the app's own, else a new stage in front).
     pub fn open_window(&mut self, pid: i32, id: u32) {
@@ -254,7 +296,8 @@ impl FakeWindowManager {
             return;
         }
         if let Some((pid, _)) = self.windows.get(&id) {
-            self.hidden.remove(pid);
+            let pid = *pid;
+            self.show_app(pid);
         }
         // A window in front is raised within its stage: no motion.
         if let Some(k) = self.current.iter().position(|w| *w == id) {
@@ -285,6 +328,7 @@ impl FakeWindowManager {
     pub fn close(&mut self, id: u32) {
         self.change();
         self.windows.remove(&id);
+        self.shown_nowhere.retain(|w| *w != id);
         self.current.retain(|w| *w != id);
         for st in &mut self.stages {
             st.retain(|w| *w != id);
@@ -456,6 +500,12 @@ impl FakeWindowManager {
                 windows.push(app(*id, at(*id), false));
             }
         }
+        // A hidden app's reopened windows: listed off screen at their frames.
+        for id in &self.shown_nowhere {
+            if let Some(f) = self.frame(*id) {
+                windows.push(app(*id, f, false));
+            }
+        }
         // The Desktops not shown: listed off screen at their frames.
         for (current, stages) in &self.desktops {
             for id in current.iter().chain(stages.iter().flatten()) {
@@ -515,5 +565,11 @@ impl AppleDesk for FakeWindowManager {
 
     fn landed(&mut self) -> Option<Landed> {
         self.landed.take()
+    }
+
+    fn unhide(&mut self, pid: i32) -> Result<(), String> {
+        self.unhidden.push(pid);
+        self.show_app(pid);
+        Ok(())
     }
 }

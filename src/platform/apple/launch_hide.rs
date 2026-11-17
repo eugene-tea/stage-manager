@@ -6,6 +6,13 @@
 //! did-launch one at 492 ms; Apple's did not switch and the window went into the strip at
 //! about 700 ms).
 //!
+//! The same hide serves a running app with no window activated where the rules want its next
+//! window here ([`Moment::Activation`], the sixth probe of 11-16: an app reopening a window at
+//! its activation, hidden at its did-activate notice, retried every 2 ms, took about when the
+//! window came; Apple's did not switch, the window showed nowhere, and `unhide()` without
+//! activating put it into the strip). Showing it again is the job's step (`Step::Unhide`),
+//! once the window exists.
+//!
 //! On a thread of its own, polling every [`POLL`] for at most [`HIDE_WAIT`]: only an app with
 //! the regular activation policy is ever hidden (a menu bar app or a helper never is), and
 //! never once a window of it shows at full size (Apple's has switched to its stage then: the
@@ -65,6 +72,24 @@ pub enum HideOutcome {
     Cancelled,
 }
 
+/// When the hide began: what the log says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moment {
+    /// At a newly opened app's launch notice.
+    Launch,
+    /// At a running app's did-activate notice (its window reopened).
+    Activation,
+}
+
+impl Moment {
+    fn words(self) -> &'static str {
+        match self {
+            Self::Launch => "a newly opened app hidden at its launch",
+            Self::Activation => "a running app hidden at its activation",
+        }
+    }
+}
+
 /// A hide under way or done.
 #[derive(Debug, Clone)]
 pub struct Hiding {
@@ -88,8 +113,8 @@ impl Hiding {
     }
 }
 
-/// Starts hiding app `pid` (see the module docs).
-pub fn start(pid: i32) -> Result<Hiding, String> {
+/// Starts hiding app `pid` at `moment` (see the module docs).
+pub fn start(pid: i32, moment: Moment) -> Result<Hiding, String> {
     let outcome = Arc::new(Mutex::new(None));
     let out = outcome.clone();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -99,7 +124,7 @@ pub fn start(pid: i32) -> Result<Hiding, String> {
         .name("apple-launch-hide".into())
         .spawn(move || {
             let got = hide_loop(pid, since, &called_off);
-            tracing::info!(pid, outcome = ?got, "apple mode: a newly opened app hidden at its launch");
+            tracing::info!(pid, outcome = ?got, "apple mode: {}", moment.words());
             if let Ok(mut o) = out.lock() {
                 *o = Some(got);
             }
@@ -148,6 +173,17 @@ pub fn unhide(pid: i32) {
         && app.isHidden()
     {
         let _ = app.unhide();
+    }
+}
+
+/// App `pid` activated (shown again with it): a running app hidden at its activation that
+/// reopened no window gets the activation the person asked for.
+pub fn activate(pid: i32) {
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        if app.isHidden() {
+            let _ = app.unhide();
+        }
+        let _ = app.activateWithOptions(objc2_app_kit::NSApplicationActivationOptions::empty());
     }
 }
 

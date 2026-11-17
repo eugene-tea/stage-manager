@@ -131,6 +131,15 @@ impl Conductor {
         }
     }
 
+    /// An app activated (the Apple mode hides a running app with no window that the rules
+    /// want here, before the window it reopens shows; ours places that window when it comes).
+    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
+        match self {
+            Self::Ours(_) => {}
+            Self::Apples(a) => a.app_activated(ob, app),
+        }
+    }
+
     /// Re-read config.toml.
     pub fn reload_config(&mut self, ob: &mut Observer) {
         match self {

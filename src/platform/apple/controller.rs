@@ -13,7 +13,11 @@
 //! here" for a newly opened app (a rule's `current`, `[stages] new_apps_join_current`, Shift
 //! held at the launch, `[sugar] shift_brings_here`): the app hidden at its launch
 //! ([`super::launch_hide`]) so Apple's keeps the stage in front, its window Shift-clicked in
-//! from the strip, then focused; the round trip when the hide came too late.
+//! from the strip, then focused; the round trip when the hide came too late. A running app
+//! with no window, activated where the same rules want its next window (a Dock click, `open`,
+//! ⌘Tab: it reopens one), the same way: hidden at its activation, shown again without
+//! activating once its window exists (Apple's puts it into the strip), Shift-clicked in, then
+//! focused ([`Self::app_activated`]).
 //!
 //! Apple's posts no Accessibility notices, so it polls: a read at every activation, window
 //! found or gone, focus, mouse-up near the strip and Desktop change; then every 50 ms while
@@ -43,7 +47,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{Value, json};
 
 use super::desk::Desk;
-use super::launch_hide::{self, HideOutcome, Hiding};
+use super::launch_hide::{self, HideOutcome, Hiding, Moment};
 use super::routes::drag::Drag;
 use super::routes::focus::Focus;
 use super::routes::rejected;
@@ -335,7 +339,7 @@ impl AppleController {
     pub fn app_launched(&mut self, ob: &Observer, pid: i32) {
         if ob.admits_pid(pid) {
             let bundle = ob.bundle_id(pid).unwrap_or_default().to_string();
-            self.arrival(pid, &bundle, Instant::now());
+            self.arrival(pid, &bundle, Moment::Launch, Instant::now());
         }
         if let Some(a) = self.auto.as_mut() {
             a.busy(Instant::now());
@@ -346,16 +350,35 @@ impl AppleController {
 
     /// An app about to launch: a newly opened app the rules want here is hidden at once.
     pub fn app_will_launch(&mut self, _ob: &Observer, app: &AppInfo) {
-        self.arrival(app.pid, app.bundle_or_unknown(), Instant::now());
+        self.arrival(app.pid, app.bundle_or_unknown(), Moment::Launch, Instant::now());
         self.read_due = Some(Instant::now());
     }
 
-    /// Newly opened app `pid` (`bundle`): "open here" when a rule's `current`,
-    /// `[stages] new_apps_join_current` or Shift held (`[sugar] shift_brings_here`) asks for
-    /// the stage in front, as the app's own mode decides for a newly opened app's first window
-    /// (`Decision::for_new_window`; a rule's title pattern is matched against no title, the
-    /// app having no window yet). With no stage in front, or Apple's own rule asked, nothing.
-    fn arrival(&mut self, pid: i32, bundle: &str, now: Instant) {
+    /// An app activated (its did-activate notice, before the observer hears it): a running
+    /// app with no window anywhere, whose next window the rules (or Shift held) want in the
+    /// stage in front, is hidden at once, so the window it reopens does not take a stage of its
+    /// own in front (the sixth probe of 11-16). Never for an app that has a window (in a stage,
+    /// on another Desktop, minimized, or any window the observer knows: Apple's switches to its
+    /// stage, as it should), nor for one launched just now (the launch's own route).
+    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
+        let (pid, now) = (app.pid, Instant::now());
+        if ob.launched_at(pid).is_some_and(|t| now.saturating_duration_since(t) < job::FIRST_WINDOW) {
+            return;
+        }
+        if self.pids.values().any(|p| *p == pid) || ob.windows().values().any(|w| w.pid == pid) {
+            return;
+        }
+        self.arrival(pid, app.bundle_or_unknown(), Moment::Activation, now);
+    }
+
+    /// Newly opened app `pid` (`bundle`), or a running one with no window activated
+    /// (`moment`): "open here" when a rule's `current`, `[stages] new_apps_join_current` or
+    /// Shift held (`[sugar] shift_brings_here`) asks for the stage in front, as the app's own
+    /// mode decides for a newly opened app's first window (`Decision::for_new_window`; a
+    /// rule's title pattern is matched against no title, the app having no window yet; an app
+    /// whose windows were all closed counts as newly opened, as there). With no stage in front,
+    /// or Apple's own rule asked, nothing.
+    fn arrival(&mut self, pid: i32, bundle: &str, moment: Moment, now: Instant) {
         if self.hidings.contains_key(&pid) || self.jobs.iter().any(|j| j.intent == Intent::OpenHere(pid)) {
             return;
         }
@@ -387,8 +410,12 @@ impl AppleController {
             tracing::debug!(pid, bundle, "apple mode: a newly opened app to open here, a full-screen app's Space shows: Apple's own");
             return;
         }
-        let Some(mut job) = plan::open_here(mirror, pid, now) else {
-            tracing::debug!(pid, bundle, "apple mode: a newly opened app to open here, no stage in front: Apple's puts it in front");
+        let planned = match moment {
+            Moment::Launch => plan::open_here(mirror, pid, now),
+            Moment::Activation => plan::reopen_here(mirror, pid, &self.pids, now),
+        };
+        let Some(mut job) = planned else {
+            tracing::debug!(pid, bundle, ?moment, "apple mode: an app to open here, no stage in front (or a window of it known): Apple's own");
             return;
         };
         job.screen = screen;
@@ -396,14 +423,17 @@ impl AppleController {
             tracing::warn!(pid, bundle, "apple mode: a newly opened app to open here, too many steps waiting: Apple's own");
             return;
         }
-        match launch_hide::start(pid) {
+        match launch_hide::start(pid, moment) {
             Ok(h) => {
                 self.hidings.insert(pid, h);
             }
             Err(e) => tracing::warn!(pid, "apple mode: {e}; the round trip instead"),
         }
         let why = if shift { "Shift held" } else if decision.action == RuleAction::Current { "a rule's current" } else { "[stages] new_apps_join_current" };
-        tracing::info!(pid, bundle, why, "apple mode: a newly opened app opens here: hidden at its launch, then brought into the stage in front");
+        match moment {
+            Moment::Launch => tracing::info!(pid, bundle, why, "apple mode: a newly opened app opens here: hidden at its launch, then brought into the stage in front"),
+            Moment::Activation => tracing::info!(pid, bundle, why, "apple mode: a running app with no window activated: hidden at its activation, the window it reopens shown into the strip, then brought into the stage in front"),
+        }
         self.jobs.push_back(job);
         self.watch();
     }
@@ -588,6 +618,18 @@ impl AppleController {
             return;
         }
         let t0 = Instant::now();
+        // An app hidden at its activation: the window it reopens may come with no notice the
+        // observer hears; its window list is asked at each read until one is tracked.
+        let quiet: Vec<i32> = self
+            .jobs
+            .iter()
+            .filter(|j| j.reopen && j.hidden)
+            .filter_map(|j| if let Intent::OpenHere(pid) = j.intent { Some(pid) } else { None })
+            .filter(|pid| !ob.windows().values().any(|w| w.pid == *pid))
+            .collect();
+        for pid in quiet {
+            ob.track_app_windows(pid, "window found (reopened while its app is hidden)");
+        }
         if self.manager_checked.is_none_or(|t| now.duration_since(t) >= MANAGER_CHECK) || self.manager.is_none() {
             self.manager = super::strip_ax::manager_pid();
             self.manager_checked = Some(now);
@@ -746,7 +788,7 @@ impl AppleController {
             if let Intent::OpenHere(pid) = j.intent
                 && let Some(HideOutcome::Hidden { .. }) = self.hidings.get(&pid).and_then(Hiding::outcome)
             {
-                j.hidden = true;
+                j.hide_took(now);
             }
         }
         // A step at a time: each advance runs at most one, against its screen's mirror.
@@ -788,6 +830,10 @@ impl AppleController {
                 if let Some(pid) = report.unhide {
                     launch_hide::unhide(pid);
                 }
+                if let Some(pid) = report.activate {
+                    tracing::info!(pid, "apple mode: given up: the app hidden at its activation reopened no window; activated, as asked");
+                    launch_hide::activate(pid);
+                }
                 if let Some((w, frame)) = report.set_back
                     && let Some(tw) = ob.window(w)
                 {
@@ -813,6 +859,7 @@ impl AppleController {
                 route = report.route,
                 ms = report.ms,
                 first_window_ms = report.first_window_ms,
+                unhide_ms = report.unhide_ms,
                 hide = ?hide,
                 focuses = report.focuses,
                 clicks = report.clicks,
@@ -838,6 +885,16 @@ impl AppleController {
             Step::Focus(_) => &Focus,
             Step::Post(Posted::Clicks { .. }) => &ShiftClick,
             Step::Post(Posted::Drag { .. }) => &Drag,
+            Step::Unhide(pid) => {
+                // No route: nothing posted, no pointer. Apple's moves the window into the
+                // strip from here.
+                let ran = desk.unhide(*pid);
+                tracing::debug!(pid, "apple mode: the app hidden at its activation shown again, not activated");
+                self.mirror_on_mut(Some(screen.id)).step_began(now);
+                self.watch();
+                self.read_due = Some(now + mirror::MOTION_READ);
+                return ran;
+            }
             Step::AwaitSettle | Step::AwaitStrip(_) => return Ok(()),
         };
         let t0 = Instant::now();

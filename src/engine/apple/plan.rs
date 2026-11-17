@@ -19,7 +19,8 @@
 //! moves (the fifth probe of 11-16, every drop point tried). Send and New for such a window
 //! are refused up front with that reason; with "One at a Time" they are tried (unprobed).
 //! - **Open here** (a rule's `current`, `[stages] new_apps_join_current`, Shift held at the
-//!   launch): a newly opened app's windows into the stage in front ([`open_here`]).
+//!   launch): a newly opened app's windows into the stage in front ([`open_here`]); a running
+//!   app with no window that reopens one at its activation the same ([`reopen_here`]).
 //! - **Restore** (`ctl apple restore`, and by itself after a restart): the saved stages put
 //!   back ([`super::restore`]).
 //!
@@ -65,6 +66,10 @@ pub enum Step {
     AwaitStrip(usize),
     /// Wait until the arrangement is settled.
     AwaitSettle,
+    /// App `0`, hidden by us at its activation, shown again without activating it once its
+    /// reopened window exists: Apple's puts that window into the strip (the sixth probe of
+    /// 11-16).
+    Unhide(i32),
 }
 
 /// Why an intent is not carried out.
@@ -202,6 +207,20 @@ pub fn open_here(a: &Arrangement, pid: i32, now: std::time::Instant) -> Option<J
         return None;
     }
     Some(Job::new(Intent::OpenHere(pid), vec![Goal::Gather { windows: a.current.clone(), app: Some(pid), focus_app: true }], now))
+}
+
+/// Running app `pid` activated (a Dock click, `open`, ⌘Tab) where the rules want its next
+/// window in the stage in front: [`open_here`]'s goal, for a job that hides the app at its
+/// activation and shows it again once its reopened window exists ([`Job::reopen`]). `None`
+/// when the app has a window already (`pids`: each known window's app; Apple's activation
+/// then switches to its stage, as it should), or with no stage in front.
+pub fn reopen_here(a: &Arrangement, pid: i32, pids: &BTreeMap<u32, i32>, now: std::time::Instant) -> Option<Job> {
+    if pids.values().any(|p| *p == pid) {
+        return None;
+    }
+    let mut job = open_here(a, pid, now)?;
+    job.reopen = true;
+    Some(job)
 }
 
 #[cfg(test)]

@@ -72,6 +72,7 @@ fn drive_with(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, max
                 let ok = match &step {
                     Step::Focus(w) => f.focus(*w).is_ok(),
                     Step::Post(p) => f.post(p).is_ok(),
+                    Step::Unhide(pid) => f.unhide(*pid).is_ok(),
                     Step::AwaitSettle | Step::AwaitStrip(_) => true,
                 };
                 job.ran(&step, ok);
@@ -384,6 +385,7 @@ fn a_drag_its_guard_refuses_is_given_up_with_the_guards_words() {
                 let ok = match &step {
                     Step::Focus(w) => f.focus(*w).is_ok(),
                     Step::Post(p) => f.post(p).is_ok(),
+                    Step::Unhide(pid) => f.unhide(*pid).is_ok(),
                     Step::AwaitSettle | Step::AwaitStrip(_) => true,
                 };
                 job.ran(&step, ok);
@@ -513,6 +515,112 @@ fn a_new_app_that_never_shows_a_window_is_unhidden() {
     let r = d.end.expect("ended").expect_err("given up");
     assert_eq!(r.unhide, Some(40));
     assert_eq!(r.undo, None);
+}
+
+// ── A running app's reopened window ─────────────────────────────────────────────────────
+
+/// The sixth probe of 11-16 (the owner's smoke test): a running app with no window, activated
+/// under a `current` rule, hidden at its activation; its reopened window shows nowhere until
+/// the app is shown again without activating it, then comes in from the strip with one
+/// Shift-click and is focused. The stage in front never moves.
+#[test]
+fn a_running_apps_reopened_window_comes_in_hidden_at_its_activation_and_the_stage_in_front_never_moves() {
+    let (mut f, mut a) = three();
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
+    // The platform's hide thread: the hide took at the activation, the window came after.
+    job.hide_took(f.now());
+    let d = drive_with(&mut f, &mut a, &mut job, 6000, |f, t| {
+        if t == 100 {
+            f.reopen(40, 5, true);
+        }
+    });
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("hide_activation"));
+    let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
+    assert_eq!(kinds, vec!["unhide", "shift_click", "focus"], "{:?}", d.steps);
+    assert_eq!(f.unhidden, vec![40], "shown again once, by us");
+    assert_eq!(clicks(&d.steps), vec![5]);
+    assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)), "focused last: it has the keyboard");
+    assert_eq!(sorted(f.current()), vec![4, 5]);
+    assert!(d.moved_in_front.is_empty(), "the stage in front never moved: {:?}", d.moved_in_front);
+    assert!(!f.hidden.contains(&40));
+    assert!(r.unhide_ms.is_some_and(|ms| ms >= 100), "{r:?}");
+    assert!(r.first_window_ms.is_some());
+}
+
+/// The fallback: the window showed before the hide took, Apple's switched to the app's stage
+/// (the stage in front into the strip); after the settle the stage that left comes back in
+/// one Shift press, all its windows, so the result is one stage with both.
+#[test]
+fn a_running_apps_window_shown_before_the_hide_took_comes_back_by_the_round_trip() {
+    let mut f = FakeWindowManager::new();
+    f.open_app(20, &[3]);
+    f.open_app(10, &[1, 2]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front");
+    // The activation stirs the mirror (in motion from it, as the platform's watch has it);
+    // the window shows at once, the hide not taken.
+    a.step_began(f.now());
+    f.reopen(40, 5, false);
+    let d = drive(&mut f, &mut a, &mut job, 6000);
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("round_trip"));
+    assert_eq!(presses(&d.steps), vec![vec![1, 2]], "the stage that left, all its windows in one press");
+    assert!(f.unhidden.is_empty(), "nothing hidden, nothing shown again");
+    assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)));
+    assert_eq!(sorted(f.current()), vec![1, 2, 5], "one stage with both");
+}
+
+/// An app with a window in some stage: no job, nothing hidden; Apple's activation switches to
+/// that stage, as it should.
+#[test]
+fn a_running_app_with_a_window_in_a_stage_is_left_to_apples_switch() {
+    let (mut f, a) = three();
+    assert!(plan::reopen_here(&a, 20, &f.pids(), f.now()).is_none(), "Bravo has window 3 in the strip");
+    assert!(plan::reopen_here(&a, 30, &f.pids(), f.now()).is_none(), "Charlie's window is in front");
+    assert!(plan::reopen_here(&Arrangement::default(), 40, &f.pids(), f.now()).is_none(), "no stage in front: Apple's own");
+    // Apple's own answer to the activation: Bravo's stage in front.
+    f.focus_window(3);
+    let a = settle(&mut f, &a);
+    assert_eq!(a.current, vec![3]);
+    assert!(f.posted.is_empty() && f.unhidden.is_empty());
+}
+
+/// `[sugar] shift_brings_here`: Shift held on the Dock click of a running app with no window
+/// asks the stage in front for its window (`Decision::for_new_window`); the person still
+/// holding Shift when the window comes, the Shift-click uses that Shift (none of ours).
+#[test]
+fn shift_held_at_a_running_apps_activation_brings_its_window_here_with_the_persons_own_shift() {
+    use crate::engine::rules::{Decision, RuleAction};
+    let (decision, _) = Decision::default().for_new_window(true, false, true);
+    assert_eq!(decision.action, RuleAction::Current, "Shift held: the next window here");
+    let (mut f, mut a) = three();
+    f.input.shift = true;
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("planned");
+    job.hide_took(f.now());
+    let d = drive_with(&mut f, &mut a, &mut job, 6000, |f, t| {
+        if t == 50 {
+            f.reopen(40, 5, true);
+        }
+    });
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("hide_activation"));
+    assert!(matches!(f.posted[..], [Posted::Clicks { own_shift: false, .. }]), "the person's Shift: {:?}", f.posted);
+    assert_eq!(sorted(f.current()), vec![4, 5]);
+}
+
+/// A ⌘Tab (under a rule) to a running app that reopens no window: hidden at its activation,
+/// it is shown again and activated a second after the hide, as the person asked.
+#[test]
+fn a_running_app_hidden_at_its_activation_that_reopens_no_window_is_activated_again() {
+    let (mut f, mut a) = three();
+    let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("planned");
+    job.hide_took(f.now());
+    let d = drive(&mut f, &mut a, &mut job, 6000);
+    let r = d.end.expect("ended").expect_err("given up");
+    assert_eq!((r.unhide, r.activate), (Some(40), Some(40)), "{r:?}");
+    assert!(r.ms <= super::job::REOPEN_WAIT.as_millis() as u64 + 200, "given up {} ms in", r.ms);
+    assert!(f.posted.is_empty());
 }
 
 /// The fifth probe of 11-16: under "All at Once" Apple's never splits one app's windows (a

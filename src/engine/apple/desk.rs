@@ -127,4 +127,7 @@ pub trait AppleDesk {
     fn post(&mut self, posted: &Posted) -> Result<(), String>;
     /// How the last gesture ended, once it has (taken: asked again, `None`).
     fn landed(&mut self) -> Option<Landed>;
+    /// App `pid` shown again without activating it (hidden by us at its activation): Apple's
+    /// puts the window it reopened meanwhile into the strip.
+    fn unhide(&mut self, pid: i32) -> Result<(), String>;
 }

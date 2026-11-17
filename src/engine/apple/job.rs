@@ -19,6 +19,12 @@
 //!   the strip and its windows are Shift-clicked back after the settle). The goal is met at
 //!   the first read that shows every window in the stage in front, settled or not; a newly
 //!   opened app's front window is focused then and there, and the job ends with that focus.
+//!   A running app's reopened window ([`Job::reopen`], the app hidden at its activation)
+//!   shows nowhere while the app is hidden: once the app has a window the mirror holds in no
+//!   stage, the app is shown again without activating it ([`Step::Unhide`]), Apple's puts the
+//!   window into the strip, and it is Shift-clicked in as a newly opened app's is (the sixth
+//!   probe of 11-16). No window [`REOPEN_WAIT`] after the hide took: the app shown again and
+//!   activated, as the person asked.
 //! - [`Goal::Out`]: a window out to a stage of its own, by a drag of its title bar onto the
 //!   strip (it works with the strip covered, a probe of 11-16), grabbed where the title bar
 //!   shows; one covered all along it is raised first (live 11-16: the fixture windows open at
@@ -63,6 +69,15 @@ pub const TRIES: u32 = 2;
 
 /// How long a newly opened app may take to show its first window.
 pub const FIRST_WINDOW: Duration = Duration::from_secs(10);
+
+/// How long a running app activated with no window may take to reopen one (the probe's came
+/// about 50 ms after the activation): a ⌘Tab to an app that opens none is not held up longer.
+pub const REOPEN_WINDOW: Duration = Duration::from_secs(3);
+
+/// How long after the hide at its activation took a running app may take to show a window of
+/// its own (the probe's hide took about when the window came): none by then, the app is
+/// shown again and activated.
+pub const REOPEN_WAIT: Duration = Duration::from_millis(1000);
 
 /// What a job is to bring about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -132,13 +147,18 @@ pub struct Report {
     /// What was asked.
     pub intent: Option<Intent>,
     /// The way "open here" went: `"hide"` (the app hidden at its launch, its window
-    /// Shift-clicked in from the strip) or `"round_trip"` (the stage pushed into the strip
-    /// Shift-clicked back), `None` for the rest.
+    /// Shift-clicked in from the strip), `"hide_activation"` (a running app hidden at its
+    /// activation, shown again once its reopened window exists, the window Shift-clicked in
+    /// from the strip) or `"round_trip"` (the stage pushed into the strip Shift-clicked back),
+    /// `None` for the rest.
     pub route: Option<&'static str>,
     /// From the ask to the end, in ms.
     pub ms: u64,
     /// From the ask to the newly opened app's first window seen, in ms.
     pub first_window_ms: Option<u64>,
+    /// From the ask to the app shown again (the hide at its activation), in ms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unhide_ms: Option<u64>,
     /// Focuses run.
     pub focuses: u32,
     /// Shift-clicks posted.
@@ -154,6 +174,10 @@ pub struct Report {
     /// A newly opened app to unhide after a give-up (the hide route took and its window
     /// never came in).
     pub unhide: Option<i32>,
+    /// An app to activate after a give-up: hidden at its activation, it reopened no window
+    /// (the activation the person asked for, given back).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub activate: Option<i32>,
     /// A window to set back to its frame after a give-up: a drag that moved it without
     /// taking it out.
     pub set_back: Option<(u32, Rect)>,
@@ -197,8 +221,15 @@ pub struct Job {
     last: Option<Ran>,
     waiting: Waiting,
     report: Report,
-    /// The newly opened app was hidden by us at its launch (the hide route took).
+    /// The newly opened app was hidden by us at its launch or activation (the hide took).
     pub hidden: bool,
+    /// When the hide took.
+    hidden_at: Option<Instant>,
+    /// A running app with no window, activated: hidden at its activation, shown again once
+    /// its reopened window exists ([`super::plan::reopen_here`]).
+    pub reopen: bool,
+    /// The app was shown again ([`Step::Unhide`] ran).
+    unhidden: bool,
     /// The app's windows seen so far.
     app_seen: BTreeSet<u32>,
     focused_app: bool,
@@ -242,6 +273,9 @@ impl Job {
             waiting: Waiting::default(),
             report: Report { intent: Some(intent), ..Report::default() },
             hidden: false,
+            hidden_at: None,
+            reopen: false,
+            unhidden: false,
             app_seen: BTreeSet::new(),
             focused_app: false,
             focus_pending: None,
@@ -251,6 +285,15 @@ impl Job {
             waits_for: "the settle",
             lenient: false,
             screen: None,
+        }
+    }
+
+    /// The hide at the app's launch or activation took at `now` (the platform's hide thread
+    /// said so).
+    pub fn hide_took(&mut self, now: Instant) {
+        if !self.hidden {
+            self.hidden = true;
+            self.hidden_at = Some(now);
         }
     }
 
@@ -359,6 +402,7 @@ impl Job {
                 self.report.presses += 1;
             }
             Step::Post(Posted::Drag { .. }) => self.report.drags += 1,
+            Step::Unhide(_) => self.unhidden = true,
             Step::AwaitSettle | Step::AwaitStrip(_) => {}
         }
     }
@@ -516,15 +560,31 @@ impl Job {
                 }
             }
             if app_windows.is_empty() {
-                if now.saturating_duration_since(self.since) > FIRST_WINDOW {
-                    return Need::Fail(format!("app {pid} showed no window in {} s", FIRST_WINDOW.as_secs()));
+                if self.reopen && self.hidden && !self.unhidden {
+                    // Its reopened window exists and shows nowhere (the app hidden): the app
+                    // shown again, without activating it, puts the window into the strip.
+                    if cx.pids.iter().any(|(w, p)| *p == pid && a.where_is(*w).is_none()) {
+                        self.report.unhide_ms.get_or_insert(ms(now, self.since));
+                        return Need::Step(Step::Unhide(pid));
+                    }
+                    if self.hidden_at.is_some_and(|t| now.saturating_duration_since(t) > REOPEN_WAIT) {
+                        return Need::Fail(format!("app {pid} reopened no window in {} ms of its hide: shown again and activated", REOPEN_WAIT.as_millis()));
+                    }
+                }
+                let first = if self.reopen { REOPEN_WINDOW } else { FIRST_WINDOW };
+                if now.saturating_duration_since(self.since) > first {
+                    return Need::Fail(format!("app {pid} showed no window in {} s", first.as_secs()));
                 }
                 return Need::Wait("the app's first window");
             }
             if self.report.route.is_none() {
                 let app_in_front = app_windows.iter().any(|w| a.current.contains(w));
                 let before_in_front = want.iter().all(|w| a.current.contains(w));
-                self.report.route = Some(if app_in_front && !before_in_front { "round_trip" } else { "hide" });
+                self.report.route = Some(match (app_in_front && !before_in_front, self.reopen) {
+                    (true, _) => "round_trip",
+                    (false, true) => "hide_activation",
+                    (false, false) => "hide",
+                });
             }
             for w in &app_windows {
                 if !want.contains(w) {
@@ -577,7 +637,8 @@ impl Job {
                     *own_shift = go.own_shift;
                 }
             }),
-            Step::AwaitSettle | Step::AwaitStrip(_) => Ok(()),
+            // Nothing posted, no pointer: the app shown again at once.
+            Step::Unhide(_) | Step::AwaitSettle | Step::AwaitStrip(_) => Ok(()),
         };
         if let Err(hold) = gated {
             if self.waiting.hold(hold, now) {
@@ -630,6 +691,10 @@ impl Job {
                 self.report.undo = waiting.map(Step::Focus);
                 if self.hidden && waiting.is_none() {
                     self.report.unhide = Some(pid);
+                    // Hidden at its activation: the activation the person asked for, given back.
+                    if self.reopen {
+                        self.report.activate = Some(pid);
+                    }
                 }
             }
         }
@@ -646,6 +711,7 @@ fn step_key(step: &Step) -> (u8, u32) {
         Step::Post(p @ Posted::Drag { .. }) => (2, p.window()),
         Step::AwaitSettle => (3, 0),
         Step::AwaitStrip(slot) => (4, *slot as u32),
+        Step::Unhide(pid) => (5, *pid as u32),
     }
 }
 
@@ -655,6 +721,7 @@ pub fn step_name(step: &Step) -> &'static str {
         Step::Focus(_) => "focus",
         Step::Post(Posted::Clicks { .. }) => "shift_click",
         Step::Post(Posted::Drag { .. }) => "drag",
+        Step::Unhide(_) => "unhide",
         Step::AwaitSettle | Step::AwaitStrip(_) => "wait",
     }
 }
