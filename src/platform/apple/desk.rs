@@ -17,7 +17,7 @@ use crate::engine::model::Display;
 use crate::engine::overview::{self, Sighting};
 use crate::platform::controller::ax_focus;
 use crate::platform::observe::Observer;
-use crate::platform::{session, windows};
+use crate::platform::{desktop, dock as dock_app, session, windows};
 
 /// The desk as seen through `ob` (the observer's window elements) and WindowManager `manager`.
 pub struct Desk<'a> {
@@ -48,12 +48,21 @@ impl AppleDesk for Desk<'_> {
 
     fn listed(&mut self) -> Listed {
         let list = windows::wake_list();
+        let screens = desktop::cg_display_bounds();
+        let mut dock = None;
         Listed {
             windows: list
                 .iter()
                 // A clear window above the windows' layer covers nothing (the gestures' guard
-                // passes over it too): counted off screen.
-                .map(|w| ListedWindow { id: w.id, pid: w.pid, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen && (w.layer == 0 || w.alpha > 0.0) })
+                // passes over it too), nor one of macOS's own over the whole screen that lets
+                // clicks through ([`lets_clicks_through`]): counted off screen.
+                .map(|w| ListedWindow {
+                    id: w.id,
+                    pid: w.pid,
+                    layer: w.layer,
+                    bounds: w.bounds,
+                    onscreen: w.onscreen && (w.layer == 0 || w.alpha > 0.0) && !lets_clicks_through(w, &mut dock, &screens),
+                })
                 .collect(),
             manager: self.manager,
         }
@@ -119,4 +128,22 @@ impl AppleDesk for Desk<'_> {
         super::launch_hide::unhide(pid);
         Ok(())
     }
+}
+
+/// A window of macOS's own over the whole screen that lets clicks through where it draws
+/// nothing: Notification Center's full-screen window (layer 23; its banners and panel are
+/// drawn inside it, [`desktop::click_through_overlay`]) and the Dock's (its layer, the bar
+/// drawn inside it). Both are listed on screen and opaque, so the mirror read them as
+/// covering every strip thumbnail (live 11-17: a `current` rule's app shown into the strip,
+/// its thumbnail never pressed, given up after 4 s). For the mirror they cover nothing; the
+/// gesture's guard still looks at the point itself (`post::top_is`). `dock`: the Dock's pid,
+/// asked once a read and only when a window at its layer spans a screen.
+pub(crate) fn lets_clicks_through(w: &windows::CgWindow, dock: &mut Option<Option<i32>>, screens: &[Rect]) -> bool {
+    if w.layer <= 0 || !w.onscreen || w.alpha <= 0.0 {
+        return false;
+    }
+    if w.layer == dock_app::DOCK_LAYER && screens.iter().any(|s| desktop::covers_screen(w.bounds, *s)) && *dock.get_or_insert_with(dock_app::dock_pid) == Some(w.pid) {
+        return true;
+    }
+    desktop::overlay_of(w) != desktop::Through::Covers
 }

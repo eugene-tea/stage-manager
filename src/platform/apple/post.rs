@@ -43,7 +43,7 @@ use objc2_core_graphics::{
 
 use crate::engine::apple::desk::{CLICK_GAP, Landed, Posted, Press};
 use crate::engine::geometry::Point;
-use crate::platform::{input, windows};
+use crate::platform::{desktop, dock as dock_app, input, windows};
 
 /// Between the Shift key-down and the click, and between the click and Shift up (measured).
 pub const SHIFT_LEAD: Duration = Duration::from_millis(12);
@@ -388,7 +388,20 @@ fn interrupted(g: &mut Gesture, why: &'static str) -> Landed {
 /// clear) passes `ok`.
 fn top_is(p: Point, ok: impl Fn(&windows::CgWindow) -> bool) -> Result<(), String> {
     let list = windows::on_screen();
-    match list.iter().find(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p)) {
+    let screens = desktop::cg_display_bounds();
+    let mut dock = None;
+    // macOS's own full-screen windows that let clicks through (the mirror's
+    // [`super::desk::lets_clicks_through`]) are passed over where they draw nothing at `p`:
+    // Notification Center's off its banners and panel, the Dock's off its bar.
+    let through = |w: &windows::CgWindow, dock: &mut Option<Option<i32>>| {
+        super::desk::lets_clicks_through(w, dock, &screens)
+            && if w.layer == dock_app::DOCK_LAYER && dock.flatten() == Some(w.pid) {
+                dock_app::bar_frame(w.pid).is_some_and(|bar| !bar.contains(p))
+            } else {
+                desktop::seen_through(w, p)
+            }
+    };
+    match list.iter().find(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !through(w, &mut dock)) {
         Some(w) if ok(w) => Ok(()),
         Some(w) => Err(format!("the topmost window at {:.0},{:.0} is not the one meant (pid {}, layer {})", p.x, p.y, w.pid, w.layer)),
         None => Err(format!("no window at {:.0},{:.0}", p.x, p.y)),
