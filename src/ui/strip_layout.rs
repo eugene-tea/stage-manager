@@ -28,8 +28,9 @@
 //! Every length is multiplied by the strip's length scale `k` (1 unless `[strip] scale` or
 //! `scale_to_display` say otherwise).
 
-use crate::config::StripStyle;
+use crate::config::{CardArrangement, StripStyle};
 use crate::engine::geometry::{Point, Rect, Size};
+use crate::ui::card_spread::{self, Spread};
 use crate::ui::strip_model::CardSnapshot;
 
 /// The two displays the automatic tilt and perspective were measured on: (visible width,
@@ -67,6 +68,12 @@ pub struct Metrics {
     pub third_app_dx: f64,
     pub third_app_dy: f64,
     pub max_windows: usize,
+    /// How a card of several apps places its windows (`[strip] card_layout`).
+    pub card_layout: CardArrangement,
+    /// Apple's spread (`card_layout = "apple"`), its lengths scaled by `k`.
+    pub spread: Spread,
+    /// `card_layout = "spread_covered"`: the least share of itself a window may show stacked.
+    pub covered_share: f64,
     /// The turn, radians.
     pub tilt: f64,
     /// Eye distance.
@@ -111,6 +118,18 @@ impl Metrics {
             third_app_dx: c.third_app_dx * k,
             third_app_dy: c.third_app_dy * k,
             max_windows: c.max_windows.max(1),
+            card_layout: style.card_layout,
+            spread: Spread {
+                step: c.spread_step,
+                narrow: c.spread_narrow,
+                third: c.spread_third,
+                line: c.spread_line,
+                raise: c.spread_raise * k,
+                raise_third: c.spread_raise_third * k,
+                height: c.spread_height * k,
+                min_scale: c.spread_min_scale,
+            },
+            covered_share: c.spread_covered_share,
             tilt: c.tilt.or(auto_tilt).to_radians(),
             perspective: c.perspective.or(auto_d) * k,
             eye: Point::new(c.perspective_x * k, display_middle + c.perspective_y * k),
@@ -178,6 +197,13 @@ impl Metrics {
         [Point::new(x, top), Point::new(rx, ry(top)), Point::new(rx, ry(top + v)), Point::new(x, top + v)]
     }
 
+    /// A point of the turned plane whose left edge is at `x`, `across` right of that edge
+    /// before the turn and at height `y`: where [`Metrics::project`] draws it.
+    pub fn project_point(&self, x: f64, across: f64, y: f64) -> Point {
+        let f = self.far_ratio(across);
+        Point::new(self.eye.x + (x + across * self.tilt.cos() - self.eye.x) * f, self.eye.y + (y - self.eye.y) * f)
+    }
+
     /// The depth (toward the eye) of the turned plane whose left edge is at `x`, at the point
     /// it covers `px` across before the projection: `-(px - x) tan tilt`. Of two planes over
     /// the same point the one with the greater depth is nearer the eye, and the turn is the
@@ -230,7 +256,35 @@ impl Metrics {
     fn card_right(&self) -> f64 {
         let x = self.card_x + self.plane_offsets().into_iter().fold(f64::NEG_INFINITY, f64::max);
         let plane = x.max(self.far_x(x, self.max_width));
-        plane.max(self.icons_right())
+        let spread = self.spread_planes().into_iter().map(|(x, u)| (self.card_x + x).max(self.far_x(self.card_x + x, u)));
+        spread.fold(plane, f64::max).max(self.icons_right())
+    }
+
+    /// The windows' planes (left edge right of the card's left edge, width before the turn) of
+    /// spread cards that reach furthest right ([`card_spread::offsets`]): a window as wide as
+    /// the widest card, half as wide or a sliver, in front or behind, on either side. A spread
+    /// card's windows are scaled together, its widest never past `max_width`, so its planes
+    /// reach no further than these. None with `card_layout = "stacked"`.
+    fn spread_planes(&self) -> Vec<(f64, f64)> {
+        if self.card_layout == CardArrangement::Stacked {
+            return Vec::new();
+        }
+        let n = self.max_windows.clamp(2, 3);
+        let widths = [0.05, 0.5, 1.0].map(|f| f * self.max_width);
+        let mut out = Vec::new();
+        for a in widths {
+            for b in widths {
+                for c in widths {
+                    for sides in [[0.0, -1.0, -1.0], [0.0, -1.0, 1.0], [0.0, 1.0, -1.0], [0.0, 1.0, 1.0]] {
+                        let w = &[a, b, c][..n];
+                        let xs = card_spread::offsets(w, &sides[..n], &self.spread);
+                        let x0 = xs.iter().copied().fold(f64::INFINITY, f64::min);
+                        out.extend(xs.iter().zip(w).map(|(x, &u)| (x - x0, u)));
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// The right edge of a card's last app icon at most (the icons start at the leftmost
@@ -287,7 +341,11 @@ impl Metrics {
         let x = self.card_x + self.plane_offsets().into_iter().fold(f64::NEG_INFINITY, f64::max);
         // Every point of a plane moves at least as far as its far edge does.
         let far = x.max(self.far_x(x, self.max_width)) / self.far_ratio(self.max_width);
-        far.max(self.icons_right()).max(0.0)
+        let spread = self.spread_planes().into_iter().map(|(x, u)| {
+            let x = self.card_x + x;
+            x.max(self.far_x(x, u)) / self.far_ratio(u)
+        });
+        spread.fold(far, f64::max).max(self.icons_right()).max(0.0)
     }
 }
 
@@ -457,7 +515,79 @@ fn stacked_height(sizes: &[Size], up: &[f64], grow: f64) -> f64 {
 /// side and `third_app_dy` up, behind the others at the top (Apple's card of three, measured
 /// 11-09: the second app's window where it sits on a card of two, the third's 0.29 of that
 /// sideways and 1.6 times as high).
+///
+/// That is `card_layout = "stacked"`. With `"apple"` a card of several apps is spread instead
+/// ([`card_spread`]), and with `"spread_covered"` only when a window of the stacked card shows
+/// less than `covered_share` of itself ([`visible_shares`]). A card of one app is stacked
+/// either way (Apple's, measured 11-16: two windows of one app 16 pt apart, at their own size).
 pub fn arrange_card(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<ThumbSlot>) {
+    let windows = &card.windows[..card.windows.len().min(m.max_windows)];
+    let several_apps = windows.iter().any(|w| w.pid != windows[0].pid);
+    match m.card_layout {
+        CardArrangement::Apple if several_apps => arrange_spread(card, m, scale),
+        CardArrangement::SpreadCovered if several_apps => {
+            let stacked = arrange_stacked(card, m, scale);
+            if visible_shares(&stacked.1, m).iter().any(|&s| s < m.covered_share) {
+                arrange_spread(card, m, scale)
+            } else {
+                stacked
+            }
+        }
+        _ => arrange_stacked(card, m, scale),
+    }
+}
+
+/// [`arrange_card`] spread as Apple's ([`card_spread::arrange`]): every window at the plain
+/// scale times one factor, each on its side of the front window (`behind_scale` not used).
+fn arrange_spread(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<ThumbSlot>) {
+    let windows = &card.windows[..card.windows.len().min(m.max_windows)];
+    let Some(front) = windows.first() else { return arrange_stacked(card, m, scale) };
+    let plain: Vec<Size> = windows.iter().map(|w| m.plain_size(&w.frame)).collect();
+    let sides: Vec<f64> = windows.iter().map(|w| second_app_side(&front.frame, &w.frame)).collect();
+    let rects = card_spread::arrange(&plain, &sides, &m.spread, m.max_width);
+    let max_x = rects.iter().map(|r| r.max_x()).fold(0.0, f64::max);
+    let max_y = rects.iter().map(|r| r.max_y()).fold(0.0, f64::max);
+    let thumbs = windows
+        .iter()
+        .zip(rects)
+        .map(|(w, r)| ThumbSlot { id: w.id, pid: w.pid, rect: Rect::new(r.x * scale, r.y * scale, r.w * scale, r.h * scale) })
+        .collect();
+    (Size::new(max_x * scale, max_y * scale), thumbs)
+}
+
+/// The share of each of a card's thumbnails (front first, card-relative as [`arrange_card`]
+/// gives them) that shows as the card draws them: each window's turned plane sampled on a
+/// 12 × 8 grid, a point hidden where a window drawn over it (earlier in the list) holds it.
+/// The card sits at the cards' left edge, its middle level with the eye (the share hardly
+/// moves with the card's place in the column).
+pub fn visible_shares(thumbs: &[ThumbSlot], m: &Metrics) -> Vec<f64> {
+    const ACROSS: usize = 12;
+    const DOWN: usize = 8;
+    let bottom = thumbs.iter().map(|t| t.rect.max_y()).fold(0.0, f64::max);
+    let (x0, y0) = (m.card_x, m.eye.y - bottom / 2.0);
+    let quads: Vec<[Point; 4]> = thumbs.iter().map(|t| m.project(x0 + t.rect.x, y0 + t.rect.y, t.rect.w, t.rect.h)).collect();
+    thumbs
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let mut shown = 0usize;
+            for a in 0..ACROSS {
+                for b in 0..DOWN {
+                    let across = t.rect.w * (a as f64 + 0.5) / ACROSS as f64;
+                    let y = y0 + t.rect.y + t.rect.h * (b as f64 + 0.5) / DOWN as f64;
+                    let p = m.project_point(x0 + t.rect.x, across, y);
+                    if !quads[..i].iter().any(|q| in_quad(q, p)) {
+                        shown += 1;
+                    }
+                }
+            }
+            shown as f64 / (ACROSS * DOWN) as f64
+        })
+        .collect()
+}
+
+/// [`arrange_card`] stacked at the fixed offsets of the 11-09 measurements.
+fn arrange_stacked(card: &CardSnapshot, m: &Metrics, scale: f64) -> (Size, Vec<ThumbSlot>) {
     let windows = &card.windows[..card.windows.len().min(m.max_windows)];
     if windows.is_empty() {
         let s = m.thumb_size(&Rect::new(0.0, 0.0, 800.0, 600.0));
@@ -1309,5 +1439,124 @@ mod tests {
         let rms = (sum / n).sqrt();
         assert!(rms < 0.07 && worst < 0.13, "rms {rms:.3}, worst {worst:.3}");
         assert_eq!((appear_progress(0.0), appear_progress(0.5), appear_progress(1.0), appear_progress(2.0)), (0.0, 0.5, 1.0, 1.0));
+    }
+
+    /// The laptop with `card_layout` set.
+    fn laptop_with(layout: CardArrangement) -> Metrics {
+        Metrics::new(&StripStyle { card_layout: layout, ..StripStyle::default() }, Size::new(1800.0, 1130.0), 1.0, 584.5 - 39.0)
+    }
+
+    /// Apple's cards of fixture windows of different apps (pids 1 alpha, 2 bravo, 3 charlie),
+    /// measured 11-16 on the laptop through the window list: each window's frame on the screen,
+    /// front window first, and where Apple drew it on the card (left edge and top from the
+    /// card's leftmost left edge and highest top, and its height; the window list's bounds of
+    /// a turned window give its left edge, the near one, whole).
+    type Layout = (&'static str, &'static [(i32, Rect, (f64, f64, f64))]);
+    const APPLE_1116: &[Layout] = &[
+        ("inside", &[(2, Rect::new(550.0, 298.0, 500.0, 432.0), (77.0, 44.0, 56.0)), (1, Rect::new(300.0, 148.0, 1000.0, 732.0), (0.0, 0.0, 95.0))]),
+        ("side", &[(2, Rect::new(800.0, 248.0, 700.0, 632.0), (25.0, 12.0, 90.0)), (1, Rect::new(244.0, 198.0, 700.0, 632.0), (0.0, 0.0, 90.0))]),
+        ("behind", &[(1, Rect::new(300.0, 148.0, 1000.0, 732.0), (0.0, 12.0, 92.0)), (2, Rect::new(400.0, 198.0, 1000.0, 732.0), (30.0, 0.0, 92.0))]),
+        ("apart", &[(2, Rect::new(1100.0, 598.0, 600.0, 532.0), (27.0, 13.0, 89.0)), (1, Rect::new(244.0, 98.0, 600.0, 532.0), (0.0, 0.0, 90.0))]),
+        (
+            "three",
+            &[
+                (3, Rect::new(700.0, 448.0, 600.0, 482.0), (55.0, 40.0, 61.0)),
+                (2, Rect::new(500.0, 298.0, 900.0, 682.0), (0.0, 7.0, 88.0)),
+                (1, Rect::new(300.0, 148.0, 900.0, 682.0), (18.0, 0.0, 88.0)),
+            ],
+        ),
+        ("tiny-front", &[(1, Rect::new(500.0, 298.0, 400.0, 332.0), (0.0, 86.0, 42.0)), (2, Rect::new(244.0, 98.0, 1400.0, 1032.0), (14.0, 0.0, 127.0))]),
+    ];
+
+    fn fixture_card(windows: &[(i32, Rect, (f64, f64, f64))]) -> CardSnapshot {
+        card_at(1, &windows.iter().map(|&(pid, f, _)| (pid as u32, pid, f)).collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn apple_spreads_the_six_measured_cards_where_apple_drew_them() {
+        let m = laptop_with(CardArrangement::Apple);
+        for (name, windows) in APPLE_1116 {
+            let (_, t) = arrange_card(&fixture_card(windows), &m, 1.0);
+            for (slot, &(pid, _, (x, y, h))) in t.iter().zip(windows.iter()) {
+                let r = slot.rect;
+                assert_eq!(slot.pid, pid);
+                assert!((r.x - x).abs() < 2.0 && (r.y - y).abs() < 2.0 && (r.h - h).abs() < 2.0, "{name}, pid {pid}: {r:?} against Apple's ({x}, {y}, h {h})");
+            }
+        }
+    }
+
+    #[test]
+    fn stacked_keeps_the_fixed_offsets_and_one_app_is_never_spread() {
+        // The six cards stacked: the window behind 42 pt to its side, as before.
+        let m = laptop_with(CardArrangement::Stacked);
+        let (_, t) = arrange_card(&fixture_card(APPLE_1116[1].1), &m, 1.0);
+        assert_eq!((t[0].rect.x, t[1].rect.x), (42.0, 0.0));
+        assert_eq!(laptop().card_layout, CardArrangement::Stacked, "the default until the owner picks");
+        // A card of one app steps stack_dx under every layout.
+        for layout in [CardArrangement::Apple, CardArrangement::SpreadCovered] {
+            let m = laptop_with(layout);
+            let one = card_at(1, &[(1, 10, Rect::new(500.0, 300.0, 400.0, 332.0)), (2, 10, Rect::new(244.0, 98.0, 1400.0, 1032.0))]);
+            assert_eq!(arrange_card(&one, &m, 1.0), arrange_card(&one, &laptop(), 1.0), "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn a_window_hidden_behind_a_wider_one_spreads_a_spread_covered_card() {
+        let stacked = laptop();
+        let covered = laptop_with(CardArrangement::SpreadCovered);
+        let apple = laptop_with(CardArrangement::Apple);
+        // A wide editor in front, a narrower terminal behind it to its right (the 11-16 card).
+        let editor = Rect::new(50.0, 60.0, 1700.0, 1000.0);
+        let terminal = Rect::new(700.0, 300.0, 900.0, 600.0);
+        let c = card_at(1, &[(1, 10, editor), (2, 20, terminal)]);
+        let (_, t) = arrange_card(&c, &stacked, 1.0);
+        let shares = visible_shares(&t, &stacked);
+        assert_eq!(shares[0], 1.0, "the front window shows whole");
+        assert!(shares[1] < 0.1, "stacked, the terminal hides: {shares:?}");
+        assert_eq!(arrange_card(&c, &covered, 1.0), arrange_card(&c, &apple, 1.0), "so spread_covered spreads it");
+        let (_, t) = arrange_card(&c, &apple, 1.0);
+        assert!(visible_shares(&t, &apple)[1] > 0.6, "spread, it reads: {:?}", visible_shares(&t, &apple));
+        // Two windows side by side: the one behind shows enough stacked, and stays stacked.
+        let c = fixture_card(APPLE_1116[1].1);
+        let (_, t) = arrange_card(&c, &stacked, 1.0);
+        assert!(visible_shares(&t, &stacked)[1] >= 0.3, "{:?}", visible_shares(&t, &stacked));
+        assert_eq!(arrange_card(&c, &covered, 1.0), arrange_card(&c, &stacked, 1.0));
+    }
+
+    #[test]
+    fn visible_shares_count_what_the_windows_drawn_over_hide() {
+        let m = laptop();
+        let slot = |id: u32, x: f64| ThumbSlot { id, pid: id as i32, rect: Rect::new(x, 0.0, 100.0, 80.0) };
+        assert_eq!(visible_shares(&[slot(1, 0.0)], &m), vec![1.0]);
+        let same = visible_shares(&[slot(1, 0.0), slot(2, 0.0)], &m);
+        assert_eq!(same[1], 0.0, "right behind an equal window: hidden");
+        let beside = visible_shares(&[slot(1, 200.0), slot(2, 0.0)], &m);
+        assert_eq!(beside[1], 1.0, "beside it: whole");
+    }
+
+    #[test]
+    fn the_panel_and_the_hidden_slide_have_room_for_spread_cards() {
+        for layout in [CardArrangement::Apple, CardArrangement::SpreadCovered] {
+            let m = laptop_with(layout);
+            let (panel, d) = (m.panel_width(), m.hide_distance());
+            let sizes = [Rect::new(0.0, 0.0, 120.0, 90.0), Rect::new(0.0, 0.0, 900.0, 700.0), Rect::new(0.0, 0.0, 1800.0, 1130.0), Rect::new(0.0, 0.0, 1800.0, 300.0)];
+            for a in sizes {
+                for b in sizes {
+                    for (bx, cx) in [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)] {
+                        let at = |r: Rect, side: f64| r.translate(900.0 + side * 400.0 - r.w / 2.0, 0.0);
+                        let front = at(a, 0.0);
+                        let c = card_at(1, &[(1, 10, front), (2, 20, at(b, bx)), (3, 30, at(a, cx))]);
+                        let l = layout_column(&[c], m.visible.h, &m).remove(0);
+                        let hovered = grown(&l, &m, m.hover_scale);
+                        assert!(hovered.max_x() + m.shadow <= panel, "{layout:?}: {} in {panel}", hovered.max_x());
+                        for t in &l.thumbs {
+                            let x = l.frame.x + t.rect.x;
+                            let far = m.eye.x + (x - d + t.rect.w * m.tilt.cos() - m.eye.x) * m.far_ratio(t.rect.w);
+                            assert!(far <= 1e-6 && x - d <= 1e-6, "{layout:?}: far edge at {far} after a slide of {d}");
+                        }
+                    }
+                }
+            }
+        }
     }
 }

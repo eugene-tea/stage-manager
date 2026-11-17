@@ -7,6 +7,7 @@ pub mod app_icons;
 pub mod app_menu;
 pub mod assistive;
 pub mod card_glass;
+pub mod card_spread;
 pub mod corner_patch;
 pub mod corner_settle;
 pub mod display_options;

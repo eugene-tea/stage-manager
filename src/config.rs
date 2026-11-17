@@ -149,6 +149,25 @@ pub struct CardStyle {
     pub second_app_dy: f64,
     pub third_app_dx: f64,
     pub third_app_dy: f64,
+    /// `card_layout = "apple"`: the next window's left edge, this share of the width of the
+    /// window left of it further right.
+    pub spread_step: f64,
+    /// ...plus this share of how much narrower the right one is.
+    pub spread_narrow: f64,
+    /// A third window on the second's side: this share of its own step from the front one.
+    pub spread_third: f64,
+    /// The windows lined up this far down each (0 top, 1 bottom).
+    pub spread_line: f64,
+    /// The window behind the front one raised this far, the third `spread_raise_third`.
+    pub spread_raise: f64,
+    pub spread_raise_third: f64,
+    /// The card's windows, top to bottom, held this tall...
+    pub spread_height: f64,
+    /// ...never shrunk below this share of the plain scale.
+    pub spread_min_scale: f64,
+    /// `card_layout = "spread_covered"`: a window showing less than this share of itself on
+    /// the stacked card spreads the card.
+    pub spread_covered_share: f64,
     pub hover_scale: f64,
     pub hover_ms: u64,
     /// A pressed card's size, of its resting one.
@@ -304,11 +323,27 @@ pub enum StripLevel {
     AboveWindows,
 }
 
+/// `[strip] card_layout`: how a card of several apps places its windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CardArrangement {
+    /// Stacked at the fixed offsets of the 11-09 measurements (`second_app_dx` and the rest):
+    /// a window behind a wider one can hide behind it.
+    #[default]
+    Stacked,
+    /// Apple's spread, measured 11-16 (`spread_*`): each window stepped out by a share of the
+    /// one beside it, a narrower one further.
+    Apple,
+    /// Stacked, unless a window shows less than `spread_covered_share` of itself: then spread.
+    SpreadCovered,
+}
+
 /// Everything the strip panel draws with; changes apply live.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StripStyle {
     /// Below or above windows.
     pub level: StripLevel,
+    /// How a card of several apps places its windows.
+    pub card_layout: CardArrangement,
     /// Cards can be dragged to another slot.
     pub reorder: bool,
     /// A card dropped onto another card merges the two stages.
@@ -961,6 +996,11 @@ impl Config {
                     "above_windows" => StripLevel::AboveWindows,
                     _ => StripLevel::BelowWindows,
                 },
+                card_layout: match v.text("strip.card_layout") {
+                    "apple" => CardArrangement::Apple,
+                    "spread_covered" => CardArrangement::SpreadCovered,
+                    _ => CardArrangement::Stacked,
+                },
                 reorder: v.flag("strip.reorder"),
                 merge_on_drop: v.flag("strip.merge_on_drop"),
                 width: v.num("strip.width"),
@@ -994,6 +1034,15 @@ impl Config {
                     second_app_dy: v.num("cards.second_app_dy"),
                     third_app_dx: v.num("cards.third_app_dx"),
                     third_app_dy: v.num("cards.third_app_dy"),
+                    spread_step: v.num("cards.spread_step"),
+                    spread_narrow: v.num("cards.spread_narrow"),
+                    spread_third: v.num("cards.spread_third"),
+                    spread_line: v.num("cards.spread_line"),
+                    spread_raise: v.num("cards.spread_raise"),
+                    spread_raise_third: v.num("cards.spread_raise_third"),
+                    spread_height: v.num("cards.spread_height"),
+                    spread_min_scale: v.num("cards.spread_min_scale"),
+                    spread_covered_share: v.num("cards.spread_covered_share"),
                     hover_scale: v.num("cards.hover_scale"),
                     hover_ms: v.uint("cards.hover_ms"),
                     press_scale: v.num("cards.press_scale"),
@@ -1433,6 +1482,12 @@ mod tests {
         assert!(c.sugar.shift_brings_here, "invisible until Shift is held");
         assert!(c.windows.minimize_to_strip);
         assert_eq!(c.style.level, StripLevel::BelowWindows, "a window moved over the strip covers it");
+        assert_eq!(c.style.card_layout, CardArrangement::Stacked, "stacked until the owner picks a spread");
+        for (text, layout) in [("apple", CardArrangement::Apple), ("spread_covered", CardArrangement::SpreadCovered), ("stacked", CardArrangement::Stacked)] {
+            let p = parse(&format!("[strip]\ncard_layout = \"{text}\"\n"));
+            assert_eq!(p.config.style.card_layout, layout);
+        }
+        assert!(Config::parse("[strip]\ncard_layout = \"real\"\n").is_err(), "only the three");
         assert!(c.style.reorder, "invisible until a card is dragged");
         assert!(c.style.merge_on_drop, "invisible until a card is dropped on a card (the owner's word, 10-12)");
         assert_eq!(c.style.drag.merge_zone, 0.5);

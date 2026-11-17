@@ -51,6 +51,7 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `strip.dock_ignore` | `["com.apple.finder"]` | list of bundle ids such as "com.apple.finder" | With order = "dock", apps (bundle ids) that give a stage its place only when no other app of the stage is in the Dock: the Finder, whose windows join every stage, would otherwise pull each stage it joins to the Finder's place at the top. A stage of these apps alone still sits at their place. |
 | `strip.active` | `"close"` | "close", "gap", "card" | With order = "in_place" or "dock", the active stage's place: "close" shows no card and the cards below close up; "gap" leaves its slot empty so no other card moves; "card" shows it as a highlighted card. |
 | `strip.level` | `"below_windows"` | "below_windows", "above_windows" | Where the strip sits: "below_windows" is Apple's (a window moved over it covers it); "above_windows" keeps it over windows. |
+| `strip.card_layout` | `"stacked"` | "stacked", "apple", "spread_covered" | How a card of several apps places its windows: "stacked" at the fixed offsets below (second_app_dx and the rest), so a window behind a wider one can hide; "apple" spreads them as Apple's does (spread_*: a window behind stays readable); "spread_covered" stacks them unless a window would show less than spread_covered_share of itself, then spreads. Cards of one app step stack_dx either way. |
 | `strip.reorder` | `true` | true or false | Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). Off while order = "dock". |
 | `strip.merge_on_drop` | `true` | true or false | Drop a card onto another card to merge the two stages (an extension; Apple's draws no such drop, invisible until used). |
 | `strip.hide_while_desktop_shown` | `false` | true or false | Hide the strip while a wallpaper click shows the desktop; it comes back on any window activation. Apple keeps it shown. |
@@ -91,6 +92,15 @@ and `[drag]`. Their defaults are Apple's, measured.
 | `cards.second_app_dy` | `15.0` | number, -300 to 300 | ...and this far up (the windows centered on one line otherwise). |
 | `cards.third_app_dx` | `12.0` | number, -300 to 300 | On a card of three apps, the third app's window sits this far from the front window, toward the second app's side (Apple's, measured: about 0.29 of the second's). |
 | `cards.third_app_dy` | `24.0` | number, -300 to 300 | ...and this far up, behind the others at the top (Apple's, measured: about 1.6 times the second's). |
+| `cards.spread_step` | `0.25` | number, 0 to 2 | With card_layout = "apple": each window's left edge sits this share of the width of the window left of it further right (Apple's, measured on the laptop's window list: 0.25). |
+| `cards.spread_narrow` | `0.65` | number, 0 to 2 | ...plus this share of how much narrower the right one is, so a small window comes out beside a big one (Apple's: 0.65). |
+| `cards.spread_third` | `0.65` | number, 0 to 2 | A third window on the second's side of the front one: this share of its own step (Apple's: 0.65; between the two, one card measured). |
+| `cards.spread_line` | `0.85` | number, 0 to 1 | The windows are lined up this far down each, 0 their tops, 1 their bottoms (Apple's: 0.85)... |
+| `cards.spread_raise` | `12.0` | number, -300 to 300 | ...the window behind the front one raised this far (Apple's: 12)... |
+| `cards.spread_raise_third` | `19.0` | number, -300 to 300 | ...and the third this far (Apple's: 19). |
+| `cards.spread_height` | `102.0` | number, 10 to 1000 | The spread card's windows, top to bottom, are scaled together to this height (Apple's, on its window list: 100 to 104)... |
+| `cards.spread_min_scale` | `0.875` | number, 0.1 to 1 | ...never below this share of the plain scale (Apple's: 0.87 to 0.88 for big windows). |
+| `cards.spread_covered_share` | `0.3` | number, 0 to 1 | With card_layout = "spread_covered": a window showing less than this share of itself on the stacked card spreads the card. |
 | `cards.hover_scale` | `1.11` | number, 1 to 2 | The card under the pointer grows by this factor, about its center (Apple's, measured on a card of one window: 1.11). |
 | `cards.hover_ms` | `400` | whole number, 0 to 3000 | How long the hover growth (and its undoing) takes, in milliseconds: a spring, 99 % there by then, half way at a quarter of it (Apple's, measured: about 400). |
 | `cards.press_scale` | `0.987` | number, 0.5 to 1 | A pressed card eases to this size of its resting one, from the mouse-down (Apple's, measured: 0.987, the hover growth undone and a little more). |
