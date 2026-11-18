@@ -2,9 +2,9 @@
 
 macOS has no public way to hide a window and keep it ready, and Apple's Stage Manager has no
 interface for other apps. Each way of running stages works around that differently, and each
-trades something. Three are built: Accessibility (the default), macOS's own Spaces (in
-testing) and integrating with Apple's Stage Manager. This page compares them for anyone who wants to
-choose or try one. [STRATEGIES.md](STRATEGIES.md) has every call, cost and measurement behind
+trades something. Three are built: Accessibility (the default), macOS's own Spaces, and
+integrating with Apple's Stage Manager. This page compares them for anyone who wants to choose
+or try one. [STRATEGIES.md](STRATEGIES.md) has every call, cost and measurement behind
 them.
 
 ## Comparison
@@ -13,7 +13,7 @@ them.
 
 | | Accessibility | Spaces | Integrated with Apple's |
 |---|:---:|:---:|:---:|
-| **Status** | Default | In testing | Opt-in |
+| **Status** | Default | Opt-in | Opt-in |
 | **Setting** (`[windows]`) | `engine = "accessibility"` | `engine = "spaces"` | `apple_stage_manager_on = "integrate"` |
 | **Apple's Stage Manager** | Off | Off | On |
 | **Strip drawn by** | Stage Manager | Stage Manager | Apple |
@@ -74,7 +74,7 @@ Every move goes through Accessibility, the public interface for moving other app
 so this works on every Mac that runs Stage Manager. Each move is made by the app itself,
 though, so an app that refuses a move, limits a window's position or answers slowly shows it.
 
-## Spaces (in testing)
+## Spaces
 
 Each hidden stage goes into a Space of its own that the window server keeps out of sight, as
 macOS does with the windows of another Desktop. Nothing is left in a corner, and no app is

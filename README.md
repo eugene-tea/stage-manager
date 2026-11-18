@@ -53,7 +53,7 @@ macOS has no public way to hide a window and keep it ready, so three ways are bu
 with its trade-offs:
 
 - **Accessibility** (the default): hidden windows wait in a corner of the screen; every addition works.
-- **Spaces** (in testing, `[windows] engine = "spaces"`): hidden windows go to a hidden Space of
+- **Spaces** (`[windows] engine = "spaces"`): hidden windows go to a hidden Space of
   the window server; faster, on undocumented calls.
 - **Integrated with Apple's Stage Manager** (`[windows] apple_stage_manager_on = "integrate"`): Apple's draws the
   strip and arranges the windows; hotkeys, moving windows between stages and restore are added on top.
