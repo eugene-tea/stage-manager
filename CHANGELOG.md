@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Settings → Advanced opens with the mode: Accessibility, Spaces or With Apple's, a choice of
+  three segments with a line on what the chosen one does and costs. With Apple's turns Apple's
+  Stage Manager on and follows it (`apple_stage_manager_on = "integrate"`); Accessibility and
+  Spaces set `[windows] engine` and turn Apple's Stage Manager off if it is on. An engine that
+  applies at the next launch is marked so, with a Relaunch button: every window is brought
+  back, and Stage Manager is opened again. While Apple's Stage Manager is on and Stage Manager
+  is paused, no mode is selected and the line says so.
+
 ## 1.9.0 — 2026-11-18
 
 - New mode: `[windows] engine = "spaces"` keeps each hidden stage in a Space of macOS's own

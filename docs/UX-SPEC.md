@@ -26,7 +26,10 @@ file never repeats one.
 | Show items on desktop | Read, but not acted on (see the differences). |
 
 Settings changes "Show recent apps" and "Show windows from an application" the same way
-Apple's own Customize sheet does.
+Apple's own Customize sheet does. Its mode picker (Advanced → Mode: Accessibility, Spaces,
+With Apple's) is the user's ask to change Stage Manager on or off: With Apple's turns Apple's
+on (with `apple_stage_manager_on = "integrate"` written first, so nothing pauses in
+between), the other two turn it off if it is on. Nothing else in the app turns it on.
 
 ## Where we match Apple
 
@@ -587,7 +590,7 @@ passed every check again and is the release that check finds (otherwise: from sc
 while any process keeps the display awake (a film, a call: macOS's own sign that someone
 watches with no input) it waits, then counts its 120 s from the end of that.
 An alert that comes from a Settings control (Check for Updates… and the install it leads
-to, a setting that can't be saved, Turn Off) is a sheet on the Settings window while it is
+to, a setting that can't be saved, Turn Off, a mode Apple's Stage Manager did not take) is a sheet on the Settings window while it is
 up, as Apple's HIG asks; the menu bar's counts as one from Settings while Settings is
 frontmost. The automatic check's notices and the others stand free, as before.
 

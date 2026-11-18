@@ -20,6 +20,10 @@
 //! watch is done with no cancel yet, the guardian waits as after a clean quit (round
 //! logout-cancel, 1.8.x).
 //!
+//! The same marker carries a relaunch the user asked for (Settings → Advanced → Relaunch, a
+//! mode that applies at the next launch): [`RELAUNCH_MARK`], and the guardian opens the app
+//! again at once after that clean exit ([`AfterExit::reopen`]).
+//!
 //! The guardian is no app: `loginwindow` never waits for it, and the app's own quit is as
 //! quick as before.
 
@@ -35,15 +39,25 @@ pub const WATCH: Duration = Duration::from_secs(600);
 /// The clean-exit marker's text after a quit at a logout ([`quit_marker`]).
 pub const LOGOUT_MARK: &str = "logout";
 
+/// The clean-exit marker's text after a quit to relaunch ([`quit_marker`]).
+pub const RELAUNCH_MARK: &str = "relaunch";
+
 /// The clean-exit marker's text after any other clean quit.
 pub const CLEAN_MARK: &str = "clean";
 
 /// What a clean exit leaves in its marker: [`LOGOUT_MARK`] when the app quit for a logout
 /// (`after_head_start`: the quit came while the logout's head start held, or `logout_reason`:
 /// the system's quit said logout, restart or shutdown) and not by the user's own Quit
-/// (`user_quit`: the menu's Quit, which a cancel must never undo).
-pub fn quit_marker(after_head_start: bool, logout_reason: bool, user_quit: bool) -> &'static str {
-    if (after_head_start || logout_reason) && !user_quit { LOGOUT_MARK } else { CLEAN_MARK }
+/// (`user_quit`: the menu's Quit, which a cancel must never undo); else [`RELAUNCH_MARK`]
+/// when the quit was the user's Relaunch (`relaunch`).
+pub fn quit_marker(after_head_start: bool, logout_reason: bool, user_quit: bool, relaunch: bool) -> &'static str {
+    if (after_head_start || logout_reason) && !user_quit {
+        LOGOUT_MARK
+    } else if relaunch {
+        RELAUNCH_MARK
+    } else {
+        CLEAN_MARK
+    }
 }
 
 /// Whether a clean-exit marker's text says the app quit for a logout.
@@ -59,6 +73,9 @@ pub struct AfterExit {
     /// Listen for the logout's cancel from the exit on (through the recovery watch, then
     /// [`WATCH`] as after a clean quit): the app quit for a logout.
     pub listen: bool,
+    /// Open the app again at once: it quit cleanly to relaunch ([`RELAUNCH_MARK`]). An
+    /// unclean quit is never reopened: its windows are the recovery watch's first.
+    pub reopen: bool,
 }
 
 /// The guardian's plan after the exit: `marker`, the clean-exit marker's text (`None`: no
@@ -67,8 +84,8 @@ pub struct AfterExit {
 /// marker; a crash never does).
 pub fn after_exit(marker: Option<&str>, parked_logout: bool) -> AfterExit {
     match marker {
-        Some(text) => AfterExit { recover: false, listen: quit_for_logout(text) },
-        None => AfterExit { recover: true, listen: parked_logout },
+        Some(text) => AfterExit { recover: false, listen: quit_for_logout(text), reopen: text.trim() == RELAUNCH_MARK },
+        None => AfterExit { recover: true, listen: parked_logout, reopen: false },
     }
 }
 
@@ -218,10 +235,12 @@ mod tests {
 
     #[test]
     fn the_marker_says_logout_only_for_the_systems_quit_at_a_logout() {
-        assert_eq!(quit_marker(true, false, false), LOGOUT_MARK, "the quit after the head start");
-        assert_eq!(quit_marker(false, true, false), LOGOUT_MARK, "no early signal; the quit event says logout");
-        assert_eq!(quit_marker(true, true, true), CLEAN_MARK, "the user's own Quit during a logout is never undone");
-        assert_eq!(quit_marker(false, false, false), CLEAN_MARK, "any other quit");
+        assert_eq!(quit_marker(true, false, false, false), LOGOUT_MARK, "the quit after the head start");
+        assert_eq!(quit_marker(false, true, false, false), LOGOUT_MARK, "no early signal; the quit event says logout");
+        assert_eq!(quit_marker(true, true, true, false), CLEAN_MARK, "the user's own Quit during a logout is never undone");
+        assert_eq!(quit_marker(false, false, false, false), CLEAN_MARK, "any other quit");
+        assert_eq!(quit_marker(false, false, false, true), RELAUNCH_MARK, "the user's Relaunch");
+        assert_eq!(quit_marker(true, false, false, true), LOGOUT_MARK, "a logout under way outranks a relaunch: its cancel reopens");
         assert!(quit_for_logout("logout\n") && !quit_for_logout("clean\n") && !quit_for_logout(""));
     }
 
@@ -258,11 +277,12 @@ mod tests {
 
     #[test]
     fn what_the_guardian_does_after_the_exit() {
-        assert_eq!(after_exit(Some("clean\n"), false), AfterExit { recover: false, listen: false });
-        assert_eq!(after_exit(Some("logout\n"), false), AfterExit { recover: false, listen: true });
-        assert_eq!(after_exit(None, false), AfterExit { recover: true, listen: false }, "a crash, or an unclean user's Quit");
-        assert_eq!(after_exit(None, true), AfterExit { recover: true, listen: true }, "an unclean quit at a logout");
-        assert_eq!(after_exit(Some("clean\n"), true), AfterExit { recover: false, listen: false }, "the marker decides a clean exit");
+        assert_eq!(after_exit(Some("clean\n"), false), AfterExit { recover: false, listen: false, reopen: false });
+        assert_eq!(after_exit(Some("logout\n"), false), AfterExit { recover: false, listen: true, reopen: false });
+        assert_eq!(after_exit(Some("relaunch\n"), false), AfterExit { recover: false, listen: false, reopen: true }, "the user's Relaunch");
+        assert_eq!(after_exit(None, false), AfterExit { recover: true, listen: false, reopen: false }, "a crash, or an unclean user's Quit or Relaunch");
+        assert_eq!(after_exit(None, true), AfterExit { recover: true, listen: true, reopen: false }, "an unclean quit at a logout");
+        assert_eq!(after_exit(Some("clean\n"), true), AfterExit { recover: false, listen: false, reopen: false }, "the marker decides a clean exit");
     }
 
     /// Clean or unclean quit, at a logout or not, cancelled or not (round logout-cancel).

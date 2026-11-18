@@ -341,8 +341,13 @@ Applications and Settings appears. The buttons along its top switch between five
   holding Shift to choose the stage, merging stages by dropping cards, and the strip order
   (Apple's, Keep in Place or Follow the Dock).
 - **Windows:** keeping windows clear of the strip, animation speed, and keyboard shortcuts.
-- **Advanced:** the config file (open it, or reveal it in Finder), and help for asking an AI
-  assistant to change it.
+- **Advanced:** the mode, the way stages are kept: **Accessibility**, **Spaces** or **With
+  Apple's** ([MODES.md](MODES.md) compares them), with a line on what the one chosen does and
+  costs. With Apple's turns Apple's Stage Manager on and follows it; Accessibility and Spaces
+  turn it off if it is on. A new engine applies after a relaunch, and **Relaunch** appears
+  beside it: every window comes back, and Stage Manager opens again. While Apple's Stage
+  Manager is on and Stage Manager is paused, no mode is selected. Below the mode: the config
+  file (open it, or reveal it in Finder), and help for asking an AI assistant to change it.
 
 Changes apply at once.
 

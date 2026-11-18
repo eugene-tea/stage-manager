@@ -84,7 +84,7 @@ them.
 
 ## Settings
 
-Both are in the `[windows]` section of the config file.
+Both are in the `[windows]` section of the config file, or Settings → Advanced → Mode.
 
 - `engine`: how Stage Manager hides windows while Apple's Stage Manager is off.
   `"accessibility"` (the default) or `"spaces"`. It is read at launch, so Stage Manager has to

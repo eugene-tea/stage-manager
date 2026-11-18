@@ -226,8 +226,10 @@ handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` wi
 
 ## Other tools
 
-- `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--pane PANE] [--png FILE]`
+- `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--pane PANE] [--mode MODE] [--png FILE]`
   opens one of the app's windows alone, or draws it to a PNG, without managing anything.
+  `--mode accessibility|spaces|apple|paused|relaunch|fell-back` sets what the Advanced pane's
+  mode picker shows.
 - `stage-manager strip-demo` runs the strip alone, fed from the live window list, and never
   moves a window. Its variables (`STAGE_MANAGER_DEMO_*`, and an offscreen render with
   `--features debug-render`) are described in `src/ui/strip_demo.rs`.
