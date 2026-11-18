@@ -9558,6 +9558,140 @@ def phase_cmdtab_probe():
     stop_fixture()
 
 
+def phase_panel():
+    """Round attached-panel (Spaces engine only, `SM_ENGINE=spaces`): a window with an attached
+    panel (the fixture's --child, an NSPopover from a button as a calendar's event details),
+    its stage hidden. The window server moves a window and its attached child windows between
+    Spaces together, and the panel is no window Accessibility lists, so the engine holds the
+    window and finds the panel in the stage Space with nothing answering for it (live 11-18:
+    let out every 10 s, it pulled its window onto the Desktop each time).
+
+    1. Fixture 1 (with its popup) and Fixture 2 each in a stage; Fixture 2's shown: Fixture 1 in
+       its stage Space, and the popup with it (else: not a reproduction, said and skipped).
+    2. 25 s (two of the engine's tidies), the window server sampled every ~0.2 s: Fixture 1 and
+       its popup stay in the stage Space on every sample; the log has no let-out of the popup
+       and no "no longer held" for Fixture 1; `ctl state` `engine.companions` names the popup.
+    3. Fixture 1's stage shown: the popup out of the stage Space with it, on screen.
+    4. Hidden again, then a quit: Fixture 1 and the popup out of every stage Space.
+    5. Hidden again, app and guardian killed: both out of every stage Space (the Spaces end
+       with the app), and every fixture window on screen."""
+    say("\n== panel: a window's attached panel goes with its stage (Spaces engine) ==")
+    if not SPACES:
+        skip("panel", "the Spaces engine's own: run with SM_ENGINE=spaces")
+        return
+    stop_app()
+    stop_all_fixtures()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(2, "--child", "--frames", "120,120,700,520;300,200,600,400")
+    s = start_app(2)
+    if not check(s is not None and s["engine"]["kind"] == "spaces", "panel: the Spaces engine runs"):
+        stop_app()
+        return
+    one, two = by_title(s)["Fixture 1"], by_title(s)["Fixture 2"]
+    managed = {w["id"] for w in s["windows"]}
+    if [t for t in stage_titles(s).get(two["home"], []) if t != "Fixture 2"]:
+        do("new", two["id"])
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2"]], "two stages")
+    if not check(s is not None, "panel: Fixture 1 and 2 each in a stage"):
+        stop_app()
+        return
+    one_n, two_n = number_of(s, "Fixture 1"), number_of(s, "Fixture 2")
+
+    def listed():
+        """Every fixture window (any layer) by id, with `staged` (the window server's word)."""
+        r = subprocess.run([BIN, "probe-windows", FIX_ID], env=dict(ENV, STAGE_MANAGER_ENGINE="spaces"),
+                           capture_output=True, text=True, timeout=10)
+        return {w["id"]: w for w in json.loads(r.stdout)["windows"]}
+
+    def popup_id():
+        """The popup: a fixture window the model does not manage, past Fixture 1's right edge."""
+        wins = listed()
+        win = wins.get(one["id"])
+        if not win:
+            return None
+        b1 = win["bounds"]
+        return next((i for i, w in wins.items() if i not in managed and w["bounds"]["x"] + w["bounds"]["w"] > b1["x"] + b1["w"] + 20
+                     and w["bounds"]["y"] < b1["y"] + b1["h"] and b1["y"] < w["bounds"]["y"] + w["bounds"]["h"]), None)
+
+    do("switch", one_n)
+    pop = wait_until(popup_id, 5, "Fixture 1's popup")
+    if not check(pop is not None, "panel: Fixture 1's popup listed by the window server"):
+        stop_app()
+        return
+    layer = listed()[pop]["layer"]
+    say(f"  popup: window {pop}, layer {layer} (the engine's sweep looks at layer 0 only)")
+    mark = len(log_text())
+    do("switch", two_n)
+    hidden = wait_until(lambda: (lambda ws: ws if ws.get(one["id"], {}).get("staged") else None)(listed()), 4, "Fixture 1 in its stage Space")
+    if not check(hidden is not None, "panel: Fixture 1 hidden in its stage Space"):
+        stop_app()
+        return
+    time.sleep(0.5)
+    if not listed().get(pop, {}).get("staged"):
+        skip("panel: the popup with its window", "the popup did not go into the stage Space with Fixture 1 (macOS does not attach it): not a reproduction")
+        stop_app()
+        all_onscreen("panel: quit")
+        return
+    check(True, "panel: the popup went into the stage Space with Fixture 1")
+
+    say("  25 s with Fixture 1's stage hidden (two tidies), sampled")
+    out = []
+    t0 = time.time()
+    while time.time() - t0 < 25:
+        ws = listed()
+        for wid, what in ((one["id"], "Fixture 1"), (pop, "popup")):
+            w = ws.get(wid)
+            if w and (not w.get("staged") or w.get("onscreen")):
+                out.append((round(time.time() - t0, 1), what))
+        time.sleep(0.2)
+    check(not out, f"panel: Fixture 1 and its popup stayed in the stage Space on every sample ({out[:8]})")
+    text = log_text()[mark:]
+    let_out = [ln for ln in text.splitlines() if "nothing answered for was in a stage's Space: let out" in ln and f"id={pop} " in ln]
+    unheld = [ln for ln in text.splitlines() if "no longer held" in ln and str(one["id"]) in ln.split("windows=")[-1]]
+    check(not let_out, f"panel: the popup was never let out ({len(let_out)} times)")
+    check(not unheld, f"panel: Fixture 1 was never pulled out of its stage Space ({len(unheld)} times)")
+    eng = state()["engine"]
+    if layer == 0:
+        check(pop in (eng.get("companions") or []), f"panel: ctl state names the popup a companion ({eng.get('companions')}, pulls {eng.get('pulls')})")
+        stays = text.count("stays with it")
+        check(stays == 1, f"panel: the log says the popup stays with its window, once ({stays})")
+    else:
+        skip("panel: the popup a companion", f"the popup is on layer {layer}, which the engine's sweep never lets out")
+
+    do("switch", one_n)
+    back = wait_until(lambda: (lambda ws: ws if not ws.get(one["id"], {}).get("staged") and ws.get(pop) and not ws[pop].get("staged") and ws[pop].get("onscreen") else None)(listed()),
+                      4, "Fixture 1 and its popup shown")
+    check(back is not None, "panel: Fixture 1's stage shown: the popup out of the stage Space with it, on screen")
+
+    for how in ("quit", "kill"):
+        do("switch", two_n)
+        if not check(wait_until(lambda: (lambda ws: ws if ws.get(one["id"], {}).get("staged") and ws.get(pop, {}).get("staged") else None)(listed()), 4, "both hidden") is not None,
+                     f"panel {how}: Fixture 1 and its popup hidden again"):
+            break
+        if how == "quit":
+            stop_app()
+        else:
+            app = app_pid()
+            for g in guardian_pids(app):
+                os.kill(g, signal.SIGKILL)
+            os.kill(app, signal.SIGKILL)
+            wait_gone(app)
+        ws = wait_until(lambda: (lambda x: x if not x.get(one["id"], {}).get("staged") and not x.get(pop, {}).get("staged") else None)(listed()), 4, "out of the stage Space")
+        check(ws is not None, f"panel {how}: Fixture 1 and its popup out of every stage Space")
+        all_onscreen(f"panel {how}")
+        if how == "quit":
+            s = start_app(2, fresh_log=False)
+            if not check(s is not None, "panel: the app up again"):
+                return
+            two_n, one_n = number_of(s, "Fixture 2"), number_of(s, "Fixture 1")
+            mapped = by_title(s)
+            one, two = mapped["Fixture 1"], mapped["Fixture 2"]
+    stop_app()
+    stop_all_fixtures()
+
+
 def phase_edgeflat():
     """Round edge-flat (11-16): Apple's strip brought back at the left edge shows its cards
     flat and turns them back as it hides (`ui::edge_flat`; UX-SPEC, "The strip brought back at
@@ -9710,7 +9844,7 @@ def main():
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
-             "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat}[p]()
+             "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
