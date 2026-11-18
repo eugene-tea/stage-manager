@@ -38,7 +38,7 @@ them.
 | Documented macOS interfaces only | ✓ | — ⁶ | ◐ ⁷ |
 | ***Cost at rest*** ⁸ | | | |
 | **Total, with the system's share** | **about 4.9 %** | **about 1.2 %** | — |
-| Stage Manager itself (what Activity Monitor shows) | 1.07 % | 0.35 % | — |
+| Stage Manager itself (what Activity Monitor shows) | 1.07 % | 0.35 % | about 1 % ⁹ |
 | macOS's screen-capture service | 1.23 % | 0 % | — |
 | Window server, above its own load | +2.58 % | +0.86 % | — |
 | Time awake per minute | 500 ms | 125 ms | — |
@@ -74,6 +74,9 @@ them.
    "Window engines measured"). Most of what Accessibility costs is in macOS's own processes
    (the screen-capture service, for the pictures that play the motion, and the window server),
    so Activity Monitor's line for Stage Manager shows only about a fifth of it.
+9. An average over 13 hours of everyday use with Apple's Stage Manager on (11-17 to 11-18),
+   before the work this mode doesn't use was switched off. It's an average over work and rest,
+   so it isn't directly comparable with the other two columns.
 
 ## Settings
 
