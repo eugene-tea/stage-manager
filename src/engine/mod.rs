@@ -31,6 +31,7 @@ pub mod not_ours;
 pub mod observe_retry;
 pub mod overview;
 pub mod persist;
+pub mod perspective;
 pub mod phase;
 pub mod placement;
 pub mod raise_order;

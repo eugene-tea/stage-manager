@@ -30,19 +30,10 @@
 
 use crate::config::StripStyle;
 use crate::engine::geometry::{Point, Rect, Size};
+use crate::engine::perspective::{View, in_quad, quad_bounds};
 use crate::ui::strip_model::CardSnapshot;
 
-/// The two displays the automatic tilt and perspective were measured on: (visible width,
-/// tilt in degrees, eye distance in points).
-pub const MEASURED_PERSPECTIVE: [(f64, f64, f64); 2] = [(1800.0, 44.2, 1346.0), (2560.0, 47.9, 2260.0)];
-
-/// Apple's tilt (degrees) and eye distance (points) for a visible width: linear between the
-/// two measured displays, held at the nearer one outside them.
-pub fn auto_perspective(visible_width: f64) -> (f64, f64) {
-    let [(w0, t0, d0), (w1, t1, d1)] = MEASURED_PERSPECTIVE;
-    let t = if visible_width.is_finite() { ((visible_width - w0) / (w1 - w0)).clamp(0.0, 1.0) } else { 1.0 };
-    (t0 + (t1 - t0) * t, d0 + (d1 - d0) * t)
-}
+pub use crate::engine::perspective::{MEASURED_PERSPECTIVE, auto_perspective};
 
 /// The style resolved for one display: every length scaled by `k`, auto values computed.
 #[derive(Clone, Debug, PartialEq)]
@@ -159,8 +150,12 @@ impl Metrics {
 
     /// [`Metrics::far_ratio`] for a plane turned by `tilt` (radians), not the cards' turn.
     fn far_ratio_turned(&self, u: f64, tilt: f64) -> f64 {
-        let d = self.perspective.max(1.0);
-        d / (d + u * tilt.sin())
+        self.view(tilt).far_ratio(u)
+    }
+
+    /// The cards' eye with the turn `tilt` (radians): the shared projection.
+    fn view(&self, tilt: f64) -> View {
+        View { tilt, distance: self.perspective.max(1.0), eye: self.eye }
     }
 
     /// The four corners of a thumbnail whose left edge runs from (`x`, `top`) down `v`, `u`
@@ -172,10 +167,7 @@ impl Metrics {
     /// [`Metrics::project`] for a plane turned by `tilt` (radians) about its left edge, seen
     /// from the cards' eye: a snapshot on its way between a card and its window.
     pub fn project_turned(&self, x: f64, top: f64, u: f64, v: f64, tilt: f64) -> [Point; 4] {
-        let f = self.far_ratio_turned(u, tilt);
-        let rx = self.eye.x + (x + u * tilt.cos() - self.eye.x) * f;
-        let ry = |y: f64| self.eye.y + (y - self.eye.y) * f;
-        [Point::new(x, top), Point::new(rx, ry(top)), Point::new(rx, ry(top + v)), Point::new(x, top + v)]
+        self.view(tilt).project(x, top, u, v)
     }
 
     /// The depth (toward the eye) of the turned plane whose left edge is at `x`, at the point
@@ -193,10 +185,7 @@ impl Metrics {
 
     /// The bounding box of [`Metrics::project_turned`].
     pub fn projected_bounds_turned(&self, x: f64, top: f64, u: f64, v: f64, tilt: f64) -> Rect {
-        let q = self.project_turned(x, top, u, v, tilt);
-        let (x0, x1) = (q.iter().map(|p| p.x).fold(f64::INFINITY, f64::min), q.iter().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max));
-        let (y0, y1) = (q.iter().map(|p| p.y).fold(f64::INFINITY, f64::min), q.iter().map(|p| p.y).fold(f64::NEG_INFINITY, f64::max));
-        Rect::new(x0, y0, x1 - x0, y1 - y0)
+        quad_bounds(&self.project_turned(x, top, u, v, tilt))
     }
 }
 
@@ -221,7 +210,7 @@ impl Metrics {
     /// The far edge of a window's plane whose left edge is at `x`, `u` wide before the turn
     /// (the right side of [`Metrics::project`]).
     fn far_x(&self, x: f64, u: f64) -> f64 {
-        self.eye.x + (x + u * self.tilt.cos() - self.eye.x) * self.far_ratio(u)
+        self.project(x, 0.0, u, 0.0)[1].x
     }
 
     /// The rightmost point any card can draw at rest in its slot (panel coordinates): the far
@@ -410,18 +399,6 @@ impl CardLayout {
         let r = r.unwrap_or(self.frame);
         Point::new(r.x + r.w / 2.0, r.y + r.h / 2.0)
     }
-}
-
-/// True when `p` lies in the convex quadrilateral `q` (its corners in order, either way
-/// round), its edges included.
-fn in_quad(q: &[Point; 4], p: Point) -> bool {
-    let sides: Vec<f64> = (0..4)
-        .map(|i| {
-            let (a, b) = (q[i], q[(i + 1) % 4]);
-            (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
-        })
-        .collect();
-    sides.iter().all(|&c| c >= 0.0) || sides.iter().all(|&c| c <= 0.0)
 }
 
 /// The side a card of several apps puts a second app's windows on: -1 left of the front
