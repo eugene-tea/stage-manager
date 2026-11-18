@@ -51,6 +51,7 @@ use crate::engine::leftovers;
 use crate::engine::lend_park::{self, LendSteps, Parked};
 use crate::engine::model::{Display, Model, WindowId};
 use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
+use crate::engine::stage_companions::{Companions, HeldWindow, Stay};
 use crate::platform::ax::{AxElement, AxError, AxResult};
 use crate::platform::safety::{self, Ours, Report, ScanScope};
 use crate::platform::window_engine::{Back, EngineKind, Lend, LendPark, Motion, ShowHow, Stretch, StretchDone, WindowEngine};
@@ -231,6 +232,9 @@ struct State {
     /// ([`WindowEngine::parked_lend`]); a hide, a show, a sweep or the retry of a show's frame
     /// sets the frame again.
     parked: BTreeMap<u32, ParkedLend>,
+    /// Windows in a stage Space that go with a held window (an attached panel), and the
+    /// let-outs that pulled a held window out ([`Companions`]).
+    companions: Companions,
 }
 
 impl State {
@@ -243,6 +247,7 @@ impl State {
         self.lent.clear();
         self.new.clear();
         self.owed.clear();
+        self.companions.clear();
         std::mem::take(&mut self.stages).into_values().collect()
     }
 }
@@ -1015,6 +1020,7 @@ impl SpacesEngine {
             let held: BTreeSet<u32> = st.held.keys().copied().collect();
             st.lent.retain(|id| held.contains(id));
             st.parked.retain(|id, _| keep(id));
+            st.companions.retain(|id| alive.contains(&id) || listed.contains(&id));
             let used: BTreeSet<u64> = st.held.values().map(|h| h.space).collect();
             // The Space where new windows wait stays (a launch's watch may be putting a window
             // into it now); it ends with the others at a bring-back.
@@ -1073,11 +1079,19 @@ impl SpacesEngine {
         let blocked = self.blocked();
         let mut by_home: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
         let mut in_space: BTreeMap<u32, u64> = BTreeMap::new();
-        for w in windows::every_window().iter().filter(|w| w.pid != own) {
+        let all = windows::every_window();
+        // A recovery scan while running leaves the held windows' companions with them too: let
+        // out, an attached panel pulls its held window onto the Desktop ([`Companions`]).
+        let held = if strays_only { self.held_windows(&all) } else { Vec::new() };
+        for w in all.iter().filter(|w| w.pid != own) {
             let now = sky.spaces_of(&[w.id]);
             let Some(space) = now.iter().copied().find(|s| ours.contains(s)) else { continue };
-            if strays_only && self.state().held.contains_key(&w.id) {
-                continue;
+            if strays_only {
+                // Read first: the state's guard is not held into the companions' look.
+                let is_held = self.state().held.contains_key(&w.id);
+                if is_held || self.companion_stays(w, space, false, &held) {
+                    continue;
+                }
             }
             in_space.insert(w.id, space);
             report.checked += 1;
@@ -1168,7 +1182,8 @@ impl SpacesEngine {
     /// their stage Space ([`escaped`]), forgotten as held, so that the tick, which compares
     /// what the model counts hidden with what this engine holds, hides them again (review
     /// A-7: `held` is only what the engine last read back). Windows lent, waiting as new or
-    /// flying their last stretch are where they are on purpose. The windows forgotten.
+    /// flying their last stretch are where they are on purpose. A window let out of the same
+    /// Space just before pulled them out ([`Companions::escaped`]). The windows forgotten.
     pub fn forget_escaped(&self) -> Vec<u32> {
         let held: Vec<(u32, Held)> = {
             let st = self.state();
@@ -1180,20 +1195,25 @@ impl SpacesEngine {
         let Some(sky) = self.sky() else { return Vec::new() };
         let (_, shown) = Self::desktops(sky);
         let flying = self.stretching();
-        let out: Vec<u32> = held
+        let out: Vec<(u32, u64)> = held
             .into_iter()
             .filter(|(id, h)| shown.contains(&h.home) && !flying.contains(id) && escaped(&sky.spaces_of(&[*id]), *h))
-            .map(|(id, _)| id)
+            .map(|(id, h)| (id, h.space))
             .collect();
+        let out_ids: Vec<u32> = out.iter().map(|(id, _)| *id).collect();
         if !out.is_empty() {
             let mut st = self.state();
-            for id in &out {
+            for id in &out_ids {
                 st.held.remove(id);
             }
+            let pulls = st.companions.escaped(&out, Instant::now());
             drop(st);
-            tracing::info!(windows = ?out, "spaces engine: windows held were out of their stage Space (not by this engine): no longer held");
+            for (let_out, pulled) in pulls {
+                tracing::warn!(id = let_out, pulled, "spaces engine: a window let out of a stage's Space pulled a held window out with it; not let out again while that one is held there");
+            }
+            tracing::info!(windows = ?out_ids, "spaces engine: windows held were out of their stage Space (not by this engine): no longer held");
         }
-        out
+        out_ids
     }
 
     /// The windows hidden on a Desktop that shows now: present there, though the window
@@ -1213,9 +1233,11 @@ impl SpacesEngine {
     /// Lets out every window the window server lists in one of this engine's Spaces that
     /// the engine does not hold (a window its app ordered out while hidden, forgotten, and
     /// ordered in again comes back in the Space it was in): onto that Space's Desktop. No
-    /// window stays in a stage Space with nothing answering for it. `list`: every window, on
-    /// screen or not (the tick's read, [`windows::wake_list`]). How many came out.
-    pub fn let_strangers_out(&self, list: &[windows::CgWindow]) -> usize {
+    /// window stays in a stage Space with nothing answering for it, but a companion of a held
+    /// window: one the model does not know (`known`) of an app with a window held in that
+    /// Space goes with it ([`Companions`]). `list`: every window, on screen or not (the
+    /// tick's read, [`windows::wake_list`]). How many came out.
+    pub fn let_strangers_out(&self, list: &[windows::CgWindow], known: impl Fn(u32) -> bool) -> usize {
         let (spaces, held): (BTreeMap<u64, u64>, BTreeSet<u32>) = {
             let st = self.state();
             (st.stages.iter().map(|((desktop, _), space)| (*space, *desktop)).collect(), st.held.keys().copied().collect())
@@ -1227,18 +1249,48 @@ impl SpacesEngine {
         let own = std::process::id() as i32;
         let ours: BTreeSet<u64> = spaces.keys().copied().collect();
         let (desktops, shown) = Self::desktops(sky);
+        let held_windows = self.held_windows(list);
+        let mut stayed = BTreeSet::new();
         let mut out = 0;
         for w in list.iter().filter(|w| w.pid != own && !w.onscreen && w.layer == 0 && !held.contains(&w.id)) {
             let now = sky.spaces_of(&[w.id]);
             let Some(space) = now.iter().find(|s| ours.contains(s)) else { continue };
+            if self.companion_stays(w, *space, known(w.id), &held_windows) {
+                stayed.insert(w.id);
+                continue;
+            }
             let home = spaces.get(space).copied().filter(|d| desktops.contains(d)).or(shown.first().copied());
             let Some(home) = home else { continue };
             let _ = sky.add_remove_from(Route::Bridged, home, &[w.id], ALL_SPACES_MASK);
             let (ok, after) = self.read_back(sky, w.id, |s| out_of(s, &ours));
+            self.state().companions.let_out(w.id, *space, Instant::now());
             tracing::info!(id = w.id, pid = w.pid, space, desktop = home, ok, listed = ?after, "spaces engine: a window nothing answered for was in a stage's Space: let out");
             out += usize::from(ok);
         }
+        self.state().companions.settle(&stayed);
         out
+    }
+
+    /// The windows held, each with its process from `list` (one `list` does not name is left
+    /// out: gone).
+    fn held_windows(&self, list: &[windows::CgWindow]) -> Vec<HeldWindow> {
+        let held: BTreeMap<u32, u64> = self.state().held.iter().map(|(id, h)| (*id, h.space)).collect();
+        list.iter().filter_map(|w| held.get(&w.id).map(|space| HeldWindow { id: w.id, pid: w.pid, space: *space })).collect()
+    }
+
+    /// True when window `w`, in stage Space `space` and not held, stays there with a held
+    /// window ([`Companions::stays`]); said once while it does.
+    fn companion_stays(&self, w: &windows::CgWindow, space: u64, known: bool, held: &[HeldWindow]) -> bool {
+        let mut st = self.state();
+        let Some(why) = st.companions.stays(w.id, w.pid, space, known, held) else { return false };
+        if st.companions.say_once(w.id) {
+            drop(st);
+            match why {
+                Stay::Sibling(with) => tracing::info!(id = w.id, pid = w.pid, space, with, "spaces engine: a window nothing answered for is in a stage's Space with a held window of its app: it stays with it"),
+                Stay::Pulled(with) => tracing::info!(id = w.id, pid = w.pid, space, with, "spaces engine: a window whose let-out pulled a held window out stays in its stage's Space while that one is held"),
+            }
+        }
+        true
     }
 
     /// The Desktop a just-opened app's window shows on: the one of the screen with the
@@ -1385,6 +1437,8 @@ impl SpacesEngine {
             "new_missed": st.counts.new_missed,
             "lent_now": st.lent,
             "parked_lends": st.parked.keys().collect::<Vec<_>>(),
+            "companions": st.companions.staying(),
+            "pulls": st.companions.pulls(),
             "frames_owed": st.frames.keys().collect::<Vec<_>>(),
             "lent": st.counts.lent,
             "taken_back": st.counts.taken_back,

@@ -51,6 +51,7 @@ pub mod stale_activation;
 pub mod stale_handle;
 pub mod vanished;
 pub mod stage_area;
+pub mod stage_companions;
 pub mod stand_down;
 pub mod stranded;
 pub mod switcher;
