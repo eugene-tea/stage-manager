@@ -408,8 +408,21 @@ impl AppleController {
         if ob.launched_at(pid).is_some_and(|t| now.saturating_duration_since(t) < LAUNCH_ACTIVATION) {
             return;
         }
-        if self.pids.values().any(|p| *p == pid) || ob.windows().values().any(|w| w.pid == pid) {
+        if self.pids.values().any(|p| *p == pid) {
             return;
+        }
+        let known: Vec<u32> = ob.windows().values().filter(|w| w.pid == pid).map(|w| w.id).collect();
+        if !known.is_empty() {
+            // A window closed with no destroyed notice stays known until the observer's sweep
+            // drops it, which in this mode waits for a read of its own (the 1.9 live suite: the
+            // fixture's window closed by a signal was dropped 10 s on, and its reactivation
+            // within them was left to Apple's). Only the windows the window server still lists
+            // on some Desktop count: one fresh read, at an activation only.
+            let listed: BTreeSet<u32> = crate::platform::windows::list_windows().iter().map(|w| w.id).collect();
+            if known.iter().any(|id| listed.contains(id)) {
+                return;
+            }
+            tracing::debug!(pid, ?known, "apple mode: the app's known windows are no longer listed: taken as closed");
         }
         // Not the person's activation (live 11-17, Contacts opened here: its hide handed the
         // focus to Finder, which has a `current` rule and no window; the job waited 3 s for a
