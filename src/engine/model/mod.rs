@@ -437,6 +437,11 @@ pub struct Model {
     /// changed, keep them): macOS may put them on another Desktop of the main display
     /// and show that one, where their stages come whole ([`Model::carry_adopted`]).
     pub(crate) adopted: BTreeSet<WindowId>,
+    /// Windows hidden in a stage of a Desktop of a screen that went, at that change (but those
+    /// [`Self::adopted`], whose stages [`Model::carry_adopted`] takes whole): one listed on
+    /// another Desktop while the change settles stays in its stage, hidden again
+    /// ([`ArrivalNote::kept_hidden`]). Set again at each change of the screens.
+    pub(crate) handed_hidden: HashSet<WindowId>,
     /// Desktops not shown whose front stage left them (the lid closed: the laptop's front,
     /// brought in front on the 5K's first Desktop, carried whole to the second one macOS
     /// slid to, [`Model::carry_adopted`]): their most recent card comes forward when they
@@ -540,6 +545,7 @@ impl Model {
             merged: HashMap::new(),
             launch_listed: HashSet::new(),
             adopted: BTreeSet::new(),
+            handed_hidden: HashSet::new(),
             front_owed: BTreeSet::new(),
             hold_arrivals: false,
             slide_carried: HashSet::new(),

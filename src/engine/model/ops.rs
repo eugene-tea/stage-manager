@@ -8,6 +8,7 @@ use super::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::engine::geometry::{Point, Rect};
+use crate::engine::recovery::EngineKind;
 use crate::engine::corner::park::TITLE_BAR_HEIGHT;
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
@@ -1895,6 +1896,20 @@ impl Model {
         // slide to another Desktop with the closed screen's windows may still come.
         if removed || displays.iter().any(|d| !before.iter().any(|o| o.id == d.id)) {
             self.adopted.clear();
+            self.handed_hidden.clear();
+        }
+        // The windows hidden on the Desktops of a screen going (Spaces engine): the window
+        // server may let them out onto another Desktop as it goes; they stay in their stages.
+        if self.options.engine == EngineKind::Spaces {
+            let gone_ids: Vec<DisplayId> = gone.iter().map(|g| g.id).collect();
+            let spaces = &self.spaces;
+            self.handed_hidden = self
+                .windows
+                .values()
+                .filter(|w| w.parked && spaces.iter().any(|s| s.id == w.space && gone_ids.contains(&s.display)))
+                .map(|w| w.meta.id)
+                .chain(self.handed_hidden.iter().copied())
+                .collect();
         }
         self.displays = displays;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
@@ -1907,6 +1922,10 @@ impl Model {
         for g in gone {
             self.adopt_display(g, &mut actions);
         }
+        // Those of the Desktop it showed go with their stages wherever macOS shows them
+        // ([`Model::carry_adopted`]).
+        let adopted = &self.adopted;
+        self.handed_hidden.retain(|id| !adopted.contains(id));
         for d in live {
             if !self.current.contains_key(&d) {
                 let s = self.new_space(d);

@@ -64,6 +64,7 @@ use serde::{Deserialize, Serialize};
 use super::pool::Scope;
 use super::{Action, DisplayId, Home, Model, NativeTarget, Observation, Stage, StageId, WindowId, WindowMeta, WindowRole};
 use crate::engine::displays::ScreenKey;
+use crate::engine::recovery::EngineKind;
 use crate::engine::persist::{LaunchFrames, LaunchHints, SavedSpace, bundle_matches, confident_matches, exact_matches, rematch_on};
 use crate::engine::rules::Decision;
 use crate::engine::window_match::LowRule;
@@ -105,6 +106,10 @@ pub struct ArrivalNote {
     /// Windows the platform's own switch had just shown ([`Model::set_slide_carried`]),
     /// listed here while their own Desktop is another: they stay in their stage there.
     pub kept_home: Vec<WindowId>,
+    /// Windows of a hidden stage of a gone screen's Desktop, listed here while arrivals are
+    /// held (macOS's doing as the screen went, [`Model::set_hold_arrivals`]): they stay in
+    /// their stage on their own Desktop and are hidden again (the Spaces engine).
+    pub kept_hidden: Vec<WindowId>,
     /// Windows taken for windows on every Desktop at this arrival ([`STICKY_HOPS`]): pinned,
     /// out of their stage.
     pub sticky: Vec<WindowId>,
@@ -678,13 +683,20 @@ impl Model {
         let kept_home: Vec<WindowId> =
             carried_known.iter().copied().filter(|id| self.windows.get(id).is_some_and(|w| w.space != target)).collect();
         known.retain(|id| !kept_home.contains(id));
+        // A window of a hidden stage of a gone screen's Desktop, listed here while the display
+        // change settles with no click or key since: the window server let it out of its stage
+        // Space as the screen went (a log, 11-18), not the user's move. It stays in its stage
+        // on its own Desktop, hidden again (`handed_hidden`).
+        let kept_hidden = self.kept_hidden(target, &known);
+        known.retain(|id| !kept_hidden.contains(id));
         let unkept: Vec<WindowMeta>;
-        let live = if kept_home.is_empty() {
+        let live = if kept_home.is_empty() && kept_hidden.is_empty() {
             live
         } else {
-            unkept = live.iter().filter(|m| !kept_home.contains(&m.id)).cloned().collect();
+            unkept = live.iter().filter(|m| !kept_home.contains(&m.id) && !kept_hidden.contains(&m.id)).cloned().collect();
             &unkept[..]
         };
+        actions.extend(kept_hidden.iter().map(|id| Action::Hide { id: *id }));
         let arrivals: Vec<WindowMeta> = arrivals.into_iter().filter(|m| !held.contains(&m.id)).collect();
         let saved = self
             .leftovers
@@ -852,10 +864,26 @@ impl Model {
             beside: beside.iter().map(|s| s.0).collect(),
             held,
             kept_home,
+            kept_hidden,
             sticky,
         };
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// Of `known` (windows listed at an arrival on `target`), those of a hidden stage of a gone
+    /// screen's Desktop (`handed_hidden`) still counted hidden there, while arrivals are held
+    /// (a display change settling, no click or key since) under the Spaces engine. After the
+    /// settle, or once the user acted, a window listed elsewhere is taken as ever.
+    fn kept_hidden(&self, target: SpaceId, known: &[WindowId]) -> Vec<WindowId> {
+        if !self.hold_arrivals || self.options.engine != EngineKind::Spaces {
+            return Vec::new();
+        }
+        known
+            .iter()
+            .copied()
+            .filter(|id| self.handed_hidden.contains(id) && self.windows.get(id).is_some_and(|w| w.parked && !w.sticky && w.space != target))
+            .collect()
     }
 
     /// Stages of the Desktop a removed display showed (`adopted`, [`Model::adopt_display`])

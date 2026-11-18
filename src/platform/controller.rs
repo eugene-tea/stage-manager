@@ -969,6 +969,9 @@ pub struct Controller {
     /// The screen is locked (or the session is not on the console): no Space is inferred,
     /// no window is counted gone, and `state.json` is not written until it unlocks.
     locked: bool,
+    /// A screen went while the screen was locked: under the Spaces engine, its watch over the
+    /// hidden windows starts again at the unlock ([`crate::platform::spaces::engine::SpacesEngine::watch_display_change`]).
+    spill_at_unlock: bool,
     /// When the login session was last asked ([`LOCK_POLL`]).
     lock_checked: Option<Instant>,
     /// Since when Accessibility has listed none of the known windows on screen at a Space
@@ -1272,6 +1275,7 @@ impl Controller {
             screens_wait: None,
             build_tried: None,
             locked: false,
+            spill_at_unlock: false,
             lock_checked: None,
             ax_silent_since: None,
             ax_silent_rescan: None,
@@ -4735,6 +4739,9 @@ impl Controller {
                 tracing::info!("the screen is unlocked: the Desktop is looked at again after a settle");
                 self.phase.feed(phase::Event::Unlocked, now);
                 self.space_checked = now;
+                if std::mem::take(&mut self.spill_at_unlock) && self.engine.kind() == crate::platform::window_engine::EngineKind::Spaces {
+                    crate::platform::spaces::engine::shared().watch_display_change("the unlock after a screen went");
+                }
             }
         }
         locked
@@ -5541,7 +5548,15 @@ impl Controller {
             let connected: Vec<DisplayId> = displays.iter().map(|d| d.id).collect();
             self.displays_added = returned_screens(&self.displays_added, settling, added, &connected);
         }
+        // A screen gone (not one seen again under a new id): under the Spaces engine its hidden
+        // windows are kept in their stages, on their own Desktops, before the model's batch
+        // hides anything ([`crate::platform::spaces::engine::SpacesEngine::watch_display_change`]).
+        let screen_gone = self.displays.iter().any(|o| !displays.iter().any(|d| d.id == o.id || d.key == o.key));
         self.displays = displays.clone();
+        if screen_gone && self.engine.kind() == crate::platform::window_engine::EngineKind::Spaces {
+            crate::platform::spaces::engine::shared().watch_display_change("a screen went");
+            self.spill_at_unlock = self.locked || session::screen_locked();
+        }
         let mut actions = Vec::new();
         if let Some(m) = self.model.as_mut() {
             // Each strip's capacity first: a removed display's stages are counted against
@@ -7087,6 +7102,12 @@ fn log_arrival_lets(note: &crate::engine::model::ArrivalNote) {
         tracing::info!(
             windows = ?note.kept_home.iter().map(|w| w.0).collect::<Vec<_>>(),
             "windows our switch had just shown, listed on the Desktop macOS slid to: they stay in their stage on their own Desktop"
+        );
+    }
+    if !note.kept_hidden.is_empty() {
+        tracing::info!(
+            windows = ?note.kept_hidden.iter().map(|w| w.0).collect::<Vec<_>>(),
+            "display: windows of a gone screen's hidden stages listed on another Desktop as the change settles: they stay in their stages, hidden again"
         );
     }
     for id in &note.sticky {

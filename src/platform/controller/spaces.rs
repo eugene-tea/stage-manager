@@ -68,6 +68,9 @@ impl Controller {
     pub(super) fn spaces_tick(&mut self) {
         let now = Instant::now();
         let spaces = engine::shared();
+        // A screen gone: windows the window server let out of their stage Spaces go back in,
+        // on their own Desktops, whatever else holds the tick back (a slide there comes later).
+        spaces.keep_tick();
         let Some(m) = self.model.as_ref() else {
             self.spaces.strays.clear();
             return;
