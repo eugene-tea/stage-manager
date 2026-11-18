@@ -845,14 +845,15 @@ mod tests {
     }
 
     /// The owner's laptop: visible 0,39 1800 × 1130 in a 1800 × 1169 display; the panel starts at
-    /// y = 39, so the display's middle (584.5) is 545.5 in panel coordinates.
+    /// y = 39, so the display's middle (584.5) is 545.5 in panel coordinates. Cards stacked at
+    /// the fixed offsets the 11-09 measurements fitted (the spread's own: [`laptop_with`]).
     fn laptop() -> Metrics {
-        Metrics::new(&StripStyle::default(), Size::new(1800.0, 1130.0), 1.0, 584.5 - 39.0)
+        laptop_with(CardArrangement::Stacked)
     }
 
     /// The 5K display: visible 0,30 2560 × 1410 in 2560 × 1440.
     fn five_k() -> Metrics {
-        Metrics::new(&StripStyle::default(), Size::new(2560.0, 1410.0), 1.0, 720.0 - 30.0)
+        Metrics::new(&StripStyle { card_layout: CardArrangement::Stacked, ..StripStyle::default() }, Size::new(2560.0, 1410.0), 1.0, 720.0 - 30.0)
     }
 
     /// The bounding box Apple's window list reported for a card of a `w × h` window whose
@@ -1519,7 +1520,7 @@ mod tests {
         let m = laptop_with(CardArrangement::Stacked);
         let (_, t) = arrange_card(&fixture_card(APPLE_1116[1].1), &m, 1.0);
         assert_eq!((t[0].rect.x, t[1].rect.x), (42.0, 0.0));
-        assert_eq!(laptop().card_layout, CardArrangement::Stacked, "the default until the owner picks");
+        assert_eq!(StripStyle::default().card_layout, CardArrangement::Apple, "the spread is the default, as Apple's");
         // A card of one app steps stack_dx under every layout.
         for layout in [CardArrangement::Apple, CardArrangement::SpreadCovered] {
             let m = laptop_with(layout);
