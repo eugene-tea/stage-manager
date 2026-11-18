@@ -2,8 +2,8 @@
 
 macOS has no public way to hide a window and keep it ready, and Apple's Stage Manager has no
 interface for other apps. Each way of running stages works around that differently, and each
-trades something. Three are built: the park corner (the default), macOS's own Spaces (in
-testing) and following Apple's Stage Manager. This page compares them for anyone who wants to
+trades something. Three are built: Accessibility (the default), macOS's own Spaces (in
+testing) and integrating with Apple's Stage Manager. This page compares them for anyone who wants to
 choose or try one. [STRATEGIES.md](STRATEGIES.md) has every call, cost and measurement behind
 them.
 
@@ -11,10 +11,10 @@ them.
 
 ✓ yes · — no · ◐ in part (see the notes below the table)
 
-| | Park corner | Spaces | Following Apple's |
+| | Accessibility | Spaces | Integrated with Apple's |
 |---|:---:|:---:|:---:|
 | **Status** | Default | In testing | Opt-in |
-| **Setting** (`[windows]`) | `engine = "accessibility"` | `engine = "spaces"` | `with_apple = "augment"` |
+| **Setting** (`[windows]`) | `engine = "accessibility"` | `engine = "spaces"` | `apple_stage_manager_on = "integrate"` |
 | **Apple's Stage Manager** | Off | Off | On |
 | **Strip drawn by** | Stage Manager | Stage Manager | Apple |
 | ***Stages*** | | | |
@@ -57,15 +57,14 @@ them.
    frame per click, about a second per drag, then comes back. Nothing is posted while the user
    clicks, types or holds a key.
 6. The window server's own Space calls are undocumented. Each launch tests them first, health
-   checks keep watching, and the park corner takes over whenever they fail.
+   checks keep watching, and Accessibility takes over whenever they fail.
 7. Accessibility and posted events are documented. Where to click depends on how Apple's strip
    is drawn, as measured on macOS 27, and a macOS update can change that. The live tests
    recheck it.
 
-## Park corner
+## Accessibility
 
-The default (`engine = "auto"` also uses it in this version). To hide a stage, Stage Manager
-moves its windows into the bottom-right corner of the screen, or into a free corner when
+The default. To hide a stage, Stage Manager moves its windows into the bottom-right corner of the screen, or into a free corner when
 another screen sits beyond that one. macOS always keeps a thin edge of a window on screen.
 Those edges are made to ignore clicks and are covered by a matching piece of the desktop, so
 the corner looks empty ("The clean corner" in the [guide](GUIDE.md)). Switches play Apple's
@@ -83,16 +82,16 @@ asked to move its windows, so a switch costs about 2 ms per window whatever the 
 
 The calls are the window server's own and are undocumented. A macOS update can change them,
 so each launch tests them with a window of its own first, health checks keep watching, and the
-park corner takes over whenever they fail. The log says which engine runs and why. Once
-Spaces has been measured against the park corner (CPU, switch time, a new app's first moment,
-energy), `engine = "auto"` will choose it wherever it works.
+Accessibility takes over whenever they fail, so `engine = "spaces"` is safe to try on any
+Mac. The log says which engine runs and why. Spaces is being measured against Accessibility
+(CPU, switch time, a new app's first moment, energy) before it becomes the default.
 
-## Following Apple's Stage Manager
+## Integrated with Apple's Stage Manager
 
-With `with_apple = "augment"` and Apple's Stage Manager on, Apple's draws the strip and
+With `apple_stage_manager_on = "integrate"` and Apple's Stage Manager on, Apple's draws the strip and
 arranges the windows. Stage Manager reads that arrangement and adds the stage hotkeys, `ctl`
-commands, new apps in the current stage (with the limits in note 3), and putting the stages back after a restart ("With
-Apple's Stage Manager on" in the [guide](GUIDE.md)).
+commands, new apps in the current stage (with the limits in note 3), and putting the stages
+back after a restart ("With Apple's Stage Manager on" in the [guide](GUIDE.md)).
 
 Apple's Stage Manager posts no notices and takes changes only from the pointer. So Stage
 Manager reads its arrangement on every event, and a few times a second while windows move. It
@@ -101,14 +100,14 @@ it. Routes that were tried and didn't work, such as Apple's own Accessibility ac
 strip and clicks sent to its process, are rechecked by the live tests, so a macOS update that
 changes them shows up.
 
-Without this setting (`with_apple = "stand_down"`, the default), Stage Manager brings every
-window back and arranges nothing while Apple's Stage Manager is on. It picks up again once
-Apple's is off.
+With `apple_stage_manager_on = "pause"`, the default, Stage Manager brings every window back
+and arranges nothing while Apple's Stage Manager is on. It picks up again with its own stages
+once Apple's is off. The `engine` setting applies whenever Apple's Stage Manager is off, so the
+two combine: for example Spaces while Apple's is off, integrated while it is on.
 
 ## Choosing
 
-- **For every addition, with Apple's look:** the park corner, the default.
+- **For every addition, with Apple's look:** Accessibility, the default.
 - **For hidden windows off the screen entirely, on a Mac where the test passes:** Spaces.
-- **For Apple's own strip, with hotkeys and restore on top:** following Apple's.
-- **If windows misbehave on a stage change:** `engine = "accessibility"` keeps the park corner
-  whatever later versions choose by default.
+- **For Apple's own strip, with hotkeys and restore on top:** integrated with Apple's.
+- **If windows misbehave on a stage change with Spaces:** `engine = "accessibility"`.
