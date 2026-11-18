@@ -374,7 +374,7 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
 
 impl Shell {
     fn capture_on(&self) -> bool {
-        self.config.strip.capture && std::env::var_os("STAGE_MANAGER_NO_CAPTURE").is_none()
+        self.config.strip.capture && !crate::platform::capture::env_disabled()
     }
 
     fn apple_on(&self) -> bool {
