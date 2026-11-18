@@ -8,64 +8,129 @@
 //! (a Shift-click adds only the window clicked). One fully under the others has no point of
 //! its own: it is clicked at the next settle, once the clicks of the press before took the
 //! ones over it away (a press goes back to front: the job's docs).
+//!
+//! **Only the drawn card takes a click.** The window list lists a thumbnail at the bounding box
+//! of its turned plane (the strip's perspective, [`crate::engine::perspective`]: a stage's
+//! listed boxes turned back give planes of its windows' own aspect within 1.5 %, live 11-17;
+//! our strip's model matches Apple's boxes within 1.5 pt), and WindowManager's click target
+//! over it has those bounds; a click in the box outside the drawn plane falls through to the
+//! wallpaper, whose click reveals the desktop (probe 7, 11-17), or is lost (a press at 0.9 pt
+//! inside the model's top edge, at its rounded corner, took nothing, live 11-17). So a press
+//! goes [`INSIDE`] deep in the thumbnail's plane, [`CLEAR`] off every plane in front of it as
+//! drawn under the pointer ([`HOVER`]), and off the part of each app icon that is drawn
+//! ([`icon_drawn`]); a box no plane fits has no point (it waits, then gives up).
 
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::Display;
+use crate::engine::perspective::{self, View};
 
-/// A point this close to an edge of what covers it, or of the thumbnail, is not taken (the
-/// window server rounds bounds to whole points; the pointer lands on a pixel).
+/// A point this close to an edge of the screen is not taken (the window server rounds bounds
+/// to whole points; the pointer lands on a pixel).
 const MARGIN: f64 = 2.0;
 
-/// A visible point of `thumb` (its listed bounds) that none of `over` (every window listed
-/// in front of it, and the app icons) covers and that lies within `screen`: of the candidates,
-/// the one farthest from any edge (of equals, the nearest its middle). `None` when no part of
-/// it shows.
-pub fn visible_point(thumb: Rect, over: &[Rect], screen: Rect) -> Option<Point> {
-    let area = thumb.intersect(&screen)?;
-    let (lo_x, hi_x, lo_y, hi_y) = (area.x + MARGIN, area.max_x() - MARGIN, area.y + MARGIN, area.max_y() - MARGIN);
-    if hi_x < lo_x || hi_y < lo_y {
-        return None;
+/// How deep in its thumbnail's drawn plane a press goes: the plane's rounded corners (radius 8,
+/// [cards] corner_radius) cut 2.3 pt in along a corner's diagonal, the list rounds to whole
+/// points, a press shrinks the card to 0.987 about its middle, and a press 0.9 pt inside the
+/// model's edge took nothing (live 11-17).
+pub const INSIDE: f64 = 6.0;
+
+/// How far off what is drawn over it a press stays.
+pub const CLEAR: f64 = 3.0;
+
+/// How much a thumbnail in front grows under the pointer, about its own middle (Apple's,
+/// measured 11-09: [cards] hover_scale's default). A posted press lands before any growth
+/// shows, but the planes in front are counted grown all the same: a press 5 pt left of the
+/// front window's plane at rest (0.9 pt off it grown) took nothing (live 11-17).
+pub const HOVER: f64 = 1.11;
+
+/// The part of an app icon window (66x82) that is drawn: the icon image (38 pt, [icons] size,
+/// about 31 pt of it opaque) at the window's middle across (its middle 33 pt right of the
+/// window's left, as the card's left edge plus [icons] center_dx is, measured), its middle
+/// between 33 and 41 pt below the window's top (the live run of 11-17: the presses picked
+/// reproduce only with the icon window's top 33 to 41 pt above the middle our model draws it
+/// at), and 3 pt round it. The rest of the window is clear: a click there goes to the card
+/// under it, as one outside the card's drawn plane goes through its click target.
+pub fn icon_drawn(icon: Rect) -> Rect {
+    const IMAGE: f64 = 38.0;
+    const ROUND: f64 = 3.0;
+    let w = IMAGE + 2.0 * ROUND;
+    let top = icon.y + 33.0 - IMAGE / 2.0 - ROUND;
+    let bottom = icon.y + 41.0 + IMAGE / 2.0 + ROUND;
+    Rect::new(icon.x + (icon.w - w) / 2.0, top, w, bottom - top)
+}
+
+/// What is listed in front of a strip thumbnail, by how it is drawn.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Over {
+    /// Another strip thumbnail, or its click target: its turned plane.
+    Thumb(Rect),
+    /// An app icon window of WindowManager's: [`icon_drawn`].
+    Icon(Rect),
+    /// Any other window: all of its bounds.
+    Window(Rect),
+}
+
+impl Over {
+    /// Its listed bounds.
+    pub fn bounds(&self) -> Rect {
+        match *self {
+            Over::Thumb(r) | Over::Icon(r) | Over::Window(r) => r,
+        }
     }
-    let over: Vec<Rect> = over.iter().filter(|o| o.intersect(&area).is_some()).copied().collect();
-    // Candidate lines: a grid over the thumbnail, its centre, and both sides of every edge of
-    // what covers it (the strips that show).
-    let mut xs: Vec<f64> = (0..=8).map(|i| lo_x + (hi_x - lo_x) * f64::from(i) / 8.0).collect();
-    let mut ys: Vec<f64> = (0..=8).map(|i| lo_y + (hi_y - lo_y) * f64::from(i) / 8.0).collect();
-    for o in &over {
-        xs.extend([o.x - MARGIN - 0.5, o.max_x() + MARGIN + 0.5]);
-        ys.extend([o.y - MARGIN - 0.5, o.max_y() + MARGIN + 0.5]);
+
+    /// What of it covers, as a quadrilateral: a thumbnail's plane grown by [`HOVER`] (its box
+    /// when no plane fits it: all of it), an icon's drawn part, a window's bounds.
+    fn drawn(&self, view: &View) -> [Point; 4] {
+        match *self {
+            Over::Thumb(r) => view.from_bounds(r).map_or_else(|| perspective::rect_quad(r), |q| perspective::grown(&q, HOVER)),
+            Over::Icon(r) => perspective::rect_quad(icon_drawn(r)),
+            Over::Window(r) => perspective::rect_quad(r),
+        }
     }
-    let mid = area.center();
+}
+
+/// The grid a thumbnail's plane is searched on, in points.
+const STEP: f64 = 1.0;
+
+/// A point of strip thumbnail `thumb` (its listed bounds) on display `screen` to press: in its
+/// drawn plane by [`INSIDE`], off what `over` (everything listed in front of it) draws there by
+/// [`CLEAR`], and on the screen; of the candidates, the one with the most room to spare (of
+/// equals, the nearest the plane's middle). `None` when no such point is there, or no plane
+/// fits the box.
+pub fn visible_point(thumb: Rect, over: &[Over], screen: &Display) -> Option<Point> {
+    let view = View::apples(screen.visible, screen.frame.center().y);
+    let own = view.from_bounds(thumb)?;
+    let area = perspective::quad_bounds(&own).intersect(&screen.frame)?;
+    let screen_q = perspective::rect_quad(screen.frame);
+    let near = Rect::new(area.x - CLEAR, area.y - CLEAR, area.w + 2.0 * CLEAR, area.h + 2.0 * CLEAR);
+    let covers: Vec<[Point; 4]> = over
+        .iter()
+        .map(|o| o.drawn(&view))
+        .filter(|q| perspective::quad_bounds(q).intersect(&near).is_some())
+        .collect();
+    let mid = perspective::quad_bounds(&own).center();
     let mut best: Option<(f64, Point)> = None;
-    for &x in xs.iter().filter(|x| (lo_x..=hi_x).contains(*x)) {
-        for &y in ys.iter().filter(|y| (lo_y..=hi_y).contains(*y)) {
-            let p = Point::new(x, y);
-            if over.iter().any(|o| o.contains(p)) {
+    let (nx, ny) = ((area.w / STEP).floor() as i64, (area.h / STEP).floor() as i64);
+    for i in 0..=nx {
+        for j in 0..=ny {
+            let p = Point::new(area.x + i as f64 * STEP, area.y + j as f64 * STEP);
+            let mut room = (perspective::quad_depth(&own, p) - INSIDE).min(perspective::quad_depth(&screen_q, p) - MARGIN);
+            if room < 0.0 {
                 continue;
             }
-            let clear = clearance(p, area, &over);
-            // The clearest; of equals, the nearest the thumbnail's middle.
+            for q in &covers {
+                room = room.min(-perspective::quad_depth(q, p) - CLEAR);
+            }
+            if room < 0.0 {
+                continue;
+            }
             let nearer = |q: Point| (p.x - mid.x).hypot(p.y - mid.y) < (q.x - mid.x).hypot(q.y - mid.y);
-            if clear >= MARGIN && best.is_none_or(|(c, q)| clear > c + 0.01 || ((clear - c).abs() <= 0.01 && nearer(q))) {
-                best = Some((clear, p));
+            if best.is_none_or(|(r, q)| room > r + 0.01 || ((room - r).abs() <= 0.01 && nearer(q))) {
+                best = Some((room, p));
             }
         }
     }
     best.map(|(_, p)| p)
-}
-
-/// How far `p` is from the nearest edge of `area` (inside) and of every rectangle of `over`
-/// (outside).
-fn clearance(p: Point, area: Rect, over: &[Rect]) -> f64 {
-    let inside = (p.x - area.x).min(area.max_x() - p.x).min(p.y - area.y).min(area.max_y() - p.y);
-    over.iter().map(|o| outside(p, *o)).fold(inside, f64::min)
-}
-
-/// How far `p` is outside rectangle `r` (0 inside).
-fn outside(p: Point, r: Rect) -> f64 {
-    let dx = (r.x - p.x).max(p.x - r.max_x()).max(0.0);
-    let dy = (r.y - p.y).max(p.y - r.max_y()).max(0.0);
-    (dx * dx + dy * dy).sqrt()
 }
 
 /// How far below a window's top edge its title bar is grabbed (the drag that worked in the
@@ -146,37 +211,128 @@ mod tests {
 
     const SCREEN: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
 
-    #[test]
-    fn a_thumbnail_alone_is_pressed_near_its_middle() {
-        let t = Rect::new(15.0, 300.0, 87.0, 116.0);
-        let p = visible_point(t, &[], SCREEN).expect("a point");
-        assert!(t.contains(p));
-        assert!((p.x - t.center().x).abs() < 6.0 && (p.y - t.center().y).abs() < 8.0, "{p:?}");
+    /// The 5K display of the live run of 11-17: 2560 × 1440, visible from y = 30.
+    fn five_k() -> Display {
+        Display { frame: Rect::new(0.0, 0.0, 2560.0, 1440.0), visible: Rect::new(0.0, 30.0, 2560.0, 1410.0), ..display() }
+    }
+
+    /// The thumbnail's drawn plane (the model's, turned back from its box).
+    fn plane(thumb: Rect, d: &Display) -> [Point; 4] {
+        View::apples(d.visible, d.frame.center().y).from_bounds(thumb).expect("a plane fits")
+    }
+
+    /// `p` lies `INSIDE` deep in `thumb`'s plane and `CLEAR` off what `over` draws.
+    fn safe(p: Point, thumb: Rect, over: &[Over], d: &Display) -> bool {
+        let view = View::apples(d.visible, d.frame.center().y);
+        perspective::quad_depth(&plane(thumb, d), p) >= INSIDE - 1e-9 && over.iter().all(|o| -perspective::quad_depth(&o.drawn(&view), p) >= CLEAR - 1e-9)
     }
 
     #[test]
-    fn the_back_thumbnail_of_a_stage_of_two_is_pressed_where_it_shows() {
-        // The live capture of 11-16: Alpha's two thumbnails and the item's icon.
-        let back = Rect::new(15.0, 575.0, 87.0, 97.0);
-        let front = Rect::new(32.0, 575.0, 85.0, 97.0);
-        let icon = Rect::new(-7.0, 628.0, 66.0, 82.0);
-        let p = visible_point(back, &[front, front, icon], SCREEN).expect("a part of its own shows");
-        assert!(back.contains(p) && !front.contains(p) && !icon.contains(p), "{p:?}");
-        assert!(p.x < 32.0 - MARGIN && p.y < 628.0 - MARGIN);
+    fn a_thumbnail_alone_is_pressed_deep_in_its_plane() {
+        let d = five_k();
+        // A stage of one 520 × 424 window, above the display's middle and below it.
+        for t in [Rect::new(16.0, 266.0, 76.0, 110.0), Rect::new(16.0, 900.0, 76.0, 110.0)] {
+            let p = visible_point(t, &[], &d).expect("a point");
+            assert!(safe(p, t, &[], &d), "{p:?}");
+            let q = plane(t, &d);
+            assert!(perspective::quad_depth(&q, p) > 30.0, "the deepest point: {p:?}");
+        }
     }
 
     #[test]
-    fn a_thumbnail_fully_covered_or_off_screen_has_no_point() {
-        let t = Rect::new(15.0, 300.0, 80.0, 100.0);
-        assert_eq!(visible_point(t, &[Rect::new(10.0, 295.0, 100.0, 120.0)], SCREEN), None);
-        assert_eq!(visible_point(Rect::new(-258.0, 300.0, 80.0, 100.0), &[], SCREEN), None, "the strip hidden");
+    fn a_cards_corner_regions_are_never_chosen() {
+        let d = five_k();
+        let t = Rect::new(35.0, 266.0, 58.0, 84.0);
+        let q = plane(t, &d);
+        // The box's corners outside the drawn plane (above the middle the far edge is drawn
+        // lower: the top-right and bottom-left of the box are empty) are no part of the card.
+        assert!(!perspective::in_quad(&q, Point::new(t.max_x() - 3.0, t.y + 3.0)));
+        assert!(!perspective::in_quad(&q, Point::new(t.x + 3.0, t.max_y() - 3.0)));
+        // Everything covered but one corner of the box after another: no point there.
+        let corners = [(t.x, t.y), (t.max_x() - 14.0, t.y), (t.max_x() - 14.0, t.max_y() - 14.0), (t.x, t.max_y() - 14.0)];
+        for (cx, cy) in corners {
+            let hole = Rect::new(cx, cy, 14.0, 14.0);
+            // Four windows round the hole.
+            let over = [
+                Over::Window(Rect::new(0.0, 0.0, 200.0, hole.y)),
+                Over::Window(Rect::new(0.0, hole.max_y(), 200.0, 400.0)),
+                Over::Window(Rect::new(0.0, 0.0, hole.x, 400.0)),
+                Over::Window(Rect::new(hole.max_x(), 0.0, 200.0, 400.0)),
+            ];
+            if let Some(p) = visible_point(t, &over, &d) {
+                assert!(safe(p, t, &over, &d), "corner {cx},{cy}: {p:?}");
+            }
+        }
+        // The live run's press (84.25, 278): 0.9 pt inside the top edge near its rounded
+        // corner, took nothing. Under the stage's other two windows it is not taken again.
+        let over = [Over::Thumb(Rect::new(41.0, 289.0, 58.0, 84.0)), Over::Thumb(Rect::new(15.0, 276.0, 59.0, 84.0))];
+        assert!(perspective::quad_depth(&q, Point::new(84.25, 278.0)) < INSIDE);
+        if let Some(p) = visible_point(t, &over, &d) {
+            assert!(safe(p, t, &over, &d), "{p:?}");
+            assert!((p.x - 84.25).abs() > 1.0 || (p.y - 278.0).abs() > 4.0, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn the_back_thumbnail_of_a_stage_of_two_is_pressed_clear_of_the_front_one_grown() {
+        let d = five_k();
+        // The live run of 11-17: Bravo's two windows alone in an item, the back one pressed
+        // at (27, 307.75), 5 pt left of the front one's plane at rest, took nothing.
+        let back = Rect::new(16.0, 266.0, 76.0, 110.0);
+        let front = Over::Thumb(Rect::new(32.0, 266.0, 75.0, 110.0));
+        let icon = Over::Icon(Rect::new(-7.0, 313.0, 66.0, 82.0));
+        let over = [front, front, icon];
+        assert!(!safe(Point::new(27.0, 307.75), back, &over, &d), "the press that missed is no safe point");
+        if let Some(p) = visible_point(back, &over, &d) {
+            assert!(safe(p, back, &over, &d), "{p:?}");
+            assert!(p.x < 27.0, "left of the front window as it grows: {p:?}");
+        }
+        // Two apps' windows: the back one shows above the other two.
+        let t = Rect::new(35.0, 266.0, 58.0, 84.0);
+        let q = plane(t, &d);
+        let p = visible_point(t, &[], &d).expect("alone: a point");
+        assert!(perspective::quad_depth(&q, p) >= INSIDE);
+    }
+
+    #[test]
+    fn a_thumbnail_half_under_its_icon_is_pressed_beside_the_drawn_icon() {
+        let d = five_k();
+        // A stage alone low in the strip: its top half and its right part under windows in
+        // front, its lower left under its icon window (66 × 82 at x = -7), whose middle only
+        // is drawn: the part that shows lies in the icon window, right of the drawn icon.
+        let t = Rect::new(16.0, 900.0, 76.0, 110.0);
+        let icon = Rect::new(-7.0, 940.0, 66.0, 82.0);
+        let over = [Over::Window(Rect::new(-100.0, 0.0, 400.0, 945.0)), Over::Window(Rect::new(62.0, 0.0, 400.0, 1440.0)), Over::Icon(icon)];
+        let p = visible_point(t, &over, &d).expect("beside the drawn icon");
+        assert!(safe(p, t, &over, &d), "{p:?}");
+        assert!(icon.contains(p) && !icon_drawn(icon).contains(p), "in the icon window's clear part: {p:?}");
+        // Counted whole, as before, the icon window would leave no point.
+        assert_eq!(visible_point(t, &[over[0], over[1], Over::Window(icon)], &d), None);
+    }
+
+    #[test]
+    fn a_thumbnail_wholly_under_drawn_parts_has_no_point() {
+        let d = five_k();
+        // A small window's thumbnail (37 × 103) at the strip's foot (the owner's smoke test of
+        // 11-17, Calculator's): its top under the item above's thumbnail as it grows, the rest
+        // under its icon as drawn (its middle 10.5 pt above the card's bottom, as our model
+        // draws it, 37 pt below the icon window's top).
+        let t = Rect::new(15.0, 1200.0, 37.0, 103.0);
+        let icon = Rect::new(-7.0, 1303.0 - 10.5 - 37.0, 66.0, 82.0);
+        let above = Over::Thumb(Rect::new(16.0, 1160.0, 76.0, 110.0));
+        assert_eq!(visible_point(t, &[above, Over::Icon(icon)], &d), None);
+        // Fully covered, or off screen, or a box no plane fits: none.
+        assert_eq!(visible_point(Rect::new(15.0, 300.0, 80.0, 100.0), &[Over::Window(Rect::new(10.0, 295.0, 100.0, 120.0))], &d), None);
+        assert_eq!(visible_point(Rect::new(-258.0, 300.0, 80.0, 100.0), &[], &d), None, "the strip hidden");
+        assert_eq!(visible_point(Rect::new(15.0, 300.0, 4000.0, 100.0), &[], &d), None, "no plane fits");
     }
 
     #[test]
     fn a_sliver_too_thin_to_press_safely_is_no_point() {
+        let d = five_k();
         let back = Rect::new(15.0, 300.0, 80.0, 100.0);
-        let front = Rect::new(18.0, 300.0, 80.0, 100.0);
-        assert_eq!(visible_point(back, &[front], SCREEN), None, "3 points showing: no press that sure");
+        let front = Rect::new(22.0, 300.0, 80.0, 100.0);
+        assert_eq!(visible_point(back, &[Over::Thumb(front)], &d), None, "7 points showing: no press that sure");
     }
 
     #[test]

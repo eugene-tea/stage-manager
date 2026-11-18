@@ -8,8 +8,9 @@
   `ctl state` lists Apple's stages. `"stand_down"`, the default, keeps the behaviour as it
   was.
 - With `[windows] with_apple = "augment"`, `ctl merge N`, `ctl send N`, `ctl new` and the
-  send and new-stage hotkeys move windows between Apple's stages, by a Shift-click on a
-  thumbnail in Apple's strip or a drag of the title bar onto it; nothing is posted while the
+  send and new-stage hotkeys move windows between Apple's stages, by a Shift-click well
+  inside a thumbnail as Apple's strip draws it (clear of the thumbnails and app icons drawn
+  over it) or a drag of the title bar onto it; nothing is posted while the
   user clicks, types or holds a key. A newly opened app that a rule's `current`,
   `[stages] new_apps_join_current` or Shift wants in the stage in front joins it: the app is
   hidden as it launches, so Apple's Stage Manager keeps the stage in front, then brought in.

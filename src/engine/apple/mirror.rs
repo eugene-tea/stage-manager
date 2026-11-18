@@ -62,7 +62,8 @@ use serde::Serialize;
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::Display;
 
-use super::{points, thumbnail_sized};
+use super::points::{self, Over};
+use super::thumbnail_sized;
 
 /// How long a change keeps the arrangement unsettled: Apple's motion, about 700 ms
 /// (a recording of 11-16: a focus at .305, motion from .404 to about .900; clicks before
@@ -583,8 +584,10 @@ fn by_ax(strip: &[Group], ax: &[Vec<u32>]) -> Vec<Group> {
 
 /// Where each strip window (`thumbs`: its id and its place in `listed`) shows a part of its
 /// own: what covers it is every window listed in front of it on screen but its own twin
-/// (the click target, listed right above it with its bounds), and every app icon. With the
-/// points, what covers each one that shows none ([`Cover`]).
+/// (the click target, listed right above it with its bounds), each as it is drawn
+/// ([`points::Over`]: another thumbnail or its twin as its turned plane, any other window
+/// whole), and every app icon where it is drawn. With the points, what covers each one that
+/// shows none ([`Cover`]).
 fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen: &Display) -> (BTreeMap<u32, Point>, BTreeMap<u32, Vec<Cover>>) {
     let mut out = BTreeMap::new();
     let mut covered = BTreeMap::new();
@@ -594,10 +597,17 @@ fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen
             continue;
         }
         let twin = has_twin(listed, i).then(|| i - 1);
-        let in_front: Vec<&ListedWindow> = listed.windows[..i].iter().enumerate().filter(|(j, o)| o.onscreen && Some(*j) != twin).map(|(_, o)| o).collect();
-        let mut over: Vec<Rect> = in_front.iter().map(|o| o.bounds).collect();
-        over.extend(icons.iter().copied());
-        match points::visible_point(w.bounds, &over, screen.frame) {
+        let in_front: Vec<(usize, &ListedWindow)> = listed.windows[..i].iter().enumerate().filter(|(j, o)| o.onscreen && Some(*j) != twin).collect();
+        let manager_layer0 = |o: &ListedWindow| Some(o.pid) == listed.manager && o.layer == 0;
+        // The icons are counted once, below, where they are drawn.
+        let mut over: Vec<Over> = in_front
+            .iter()
+            .filter(|(_, o)| !(manager_layer0(o) && icon_sized(o.bounds)))
+            .map(|&(j, o)| if has_twin(listed, j) || (manager_layer0(o) && has_twin(listed, j + 1)) { Over::Thumb(o.bounds) } else { Over::Window(o.bounds) })
+            .collect();
+        over.extend(icons.iter().map(|r| Over::Icon(*r)));
+        let in_front: Vec<&ListedWindow> = in_front.into_iter().map(|(_, o)| o).collect();
+        match points::visible_point(w.bounds, &over, screen) {
             Some(p) => {
                 out.insert(id, p);
             }
