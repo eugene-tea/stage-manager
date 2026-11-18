@@ -12,11 +12,11 @@ and the strip's order).
 
 | Strategy | What it does | Calls | Cost | What breaks it | Code | Measured |
 |---|---|---|---|---|---|---|
-| Stand down | While Apple's Stage Manager is on (`[windows] with_apple = "stand_down"`, the default): every window back, nothing arranged, no strip | Accessibility set frame for each window held, once | Nothing while it lasts | Nothing: Apple's arranges | `engine/stand_down.rs` | The live check `scripts/test-apple-stage-manager.sh` |
+| Stand down | While Apple's Stage Manager is on (`[windows] apple_stage_manager_on = "pause"`, the default): every window back, nothing arranged, no strip | Accessibility set frame for each window held, once | Nothing while it lasts | Nothing: Apple's arranges | `engine/stand_down.rs` | The live check `scripts/test-apple-stage-manager.sh` |
 | Corner | Inactive stages' windows parked in a corner of their screen, the motion played by pictures | Accessibility set position and frame; ScreenCaptureKit pictures | A park per window (an app's own move); pictures every 2 s while the strip shows; a sliver per window in the corner, covered by the corner patch | An app that refuses or clamps the move; another screen beyond the corner | `engine/corner`, `platform/corner` | The live suite (`scripts/test_stages.py`) |
 | Spaces with pictures | Each inactive stage in a hidden window-server Space of its own; the motion played by pictures | SkyLight Space calls, read back; Accessibility set frame on a show | About 2 ms a window, no app asked; pictures taken at the switch | A window server that refuses the calls (the launch probe, the health checks, then the fall back to Corner) | `engine/spaces`, `platform/spaces` | The launch probe; the live suite with `SM_ENGINE=spaces` |
 | Spaces live landing | As above, the incoming windows flying the last stretch themselves through their Space's transform | The Space transform per step | As above, no picture over the window at its end | A transform call missing (then pictures) | `platform/spaces/landing.rs` | `STAGE_MANAGER_LANDING=live`, the live suite |
-| Apple-augmented | Apple's Stage Manager arranges; Stage Manager reads its arrangement and follows it with its own model, and acts through routes Apple's answers to | The window list (each read); WindowManager's Accessibility (read only, every 2 s); the routes below | A list read per event, every 50 ms while anything moves, every 2 s at rest; nothing of ours hidden, no strip or pictures of ours | Apple's changing what WindowManager lists (its layer-0 windows over the thumbnails, `sm.strip`'s items); see each route | `engine/apple`, `platform/apple`, `platform/conductor.rs`; `[windows] with_apple = "augment"` | Two probes, 11-16, macOS 27.2; `scripts/test_apple.py` |
+| Apple-augmented | Apple's Stage Manager arranges; Stage Manager reads its arrangement and follows it with its own model, and acts through routes Apple's answers to | The window list (each read); WindowManager's Accessibility (read only, every 2 s); the routes below | A list read per event, every 50 ms while anything moves, every 2 s at rest; nothing of ours hidden, no strip or pictures of ours | Apple's changing what WindowManager lists (its layer-0 windows over the thumbnails, `sm.strip`'s items); see each route | `engine/apple`, `platform/apple`, `platform/conductor.rs`; `[windows] apple_stage_manager_on = "integrate"` | Two probes, 11-16, macOS 27.2; `scripts/test_apple.py` |
 
 ## Routes inside Apple mode
 
@@ -102,7 +102,7 @@ count as the user's Shift for "open here".
 ## Possible next steps
 
 - **Our stages carried into Apple's when the mode starts** (an open decision): when Apple's is
-  turned on with `with_apple = "augment"`, Stage Manager's own stages (`state.json`'s Desktop
+  turned on with `apple_stage_manager_on = "integrate"`, Stage Manager's own stages (`state.json`'s Desktop
   shown) could be put on Apple's by the restore's job, as it puts back `state-apple.json`'s.
   Today they are set aside and come back when Apple's is turned off; Apple's starts from its
   own arrangement. It would cost the restore's visible sequence at every turn on, and asks

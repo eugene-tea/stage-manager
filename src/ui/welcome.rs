@@ -25,7 +25,7 @@ pub enum WelcomeRow {
     Approval(Approval, bool),
     /// Apple's Stage Manager, and whether it is off now.
     AppleOff(bool),
-    /// Apple's Stage Manager on and followed (`[windows] with_apple = "augment"`): nothing to
+    /// Apple's Stage Manager on and followed (`[windows] apple_stage_manager_on = "integrate"`): nothing to
     /// do, the row says what Stage Manager does with it.
     AppleFollowed,
 }
@@ -339,7 +339,7 @@ mod tests {
         assert!(all_set(&turned_off));
         assert!(!all_set(&rows(&p(true, false), true, false, false, false)));
         let followed = rows(&p(true, true), true, true, true, true);
-        assert_eq!(followed.last(), Some(&AppleFollowed), "with_apple = augment: nothing to turn off");
+        assert_eq!(followed.last(), Some(&AppleFollowed), "apple_stage_manager_on = integrate: nothing to turn off");
         assert!(all_set(&followed));
     }
 

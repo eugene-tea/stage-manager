@@ -9,14 +9,14 @@
 //! This is the pure part: what to do when the setting is read, as an ordered plan of
 //! [`Task`]s the WM thread (`platform::wm_thread`) carries out.
 //!
-//! **Or augmenting** (`[windows] with_apple = "augment"`, [`WithApple`]): while Apple's is on
+//! **Or augmenting** (`[windows] apple_stage_manager_on = "integrate"`, [`WithApple`]): while Apple's is on
 //! the app follows it instead of standing down ([`augment_plan`]): every parked window back
 //! and the saved stages set aside as at a release, then the Apple mode's null-hide engine and
 //! its conductor in place of a fresh controller, observation kept running (the mode reads
 //! Apple's strip and follows it: `engine::apple`). Apple's off, the launch's engine comes back
 //! and observation starts afresh as at a resume. Nothing is hidden by either, so a config
 //! reload swaps the two freely while Apple's is on ([`Step::ToAugment`],
-//! [`Step::ToStandDown`]). `"stand_down"`, the default, gives today's plans unchanged.
+//! [`Step::ToStandDown`]). `"pause"`, the default, gives today's plans unchanged.
 //!
 //! - **Saved stages go aside at the release** ([`Task::DropSavedStages`]), the moment Apple's
 //!   arranges the windows: a quit, crash or logout while standing down then leaves no
@@ -57,7 +57,7 @@
 
 use std::time::{Duration, Instant};
 
-/// What the app does while Apple's Stage Manager is on (`[windows] with_apple`).
+/// What the app does while Apple's Stage Manager is on (`[windows] apple_stage_manager_on`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum WithApple {
     /// Stand down: every window back, nothing arranged (the default, Apple's way).
@@ -72,14 +72,14 @@ impl WithApple {
     /// Its name in config and logs.
     pub fn name(self) -> &'static str {
         match self {
-            Self::StandDown => "stand_down",
-            Self::Augment => "augment",
+            Self::StandDown => "pause",
+            Self::Augment => "integrate",
         }
     }
 
-    /// The value of the config text `text` (`"augment"`, else standing down).
+    /// The value of the config text `text` (`"integrate"`, else standing down).
     pub fn parse(text: &str) -> Self {
-        if text == "augment" { Self::Augment } else { Self::StandDown }
+        if text == "integrate" { Self::Augment } else { Self::StandDown }
     }
 }
 
@@ -90,17 +90,17 @@ pub enum Step {
     Nothing,
     /// Apple's came on: carry out [`release_plan`].
     Release,
-    /// Apple's came on with `with_apple = "augment"`: carry out [`augment_plan`].
+    /// Apple's came on with `apple_stage_manager_on = "integrate"`: carry out [`augment_plan`].
     Augment,
     /// Apple's went off: carry out [`resume_plan`] (`from`: what the app did while it was on).
     Resume {
         /// Standing down or augmenting until now.
         from: WithApple,
     },
-    /// Apple's still on, `with_apple` changed to `"augment"` while standing down: carry out
+    /// Apple's still on, `apple_stage_manager_on` changed to `"integrate"` while standing down: carry out
     /// [`to_augment_plan`].
     ToAugment,
-    /// Apple's still on, `with_apple` changed to `"stand_down"` while augmenting: carry out
+    /// Apple's still on, `apple_stage_manager_on` changed to `"pause"` while augmenting: carry out
     /// [`to_stand_down_plan`].
     ToStandDown,
 }
@@ -152,7 +152,7 @@ pub fn release_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
     plan
 }
 
-/// Apple's came on with `with_apple = "augment"`, in order: every window back and the saved
+/// Apple's came on with `apple_stage_manager_on = "integrate"`, in order: every window back and the saved
 /// stages set aside as at a release ([`release_plan`]), then the Apple mode's engine and
 /// conductor in place of a fresh controller, given the last displays and settings; the strip
 /// hides. Observation keeps running: the mode reads what Apple's shows.
@@ -191,7 +191,7 @@ pub fn resume_plan(stranded: bool, from: WithApple, have_displays: bool, have_se
     plan
 }
 
-/// Standing down, `with_apple` turned to `"augment"`: the Apple mode's engine and conductor in
+/// Standing down, `apple_stage_manager_on` turned to `"integrate"`: the Apple mode's engine and conductor in
 /// place of the idle controller, observation started (nothing was parked meanwhile).
 pub fn to_augment_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
     let mut plan = vec![Task::InstallAppleEngine, Task::AppleConductor];
@@ -205,7 +205,7 @@ pub fn to_augment_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
     plan
 }
 
-/// Augmenting, `with_apple` turned to `"stand_down"`: observation stops, the launch's engine
+/// Augmenting, `apple_stage_manager_on` turned to `"pause"`: observation stops, the launch's engine
 /// comes back and a fresh idle controller waits, as after a release (nothing is hidden by
 /// either, so nothing is brought back).
 pub fn to_stand_down_plan(have_displays: bool, have_settings: bool) -> Vec<Task> {
@@ -460,7 +460,7 @@ impl StandDown {
         self.reading(on, WithApple::StandDown)
     }
 
-    /// A reading of Apple's `GloballyEnabled` (`on`) and `[windows] with_apple` (`with`): the
+    /// A reading of Apple's `GloballyEnabled` (`on`) and `[windows] apple_stage_manager_on` (`with`): the
     /// step it calls for. Apple's coming on releases or augments as `with` says; going off
     /// resumes from what the app did; while on, a changed `with` swaps the two.
     pub fn reading(&mut self, on: bool, with: WithApple) -> Step {
@@ -492,12 +492,12 @@ impl StandDown {
         self.stranded = !all_back;
     }
 
-    /// Whether the app is standing down (Apple's on, `with_apple = "stand_down"`).
+    /// Whether the app is standing down (Apple's on, `apple_stage_manager_on = "pause"`).
     pub fn stood_down(&self) -> bool {
         self.with == Some(WithApple::StandDown)
     }
 
-    /// Whether the app follows Apple's (Apple's on, `with_apple = "augment"`).
+    /// Whether the app follows Apple's (Apple's on, `apple_stage_manager_on = "integrate"`).
     pub fn augmenting(&self) -> bool {
         self.with == Some(WithApple::Augment)
     }
@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(steps, vec![Step::Release, resume, Step::Release, resume]);
     }
 
-    /// `with_apple = "stand_down"` (the default) gives today's plans unchanged.
+    /// `apple_stage_manager_on = "pause"` (the default) gives today's plans unchanged.
     #[test]
     fn standing_down_keeps_todays_plans() {
         assert_eq!(WithApple::default(), WithApple::StandDown);
@@ -786,7 +786,7 @@ mod tests {
         assert_eq!(resume_plan(true, WithApple::StandDown, true, true), vec![Task::RetryHeld, Task::StartObserving]);
     }
 
-    /// `with_apple = "augment"`: Apple's coming on brings every window back and sets the
+    /// `apple_stage_manager_on = "integrate"`: Apple's coming on brings every window back and sets the
     /// stages aside as a release does, then the Apple mode runs, observation kept; going off,
     /// the launch's engine comes back before observation starts afresh.
     #[test]
@@ -822,7 +822,7 @@ mod tests {
     }
 
     /// A config reload while Apple's is on swaps standing down and augmenting (nothing is
-    /// hidden in either); off, `with_apple` changes nothing until Apple's comes on.
+    /// hidden in either); off, `apple_stage_manager_on` changes nothing until Apple's comes on.
     #[test]
     fn a_reload_swaps_standing_down_and_augmenting_while_apples_is_on() {
         let mut s = StandDown::default();
@@ -849,9 +849,9 @@ mod tests {
 
     #[test]
     fn with_apple_reads_its_two_values() {
-        assert_eq!(WithApple::parse("augment"), WithApple::Augment);
-        assert_eq!(WithApple::parse("stand_down"), WithApple::StandDown);
+        assert_eq!(WithApple::parse("integrate"), WithApple::Augment);
+        assert_eq!(WithApple::parse("pause"), WithApple::StandDown);
         assert_eq!(WithApple::parse("anything"), WithApple::StandDown);
-        assert_eq!(WithApple::Augment.name(), "augment");
+        assert_eq!(WithApple::Augment.name(), "integrate");
     }
 }

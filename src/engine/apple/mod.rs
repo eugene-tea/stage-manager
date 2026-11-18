@@ -1,5 +1,5 @@
 //! The Apple mode's pure half: what the app does while Apple's Stage Manager is on and
-//! `[windows] with_apple = "augment"` (docs/STRATEGIES.md, "Apple-augmented"). Apple's
+//! `[windows] apple_stage_manager_on = "integrate"` (docs/STRATEGIES.md, "Apple-augmented"). Apple's
 //! arranges the windows; this app hides nothing, reads what Apple's shows ([`mirror`]), and
 //! keeps its own model in step with it ([`follow`]), so the model's stages, `ctl state`, the
 //! hotkeys and the saved stages (`state-apple.json`) work on Apple's stages. A step of its own

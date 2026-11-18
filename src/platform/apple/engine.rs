@@ -1,5 +1,5 @@
 //! The Apple mode's window engine: the null-hide engine. While Apple's Stage Manager is on
-//! and `[windows] with_apple = "augment"`, Apple's arranges the windows and this app hides
+//! and `[windows] apple_stage_manager_on = "integrate"`, Apple's arranges the windows and this app hides
 //! none, so every [`WindowEngine`] call is answered honestly with "nothing of ours is hidden"
 //! and no trait method changes (docs/STRATEGIES.md, "Apple-augmented"). No controller of ours
 //! runs meanwhile ([`super::controller::AppleController`] does), so `hide` and `show` are

@@ -2,12 +2,12 @@
 
 ## Unreleased
 
-- New setting `[windows] with_apple` (`"stand_down"` or `"augment"`). With `"augment"`,
+- New setting `[windows] apple_stage_manager_on` (`"pause"` or `"integrate"`). With `"integrate"`,
   Stage Manager follows Apple's Stage Manager while it is on instead of stepping aside: the
   stage hotkeys and `ctl switch N` bring stage N of Apple's strip to the front, and
-  `ctl state` lists Apple's stages. `"stand_down"`, the default, keeps the behaviour as it
+  `ctl state` lists Apple's stages. `"pause"`, the default, keeps the behaviour as it
   was.
-- With `[windows] with_apple = "augment"`, `ctl merge N`, `ctl send N`, `ctl new` and the
+- With `[windows] apple_stage_manager_on = "integrate"`, `ctl merge N`, `ctl send N`, `ctl new` and the
   send and new-stage hotkeys move windows between Apple's stages, by a Shift-click well
   inside a thumbnail as Apple's strip draws it (clear of the thumbnails and app icons drawn
   over it) or a drag of the title bar onto it; nothing is posted while the
@@ -19,11 +19,11 @@
   later, and brought in. Finder is left to Apple's Stage Manager. When the app's window shows before the
   hide takes, the stage that was in front comes back as it was, its windows in their order
   and in one go, with the app's window on top.
-- New setting `[stages] restore_with_apple`, on by default. With `[windows] with_apple =
-  "augment"`, Apple's stages are put back as saved after a restart or a new login, once the
+- New setting `[stages] restore_with_apple`, on by default. With `[windows] apple_stage_manager_on =
+  "integrate"`, Apple's stages are put back as saved after a restart or a new login, once the
   reopened windows have shown; under "All at Once" an app's windows stay in one stage.
   `ctl apple restore` puts back the stages saved when the following started.
-- With `[windows] with_apple = "augment"`, each screen's stages are followed apart and a
+- With `[windows] apple_stage_manager_on = "integrate"`, each screen's stages are followed apart and a
   stage hotkey or `ctl` command acts on one screen only; stages of a Desktop not shown are
   kept and left alone; nothing is done while a full-screen app shows. The menu, the welcome
   and Settings say that Apple's Stage Manager is followed instead of offering to turn it

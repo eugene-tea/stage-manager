@@ -387,7 +387,7 @@ pub enum EngineKind {
     /// off screen. Its pure half is [`super::spaces`]; its platform half is S3's.
     Spaces,
     /// Apple's Stage Manager arranges the windows and this app follows it
-    /// (`[windows] with_apple = "augment"`): nothing is hidden by this app. Its pure half is
+    /// (`[windows] apple_stage_manager_on = "integrate"`): nothing is hidden by this app. Its pure half is
     /// [`super::apple`]; its platform half `platform::apple`.
     Apple,
 }

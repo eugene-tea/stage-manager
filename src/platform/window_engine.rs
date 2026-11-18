@@ -6,7 +6,7 @@
 //! ([`super::corner::engine::CornerEngine`], today's Accessibility park corner), the Spaces
 //! engine ([`super::spaces::engine::SpacesEngine`], 1.9), and the Apple mode's null-hide
 //! engine ([`super::apple::engine::AppleEngine`]: Apple's Stage Manager arranges, nothing of
-//! ours is hidden; installed at the release while `[windows] with_apple = "augment"`, the
+//! ours is hidden; installed at the release while `[windows] apple_stage_manager_on = "integrate"`, the
 //! launch's choice installed again at the resume). Shared code asks the engine and never
 //! which one runs; what only one engine needs stays inside it.
 //!

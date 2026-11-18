@@ -14,7 +14,7 @@
 //! ([`resume_plan`]), held windows are tried again and observation starts: the fresh
 //! controller builds stages from the windows on screen.
 //!
-//! With `[windows] with_apple = "augment"` the thread follows Apple's instead of standing down
+//! With `[windows] apple_stage_manager_on = "integrate"` the thread follows Apple's instead of standing down
 //! ([`augment_plan`]): every window back and the stages set aside as at a release, then the
 //! Apple mode's null-hide engine and its conductor ([`Conductor::Apples`]) in place of a fresh
 //! controller, observation kept running; Apple's off, the launch's engine and a fresh
@@ -364,7 +364,7 @@ impl WmHandle {
 struct WmState {
     observer: Observer,
     /// Who conducts the windows: the app's own controller, or the Apple mode's while Apple's
-    /// Stage Manager is on and `[windows] with_apple = "augment"`.
+    /// Stage Manager is on and `[windows] apple_stage_manager_on = "integrate"`.
     conductor: Conductor,
     scanned: bool,
     /// The tick's clock: when an event last stirred it, the last full pass ([`tick_pace`]).
@@ -865,7 +865,7 @@ impl WmState {
         }
     }
 
-    /// Carries out the step a reading of Apple's Stage Manager and `[windows] with_apple`
+    /// Carries out the step a reading of Apple's Stage Manager and `[windows] apple_stage_manager_on`
     /// called for ([`StandDown::reading`]).
     fn carry_out(&mut self, step: Step) {
         match step {
@@ -878,7 +878,7 @@ impl WmState {
         }
     }
 
-    /// `[windows] with_apple` as the config in force has it now, against what the app does
+    /// `[windows] apple_stage_manager_on` as the config in force has it now, against what the app does
     /// while Apple's is on: a changed value swaps standing down and augmenting (after a
     /// reload, and at every tick: the conductor polls the file).
     fn follow_with_apple(&mut self) {
@@ -891,7 +891,7 @@ impl WmState {
         }
     }
 
-    /// Apple's Stage Manager came on with `with_apple = "augment"`: carries out
+    /// Apple's Stage Manager came on with `apple_stage_manager_on = "integrate"`: carries out
     /// [`augment_plan`]. Every window back as at a release; then the Apple mode follows
     /// Apple's, observation kept running.
     fn augment(&mut self) {
@@ -909,14 +909,14 @@ impl WmState {
         }
     }
 
-    /// While Apple's is on, `with_apple` changed: to augmenting (`to_augment`, from standing
+    /// While Apple's is on, `apple_stage_manager_on` changed: to augmenting (`to_augment`, from standing
     /// down) or back to standing down. Nothing is hidden by either, so nothing comes back.
     fn swap(&mut self, to_augment: bool) {
         let plan = match to_augment {
             true => to_augment_plan(self.displays.is_some(), self.settings.is_some()),
             false => to_stand_down_plan(self.displays.is_some(), self.settings.is_some()),
         };
-        tracing::info!(with_apple = if to_augment { "augment" } else { "stand_down" }, "config: [windows] with_apple changed while Apple's Stage Manager is on");
+        tracing::info!(apple_stage_manager_on = if to_augment { "integrate" } else { "pause" }, "config: [windows] apple_stage_manager_on changed while Apple's Stage Manager is on");
         for task in plan {
             match task {
                 Task::InstallAppleEngine => window_engine::install(window_engine::of(window_engine::EngineKind::Apple)),
@@ -1165,7 +1165,7 @@ impl WmState {
         step("rescan", || self.rescan_pass());
         step("events", || self.pump());
         step("controller tick", || self.conductor.tick(&mut self.observer));
-        step("with_apple", || self.follow_with_apple());
+        step("apple_stage_manager_on", || self.follow_with_apple());
         // The minimize tap passes everything while nothing is arranged.
         minimize_tap::admit(self.arranging() && !self.conductor.is_apples());
         step("minimize tap", minimize_tap::refresh);

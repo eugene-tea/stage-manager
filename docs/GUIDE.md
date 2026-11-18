@@ -265,9 +265,9 @@ with it, and each screen's corner has its own, drawn from that screen's desktop.
 ### With Apple's Stage Manager on
 
 While Apple's Stage Manager is on, Stage Manager brings every window back and arranges
-nothing until it is off. With `[windows] with_apple = "augment"` it follows Apple's stages
-instead. Apple's Stage Manager draws the strip and arranges the windows; Stage Manager shows
-no strip of its own.
+nothing until it is off (`[windows] apple_stage_manager_on = "pause"`, the default). With
+`"integrate"` it follows Apple's stages instead. Apple's Stage Manager draws the strip and
+arranges the windows; Stage Manager shows no strip of its own.
 
 - The stage hotkeys (`[hotkeys] switch`) and `ctl switch N` bring stage N of Apple's strip
   to the front, counted from the top (then the stages the strip has no room for), without

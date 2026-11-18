@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live check of the Apple mode ([windows] with_apple = "augment"): Stage Manager follows
+"""Live check of the Apple mode ([windows] apple_stage_manager_on = "integrate"): Stage Manager follows
 Apple's Stage Manager while it is on (docs/STRATEGIES.md, "Apple-augmented").
 
 OFF BY DEFAULT: it turns Apple's Stage Manager on on this Mac (Apple's then arranges every
@@ -74,7 +74,7 @@ Each fixture window opens at a frame of its own (FRAMES).
 Needs: make dev (the dev copy). Builds the fixture copies Alpha, Bravo and Charlie (their own
 bundle ids, scripts/bundle.sh's FIXTURE_ID and FIXTURE_APP) when stale. Manages only them
 (STAGE_MANAGER_ONLY), in a scratch STAGE_MANAGER_HOME whose config.toml sets
-with_apple = "augment". Window titles are the fixture's own ("Alpha 1", ...).
+apple_stage_manager_on = "integrate". Window titles are the fixture's own ("Alpha 1", ...).
 """
 
 import atexit
@@ -261,7 +261,7 @@ def build_fixtures():
 
 def write_config(extra=""):
     with open(os.path.join(HOME, "config.toml"), "w", encoding="utf-8") as f:
-        f.write('[windows]\nwith_apple = "augment"\n' + extra)
+        f.write('[windows]\napple_stage_manager_on = "integrate"\n' + extra)
 
 
 def open_fixture(name, windows=None, extra=()):
@@ -300,7 +300,7 @@ def start():
     launch_app()
     set_apple(True)
     s = following()
-    check(s is not None, "Apple's on with with_apple = \"augment\": the Apple mode follows it")
+    check(s is not None, "Apple's on with apple_stage_manager_on = \"integrate\": the Apple mode follows it")
     return s
 
 

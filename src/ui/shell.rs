@@ -371,7 +371,7 @@ impl Shell {
         native_settings::apple_stage_manager_enabled(&self.raw)
     }
 
-    /// Stage Manager follows Apple's while it is on (`[windows] with_apple = "augment"`)
+    /// Stage Manager follows Apple's while it is on (`[windows] apple_stage_manager_on = "integrate"`)
     /// instead of standing down.
     fn follows_apple(&self) -> bool {
         self.config.windows.with_apple == crate::engine::stand_down::WithApple::Augment

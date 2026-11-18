@@ -397,8 +397,8 @@ pub const KEYS: &[KeyDef] = &[
         ..k("windows", "engine", Kind::Choice(&["accessibility", "spaces"]), "\"accessibility\"",
             "How a stage's windows are hidden: \"accessibility\" keeps them in the Accessibility park corner and never tries Spaces; \"spaces\" puts each hidden stage in a Space of the window server's own where a trial at launch works, with the park corner otherwise and for the rest of a run in which a Space call fails. \"accessibility\" is the way back if windows go missing or flicker on a switch. Read at launch.")
     },
-    k("windows", "with_apple", Kind::Choice(&["stand_down", "augment"]), "\"stand_down\"",
-        "What Stage Manager does while Apple's Stage Manager is on: \"stand_down\" brings every window back and arranges nothing until Apple's is off; \"augment\" follows Apple's stages instead: the stage hotkeys and `ctl switch` switch between them, and Stage Manager shows no strip of its own. With Apple's off, Stage Manager runs its own stages either way."),
+    k("windows", "apple_stage_manager_on", Kind::Choice(&["pause", "integrate"]), "\"pause\"",
+        "What Stage Manager does while Apple's Stage Manager is on: \"pause\" brings every window back and arranges nothing until Apple's is off; \"integrate\" follows Apple's stages instead: the stage hotkeys and `ctl switch` switch between them, and Stage Manager shows no strip of its own. With Apple's off, Stage Manager runs its own stages either way."),
     // [displays]
     KeyDef {
         applies: Applies::Restart,
@@ -425,7 +425,7 @@ pub const KEYS: &[KeyDef] = &[
     k("stages", "new_apps_join_current", Kind::Bool, "false",
         "A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule."),
     k("stages", "restore_with_apple", Kind::Bool, "true",
-        "With [windows] with_apple = \"augment\", after a restart or a new login Apple's Stage Manager's stages are put back as they were, once their windows have reopened: a window of each stage brought to the front, the stage's other windows Shift-clicked in from Apple's strip and windows of other stages dragged out of it (the pointer jumps for each and comes back; nothing is posted during a click, typing or a held key). An app's windows stay in one stage under \"Show windows from an application: All at Once\". Off: Apple's Stage Manager arranges the reopened windows its own way. `ctl apple restore` puts back the stages saved when Stage Manager started following Apple's."),
+        "With [windows] apple_stage_manager_on = \"integrate\", after a restart or a new login Apple's Stage Manager's stages are put back as they were, once their windows have reopened: a window of each stage brought to the front, the stage's other windows Shift-clicked in from Apple's strip and windows of other stages dragged out of it (the pointer jumps for each and comes back; nothing is posted during a click, typing or a held key). An app's windows stay in one stage under \"Show windows from an application: All at Once\". Off: Apple's Stage Manager arranges the reopened windows its own way. `ctl apple restore` puts back the stages saved when Stage Manager started following Apple's."),
     // [restore]
     k("restore", "saved_size", Kind::Bool, "true",
         "A window its app reopens after a restart at under half its saved size (matched by its title, on the screen it was saved on) gets its saved frame back once, when first shown; moved or resized by you first, it keeps yours. Off: every window keeps the frame its app gives it, as Apple's does."),

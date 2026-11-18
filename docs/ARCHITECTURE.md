@@ -98,7 +98,7 @@ flowchart TD
     S -. "falls back" .-> K
 ```
 
-**The Apple mode** (`[windows] with_apple = "augment"`) is what the app does while Apple's
+**The Apple mode** (`[windows] apple_stage_manager_on = "integrate"`) is what the app does while Apple's
 Stage Manager is on, in place of standing down: a third engine that hides nothing
 (`platform/apple/engine.rs`, `EngineKind::Apple`; a third arm in the model's door and in the
 controller's upkeep door, the trait unchanged), and a second conductor beside the controller
