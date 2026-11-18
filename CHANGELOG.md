@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The cards are solid while the strip is shown over windows, as with Apple's Stage Manager:
+  revealed at the screen's edge over a window that covers it, the cards are no longer tinted by
+  the wallpaper. Over the desktop the wallpaper is still let through.
 - A window dragged toward the strip is taken in as with Apple's Stage Manager: its card is shown
   next to the pointer once the pointer is within about 290 points of the screen's edge, and it
   is no longer shown for a window whose left edge reaches the screen's edge, which hides the
