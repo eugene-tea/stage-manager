@@ -24,7 +24,7 @@ them.
 | Switch stages from the keyboard (⌃⌥1–9) | ✓ | ✓ | ✓ |
 | Send a window to a stage, or to a new one | ✓ | ✓ | ◐ ¹ |
 | Combine two stages | ✓ | ✓ | ◐ ² |
-| A new app opened into the current stage (Shift, rules) | ✓ | ✓ | ✓ |
+| A new app opened into the current stage (Shift, rules) | ✓ | ✓ | ◐ ³ |
 | ***Additions on the strip*** | | | |
 | Card order: custom, in place, or the Dock's | ✓ | ✓ | — |
 | Named stages | ✓ | ✓ | — |
@@ -32,10 +32,10 @@ them.
 | Rules for placing new windows, pinned windows | ✓ | ✓ | — |
 | Strip width, size, tilt and edge tab | ✓ | ✓ | — |
 | ***How it works*** | | | |
-| Hidden windows leave the screen entirely | — ³ | ✓ | ✓ |
+| Hidden windows leave the screen entirely | — ⁴ | ✓ | ✓ |
 | Works with apps that refuse or limit a window move | — | ✓ | ✓ |
-| Pointer never moved by the app | ✓ | ✓ | — ⁴ |
-| Documented macOS interfaces only | ✓ | — ⁵ | ◐ ⁶ |
+| Pointer never moved by the app | ✓ | ✓ | — ⁵ |
+| Documented macOS interfaces only | ✓ | — ⁶ | ◐ ⁷ |
 
 1. Apple's Stage Manager takes changes only from the pointer, so the window is moved with a
    posted drag onto its strip. Under "Show windows from an application: All at Once" an app's
@@ -43,14 +43,22 @@ them.
    sent.
 2. With the hotkeys or `ctl merge N`. Dropping one card on another works only in Stage
    Manager's own strip.
-3. macOS keeps a thin edge of every window on screen. Those edges sit in a corner, ignore
+3. Apple's Stage Manager gives every new app a stage of its own, so the app is hidden as it
+   opens and its window is then Shift-clicked in from Apple's strip, about 1.7 seconds after
+   the launch. When the window shows before the hide takes, Apple's has already switched: the
+   stage that was in front comes back with the app's window on top, a visible round trip of
+   about two seconds. Finder, and apps that bring themselves forward again once shown, always
+   take that round trip. While Apple's strip is covered the window waits a few seconds, then
+   stays in a stage of its own. A running app with no window that opens one as it is
+   activated is handled the same way.
+4. macOS keeps a thin edge of every window on screen. Those edges sit in a corner, ignore
    clicks, and are covered by a matching piece of the desktop.
-4. Each move is a posted Shift-click or drag in Apple's strip: the pointer leaves for about a
+5. Each move is a posted Shift-click or drag in Apple's strip: the pointer leaves for about a
    frame per click, about a second per drag, then comes back. Nothing is posted while the user
    clicks, types or holds a key.
-5. The window server's own Space calls are undocumented. Each launch tests them first, health
+6. The window server's own Space calls are undocumented. Each launch tests them first, health
    checks keep watching, and the park corner takes over whenever they fail.
-6. Accessibility and posted events are documented. Where to click depends on how Apple's strip
+7. Accessibility and posted events are documented. Where to click depends on how Apple's strip
    is drawn, as measured on macOS 27, and a macOS update can change that. The live tests
    recheck it.
 
@@ -83,7 +91,7 @@ energy), `engine = "auto"` will choose it wherever it works.
 
 With `with_apple = "augment"` and Apple's Stage Manager on, Apple's draws the strip and
 arranges the windows. Stage Manager reads that arrangement and adds the stage hotkeys, `ctl`
-commands, new apps in the current stage, and putting the stages back after a restart ("With
+commands, new apps in the current stage (with the limits in note 3), and putting the stages back after a restart ("With
 Apple's Stage Manager on" in the [guide](GUIDE.md)).
 
 Apple's Stage Manager posts no notices and takes changes only from the pointer. So Stage
