@@ -2847,11 +2847,12 @@ impl Controller {
                     // again under them ([`Self::reconcile_parked`]).
                     self.hidden_moved_by_user(id);
                 }
-                // Show Desktop pushing the windows aside (or sliding them back) is macOS's move,
-                // never the window's own frame (11-09).
+                // Show Desktop pushing the windows aside (or sliding them back), or Mission
+                // Control laying them out, is macOS's move, never the window's own frame (11-09,
+                // 11-18).
                 let aside = !ours && !input::left_button_down() && self.overview.moves_windows(now);
                 if aside {
-                    tracing::trace!(id, "a move while Show Desktop has the windows aside: not the window's frame");
+                    tracing::trace!(id, "a move while Show Desktop or Mission Control has the windows aside: not the window's frame");
                 }
                 // Parked for ⌘Tab's lend (round cmdtab-park), or its frame not set again yet:
                 // the park's and the restore's moves are ours, never the window's frame.
@@ -7231,16 +7232,21 @@ fn observed_frames(reads: &[FrameRead], listed: &HashMap<u32, Rect>, settling: b
         .collect()
 }
 
-/// The frames an observation takes (`frames`, read now): none while macOS's Show Desktop may
-/// have the windows pushed aside (`aside`, [`OverviewWatch::moves_windows`]: listed, expected
-/// from a wallpaper click, or sliding back after its close), so the model keeps each window's
-/// own frame. 11-09: an activation right at Show Desktop's close took a window's listed frame,
-/// pushed off the right edge (2408,42 for 452,55), as its own, and every switch to its stage
-/// brought it back there. A parked window macOS pushes out of the park zone then is left to
-/// [`Controller::reconcile_parked`], which waits for the overview's settle.
+/// The frames an observation takes (`frames`, read now): none while macOS may have the
+/// windows somewhere other than their frames (`aside`, [`OverviewWatch::moves_windows`]: Show
+/// Desktop listed, expected from a wallpaper click, or sliding back after its close; Mission
+/// Control or App Exposé shown, or flying the windows back after its close), so the model
+/// keeps each window's own frame. 11-09: an activation right at Show Desktop's close took a
+/// window's listed frame, pushed off the right edge (2408,42 for 452,55), as its own, and
+/// every switch to its stage brought it back there. 11-18: a pick in Mission Control
+/// activated an app of a hidden stage, and the switch took the front stage's windows at their
+/// places in Mission Control's layout (350,44 1949x1288 listed at 18,780 718x474): the next
+/// switch to their stage brought them back at that size. A parked window macOS pushes out of
+/// the park zone then is left to [`Controller::reconcile_parked`], which waits for the
+/// overview's settle.
 fn frames_unless_aside(frames: HashMap<WindowId, Rect>, aside: bool) -> HashMap<WindowId, Rect> {
     if aside && !frames.is_empty() {
-        tracing::debug!(windows = frames.len(), "Show Desktop has the windows aside: their frames are not taken; each keeps its own");
+        tracing::debug!(windows = frames.len(), "Show Desktop, Mission Control or App Exposé has the windows aside: their frames are not taken; each keeps its own");
         return HashMap::new();
     }
     frames
@@ -7429,6 +7435,29 @@ mod tests {
         watch.see(None, t0 + Duration::from_millis(300));
         assert!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_millis(400))).is_empty(), "sliding back");
         assert_eq!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_secs(2))), read, "settled: read again");
+    }
+
+    /// 11-18 12:04:04: a pick in Mission Control (a hidden stage's window) activated its app;
+    /// the window server listed the front stage's windows at their places in Mission
+    /// Control's layout, the activation took them for their frames and the switch kept them
+    /// as their restore frames. While Mission Control shows, and as its windows fly back, no
+    /// frame is taken: the switch keeps each window's own (the tracked frame).
+    #[test]
+    fn a_frame_mission_control_set_is_never_taken() {
+        use crate::engine::overview::{Overview, OverviewWatch};
+        let tracked = Rect::new(350.0, 44.0, 1949.0, 1288.0);
+        let laid_out = Rect::new(18.0, 780.0, 718.0, 474.0);
+        let studio = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let read: HashMap<WindowId, Rect> =
+            [(WindowId(77), activation_frame(tracked, Some(laid_out), studio, false, false))].into();
+        assert_eq!(read[&WindowId(77)], laid_out, "the window server's bounds win an activation");
+        let t0 = Instant::now();
+        let mut watch = OverviewWatch::default();
+        watch.see(Some(Overview::MissionControl), t0);
+        assert!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_millis(1100))).is_empty(), "shown: nothing taken");
+        watch.see(None, t0 + Duration::from_millis(1750));
+        assert!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_millis(2000))).is_empty(), "flying back");
+        assert_eq!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_secs(3))), read, "settled: read again");
     }
 
     /// 11-09: an app's windows found together go front to back, so the one it opened last (in

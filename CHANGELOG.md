@@ -10,6 +10,10 @@
   `"shown"` (the default) does this once Mission Control shows, `"key"` already at its
   keyboard shortcut, `"off"` leaves hidden stages out. Opened with a trackpad gesture, a hot
   corner or the Dock, the other stages' windows can join up to two seconds late.
+- A window picked in Mission Control or App Exposé no longer leaves the stage in front
+  shrunk: picking a hidden stage's window switched stages, and the stage that went out came
+  back later with its windows at the size Mission Control showed them. No window's frame is
+  read from the screen while Mission Control or App Exposé shows, or as the windows fly back.
 - Settings → Advanced opens with the mode: Accessibility, Spaces or With Apple's, a choice of
   three segments with a line on what the chosen one does and costs. With Apple's turns Apple's
   Stage Manager on and follows it (`apple_stage_manager_on = "integrate"`); Accessibility and
