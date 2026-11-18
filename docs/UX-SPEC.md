@@ -547,10 +547,9 @@ sent once more, and one still not there, or three set right by that retry within
 ends the Spaces way for the rest of the run: every window it hid comes back onto its
 Desktop, the park corner takes over and hides again the windows that were hidden, and the
 next launch probes again. `[windows] engine = "accessibility"` keeps the park corner and
-never probes (GUIDE, Troubleshooting); `"spaces"` takes the Spaces way wherever the probe
-passes. Until the Spaces way is measured against the corner ("Window engines measured",
-below), `"auto"` keeps the park corner; the probe still runs and logs its verdict at every
-launch.
+never probes, and is the default (GUIDE, Troubleshooting); `"spaces"` runs the probe at
+every launch and takes the Spaces way wherever it passes. The two are measured against each
+other in "Window engines measured", below.
 
 **Updates.** Apple's Stage Manager updates with macOS; ours updates itself (GUIDE, Updates).
 A downloaded update also installs when you quit Stage Manager: the menu's Quit, or ⌘Q in

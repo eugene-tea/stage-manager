@@ -76,12 +76,11 @@ implementations. The **Corner engine** is today's: Accessibility moves to the pa
 pictures for the motion. The **Spaces engine** puts each inactive stage in a hidden Space of
 the window server's own. Everything else is written once and never asks which engine runs.
 The Corner engine is the default. `[windows] engine` (read at launch,
-`engine::engine_choice`) has three values: `"auto"`, the default, runs the Corner engine in
-this version, with the launch probe run and its verdict logged, and will pick the Spaces
-engine where the probe passes once the measurements are in (PLAN, 1.9;
-`scripts/measure_engines.py`, UX-SPEC "Window engines measured"); `"spaces"` runs the Spaces
-engine when the launch probe passes, else the Corner engine, and the Corner engine for the
-rest of a run whose checks fail; `"accessibility"` runs the Corner engine and never probes.
+`engine::engine_choice`) has two values: `"accessibility"`, the default, runs the Corner
+engine and never probes; `"spaces"` runs the launch probe and the Spaces engine when it
+passes, else the Corner engine, and the Corner engine for the rest of a run whose checks
+fail. The two are measured side by side by `scripts/measure_engines.py` (UX-SPEC, "Window
+engines measured").
 The live suite's test switch (`STAGE_MANAGER_ENGINE=spaces|corner`, honoured with
 `STAGE_MANAGER_ONLY` only) comes ahead of the config.
 
@@ -158,15 +157,15 @@ versions:
 ```mermaid
 stateDiagram-v2
     [*] --> Corner: [windows] engine = "accessibility" (no probe)
-    [*] --> Probe: "auto"
-    Probe --> Spaces: the calls resolve, a trial Space with an own panel reads back, and opted in
-    Probe --> Corner: a step fails, or not opted in (the verdict logged either way)
+    [*] --> Probe: "spaces"
+    Probe --> Spaces: the calls resolve, a trial Space with an own panel reads back
+    Probe --> Corner: a step fails (the verdict logged either way)
     Spaces --> Spaces: every hide and show read back; a miss sent once more
     Spaces --> BringAllBack: still missed after the retry, or 3 misses set right within 60 s
     BringAllBack --> Corner: for the rest of the run; the hidden windows parked
 ```
 
-The choice is pure (`engine/engine_choice.rs`: `choose` from the config, the opt-in, the
+The choice is pure (`engine/engine_choice.rs`: `choose` from the config, the
 test switch and the probe's verdict; `Health`, the strikes in their window of time) and is
 made in `main` once AppKit is up and before the WM thread starts
 (`window_engine::choose_at_launch`). The probe (`platform/spaces/probe.rs`) looks up the

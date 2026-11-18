@@ -508,11 +508,10 @@ was, and the next launch checks the corner again.
 
 **Windows flicker or go missing when the stage changes.** With `[windows] engine =
 "accessibility"`, hidden windows always wait in the park corner and macOS's own Spaces are
-never tried. `"spaces"` hides each stage in a Space of macOS's own instead, wherever a trial
-at launch shows that it works, and goes back to the park corner for the rest of the run if
-a window is ever not where it was put. `"auto"`, the default, uses the park corner in this
-version and only logs that trial; it will pick Spaces once they are measured. The setting is
-read at launch: Stage Manager has to be quit and opened again after it is changed.
+never tried; this is the default. `"spaces"` hides each stage in a Space of macOS's own
+instead, wherever a trial at launch shows that it works, and goes back to the park corner
+for the rest of the run if a window is ever not where it was put. The setting is read at
+launch: Stage Manager has to be quit and opened again after it is changed.
 
 Some limits to know about:
 

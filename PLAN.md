@@ -61,7 +61,8 @@ UX-SPEC, "Known gaps".
     (a window not where the Space call put it) brings every window back and runs Corner for
     the rest of the run; the next launch probes again. No list of checked macOS versions,
     so nobody has to check each macOS update before users get it. `[windows] engine =
-    "auto"` (or `"accessibility"`) as a way out, listed under troubleshooting.
+    "spaces"` runs the probe and the Spaces engine; `"accessibility"`, the default, is the
+    way out, listed under troubleshooting.
   - Quit, a crash, a logout and a stand-down use the same bring-back, whichever engine runs.
 - **A newly opened app's stage comes as its window shows** (Corner engine; worth doing only
   if the Spaces engine does not ship or S6 shows it still matters). After 1.8.5's fixes (the AX ask

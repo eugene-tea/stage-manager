@@ -359,8 +359,8 @@ fn lock_choice() -> std::sync::MutexGuard<'static, Option<Choice>> {
     CHOICE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// The app's launch: runs the launch probe unless `config` or the test switch asks for the
-/// Corner engine, chooses ([`engine_choice::choose`]), installs the engine and logs the
+/// The app's launch: runs the launch probe when `config` or the test switch asks for the
+/// Spaces engine, chooses ([`engine_choice::choose`]), installs the engine and logs the
 /// choice with its reason. Main thread, once AppKit is up, before the WM thread starts.
 pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     let asked = Asked { config, test: super::spaces::engine::from_env() };

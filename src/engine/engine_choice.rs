@@ -1,5 +1,5 @@
 //! Which window engine runs (docs/ARCHITECTURE.md, "Window engines"): decided on every Mac
-//! at every launch from the config, the launch probe and two switches, never from a list of
+//! at every launch from the config, the launch probe and the test switch, never from a list of
 //! macOS versions; and the checks while running that end a run of the Spaces engine early.
 //! Pure: the platform runs the probe ([`crate::platform::spaces::probe`]) and installs the
 //! engine ([`crate::platform::window_engine::choose_at_launch`]).
@@ -14,35 +14,29 @@ use super::recovery::EngineKind;
 /// `[windows] engine`: which engines the app may run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConfigEngine {
-    /// The Accessibility corner in this version, with the launch probe run and logged; it
-    /// picks the window server's Spaces where the probe passes once the Spaces engine is
-    /// measured (PLAN, 1.9).
+    /// The Accessibility corner only; the probe is not run.
     #[default]
-    Auto,
+    Accessibility,
     /// The window server's Spaces where the launch probe passes, else the Accessibility
     /// corner (and for the rest of a run whose checks fail).
     Spaces,
-    /// The Accessibility corner only; the probe is not run.
-    Accessibility,
 }
 
 impl ConfigEngine {
     /// The config's word for it.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
-            Self::Spaces => "spaces",
             Self::Accessibility => "accessibility",
+            Self::Spaces => "spaces",
         }
     }
 
-    /// The value for the config's `word` (`auto` for anything else: the schema has
-    /// refused it already).
+    /// The value for the config's `word` (`accessibility` for anything else: the schema
+    /// has refused it already).
     pub fn parse(word: &str) -> Self {
         match word.trim() {
             "spaces" => Self::Spaces,
-            "accessibility" => Self::Accessibility,
-            _ => Self::Auto,
+            _ => Self::Accessibility,
         }
     }
 }
@@ -72,13 +66,13 @@ pub struct Asked {
 }
 
 impl Asked {
-    /// True when the launch probe runs: always, unless the config or the test switch asks
-    /// for the Corner engine (the way out never touches the window server's Space calls).
+    /// True when the launch probe runs: when the config or the test switch asks for the
+    /// Spaces engine (the Corner engine never touches the window server's Space calls).
     pub fn probes(&self) -> bool {
         match self.test {
             Some(EngineKind::Corner | EngineKind::Apple) => false,
             Some(EngineKind::Spaces) => true,
-            None => self.config != ConfigEngine::Accessibility,
+            None => self.config == ConfigEngine::Spaces,
         }
     }
 }
@@ -105,9 +99,6 @@ pub fn choose(asked: Asked, probe: Option<ProbeVerdict>) -> Choice {
         Some(EngineKind::Spaces) => "the test switch asks for it",
         None => match asked.config {
             ConfigEngine::Accessibility => return corner("[windows] engine = \"accessibility\"".into(), probe),
-            ConfigEngine::Auto => {
-                return corner("[windows] engine = \"auto\": the park corner in this version, until the Spaces engine is measured".into(), probe);
-            }
             ConfigEngine::Spaces => "[windows] engine = \"spaces\"",
         },
     };
@@ -185,15 +176,16 @@ mod tests {
         Asked { config, test }
     }
 
-    const CONFIGS: [ConfigEngine; 3] = [ConfigEngine::Auto, ConfigEngine::Spaces, ConfigEngine::Accessibility];
+    const CONFIGS: [ConfigEngine; 2] = [ConfigEngine::Accessibility, ConfigEngine::Spaces];
 
     #[test]
     fn the_config_words_parse_and_name_each_other() {
         for c in CONFIGS {
             assert_eq!(ConfigEngine::parse(c.name()), c);
         }
-        assert_eq!(ConfigEngine::parse("nonsense"), ConfigEngine::Auto);
-        assert_eq!(ConfigEngine::default(), ConfigEngine::Auto);
+        assert_eq!(ConfigEngine::parse("nonsense"), ConfigEngine::Accessibility);
+        assert_eq!(ConfigEngine::parse("auto"), ConfigEngine::Accessibility, "never released: no alias");
+        assert_eq!(ConfigEngine::default(), ConfigEngine::Accessibility);
     }
 
     #[test]
@@ -217,20 +209,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_runs_the_corner_engine_and_still_probes() {
-        let a = asked(ConfigEngine::Auto, None);
-        assert!(a.probes(), "the verdict is logged at every launch");
-        for probe in [passed(), failed(), None] {
-            let c = choose(a, probe.clone());
-            assert_eq!(c.kind, EngineKind::Corner);
-            assert!(c.why.contains("\"auto\"") && c.why.contains("park corner"), "{}", c.why);
-            assert_eq!(c.probe, probe, "the verdict is kept for ctl state");
-        }
-    }
-
-    #[test]
-    fn accessibility_is_the_way_out_and_runs_no_probe() {
-        let a = asked(ConfigEngine::Accessibility, None);
+    fn accessibility_is_the_default_and_runs_no_probe() {
+        let a = Asked::default();
+        assert_eq!(a, asked(ConfigEngine::Accessibility, None));
         assert!(!a.probes());
         let c = choose(a, None);
         assert_eq!(c.kind, EngineKind::Corner);

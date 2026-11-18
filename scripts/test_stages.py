@@ -8557,9 +8557,10 @@ def engine_windows():
 def phase_engine():
     """Round sm-probe (1.9, S5): which window engine runs. Each launch's probe and choice
     (`ctl state` `engine`: kind, why, probe, fallback):
-    1. `auto` (no config): the Corner engine; the probe ran and passed, its time said.
-    2. `[windows] engine = "accessibility"`: the Corner engine, no probe.
-    3. `[windows] engine = "spaces"`: the Spaces engine.
+    1. No config (the default, `accessibility`): the Corner engine, no probe.
+    2. `[windows] engine = "accessibility"`: the same.
+    3. `[windows] engine = "spaces"`: the probe ran and passed, its time said; the Spaces
+       engine.
     4. The probe made to fail at its hide, then at its show (STAGE_MANAGER_PROBE_FAIL): the
        Corner engine, the failed step named.
     5. The fallback drill, Fixture 1 and 2 each in a stage, Fixture 2's hidden in its Space:
@@ -8595,32 +8596,28 @@ def phase_engine():
         return s["engine"]
 
     start_fixture(2, "--frames", "80,80,640,420;260,160,560,380")
-    fresh()
-    e = launch({}, "auto")
-    if e is None:
-        return
-    probe_v = e.get("probe") or {}
-    check(e["kind"] == "corner" and '"auto"' in (e.get("why") or ""), f"engine: auto runs the Corner engine ({e.get('why')})")
-    check(probe_v.get("ok") is True, f"engine: the launch probe passed ({probe_v})")
-    say(f"  probe: {probe_v.get('ms', 0):.1f} ms")
-    check(probe_v.get("ms", 999) < 50, f"engine: the probe took under 50 ms ({probe_v.get('ms', 0):.1f} ms)")
-    check("window engine: launch probe passed" in log_text(), "engine: the probe's verdict is logged")
-    stop_app()
-
-    fresh()
-    with open(config, "w") as f:
-        f.write('[windows]\nengine = "accessibility"\n')
-    e = launch({}, "accessibility")
-    if e is not None:
+    for text, what in (("", "the default"), ('[windows]\nengine = "accessibility"\n', "accessibility")):
+        fresh()
+        if text:
+            with open(config, "w") as f:
+                f.write(text)
+        e = launch({}, what)
+        if e is None:
+            return
         check(e["kind"] == "corner" and e.get("probe") is None and "accessibility" in (e.get("why") or ""),
-              f"engine: accessibility runs the Corner engine with no probe ({e.get('why')}, probe {e.get('probe')})")
-    stop_app()
+              f"engine: {what} runs the Corner engine with no probe ({e.get('why')}, probe {e.get('probe')})")
+        stop_app()
 
     fresh()
     with open(config, "w") as f:
         f.write('[windows]\nengine = "spaces"\n')
     e = launch({}, "spaces")
     if e is not None:
+        probe_v = e.get("probe") or {}
+        check(probe_v.get("ok") is True, f"engine: the launch probe passed ({probe_v})")
+        say(f"  probe: {probe_v.get('ms', 0):.1f} ms")
+        check(probe_v.get("ms", 999) < 50, f"engine: the probe took under 50 ms ({probe_v.get('ms', 0):.1f} ms)")
+        check("window engine: launch probe passed" in log_text(), "engine: the probe's verdict is logged")
         check(e["kind"] == "spaces" and '"spaces"' in (e.get("why") or ""),
               f"engine: spaces runs the Spaces engine ({e.get('why')})")
     stop_app()

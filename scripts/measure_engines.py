@@ -108,7 +108,7 @@ def say_plan(o, p):
         print("  builds and signs the app and the fixtures (make sign, scripts/bundle.sh fixture), puts the app in the dev copy")
     for run in range(1, o["runs"] + 1):
         for e in ENGINES:
-            how = "STAGE_MANAGER_ENGINE=spaces (the launch probe must pass)" if e == "spaces" else "the default engine (the park corner)"
+            how = "STAGE_MANAGER_ENGINE=spaces (the launch probe must pass)" if e == "spaces" else "the default, [windows] engine = \"accessibility\" (the park corner)"
             print(f"  run {run}, {e}: a scratch home, {how}, STAGE_MANAGER_NO_CAPTURE=1; {' '.join(o['scenarios'])}")
     print(f"  then the table, corner against spaces, and every number in {os.path.relpath(SUMMARY, ROOT)}; raw lines in {o['out']}")
     print("  not measured: powermetrics (needs root; top's POWER stands in), frames the window server drops on screen")
