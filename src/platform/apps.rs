@@ -100,8 +100,9 @@ impl Drop for WorkspaceObservers {
     }
 }
 
-/// A notification name, the event it becomes, and whether only regular apps count.
-type Route = (&'static NSNotificationName, fn(AppInfo) -> AppEvent, bool);
+/// A notification name, the event it becomes, whether only regular apps count, and whether
+/// it changes which apps run (a launch or a quit: [`super::dock::apps_changed`]).
+type Route = (&'static NSNotificationName, fn(AppInfo) -> AppEvent, bool, bool);
 
 /// Observes will-launch / launch / terminate / activate / hide / unhide on the main queue and
 /// calls `sink` with plain values. All but will-launch and terminate report regular apps only;
@@ -114,21 +115,25 @@ pub fn observe_workspace(sink: impl Fn(AppEvent) + 'static) -> WorkspaceObserver
     // SAFETY: the notification names are valid framework statics.
     let names: [Route; 6] = unsafe {
         [
-            (NSWorkspaceWillLaunchApplicationNotification, AppEvent::WillLaunch, false),
-            (NSWorkspaceDidLaunchApplicationNotification, AppEvent::Launched, true),
-            (NSWorkspaceDidTerminateApplicationNotification, AppEvent::Terminated, false),
-            (NSWorkspaceDidActivateApplicationNotification, |a| AppEvent::Activated(a, Instant::now()), true),
-            (NSWorkspaceDidHideApplicationNotification, AppEvent::Hidden, true),
-            (NSWorkspaceDidUnhideApplicationNotification, AppEvent::Unhidden, true),
+            (NSWorkspaceWillLaunchApplicationNotification, AppEvent::WillLaunch, false, true),
+            (NSWorkspaceDidLaunchApplicationNotification, AppEvent::Launched, true, true),
+            (NSWorkspaceDidTerminateApplicationNotification, AppEvent::Terminated, false, true),
+            (NSWorkspaceDidActivateApplicationNotification, |a| AppEvent::Activated(a, Instant::now()), true, false),
+            (NSWorkspaceDidHideApplicationNotification, AppEvent::Hidden, true, false),
+            (NSWorkspaceDidUnhideApplicationNotification, AppEvent::Unhidden, true, false),
         ]
     };
     let mut tokens = Vec::new();
-    for (name, make, regular_only) in names {
+    for (name, make, regular_only, changes_apps) in names {
         let sink = sink.clone();
         let block = RcBlock::new(move |note: NonNull<NSNotification>| {
             // SAFETY: AppKit passes a live notification for the duration of the block.
             let note = unsafe { note.as_ref() };
             let Some(app) = running_app_of(note) else { return };
+            if changes_apps {
+                // Any app, regular or not: the running apps' paths are read again.
+                super::dock::apps_changed();
+            }
             if regular_only && !is_regular(&app) {
                 return;
             }

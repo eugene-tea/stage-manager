@@ -177,6 +177,13 @@ pub fn wake_list() -> Rc<Vec<CgWindow>> {
     })
 }
 
+/// True when the open wake holds [`wake_list`]'s read, still fresh (no write of ours since):
+/// a duty that may skip a turn (the Apple mode's closed windows' sweep) reads only then, and
+/// so never alone. False outside a wake.
+pub fn wake_has_list() -> bool {
+    WAKE.with(|w| w.borrow_mut().as_mut().is_some_and(|lists| lists.fresh().full.is_some()))
+}
+
 /// [`on_screen`], read once per wake (the on-screen query [`wake_list`] made, when it came
 /// first); fresh outside one.
 pub fn wake_on_screen() -> Rc<Vec<CgWindow>> {
@@ -253,6 +260,7 @@ pub fn describe(ids: &[u32]) -> Vec<CgWindow> {
 }
 
 fn query(options: CGWindowListOption) -> Vec<CgWindow> {
+    super::costs::bump(super::costs::Cost::WindowList);
     let Some(array) = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
         tracing::warn!("CGWindowListCopyWindowInfo returned nothing");
         return Vec::new();

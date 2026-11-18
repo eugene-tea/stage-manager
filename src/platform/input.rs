@@ -116,17 +116,12 @@ impl Drop for InputMonitor {
 }
 
 /// Calls `sink` (main thread) for every left mouse down/up, right or other mouse down and key
-/// down in another app, and `moved` with the pointer (global, top-left) for every mouse move
-/// over another app's window or the desktop.
-pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved: impl Fn(Point) + 'static) -> Option<InputMonitor> {
+/// down in another app. Mouse moves have a monitor of their own ([`monitor_moves`]), made
+/// only while a strip may show (round idle-subsystems: each move wakes the main thread).
+pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Option<InputMonitor> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| {
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event = unsafe { event.as_ref() };
-        if event.r#type() == NSEventType::MouseMoved {
-            let at = NSEvent::mouseLocation();
-            moved(point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)));
-            return;
-        }
         if event.r#type() == NSEventType::FlagsChanged {
             let held = event.modifierFlags().contains(NSEventModifierFlags::Command);
             if !command_changed(COMMAND_HELD.swap(held, Ordering::Relaxed), held) {
@@ -161,9 +156,20 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
         | NSEventMask::RightMouseDown
         | NSEventMask::OtherMouseDown
         | NSEventMask::KeyDown
-        | NSEventMask::FlagsChanged
-        | NSEventMask::MouseMoved;
+        | NSEventMask::FlagsChanged;
     let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block)?;
+    Some(InputMonitor { token })
+}
+
+/// Calls `moved` (main thread) with the pointer (global, top-left) for every mouse move over
+/// another app's window or the desktop, while the monitor it returns lives.
+pub fn monitor_moves(mtm: MainThreadMarker, moved: impl Fn(Point) + 'static) -> Option<InputMonitor> {
+    let block = RcBlock::new(move |_event: NonNull<NSEvent>| {
+        super::costs::bump(super::costs::Cost::MouseMove);
+        let at = NSEvent::mouseLocation();
+        moved(point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)));
+    });
+    let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::MouseMoved, &block)?;
     Some(InputMonitor { token })
 }
 

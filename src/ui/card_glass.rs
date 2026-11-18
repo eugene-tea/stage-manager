@@ -161,14 +161,34 @@ pub fn set_space(display: u32, space: u64) {
     });
 }
 
-/// `display`'s strip's glass is `on` (its style, at each snapshot): a first read happens at
-/// the next poll.
+/// `display`'s strip's glass is `on` (its style, at each snapshot), and the strip has cards
+/// to show (`[strip] visible`, not standing down for Apple's Stage Manager): while it has not,
+/// no wallpaper is read (until 1.9 every 2 s whatever the strip showed). The backdrops read
+/// before are kept; one wanted again is read at once, right after the snapshot that wants it
+/// (a picture changed meanwhile repaints the cards once rendered, as after a Desktop change),
+/// then at the poll as before. A first read at launch happens at the next poll.
 pub fn set_wanted(display: u32, on: bool) {
-    STATE.with(|s| {
-        if let Ok(mut s) = s.try_borrow_mut() {
-            s.screens.entry(display).or_default().wanted = on;
-        }
+    let again = STATE.with(|s| {
+        let Ok(mut s) = s.try_borrow_mut() else { return false };
+        let d = s.screens.entry(display).or_default();
+        let again = wanted_again(d.wanted, on, d.read.is_some());
+        d.wanted = on;
+        again
     });
+    if again {
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            if read(mtm, display) == Read::Same {
+                super::strip::glass_changed(display);
+            }
+        });
+    }
+}
+
+/// Whether a glass wanted again (`was` off, `on` now) is read at once: when it was read
+/// before (`read_before`; the first read waits for the poll, as at launch).
+fn wanted_again(was: bool, on: bool, read_before: bool) -> bool {
+    !was && on && read_before
 }
 
 /// The displays changed (`kept`: the strips' display keys still there): the glass of a
@@ -433,6 +453,25 @@ mod tests {
 
     fn on(d: &mut Screen, space: u64) {
         d.space = Some((space, Instant::now() - SETTLE));
+    }
+
+    #[test]
+    fn a_strip_that_shows_no_card_reads_no_wallpaper_and_reads_it_at_once_when_it_shows_again() {
+        // The poll reads only the screens whose glass is wanted.
+        STATE.with(|s| s.borrow_mut().screens.clear());
+        set_wanted(7, true);
+        assert_eq!(wanted(), vec![7]);
+        set_wanted(7, false);
+        assert!(wanted().is_empty(), "hidden or standing down: nothing read at the poll");
+        // Wanted again after a read: read at once, before the next poll; never on the first.
+        assert!(wanted_again(false, true, true));
+        assert!(!wanted_again(false, true, false), "never read: the poll's first read, as at launch");
+        assert!(!wanted_again(true, true, true), "wanted all along: the poll's pace");
+        assert!(!wanted_again(true, false, true));
+        // A minute at rest, Apple's Stage Manager on: reads before (every READ_EVERY) and now.
+        let before = 60 / READ_EVERY.as_secs();
+        assert_eq!((before, wanted().len() as u64 * before), (30, 0));
+        STATE.with(|s| s.borrow_mut().screens.clear());
     }
 
     #[test]

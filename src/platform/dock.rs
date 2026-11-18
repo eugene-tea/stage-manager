@@ -17,9 +17,10 @@
 //! items, pinned and running alike, as the Dock shows them ([`app_order`]); the engine sorts
 //! the strip by it.
 
-use std::time::{Duration, Instant};
-
 use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use objc2_app_kit::{NSRunningApplication, NSWorkspace};
 use objc2_foundation::{NSBundle, NSString};
@@ -216,6 +217,7 @@ fn application_item(element: &AxElement) -> AxResult<Option<DockItem>> {
 /// pinned are in it too. Every call runs at the Dock's bounded timeout; `None` when the Dock
 /// does not answer (the last order read stays).
 pub fn app_order(dock: i32) -> Option<Vec<DockApp>> {
+    super::costs::bump(super::costs::Cost::DockRead);
     let t = DOCK_AX_TIMEOUT_SECONDS;
     let lists = AxElement::application(dock).bounded(t, AxElement::children).ok()?;
     let mut paths = Vec::new();
@@ -314,13 +316,62 @@ pub fn app_path(pid: i32) -> Option<String> {
     Some(app.bundleURL()?.path()?.to_string().trim_end_matches('/').to_string())
 }
 
-/// The running apps by their bundle's path (no trailing slash).
+/// App launches and quits NSWorkspace told of so far (any app, any thread:
+/// [`apps_changed`]): the running apps' paths are asked of LaunchServices again only after
+/// one ([`running_by_path`]).
+static APPS_CHANGED: AtomicU64 = AtomicU64::new(0);
+
+/// The running apps by their bundle's path, as read at a moment: the launches and quits
+/// heard by then, when, what.
+type PathsRead = (u64, Instant, HashMap<String, i32>);
+
+/// The running apps' paths as last read.
+static PATHS: Mutex<Option<PathsRead>> = Mutex::new(None);
+
+/// The longest the paths read stand with no launch or quit heard: a backstop for a change no
+/// notice told of.
+pub const PATHS_MAX_AGE: Duration = Duration::from_secs(60);
+
+/// An app is about to launch, launched or quit (NSWorkspace's notice, any app): the running
+/// apps' paths are read again at the next ask.
+pub fn apps_changed() {
+    APPS_CHANGED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Whether the running apps' paths are to be read again at `now`: never read (`last`:
+/// `None`), an app launched or quit since (`changes` differs from the read's), or the read
+/// [`PATHS_MAX_AGE`] old. A pid's bundle never changes while it runs, so between launches
+/// and quits the read stands.
+pub fn paths_due(last: Option<(u64, Instant)>, changes: u64, now: Instant) -> bool {
+    last.is_none_or(|(seen, at)| seen != changes || now.saturating_duration_since(at) >= PATHS_MAX_AGE)
+}
+
+/// The running apps by their bundle's path (no trailing slash). Read from LaunchServices
+/// (two XPC round trips an app: its bundle's URL and its pid, every app running) only when
+/// [`paths_due`]; else as read last. Until 1.9 it was read afresh at each ask: every 2 s
+/// while the strip follows the Dock, the largest single cost of the WM thread at rest
+/// (a sample, 11-18).
 pub(crate) fn running_by_path() -> HashMap<String, i32> {
+    let changes = APPS_CHANGED.load(Ordering::Relaxed);
+    let now = Instant::now();
+    let Ok(mut cached) = PATHS.lock() else { return read_running_by_path() };
+    if let Some((_, _, by_path)) = cached.as_ref().filter(|(seen, at, _)| !paths_due(Some((*seen, *at)), changes, now)) {
+        return by_path.clone();
+    }
+    let fresh = read_running_by_path();
+    *cached = Some((changes, now, fresh.clone()));
+    fresh
+}
+
+/// [`running_by_path`] asked of LaunchServices now.
+fn read_running_by_path() -> HashMap<String, i32> {
     NSWorkspace::sharedWorkspace()
         .runningApplications()
         .iter()
         .filter_map(|a| {
+            super::costs::bump(super::costs::Cost::LaunchServices);
             let path = a.bundleURL()?.path()?.to_string();
+            super::costs::bump(super::costs::Cost::LaunchServices);
             Some((path.trim_end_matches('/').to_string(), a.processIdentifier()))
         })
         .collect()
@@ -334,6 +385,32 @@ pub fn bundle_id_at(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The running apps' paths are asked of LaunchServices once, then again only after an
+    /// app launched or quit, or once a minute: a strip following the Dock (read every 2 s)
+    /// asked about 1,140 times a minute at rest for 19 apps, none now.
+    #[test]
+    fn the_running_apps_paths_are_read_again_only_after_a_launch_or_a_quit() {
+        let t0 = Instant::now();
+        assert!(paths_due(None, 0, t0), "never read: read");
+        let read = Some((0, t0));
+        assert!(!paths_due(read, 0, t0 + Duration::from_secs(2)), "the next Dock read: as read");
+        assert!(paths_due(read, 1, t0 + Duration::from_secs(2)), "an app launched or quit: read again");
+        assert!(paths_due(read, 0, t0 + PATHS_MAX_AGE), "a minute on: read again (a backstop)");
+        // A minute at rest, the Dock read every 2 s, 19 apps: LaunchServices asked by each policy.
+        let apps = 19;
+        let reads: Vec<Instant> = (0..30).map(|i| t0 + Duration::from_secs(2 * i)).collect();
+        let before = reads.len() * 2 * apps;
+        let mut last = None;
+        let mut after = 0;
+        for at in reads {
+            if paths_due(last, 0, at) {
+                after += 2 * apps;
+                last = Some((0, at));
+            }
+        }
+        assert_eq!((before, after), (1140, 38), "the first read only (the launch's)");
+    }
 
     /// A Dock that stops answering mid-read is asked nothing more: each further item would
     /// wait its whole timeout on the WM thread. What was read by then stands.

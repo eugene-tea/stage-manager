@@ -846,7 +846,7 @@ impl WmState {
                     self.observer.stop();
                     let _ = self.observer.take_events();
                 }
-                Task::NewController => self.conductor = Conductor::ours(),
+                Task::NewController => self.replace_conductor(Conductor::ours()),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
                         self.conductor.set_displays(&mut self.observer, d, Instant::now());
@@ -857,9 +857,7 @@ impl WmState {
                         self.conductor.set_settings(raw);
                     }
                 }
-                Task::HideStrip => {
-                    dispatch2::DispatchQueue::main().exec_async(|| crate::ui::strip::stand_down("Apple's Stage Manager is on"));
-                }
+                Task::HideStrip => self.replay(Task::HideStrip, "Apple's Stage Manager is on"),
                 Task::RetryHeld | Task::StartObserving | Task::SaveStages | Task::InstallAppleEngine | Task::AppleConductor | Task::InstallLaunchEngine => {}
             }
         }
@@ -902,7 +900,7 @@ impl WmState {
                 Task::HoldStranded => self.hold_stranded("augmenting Apple's"),
                 Task::DropSavedStages => drop_saved_stages(),
                 Task::InstallAppleEngine => window_engine::install(window_engine::of(window_engine::EngineKind::Apple)),
-                Task::AppleConductor => self.conductor = Conductor::apples(),
+                Task::AppleConductor => self.replace_conductor(Conductor::apples()),
                 Task::ReplayDisplays | Task::ReplaySettings | Task::HideStrip => self.replay(task, "Apple's Stage Manager is on"),
                 _ => {}
             }
@@ -921,8 +919,8 @@ impl WmState {
             match task {
                 Task::InstallAppleEngine => window_engine::install(window_engine::of(window_engine::EngineKind::Apple)),
                 Task::InstallLaunchEngine => install_launch_engine(),
-                Task::AppleConductor => self.conductor = Conductor::apples(),
-                Task::NewController => self.conductor = Conductor::ours(),
+                Task::AppleConductor => self.replace_conductor(Conductor::apples()),
+                Task::NewController => self.replace_conductor(Conductor::ours()),
                 Task::StopObserving => {
                     self.observer.stop();
                     let _ = self.observer.take_events();
@@ -949,10 +947,26 @@ impl WmState {
                 }
             }
             Task::HideStrip => {
-                dispatch2::DispatchQueue::main().exec_async(move || crate::ui::strip::stand_down(why));
+                // The corner patch too (it covers a park corner, and nothing is parked now):
+                // its wallpaper is read no more until a controller of ours plans it again.
+                dispatch2::DispatchQueue::main().exec_async(move || {
+                    crate::ui::strip::stand_down(why);
+                    if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
+                        crate::ui::corner_patch::stand_down(mtm);
+                    }
+                });
             }
             _ => {}
         }
+    }
+
+    /// Who conducts the windows from now on (a release, an augment, a swap, a logout's hold,
+    /// a resume: every window of the one before is back by then). The inert slivers' tap is
+    /// switched off with the old one's shield: the next controller of ours publishes its own
+    /// once it parks windows, and none in the Apple mode or standing down.
+    fn replace_conductor(&mut self, next: Conductor) {
+        super::corner::sliver_tap::off();
+        self.conductor = next;
     }
 
     /// [`Task::UnparkAll`] of a release: the controller's unpark, the registry's last resort,
@@ -1026,7 +1040,7 @@ impl WmState {
                     self.observer.stop();
                     let _ = self.observer.take_events();
                 }
-                Task::NewController => self.conductor = Conductor::ours(),
+                Task::NewController => self.replace_conductor(Conductor::ours()),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
                         self.conductor.set_displays(&mut self.observer, d, Instant::now());
@@ -1092,7 +1106,7 @@ impl WmState {
                     self.observer.stop();
                     let _ = self.observer.take_events();
                 }
-                Task::NewController => self.conductor = Conductor::ours(),
+                Task::NewController => self.replace_conductor(Conductor::ours()),
                 Task::ReplayDisplays | Task::ReplaySettings => self.replay(task, "Apple's Stage Manager is off"),
                 Task::RetryHeld => {
                     self.retry_held();
@@ -1154,7 +1168,9 @@ impl WmState {
             step("release overdue scans", || self.release_overdue_scans());
             step("retry pending apps", || self.observer.retry_pending(ax_callback));
             // Windows closed while their app did not answer (8M): no destroyed notice came.
-            step("sweep closed windows", || self.observer.sweep_closed());
+            if sweep_now(Sweep::BeforeConductor, self.conductor.is_apples(), false) {
+                step("sweep closed windows", || self.observer.sweep_closed());
+            }
             // Windows taken from an old guardian (round 8N): its rules, about once a second.
             if self.trusted {
                 step("taken windows", || self.taken.pass(&self.conductor.model_window_ids()));
@@ -1165,6 +1181,10 @@ impl WmState {
         step("rescan", || self.rescan_pass());
         step("events", || self.pump());
         step("controller tick", || self.conductor.tick(&mut self.observer));
+        if full && sweep_now(Sweep::AfterConductor, self.conductor.is_apples(), windows::wake_has_list()) {
+            // The Apple mode's: on the list its own read took this tick, never one of its own.
+            step("sweep closed windows", || self.observer.sweep_closed());
+        }
         step("apple_stage_manager_on", || self.follow_with_apple());
         // The minimize tap passes everything while nothing is arranged.
         minimize_tap::admit(self.arranging() && !self.conductor.is_apples());
@@ -1278,6 +1298,32 @@ impl WmState {
         tracing::error!("recovering from a panic on the WM thread: resyncing the parked-window registry");
         let _ = self.observer.take_events();
         self.conductor.resync_registry(&self.observer);
+    }
+}
+
+/// Where in the tick the closed windows' sweep may run ([`sweep_now`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Sweep {
+    /// Its old place, before the events and the controller's tick (whose duties then share
+    /// the list it read).
+    BeforeConductor,
+    /// After the conductor's tick.
+    AfterConductor,
+}
+
+/// Whether the closed windows' sweep ([`Observer::sweep_closed`]) runs at `at` in a full
+/// pass. Our own engines: before the conductor, as always (the Space check and the engine's
+/// upkeep read the same list after it). The Apple mode (`apple`): after the conductor, and
+/// only when the window list was read this tick already (`list_read`: the mirror's read at
+/// rest, every 2 s), so the sweep never reads one of its own. A window closed while its app
+/// did not answer leaves the mirror at its next read anyway (the mirror keeps only windows
+/// the list shows); the sweep only drops it from the observer, a read or two later than in
+/// our engines. Until 1.9 it read the list about once a second in every mode, the Apple mode's
+/// reads aside.
+fn sweep_now(at: Sweep, apple: bool, list_read: bool) -> bool {
+    match at {
+        Sweep::BeforeConductor => !apple,
+        Sweep::AfterConductor => apple && list_read,
     }
 }
 
@@ -1432,6 +1478,25 @@ mod tests {
 
     /// Round sm-tick: what stirs the tick. Typing does not; a click, a shortcut and every
     /// other command do.
+    #[test]
+    fn the_apple_modes_closed_window_sweep_reads_no_list_of_its_own() {
+        // Our engines: before the conductor, whatever was read.
+        assert!(sweep_now(Sweep::BeforeConductor, false, false));
+        assert!(!sweep_now(Sweep::AfterConductor, false, true), "once a tick");
+        // The Apple mode: after its tick, on the list it read.
+        assert!(!sweep_now(Sweep::BeforeConductor, true, false));
+        assert!(sweep_now(Sweep::AfterConductor, true, true));
+        assert!(!sweep_now(Sweep::AfterConductor, true, false), "no read this tick: no sweep, no read");
+        // A minute of brisk ticks (a person working: every 250 ms, a full pass about once a
+        // second), the mirror reading the list every 2 s on the tick: the sweep's own reads.
+        let ticks = 240;
+        let full = |i: usize| i.is_multiple_of(4);
+        let mirror_read = |i: usize| i.is_multiple_of(8);
+        let before = (0..ticks).filter(|&i| full(i) && !mirror_read(i)).count();
+        let after = (0..ticks).filter(|&i| full(i) && sweep_now(Sweep::AfterConductor, true, mirror_read(i)) && !mirror_read(i)).count();
+        assert_eq!((before, after), (30, 0), "window list reads a minute the sweep added in the Apple mode");
+    }
+
     #[test]
     fn a_plain_key_does_not_stir_the_tick_a_click_or_a_shortcut_does() {
         use crate::engine::geometry::Point;

@@ -371,6 +371,9 @@ pub fn displays_changed(ids: &[u32]) {
     kept.push(strip_model::MAIN_STRIP);
     strip_model::retain_cards_of(&kept);
     card_glass::displays_changed(&kept);
+    if let Some(mtm) = MainThreadMarker::new() {
+        moves_of_strips(mtm, &kept);
+    }
     strip_model::retain_panel_statuses_of(&kept);
     close_strips_gone();
 }
@@ -513,9 +516,66 @@ pub fn pointer_moved(p: Point) {
 /// instead of polling the pointer. Without it (no monitor) the edge is polled as before.
 static MOVES_FED: AtomicBool = AtomicBool::new(false);
 
-/// Says whether the global monitor's mouse moves reach [`pointer_moved`]. Main thread.
-pub fn set_moves_fed(fed: bool) {
-    MOVES_FED.store(fed, Ordering::Relaxed);
+/// The mouse moves' monitor ([`crate::platform::input::monitor_moves`]) and the strips that
+/// want it: made while a strip may show cards (`[strip] visible`, not standing down for
+/// Apple's Stage Manager) or a window is dragged, gone otherwise (round idle-subsystems: until
+/// 1.9 every mouse move of the session woke the main thread, the Apple mode's too).
+#[derive(Default)]
+struct Moves {
+    /// The strips (display keys) that want the moves now.
+    wanting: std::collections::BTreeSet<u32>,
+    monitor: Option<crate::platform::input::InputMonitor>,
+}
+
+thread_local! {
+    static MOVES: RefCell<Moves> = RefCell::new(Moves::default());
+}
+
+/// Whether the moves' monitor is to be made (`Some(true)`), let go (`Some(false)`) or left as
+/// it is, for the strips `wanting` it and whether it is made (`made`).
+fn moves_step(wanting: usize, made: bool) -> Option<bool> {
+    match (wanting > 0, made) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// The strip of `display` wants the pointer's moves (`on`) or not: the monitor made or let go
+/// as the strips want, before the snapshot is laid out (a strip hidden at the edge decides
+/// whether to poll the pointer from it, [`MOVES_FED`]). Main thread.
+fn want_moves(mtm: MainThreadMarker, display: u32, on: bool) {
+    MOVES.with(|m| {
+        let Ok(mut m) = m.try_borrow_mut() else { return };
+        if on {
+            m.wanting.insert(display);
+        } else {
+            m.wanting.remove(&display);
+        }
+        match moves_step(m.wanting.len(), m.monitor.is_some()) {
+            Some(true) => {
+                m.monitor = crate::platform::input::monitor_moves(mtm, pointer_moved);
+                if m.monitor.is_none() {
+                    tracing::warn!("cannot monitor mouse moves: the strip's edge polls the pointer");
+                }
+                tracing::debug!(made = m.monitor.is_some(), "strip: the mouse moves' monitor made (a strip may show)");
+            }
+            Some(false) => {
+                m.monitor = None;
+                tracing::debug!("strip: the mouse moves' monitor let go (no strip shows)");
+            }
+            None => {}
+        }
+        MOVES_FED.store(m.monitor.is_some(), Ordering::Relaxed);
+    });
+}
+
+/// The strips of displays no longer there want no moves.
+fn moves_of_strips(mtm: MainThreadMarker, kept: &[u32]) {
+    let gone: Vec<u32> = MOVES.with(|m| m.try_borrow().map(|m| m.wanting.iter().copied().filter(|d| !kept.contains(d)).collect()).unwrap_or_default());
+    for display in gone {
+        want_moves(mtm, display, false);
+    }
 }
 
 /// What the strip draws now, for a scripted test (`ctl debug-strip`): the cards in slot
@@ -2250,7 +2310,10 @@ impl Strip {
             // (the strip was built with the defaults, so `hide_delay_ms` never applied).
             self.visibility.set_timing(Timing::from_style(&self.style.reveal));
         }
-        card_glass::set_wanted(self.display, self.glass().on());
+        // No wallpaper read for a strip that shows no card (hidden, standing down, or no
+        // card to show), no mouse move heard for a hidden one.
+        card_glass::set_wanted(self.display, self.glass().on() && snapshot.user_visible && !snapshot.cards.is_empty());
+        want_moves(self.mtm, self.display, snapshot.user_visible || snapshot.window_drag.is_some());
         let geometry = Geometry::for_display(self.mtm, self.display, &self.style).posed(self.flat);
         if geometry != self.geometry {
             tracing::debug!(k = geometry.m.k, tilt = geometry.m.tilt.to_degrees(), d = geometry.m.perspective, "strip geometry");
@@ -4462,6 +4525,14 @@ fn click_adds(flags: NSEventModifierFlags) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_moves_are_heard_only_while_a_strip_may_show() {
+        assert_eq!(moves_step(1, false), Some(true), "a strip shows: the monitor made");
+        assert_eq!(moves_step(2, true), None);
+        assert_eq!(moves_step(0, true), Some(false), "hidden, or standing down for Apple's: let go");
+        assert_eq!(moves_step(0, false), None);
+    }
 
     /// A laptop docked to a screen that becomes the main one: the main strip's panes on the
     /// laptop's other Desktops close (that screen gets a strip of its own). With the lid

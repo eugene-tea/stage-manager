@@ -141,6 +141,7 @@ pub fn accessibility_blind() -> bool {
 /// True while the screen is locked or this login session is not the one on the console.
 /// `false` when the session cannot be read (never blocks the app on an unknown).
 pub fn screen_locked() -> bool {
+    super::costs::bump(super::costs::Cost::LockPoll);
     let Some(dict) = CGSessionCopyCurrentDictionary() else {
         return false;
     };
