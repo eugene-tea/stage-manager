@@ -599,7 +599,7 @@ mod app {
                     return ctl::error_reply("debug-engine-fail needs STAGE_MANAGER_TEST=1");
                 }
                 use stage_manager::platform::spaces::engine::{self as spaces_engine, FailMode};
-                let Some(mode) = FailMode::parse(&word) else { return ctl::error_reply("debug-engine-fail takes next, hide, show, all or off") };
+                let Some(mode) = FailMode::parse(&word) else { return ctl::error_reply("debug-engine-fail takes next, hide, show, park, all or off") };
                 spaces_engine::shared().fail_calls(mode);
                 json!({ "ok": true, "engine": window_engine::current().kind().name(), "mode": word })
             }

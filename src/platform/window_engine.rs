@@ -52,6 +52,9 @@ pub struct LendPark {
     pub ask: crate::engine::lend_park::ParkAsk,
     /// The window's element: the park's and the restore's moves.
     pub window: AxElement,
+    /// How long the park's move may wait for the app's answer (seconds); `None`: the
+    /// engine's own bound. A Dock press asks less: its lend must be made before the release.
+    pub ax_seconds: Option<f32>,
 }
 
 /// What a lend did ([`WindowEngine::lend_home`]).
@@ -184,8 +187,9 @@ pub trait WindowEngine: Send + Sync {
     /// already shown keep its place with no picture growing over it
     /// ([`crate::ui::transition_plan::already_shown`]). By [`Self::hides_now`] unless the
     /// engine knows better; the Spaces engine: held in its stage Space off every Desktop, or
-    /// parked for a lend (a window put home at a Dock press, at its frame on its Desktop, is
-    /// in view though still counted hidden).
+    /// parked for a lend and listed away from the frame it had (a window put home at its
+    /// frame on its Desktop, its park not taken or none asked, is in view though still
+    /// counted hidden).
     fn keeps_out_of_view(&self, id: WindowId, d: &Display, listed: Rect) -> bool {
         self.hides_now(id, d, listed)
     }
@@ -215,9 +219,9 @@ pub trait WindowEngine: Send + Sync {
     /// while, still counted hidden: macOS counts it there from now on when it picks a Desktop
     /// for its app's activation (a Dock press, or ⌘Tab's switcher selecting the app, under the
     /// Spaces engine: [`crate::engine::model::Model::dock_home`]). With `park` (⌘Tab's
-    /// switcher, round cmdtab-park) the window is moved to its park frame first, while still
-    /// hidden ([`crate::engine::lend_park::lend`]); without (a Dock press) it shows at its
-    /// frame, at its old place in the window order. The model's show of it later brings it to
+    /// switcher, round cmdtab-park; a Dock press, round dock-put-home) the window is moved to
+    /// its park frame first, while still hidden ([`crate::engine::lend_park::lend`]); without
+    /// it shows at its frame, at its old place in the window order. The model's show of it later brings it to
     /// its frame; [`Self::take_back`] hides it again. The Corner engine: nothing (a parked
     /// window is on its Desktop already).
     fn lend_home(&self, _id: WindowId, _park: Option<LendPark>) -> Lend {

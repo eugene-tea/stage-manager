@@ -2092,8 +2092,8 @@ impl Controller {
     /// [`Self::transition_for`]), then moved the way the engine says ([`WindowEngine::animate`]).
     /// An activation's focus is `run`'s ([`ActivationRun::focus`]). `early_corner`: the
     /// corner's cover as the activation found it, and the window list it read (none read, or
-    /// moved since: both read again). An incoming window already shown at its frame is taken
-    /// out of the transition ([`Self::skip_shown_incoming`]).
+    /// moved since: both read again). An incoming window already shown at its frame takes
+    /// the incoming side out of the transition ([`Self::skip_shown_incoming`]).
     fn execute_animated_rest(
         &mut self,
         ob: &Observer,
@@ -2123,12 +2123,14 @@ impl Controller {
         }
     }
 
-    /// Takes out of `t` every incoming window already shown at its frame: in `list` (the
-    /// on-screen windows) within [`transition_plan::SHOWN_SLACK`] of it, and not kept out of
-    /// view by the engine ([`WindowEngine::keeps_out_of_view`]). No picture grows over such a
-    /// window and it stays as it is; its show, raise and focus run with the batch as before
-    /// (round skip-shown-incoming: a Dock press's lend showed the window before its switch,
-    /// and the switch grew a picture over it).
+    /// An incoming window of `t` already shown at its frame: in `list` (the on-screen
+    /// windows) within [`transition_plan::SHOWN_SLACK`] of it, and not kept out of view by
+    /// the engine ([`WindowEngine::keeps_out_of_view`]). No picture grows over such a window
+    /// and it stays as it is; its show, raise and focus run with the batch as before (round
+    /// skip-shown-incoming: a Dock press's lend showed the window before its switch, and the
+    /// switch grew a picture over it). When there is one, the rest of the incoming stage is
+    /// taken out too and shows at once with the batch, in its order (round dock-put-home: a
+    /// stage never comes in half popped, half flying); the outgoing side plays as planned.
     fn skip_shown_incoming(&self, t: &mut Transition, list: &[windows::CgWindow]) {
         let Some(m) = self.model.as_ref() else { return };
         let engine = &self.engine;
@@ -2140,8 +2142,12 @@ impl Controller {
             let engine_hides = listed.is_some_and(|r| display.is_none_or(|d| engine.keeps_out_of_view(id, d, r)));
             transition_plan::already_shown(g.window.frame, transition_plan::Sighting { listed, engine_hides })
         });
-        for (window, off) in skipped {
+        for (window, off) in &skipped.shown {
             tracing::info!(id = t.id, window, off, reason = "on screen at its frame and not hidden by the engine", "transition: incoming window already shown: no grow-in");
+        }
+        if !skipped.rest.is_empty() {
+            let shown: Vec<u32> = skipped.shown.iter().map(|s| s.0).collect();
+            tracing::info!(id = t.id, ?shown, rest = ?skipped.rest, "transition: part of the incoming stage already shown: the rest shown at once");
         }
     }
 

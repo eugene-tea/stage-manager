@@ -365,7 +365,13 @@ macOS should go to is put on its Desktop first: an arrangement ahead for another
 made at the press, and for an app whose stage on the Desktop shown is hidden while it shows
 a window elsewhere, that stage's window is put home for a while, still counted hidden
 (`WindowEngine::lend_home`, `Model::dock_home`), and taken back when no switch to its stage
-follows. ⌘Tab has the same shape: the switcher shows while ⌘ is held after a Tab and
+follows. It is moved to its park frame at the screen's corner first, while still in its
+stage Space (`engine::lend_park`, as for ⌘Tab): macOS counts a window on a Desktop wherever
+it is, and at its own frame it showed before its stage's switch (under the front windows
+from the press, in front of them from the release). The park's move waits 30 ms for the app
+at most; past that the window is put home where it is, and the switch, finding an incoming
+window already on screen at its frame, shows the whole stage at once instead of growing it
+from the card (`transition_plan::skip_shown`). ⌘Tab has the same shape: the switcher shows while ⌘ is held after a Tab and
 activates its app at ⌘'s release, so the same window is put home while the switcher selects
 the app (`engine::switcher` follows the keys the input monitor hears, ⌘ pressed and let go
 among them). The first Tab's app is predicted from the order of activations and put home at

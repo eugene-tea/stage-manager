@@ -16,9 +16,15 @@
   switch. In a stage of overlapping windows, the front window's shadow on the one behind was
   dropped as the windows landed and faded back in over the next third of a second.
 - A window already on screen when its stage is chosen no longer flies in from its card as if
-  it were hidden: it stays where it is, and only the stage's hidden windows grow from the
-  card. With `engine = "spaces"`, a Dock click on an app whose window waited in a stage
-  showed that window first and then played its grow-in over it.
+  it were hidden: it stays where it is, and the rest of its stage shows with it at once. With
+  `engine = "spaces"`, a Dock click on an app whose window waited in a stage showed that
+  window first and then played its grow-in over it.
+- With `engine = "spaces"`, a Dock click on an app whose stage is hidden while the app has a
+  window on another Desktop no longer shows one window of that stage about a seventh of a
+  second before the switch. The window is still put on the Desktop at the press, so that
+  macOS stays there, but out of sight at the screen's corner, as for ⌘Tab; the whole stage
+  then grows from its card together. An app that does not move its window within 30 ms shows
+  it early as before, and its stage then appears at once.
 
 ## 1.9.0 — 2026-11-18
 

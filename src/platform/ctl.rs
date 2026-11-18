@@ -8,8 +8,9 @@
 //! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-engine-fail
-//! [next|hide|show|all|off]` makes the Spaces engine's next hide or show (or every bridged
-//! call) fail as a refusing window server would (the fallback drill), `debug-click X Y
+//! [next|hide|show|park|all|off]` makes the Spaces engine's next hide or show (or every bridged
+//! call) fail as a refusing window server would (the fallback drill; `park`: the next lend's
+//! park is not asked, as of an app that does not move its window in time), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
@@ -421,8 +422,8 @@ impl Command {
             ["mark", note @ ..] => Ok(Self::Mark(note.join(" "))),
             ["debug-panic"] => Ok(Self::DebugPanic),
             ["debug-engine-fail", rest @ ..] if rest.len() <= 1 => match rest.first().copied().unwrap_or("next") {
-                w @ ("next" | "hide" | "show" | "all" | "off") => Ok(Self::DebugEngineFail(w.to_string())),
-                _ => Err("debug-engine-fail takes next, hide, show, all or off".into()),
+                w @ ("next" | "hide" | "show" | "park" | "all" | "off") => Ok(Self::DebugEngineFail(w.to_string())),
+                _ => Err("debug-engine-fail takes next, hide, show, park, all or off".into()),
             },
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
             ["debug-update"] => Ok(Self::DebugUpdate),
@@ -1003,6 +1004,7 @@ mod tests {
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));
         assert_eq!(Command::parse("debug-engine-fail"), Ok(Command::DebugEngineFail("next".into())));
         assert_eq!(Command::parse("debug-engine-fail all"), Ok(Command::DebugEngineFail("all".into())));
+        assert_eq!(Command::parse("debug-engine-fail park"), Ok(Command::DebugEngineFail("park".into())));
         assert!(Command::parse("debug-engine-fail sometimes").is_err());
         assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
         assert_eq!(

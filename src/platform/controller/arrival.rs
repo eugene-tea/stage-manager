@@ -51,6 +51,7 @@ use super::{Controller, cards_in};
 use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
+use crate::engine::lend_park;
 use crate::engine::switcher::{LetGo, LetGoStep};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Display, DisplayId, Model, Observation, SpaceId, StageId, WindowId};
@@ -1796,15 +1797,25 @@ impl Controller {
             let _ = self.engine.take_back(prev.window);
         }
         if let Some(home) = home {
-            if self.engine.lend_home(home, None).home {
+            // Parked first, while still hidden (round dock-put-home): on its Desktop for
+            // macOS, out of sight until its stage's switch. The lend is made either way.
+            let park = self.lend_park(ob, home, true, Some(lend_park::DOCK_PARK_SECONDS));
+            let asked = park.is_some();
+            let lend = self.engine.lend_home(home, park);
+            if lend.home {
                 self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: None });
                 tracing::info!(
                     bundle,
                     pid,
                     window = home.0,
+                    parked = lend.parked.unwrap_or(false),
+                    park_ms = lend.park_ms,
                     took_ms = ms(started, Instant::now()),
                     "dock: the app's windows here wait off every Desktop and macOS counts one elsewhere: its stage's window is put home before the release"
                 );
+                if !lend.parked.unwrap_or(false) {
+                    tracing::info!(bundle, pid, window = home.0, asked, park_ms = lend.park_ms, "dock: the window put home could not be parked off the screen first (its app did not move it in time): it shows at its frame until its stage's switch");
+                }
                 self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted: None });
                 return Err("the app's window here was put home at the press: macOS activates it here");
             }

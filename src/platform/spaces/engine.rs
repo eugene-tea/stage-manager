@@ -168,18 +168,22 @@ pub enum FailMode {
     NextShow,
     /// The next hide or show, whichever comes first (with its retry).
     Next,
+    /// The next lend's park is not asked (an app that would not move its window in time):
+    /// the window is put home at its frame, in view.
+    NextPark,
     /// Every bridged call from now on, the bring-backs' too (a window server that blocked
     /// the bridge mid-run); the Space calls of the classic route still go.
     All,
 }
 
 impl FailMode {
-    /// The mode `word` names (`hide`, `show`, `next`, `all`, `off`).
+    /// The mode `word` names (`hide`, `show`, `park`, `next`, `all`, `off`).
     pub fn parse(word: &str) -> Option<Self> {
         Some(match word {
             "next" | "" => Self::Next,
             "hide" => Self::NextHide,
             "show" => Self::NextShow,
+            "park" => Self::NextPark,
             "all" => Self::All,
             "off" => Self::Off,
             _ => return None,
@@ -187,11 +191,12 @@ impl FailMode {
     }
 }
 
-/// A hide or a show, for [`FailMode`].
+/// A hide, a show or a lend's park, for [`FailMode`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Call {
     Hide,
     Show,
+    Park,
 }
 
 #[derive(Default)]
@@ -261,6 +266,8 @@ struct Steps<'a> {
     held: Held,
     ours: &'a BTreeSet<u64>,
     element: Option<&'a AxElement>,
+    /// How long a move may wait for the app's answer (seconds).
+    ax_seconds: f32,
     /// What the moves took, with their read back.
     moves: Duration,
     /// A restore's move: wait for the frame exactly, up to [`RESTORE_READ_BACK`]. A park's
@@ -277,7 +284,7 @@ impl LendSteps for Steps<'_> {
         let element = self.element?;
         let t = Instant::now();
         let before = self.listed();
-        let sent = element.bounded(PARK_AX_SECONDS, |e| e.set_position(to.origin()));
+        let sent = element.bounded(self.ax_seconds, |e| e.set_position(to.origin()));
         let out = match sent {
             Err(e) => {
                 tracing::debug!(id = self.id, "spaces engine: a lend's move was not taken: {e}");
@@ -494,9 +501,10 @@ impl SpacesEngine {
         let mut st = self.state();
         let hit = match st.fail {
             FailMode::Off => false,
-            FailMode::All | FailMode::Next => true,
+            FailMode::All | FailMode::Next => call != Call::Park,
             FailMode::NextHide => call == Call::Hide,
             FailMode::NextShow => call == Call::Show,
+            FailMode::NextPark => call == Call::Park,
         };
         if hit && st.fail != FailMode::All {
             st.fail = FailMode::Off;
@@ -711,7 +719,7 @@ impl SpacesEngine {
         let Some(sky) = self.sky() else { return };
         let ours = BTreeSet::new();
         let held = Held { space: 0, home: 0 };
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: Some(&element), moves: Duration::ZERO, exact: true };
+        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: Some(&element), ax_seconds: PARK_AX_SECONDS, moves: Duration::ZERO, exact: true };
         let restored = lend_park::restore(&mut steps, parked);
         if restored {
             self.state().parked.remove(&id);
@@ -816,9 +824,10 @@ impl SpacesEngine {
     /// Window `id`, held in its stage Space, onto its own Desktop, while the engine still
     /// counts it hidden (the model does): macOS counts it on that Desktop from now on when it
     /// picks a Desktop for its app's activation (a Dock press, the owner's log of 11-15). With
-    /// `park` (⌘Tab's switcher, round cmdtab-park) it is moved to its park frame first, while
-    /// still in its stage Space ([`lend_park::lend`]): it shows at most as a sliver at the
-    /// display's corner while the switcher is up. Without, it shows at its frame, at its old
+    /// `park` (⌘Tab's switcher, round cmdtab-park; a Dock press, round dock-put-home) it is
+    /// moved to its park frame first, while still in its stage Space ([`lend_park::lend`]):
+    /// it shows at most as a sliver at the display's corner until its switch (or its take
+    /// back). Without, or when the park does not take, it shows at its frame, at its old
     /// place in the window order (under the windows raised since it hid). The model's show of
     /// it later finds it out of every stage Space and sets its frame ([`WindowEngine::show`]);
     /// a hide puts it back as any hide (its frame set again); [`Self::take_back_window`] puts
@@ -841,11 +850,12 @@ impl SpacesEngine {
             return Lend::default();
         }
         let ours = self.ours();
-        let (ask, element) = match park {
-            Some(p) => (Some(p.ask), Some(p.window)),
-            None => (None, None),
+        let park = park.filter(|_| !self.failing(Call::Park));
+        let (ask, element, ax_seconds) = match park {
+            Some(p) => (Some(p.ask), Some(p.window), p.ax_seconds.unwrap_or(PARK_AX_SECONDS)),
+            None => (None, None, PARK_AX_SECONDS),
         };
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), moves: Duration::ZERO, exact: false };
+        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), ax_seconds, moves: Duration::ZERO, exact: false };
         let done = lend_park::lend(&mut steps, ask);
         let park_ms = steps.moves.as_millis() as u64;
         let mut st = self.state();
@@ -876,7 +886,7 @@ impl SpacesEngine {
         let Some(sky) = self.sky() else { return Back::default() };
         let ours = self.ours();
         let element = parked.as_ref().map(|(_, e)| e.clone());
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), moves: Duration::ZERO, exact: true };
+        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), ax_seconds: PARK_AX_SECONDS, moves: Duration::ZERO, exact: true };
         let done = lend_park::take_back(&mut steps, parked.map(|(p, _)| p));
         if done.moved_off {
             tracing::info!(id, "spaces engine: a window parked for a lend was moved off the park by its app");
@@ -1542,11 +1552,12 @@ impl WindowEngine for SpacesEngine {
         self.holds(id.0)
     }
 
-    /// Held in its stage Space (not put home), flying its last stretch, or parked for a lend:
-    /// a window put home at a Dock press shows at its frame on its Desktop while still held
-    /// (11-18 10:41:33, the owner's log: its stage's switch grew a picture over it).
-    fn keeps_out_of_view(&self, id: WindowId, _d: &Display, _listed: Rect) -> bool {
-        self.off_desktop(id.0) || self.state().parked.contains_key(&id.0)
+    /// Held in its stage Space (not put home), flying its last stretch, or parked for a lend
+    /// and listed away from the frame it had: a window put home at its frame (its park not
+    /// taken, or none asked) shows on its Desktop while still held (11-18 10:41:33, the
+    /// owner's log: its stage's switch grew a picture over it).
+    fn keeps_out_of_view(&self, id: WindowId, _d: &Display, listed: Rect) -> bool {
+        self.off_desktop(id.0) || self.state().parked.get(&id.0).is_some_and(|p| lend_park::away(listed, p.park))
     }
 
     /// While the engine holds it and its app has a window on a Desktop not shown: a window
