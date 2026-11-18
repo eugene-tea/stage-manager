@@ -69,10 +69,10 @@ pub struct InputEvent {
     pub cmd: bool,
     /// Option or Control held (a Dock click with either is no plain activation).
     pub other_modifiers: bool,
-    /// Control held (one of Mission Control's shortcuts is told from the key and exactly
-    /// these: [`crate::engine::mission_control::trigger`]).
+    /// Control held (⌃-arrow: macOS's Desktop and Mission Control keys by default).
     pub control: bool,
-    /// Option held.
+    /// Option held (one of Mission Control's shortcuts is told from the key and exactly its
+    /// modifiers: [`crate::engine::mission_control::trigger`]).
     pub option: bool,
     /// For a mouse event, macOS's click count: 2 for the second click of a double click
     /// (within the user's double-click interval, near the first), 1 for a single click; 0
@@ -89,6 +89,10 @@ pub struct InputEvent {
 pub const KEY_TAB: u16 = crate::engine::switcher::KEY_TAB;
 /// The ` key's virtual key code (⌘` cycles an app's windows).
 pub const KEY_GRAVE: u16 = crate::engine::switcher::KEY_GRAVE;
+/// The left arrow's virtual key code (the arrows run 123 left, 124 right, 125 down, 126 up).
+pub const KEY_LEFT: u16 = 123;
+/// The up arrow's virtual key code.
+pub const KEY_UP: u16 = 126;
 
 /// ⌘'s state as last reported ([`InputKind::CommandKey`]); main thread.
 static COMMAND_HELD: AtomicBool = AtomicBool::new(false);
@@ -105,6 +109,14 @@ impl InputEvent {
     /// (⌘C, ⌘S, ⌘→ held down) are not.
     pub fn is_switcher_key(&self) -> bool {
         self.kind == InputKind::KeyDown && self.cmd && matches!(self.key, Some(KEY_TAB | KEY_GRAVE))
+    }
+
+    /// A key-down of ⌃ with an arrow: macOS's default keys to move a Desktop left or right,
+    /// and for Mission Control and App Exposé (the slide watch takes a Desktop change after
+    /// one for the person's own, [`crate::engine::slide_watch`]). macOS may keep its own
+    /// shortcuts from the global monitor: when it does, none is heard.
+    pub fn is_desktop_key(&self) -> bool {
+        self.kind == InputKind::KeyDown && self.control && matches!(self.key, Some(KEY_LEFT..=KEY_UP))
     }
 }
 
@@ -919,6 +931,18 @@ mod tests {
         assert!(!event(InputKind::KeyDown, true, 0, Some(8)).is_switcher_key(), "⌘C");
         assert!(!event(InputKind::KeyDown, true, 0, Some(124)).is_switcher_key(), "⌘→");
         assert!(!event(InputKind::MouseDown, true, 1, None).is_switcher_key());
+    }
+
+    #[test]
+    fn a_desktop_key_is_control_with_an_arrow() {
+        let control = |key| InputEvent { control: true, other_modifiers: true, ..event(InputKind::KeyDown, false, 0, Some(key)) };
+        assert!(control(KEY_LEFT).is_desktop_key(), "⌃←");
+        assert!(control(124).is_desktop_key(), "⌃→");
+        assert!(control(KEY_UP).is_desktop_key(), "⌃↑: Mission Control");
+        assert!(!control(KEY_TAB).is_desktop_key(), "⌃Tab");
+        assert!(!event(InputKind::KeyDown, false, 0, Some(KEY_LEFT)).is_desktop_key(), "← alone");
+        let option = InputEvent { other_modifiers: true, ..event(InputKind::KeyDown, false, 0, Some(KEY_LEFT)) };
+        assert!(!option.is_desktop_key(), "⌥← moves a word");
     }
 
     #[test]

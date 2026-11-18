@@ -129,7 +129,16 @@ struct OwedFrame {
     pid: Option<i32>,
     /// When it is tried again: backing off while its app does not answer.
     backoff: Backoff,
+    /// Tries in a row its element answered `kAXErrorInvalidUIElement`: at
+    /// [`DEAD_ELEMENT_TRIES`] the frame is no longer owed.
+    dead: u8,
 }
+
+/// Tries of an owed frame whose element is invalid (`kAXErrorInvalidUIElement`: the window
+/// went away, its app let it go) before it is no longer owed. The window server may list such
+/// a window for minutes, off screen: a frame owed to a window a Moonlight stream had closed
+/// was tried every second for five minutes (a log, 11-18 11:33 to 11:38).
+const DEAD_ELEMENT_TRIES: u8 = 3;
 
 /// What the engine counts, for `ctl state` and the checks while running.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -982,8 +991,16 @@ impl SpacesEngine {
                     tracing::info!(id, "spaces engine: a window took the frame its show asked, tried again");
                 }
                 Err(e) => {
+                    let dead = if e == AxError::INVALID_ELEMENT { owed.dead.saturating_add(1) } else { 0 };
+                    if dead >= DEAD_ELEMENT_TRIES {
+                        st.frames.remove(&id);
+                        st.parked.remove(&id);
+                        tracing::info!(id, tries = dead, "spaces engine: a window owed the frame its show asked has no live element: no longer tried ({e})");
+                        continue;
+                    }
                     let reply = if e == AxError::CANNOT_COMPLETE { Reply::TimedOut } else { Reply::CannotTell };
                     if let Some(f) = st.frames.get_mut(&id) {
+                        f.dead = dead;
                         f.backoff.failed(owed.pid, reply, busy, now);
                     }
                     let wait_s = st.frames.get(&id).map(|f| f.backoff.wait.as_secs());
@@ -1536,7 +1553,7 @@ impl WindowEngine for SpacesEngine {
                 tracing::debug!(id = id.0, "spaces engine: a window parked for a lend shown at its frame");
             }
         } else if away {
-            st.frames.insert(id.0, OwedFrame { frame, element: window.clone(), pid: window.pid().ok(), backoff: Backoff::new(Instant::now()) });
+            st.frames.insert(id.0, OwedFrame { frame, element: window.clone(), pid: window.pid().ok(), backoff: Backoff::new(Instant::now()), dead: 0 });
             tracing::warn!(id = id.0, parked = parked.is_some(), "spaces engine: a window came out of its Space away from the frame its show asked and did not take it: owed, tried again");
         }
         framed
@@ -1942,7 +1959,7 @@ mod tests {
         let e = unloaded();
         let frame = Rect::new(300.0, 120.0, 1100.0, 800.0);
         let t0 = Instant::now();
-        let owed = OwedFrame { frame, element: dead_element(), pid: Some(4242), backoff: Backoff::new(t0) };
+        let owed = OwedFrame { frame, element: dead_element(), pid: Some(4242), backoff: Backoff::new(t0), dead: 0 };
         e.state().frames.insert(NO_WINDOW, owed);
         let mut busy = BusyApps::default();
         let calls = std::cell::Cell::new(0);
@@ -1960,5 +1977,37 @@ mod tests {
         assert_eq!(calls.get(), before + 1, "a quit tries it once");
         e.retry_frames(true, &mut busy, t0 + Duration::from_secs(61), |_| true, |_| Ok(()));
         assert!(e.owed().is_empty() && !busy.not_answering(4242), "taken: forgotten, the app answering again");
+    }
+
+    /// A log of 11-18: a frame owed to a window whose app had let it go (its element
+    /// invalid), still listed off screen by the window server, was tried every second for
+    /// five minutes. Tried [`DEAD_ELEMENT_TRIES`] times with an invalid element, it is owed no
+    /// more; a reply of a busy app in between starts the count again.
+    #[test]
+    fn a_frame_owed_to_a_dead_element_is_given_up_after_a_few_tries() {
+        let e = unloaded();
+        let frame = Rect::new(300.0, 120.0, 1100.0, 800.0);
+        let t0 = Instant::now();
+        let owed = OwedFrame { frame, element: dead_element(), pid: Some(4243), backoff: Backoff::new(t0), dead: 0 };
+        e.state().frames.insert(NO_WINDOW, owed);
+        let mut busy = BusyApps::default();
+        let calls = std::cell::Cell::new(0);
+        let replies = [AxError::INVALID_ELEMENT, AxError::INVALID_ELEMENT, AxError::FAILURE, AxError::INVALID_ELEMENT, AxError::INVALID_ELEMENT];
+        let dead = |_: &OwedFrame| {
+            let i = calls.get();
+            calls.set(i + 1);
+            Err(replies.get(i).copied().unwrap_or(AxError::INVALID_ELEMENT))
+        };
+        for tick in 0..5u64 {
+            e.retry_frames(true, &mut busy, t0 + Duration::from_secs(tick), |_| true, dead);
+            assert!(e.owes_frame(NO_WINDOW), "try {}: still owed", tick + 1);
+        }
+        e.retry_frames(true, &mut busy, t0 + Duration::from_secs(5), |_| true, dead);
+        assert!(!e.owes_frame(NO_WINDOW), "three invalid replies in a row: owed no more");
+        assert_eq!(calls.get(), 6);
+        for tick in 6..20u64 {
+            e.retry_frames(true, &mut busy, t0 + Duration::from_secs(tick), |_| true, dead);
+        }
+        assert_eq!(calls.get(), 6, "never tried again");
     }
 }

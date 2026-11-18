@@ -47,6 +47,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use super::slide_watch::LendNote;
 use super::{Controller, cards_in};
 use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
@@ -1521,6 +1522,7 @@ impl Controller {
             tracing::debug!("dock: a press kept from before, its release never seen: no click");
             self.press_not_click(ob);
         }
+        self.slide_watch_pressing();
         if self.model.is_none() || self.frozen() {
             return;
         }
@@ -1657,7 +1659,9 @@ impl Controller {
     /// pressed has its prediction arranged ([`Self::dock_clicked`]).
     pub(super) fn dock_released(&mut self, ob: &Observer, p: crate::engine::geometry::Point, modifiers: bool, now: Instant) -> Option<WindowId> {
         let press = self.dock_press.take()?;
-        if dock::is_click(&press, p, now, modifiers) {
+        let click = dock::is_click(&press, p, now, modifiers);
+        self.slide_watch_released(click, ms(press.when, now), now);
+        if click {
             self.dock_clicked(ob, &press, now)
         } else {
             tracing::debug!(path = press.item.path, held_ms = ms(press.when, now), modifiers, "dock: a press, not a click; no prediction");
@@ -1796,12 +1800,14 @@ impl Controller {
             // home for ⌘Tab's switcher only when this press puts another home).
             let _ = self.engine.take_back(prev.window);
         }
+        let mut noted = None;
         if let Some(home) = home {
             // Parked first, while still hidden (round dock-put-home): on its Desktop for
             // macOS, out of sight until its stage's switch. The lend is made either way.
             let park = self.lend_park(ob, home, true, Some(lend_park::DOCK_PARK_SECONDS));
             let asked = park.is_some();
             let lend = self.engine.lend_home(home, park);
+            noted = Some(LendNote { home: lend.home, parked: lend.parked, asked, park_ms: lend.park_ms });
             if lend.home {
                 self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: None });
                 tracing::info!(
@@ -1817,6 +1823,7 @@ impl Controller {
                     tracing::info!(bundle, pid, window = home.0, asked, park_ms = lend.park_ms, "dock: the window put home could not be parked off the screen first (its app did not move it in time): it shows at its frame until its stage's switch");
                 }
                 self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted: None });
+                self.slide_watch_press(&bundle, pid, noted, None);
                 return Err("the app's window here was put home at the press: macOS activates it here");
             }
             tracing::info!(bundle, pid, window = home.0, "dock: the app's window here could not be put home; macOS goes where it counts one");
@@ -1824,6 +1831,7 @@ impl Controller {
         let result = m.dock_arrival(pid, facts, ax_window);
         let predicted = result.ok().and_then(|w| m.space_of(w)).map(|s| s.0);
         self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted });
+        self.slide_watch_press(&bundle, pid, noted, predicted);
         let window = result?;
         tracing::debug!(bundle, pid, window = window.0, "dock: the window macOS will show");
         Ok((pid, window))

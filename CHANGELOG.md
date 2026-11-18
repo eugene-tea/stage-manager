@@ -33,6 +33,13 @@
   macOS stays there, but out of sight at the screen's corner, as for ⌘Tab; the whole stage
   then grows from its card together. An app that does not move its window within 30 ms shows
   it early as before, and its stage then appears at once.
+- With `engine = "spaces"`, a Dock click (or ⌘Tab) on an app whose stage a wallpaper click
+  set aside on another Desktop now goes to that Desktop and brings the stage back, as Apple's
+  does: the reveal ends there. The click did nothing before: the app's window was kept off
+  every Desktop, so macOS had nowhere to go. If macOS stays where it is after all, the other
+  Desktop is left revealed as it was.
+- With `engine = "spaces"`, a window that closed while its frame was still owed is given up
+  after three tries; it was retried every second for as long as the window server listed it.
 
 ## 1.9.0 — 2026-11-18
 

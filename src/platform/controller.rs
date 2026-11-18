@@ -154,6 +154,7 @@ mod fallback;
 mod landing_focus;
 mod mission_control;
 mod raise_order;
+mod slide_watch;
 mod spaces;
 mod stale;
 mod switch_pictures;
@@ -1054,6 +1055,9 @@ pub struct Controller {
     verify: Option<arrival::Verify>,
     /// The latest Dock press's prediction, until a Space change shows where it went.
     dock_seen: Option<arrival::DockSeen>,
+    /// The slide watch: each Dock click and ⌘Tab release under the Spaces engine, judged for
+    /// a Desktop slide nobody asked for and logged ([`slide_watch`]).
+    slide_watch: slide_watch::SlideWatch,
     /// A window put on the Desktop shown at a Dock press, still counted hidden, until its
     /// stage comes in front or it goes back ([`arrival::Lent`]).
     lent: Option<arrival::Lent>,
@@ -1297,6 +1301,7 @@ impl Controller {
             unminimizing: HashMap::new(),
             verify: None,
             dock_seen: None,
+            slide_watch: slide_watch::SlideWatch::default(),
             lent: None,
             switcher: switcher::SwitcherWatch::default(),
             defer_present: false,
@@ -2115,7 +2120,10 @@ impl Controller {
             Some((cover, list)) => (Some(cover), list),
             None => (None, windows::wake_on_screen().to_vec()),
         };
-        self.skip_shown_incoming(&mut t, &list);
+        let shown = self.skip_shown_incoming(&mut t, &list);
+        if !shown.is_empty() {
+            self.slide_watch_shown_early(&shown);
+        }
         if t.incoming.is_empty() && t.outgoing.is_empty() {
             return self.execute(ob, actions);
         }
@@ -2132,8 +2140,9 @@ impl Controller {
     /// switch grew a picture over it). When there is one, the rest of the incoming stage is
     /// taken out too and shows at once with the batch, in its order (round dock-put-home: a
     /// stage never comes in half popped, half flying); the outgoing side plays as planned.
-    fn skip_shown_incoming(&self, t: &mut Transition, list: &[windows::CgWindow]) {
-        let Some(m) = self.model.as_ref() else { return };
+    /// Returns the windows found already shown.
+    fn skip_shown_incoming(&self, t: &mut Transition, list: &[windows::CgWindow]) -> Vec<u32> {
+        let Some(m) = self.model.as_ref() else { return Vec::new() };
         let engine = &self.engine;
         let skipped = transition_plan::skip_shown(t, |g| {
             let id = WindowId(g.window.id);
@@ -2150,6 +2159,7 @@ impl Controller {
             let shown: Vec<u32> = skipped.shown.iter().map(|s| s.0).collect();
             tracing::info!(id = t.id, ?shown, rest = ?skipped.rest, "transition: part of the incoming stage already shown: the rest shown at once");
         }
+        skipped.shown.iter().map(|s| s.0).collect()
     }
 
     /// A switch played with pictures ([`Motion::Pictures`]), the Corner engine's choreography:
@@ -3034,6 +3044,7 @@ impl Controller {
                 crate::platform::switcher_probe::note("activated", format!("pid={pid} notice_age_ms={}", fired.elapsed().as_millis()));
                 // A window put home for ⌘Tab's switcher is kept only for its app's activation.
                 self.switcher_activated(pid);
+                self.slide_watch_activated(pid);
                 // Its enhanced UI is read again at its next move (round enhanced-ui).
                 enhanced_ui::forget(pid);
                 // Before the echo check: a window of the app that shows now is placed whoever
@@ -3553,6 +3564,7 @@ impl Controller {
     /// over the visible strip, which slot a dragged window goes to.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent, drop: Option<StripDrop>) {
         let now = Instant::now();
+        self.slide_watch_step(now);
         if event.kind == InputKind::CommandKey {
             // ⌘ pressed or let go: only ⌘Tab's switcher cares (its release activates).
             self.switcher_key(ob, &event, now);
@@ -3666,6 +3678,9 @@ impl Controller {
                 self.switcher_key(ob, &event, now);
                 // One of Mission Control's shortcuts: the engine's upkeep may have work for it.
                 self.upkeep_key(ob, &event, now);
+                if event.is_desktop_key() {
+                    self.slide_watch_person(crate::engine::slide_watch::Person::DesktopKey);
+                }
                 // ⌘Tab's own app switch brings its stage; nothing else comes forward for it.
                 if event.is_switcher_key() {
                     self.end_restore(ob, "an app switcher key", End::Switcher);
@@ -4137,6 +4152,7 @@ impl Controller {
             overview::Change::None => {}
             overview::Change::Began(kind) => {
                 tracing::info!("{} shows: no Space is inferred from the window list until it closes", kind.name());
+                self.slide_watch_person(crate::engine::slide_watch::Person::MissionControl);
                 self.hidden_changed();
             }
             overview::Change::Ended(kind) => {
@@ -4252,6 +4268,7 @@ impl Controller {
         self.space_changes += 1;
         counters::bump(Count::SpaceChange);
         tracing::debug!(changes = self.space_changes, "Space change notified");
+        self.slide_watch_notice(now);
         self.space_checked = now;
         self.pressed_obs = None;
         self.switcher_space_changed(now);
@@ -4418,6 +4435,7 @@ impl Controller {
             "Space changed"
         );
         log_arrival_lets(&note);
+        self.slide_watch_arrived(before, after);
         self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
         let (more, predicted) = self.settle_ahead(ob, list, main.id, after, Instant::now());
@@ -6039,6 +6057,7 @@ impl Controller {
     /// known to the leftovers check that follows ([`Self::safety_ours`]), and the stages are
     /// saved before that check reads `state.json` (the review of 10-29, S1).
     pub fn unpark_all(&mut self, ob: &mut Observer) -> usize {
+        self.slide_watch_quit();
         self.flush_pending(ob);
         // A tab selected since the last check, its group hidden: the tab selected comes back
         // at the group's frame, not the hidden tab (round tab-quit).
@@ -6116,6 +6135,7 @@ impl Controller {
     /// Housekeeping, about every 250 ms: debounced save, config polling, strip refresh.
     pub fn tick(&mut self, ob: &mut Observer) {
         let now = Instant::now();
+        self.slide_watch_step(now);
         self.publish_minimizable(ob);
         if let Some(s) = self.phase.switching().filter(|s| s.overdue(now)) {
             tracing::warn!(id = s.id, max_ms = s.max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
@@ -6814,6 +6834,8 @@ impl Controller {
         state["tick"] = super::wm_thread::tick_status();
         // What the app asked of macOS since the launch (round idle-subsystems).
         state["costs"] = super::costs::status();
+        // Dock clicks and ⌘Tab releases watched for a Desktop slide (the Spaces engine), by `via`.
+        state["slide_watch"] = self.slide_watch_json();
         // Accessibility lists no window for the session (round ax-blind), since (Unix s).
         (state["accessibility_blind"], state["accessibility_blind_since"]) = self.ax_blind_json();
         state["displays"] = Value::Array(displays_json);

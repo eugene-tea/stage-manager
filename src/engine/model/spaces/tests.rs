@@ -2093,6 +2093,144 @@ mod arranged_ahead {
         mac.m.active.insert(space, browser);
         assert!(mac.m.arrange_ahead(w(1), None).is_some());
     }
+
+    #[test]
+    fn a_dock_click_from_another_desktop_ends_the_reveal_there_and_brings_the_stage() {
+        // A log of 11-18 11:36: a wallpaper click on Desktop 1 set the editor's stage aside;
+        // from Desktop 2, Dock clicks on the editor (active there) did nothing: the reveal's
+        // empty stage stood, the arrangement was refused, and the Spaces engine kept the
+        // window on no Desktop, so macOS never went there.
+        let (mut mac, editor) = revealed_on_desktop_1();
+        let space = mac.m.space_of(w(1)).expect("space");
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged: the reveal ends");
+        assert_eq!(ahead.stage, editor);
+        assert!(!raises_or_focus(&actions), "moves only: {actions:?}");
+        mac.run(actions);
+        assert!(!mac.parked(1), "the editor's window is back on its Desktop: macOS has it there to go to");
+        assert_eq!(mac.m.active_stage_in(space), Some(editor));
+        mac.shown = 0;
+        mac.focused = Some(w(1));
+        let at = arrival(&mut mac, Some(&ahead), Some(Wanted::Window { id: w(1), pid: 10 }));
+        assert!(moves(&at).is_empty(), "nothing moves at the arrival: {at:?}");
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        assert!(!mac.m.desktop_revealed(), "the reveal ended");
+        assert_eq!(mac.focused, Some(w(1)));
+        consistent(&mac);
+        // A wallpaper click there reveals again, as after any switch.
+        let obs = mac.obs();
+        let a = mac.m.reveal_desktop_on(Some(MAIN), &obs);
+        mac.run(a);
+        assert!(mac.m.desktop_revealed() && mac.parked(1));
+        consistent(&mac);
+    }
+
+    #[test]
+    fn arriving_unarranged_on_a_revealed_desktop_for_a_window_set_aside_brings_its_stage() {
+        // The Corner engine's parked window is on its Desktop all along: macOS goes there
+        // for it even with nothing arranged, and the arrival brings its stage, ending the
+        // reveal (why the Corner engine did not show the 11-18 case).
+        let (mut mac, editor) = revealed_on_desktop_1();
+        mac.shown = 0;
+        mac.focused = Some(w(1));
+        arrival(&mut mac, None, Some(Wanted::Window { id: w(1), pid: 10 }));
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        assert!(!mac.m.desktop_revealed() && !mac.parked(1));
+        consistent(&mac);
+    }
+
+    #[test]
+    fn a_wrong_prediction_into_a_revealed_desktop_sets_the_reveal_up_again() {
+        let (mut mac, editor) = revealed_on_desktop_1();
+        let space = mac.m.space_of(w(1)).expect("space");
+        let slots = mac.m.slots[&space].clone();
+        let (ahead, actions) = mac.m.arrange_ahead(w(1), None).expect("arranged");
+        mac.run(actions);
+        // macOS stays on Desktop 2: undone, the reveal is back.
+        let undo = mac.m.undo_ahead(&ahead);
+        assert!(!raises_or_focus(&undo), "{undo:?}");
+        mac.run(undo);
+        assert!(mac.parked(1), "the editor's window set aside again");
+        assert_ne!(mac.m.active_stage_in(space), Some(editor));
+        assert_eq!(mac.m.slots[&space], slots, "the strip's slots as they were");
+        assert!(mac.m.undo_ahead(&ahead).is_empty(), "undone once");
+        consistent(&mac);
+        // Desktop 1 later, by a plain slide: still revealed; a second wallpaper click brings
+        // the editor's stage back, as before the arrangement.
+        mac.focused = None;
+        mac.go(0);
+        assert!(mac.m.desktop_revealed(), "the Desktop comes back revealed");
+        let obs = mac.obs();
+        let a = mac.m.reveal_desktop_on(Some(MAIN), &obs);
+        mac.run(a);
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "the second click brings the stage set aside");
+        assert!(!mac.parked(1));
+        consistent(&mac);
+    }
+
+    #[test]
+    fn an_activation_on_the_revealed_desktop_brings_its_apps_stage_back() {
+        let (mut mac, editor) = revealed_on_desktop_1();
+        mac.focused = None;
+        mac.go(0);
+        assert!(mac.m.desktop_revealed());
+        // ⌘Tab (or a Dock click) to the editor on the Desktop shown.
+        let obs = mac.obs();
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        assert!(!mac.m.desktop_revealed() && !mac.parked(1));
+        consistent(&mac);
+    }
+
+    #[test]
+    fn another_apps_activation_leaves_the_reveal_on() {
+        let (mut mac, _) = revealed_on_desktop_1();
+        // Chat, on Desktop 2 only, activated there: Desktop 1 is not touched.
+        let obs = mac.obs();
+        let a = mac.m.app_activated(30, &obs);
+        mac.run(a);
+        assert!(mac.m.arrange_ahead(w(4), None).is_none(), "a window of the Desktop shown");
+        mac.focused = None;
+        mac.go(0);
+        assert!(mac.m.desktop_revealed(), "Desktop 1 still revealed");
+        // Chat activated on Desktop 1, where it has no stage: the reveal stays.
+        let obs = mac.obs();
+        let a = mac.m.app_activated(30, &obs);
+        mac.run(a);
+        assert!(mac.m.desktop_revealed() && mac.parked(1));
+        consistent(&mac);
+    }
+
+    #[test]
+    fn a_revealed_desktop_whose_empty_stage_took_a_window_is_not_arranged() {
+        let (mut mac, _) = revealed_on_desktop_1();
+        let space = mac.m.space_of(w(1)).expect("space");
+        let desktop = mac.m.active_stage_in(space).expect("the reveal's stage");
+        // A window joined the reveal's stage meanwhile: it is no bare desktop any more,
+        // and leaving it is an ordinary switch.
+        mac.m.stage_mut(desktop).expect("stage").windows.push(w(2));
+        assert!(mac.m.arrange_ahead(w(1), None).is_none(), "the reveal no longer stands: not arranged");
+    }
+    }
+
+    /// Desktop 1 shows the editor's stage (window 1); a wallpaper click there sets it aside
+    /// (the reveal); the user goes to Desktop 2, where the editor has window 3.
+    fn revealed_on_desktop_1() -> (Mac, StageId) {
+        let mut mac = two_desktops();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let editor = mac.m.stage_of(w(1)).expect("editor stage");
+        mac.click(editor);
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        let obs = mac.obs();
+        let a = mac.m.reveal_desktop_on(Some(MAIN), &obs);
+        mac.run(a);
+        assert!(mac.m.desktop_revealed() && mac.parked(1), "the wallpaper click set the editor's stage aside");
+        mac.focused = Some(w(3));
+        mac.go(1);
+        assert!(!mac.parked(3));
+        mac.elsewhere.clear();
+        (mac, editor)
     }
 }
 
