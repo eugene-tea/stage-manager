@@ -37,7 +37,10 @@
 //!   short fade; a new picture of the wallpaper repaints the strip shown; another Desktop's
 //!   pane laid out ahead keeps its colours until it shows. No picture of the wallpaper:
 //!   opaque cards. The card under the pointer (or a dragged card's target) eases to
-//!   `[cards] hover_window_opacity` (solid) with its growth, and back on leave.
+//!   `[cards] hover_window_opacity` (solid) with its growth, and back on leave. While the
+//!   strip shows over windows (a window covers it: revealed at the edge, or hidden there) every
+//!   card is solid, as Apple's, eased there and back on the same fade
+//!   ([`strip_visibility::over_windows`]).
 //! - **Level** (`[strip] level`): Apple's strip sits below windows, so a window moved over
 //!   it covers it (and auto-hide slides it away), also while the window is dragged over it.
 //!   It is lifted above windows only while a card is dragged and while the edge reveals it
@@ -2149,6 +2152,9 @@ struct Strip {
     /// The cards are drawn flat: the strip was brought back at the left edge
     /// (`[reveal] flat`, [`edge_flat`]); they turn back as it hides.
     flat: bool,
+    /// The strip shows over windows ([`strip_visibility::over_windows`]): its cards are solid,
+    /// no glass ([`Glass::picture`]), and no wallpaper is read for them meanwhile.
+    over_windows: bool,
     poll_timer: Option<Retained<NSTimer>>,
     /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
     /// global monitor to the edge or the tab looks again.
@@ -2202,6 +2208,7 @@ impl Strip {
             app_names: HashMap::new(),
             visibility: Visibility::default(),
             flat: false,
+            over_windows: false,
             poll_timer: None,
             edge_waits: false,
             capturer,
@@ -3088,15 +3095,14 @@ impl Strip {
 
     /// The cards' glass as the style sets it.
     fn glass(&self) -> Glass {
-        let c = &self.style.cards;
         // Reduce Transparency: solid cards, as macOS's own materials turn opaque.
-        let opacity = if display_options::reduce_transparency() { 1.0 } else { c.window_opacity };
-        Glass { opacity, hover_opacity: c.hover_window_opacity, saturation: c.backdrop_saturation, brightness: c.backdrop_brightness }
+        Glass::of(&self.style.cards, display_options::reduce_transparency())
     }
 
     /// The glass behind `slot`'s picture on `layout`, from the wallpaper behind the thumbnail
-    /// as drawn (turned, at rest), the picture at the card's opacity for its hover now
-    /// ([`Glass::picture`]); `None` with the glass off or no picture of the wallpaper.
+    /// as drawn (turned, at rest), the picture at the card's opacity for its hover now and
+    /// solid over windows ([`Glass::picture`]); `None` with the glass off or no picture of
+    /// the wallpaper.
     fn glass_at(&self, layout: &CardLayout, slot: &strip_layout::ThumbSlot) -> Option<GlassLook> {
         let glass = self.glass();
         if !glass.on() {
@@ -3106,7 +3112,7 @@ impl Strip {
         let g = self.geometry.global;
         let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let rgb = glass.under(shown.backdrop.mean(r.translate(g.x, g.y))?);
-        Some(GlassLook { color: shown.color(rgb), rgb, opacity: glass.picture(self.grown(layout.stage)) as f32 })
+        Some(GlassLook { color: shown.color(rgb), rgb, opacity: glass.picture(self.grown(layout.stage), self.over_windows) as f32 })
     }
 
     /// The glass window `id` shows on the card of `layout` (its own thumbnail, else the
@@ -3172,11 +3178,30 @@ impl Strip {
 
     /// A new picture of the wallpaper (or none): the strip shown takes its colours.
     fn repaint_glass(&mut self) {
-        let fade = self.style.animation.seconds(GLASS_FADE_MS);
+        self.repaint_glass_over(self.style.animation.seconds(GLASS_FADE_MS));
+    }
+
+    /// Every card's glass painted again, a change easing over `seconds` (none: at once).
+    fn repaint_glass_over(&mut self, seconds: f64) {
         let stages: Vec<u64> = self.pane.cards.keys().copied().collect();
         for stage in stages {
-            self.paint_glass(stage, Ease::Out(fade));
+            self.paint_glass(stage, Ease::Out(seconds));
         }
+    }
+
+    /// The strip shows over windows now (`over`) or not ([`strip_visibility::over_windows`]):
+    /// its cards turn solid or back to the glass on the glass's fade when the strip was in
+    /// view (`was_shown`), at once while it was off the screen; the wallpaper is read again
+    /// once it is back over the desktop ([`card_glass::set_over_windows`]).
+    fn set_over_windows(&mut self, over: bool, was_shown: bool) {
+        if self.over_windows == over {
+            return;
+        }
+        self.over_windows = over;
+        tracing::debug!(over, was_shown, "strip over windows: the cards {}", if over { "solid" } else { "glass" });
+        card_glass::set_over_windows(self.display, over);
+        let seconds = if was_shown && !self.instant { self.style.animation.seconds(GLASS_FADE_MS) } else { 0.0 };
+        self.repaint_glass_over(seconds);
     }
 
     /// Every card's thumbnails and the switch snapshots taken again ([`pictures_changed`]).
@@ -4275,6 +4300,7 @@ impl Strip {
     }
 
     fn update_visibility(&mut self) {
+        let was_shown = self.pane.shown;
         let window_drag = self.snapshot.window_drag.is_some();
         let drag_pointer = window_drag.then(|| self.pointer());
         // A window dragged toward the strip ([`window_drop`]): taken in by where the pointer
@@ -4339,6 +4365,9 @@ impl Strip {
         // has landed (10-13, a laptop: a card click to a stage clear of the strip dropped it
         // at once, under the window leaving).
         let held_up = self.pane.lifted == Some(true) && (self.transition_starting || self.motion_running());
+        // Over windows the cards are solid (the owner's rule, 11-18), held so through a switch
+        // from there until its snapshots land, as the lift is.
+        self.set_over_windows(strip_visibility::over_windows(mode, covered, held_up, self.over_windows), was_shown);
         self.set_lifted(strip_visibility::lifted(strip_visibility::Lift {
             always: self.style.level == StripLevel::AboveWindows,
             card_drag: card_dragging,

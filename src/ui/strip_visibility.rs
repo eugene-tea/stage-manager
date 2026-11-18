@@ -113,6 +113,18 @@ pub fn lifted(l: Lift) -> bool {
     l.always || l.card_drag || l.transition || l.edge_reveal
 }
 
+/// Whether the strip shows over windows, its cards solid with no glass (the owner's rule,
+/// 11-18: Apple's cards revealed over a light window and over a dark one are fully solid, no
+/// tint, nothing of the window behind): the strip on and covered by a window (`mode` is
+/// [`Mode::EdgeOnly`] because of `covered`, the edge revealing it over that window, or hidden
+/// behind it at the edge, ready to show so), or held up for a switch under way (`held`) when it
+/// was over windows before (`was`: the leaving windows cover it until their snapshots land in
+/// solid cards). Apple's "hide recent apps" (`AutoHide`) with nothing covering the strip is not
+/// over windows: the strip comes in over the desktop and keeps the glass.
+pub fn over_windows(mode: Mode, covered: bool, held: bool, was: bool) -> bool {
+    (mode == Mode::EdgeOnly && covered) || (held && was)
+}
+
 /// Whether any of `frames` (the active stage's shown windows) hides the strip whose area is
 /// `strip` (global coordinates): it reaches into the strip's area and its left edge is within
 /// [`COVER_EDGE`] of the strip's left edge (or past it). A window over the cards but further
@@ -270,6 +282,25 @@ impl Visibility {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_strip_is_over_windows_while_a_window_covers_it_and_through_a_switch_from_there() {
+        // (user_visible, hide_recent_apps, covered, held, was) -> over windows
+        let cases = [
+            ((true, false, true, false, false), true, "revealed at the edge over a covering window"),
+            ((true, true, true, false, false), true, "auto-hide and a covering window: over the window"),
+            ((true, true, false, false, false), false, "auto-hide over the desktop: the glass"),
+            ((true, false, false, false, false), false, "at rest over the desktop"),
+            ((false, false, true, false, false), false, "hidden by the user"),
+            ((true, false, false, true, true), true, "a switch from over windows to a stage clear of the strip"),
+            ((true, false, false, true, false), false, "a switch held up, never over windows"),
+            ((true, false, false, false, true), false, "the switch landed: back to the glass"),
+        ];
+        for ((visible, auto_hide, covered, held, was), want, why) in cases {
+            let mode = Mode::of(visible, auto_hide, covered);
+            assert_eq!(over_windows(mode, covered, held, was), want, "{why}");
+        }
+    }
 
     const STRIP: Rect = Rect::new(0.0, 30.0, 200.0, 1410.0);
 
