@@ -6763,6 +6763,8 @@ impl Controller {
         state["engine"] = self.status_engine();
         // The WM tick's pace (round sm-tick): ticks brisk and at rest since the launch.
         state["tick"] = super::wm_thread::tick_status();
+        // What the app asked of macOS since the launch (round idle-subsystems).
+        state["costs"] = super::costs::status();
         // Accessibility lists no window for the session (round ax-blind), since (Unix s).
         (state["accessibility_blind"], state["accessibility_blind_since"]) = self.ax_blind_json();
         state["displays"] = Value::Array(displays_json);

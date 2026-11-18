@@ -1161,6 +1161,7 @@ fn gate_outcome(sck: Option<Outcome>) -> Outcome {
 /// shareable content first). Returns what [`sck_round`] returns, for the whole batch, its
 /// outcome ScreenCaptureKit's alone ([`gate_outcome`]).
 fn capture_round(round: u64, batch: &[Target], deliver: Deliver, outcomes: &mut HashMap<u32, bool>, permit: Permit) -> RoundResult {
+    super::costs::add(super::costs::Cost::Capture, batch.len() as u64);
     let fast = if takes_fast(permit) { fast_part(batch, deliver) } else { FastPart { left: batch.to_vec(), ..FastPart::default() } };
     let took: Vec<Target> = batch.iter().filter(|t| !fast.left.contains(t)).copied().collect();
     if !took.is_empty() && !CLOSING.load(Ordering::SeqCst) {

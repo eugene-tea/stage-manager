@@ -171,6 +171,7 @@ impl Reader {
     /// Reads what `screen`'s desktop shows now (main thread; round displays-2): each screen
     /// may show a different picture, with its own placement, size, scale and colour space.
     pub fn read_screen(&mut self, mtm: MainThreadMarker, screen: &NSScreen) -> Wall {
+        super::costs::bump(super::costs::Cost::WallpaperRead);
         let dark = dark_appearance(mtm);
         let f = screen.frame();
         let frame = super::desktop::to_top_left(

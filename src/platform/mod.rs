@@ -17,6 +17,7 @@ pub mod code_sign;
 pub mod conductor;
 pub mod controller;
 pub mod corner;
+pub mod costs;
 pub mod ctl;
 pub mod desktop;
 pub mod desktop_counts;

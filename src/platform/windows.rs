@@ -253,6 +253,7 @@ pub fn describe(ids: &[u32]) -> Vec<CgWindow> {
 }
 
 fn query(options: CGWindowListOption) -> Vec<CgWindow> {
+    super::costs::bump(super::costs::Cost::WindowList);
     let Some(array) = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
         tracing::warn!("CGWindowListCopyWindowInfo returned nothing");
         return Vec::new();

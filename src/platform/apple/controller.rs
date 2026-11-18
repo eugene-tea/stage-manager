@@ -1304,7 +1304,14 @@ impl AppleController {
             "last_refusal": self.last_refusal,
         });
         let Some(m) = &self.model else {
-            return json!({ "ok": false, "error": "not following Apple's Stage Manager yet (no settled read)", "engine": engine, "apple": apple });
+            return json!({
+                "ok": false,
+                "error": "not following Apple's Stage Manager yet (no settled read)",
+                "engine": engine,
+                "apple": apple,
+                "tick": crate::platform::wm_thread::tick_status(),
+                "costs": crate::platform::costs::status(),
+            });
         };
         let active = m.main_active_stage();
         let stages: Vec<Value> = m
@@ -1350,6 +1357,10 @@ impl AppleController {
             "windows": windows,
             "display": self.screen().map(|d| json!({ "id": d.id.0, "frame": d.frame, "visible": d.visible })),
             "apple": apple,
+            // The WM tick's pace and what the app asked of macOS since the launch, as in
+            // our engines' `ctl state`.
+            "tick": crate::platform::wm_thread::tick_status(),
+            "costs": crate::platform::costs::status(),
         })
     }
 
