@@ -97,7 +97,8 @@ impl Controller {
     pub(super) fn upkeep_wants_fast_tick(&self, now: Instant) -> bool {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_replans(now) || self.reveal_fast(now),
-            EngineKind::Spaces | EngineKind::Apple => false,
+            EngineKind::Spaces => self.mission_wants_fast(now),
+            EngineKind::Apple => false,
         }
     }
 
@@ -145,11 +146,44 @@ impl Controller {
     }
 
     /// The fast tick's share of the upkeep. The Corner engine: one plan of the patch at most
-    /// ([`Self::corner_fast_tick`]).
-    pub(super) fn upkeep_fast_tick(&mut self, now: Instant) {
+    /// ([`Self::corner_fast_tick`]). The Spaces engine: Mission Control looked for after one
+    /// of its keys, the hidden stages' windows put home for it and taken back
+    /// ([`Self::mission_fast_tick`]).
+    pub(super) fn upkeep_fast_tick(&mut self, ob: &Observer, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_fast_tick(now),
-            EngineKind::Spaces | EngineKind::Apple => {},
+            EngineKind::Spaces => self.mission_fast_tick(ob, now),
+            EngineKind::Apple => {}
+        }
+    }
+
+    /// A key-down in another app. The Spaces engine: one of Mission Control's shortcuts
+    /// ([`Self::mission_key`]); the Corner engine's hidden windows are on their Desktop,
+    /// where Mission Control shows them.
+    pub(super) fn upkeep_key(&mut self, ob: &Observer, event: &crate::platform::input::InputEvent, now: Instant) {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_key(ob, event, now),
+            EngineKind::Corner | EngineKind::Apple => {}
+        }
+    }
+
+    /// A notice of the Dock's (`name`). The Spaces engine: Mission Control may be opening
+    /// ([`Self::mission_dock_notice`]).
+    pub(super) fn upkeep_dock_notice(&mut self, name: &str, now: Instant) {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_dock_notice(name, now),
+            EngineKind::Corner | EngineKind::Apple => {}
+        }
+    }
+
+    /// `ctl debug-mission-control …` (a test's). The Spaces engine only
+    /// ([`Self::debug_mission_control`]).
+    pub(super) fn upkeep_debug_mission_control(&mut self, ob: &Observer, words: &[String]) -> Value {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.debug_mission_control(ob, words),
+            EngineKind::Corner | EngineKind::Apple => {
+                json!({ "ok": false, "error": "only under the Spaces engine: with the others Mission Control shows every window already" })
+            }
         }
     }
 
@@ -160,7 +194,8 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_tick(ob),
             EngineKind::Spaces => {
-                let _ = ob;
+                // Mission Control first: what it has put home is the engine's to count.
+                self.mission_tick(ob, Instant::now());
                 self.spaces_tick();
             }
             EngineKind::Apple => {}
@@ -400,6 +435,15 @@ impl Controller {
             EngineKind::Corner => self.strays_status(),
             EngineKind::Spaces => self.spaces_strays_status(),
             EngineKind::Apple => Vec::new(),
+        }
+    }
+
+    /// `ctl state`'s `mission_control`: the Spaces engine's lends for Mission Control
+    /// ([`Self::mission_status`]); `null` under the others.
+    pub(super) fn status_mission_control(&self) -> Value {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_status(),
+            EngineKind::Corner | EngineKind::Apple => Value::Null,
         }
     }
 

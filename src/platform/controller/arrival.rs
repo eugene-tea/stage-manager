@@ -1191,7 +1191,7 @@ impl Controller {
         // A newly opened app's window seen by AX before its first frame: placed as it shows.
         self.offer_fresh(ob, now);
         // The engine's share (the Corner engine: its patch after a focus, through Show Desktop).
-        self.upkeep_fast_tick(now);
+        self.upkeep_fast_tick(ob, now);
         if self.model.is_none() {
             self.verify = None;
         } else if let Some(v) = self.verify.as_ref().filter(|v| v.polling && now >= v.next) {

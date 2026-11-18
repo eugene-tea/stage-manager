@@ -436,14 +436,15 @@ impl Lends {
     }
 
     /// A hint at `now`. True when it is taken (the looks come at the fast tick for its
-    /// watch); in [`Mode::Key`] one of the keys also wants a round at once.
+    /// watch; false for a key's repeats and for anything while Mission Control shows); in
+    /// [`Mode::Key`] one of the keys also wants a round at once.
     pub fn hint(&mut self, hint: Hint, now: Instant) -> bool {
         if self.mode == Mode::Off || self.up.is_some() {
             return false;
         }
-        // A key is not replaced by the Dock's notice that follows it.
-        let keyed = self.hint.is_some_and(|(h, t)| matches!(h, Hint::Key(_)) && now.saturating_duration_since(t) < h.watch());
-        if hint == Hint::Dock && keyed {
+        // A key stands for its watch: not replaced by the Dock's notice that follows it, nor
+        // by its own repeats while it is held.
+        if self.hint.is_some_and(|(h, t)| matches!(h, Hint::Key(_)) && now.saturating_duration_since(t) < h.watch()) {
             return false;
         }
         self.hint = Some((hint, now));
@@ -787,6 +788,7 @@ mod tests {
         assert!(l.hint(Hint::Key(Trigger::AppWindows), t + ms(5)));
         assert_eq!(l.wanted(), Some(By::Key));
         assert!(!l.hint(Hint::Dock, t + ms(8)), "the key stays the hint");
+        assert!(!l.hint(Hint::Key(Trigger::AppWindows), t + ms(300)), "nor do its repeats while held replace it");
         l.plan(vec![w(1)], t + ms(5));
         assert_eq!(l.next(), Some(w(1)));
         l.lent(out(1), 7);
