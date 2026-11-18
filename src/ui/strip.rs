@@ -140,6 +140,7 @@ use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Grip, Metrics};
 use crate::ui::strip_model::{self, CardChange, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
 use crate::ui::strip_visibility::{self, Mode, Timing, Visibility};
+use crate::ui::window_drop;
 
 #[path = "strip_motion.rs"]
 mod motion;
@@ -295,15 +296,15 @@ fn with_other<S, R>(
     })
 }
 
-/// Runs `f` on the first strip (the main display's first) whose column holds `p`, if any.
-fn with_strip_at<R>(p: Point, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
-    let main = with_strip(|s| s.geometry.global.contains(p)).unwrap_or(false);
-    if main {
+/// Runs `f` with the strip that takes a window released at `p` ([`Strip::takes_drop_at`]):
+/// the main display's first, then the others'.
+fn with_strip_taking<R>(p: Point, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
+    if with_strip(|s| s.takes_drop_at(p)).unwrap_or(false) {
         return with_strip(f);
     }
     OTHERS.with(|o| {
         let mut others = o.try_borrow_mut().ok()?;
-        let s = others.values_mut().find(|s| s.geometry.global.contains(p))?;
+        let s = others.values_mut().find(|s| s.takes_drop_at(p))?;
         Some(f(s))
     })
 }
@@ -496,11 +497,12 @@ pub fn set_thumbnail_interval(ms: u64) {
     with_strips(|s| s.capturer.set_interval(crate::platform::capture::interval_of(ms)));
 }
 
-/// Where a window released at `p` (global, top-left origin) goes: `None` when it is not over
-/// the strip (the user hid the strip, or `p` is outside the strip column), else the slot under
-/// `p`, the same one the strip's gap shows. Main thread.
+/// Where a window released at `p` (global, top-left origin) goes: `None` when no strip takes
+/// it there (the user hid the strip, `p` is out of its reach, or the window hid the strip:
+/// [`window_drop::taken_in`], the same test that shows its card), else the slot under `p`,
+/// the same one the strip's gap shows. Main thread.
 pub fn drop_slot(p: Point) -> Option<StripDrop> {
-    with_strip_at(p, |s| s.snapshot.user_visible.then(|| StripDrop { before: s.real_stage(s.drop_slot_at(p).before) })).flatten()
+    with_strip_taking(p, |s| StripDrop { before: s.real_stage(s.drop_slot_at(p).before) })
 }
 
 /// The pointer moved to `p` (global, top-left origin) over another app's window or the
@@ -4112,6 +4114,26 @@ impl Strip {
         self.geometry.global_point(NSEvent::mouseLocation())
     }
 
+    /// Whether this strip takes the dragged window with the pointer at `p` (global): its card
+    /// shows and a release drops it ([`window_drop::taken_in`], from where it was at the last
+    /// step).
+    fn takes_window_at(&self, p: Point) -> bool {
+        self.snapshot.window_drag.is_some()
+            && self.snapshot.user_visible
+            && window_drop::taken_in(self.drop_over, p, &self.geometry.global, self.geometry.m.k, self.dragged_frame(p))
+    }
+
+    /// Whether a window released at `p` (global) drops into this strip: the dragged window's
+    /// test ([`Self::takes_window_at`]); a release the strip has not heard of as a drag yet,
+    /// over its column.
+    fn takes_drop_at(&self, p: Point) -> bool {
+        if self.snapshot.window_drag.is_some() {
+            self.takes_window_at(p)
+        } else {
+            self.snapshot.user_visible && self.geometry.global.contains(p)
+        }
+    }
+
     /// True when the strip is on but a window of the active stage at the screen's left edge
     /// hides it ([`strip_visibility::hides_strip`]).
     fn covered(&self) -> bool {
@@ -4190,12 +4212,20 @@ impl Strip {
     }
 
     fn update_visibility(&mut self) {
-        let covered = strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global);
+        let window_drag = self.snapshot.window_drag.is_some();
+        let drag_pointer = window_drag.then(|| self.pointer());
+        // A window dragged toward the strip ([`window_drop`]): taken in by where the pointer
+        // is (its card shows, the gap opens under the pointer, the strip shows under the
+        // window), with a margin on the way out; until then it hides the strip as any window
+        // of the stage does, and one that hides it is no drop (Apple's, 11-09).
+        let over = drag_pointer.filter(|p| self.takes_window_at(*p));
+        let drop_over = over.is_some();
+        let drag_hides = drag_pointer.is_some_and(|p| window_drop::hides(drop_over, &self.geometry.global, self.dragged_frame(p)));
+        let covered = strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global) || drag_hides;
         let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, covered);
         self.visibility.set_tab(self.pane.tab.shown.then(|| self.geometry.tab()));
         self.visibility.set_screen_left(self.geometry.screen.origin.x);
-        let window_drag = self.snapshot.window_drag.is_some();
-        let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());
+        let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| drag_pointer.unwrap_or_else(|| self.pointer()));
         let edge_pointer = pointer.filter(|_| mode == Mode::EdgeOnly);
         // A strip in plain view stays under the pointer only for the switch its own card click
         // started (the clicked card stays squeezed until it lands).
@@ -4203,14 +4233,11 @@ impl Strip {
             self.visibility.forget_shown();
         }
         let decision = self.visibility.step(mode, edge_pointer, &self.geometry.global, Instant::now());
-        // A window dragged over the strip column shows it (under the window) and opens the gap
-        // under the pointer.
-        let over = pointer.filter(|p| window_drag && self.snapshot.user_visible && self.geometry.global.contains(*p));
-        let drop_over = over.is_some();
         let before = over.and_then(|p| self.drop_slot_at(p).before);
         if drop_over != self.drop_over || (drop_over && before != self.drop_before) {
             if drop_over != self.drop_over {
-                tracing::debug!(drop_over, "window drag over the strip");
+                let x = drag_pointer.map(|p| (p.x - self.geometry.global.x).round());
+                tracing::debug!(drop_over, ?x, drag_hides, "window drag over the strip");
             }
             self.drop_over = drop_over;
             self.drop_before = before;

@@ -97,6 +97,7 @@ use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, GlassLook, 
 use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
 use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, ShadowReport, StripEvent, Transition, TransitionReport};
+use crate::ui::window_drop;
 use crate::ui::window_shadow::{self, DEFAULT_CORNER, WindowShadow};
 
 /// The interval used when `snapshot_interval_ms = 0` (captures only on demand).
@@ -1905,8 +1906,23 @@ impl Strip {
         }
     }
 
-    /// While a window is dragged with the pointer over the strip column (`over`, global), its
-    /// card follows the pointer above everything; elsewhere it goes.
+    /// Where the button went down on the dragged window (review R1-ui 7), else where the
+    /// pointer was when the strip first heard of the drag (global).
+    fn window_drag_grab(&self) -> Option<Point> {
+        let w = self.snapshot.window_drag?;
+        self.snapshot.window_drag_grab.or_else(|| self.motion.drag_seen.filter(|s| s.0 == w.id).map(|s| s.1))
+    }
+
+    /// The dragged window's frame with the pointer at `p` (global), moved from its frame at the
+    /// press with the pointer ([`window_drop::live_frame`]); `None` with no window dragged.
+    pub(super) fn dragged_frame(&self, p: Point) -> Option<Rect> {
+        let w = self.snapshot.window_drag?;
+        Some(window_drop::live_frame(w.frame, self.window_drag_grab()?, p))
+    }
+
+    /// While the strip takes the dragged window (`over`: the pointer, global;
+    /// [`window_drop::taken_in`]), its card follows the pointer above everything; elsewhere
+    /// it goes.
     pub(super) fn window_drag_card(&mut self, over: Option<Point>) {
         let (Some(p), Some(w)) = (over, self.snapshot.window_drag) else {
             if self.motion.window_card.take().is_some_and(|c| {
@@ -1921,9 +1937,9 @@ impl Strip {
         let m = self.m().clone();
         // The grab point: where the button went down on the window (review R1-ui 7), else
         // where the pointer was when the strip first heard of the drag.
-        let seen = self.snapshot.window_drag_grab.unwrap_or_else(|| self.motion.drag_seen.filter(|s| s.0 == w.id).map_or(p, |s| s.1));
+        let seen = self.window_drag_grab().unwrap_or(p);
         let f = w.frame;
-        let grab = if f.w > 1.0 && f.h > 1.0 { ((seen.x - f.x) / f.w, (seen.y - f.y) / f.h) } else { (0.5, 0.05) };
+        let grab = window_drop::grab_share(f, seen);
         let corner = self.style.cards.corner_radius * m.k;
         if self.motion.window_card.as_ref().is_none_or(|c| c.window != w.id) {
             // The card goes above every window: a cover held over the corner, and landed

@@ -38,4 +38,5 @@ pub mod strip_render;
 pub mod strip_visibility;
 pub mod transition_plan;
 pub mod welcome;
+pub mod window_drop;
 pub mod window_shadow;
