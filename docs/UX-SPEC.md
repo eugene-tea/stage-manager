@@ -149,9 +149,20 @@ brightness (`[cards] window_opacity`, `backdrop_saturation`, `backdrop_brightnes
 black and grey: the opacity 0.78 in two runs, the colour behind within a level of the model,
 the grey a blend in the display's encoded values; the hovered card read fully solid. Apple's
 colour is flat over a card where the wallpaper behind it changes, so it is an average, not a
-blur. Not measured yet: dark mode, and what Apple shows through a window behind
-another on one card (here each window has the wallpaper behind it). A switch's snapshots
-take the card's look as they shrink into it and leave it as they grow into their windows.
+blur. Not measured yet: dark mode. **Over windows the
+cards are solid** (screenshots, 11-18): Apple's strip revealed at the edge over a maximized
+light window and over a dark one shows every card fully solid, no tint and nothing of the
+window behind. Ours draws every picture at 1 while a window covers the strip (revealed at
+the edge over it, or hidden behind it there) and through a switch started from there until
+its snapshots land, easing there and back on the glass's fade (300 ms at `[animation]
+speed` 1, at once with animations off or while the strip is off the screen); back at rest
+over the desktop the cards let the wallpaper through again. Meanwhile the wallpaper is not
+read once the Desktop shown has been, and it is read at once when the strip is over the
+desktop again. Apple's "hide recent apps" (`AutoHide`) with nothing covering the strip
+brings it in over the desktop: ours keeps the glass there (Apple's look there is not
+measured). A switch's snapshots
+take the card's look as they shrink into it and leave it as they grow into their windows
+(over windows the solid look: no tint mid-switch).
 The card under the pointer turns solid as it grows, as Apple's does: its pictures ease to
 `[cards] hover_window_opacity` (1) on the hover's own curve and time, and back as it shrinks
 on leave; a card a dragged card would merge into does the same, as it grows. A click on it
