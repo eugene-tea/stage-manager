@@ -9,6 +9,9 @@
   applies at the next launch is marked so, with a Relaunch button: every window is brought
   back, and Stage Manager is opened again. While Apple's Stage Manager is on and Stage Manager
   is paused, no mode is selected and the line says so.
+- With `engine = "spaces"`, an app's window with an attached panel (Calendar's, for one) no
+  longer flashes onto the Desktop every few seconds while its stage is hidden: the panel stays
+  hidden with its window, and is shown and brought back with it.
 - A window's shadow on the window behind it no longer goes and comes back at the end of a
   switch. In a stage of overlapping windows, the front window's shadow on the one behind was
   dropped as the windows landed and faded back in over the next third of a second.

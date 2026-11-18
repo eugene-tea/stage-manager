@@ -116,7 +116,7 @@ impl Controller {
             // for the strangers only when the tidy ended a Space).
             let alive: HashSet<u32> = windows::wake_list().iter().map(|w| w.id).collect();
             spaces.tidy(&alive, |stage| m.stages().iter().any(|s| s.id.0 == stage));
-            spaces.let_strangers_out(&windows::wake_list());
+            spaces.let_strangers_out(&windows::wake_list(), |id| m.window(WindowId(id)).is_some());
         }
     }
 
