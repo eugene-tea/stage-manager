@@ -218,8 +218,10 @@ with Apple's.
   card, it joins that card's stage in front of its windows, and is the one in front when you
   switch there; back on its own card, nothing changes.
 - **Drag a window onto the strip** by its title bar to give it a stage of its own. The cards
-  stay under the window as you drag; once the pointer is over the strip, a small picture of
-  the window shows where it will go.
+  stay under the window as you drag; once the pointer is near the strip, a small picture of
+  the window shows where it will go. A window dragged to the screen's left edge hides the
+  strip, as any window there does, and is not dropped into it: hold it nearer its left edge
+  and bring the pointer to the strip.
 - **Drag a card up or down** to move it to another place in the strip.
 - **Drop a card onto another card** to merge the two stages; the dropped card's windows go in
   front. To split them again, drag a window off the merged card into the middle or between

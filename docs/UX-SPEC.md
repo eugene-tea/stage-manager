@@ -38,7 +38,8 @@ screen, and one left in the hiding corner comes back just out of it.
 
 **The strip.** It sits below windows: a window moved over the cards covers them and the strip
 stays up under it. It slides away only once a window of the front stage covers the cards'
-left edge, its own left edge within 20 pt of the screen's, as Apple's does (recorded on a
+left edge, its own left edge within 20 pt of the screen's, as Apple's does (a window being
+dragged too, until the strip takes it in: Drag and drop) (recorded on a
 Studio Display: Apple's stayed up under a window dragged left over the cards to 52 pt, and
 slid away when it was dragged on to 15 pt, its cards starting at 16 pt; the point between
 was not measured; a laptop's windows nearly fill the screen, so there it goes more often).
@@ -448,9 +449,22 @@ what moves: on one window of a card of several, that window; on the card's app i
 are drawn over the windows), or anywhere on a card of one window, the whole card, which
 reorders and merges in the column as below and drops whole in the main area. A window dragged onto the strip
 becomes a stage of its own in the slot under the pointer. While it is dragged over the cards
-they stay under it, as Apple's do; once the pointer is over the strip, a card-sized picture of
-it follows the pointer above everything (Apple's window itself turns into a card there,
-recorded with the pointer about 280 pt from the edge on a 5K screen). Apple's took the drop
+they stay under it, as Apple's do. What takes it in is where the pointer is, not the window's
+frame: with the pointer within 290 pt of the screen's edge (`window_drop::DROP_REACH`, times
+the strip's scale, never less than the column), a card-sized picture of it follows the pointer
+above everything, held at the point the pointer holds, and a release there drops it. Apple's
+window itself turns into a card there (recorded 11-09 on a 5K screen: a window held 240 pt
+right of its left edge started to shrink with the pointer about 290 pt from the edge, its own
+left edge about 55 pt from it, and became a 97 pt tall card with the pointer a quarter of the
+way across it, on its title bar; one dragged over the cards to 48 pt with the pointer about
+450 pt out stayed a window). Until then the dragged window hides the strip as any window of
+the stage does (its left edge within 20 pt of the screen's, its frame worked out from the
+pointer), and a window that hid it shows no card and is no drop: Apple's window held 390 pt
+in, dragged onto a card, hid the strip before the pointer got near and stayed a window, the
+pointer at last about 95 pt from the edge. Once taken in it hides nothing (Apple's is a card
+by then). The pointer leaves 24 pt further out than it comes in (`DROP_LEAVE`), so a pointer
+wavering at the boundary does not show and hide the picture at every move. Apple's freezes
+the window as it shrinks; ours leaves it at its size under the picture ("Dragging uses stand-ins", below). Apple's took the drop
 of a window of another app than the stage's (11-09: Green out of Red's stage made a card) and
 sent one of the stage's only app back where it was (Red 2 out of Red's stage); ours makes a
 card of either, an extension that keeps Apple's own case as it is.
@@ -460,8 +474,8 @@ as far as the widest card can draw: a combined card's other window (`[cards]
 second_app_dx` beside the front one), grown under the pointer, or dragged to the column's
 edge with its right part past the pointer, shadows included (the widest card's span at
 `hover_scale`, past the column; about 466 pt in all on the laptop, 486 on a 5K screen). The
-column alone is the strip for everything that measures it (hit tests of drops, window drags
-over the strip, auto-hide, `[windows] fit`); the room right of it lets every click and
+column alone is the strip for everything that measures it (hit tests of drops, auto-hide,
+`[windows] fit`; a window dragged toward the strip has a reach of its own, Drag and drop); the room right of it lets every click and
 scroll through, except over a card drawn there, which hovers and clicks as the rest of it. A
 hidden strip slides `[motion] slide_distance` (Apple's 286 pt), or as far as takes the
 widest card off the screen whole where that is further (the slide is in 3D, so a card's far

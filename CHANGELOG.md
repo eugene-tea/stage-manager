@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- A window dragged toward the strip is taken in as with Apple's Stage Manager: its card is shown
+  next to the pointer once the pointer is within about 290 points of the screen's edge, and it
+  is no longer shown for a window whose left edge reaches the screen's edge, which hides the
+  strip instead and is not dropped into it. The card is no longer shown and hidden over and over
+  while the pointer wavers at the edge of that area.
 - New setting `[windows] with_apple` (`"stand_down"` or `"augment"`). With `"augment"`,
   Stage Manager follows Apple's Stage Manager while it is on instead of stepping aside: the
   stage hotkeys and `ctl switch N` bring stage N of Apple's strip to the front, and
