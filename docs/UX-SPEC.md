@@ -1089,18 +1089,29 @@ set to move its cursor with the mouse pointer.
 
 ## Window engines measured
 
-The park corner against the Spaces way on fixture windows (`scripts/measure_engines.py`, one
-app run per engine on a copy of the config, captures off). Not run yet: the numbers go here
-once it is.
+The park corner (`engine = "accessibility"`) against the Spaces way (`engine = "spaces"`) on
+fixture windows, an Apple silicon Mac with macOS 27, the median of three runs with the range
+in brackets (11-14, `scripts/measure.sh`). CPU is percent of one core. The window server's
+column "off" is its own load with Stage Manager quit; the difference is what each engine adds.
+[MODES.md](MODES.md) quotes these for the comparison.
 
-| | corner | spaces |
-|---|---|---|
-| App CPU at rest (60 s, 3 stages) | | |
-| WindowServer CPU over the same span | | |
-| Switch time, median / p90 (`ctl switch` to the last window at its final frame) | | |
-| A new app's overlap (its window shown over the old stage) | | |
-| Energy Impact (`top` POWER, the app, at rest and switching) | | |
-| Dropped frames of an animating window shown from a hidden stage | | |
+| | off | corner | spaces |
+|---|---|---|---|
+| App CPU at rest | | 1.07 (1.07-1.08) | 0.35 (0.34-0.35) |
+| App wake-ups a second at rest | | 4.4 (4.3-4.4) | 3.6 (3.6-3.6) |
+| App energy at rest (`top` POWER) | | 1.0 | 0.3 |
+| Window server CPU at rest | 4.00 (3.91-4.03) | 6.58 (6.36-6.63) | 4.86 (4.86-5.63) |
+| Screen-capture service (replayd) CPU at rest | 0.00 | 1.23 (1.18-1.25) | 0.00 (0.00-0.02) |
+| App active ms in 60 s at rest | | 500 (471-530) | 125 (122-128) |
+| Card click to the last frame, ms | | 862 (860-869) | 852 (852-857) |
+| Card click until the outgoing windows are gone, ms | | 225 (225-227) | 213 (210-217) |
+| Dock click switch, ms | | 732 | 748 |
+| App CPU per switch, ms | | 113 | 91 |
+| Missed refreshes of a call window during switches | | 0 | 0 |
+
+Most of a switch is the animation, the same in both. `scripts/measure_engines.py` repeats
+the comparison on a later build and adds a new app's overlap and an animating window shown
+from a hidden stage; its results replace this table once run.
 
 ## Known gaps
 

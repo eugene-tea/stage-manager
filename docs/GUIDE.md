@@ -267,7 +267,8 @@ with it, and each screen's corner has its own, drawn from that screen's desktop.
 While Apple's Stage Manager is on, Stage Manager brings every window back and arranges
 nothing until it is off (`[windows] apple_stage_manager_on = "pause"`, the default). With
 `"integrate"` it follows Apple's stages instead. Apple's Stage Manager draws the strip and
-arranges the windows; Stage Manager shows no strip of its own.
+arranges the windows; Stage Manager shows no strip of its own. [MODES.md](MODES.md) compares this with
+Stage Manager's own two ways of hiding windows.
 
 - The stage hotkeys (`[hotkeys] switch`) and `ctl switch N` bring stage N of Apple's strip
   to the front, counted from the top (then the stages the strip has no room for), without
@@ -511,7 +512,7 @@ was, and the next launch checks the corner again.
 never tried; this is the default. `"spaces"` hides each stage in a Space of macOS's own
 instead, wherever a trial at launch shows that it works, and goes back to the park corner
 for the rest of the run if a window is ever not where it was put. The setting is read at
-launch: Stage Manager has to be quit and opened again after it is changed.
+launch: Stage Manager has to be quit and opened again after it is changed. What each costs: [MODES.md](MODES.md).
 
 Some limits to know about:
 

@@ -69,61 +69,32 @@ them.
 7. Accessibility and posted events are documented. Where to click depends on how Apple's strip
    is drawn, as measured on macOS 27, and a macOS update can change that. The live tests
    recheck it.
-8. Percent of one CPU core, on an Apple silicon Mac with macOS 27, test windows only, the
-   median of three runs (11-14). Most of the cost of Accessibility is in macOS's own processes
+8. Percent of one CPU core at rest, test windows only, the median of three runs on an Apple
+   silicon Mac with macOS 27 (11-14; method and every figure in [UX-SPEC.md](UX-SPEC.md),
+   "Window engines measured"). Most of what Accessibility costs is in macOS's own processes
    (the screen-capture service, for the pictures that play the motion, and the window server),
-   so Activity Monitor's line for Stage Manager shows only about a fifth of it. The window
-   server is counted above its own 4.00 % with Stage Manager quit. Most of the switch time is
-   the animation, which is the same in each.
+   so Activity Monitor's line for Stage Manager shows only about a fifth of it.
 9. An average over a day of everyday use (11-18), not a measurement at rest, so it isn't
    directly comparable with the other two columns.
 
-## Accessibility
+## Settings
 
-The default. To hide a stage, Stage Manager moves its windows into the bottom-right corner of the screen, or into a free corner when
-another screen sits beyond that one. macOS always keeps a thin edge of a window on screen.
-Those edges are made to ignore clicks and are covered by a matching piece of the desktop, so
-the corner looks empty ("The clean corner" in the [guide](GUIDE.md)). Switches play Apple's
-motion with pictures of the windows, then the real windows are put in place behind them.
+Both are in the `[windows]` section of the config file.
 
-Every move goes through Accessibility, the public interface for moving other apps' windows,
-so this works on every Mac that runs Stage Manager. Each move is made by the app itself,
-though, so an app that refuses a move, limits a window's position or answers slowly shows it.
+- `engine`: how Stage Manager hides windows while Apple's Stage Manager is off.
+  `"accessibility"` (the default) or `"spaces"`. It is read at launch, so Stage Manager has to
+  be quit and opened again after a change. With `"spaces"`, the log says which one runs and
+  why.
+- `apple_stage_manager_on`: what happens while Apple's Stage Manager is on. `"pause"` (the
+  default) brings every window back and arranges nothing until Apple's is off; `"integrate"`
+  follows Apple's stages.
 
-## Spaces
-
-Each hidden stage goes into a Space of its own that the window server keeps out of sight, as
-macOS does with the windows of another Desktop. Nothing is left in a corner, and no app is
-asked to move its windows, so a switch costs about 2 ms per window whatever the app.
-
-The calls are the window server's own and are undocumented. A macOS update can change them,
-so each launch tests them with a window of its own first, health checks keep watching, and
-Accessibility takes over whenever they fail, so `engine = "spaces"` is safe to try on any
-Mac. The log says which engine runs and why. At rest it costs about a quarter of what
-Accessibility does (the Cost rows above), with the same switch time.
-
-## Integrated with Apple's Stage Manager
-
-With `apple_stage_manager_on = "integrate"` and Apple's Stage Manager on, Apple's draws the strip and
-arranges the windows. Stage Manager reads that arrangement and adds the stage hotkeys, `ctl`
-commands, new apps in the current stage (with the limits in note 3), and putting the stages
-back after a restart ("With Apple's Stage Manager on" in the [guide](GUIDE.md)).
-
-Apple's Stage Manager posts no notices and takes changes only from the pointer. So Stage
-Manager reads its arrangement on every event, and a few times a second while windows move. It
-moves windows with Shift-clicks on thumbnails in Apple's strip and drags of title bars onto
-it. Routes that were tried and didn't work, such as Apple's own Accessibility actions on the
-strip and clicks sent to its process, are rechecked by the live tests, so a macOS update that
-changes them shows up.
-
-With `apple_stage_manager_on = "pause"`, the default, Stage Manager brings every window back
-and arranges nothing while Apple's Stage Manager is on. It picks up again with its own stages
-once Apple's is off. The `engine` setting applies whenever Apple's Stage Manager is off, so the
-two combine: for example Spaces while Apple's is off, integrated while it is on.
+The two combine, for example Spaces while Apple's Stage Manager is off and integrated while it
+is on. More on each: "The clean corner", "With Apple's Stage Manager on" and "Troubleshooting"
+in the [guide](GUIDE.md); every call, route and its cost in [STRATEGIES.md](STRATEGIES.md).
 
 ## Choosing
 
 - **For every addition, with Apple's look:** Accessibility, the default.
-- **For hidden windows off the screen entirely, on a Mac where the test passes:** Spaces.
+- **For the lowest cost at rest and no windows left in a corner:** Spaces.
 - **For Apple's own strip, with hotkeys and restore on top:** integrated with Apple's.
-- **If windows misbehave on a stage change with Spaces:** `engine = "accessibility"`.
