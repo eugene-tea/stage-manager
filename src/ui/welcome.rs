@@ -25,6 +25,9 @@ pub enum WelcomeRow {
     Approval(Approval, bool),
     /// Apple's Stage Manager, and whether it is off now.
     AppleOff(bool),
+    /// Apple's Stage Manager on and followed (`[windows] apple_stage_manager_on = "integrate"`): nothing to
+    /// do, the row says what Stage Manager does with it.
+    AppleFollowed,
 }
 
 impl WelcomeRow {
@@ -33,20 +36,22 @@ impl WelcomeRow {
         match self {
             Self::Approval(_, granted) => granted,
             Self::AppleOff(off) => off,
+            Self::AppleFollowed => true,
         }
     }
 }
 
 /// The rows: Accessibility; Screen Recording while window pictures are on; Apple's Stage
-/// Manager when it was on as the window opened (it stays, checked, once turned off).
-pub fn rows(state: &PermissionState, capture_on: bool, apple_row: bool, apple_on: bool) -> Vec<WelcomeRow> {
+/// Manager when it was on as the window opened (it stays, checked, once turned off), or,
+/// when Stage Manager follows it (`follows`), the row saying so.
+pub fn rows(state: &PermissionState, capture_on: bool, apple_row: bool, apple_on: bool, follows: bool) -> Vec<WelcomeRow> {
     let mut out: Vec<WelcomeRow> = Approval::ALL
         .into_iter()
         .filter(|a| *a == Approval::Accessibility || capture_on)
         .map(|a| WelcomeRow::Approval(a, a.granted(state)))
         .collect();
     if apple_row {
-        out.push(WelcomeRow::AppleOff(!apple_on));
+        out.push(if follows && apple_on { WelcomeRow::AppleFollowed } else { WelcomeRow::AppleOff(!apple_on) });
     }
     out
 }
@@ -57,9 +62,10 @@ pub fn all_set(rows: &[WelcomeRow]) -> bool {
 }
 
 /// Whether the welcome shows at launch: the first launch, a missing required approval, or
-/// Apple's Stage Manager on (never under `STAGE_MANAGER_NO_PROMPT`).
-pub fn due(first_launch: bool, state: &PermissionState, apple_on: bool, prompts_allowed: bool) -> bool {
-    prompts_allowed && (first_launch || !state.accessibility || apple_on)
+/// Apple's Stage Manager on while Stage Manager stands down for it (`apple_in_the_way`; not
+/// when it follows Apple's), never under `STAGE_MANAGER_NO_PROMPT`.
+pub fn due(first_launch: bool, state: &PermissionState, apple_in_the_way: bool, prompts_allowed: bool) -> bool {
+    prompts_allowed && (first_launch || !state.accessibility || apple_in_the_way)
 }
 
 /// A click in the welcome.
@@ -171,11 +177,22 @@ fn build(mtm: MainThreadMarker, rows: &[WelcomeRow], target: &ActionTarget) -> (
                 "Turn Off",
                 tag::APPLE,
             ),
+            WelcomeRow::AppleFollowed => (
+                "Apple's Stage Manager".to_string(),
+                "On. Stage Manager follows its stages: the stage hotkeys, rules and saved stages work on them.".to_string(),
+                "macwindow.on.rectangle",
+                "",
+                tag::APPLE,
+            ),
         };
         let mut row = Row::new(&title, None).detail(detail);
         row.icon = Some(view(&form::symbol(mtm, symbol, 20.0, Some(&NSColor::controlAccentColor()))));
         let trailing = if r.done() {
-            done_mark(mtm, if matches!(r, WelcomeRow::AppleOff(_)) { "Off" } else { "Allowed" })
+            done_mark(mtm, match r {
+                WelcomeRow::AppleOff(_) => "Off",
+                WelcomeRow::AppleFollowed => "On",
+                WelcomeRow::Approval(..) => "Allowed",
+            })
         } else {
             let b = form::button(mtm, button, target, t);
             // "Allow…" alone does not say what for: VoiceOver reads the row it allows.
@@ -288,7 +305,7 @@ pub fn is_open() -> bool {
 
 /// Whether the open welcome has the Apple's Stage Manager row.
 pub fn has_apple_row() -> bool {
-    OPEN.with(|o| o.borrow().as_ref().is_some_and(|o| o.rows.iter().any(|r| matches!(r, WelcomeRow::AppleOff(_)))))
+    OPEN.with(|o| o.borrow().as_ref().is_some_and(|o| o.rows.iter().any(|r| matches!(r, WelcomeRow::AppleOff(_) | WelcomeRow::AppleFollowed))))
 }
 
 /// Closes the welcome.
@@ -312,15 +329,18 @@ mod tests {
     #[test]
     fn rows_follow_the_approvals_and_apples_stage_manager() {
         use WelcomeRow::*;
-        assert_eq!(rows(&p(false, false), true, false, false), vec![Approval(super::Approval::Accessibility, false), Approval(super::Approval::ScreenRecording, false)]);
-        assert_eq!(rows(&p(true, false), false, false, false), vec![Approval(super::Approval::Accessibility, true)], "no pictures, no Screen Recording row");
-        let with_apple = rows(&p(true, true), true, true, true);
+        assert_eq!(rows(&p(false, false), true, false, false, false), vec![Approval(super::Approval::Accessibility, false), Approval(super::Approval::ScreenRecording, false)]);
+        assert_eq!(rows(&p(true, false), false, false, false, false), vec![Approval(super::Approval::Accessibility, true)], "no pictures, no Screen Recording row");
+        let with_apple = rows(&p(true, true), true, true, true, false);
         assert_eq!(with_apple.last(), Some(&AppleOff(false)));
         assert!(!all_set(&with_apple), "Apple's still on");
-        let turned_off = rows(&p(true, true), true, true, false);
+        let turned_off = rows(&p(true, true), true, true, false, false);
         assert_eq!(turned_off.last(), Some(&AppleOff(true)), "the row stays, checked");
         assert!(all_set(&turned_off));
-        assert!(!all_set(&rows(&p(true, false), true, false, false)));
+        assert!(!all_set(&rows(&p(true, false), true, false, false, false)));
+        let followed = rows(&p(true, true), true, true, true, true);
+        assert_eq!(followed.last(), Some(&AppleFollowed), "apple_stage_manager_on = integrate: nothing to turn off");
+        assert!(all_set(&followed));
     }
 
     #[test]

@@ -3,13 +3,15 @@
 //! The engine compiles and tests on any OS. The platform layer feeds it observations and
 //! executes the [`model::Action`]s it returns.
 
+pub mod apple;
 pub mod ax_blind;
 pub mod busy_apps;
-pub mod corner_patch;
+pub mod corner;
 pub mod desktop_click;
 pub mod desktop_echo;
 pub mod displays;
 pub mod early_start;
+pub mod engine_choice;
 pub mod enhanced_ui;
 pub mod focus_replay;
 pub mod fullscreen;
@@ -19,6 +21,8 @@ pub mod guard_watch;
 pub mod handoff;
 pub mod hidden_tab;
 pub mod leftovers;
+pub mod landing_order;
+pub mod lend_park;
 pub mod logout_watch;
 pub mod minimize;
 pub mod minimize_press;
@@ -26,10 +30,8 @@ pub mod model;
 pub mod not_ours;
 pub mod observe_retry;
 pub mod overview;
-pub mod park;
-pub mod park_reconcile;
-pub mod patch_still;
 pub mod persist;
+pub mod perspective;
 pub mod phase;
 pub mod placement;
 pub mod raise_order;
@@ -44,12 +46,15 @@ pub mod show_desktop;
 pub mod slow_task;
 pub mod slide_hold;
 pub mod solar_settle;
+pub mod spaces;
 pub mod stale_activation;
 pub mod stale_handle;
-pub mod sliver;
 pub mod vanished;
 pub mod stage_area;
 pub mod stand_down;
+pub mod stranded;
+pub mod switcher;
+pub mod tick_pace;
 pub mod wallpaper;
 pub mod window_match;
 #[cfg(test)]

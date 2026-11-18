@@ -45,7 +45,7 @@ pub fn display_of(m: &Model, actions: &[Action]) -> DisplayId {
     actions
         .iter()
         .find_map(|a| match *a {
-            Action::Park { id, .. } | Action::SetFrame { id, .. } => m.window(id).map(|w| w.meta.display),
+            Action::Hide { id } | Action::SetFrame { id, .. } => m.window(id).map(|w| w.meta.display),
             _ => None,
         })
         .unwrap_or(m.main_display().id)
@@ -105,7 +105,7 @@ pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -
     let mut incoming: Vec<MovingWindow> = Vec::new();
     for a in actions {
         match *a {
-            Action::Park { id: w, .. } if !before.parked.contains(&w.0) => {
+            Action::Hide { id: w } if !before.parked.contains(&w.0) => {
                 let Some(state) = m.window(w) else { continue };
                 let frame = live(w.0).unwrap_or(state.meta.frame);
                 let stage = m.stage_of(w).map(|s| s.0);
@@ -150,7 +150,7 @@ pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -
         Some(w) => incoming.iter().any(|x| x.window.id == w).then_some(w),
         None => incoming.first().map(|w| w.window.id),
     };
-    Some(Transition { id, outgoing, incoming, sent: None, under: None, corner: None, key_out, key_in, late: Vec::new(), minimized: None })
+    Some(Transition { id, outgoing, incoming, sent: None, under: None, corner: None, key_out, key_in, late: Vec::new(), minimized: None, order: Vec::new(), in_place: Vec::new(), pictures_land: false })
 }
 
 /// The stage ids of `slots`, top to bottom (for the logs).
@@ -180,7 +180,7 @@ mod tests {
     use super::*;
     use crate::engine::displays::ScreenKey;
     use crate::engine::model::{ActiveCard, Display, ModelOptions, Observation, StageId, StripOrder, WindowId};
-    use crate::engine::park::Corner;
+    use crate::engine::corner::park::Corner;
     use crate::engine::rules::{Decision, Placement, RuleAction};
     use crate::engine::testkit::{Desk, meta, model_with, w};
 
@@ -238,7 +238,7 @@ mod tests {
         fn apply(&mut self, actions: Vec<Action>) -> Option<Transition> {
             let frames = self.d.frames.clone();
             let t = plan(&self.m, &actions, &self.before, |id| frames.get(&WindowId(id)).copied(), 1);
-            self.d.apply(&actions);
+            self.d.apply(&self.m, &actions);
             self.before = Before::of(&self.m);
             t
         }
@@ -551,7 +551,7 @@ mod tests {
         // Read on the 5K's strip, neither window has a card.
         let main = slots_of(&e.m);
         assert!(slot_of(&main, 6, Some(finder)).is_none() && slot_of(&main, 5, Some(chrome)).is_none());
-        assert_eq!(display_of(&e.m, &[Action::Park { id: w(6), frame: Rect::default() }]), DisplayId(2));
+        assert_eq!(display_of(&e.m, &[Action::Hide { id: w(6) }]), DisplayId(2));
         assert_eq!(display_of(&e.m, &[Action::StateChanged]), DisplayId(1), "no window: the main screen");
         // A switch on the 5K still reads the 5K's slots.
         let before = e.order();

@@ -8,7 +8,7 @@ use super::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::park::TITLE_BAR_HEIGHT;
+use crate::engine::corner::park::TITLE_BAR_HEIGHT;
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
 use crate::engine::settings::AppWindows;
@@ -196,8 +196,9 @@ impl Model {
             });
         let visible = self.display(display).visible;
         // Born in the park zone: an app that saved its own frame while the window was parked
-        // at its quit; the frame it had then, kept a day, else centered below (W2).
-        let born = if self.display(display).parks(meta.frame) {
+        // at its quit; the frame it had then, kept a day, else centered below (W2). Under the
+        // Spaces engine too: a Corner run before may have parked it there (C-2).
+        let born = if self.found_parked(display, meta.frame) {
             self.take_quit_frame(&meta.bundle_id, &meta.title).unwrap_or(meta.frame)
         } else {
             meta.frame
@@ -306,13 +307,12 @@ impl Model {
     /// window lands beside it in the corner, and came back centered on the screen, away from
     /// its window); with no parent known, centered ([`Model::safe_restore`]).
     fn child_restore(&self, meta: &WindowMeta, parent: Option<WindowId>) -> Rect {
-        let d = *self.display(meta.display);
         let f = meta.frame;
-        let usable = !f.is_degenerate() && !d.parks(f);
+        let usable = !f.is_degenerate() && !self.listed_hidden(meta.display, f);
         match parent.and_then(|p| self.windows.get(&p)) {
             Some(p) if !usable && !f.is_degenerate() => {
                 let r = p.restore;
-                d.reach(Rect::new((r.x + (r.w - f.w) / 2.0).round(), r.y + TITLE_BAR_HEIGHT.min(r.h), f.w, f.h))
+                self.within_reach(meta.display, Rect::new((r.x + (r.w - f.w) / 2.0).round(), r.y + TITLE_BAR_HEIGHT.min(r.h), f.w, f.h))
             }
             _ => self.safe_restore(f, meta.display),
         }
@@ -422,6 +422,40 @@ impl Model {
         self.current_space(self.known_display(keyboard))
     }
 
+    /// Why [`Model::send_window`] (and a drop on the strip, [`Model::drop_window_on_strip`])
+    /// would do nothing for window `id`, for the platform's log: a user's act never does
+    /// nothing silently (round stage-lost). `None` when it acts.
+    pub fn send_refused(&self, id: WindowId) -> Option<&'static str> {
+        let Some(std) = self.resolve_standard(id) else {
+            return Some(if self.windows.contains_key(&id) { "a child window with no parent managed" } else { "the window is not managed" });
+        };
+        let w = &self.windows[&std];
+        (!w.sticky && !self.is_shown_space(w.space)).then_some("its Desktop is not the one shown")
+    }
+
+    /// A window the user sees on screen that the model does not manage (stranded, round
+    /// stage-lost: [`crate::engine::stranded`]) joins the stage in front on its screen,
+    /// shown where it is, as Apple's Stage Manager counts every window on screen in the
+    /// stage in front. The platform does this before a switch whose front stage shows
+    /// nothing, so the window leaves with that stage, and before the user's act on it (a drop
+    /// on the strip, a send), which then goes on as for any managed window. Returns the
+    /// actions; nothing for a window managed already or not a standard one.
+    pub fn adopt_stranded(&mut self, meta: WindowMeta, obs: &Observation) -> Vec<Action> {
+        if self.windows.contains_key(&meta.id) || meta.role != WindowRole::Standard {
+            return Vec::new();
+        }
+        let decision = Decision { action: RuleAction::Current, ..Default::default() };
+        self.add_window(meta, &decision, obs)
+    }
+
+    /// True when the stage in front on `display`'s Desktop shows no window (none, or every
+    /// member parked): a switch then has nothing to take out ([`Model::adopt_stranded`]).
+    pub fn front_shows_nothing(&self, display: DisplayId) -> bool {
+        let display = self.known_display(display);
+        let Some(front) = self.active_stage(display) else { return true };
+        self.stage(front).is_none_or(|s| s.windows.iter().all(|id| self.windows.get(id).is_none_or(|w| w.parked)))
+    }
+
     /// Sends a standard window (a child stands for its parent) and its children to another
     /// stage, at the front, as its key window. The view does not switch: if the target is
     /// inactive the window is parked; if the source is the active stage and the window was
@@ -435,7 +469,16 @@ impl Model {
             return actions;
         };
         let src = self.windows[&id].home;
-        let space = self.windows[&id].space;
+        let mut space = self.windows[&id].space;
+        if !self.is_shown_space(space) && self.windows[&id].sticky {
+            // On every Desktop: it is on the one shown too, so it is sent from there (round
+            // stage-lost: a drag of such a window onto the strip did nothing).
+            let here = self.current_space(self.windows[&id].meta.display);
+            let mut group = vec![id];
+            group.extend(self.children_of(id));
+            self.set_space(&group, here);
+            space = here;
+        }
         if !self.is_shown_space(space) {
             // Its Desktop is not shown: moving, raising or focusing it there could make macOS
             // switch Desktops (L2; only `ctl send` by window id can ask this).
@@ -934,12 +977,12 @@ impl Model {
         // A fresh placement, not a frame the user left: the whole width on screen when it
         // fits, as before.
         let x = if old.w <= v.w { top_left.x.min(v.max_x() - old.w).max(v.x) } else { top_left.x };
-        let placed = d.reach(Rect::new(x, top_left.y, old.w, old.h));
+        let placed = self.within_reach(d.id, Rect::new(x, top_left.y, old.w, old.h));
         let (dx, dy) = (placed.x - old.x, placed.y - old.y);
         self.move_restore(id, placed);
         for c in self.children_of(id) {
             let Some(cw) = self.windows.get(&c) else { continue };
-            let moved = self.display(cw.meta.display).reach(cw.restore.translate(dx, dy));
+            let moved = self.within_reach(cw.meta.display, cw.restore.translate(dx, dy));
             self.move_restore(c, moved);
         }
     }
@@ -1063,7 +1106,7 @@ impl Model {
     /// window of a card of several, [`Model::move_window_into_active_at`]), on that screen. The
     /// windows join the active stage of the Desktop `to` shows, in front, the first focused,
     /// the front one with its top-left corner at `top_left`; the others keep their places
-    /// relative to the visible frame ([`Display::adopt`]). They are that screen's from now on;
+    /// relative to the visible frame ([`Model::carried`]). They are that screen's from now on;
     /// the stage they leave goes when emptied, its card with it, and nothing else changes on
     /// the screen they left (Apple's, 11-09: a card dragged from the 5K's strip onto the
     /// laptop opened its window there). Windows of the card still awaited after a restart stay
@@ -1106,13 +1149,14 @@ impl Model {
         }
         let target = self.current_space(to);
         let (there, here) = (*self.display(to), *self.display(from));
+        let engine = self.options.engine;
         for &id in &moving {
             let mut group = vec![id];
             group.extend(self.children_of(id));
             for g in &group {
                 if let Some(w) = self.windows.get_mut(g) {
-                    w.restore = there.adopt(w.restore, &here);
-                    w.original = w.original.map(|o| there.adopt(o, &here));
+                    w.restore = Self::carried(engine, w.restore, &there, &here);
+                    w.original = w.original.map(|o| Self::carried(engine, o, &there, &here));
                     w.meta.display = to;
                 }
             }
@@ -1445,7 +1489,7 @@ impl Model {
     /// window (`focused`, a child standing for its parent) when that is a member of the stage,
     /// else the stage's key when it is the app's, else the app's front member. None when the
     /// stage holds no standard window of the app.
-    fn activated_key(&self, stage: StageId, pid: Pid, focused: Option<WindowId>) -> Option<WindowId> {
+    pub(super) fn activated_key(&self, stage: StageId, pid: Pid, focused: Option<WindowId>) -> Option<WindowId> {
         let s = self.stage(stage)?;
         let mine = |id: &WindowId| self.windows.get(id).is_some_and(|w| w.meta.pid == pid);
         focused
@@ -1583,7 +1627,7 @@ impl Model {
         if let Some(standard) = self.resolve_standard(id)
             && self.windows.get(&standard).is_some_and(|w| w.parked)
         {
-            if standard == id && !self.display(self.windows[&id].meta.display).parks(frame) {
+            if standard == id && !self.listed_hidden(self.windows[&id].meta.display, frame) {
                 self.record_frame(id, frame);
             }
             if let Some(stage) = self.stage_of(standard) {
@@ -1867,7 +1911,7 @@ impl Model {
         let parked_again: Vec<WindowId> = actions
             .iter()
             .filter_map(|a| match a {
-                Action::Park { id, .. } => Some(*id),
+                Action::Hide { id } => Some(*id),
                 _ => None,
             })
             .collect();
@@ -1879,8 +1923,8 @@ impl Model {
         let stale: Vec<(WindowId, Rect)> = self
             .windows
             .values()
-            .filter(|w| moved_frames.contains(&w.meta.display) && self.display(w.meta.display).parks(w.restore))
-            .map(|w| (w.meta.id, self.display(w.meta.display).reach(w.restore)))
+            .filter(|w| moved_frames.contains(&w.meta.display) && self.no_restore(w.meta.display, w.restore))
+            .map(|w| (w.meta.id, self.within_reach(w.meta.display, w.restore)))
             .collect();
         for (id, restore) in stale {
             if let Some(w) = self.windows.get_mut(&id) {
@@ -1915,7 +1959,7 @@ impl Model {
     /// the main display's own cards (past the capacity they are hidden). An empty front stage
     /// on the main display gives way instead of taking a card. Its other Desktops stay
     /// Desktops, of the main display now, recognized by their windows when they show. Every
-    /// restore frame of its windows is carried onto the main display ([`Display::adopt`]).
+    /// restore frame of its windows is carried onto the main display ([`Model::carried`]).
     /// The windows of the Desktop it showed are noted as adopted (`adopted`): macOS may put
     /// them on another Desktop of the main display and show that one (11-05 16:27: the 5K
     /// slid to its second Desktop), where their stages come whole, by the same rule
@@ -1934,11 +1978,12 @@ impl Model {
                 s.display = main.id;
             }
         }
+        let engine = self.options.engine;
         for w in self.windows.values_mut() {
             if w.meta.display == gone.id {
                 w.meta.display = main.id;
-                w.restore = main.adopt(w.restore, &gone);
-                w.original = w.original.map(|o| main.adopt(o, &gone));
+                w.restore = Self::carried(engine, w.restore, &main, &gone);
+                w.original = w.original.map(|o| Self::carried(engine, o, &main, &gone));
             }
         }
         let Some(shown) = shown.filter(|s| *s != main_space) else { return };
@@ -2064,7 +2109,7 @@ impl Model {
     /// it had there, and a parked one at the laptop's old park corner): listed in that
     /// display's park zone, or as a piece at its corner ([`Display::hides`]), it is a card,
     /// parked there with its restore frame carried over
-    /// ([`Display::adopt`]), whether the model had it parked or shown (a card of that screen
+    /// ([`Model::carried`]), whether the model had it parked or shown (a card of that screen
     /// before the close, shown on the other since); listed outside, it shows at that frame, the user's (its
     /// restore frame), whether the model had it parked or not, and is never moved. Only a
     /// shown window's stage comes in front: a card put back brings nothing forward, and
@@ -2106,9 +2151,10 @@ impl Model {
         for (to, ids) in by_target {
             let target = self.current_space(to);
             let display = *self.display(to);
+            let engine = self.options.engine;
             for &id in &ids {
                 let from = *self.display(self.windows[&id].meta.display);
-                let at_corner = frames.get(&id).is_some_and(|f| display.hides(*f));
+                let at_corner = frames.get(&id).is_some_and(|f| self.listed_out_of_sight(to, *f));
                 let mut group = vec![id];
                 group.extend(self.children_of(id));
                 for g in group {
@@ -2117,9 +2163,9 @@ impl Model {
                         // A shown one put back at the corner is a card from now on: its
                         // restore frame is carried over as a parked one's.
                         if w.parked || at_corner {
-                            w.restore = display.adopt(w.restore, &from);
+                            w.restore = Self::carried(engine, w.restore, &display, &from);
                         }
-                        w.original = w.original.map(|o| display.adopt(o, &from));
+                        w.original = w.original.map(|o| Self::carried(engine, o, &display, &from));
                     }
                 }
                 let Some(&f) = frames.get(&id) else { continue };
@@ -2350,19 +2396,13 @@ impl Model {
         actions
     }
 
-    /// True when `frame` would count as parked on the window's display. Exposed for the
-    /// platform's recovery scan of windows it observes.
-    pub fn frame_is_parked(&self, display: DisplayId, frame: Rect) -> bool {
-        self.display(display).parks(frame)
-    }
-
     /// The display other than `except` whose park zone holds `frame`: where macOS put a
     /// parked window back when a screen came back (the lid opened, 11-05 20:26:05: the
     /// laptop's two cards, counted on the 5K, listed at the laptop's bottom-left corner,
     /// where they were before the close). Such a window is that display's card
     /// ([`Model::windows_moved_to_display`]), never parked again on the other.
     pub fn park_zone_display(&self, frame: Rect, except: DisplayId) -> Option<DisplayId> {
-        self.displays.iter().find(|d| d.id != except && d.parks(frame)).map(|d| d.id)
+        self.displays.iter().find(|d| d.id != except && self.listed_hidden(d.id, frame)).map(|d| d.id)
     }
 
     /// The display other than `except` (the one the model has a parked window on) that macOS
@@ -2377,7 +2417,7 @@ impl Model {
         if let Some(d) = self.park_zone_display(frame, except) {
             return Some(d);
         }
-        if returned.is_empty() || self.display(except).parks(frame) {
+        if returned.is_empty() || self.listed_hidden(except, frame) {
             return None;
         }
         let rects: Vec<(DisplayId, Rect)> = self.displays.iter().map(|d| (d.id, d.frame)).collect();

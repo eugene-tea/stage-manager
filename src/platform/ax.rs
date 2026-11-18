@@ -11,8 +11,8 @@ use objc2_application_services::{
     AXCopyMultipleAttributeOptions, AXError as RawAxError, AXObserver, AXUIElement, AXValue, AXValueType,
 };
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType, CFURL, CFURLPathStyle, CGPoint,
-    CGSize, kCFRunLoopDefaultMode,
+    CFArray, CFBoolean, CFNumber, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType, CFURL, CFURLPathStyle, CGPoint,
+    CGRect, CGSize, kCFRunLoopDefaultMode,
 };
 
 use crate::engine::geometry::{Point, Rect, Size};
@@ -90,6 +90,9 @@ pub enum AxError {
 }
 
 impl AxError {
+    /// `kAXErrorFailure`: also what a window engine answers when its own call, not an
+    /// Accessibility one, did not do what was asked.
+    pub const FAILURE: Self = Self::Api(-25200);
     /// `kAXErrorAPIDisabled`: the process is not trusted for Accessibility.
     pub const API_DISABLED: Self = Self::Api(-25211);
     /// `kAXErrorNoValue`: the attribute has no value.
@@ -227,15 +230,18 @@ impl AxElement {
         Ok(unsafe { CFRetained::from_raw(ptr) })
     }
 
-    /// Sets an attribute value.
+    /// Sets an attribute value (a window write: the wake's window list is stale after it,
+    /// [`super::windows::note_write`]).
     pub fn set_attribute(&self, name: &str, value: &CFType) -> AxResult<()> {
+        super::windows::note_write();
         let attr = CFString::from_str(name);
         // SAFETY: valid element, attribute name and CF value.
         AxError::check(unsafe { self.0.set_attribute_value(&attr, value) })
     }
 
-    /// Performs an action such as `AXRaise`.
+    /// Performs an action such as `AXRaise` (a window write, as [`Self::set_attribute`]).
     pub fn perform_action(&self, name: &str) -> AxResult<()> {
+        super::windows::note_write();
         let action = CFString::from_str(name);
         // SAFETY: valid element and action name.
         AxError::check(unsafe { self.0.perform_action(&action) })
@@ -558,6 +564,57 @@ impl AxElement {
         // SAFETY: AXChildren is documented as an array of AXUIElement; items are type-checked.
         let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
         Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(AxElement)).collect())
+    }
+
+    /// The array of elements attribute `name` holds (`AXSelectedChildren`, …); items of
+    /// another type are left out.
+    pub fn elements(&self, name: &'static str) -> AxResult<Vec<AxElement>> {
+        let v = self.attribute(name)?;
+        let array = v.downcast::<CFArray>().map_err(|_| AxError::WrongType(name))?;
+        // SAFETY: a CF array holds CF objects; each item is type-checked below.
+        let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
+        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(AxElement)).collect())
+    }
+
+    /// The boolean attribute `name` (`AXSelected`, …).
+    pub fn flag(&self, name: &'static str) -> AxResult<bool> {
+        self.bool_attr(name)
+    }
+
+    /// The string attribute `name` (`AXIdentifier`, …).
+    pub fn text(&self, name: &'static str) -> AxResult<String> {
+        self.string_attr(name)
+    }
+
+    /// The array of numbers attribute `name` holds (WindowManager's `AXWindowsIDs`); items
+    /// that are not whole numbers are left out.
+    pub fn numbers(&self, name: &'static str) -> AxResult<Vec<i64>> {
+        let v = self.attribute(name)?;
+        let array = v.downcast::<CFArray>().map_err(|_| AxError::WrongType(name))?;
+        // SAFETY: a CF array holds CF objects; each item is type-checked below.
+        let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
+        Ok(array.iter().filter_map(|item| item.downcast_ref::<CFNumber>().and_then(|n| n.as_i64())).collect())
+    }
+
+    /// The rectangle attribute `name` (`AXFrame`), top-left origin; a value that is not
+    /// finite is an error.
+    pub fn rect(&self, name: &'static str) -> AxResult<Rect> {
+        let r: CGRect = self.value_attr(name, AXValueType::CGRect)?;
+        let out = Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height);
+        if out.is_finite() { Ok(out) } else { Err(AxError::Value) }
+    }
+
+    /// The names of the attributes this element has (`AXUIElementCopyAttributeNames`; the
+    /// probes' dumps).
+    pub fn attribute_names(&self) -> AxResult<Vec<String>> {
+        let mut names: *const CFArray = std::ptr::null();
+        // SAFETY: valid element and out pointer; on success it holds a +1 reference.
+        AxError::check(unsafe { self.0.copy_attribute_names(NonNull::from(&mut names)) })?;
+        let ptr = NonNull::new(names.cast_mut()).ok_or(AxError::NO_VALUE)?;
+        // SAFETY: the Copy rule hands us ownership of one reference; the array holds strings,
+        // each type-checked below.
+        let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(ptr)) };
+        Ok(array.iter().filter_map(|n| n.downcast_ref::<CFString>().map(|s| s.to_string())).collect())
     }
 
     /// `AXURL` as a POSIX path (a Dock item's application bundle).

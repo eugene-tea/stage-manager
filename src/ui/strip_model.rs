@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::StripStyle;
 
-use crate::engine::corner_patch::SwitchCover;
+use crate::engine::corner::corner_patch::SwitchCover;
 use crate::engine::geometry::{Point, Rect};
 
 /// Everything the strip needs to draw one frame of state.
@@ -65,6 +65,10 @@ pub struct StripSnapshot {
     /// keeps full-size snapshots of them ready for the next switch (`[animation]`). Empty
     /// while the user has hidden the strip: no switch animates then, nothing is captured.
     pub active_windows: Vec<CardWindow>,
+    /// A switch's outgoing pictures are taken at the switch, the windows waiting on screen for
+    /// them (the engine hides in one step: [`crate::platform::window_engine::WindowEngine::pictures_at_switch`]):
+    /// the strip keeps no full-size picture fresh on a timer, only as the pointer nears a card.
+    pub pictures_at_switch: bool,
     /// The pinned windows shown on this Space, at their live frames: they stay shown through
     /// a switch, and a snapshot of each kept ready lets the switch's cover of the park corner
     /// draw one that reaches it (round 8L5). Empty while the user has hidden the strip.
@@ -80,6 +84,11 @@ pub struct StripSnapshot {
     pub arrived: Option<(u64, Vec<(u32, Rect)>)>,
     /// Late incoming windows of a transition ([`Transition::late`]) that show now.
     pub late: Option<LateNote>,
+    /// A window of this transition's arriving stage that shows in place only now (a
+    /// just-opened app's window the Spaces engine held on its way in, let out once the stage
+    /// left behind hid): the snapshots pass under it from here on, as under
+    /// [`Transition::under`], which could not name it while it waited off screen.
+    pub under_now: Option<(u64, u32)>,
     /// These are the cards of a Desktop not shown, arranged ahead of its arrival (a Dock
     /// click): only its own pane, if it has one, is redrawn with them, at once, so it slides
     /// in arranged; the strip shown is untouched.
@@ -108,7 +117,7 @@ pub struct Transition {
     /// an activated app's): the snapshots pass under it, not over it.
     pub under: Option<u32>,
     /// The park corner to cover while the incoming windows wait there behind their snapshots
-    /// (global, top-left; the controller's [`crate::engine::corner_patch::switch_cover`]),
+    /// (global, top-left; the controller's [`crate::engine::corner::corner_patch::switch_cover`]),
     /// with the corner patch's picture or a still of the desktop (round 8L3), whichever the
     /// controller found ready: macOS raises an activated app's windows above the patch.
     /// `None`: the corner is left as it is.
@@ -128,6 +137,19 @@ pub struct Transition {
     /// picture starts at its Dock tile, or its card fades in ([`crate::ui::minimize_motion`]),
     /// never at the frame it had before the genie.
     pub minimized: Option<Minimized>,
+    /// The arriving stage's windows front to back as they end (the model's order after the
+    /// batch), incoming and in place alike: where each picture goes in the window order
+    /// ([`crate::ui::landing_math::anchors`], round sm-landing). Empty: not known.
+    pub order: Vec<u32>,
+    /// The arriving stage's windows shown in place already (not in [`Self::incoming`]): a
+    /// picture of a window that ends behind one passes under it.
+    pub in_place: Vec<u32>,
+    /// The windows land behind their pictures even under the live landing (none flies its
+    /// last stretch itself): another app's window would stay in front of the key's until its
+    /// focus, after the landing (the key's focus waiting for its window's show with two apps
+    /// in the stage, or another app's window in place: [`crate::platform::controller`]'s
+    /// `pictures_land`).
+    pub pictures_land: bool,
 }
 
 /// A minimized window on its way to the strip ([`Transition::minimized`]).
@@ -362,6 +384,9 @@ pub enum StripEvent {
     /// The incoming windows of transition `id` are covered by their growing snapshots: put
     /// them in place now.
     Unveil { id: u64 },
+    /// Incoming window `window` of transition `id` ended its last stretch (the live landing):
+    /// on its Desktop when `landed`, else stopped or never taken over.
+    StretchEnded { id: u64, window: u32, landed: bool },
 }
 
 type Presenter = Box<dyn Fn(StripSnapshot) + Send + Sync>;
@@ -490,6 +515,33 @@ pub fn publish_snapshots(display: u32, ids: impl IntoIterator<Item = u32>) {
 /// can draw a window that stays shown into the park corner from it (round 8L5).
 pub fn has_snapshot(id: u32) -> bool {
     snapshot_ids().lock().is_ok_and(|s| s.values().any(|ids| ids.contains(&id)))
+}
+
+/// When a full-size picture of each window last reached a strip.
+fn snapshot_times() -> &'static Mutex<BTreeMap<u32, Instant>> {
+    static S: OnceLock<Mutex<BTreeMap<u32, Instant>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Entries kept in [`snapshot_times`] before the old ones go.
+const SNAPSHOT_TIMES_CAP: usize = 256;
+
+/// A full-size picture of window `id` reached the strips now (main thread).
+pub fn note_snapshot(id: u32) {
+    if let Ok(mut t) = snapshot_times().lock() {
+        let now = Instant::now();
+        if t.len() >= SNAPSHOT_TIMES_CAP {
+            t.retain(|_, at| now.duration_since(*at) < Duration::from_secs(10));
+        }
+        t.insert(id, now);
+    }
+}
+
+/// How long ago a full-size picture of window `id` last reached the strips (any thread):
+/// a switch's pictures taken at the switch skip one this fresh (the pointer's press on a
+/// card took it).
+pub fn snapshot_age(id: u32) -> Option<Duration> {
+    snapshot_times().lock().ok().and_then(|t| t.get(&id).map(Instant::elapsed))
 }
 
 fn picture_ids() -> &'static Mutex<SnapshotIds> {
@@ -642,6 +694,10 @@ pub struct GhostReport {
     /// For an incoming window: when its snapshot's shadow began to fade (ms after the unveil);
     /// never before `shown_ms`.
     pub handover_ms: Option<u64>,
+    /// For an incoming window: when it took over from its snapshot to fly the last stretch
+    /// itself (ms after the motion started; the Spaces engine's live landing, round
+    /// sm-landing); its snapshot went then, so it has no `shown_ms` or `handover_ms`.
+    pub stretch_ms: Option<u64>,
     /// The window shadow its snapshot carries ([`ShadowReport`]); `None` for a window
     /// dragged onto the strip (its card's shadow).
     pub shadow: Option<ShadowReport>,

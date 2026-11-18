@@ -33,6 +33,8 @@
 //                                      minimizes a window that has been on screen; one never
 //                                      ordered in was never listed by Accessibility in the
 //                                      10-15 live run, and SIGHUP had nothing to un-minimize).
+//   --minimize-after-ms N | FIXTURE_MINIMIZE_AFTER_MS=N  that moment (default 250; 0, the next
+//                                      turn, left the window unknown to Accessibility, live 11-14)
 //                                      A test starts this fixture before Stage Manager, so
 //                                      the moment on screen is not seen as a new window.
 //   --tabbed N   | FIXTURE_TABBED=N    the last N standard windows open as tabs of window 1
@@ -78,6 +80,19 @@
 //   --color-file F | FIXTURE_COLOR_FILE=F  every window takes the colour "rrggbb" written in F,
 //                                      read again every 200 ms (scripts/measure-apple-card-glass.py
 //                                      turns one card white, black and grey in place)
+//   --frame-clock F | FIXTURE_FRAME_CLOCK=F  also open "<title> Clock", a 480x270 window at the
+//                                      visible frame's top right, floating (always in front),
+//                                      that draws a new colour on every display refresh (a
+//                                      CADisplayLink, as a video call draws) and counts the
+//                                      refreshes it missed: every 0.25 s a line "<unix time>
+//                                      <frames> <missed> <longest gap ms since the last line>
+//                                      <frame ms>" is appended to F (scripts/measure_stages.py's
+//                                      call stand-in, round sm-measure). Give it its own bundle
+//                                      ID, off STAGE_MANAGER_ONLY, so it is never managed
+//   --frame-clock-normal | FIXTURE_FRAME_CLOCK_NORMAL=1  the clock window at the normal level: a
+//                                      standard window Stage Manager manages like any other, to be
+//                                      hidden in a stage and shown again (give it a bundle ID on
+//                                      STAGE_MANAGER_ONLY; scripts/measure_stages.py's hidden scenario)
 //   --enhanced-ui | FIXTURE_ENHANCED_UI=1  the app's AXEnhancedUserInterface starts on (as an
 //                                      assistive client leaves Chrome's: the owner's 11-03); it is
 //                                      readable and settable through Accessibility, and while
@@ -87,12 +102,18 @@
 //                                      corner (round enhanced-ui)
 //   --enhanced-ui-file F | FIXTURE_ENHANCED_UI_FILE=F  every value the attribute takes is
 //                                      appended to F ("<unix time> on|off"), the first at launch
+//   --reopen     | FIXTURE_REOPEN=1    a reopen (`open` or a Dock click on the app running) with
+//                                      no window shown opens one more standard window at once,
+//                                      key and in front, as Activity Monitor reopens its own:
+//                                      the window shows as the app activates, before a hide at
+//                                      the activation can take (live 11-17)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
 // SIGHUP un-minimizes the first minimized standard window (by title), as a Dock click would.
 // SIGWINCH stands in for "its Desktop is not shown": every visible standard window parked
-// in the screen's bottom-right corner is ordered out (the window server still lists it, off
+// in the screen's bottom-right corner (when there is none: every one in a Space that is not
+// shown, where the Spaces engine hides windows) is ordered out (the window server still lists it, off
 // screen, with its frame; Accessibility no longer does). SIGINFO orders them in again
 // behind the other windows at the same frames (their Desktop shows), without activating.
 // SIGIO selects the next tab of every tab group (as ⌘⇧] would), without activating: the tab
@@ -124,6 +145,7 @@ struct Options {
     var reverse = false
     var retitle: [String: String] = [:]
     var retitleAfterMs = 0
+    var minimizeAfterMs = 250
     var minimized: Set<String> = []
     var tabbed = 0
     var child = false
@@ -137,6 +159,9 @@ struct Options {
     var colorFile: String? = nil
     var enhancedUI = false
     var enhancedUIFile: String? = nil
+    var frameClock: String? = nil
+    var frameClockNormal = false
+    var reopen = false
 
     static func parseColors(_ text: String) -> [NSColor] {
         text.split(separator: ",").compactMap { part in
@@ -175,6 +200,7 @@ struct Options {
         if env["FIXTURE_REVERSE"] == "1" { o.reverse = true }
         if let r = env["FIXTURE_RETITLE"] { o.retitle = parseRetitle(r) }
         if let n = env["FIXTURE_RETITLE_AFTER_MS"].flatMap(Int.init) { o.retitleAfterMs = n }
+        if let n = env["FIXTURE_MINIMIZE_AFTER_MS"].flatMap(Int.init) { o.minimizeAfterMs = n }
         if let m = env["FIXTURE_MINIMIZED"] { o.minimized = Set(m.split(separator: ";").map(String.init)) }
         if let n = env["FIXTURE_TABBED"].flatMap(Int.init) { o.tabbed = n }
         if env["FIXTURE_CHILD"] == "1" { o.child = true }
@@ -188,6 +214,9 @@ struct Options {
         if let f = env["FIXTURE_COLOR_FILE"], !f.isEmpty { o.colorFile = f }
         if env["FIXTURE_ENHANCED_UI"] == "1" { o.enhancedUI = true }
         if let f = env["FIXTURE_ENHANCED_UI_FILE"], !f.isEmpty { o.enhancedUIFile = f }
+        if let f = env["FIXTURE_FRAME_CLOCK"], !f.isEmpty { o.frameClock = f }
+        if env["FIXTURE_FRAME_CLOCK_NORMAL"] == "1" { o.frameClockNormal = true }
+        if env["FIXTURE_REOPEN"] == "1" { o.reopen = true }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -202,6 +231,7 @@ struct Options {
             case "--reverse": o.reverse = true
             case "--retitle": if let r = args.next() { o.retitle = parseRetitle(r) }
             case "--retitle-after-ms": if let n = args.next().flatMap(Int.init) { o.retitleAfterMs = n }
+            case "--minimize-after-ms": if let n = args.next().flatMap(Int.init) { o.minimizeAfterMs = n }
             case "--minimized": if let m = args.next() { o.minimized = Set(m.split(separator: ";").map(String.init)) }
             case "--tabbed": if let n = args.next().flatMap(Int.init) { o.tabbed = n }
             case "--child": o.child = true
@@ -215,6 +245,9 @@ struct Options {
             case "--color-file": if let f = args.next() { o.colorFile = f }
             case "--enhanced-ui": o.enhancedUI = true
             case "--enhanced-ui-file": if let f = args.next() { o.enhancedUIFile = f }
+            case "--frame-clock": if let f = args.next() { o.frameClock = f }
+            case "--frame-clock-normal": o.frameClockNormal = true
+            case "--reopen": o.reopen = true
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -222,6 +255,7 @@ struct Options {
         o.delayMs = max(0, o.delayMs)
         o.staggerMs = max(0, o.staggerMs)
         o.retitleAfterMs = max(0, o.retitleAfterMs)
+        o.minimizeAfterMs = max(0, o.minimizeAfterMs)
         o.raiseDelayMs = max(0, o.raiseDelayMs)
         o.tabbed = max(0, min(o.tabbed, o.windows - 1))
         return o
@@ -261,6 +295,63 @@ final class LateRaiseWindow: NSWindow {
 /// A panel Accessibility reports as a dialog (`AXDialog`), as an app's alert or prompt is.
 final class DialogPanel: NSPanel {
     override func accessibilitySubrole() -> NSAccessibility.Subrole? { .dialog }
+}
+
+/// `--frame-clock`: a view that draws a new colour on every display refresh and counts the
+/// refreshes its callback missed (a gap of more than one frame since the last callback, in
+/// whole frames), appending its counts to a file every 0.25 s.
+final class FrameClockView: NSView {
+    let path: String
+    var link: CADisplayLink?
+    var frames = 0
+    var missed = 0
+    var last: CFTimeInterval = 0
+    var longest: CFTimeInterval = 0
+    var written: CFTimeInterval = 0
+    var step = 0
+
+    init(frame: NSRect, path: String) {
+        self.path = path
+        super.init(frame: frame)
+        wantsLayer = true
+        FileManager.default.createFile(atPath: path, contents: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, link == nil else { return }
+        let l = displayLink(target: self, selector: #selector(tick(_:)))
+        l.add(to: .main, forMode: .common)
+        link = l
+    }
+
+    @objc func tick(_ l: CADisplayLink) {
+        let frame = l.duration
+        if last > 0 {
+            let gap = l.timestamp - last
+            longest = max(longest, gap)
+            if frame > 0 {
+                let lost = Int((gap / frame).rounded()) - 1
+                if lost > 0 { missed += lost }
+            }
+        }
+        last = l.timestamp
+        frames += 1
+        step += 1
+        layer?.backgroundColor = NSColor(hue: CGFloat(step % 240) / 240, saturation: 0.6, brightness: 0.8, alpha: 1).cgColor
+        if l.timestamp - written >= 0.25 {
+            written = l.timestamp
+            let line = String(format: "%.3f %d %d %.2f %.2f\n", Date().timeIntervalSince1970, frames, missed, longest * 1000, frame * 1000)
+            longest = 0
+            if let h = FileHandle(forWritingAtPath: path) {
+                h.seekToEndOfFile()
+                h.write(line.data(using: .utf8)!)
+                try? h.close()
+            }
+        }
+    }
 }
 
 final class LabelView: NSView {
@@ -466,6 +557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if options.stray { makeStray() }
         if let path = options.colorFile { watchColor(path) }
+        if let path = options.frameClock { openFrameClock(path, area: area) }
         if let fixture = NSApp as? FixtureApplication {
             fixture.enhancedUIFile = options.enhancedUIFile
             fixture.enhancedUI = options.enhancedUI
@@ -484,6 +576,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !options.background {
             NSApp.activate(ignoringOtherApps: true)
         }
+    }
+
+    /// `--frame-clock`: the call stand-in's window (see [`FrameClockView`]), floating; with
+    /// `--frame-clock-normal` a standard window at the normal level.
+    func openFrameClock(_ path: String, area: NSRect) {
+        let w = NSWindow(
+            contentRect: NSRect(x: area.maxX - 500, y: area.maxY - 290, width: 480, height: 270),
+            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        w.title = "\(options.title) Clock"
+        w.isReleasedWhenClosed = false
+        w.level = options.frameClockNormal ? .normal : .floating
+        w.contentView = FrameClockView(frame: .zero, path: path)
+        w.orderFrontRegardless()
+        windows.append(w)
     }
 
     /// `--color-file`: every window takes the colour written in `path` ("rrggbb"), read every
@@ -562,7 +668,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // Accessibility and not minimized (the 10-15 live run). A moment later, so the
             // window server has shown it, it goes to the Dock.
             window.orderBack(nil)
-            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { window.miniaturize(nil) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.minimizeAfterMs)) { window.miniaturize(nil) }
         } else {
             show(window)
         }
@@ -743,8 +849,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// SIGWINCH: windows parked in the bottom-right corner go "to another Desktop".
     func sendParkedAway() {
         guard let screen = NSScreen.screens.first?.frame else { return }
-        let parked = NSApp.windows.filter { w in
+        var parked = NSApp.windows.filter { w in
             w.isVisible && !(w is NSPanel) && w.frame.minX >= screen.maxX - 64 && w.frame.maxY <= screen.minY + 64
+        }
+        if parked.isEmpty {
+            // No window in the corner: the windows hidden in a Space that is not shown (the
+            // Spaces engine keeps a hidden window at its frame, off the Desktop) go instead.
+            parked = NSApp.windows.filter { w in w.isVisible && !(w is NSPanel) && !w.isOnActiveSpace }
         }
         for w in parked { w.orderOut(nil) }
         away += parked.map { ($0, $0.frame) }
@@ -778,6 +889,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+
+    /// `--reopen`: with no window shown, one more opens at once, key and in front.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        guard options.reopen, !flag else { return true }
+        let area = NSScreen.screens.first?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        makeWindow(opened, area: area).makeKeyAndOrderFront(nil)
+        return false
+    }
 }
 
 let app = FixtureApplication.shared

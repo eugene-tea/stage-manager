@@ -54,7 +54,7 @@ use super::pending::Placed;
 use super::{Action, DisplayId, Home, Model, Observation, SpaceId, Stage, StageId, WindowId, WindowMeta, WindowRole};
 use crate::engine::displays::ScreenKey;
 use crate::engine::geometry::Rect;
-use crate::engine::park::clamp_to_visible;
+use crate::engine::corner::park::clamp_to_visible;
 use crate::engine::persist::{Assignment, SavedRole, SavedSpace, SavedWindow, live_key};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, Live, LowRule, MEDIUM, Saved, assign, at_saved_frame};
@@ -216,7 +216,7 @@ impl Model {
     /// a same-titled window waiting on another; the review of 8I, L3); a confident match
     /// elsewhere beats a low one into the stage shown.
     fn picks(&self, space: SpaceId, metas: &[WindowMeta], low: LowRule, scope: Scope) -> Vec<(usize, Spot, Grade, u32)> {
-        let lives: Vec<_> = metas.iter().map(|m| live_key(m, self.display(m.display).parks(m.frame))).collect();
+        let lives: Vec<_> = metas.iter().map(|m| live_key(m, self.seen_hidden(m))).collect();
         let run = |scope: Scope, which: &[usize], low: LowRule| -> Vec<(usize, Spot, Grade, u32)> {
             let (spots, keys) = self.waiting(space, scope);
             let sub: Vec<_> = which.iter().map(|&i| lives[i].clone()).collect();
@@ -940,7 +940,7 @@ impl Model {
     /// one was.
     fn forget_voted(&mut self, meta: &WindowMeta, desktop: u64, actions: &mut Vec<Action>) -> bool {
         let (spots, keys) = self.waiting_where(|s| s.space.0 == desktop, |l| l.id == desktop);
-        let parked = self.display(meta.display).parks(meta.frame);
+        let parked = self.seen_hidden(meta);
         let pick = assign(&keys, &[live_key(meta, parked)], LowRule::default()).into_iter().next().flatten();
         let Some(spot) = pick.filter(|p| p.grade.confident()).map(|p| spots[p.saved]) else { return false };
         self.drop_spot(spot, actions);

@@ -4,15 +4,20 @@
 //! Accessibility call runs on the WM thread ([`wm_thread`]), which owns the engine through
 //! [`controller`]; the ctl socket and the signal watcher have their own threads.
 
+pub mod apple;
 pub mod apps;
 pub mod ax;
 pub mod capture;
+pub mod capture_fast;
 pub mod capture_frame;
 pub mod capture_gate;
 pub mod capture_pace;
 pub mod capture_pixels;
 pub mod code_sign;
+pub mod conductor;
 pub mod controller;
+pub mod corner;
+pub mod costs;
 pub mod ctl;
 pub mod desktop;
 pub mod desktop_counts;
@@ -42,13 +47,22 @@ pub mod permissions;
 pub mod safety;
 pub mod self_capture;
 pub mod session;
+pub mod pixels_probe;
+pub mod settle_probe;
 pub mod shadow_probe;
 pub mod shadow_profile;
-pub mod sliver_tap;
 pub mod space_keys;
+pub mod spaces;
+pub mod new_window_probe;
+pub mod spaces_probe;
+pub mod switch_shots;
+pub mod switcher_ax;
+pub mod switcher_probe;
+pub mod tap_switch;
 pub mod update_check;
 pub mod updater;
 pub mod wallpaper;
 pub mod window_look;
+pub mod window_engine;
 pub mod windows;
 pub mod wm_thread;

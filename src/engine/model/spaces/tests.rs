@@ -1,17 +1,22 @@
 //! Spaces tests: two Desktops with their own stages and strips, recognition by windows,
 //! moves, sticky windows, leaving, persistence per Space. Made-up titles only.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::*;
 use crate::engine::geometry::Rect;
 use crate::engine::model::{NativeTarget, Observation, Pid, Target};
 use crate::engine::persist::{StateFile, rematch};
+use crate::engine::recovery::EngineKind;
 use crate::engine::rules::Decision;
+use crate::engine::switcher;
 use crate::engine::testkit::*;
 
 /// The model plus a fake Mac with two Desktops: each window lives on one (or, sticky, on
-/// both); only the shown Desktop's windows are "on screen".
+/// both); only the shown Desktop's windows are "on screen". A hide runs as the model's
+/// engine runs it: the Corner engine parks the window in the corner (still on screen), the
+/// Spaces engine puts it into a stage Space at its frame (off screen; an arrival still
+/// reports it with its Desktop, [`Mac::live`]).
 struct Mac {
     m: Model,
     /// Window → (Desktop index, or `None` for every Desktop; live frame; meta).
@@ -22,6 +27,8 @@ struct Mac {
     elsewhere: Vec<Action>,
     /// macOS leaves windows of a Desktop not shown where they are (moves there do nothing).
     still_elsewhere: bool,
+    /// Windows in a stage Space (the Spaces engine's hide).
+    stage_space: BTreeSet<u32>,
 }
 
 impl Mac {
@@ -33,6 +40,7 @@ impl Mac {
             focused: None,
             elsewhere: Vec::new(),
             still_elsewhere: false,
+            stage_space: BTreeSet::new(),
         }
     }
 
@@ -46,15 +54,26 @@ impl Mac {
     }
 
     fn on_screen(&self, id: u32) -> bool {
+        !self.stage_space.contains(&id) && self.on_shown_desktop(id)
+    }
+
+    /// True when window `id` lives on the Desktop shown (or on every Desktop), on screen or
+    /// in a stage Space of it.
+    fn on_shown_desktop(&self, id: u32) -> bool {
         self.wins
             .get(&id)
             .is_some_and(|(d, _, _)| d.is_none_or(|d| d == self.shown))
     }
 
+    /// The windows an arrival reports present: those of the Desktop shown, on screen or
+    /// hidden. A parked window is on screen in the corner; a window in a stage Space is off
+    /// screen, and reported with its stage's Desktop (the Spaces engine made that Space for
+    /// it), at its own frame. A hidden window of another Desktop is missing, as a parked one
+    /// is.
     fn live(&self) -> Vec<WindowMeta> {
         self.wins
             .iter()
-            .filter(|(id, _)| self.on_screen(**id))
+            .filter(|(id, _)| self.on_shown_desktop(**id))
             .map(|(_, (_, f, m))| WindowMeta { frame: *f, ..m.clone() })
             .collect()
     }
@@ -62,18 +81,31 @@ impl Mac {
     fn run(&mut self, actions: Vec<Action>) -> Vec<Action> {
         for a in &actions {
             let id = match *a {
-                Action::SetFrame { id, .. } | Action::Park { id, .. } | Action::Raise { id } | Action::Focus { id } => id,
+                Action::SetFrame { id, .. } | Action::Hide { id } | Action::Raise { id } | Action::Focus { id } => id,
                 Action::StateChanged => continue,
             };
-            if !self.on_screen(id.0) {
+            if !self.on_shown_desktop(id.0) {
                 self.elsewhere.push(*a);
                 if self.still_elsewhere {
                     continue;
                 }
             }
+            let spaces = self.m.options().engine == EngineKind::Spaces;
             match *a {
-                Action::SetFrame { id, frame } | Action::Park { id, frame } => {
-                    if let Some(w) = self.wins.get_mut(&id.0) {
+                Action::SetFrame { id, .. } => _ = self.stage_space.remove(&id.0),
+                Action::Hide { id } if spaces && self.wins.contains_key(&id.0) => _ = self.stage_space.insert(id.0),
+                _ => {}
+            }
+            let asked = match *a {
+                Action::SetFrame { id, frame } => Some((id, frame)),
+                Action::Hide { id } if !spaces => park_frame(&self.m, id).map(|frame| (id, frame)),
+                _ => None,
+            };
+            match *a {
+                Action::SetFrame { .. } | Action::Hide { .. } => {
+                    if let Some((id, frame)) = asked
+                        && let Some(w) = self.wins.get_mut(&id.0)
+                    {
                         w.1 = macos_places(frame);
                     }
                 }
@@ -99,7 +131,7 @@ impl Mac {
         let absent: Vec<WindowId> = self
             .wins
             .iter()
-            .filter(|(id, (d, _, _))| !self.on_screen(**id) && !matches!(*d, Some(FULL_SCREEN | HIDDEN)))
+            .filter(|(id, (d, _, _))| !self.on_shown_desktop(**id) && !matches!(*d, Some(FULL_SCREEN | HIDDEN)))
             .map(|(id, _)| w(*id))
             .filter(|id| self.m.window(*id).is_some())
             .collect();
@@ -122,7 +154,7 @@ impl Mac {
                 .filter(|(id, _)| self.on_screen(**id))
                 .map(|(id, (_, f, _))| (w(*id), *f))
                 .collect(),
-            z_order: self.live().iter().map(|m| m.id).collect(),
+            z_order: self.wins.keys().filter(|id| self.on_screen(**id)).map(|id| w(*id)).collect(),
             focused: self.focused,
         }
     }
@@ -143,8 +175,14 @@ impl Mac {
         self.run(a)
     }
 
+    /// True when window `id` is hidden as the model's engine hides: in the park zone
+    /// (Corner), in a stage Space (Spaces).
     fn parked(&self, id: u32) -> bool {
-        parked_at(self.wins[&id].1)
+        match self.m.options().engine {
+            EngineKind::Corner => parked_at(self.wins[&id].1),
+            EngineKind::Spaces => self.stage_space.contains(&id),
+            EngineKind::Apple => false,
+        }
     }
 
     fn space(&self) -> SpaceId {
@@ -177,6 +215,7 @@ fn two_desktops() -> Mac {
     mac
 }
 
+both_engines! {
 #[test]
 fn a_desktop_left_after_its_only_app_quit_keeps_the_quit_window_for_the_file() {
     // Review E5 (10-29): chat alone on Desktop 1 quits (the logout's apps quit before its
@@ -539,7 +578,9 @@ fn a_first_launch_on_another_desktop_does_not_take_the_saved_current_one() {
     third.go(0);
     assert_ne!(third.space(), d2);
 }
+}
 
+corner_nuance! {
 #[test]
 fn a_parked_window_found_outside_the_park_zone_on_arrival_is_parked_again() {
     // V1-A for a Desktop not shown: the display changed size while Desktop 1 was away; its
@@ -551,11 +592,13 @@ fn a_parked_window_found_outside_the_park_zone_on_arrival_is_parked_again() {
     mac.go(1);
     mac.wins.get_mut(&2).expect("window").1 = Rect::new(700.0, 300.0, 600.0, 400.0);
     let a = mac.go(0);
-    assert!(a.iter().any(|x| matches!(x, Action::Park { id, .. } if *id == w(2))), "{a:?}");
+    assert!(a.iter().any(|x| matches!(x, Action::Hide { id } if *id == w(2))), "{a:?}");
     assert!(mac.parked(2));
     assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
 }
+}
 
+both_engines! {
 #[test]
 fn send_and_pin_by_id_never_touch_another_desktops_window() {
     // L2: `ctl send N ID` / `ctl pin ID` naming a window of a Desktop not shown.
@@ -571,7 +614,9 @@ fn send_and_pin_by_id_never_touch_another_desktops_window() {
     // The shown Desktop's windows still can.
     assert!(!mac.m.toggle_pin(w(3), &obs).is_empty());
 }
+}
 
+corner_nuance! {
 #[test]
 fn a_shown_window_found_parked_on_arrival_is_brought_back() {
     // R1-platform 9: a batch cut short while Accessibility was off left a window the model
@@ -582,14 +627,16 @@ fn a_shown_window_found_parked_on_arrival_is_brought_back() {
     assert!(!mac.parked(1) && !mac.m.window(w(1)).expect("w1").parked);
     let size = mac.wins[&1].1.size();
     mac.wins.get_mut(&1).expect("window").1 =
-        macos_places(crate::engine::park::park_frame(size, FRAME));
+        macos_places(crate::engine::corner::park::park_frame(size, FRAME));
     assert!(mac.parked(1));
     let a = mac.arrive();
     assert!(a.iter().any(|x| matches!(x, Action::SetFrame { id, .. } if *id == w(1))), "{a:?}");
     assert!(!mac.parked(1));
     assert!(mac.parked(2), "the parked stage stays parked");
 }
+}
 
+both_engines! {
 #[test]
 fn saved_ids_never_collide_with_the_models_own() {
     let mut m = model();
@@ -672,6 +719,7 @@ fn a_window_in_full_screen_still_belongs_to_its_desktop() {
     assert_eq!(mac.m.stages_in(d1).map(|s| s.id).collect::<Vec<_>>(), stages);
     assert_ne!(mac.space(), d2);
 }
+}
 
 // ----- a Dock click, ⌘Tab or activation that lands on another Desktop (round 6R) ----------
 
@@ -721,6 +769,7 @@ mod focus_on_arrival {
         mac.run(a);
     }
 
+    both_engines! {
     #[test]
     fn focus_before_the_space_notice_brings_its_stage() {
         for ax_now in [None, Some(3)] {
@@ -816,6 +865,7 @@ mod focus_on_arrival {
         arrive_with(&mut mac, &mut replay, Some(1), Instant::now());
         assert_eq!(mac.m.main_active_stage(), Some(editor));
     }
+    }
 
     /// Desktop 1 with three stages, the browser's active (the editor's window 1 and the mail
     /// app's window 5 parked); the user is on Desktop 2.
@@ -836,6 +886,7 @@ mod focus_on_arrival {
         (mac, editor, browser, mail)
     }
 
+    both_engines! {
     #[test]
     fn an_ax_answer_that_acts_decides_over_a_held_window() {
         // AX names the editor's parked window when the Desktop is recognized: its stage
@@ -883,6 +934,7 @@ mod focus_on_arrival {
         assert_eq!(mac.m.main_active_stage(), Some(browser), "AX's answer stands");
         assert!(mac.parked(6));
     }
+    }
 
     /// The controller's "a wait ended" check (no Space change after a settle): the held
     /// focus is replayed only when its window is known and on the Desktop shown.
@@ -897,6 +949,7 @@ mod focus_on_arrival {
         true
     }
 
+    both_engines! {
     #[test]
     fn a_wait_ended_replays_a_focus_held_on_the_desktop_shown() {
         // A full-screen animation settled with no Space change after it: the editor's
@@ -975,6 +1028,7 @@ mod focus_on_arrival {
         assert!(mac.m.waits_on_another_space(w(1)));
         assert!(!mac.m.waits_on_another_space(w(99)), "unknown windows are the controller's to hold");
     }
+    }
 }
 
 // ----- an activation while a Desktop slides, before the notice (10-23) -------------------
@@ -1045,6 +1099,7 @@ mod slide_activation {
         mac.run(a);
     }
 
+    both_engines! {
     #[test]
     fn decided_at_once_mid_slide_it_switches_on_the_desktop_being_left() {
         // The failure: the model still shows Desktop 2, so the editor's activation brought
@@ -1123,7 +1178,115 @@ mod slide_activation {
         assert!(asks_focus(&mac.m, 10));
         assert!(!asks_focus(&mac.m, 30), "the chat lives on Desktop 2 only");
     }
+    }
 
+    /// Live 11-15 16:34:28 (the suite's relaunch): the app relaunched on Desktop 1 in the same
+    /// window server session, so the saved window ids still hold; Desktop 2 waits for its
+    /// first visit and none of its windows is known. Desktop 1 shows the browser's stage, the
+    /// editor's window 1 waits in its own; the editor's window 3 and the chat are on Desktop 2.
+    fn relaunched_on_desktop_1() -> Mac {
+        let mut mac = two_desktops();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        mac.focused = Some(w(4));
+        mac.go(1);
+        mac.focused = Some(w(2));
+        mac.go(0);
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        mac.click(browser);
+        let saved = StateFile::from_json(&mac.m.to_state().to_json().expect("encodes")).expect("parses");
+        let mut again = Mac::new();
+        again.m.restore_spaces(saved.spaces);
+        for (id, (desk, _, meta)) in &mac.wins {
+            again.put(desk.expect("on one Desktop"), *id, meta.pid, &meta.bundle_id, &meta.title);
+        }
+        again.focused = Some(w(2));
+        again.go(0);
+        assert_eq!(again.m.unvisited_saved_spaces(), 1, "Desktop 2 waits for its first visit");
+        assert!(again.m.window(w(3)).is_none() && again.m.window(w(4)).is_none(), "Desktop 2's windows are not known yet");
+        assert!(again.parked(1) && !again.parked(2), "Desktop 1: the browser's stage in front, the editor's waits");
+        again.elsewhere.clear();
+        again
+    }
+
+    both_engines! {
+    #[test]
+    fn after_a_relaunch_the_first_slide_to_a_desktop_not_visited_holds_the_activation() {
+        let mut mac = relaunched_on_desktop_1();
+        let d1 = mac.space();
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        // ⌃←: Desktop 2 slides in from the left, Desktop 1's windows slide out to the right.
+        // macOS activates Desktop 2's front app, the editor, before the Space change notice.
+        let three = Rect::new(-900.0, 80.0, 600.0, 400.0);
+        let four = Rect::new(-500.0, 120.0, 520.0, 392.0);
+        let list = listed(&mac, 1240.0, &[(3, three), (4, four)]);
+        assert!(slide_listed(&mac.m, &list), "Desktop 2's saved windows on screen: a slide");
+        let why = activation(&mut mac, &mut replay, 10, &list, Some(3), t0);
+        assert_eq!(why, Some(Wait::Slides));
+        assert!(mac.parked(1) && !mac.parked(2), "nothing switched on Desktop 1");
+        assert_eq!(mac.m.active_stage_in(d1), Some(browser));
+        assert_eq!(mac.focused, Some(w(2)), "nothing focused there");
+        assert!(mac.elsewhere.is_empty(), "{:?}", mac.elsewhere);
+        // The Space change: Desktop 2 shows; its stages are rebuilt from the file, the held
+        // activation replayed there.
+        mac.shown = 1;
+        mac.focused = Some(w(3));
+        mac.arrive();
+        assert_eq!(mac.m.unvisited_saved_spaces(), 0, "Desktop 2 visited");
+        let held = replay.take(t0 + Duration::from_millis(400));
+        let obs = mac.obs();
+        let a = mac.m.bring_focus_forward(Some(w(3)), held, &obs);
+        mac.run(a);
+        assert!(!mac.parked(3), "the editor's window shows on Desktop 2");
+        assert!(mac.elsewhere.is_empty(), "Desktop 1 never touched: {:?}", mac.elsewhere);
+        assert_eq!(mac.m.active_stage_in(d1), Some(browser), "Desktop 1 as it was left");
+        assert!(mac.parked(1) && !mac.parked(2));
+    }
+
+    #[test]
+    fn after_a_relaunch_a_focused_window_saved_on_a_desktop_not_visited_holds_the_activation() {
+        // The activation before the list shows the slide: the app's focused window, a window
+        // the file names on Desktop 2, says where it goes.
+        let mut mac = relaunched_on_desktop_1();
+        assert!(asks_focus(&mac.m, 10), "the editor has a window saved on Desktop 2");
+        assert!(!asks_focus(&mac.m, 20), "the browser has none");
+        let t0 = Instant::now();
+        let mut replay = FocusReplay::default();
+        let list = listed(&mac, 0.0, &[]);
+        assert!(!slide_listed(&mac.m, &list), "no slide listed yet");
+        let why = activation(&mut mac, &mut replay, 10, &list, Some(3), t0);
+        assert_eq!(why, Some(Wait::FocusElsewhere(w(3))));
+        assert!(mac.parked(1) && !mac.parked(2) && mac.elsewhere.is_empty(), "nothing switched on Desktop 1");
+    }
+
+    #[test]
+    fn after_a_relaunch_an_activation_for_a_stage_here_still_switches_at_once() {
+        // The editor activated for its stage on Desktop 1 (a Dock click, ⌘Tab): its focused
+        // window is window 1, or AX names none; no slide listed. Switched at once, as before.
+        for ax in [Some(1), None] {
+            let mut mac = relaunched_on_desktop_1();
+            let t0 = Instant::now();
+            let mut replay = FocusReplay::default();
+            let list = listed(&mac, 0.0, &[]);
+            let why = activation(&mut mac, &mut replay, 10, &list, ax, t0);
+            assert_eq!(why, None, "AX {ax:?}");
+            assert!(!mac.parked(1) && mac.parked(2), "the editor's stage on Desktop 1 (AX {ax:?})");
+            assert_eq!(replay.peek(t0), None, "nothing held");
+            assert!(mac.elsewhere.is_empty());
+        }
+        // A window not known and named by no saved Desktop (one just opened) is no slide; nor
+        // is a saved Desktop's window once the model knows it.
+        let mac = relaunched_on_desktop_1();
+        let new = Rect::new(300.0, 200.0, 500.0, 400.0);
+        assert!(!slide_listed(&mac.m, &listed(&mac, 0.0, &[(77, new)])));
+        assert!(!mac.m.saved_on_unvisited_desktop(w(1), MAIN), "known: Desktop 1's");
+        assert!(mac.m.saved_on_unvisited_desktop(w(3), MAIN));
+    }
+    }
+
+    corner_nuance! {
     #[test]
     fn the_desktop_being_lefts_parked_windows_slid_together_are_a_slide() {
         let mac = editor_parked_on_desktop_2();
@@ -1133,7 +1296,9 @@ mod slide_activation {
         assert!(slide_listed(&mac.m, &parked_only(-700.0)), "moved sideways out of the zone");
         assert!(!slide_listed(&mac.m, &[]), "none listed (a hidden app's): no slide");
     }
+    }
 
+    both_engines! {
     #[test]
     fn a_held_activation_with_no_space_change_is_decided_after_the_hold() {
         let mut mac = editor_parked_on_desktop_2();
@@ -1153,6 +1318,7 @@ mod slide_activation {
         let a = mac.m.app_activated(10, &obs);
         mac.run(a);
         assert!(!mac.parked(3), "the editor's stage on Desktop 2, as an activation always did");
+    }
     }
 }
 
@@ -1178,18 +1344,18 @@ mod arranged_ahead {
         (mac, editor, browser)
     }
 
-    /// Every managed window is where the model says: parked ones in the park zone, shown
-    /// ones out of it (on whichever Desktop).
+    /// Every managed window is where the model says: parked ones hidden by the engine (in
+    /// the park zone, in a stage Space), shown ones not (on whichever Desktop).
     fn consistent(mac: &Mac) {
         for (id, (_, frame, _)) in &mac.wins {
             if let Some(st) = mac.m.window(w(*id)) {
-                assert_eq!(st.parked, parked_at(*frame), "window {id}: the model says parked={}, its frame {frame}", st.parked);
+                assert_eq!(st.parked, mac.parked(*id), "window {id}: the model says parked={}, its frame {frame}", st.parked);
             }
         }
     }
 
     fn moves(actions: &[Action]) -> Vec<Action> {
-        actions.iter().copied().filter(|a| matches!(a, Action::SetFrame { .. } | Action::Park { .. })).collect()
+        actions.iter().copied().filter(|a| matches!(a, Action::SetFrame { .. } | Action::Hide { .. })).collect()
     }
 
     fn raises_or_focus(actions: &[Action]) -> bool {
@@ -1213,6 +1379,7 @@ mod arranged_ahead {
     use crate::engine::focus_replay::Wanted;
     use crate::engine::model::Ahead;
 
+    both_engines! {
     #[test]
     fn arranged_at_the_space_notice_the_desktop_arrives_with_nothing_left_to_move() {
         let (mut mac, editor, browser) = editor_on_both();
@@ -1249,7 +1416,7 @@ mod arranged_ahead {
             .elsewhere
             .iter()
             .filter_map(|a| match *a {
-                Action::SetFrame { id, .. } | Action::Park { id, .. } => Some(id),
+                Action::SetFrame { id, .. } | Action::Hide { id } => Some(id),
                 _ => None,
             })
             .collect();
@@ -1291,7 +1458,9 @@ mod arranged_ahead {
         assert_eq!(mac.m.main_active_stage(), Some(browser));
         consistent(&mac);
     }
+    }
 
+    corner_nuance! {
     #[test]
     fn moves_macos_did_not_carry_out_are_matched_at_the_arrival() {
         // A Desktop not shown whose windows macOS leaves where they are.
@@ -1317,7 +1486,9 @@ mod arranged_ahead {
             assert_eq!(mac.m.main_active_stage(), Some(want), "predicted {predicted}");
         }
     }
+    }
 
+    both_engines! {
     #[test]
     fn another_desktop_arriving_undoes_it_and_a_shown_desktop_is_left_as_it_is() {
         // Arranged for Desktop 1, but Desktop 2 is recognized (the slide went elsewhere).
@@ -1341,14 +1512,16 @@ mod arranged_ahead {
         assert!(mac.m.undo_ahead(&ahead).is_empty());
         assert_eq!(mac.m.main_active_stage(), Some(editor));
     }
+    }
 
     fn id_of(a: &Action) -> u32 {
         match *a {
-            Action::SetFrame { id, .. } | Action::Park { id, .. } | Action::Raise { id } | Action::Focus { id } => id.0,
+            Action::SetFrame { id, .. } | Action::Hide { id } | Action::Raise { id } | Action::Focus { id } => id.0,
             Action::StateChanged => 0,
         }
     }
 
+    both_engines! {
     #[test]
     fn arranged_at_the_notice_the_stage_left_keeps_the_order_the_user_left_it_in() {
         // Desktop 1's browser stage holds two windows; the user brought window 6 to its front
@@ -1453,6 +1626,7 @@ mod arranged_ahead {
         assert_eq!(mac.m.active_stage_in(ahead.space), Some(editor), "the window arranged for stays shown");
         consistent(&mac);
     }
+    }
 
     /// Desktop 1: the editor (window 1), the browser (2, active) and mail (5, parked);
     /// Desktop 2 shown: the editor's window 3 and chat.
@@ -1470,6 +1644,46 @@ mod arranged_ahead {
         mac
     }
 
+    /// The owner's log of 11-15: Desktop 1 shown with the browser's stage in front and Mail's
+    /// window 5 waiting in a stage of its own there; Mail's window 6 shown on Desktop 2 with
+    /// chat behind it. Mail is not the active app.
+    fn mail_waiting_here_and_shown_elsewhere() -> Mac {
+        let mut mac = Mac::new();
+        mac.put(0, 2, 20, "com.example.browser", "Work wiki");
+        mac.put(0, 5, 40, "com.example.mail", "Inbox");
+        mac.put(1, 6, 40, "com.example.mail", "Sent");
+        mac.put(1, 4, 30, "com.example.chat", "Family");
+        mac.focused = Some(w(6));
+        mac.go(1);
+        mac.focused = Some(w(5));
+        mac.go(0);
+        let browser = mac.m.stage_of(w(2)).expect("browser stage");
+        mac.click(browser);
+        assert!(mac.parked(5) && !mac.parked(6), "Mail waits here, shows on Desktop 2");
+        mac.elsewhere.clear();
+        mac
+    }
+
+    /// Round cmd-tab: ⌘Tab's keys, the app they select, the window put home for it, and the
+    /// activation at ⌘'s release, in the order a person makes them. Mail (40) waits in a stage
+    /// here and shows on Desktop 2; the browser (20) is in front, chat (30) lives on Desktop 2;
+    /// the apps were used browser, Mail, chat.
+    fn cmd_tab(mac: &Mac, keys: &mut switcher::Switcher, key: switcher::Key, lent: Option<(Pid, WindowId)>) -> Vec<switcher::Act> {
+        use crate::engine::model::AppFacts;
+        let heard = keys.hear(key);
+        let steps = match heard {
+            switcher::Heard::Selected { steps, .. } | switcher::Heard::Released { steps } => steps,
+            _ => None,
+        };
+        let selected = steps.and_then(|s| switcher::predict(&[20, 40, 30], 3, s));
+        switcher::plan(heard, selected, lent, |pid| mac.m.dock_home(pid, AppFacts { active: pid == 20, ..AppFacts::default() }))
+    }
+
+    fn tab(shift: bool) -> switcher::Key {
+        switcher::Key::Down { code: switcher::KEY_TAB, cmd: true, shift }
+    }
+
+    both_engines! {
     #[test]
     fn a_dock_click_predicts_the_window_macos_will_show_on_another_desktop() {
         use crate::engine::model::AppFacts;
@@ -1551,6 +1765,306 @@ mod arranged_ahead {
     }
 
     #[test]
+    fn a_window_hidden_here_counts_for_macos_only_under_the_corner_engine() {
+        use crate::engine::model::AppFacts;
+        let mac = mail_waiting_here_and_shown_elsewhere();
+        let none = AppFacts::default();
+        let mail_stage = mac.m.stage_of(w(5));
+        match mac.m.options().engine {
+            EngineKind::Corner => {
+                // The parked window is on Desktop 1 (in the corner): macOS activates Mail here.
+                assert_eq!(
+                    mac.m.dock_arrival(40, none, Some(w(6))),
+                    Err("the inactive app has a window on the Desktop shown: macOS activates it here"),
+                );
+                assert_eq!(mac.m.dock_home(40, none), None, "nothing to put home: the parked window counts here");
+            }
+            EngineKind::Spaces => {
+                // Window 5 is in a stage Space, on no Desktop: macOS counts Mail on Desktop 2
+                // only, and its focused window there is where the click goes.
+                assert_eq!(mac.m.dock_arrival(40, none, Some(w(6))), Ok(w(6)), "macOS goes to Desktop 2 for window 6");
+                assert_eq!(mac.m.dock_home(40, none), Some(w(5)), "window 5 goes home before the release, so macOS stays");
+                assert_eq!(mac.m.stage_of(w(5)), mail_stage);
+                assert!(mac.m.activation_stays_here(40, true), "window 5 put home: macOS counts Mail here");
+                assert!(!mac.m.activation_stays_here(40, false), "window 6 counted on Desktop 2: macOS goes there");
+                assert_eq!(mac.m.dock_home(40, AppFacts { active: true, ..none }), None, "active: its click goes elsewhere");
+                assert_eq!(mac.m.dock_home(40, AppFacts { hidden: true, ..none }), None, "hidden");
+                assert_eq!(mac.m.dock_home(40, AppFacts { visible_here: true, ..none }), None, "on screen here");
+                assert_eq!(mac.m.dock_home(20, none), None, "the browser has nothing on another Desktop");
+            }
+            EngineKind::Apple => unreachable!("the engine matrix runs the Corner and Spaces engines"),
+        }
+    }
+
+    #[test]
+    fn an_app_hidden_everywhere_with_a_stage_here_stays_here() {
+        use crate::engine::model::AppFacts;
+        // VS Code at 06:31:28 (11-15): a stage here, its focused window hidden in an inactive
+        // stage of Desktop 2.
+        let mut mac = mail_waiting_here_and_shown_elsewhere();
+        mac.go(1);
+        let chat = mac.m.stage_of(w(4)).expect("chat stage");
+        mac.click(chat);
+        assert!(mac.parked(6), "Mail's window on Desktop 2 waits behind chat");
+        mac.focused = Some(w(2));
+        mac.go(0);
+        assert!(mac.parked(5));
+        let none = AppFacts::default();
+        let prediction = mac.m.dock_arrival(40, none, Some(w(6)));
+        assert!(prediction.is_err(), "macOS stays either way: {prediction:?}");
+        assert_eq!(mac.m.dock_home(40, none), None, "nothing counted elsewhere: nothing to put home");
+        match mac.m.options().engine {
+            EngineKind::Corner => assert_eq!(prediction, Err("the inactive app has a window on the Desktop shown: macOS activates it here")),
+            EngineKind::Spaces => {
+                assert_eq!(prediction, Err("the inactive app's windows are all hidden off every Desktop: macOS stays, its activation switches here"));
+                assert!(mac.m.activation_stays_here(40, false), "macOS goes nowhere: the activation switches here");
+                assert!(!mac.m.activation_stays_here(30, false), "chat has no stage here");
+            }
+            EngineKind::Apple => unreachable!("the engine matrix runs the Corner and Spaces engines"),
+        }
+        // Its activation here switches to Mail's stage (the stage the Spaces engine keeps).
+        let obs = Observation { focused: Some(w(6)), ..mac.obs() };
+        let a = mac.m.app_activated(40, &obs);
+        mac.run(a);
+        assert_eq!(mac.m.stage_of(w(5)), mac.m.main_active_stage(), "Mail's stage here in front");
+        assert_eq!(mac.shown, 0);
+    }
+
+    #[test]
+    fn cmd_tab_puts_the_selected_apps_window_home_and_its_activation_switches_here() {
+        use switcher::{Act, Key};
+        let mut mac = mail_waiting_here_and_shown_elsewhere();
+        let mail_stage = mac.m.stage_of(w(5));
+        let mut keys = switcher::Switcher::default();
+        assert!(cmd_tab(&mac, &mut keys, Key::Command(true), None).is_empty(), "⌘ alone");
+        let acts = cmd_tab(&mac, &mut keys, tab(false), None);
+        match mac.m.options().engine {
+            EngineKind::Corner => {
+                // The parked window is on Desktop 1 already: nothing to put home, macOS stays.
+                assert!(acts.is_empty(), "the Corner engine: nothing put home ({acts:?})");
+                assert!(cmd_tab(&mac, &mut keys, Key::Command(false), None).is_empty());
+            }
+            EngineKind::Spaces => {
+                assert_eq!(acts, vec![Act::Lend { pid: 40, window: w(5) }], "one Tab: Mail, its stage's window put home");
+                let lent = Some((40, w(5)));
+                let acts = cmd_tab(&mac, &mut keys, tab(false), lent);
+                assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher's selection moved on" }], "on to chat");
+                // Back to Mail (⇧Tab), then ⌘ let go.
+                let acts = cmd_tab(&mac, &mut keys, tab(true), None);
+                assert_eq!(acts, vec![Act::Lend { pid: 40, window: w(5) }], "back on Mail");
+                let acts = cmd_tab(&mac, &mut keys, Key::Command(false), lent);
+                assert_eq!(acts, vec![Act::Release { window: w(5) }], "⌘ let go on Mail: kept for the activation");
+                assert!(mac.m.activation_stays_here(40, true), "window 5 home: macOS activates Mail here");
+                // The release order: ⌘ up, Mail's activation 10 ms later: kept for its switch.
+                let t0 = std::time::Instant::now();
+                let mut go = switcher::LetGo::default();
+                go.let_go(t0);
+                go.activated = true;
+                let wait = std::time::Duration::from_millis(1000);
+                assert_eq!(go.step(false, t0 + switcher::ACTIVATION_WAIT * 2, t0, wait), switcher::LetGoStep::Keep);
+            }
+            EngineKind::Apple => unreachable!("the engine matrix runs the Corner and Spaces engines"),
+        }
+        // The activation at the release: Mail's stage here comes in front (its focused window
+        // on Desktop 2 or the one put home: either way the stage here).
+        let obs = Observation { focused: Some(w(6)), ..mac.obs() };
+        let a = mac.m.app_activated(40, &obs);
+        mac.run(a);
+        assert_eq!(mac.m.stage_of(w(5)), mac.m.main_active_stage(), "Mail's stage here in front");
+        assert_eq!(mac.m.stage_of(w(5)), mail_stage, "in its own stage");
+        assert!(!mac.parked(5), "window 5 shown");
+        assert_eq!(mac.shown, 0, "on Desktop 1 all along");
+    }
+
+    #[test]
+    fn cmd_tab_takes_the_window_back_when_the_selection_moves_on_or_is_cancelled() {
+        use switcher::{Act, Key};
+        let mac = mail_waiting_here_and_shown_elsewhere();
+        let spaces = mac.m.options().engine == EngineKind::Spaces;
+        let lent = spaces.then_some((40, w(5)));
+        // Mail selected, then chat (a second Tab): chat has no stage here, nothing to put home.
+        let mut keys = switcher::Switcher::default();
+        let first = cmd_tab(&mac, &mut keys, tab(false), None);
+        assert_eq!(first.is_empty(), !spaces);
+        let acts = cmd_tab(&mac, &mut keys, tab(false), lent);
+        if spaces {
+            assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher's selection moved on" }], "moved on to chat");
+        } else {
+            assert!(acts.is_empty());
+        }
+        // ⌘ let go on chat: nothing lent any more, nothing to do here (macOS goes to Desktop 2).
+        assert!(cmd_tab(&mac, &mut keys, Key::Command(false), None).is_empty());
+        // Mail selected, then Escape: back, and ⌘'s release activates nothing.
+        let mut keys = switcher::Switcher::default();
+        cmd_tab(&mac, &mut keys, tab(false), None);
+        let acts = cmd_tab(&mac, &mut keys, Key::Down { code: switcher::KEY_ESCAPE, cmd: true, shift: false }, lent);
+        if spaces {
+            assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher was cancelled" }]);
+        } else {
+            assert!(acts.is_empty());
+        }
+        assert!(cmd_tab(&mac, &mut keys, Key::Command(false), None).is_empty(), "no switcher up: nothing");
+        // The live order of 11-15: the Dock's list gone 1 ms after Escape's key down, the
+        // monitor's Escape after it: the list gone decides nothing, Escape takes it back.
+        let mut keys = switcher::Switcher::default();
+        assert_eq!(cmd_tab(&mac, &mut keys, tab(false), None).is_empty(), !spaces);
+        let t0 = std::time::Instant::now();
+        keys.list_gone(t0);
+        assert_eq!(keys.gone_due(t0 + std::time::Duration::from_millis(20)), switcher::Heard::Nothing, "not decided at the list gone");
+        let acts = cmd_tab(&mac, &mut keys, Key::Down { code: switcher::KEY_ESCAPE, cmd: true, shift: false }, lent);
+        if spaces {
+            assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher was cancelled" }], "Escape after the list gone: back");
+        } else {
+            assert!(acts.is_empty());
+        }
+        assert_eq!(keys.gone_due(t0 + switcher::GONE_WAIT * 2), switcher::Heard::Nothing, "nothing left for the wait");
+        // The rerun's order: Escape never heard; the list gone, then ⌘ up heard as a release on
+        // Mail; no activation of Mail: back after the activation wait.
+        let mut keys = switcher::Switcher::default();
+        cmd_tab(&mac, &mut keys, tab(false), None);
+        let mut go = switcher::LetGo::default();
+        keys.list_gone(t0);
+        go.let_go(t0);
+        let acts = cmd_tab(&mac, &mut keys, Key::Command(false), lent);
+        if spaces {
+            assert_eq!(acts, vec![Act::Release { window: w(5) }], "the keys take it for a release");
+        }
+        let up = t0 + std::time::Duration::from_millis(87);
+        go.let_go(up);
+        let wait = std::time::Duration::from_millis(1000);
+        assert_eq!(go.step(false, up + switcher::ACTIVATION_WAIT / 2, t0, wait), switcher::LetGoStep::Keep);
+        assert_eq!(go.step(false, up + switcher::ACTIVATION_WAIT, t0, wait), switcher::LetGoStep::NoActivation, "no activation came: back");
+        assert!(mac.parked(5), "Mail's window stays hidden in its stage");
+        // Mail selected, then a key the keys do not follow (H hides it): back.
+        let mut keys = switcher::Switcher::default();
+        cmd_tab(&mac, &mut keys, tab(false), None);
+        let acts = cmd_tab(&mac, &mut keys, Key::Down { code: 4, cmd: true, shift: false }, lent);
+        assert_eq!(acts.len(), usize::from(spaces), "lost: back ({acts:?})");
+        // ⌘⇧Tab: the last app (chat), whose order is known here: nothing to put home.
+        let mut keys = switcher::Switcher::default();
+        assert!(cmd_tab(&mac, &mut keys, tab(true), None).is_empty());
+        // Three Tabs go around to the browser in front: no activation, nothing put home.
+        let mut keys = switcher::Switcher::default();
+        cmd_tab(&mac, &mut keys, tab(false), None);
+        cmd_tab(&mac, &mut keys, tab(false), lent);
+        assert!(cmd_tab(&mac, &mut keys, tab(false), None).is_empty(), "the app in front");
+    }
+
+    /// Round cmdtab-park: the window put home for the switcher is parked off the screen
+    /// first, while still in its stage Space, and put back before its frame is restored; the
+    /// model never takes the park for its frame (the echoes of both moves), its saved frame
+    /// stays its own, a kept lend lands at its frame at the activation's switch, and a quit
+    /// with a parked lend brings it back at its frame. The Corner engine lends nothing; the
+    /// model's side holds the same.
+    #[test]
+    fn cmd_tab_parks_the_lent_window_and_the_model_keeps_its_frame() {
+        use crate::engine::corner::park::ParkRequest;
+        use crate::engine::corner::park_frame_of;
+        use crate::engine::lend_park::{self, LendSteps, ParkAsk};
+        use switcher::{Act, Key};
+
+        /// Window 5 of the fake Mac as the lend's calls see it; every call in order.
+        struct Steps<'a> {
+            mac: &'a mut Mac,
+            calls: Vec<&'static str>,
+            /// Frames listed while on its Desktop.
+            seen: Vec<Rect>,
+        }
+        impl Steps<'_> {
+            fn look(&mut self) {
+                if !self.mac.stage_space.contains(&5) {
+                    self.seen.push(self.mac.wins[&5].1);
+                }
+            }
+        }
+        impl LendSteps for Steps<'_> {
+            fn listed(&mut self) -> Option<Rect> {
+                Some(self.mac.wins[&5].1)
+            }
+            fn move_to(&mut self, to: Rect) -> Option<Rect> {
+                self.calls.push(if self.mac.stage_space.contains(&5) { "move, hidden" } else { "move, on the Desktop" });
+                if let Some(w) = self.mac.wins.get_mut(&5) {
+                    w.1 = macos_places(Rect { w: w.1.w, h: w.1.h, ..to });
+                }
+                self.look();
+                self.listed()
+            }
+            fn put_home(&mut self) -> bool {
+                self.calls.push("home");
+                self.mac.stage_space.remove(&5);
+                self.look();
+                true
+            }
+            fn put_back(&mut self) -> bool {
+                self.calls.push("back");
+                self.mac.stage_space.insert(5);
+                true
+            }
+        }
+
+        let mut mac = mail_waiting_here_and_shown_elsewhere();
+        let spaces = mac.m.options().engine == EngineKind::Spaces;
+        let own = mac.m.window(w(5)).expect("managed").meta.frame;
+        let restore = mac.m.window(w(5)).expect("managed").restore;
+        let d = *mac.m.display(MAIN);
+        let at = park_frame_of(own, &d, ParkRequest::default());
+        let ask = ParkAsk { at, display: d, frame: own, must: true };
+        let mut keys = switcher::Switcher::default();
+        let acts = cmd_tab(&mac, &mut keys, tab(false), None);
+        assert_eq!(acts.is_empty(), !spaces, "only the Spaces engine puts a window home: {acts:?}");
+        if spaces {
+            assert_eq!(acts, vec![Act::Lend { pid: 40, window: w(5) }]);
+            let mut steps = Steps { mac: &mut mac, calls: Vec::new(), seen: Vec::new() };
+            let done = lend_park::lend(&mut steps, Some(ask));
+            assert_eq!((done.home, done.parked), (true, Some(true)));
+            assert_eq!(steps.calls, ["move, hidden", "home"], "parked while hidden, then home");
+            assert!(steps.seen.iter().all(|r| d.parks(*r)), "seen only parked: {:?}", steps.seen);
+            let parked = done.owed;
+            // Tab on (chat): back first, then its frame, unseen.
+            let acts = cmd_tab(&mac, &mut keys, tab(false), Some((40, w(5))));
+            assert_eq!(acts, vec![Act::TakeBack { window: w(5), why: "the switcher's selection moved on" }]);
+            let mut steps = Steps { mac: &mut mac, calls: Vec::new(), seen: Vec::new() };
+            let back = lend_park::take_back(&mut steps, parked);
+            assert_eq!((back.back, back.restored), (true, Some(true)));
+            assert_eq!(steps.calls, ["back", "move, hidden"], "back into its stage Space, then its frame");
+            assert!(steps.seen.is_empty(), "never on its Desktop at its frame");
+            assert_eq!(mac.wins[&5].1, own, "at its frame again");
+            // ⇧Tab back on Mail: lent and parked again.
+            assert_eq!(cmd_tab(&mac, &mut keys, tab(true), None), vec![Act::Lend { pid: 40, window: w(5) }]);
+            let mut steps = Steps { mac: &mut mac, calls: Vec::new(), seen: Vec::new() };
+            assert!(lend_park::lend(&mut steps, Some(ask)).owed.is_some(), "parked again");
+        }
+        // The echoes of the park (and of a restore): the model, which still counts the window
+        // hidden, never takes them for its frame.
+        let listed = mac.wins[&5].1;
+        mac.m.window_frame_changed(w(5), at);
+        mac.m.window_frame_settled(w(5), listed);
+        assert_eq!(mac.m.window(w(5)).map(|x| (x.meta.frame, x.restore)), Some((own, restore)), "the model's frame untouched");
+        let file = mac.m.to_state();
+        let saved: Vec<Rect> = file
+            .spaces
+            .iter()
+            .flat_map(|sp| sp.stages.iter())
+            .flat_map(|st| st.windows.iter())
+            .filter(|x| x.title == "Inbox")
+            .map(|x| x.frame)
+            .collect();
+        assert_eq!(saved, vec![restore], "state.json holds its own frame");
+        // Quit with the lend parked: the bring-back sets its frame.
+        let quit = mac.m.clone().unpark_all();
+        assert!(quit.contains(&Action::SetFrame { id: w(5), frame: restore }), "{quit:?}");
+        // ⌘ let go on Mail, its activation: the switch shows it at its frame.
+        cmd_tab(&mac, &mut keys, Key::Command(false), spaces.then_some((40, w(5))));
+        let obs = Observation { focused: Some(w(6)), ..mac.obs() };
+        let a = mac.m.app_activated(40, &obs);
+        assert!(a.contains(&Action::SetFrame { id: w(5), frame: restore }), "the switch asks for its frame: {a:?}");
+        mac.run(a);
+        assert_eq!(mac.m.stage_of(w(5)), mac.m.main_active_stage(), "Mail's stage here in front");
+        assert_eq!(mac.wins[&5].1, macos_places(restore), "landed at its frame, not the park");
+        assert_eq!(mac.shown, 0);
+    }
+
+    #[test]
     fn a_dock_click_arranges_the_desktop_the_slide_shows_and_the_arrival_confirms_it() {
         let mut mac = mail_parked_on_desktop_1();
         let window = mac.m.dock_arrival(40, Default::default(), Some(w(5))).expect("predicted");
@@ -1578,6 +2092,7 @@ mod arranged_ahead {
         assert!(mac.m.arrange_ahead(w(1), None).is_none());
         mac.m.active.insert(space, browser);
         assert!(mac.m.arrange_ahead(w(1), None).is_some());
+    }
     }
 }
 
@@ -1648,6 +2163,7 @@ mod identity {
         (again, d0, d1, before)
     }
 
+    both_engines! {
     #[test]
     fn a_desktop_sliding_out_beside_the_one_arriving_keeps_its_stages_and_its_id() {
         // 16:40:37: the list read at the notice held Desktop 0's 7 known windows and Desktop
@@ -1790,6 +2306,7 @@ mod identity {
         let music = mac.m.stages_in(new).find(|s| s.name.as_deref() == Some("Music")).map(|s| s.id);
         assert!(music.is_some_and(|m| mac.m.strip_slots(MAIN).contains(&m)), "the declared stage stays, in the strip");
     }
+    }
 
     /// Desktop 1 (the owner's app's Space 3): Messages alone in a stage, parked; Desktop 0: the
     /// browser active, an editor in the strip.
@@ -1810,6 +2327,7 @@ mod identity {
         (mac, d0, browser)
     }
 
+    both_engines! {
     #[test]
     fn a_window_moved_here_in_mission_control_shows_in_a_stage_of_its_own() {
         // 16:49 (mc-move.log): Messages dragged in Mission Control from Desktop 1 to Desktop
@@ -2079,8 +2597,10 @@ mod identity {
         assert!(mac.m.shows_two_desktops(MAIN, &with(2), &[]), "two");
         assert!(mac.m.shows_two_desktops(MAIN, &with(7), &[]));
     }
+    }
 }
 
+both_engines! {
 /// Review H3 (1.1.0): the shown stage carried to a new Desktop in Mission Control leaves the
 /// old Desktop a fresh empty active stage; its parked stage keeps its card, and ⌘-Tab to its
 /// app brings it.
@@ -2111,6 +2631,7 @@ fn the_desktop_left_by_its_shown_stage_keeps_every_card() {
     mac.run(a);
     assert_eq!(mac.m.main_active_stage(), Some(browser), "⌘-Tab brings the browser's stage");
     assert!(!mac.parked(2));
+}
 }
 
 /// The review's section 4, test 1: random moves of windows between Desktops (Mission Control),
@@ -2176,6 +2697,7 @@ mod invariants {
         }
     }
 
+    both_engines! {
     #[test]
     fn no_sequence_of_desktop_moves_strands_a_stage() {
         for seed in 0..200u64 {
@@ -2248,5 +2770,251 @@ mod invariants {
                 check(&mac, &format!("seed {seed} op {op} after {log:?}"));
             }
         }
+    }
+    }
+}
+
+/// Round stage-lost (the owner's log of 11-15 07:33:48 and 07:35:02): VS Code activated by
+/// ⌘Tab on Desktop 4 while its stage waited hidden and its third window showed on Desktop 1.
+/// The switch to its stage began; macOS slid to Desktop 1 for the activation and back about
+/// 250 ms later. The Space change brought the switch's windows in at once, and the window
+/// server listed them on screen on the Desktop slid to (Desktop 1), then on Desktop 4 again.
+/// Each such round trip counted as two hops; on the third hop, back where they had come
+/// from, the two windows were taken for windows on every Desktop: pinned with no stage,
+/// their stage left empty in front and gone at the next switch, all with no log line. They
+/// stayed on screen over every stage after.
+mod stage_lost {
+    use super::*;
+
+    /// Desktop 0 (the owner's Desktop 4): the editor's stage of windows 1 and 5, the
+    /// browser's stage of window 2 in front, three more stages. Desktop 1: the editor's
+    /// window 3 and chat.
+    fn desks() -> (Mac, StageId) {
+        let mut mac = Mac::new();
+        mac.put(0, 1, 10, "com.example.editor", "Code A");
+        mac.put(0, 5, 10, "com.example.editor", "Code B");
+        mac.put(0, 2, 20, "com.example.browser", "Wiki");
+        // More stages on Desktop 0 (the owner's had eight): hidden, they are missing from
+        // Desktop 1's screen, so Desktop 0 never scores there.
+        mac.put(0, 6, 40, "com.example.mail", "Inbox");
+        mac.put(0, 7, 50, "com.example.music", "Playlist");
+        mac.put(0, 8, 60, "com.example.terminal", "Shell");
+        mac.put(1, 3, 10, "com.example.editor", "Code C");
+        mac.put(1, 4, 30, "com.example.chat", "Family");
+        mac.focused = Some(w(2));
+        mac.go(0);
+        mac.go(1);
+        mac.go(0);
+        let editor = mac.m.stage_of(w(1)).expect("in a stage");
+        assert_eq!(mac.m.stage_of(w(5)), Some(editor));
+        if mac.m.main_active_stage() == Some(editor) {
+            let browser = mac.m.stage_of(w(2)).expect("in a stage");
+            mac.click(browser);
+        }
+        assert_ne!(mac.m.main_active_stage(), Some(editor));
+        (mac, editor)
+    }
+
+    /// The editor's activation switches to its stage (windows 1 and 5 shown); macOS slides
+    /// to Desktop 1 with them listed there, then back to Desktop 0. `carried`: the windows
+    /// the switch had just shown, as the platform names them at the slide's arrivals.
+    fn activation_slides_away_and_back(mac: &mut Mac, carried: bool) {
+        let obs = mac.obs();
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        mac.focused = Some(w(5));
+        // Listed on the Desktop slid to: the window server's word at that arrival.
+        for id in [1, 5] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(1);
+        }
+        if carried {
+            mac.m.set_slide_carried([w(1), w(5)].into());
+        }
+        mac.go(1);
+        let obs = mac.obs();
+        let a = mac.m.bring_focus_forward(Some(w(5)), None, &obs);
+        mac.run(a);
+        for id in [1, 5] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(0);
+        }
+        if carried {
+            mac.m.set_slide_carried([w(1), w(5)].into());
+        }
+        mac.go(0);
+        let obs = mac.obs();
+        let a = mac.m.bring_focus_forward(Some(w(5)), None, &obs);
+        mac.run(a);
+    }
+
+    fn assert_kept(mac: &Mac, editor: StageId, round: usize) {
+        let s = mac.m.stage(editor).unwrap_or_else(|| panic!("round {round}: the editor's stage is gone"));
+        let mut members = s.windows.clone();
+        members.sort();
+        assert_eq!(members, vec![w(1), w(5)], "round {round}: the stage keeps its windows");
+        for id in [1, 5] {
+            let x = mac.m.window(w(id)).unwrap_or_else(|| panic!("round {round}: window {id} left the model"));
+            assert!(!x.sticky && x.home == Home::Stage(editor), "round {round}: window {id} is the stage's, not on every Space: {x:?}");
+        }
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "round {round}: in front");
+    }
+
+    both_engines! {
+    #[test]
+    fn a_stage_slid_away_from_and_back_keeps_its_windows() {
+        let (mut mac, editor) = desks();
+        for round in 1..=3 {
+            activation_slides_away_and_back(&mut mac, true);
+            assert_kept(&mac, editor, round);
+            let note = mac.m.last_arrival().clone();
+            assert!(note.sticky.is_empty() && note.moved == 0, "round {round}: {note:?}");
+            // The next card click replaces the stage: its windows go out with it.
+            let browser = mac.m.stage_of(w(2)).expect("in a stage");
+            let a = mac.click(browser);
+            for id in [1, 5] {
+                assert!(a.contains(&Action::Hide { id: w(id) }), "round {round}: window {id} goes out with its stage: {a:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_carried_windows_stay_home_and_the_arrival_says_so() {
+        let (mut mac, editor) = desks();
+        let obs = mac.obs();
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        for id in [1, 5] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(1);
+        }
+        mac.m.set_slide_carried([w(1), w(5)].into());
+        let d1_before = mac.space();
+        mac.go(1);
+        assert_ne!(mac.space(), d1_before, "Desktop 1 is recognized whatever the carried windows say");
+        let note = mac.m.last_arrival().clone();
+        let mut kept = note.kept_home.clone();
+        kept.sort();
+        assert_eq!(kept, vec![w(1), w(5)], "{note:?}");
+        assert_eq!(note.moved, 0);
+        assert_eq!(mac.m.space_of(w(1)), Some(d1_before), "still on its own Desktop");
+        assert_eq!(mac.m.stage_of(w(1)), Some(editor));
+        // Carried names one arrival only: a window still listed here at the next arrival
+        // (the user's move) is taken as moved, as ever.
+        mac.go(1);
+        assert_eq!(mac.m.last_arrival().moved, 2, "{:?}", mac.m.last_arrival());
+    }
+
+    /// The event order as it was before the fix (no carried windows named): the third hop
+    /// makes the windows sticky. The arrival now says so ([`ArrivalNote::sticky`]): no let-go
+    /// without its line.
+    #[test]
+    fn without_the_carry_the_third_hop_pins_them_and_says_so() {
+        let (mut mac, editor) = desks();
+        activation_slides_away_and_back(&mut mac, false);
+        let browser = mac.m.stage_of(w(2)).expect("in a stage");
+        mac.click(browser);
+        activation_slides_away_and_back_first_half(&mut mac);
+        let note = mac.m.last_arrival().clone();
+        let mut sticky = note.sticky.clone();
+        sticky.sort();
+        assert_eq!(sticky, vec![w(1), w(5)], "the 11-15 07:35:03 arrival: {note:?}");
+        assert!(mac.m.stage(editor).is_some_and(|s| s.windows.is_empty()), "the stage left empty");
+    }
+    }
+
+    both_engines! {
+    /// The owner's 08:10 drops: a window taken for one on every Desktop was dragged onto the
+    /// strip three times and nothing happened (its Space, the Desktop slid to, not shown). On
+    /// every Desktop, it is on the one shown: it goes to a stage of its own.
+    #[test]
+    fn a_window_on_every_desktop_dropped_on_the_strip_gets_a_stage_of_its_own() {
+        let (mut mac, _) = desks();
+        activation_slides_away_and_back(&mut mac, false);
+        let browser = mac.m.stage_of(w(2)).expect("in a stage");
+        mac.click(browser);
+        activation_slides_away_and_back_first_half(&mut mac);
+        for id in [1, 5] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(0);
+        }
+        mac.go(0);
+        let x = mac.m.window(w(1)).expect("managed").clone();
+        assert!(x.sticky && x.home == Home::Pinned && !mac.m.is_shown_space(x.space), "the 08:06 state: {x:?}");
+        assert_eq!(mac.m.send_refused(w(1)), None);
+        let obs = mac.obs();
+        let a = mac.m.drop_window_on_strip(w(1), x.restore, None, &obs);
+        mac.run(a.clone());
+        assert!(!a.is_empty(), "the drop acts");
+        let stage = mac.m.stage_of(w(1)).expect("a stage of its own");
+        assert!(!mac.m.is_active(stage), "a card");
+        assert!(mac.m.is_shown_space(mac.m.space_of(w(1)).expect("placed")));
+    }
+
+    /// Windows the model lost while they stayed on screen in front (stranded), at a switch
+    /// whose front stage shows nothing: adopted into that stage first, they leave with it.
+    #[test]
+    fn stranded_windows_adopted_at_a_switch_leave_with_the_front_stage() {
+        let (mut mac, editor) = desks();
+        let obs = mac.obs();
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        assert_eq!(mac.m.main_active_stage(), Some(editor));
+        // Lost, by whatever path: the stage in front stays, empty; the windows stay on screen.
+        mac.m.remove_window(w(1));
+        mac.m.remove_window(w(5));
+        assert!(mac.m.front_shows_nothing(MAIN));
+        for id in [1, 5] {
+            let meta = mac.wins[&id].2.clone();
+            let obs = mac.obs();
+            let a = mac.m.adopt_stranded(meta, &obs);
+            mac.run(a);
+        }
+        assert_eq!(mac.m.main_active_stage(), Some(editor), "no switch");
+        assert!(!mac.m.front_shows_nothing(MAIN));
+        for id in [1, 5] {
+            let x = mac.m.window(w(id)).expect("managed again");
+            assert!(!x.parked && x.home == Home::Stage(editor), "in the stage in front, shown: {x:?}");
+        }
+        let browser = mac.m.stage_of(w(2)).expect("in a stage");
+        let a = mac.click(browser);
+        for id in [1, 5] {
+            assert!(a.contains(&Action::Hide { id: w(id) }), "window {id} leaves with its stage: {a:?}");
+        }
+    }
+
+    /// A drop on the strip of a window the model does not manage: adopted first, it goes to
+    /// a stage of its own as any window dropped there; before, the drop said why it did
+    /// nothing at most.
+    #[test]
+    fn a_stranded_window_dropped_on_the_strip_is_adopted_then_dropped() {
+        let (mut mac, _) = desks();
+        let obs = mac.obs();
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        mac.m.remove_window(w(1));
+        assert_eq!(mac.m.send_refused(w(1)), Some("the window is not managed"));
+        assert!(mac.m.drop_window_on_strip(w(1), mac.wins[&1].1, None, &mac.obs()).is_empty());
+        let obs = mac.obs();
+        let a = mac.m.adopt_stranded(mac.wins[&1].2.clone(), &obs);
+        mac.run(a);
+        let obs = mac.obs();
+        let a = mac.m.drop_window_on_strip(w(1), mac.wins[&1].1, None, &obs);
+        mac.run(a);
+        let stage = mac.m.stage_of(w(1)).expect("a stage of its own");
+        assert!(!mac.m.is_active(stage));
+        assert_eq!(mac.m.stage(stage).map(|s| s.windows.clone()), Some(vec![w(1)]));
+        // Adopting twice, or a managed window, does nothing.
+        assert!(mac.m.adopt_stranded(mac.wins[&1].2.clone(), &mac.obs()).is_empty());
+    }
+    }
+
+    /// The first half of [`activation_slides_away_and_back`] without the carry: the switch
+    /// and the arrival on the Desktop slid to.
+    fn activation_slides_away_and_back_first_half(mac: &mut Mac) {
+        let obs = mac.obs();
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        mac.focused = Some(w(5));
+        for id in [1, 5] {
+            mac.wins.get_mut(&id).expect("window").0 = Some(1);
+        }
+        mac.go(1);
     }
 }

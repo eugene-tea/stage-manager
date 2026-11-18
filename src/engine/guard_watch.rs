@@ -49,7 +49,7 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use super::geometry::Rect;
-use super::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded, safe_restore};
+use super::recovery::{EngineKind, Known, Listed, Registered, ScanDisplays, safe_restore};
 use super::stage_area::same_frame;
 
 /// The window list counts as settled this long after the set of windows on screen changed.
@@ -286,6 +286,9 @@ pub struct Watch {
     /// The windows judged hidden tabs or not ours in the latest pass ([`Self::leave_alone`]),
     /// with why: none joins.
     tabs: BTreeMap<u32, Release>,
+    /// The engine whose hidden windows are watched ([`Self::run_by`]): it says whether a
+    /// listed window is still where it was hidden ([`EngineKind::stranded`]).
+    engine: EngineKind,
 }
 
 impl Watch {
@@ -302,6 +305,28 @@ impl Watch {
     /// guardian): no window found in the park zone ever joins.
     pub fn registered_only(registered: &[Registered]) -> Self {
         Self { successor: true, ..Self::new(registered) }
+    }
+
+    /// This watch over windows `engine` hid (the engine the parked file names, or the one
+    /// that runs); the Corner engine until said.
+    pub fn run_by(self, engine: EngineKind) -> Self {
+        Self { engine, ..self }
+    }
+
+    /// The app's watch over the windows it takes from an old guardian (round 8N): registered
+    /// only ([`Self::registered_only`]), judged by the park corner whichever engine runs. The
+    /// crashed copy that hid them is gone, and its stage Spaces with it (the window server ends
+    /// them with their process), so the one place a taken window can still be hidden away is a
+    /// park corner. Run by the engine that runs (the review of 1.9, C-3), a Spaces run let a
+    /// Corner copy's window still in the corner go as "read back" the moment its Desktop
+    /// showed, and nothing brought it out.
+    pub fn taken() -> Self {
+        Self::registered_only(&[]).run_by(EngineKind::Corner)
+    }
+
+    /// The engine whose hidden windows are watched ([`Self::run_by`]).
+    pub fn engine(&self) -> EngineKind {
+        self.engine
     }
 
     /// Adds a registered window (taken later); false when it is registered already.
@@ -433,7 +458,7 @@ impl Watch {
             let reg = self.registered.iter().find(|r| r.id == l.id);
             // A window the app registered is its own, however small, sliver or not (L4).
             let known = reg.map_or(Known::Unknown, |r| if r.unvouched { Known::Unknown } else { Known::Registered });
-            if !is_stranded(l.bounds, displays, known) {
+            if !self.engine.stranded(l.bounds, displays, known) {
                 continue;
             }
             // While Stage Manager runs again, a window in the park zone may be one it parked:
@@ -444,6 +469,7 @@ impl Watch {
             }
         }
         let mut done = Vec::new();
+        let engine = self.engine;
         for w in self.waiting.values_mut() {
             let look = match listed.iter().find(|l| l.id == w.id) {
                 None => {
@@ -457,7 +483,7 @@ impl Watch {
                 }
                 Some(l) => {
                     w.missing_since = None;
-                    if is_stranded(l.bounds, displays, w.known()) {
+                    if engine.stranded(l.bounds, displays, w.known()) {
                         w.out_since = None;
                         Look::Parked { shown: l.onscreen, frame: l.bounds }
                     } else if !l.onscreen {
@@ -499,7 +525,7 @@ impl Watch {
     /// elsewhere since is back where they put it (S7).
     pub fn read_through_ax(&mut self, id: u32, frame: Rect, moved: bool, displays: &ScanDisplays) -> Option<Event> {
         let known = self.waiting.get(&id).map_or(Known::Unknown, Waiting::known);
-        if is_stranded(frame, displays, known) {
+        if self.engine.stranded(frame, displays, known) {
             return None;
         }
         if !moved && self.waiting.get(&id).is_some_and(|w| still_fitted(w, frame, displays)) {
@@ -614,8 +640,9 @@ fn at_pre_fit(w: &Waiting, frame: Rect, displays: &ScanDisplays) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::recovery::is_stranded;
     use crate::engine::geometry::Size;
-    use crate::engine::park::park_frame;
+    use crate::engine::corner::park::park_frame;
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
     const VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1410.0);
@@ -930,7 +957,7 @@ mod tests {
     #[test]
     fn a_window_parked_above_a_bottom_dock_joins_and_waits() {
         let d = ScanDisplays::new(MAIN, Rect::new(0.0, 30.0, 2560.0, 1334.0), vec![], []);
-        let above_dock = Rect::new(2559.0, d.visible.max_y() - crate::engine::park::MACOS_KEEPS_TITLE, 600.0, 392.0);
+        let above_dock = Rect::new(2559.0, d.visible.max_y() - crate::engine::corner::park::MACOS_KEEPS_TITLE, 600.0, 392.0);
         let t0 = Instant::now();
         let mut w = Watch::new(&[]);
         let list = [Listed { allowed: true, ..at(2, above_dock, true) }, at(9, RESTORE, true)];
@@ -1014,6 +1041,30 @@ mod tests {
         assert!(w.shown().is_empty() && !w.shows(), "on screen outside the park zone: never reached");
         assert_eq!(pass(&mut w, t0, 3000, &on_desktop_2(ordinary)), None);
         assert!(matches!(pass(&mut w, t0, 4000, &on_desktop_2(ordinary)), Some(Release::SeenBack { .. })), "let go unmoved");
+    }
+
+    /// The review of 1.9, C-3: a Spaces run takes a Corner copy's window parked on Desktop 2.
+    /// Desktop 2 shows with the window still in the park corner: the taken watch keeps it,
+    /// shown, to be brought back (a frame read there lets nothing go), whichever engine runs.
+    /// A watch run by the Spaces engine let it go as read back.
+    #[test]
+    fn a_taken_window_still_in_the_corner_waits_whichever_engine_runs() {
+        let t0 = Instant::now();
+        let mut w = Watch::taken();
+        assert_eq!(w.engine(), EngineKind::Corner);
+        w.add(reg()[0]);
+        pass(&mut w, t0, 0, &on_desktop_1());
+        assert_eq!(pass(&mut w, t0, 1500, &on_desktop_2(parked())), None);
+        assert_eq!(pass(&mut w, t0, 4000, &on_desktop_2(parked())), None, "never seen back in the corner");
+        assert_eq!(w.shown().len(), 1, "shown in the corner: to be brought back");
+        assert!(w.read_through_ax(1, parked(), false, &displays()).is_none(), "read in the corner: still away");
+        assert!(matches!(w.read_through_ax(1, RESTORE, true, &displays()), Some(Event::LetGo { why: Release::BroughtBack { .. }, .. })));
+        // A watch run by the Spaces engine keeps it too (review A-8: a registered window in the
+        // park zone is stranded under either engine); before both fixes it let it go as read back.
+        let mut spaces = Watch::registered_only(&[]).run_by(EngineKind::Spaces);
+        spaces.add(reg()[0]);
+        pass(&mut spaces, t0, 0, &on_desktop_1());
+        assert!(spaces.read_through_ax(1, parked(), false, &displays()).is_none(), "read in the corner under Spaces: still away");
     }
 
     /// Review M3 (1.1.0): Stage Manager running again is no reason to stop watching. A new app

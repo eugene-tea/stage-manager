@@ -95,6 +95,14 @@ impl Rescan {
         self.fresh.is_empty() && self.retry.is_empty()
     }
 
+    /// True when a sweep's apps wait for their first scan (slices due at once while every app
+    /// answers): the WM tick stays brisk for them. Apps that did not answer are tried at
+    /// [`RESCAN_EVERY`], which a resting tick serves (a background agent that never answers
+    /// kept the tick brisk for [`RESCAN_MAX`], live 11-14).
+    pub fn wants_brisk(&self) -> bool {
+        !self.fresh.is_empty()
+    }
+
     /// Apps a scan at `now` could not read: tried again at [`RESCAN_EVERY`] for
     /// [`RESCAN_FOR`] from now, and at least [`RESCAN_TRIES`] times.
     pub fn unanswered(&mut self, pids: impl IntoIterator<Item = i32>, why: Why, now: Instant) {
@@ -231,6 +239,21 @@ mod tests {
             }
         }
         assert!(last <= t0 + RESCAN_MAX, "let go by RESCAN_MAX: last try at {:?}", last - t0);
+    }
+
+    #[test]
+    fn only_a_sweeps_fresh_apps_keep_the_tick_brisk() {
+        let t0 = Instant::now();
+        let mut r = Rescan::default();
+        r.unanswered([5, 6], Why::Launch, t0);
+        assert!(!r.is_empty());
+        assert!(!r.wants_brisk(), "retries go at their own pace");
+        r.sweep([7]);
+        assert!(r.wants_brisk(), "a sweep's slice is due at once");
+        let (pass, _) = r.due(t0 + RESCAN_EVERY, NONE);
+        assert_eq!(pids(&pass), vec![7], "after the pace the apps that did not answer hold");
+        r.done(&[], t0 + RESCAN_EVERY);
+        assert!(!r.wants_brisk());
     }
 
     fn pids(q: &[Queued]) -> Vec<i32> {

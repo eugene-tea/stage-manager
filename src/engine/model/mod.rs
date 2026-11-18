@@ -34,6 +34,7 @@
 mod ahead;
 mod away;
 mod hidden;
+mod hiding;
 mod ops;
 mod pending;
 mod pool;
@@ -41,6 +42,7 @@ mod quit;
 mod saved_size;
 mod spaces;
 mod strip;
+mod tabs;
 #[cfg(test)]
 mod displays_tests;
 #[cfg(test)]
@@ -52,7 +54,8 @@ use serde::{Deserialize, Serialize};
 
 use super::displays::ScreenKey;
 use super::geometry::Rect;
-use super::park::{Corner, ParkRequest, clamp_to_visible, is_corner_piece_in, is_parked_in_at, onto_visible, park_frame_asked, reach_in};
+use super::corner::park::{Corner, ParkRequest, is_corner_piece_in, is_parked_in_at, onto_visible, reach_in};
+use super::recovery::EngineKind;
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
@@ -126,7 +129,7 @@ pub struct Display {
     /// The usable frame (no menu bar, no Dock).
     pub visible: Rect,
     /// Where its inactive stages park: the corner with no other display beyond it
-    /// ([`crate::engine::park::choose_corner`], chosen by the platform from the arrangement).
+    /// ([`crate::engine::corner::park::choose_corner`], chosen by the platform from the arrangement).
     pub corner: Corner,
 }
 
@@ -174,12 +177,10 @@ impl Display {
     }
 
     /// `frame`, a window's frame on display `from`, carried onto this display: at the same
-    /// place relative to the visible frame's top-left corner, then within reach
-    /// ([`Display::reach`]). Where a window of a display removed (the lid closed) is
-    /// remembered until it is seen on this display.
-    pub fn adopt(&self, frame: Rect, from: &Display) -> Rect {
-        let moved = frame.translate(self.visible.x - from.visible.x, self.visible.y - from.visible.y);
-        self.reach(moved)
+    /// place relative to the visible frame's top-left corner. Geometry only; the model brings
+    /// it within reach the engine's way ([`Model::carried`]).
+    pub fn carry(&self, frame: Rect, from: &Display) -> Rect {
+        frame.translate(self.visible.x - from.visible.x, self.visible.y - from.visible.y)
     }
 
     /// True when `key` is this display's known identity.
@@ -259,12 +260,12 @@ pub enum Action {
         /// The target frame.
         frame: Rect,
     },
-    /// Move a window into its display's park zone (macOS clamps it; that is expected).
-    Park {
+    /// Hide a window of a stage not shown. How is the window engine's: the Corner engine
+    /// moves it into its display's park zone ([`crate::engine::corner::park_frame`]; macOS
+    /// clamps it, that is expected). The model only counts it parked.
+    Hide {
         /// The window.
         id: WindowId,
-        /// The park frame.
-        frame: Rect,
     },
     /// Raise a window (`kAXRaiseAction`).
     Raise {
@@ -316,7 +317,10 @@ pub struct ModelOptions {
     pub named_stages: Vec<String>,
     /// Keeping placed windows clear of the strip (off by default; the platform sets it).
     pub fit: FitOptions,
-    /// How park frames are asked (`[windows] park_inside`, `park_drop`).
+    /// Which window engine hides this model's windows: whom the model asks about frames
+    /// (`model/hiding.rs`). The platform sets it from the engine that runs.
+    pub engine: EngineKind,
+    /// How park frames are asked (`[windows] park_inside`, `park_drop`; the Corner engine's).
     pub park: ParkRequest,
     /// Only the main display is managed (`[displays] main_only`): the model keeps the first
     /// display alone, and a window moved to another is not its own any more
@@ -335,10 +339,6 @@ pub(crate) struct Reveal {
     /// The empty stage made active by the reveal.
     pub(crate) desktop: StageId,
 }
-
-/// How far (points) a frame's side at the park corner may be from where a park asks it and
-/// still be that park's landing ([`Model::lands_parked`]): AX and the window server round.
-const PARK_LANDED_SLACK: f64 = 2.0;
 
 /// Nominal display used only when the platform reports none, so the model never panics.
 const FALLBACK_DISPLAY: Display = Display {
@@ -445,6 +445,9 @@ pub struct Model {
     /// An arrival leaves out windows first seen on the Desktop still shown
     /// ([`Model::set_hold_arrivals`]).
     pub(crate) hold_arrivals: bool,
+    /// Windows the platform's own switch just showed while macOS slid to another Desktop,
+    /// for the next arrival only ([`Model::set_slide_carried`]).
+    pub(crate) slide_carried: HashSet<WindowId>,
     /// Windows the launch's first arrival moved to the screen their saved stage is on (that
     /// screen's Desktop not formed yet; `pool.rs`, [`Model::screen_claims`]), at their saved
     /// frame there: that screen's arrival takes them with its own ([`Model::arrive`]).
@@ -539,6 +542,7 @@ impl Model {
             adopted: BTreeSet::new(),
             front_owed: BTreeSet::new(),
             hold_arrivals: false,
+            slide_carried: HashSet::new(),
             travellers: Vec::new(),
             desktop_counts: HashMap::new(),
             rescore: HashSet::new(),
@@ -689,11 +693,11 @@ impl Model {
     }
 
     pub(crate) fn safety_target(&self, w: &WindowState) -> Rect {
-        let d = self.display(w.meta.display);
+        let d = w.meta.display;
         match w.original {
-            Some(o) if !o.is_degenerate() && !d.parks(o) => o,
-            Some(o) => d.reach(o),
-            None => d.reach(w.restore),
+            Some(o) if !o.is_degenerate() && !self.no_restore(d, o) => o,
+            Some(o) => self.within_reach(d, o),
+            None => self.within_reach(d, w.restore),
         }
     }
 
@@ -718,6 +722,13 @@ impl Model {
     /// How park frames are asked from now on (windows parked already stay where they are).
     pub fn set_park_request(&mut self, req: ParkRequest) {
         self.options.park = req;
+    }
+
+    /// Which window engine's answers the model asks from now on ([`ModelOptions::engine`]):
+    /// the controller's fallback mid-run to the Corner engine. Windows hidden stay counted
+    /// hidden; the controller hides them again the new engine's way.
+    pub fn set_engine(&mut self, engine: crate::engine::recovery::EngineKind) {
+        self.options.engine = engine;
     }
 
     /// Every parked window with its restore frame.
@@ -901,13 +912,13 @@ impl Model {
     }
 
     /// Records `frame` as a window's restore frame unless it is unusable (degenerate, or one
-    /// of our parks: [`Model::lands_parked`]). Returns whether it was taken.
+    /// of our own hides: [`Model::lands_hidden`]). Returns whether it was taken.
     ///
     /// A frame that differs from the restore frame is the user's: resizing forgets the
     /// window's pre-fit frame, moving carries it along by the same offset. A frame in the park
     /// zone that is not where a park of the window lands is the user's too (S3: a window
     /// pushed into the corner by hand is recorded there, and comes back pulled just within
-    /// reach, [`Display::reach`], not at an older frame).
+    /// reach, [`Model::within_reach`], not at an older frame).
     pub(crate) fn record_frame(&mut self, id: WindowId, frame: Rect) -> bool {
         self.record(id, frame, true)
     }
@@ -928,8 +939,7 @@ impl Model {
         let Some(w) = self.windows.get(&id) else {
             return false;
         };
-        let display = *self.display(w.meta.display);
-        let ours = display.parks(frame) && (!by_user || self.lands_parked(w, frame));
+        let ours = self.no_restore(w.meta.display, frame) && (!by_user || self.lands_hidden(w, frame));
         let usable = !frame.is_degenerate() && !ours;
         if let Some(w) = self.windows.get_mut(&id) {
             w.meta.frame = frame;
@@ -977,8 +987,7 @@ impl Model {
         if w.meta.role != WindowRole::Standard || w.home == Home::Pinned {
             return false;
         }
-        let d = self.display(w.meta.display);
-        let (visible, from) = (d.visible, d.reach(w.restore));
+        let (visible, from) = (self.display(w.meta.display).visible, self.within_reach(w.meta.display, w.restore));
         let to = fit_frame(from, stage_area(visible, fit.inset), fit.shrink);
         if same_frame(to, from) {
             return false;
@@ -990,20 +999,6 @@ impl Model {
         true
     }
 
-    /// A restore frame that is safe to record for a new window: `frame`, a centered one if
-    /// `frame` is unusable, brought on screen if it shows only a piece at the display's
-    /// corner ([`Display::corner_piece`]).
-    pub(crate) fn safe_restore(&self, frame: Rect, display: DisplayId) -> Rect {
-        let d = self.display(display);
-        if frame.is_degenerate() || d.parks(frame) {
-            clamp_to_visible(frame, d.visible)
-        } else if d.corner_piece(frame) {
-            d.reach(frame)
-        } else {
-            frame
-        }
-    }
-
     /// Parks one window (no-op for pinned windows).
     pub(crate) fn park_window(&mut self, id: WindowId, actions: &mut Vec<Action>) {
         let Some(w) = self.windows.get(&id) else {
@@ -1012,49 +1007,10 @@ impl Model {
         if w.home == Home::Pinned {
             return;
         }
-        let frame = self.park_frame_for(w);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = true;
         }
-        actions.push(Action::Park { id, frame });
-    }
-
-    /// The frame that parks window `w`: its restore size in its display's park corner.
-    fn park_frame_for(&self, w: &WindowState) -> Rect {
-        let d = self.display(w.meta.display);
-        park_frame_asked(w.restore.size(), d.frame, d.corner, self.options.park)
-    }
-
-    /// True when `frame` (in the park zone) is where a park of window `w` lands: its side at
-    /// the corner as far out as a park asks it ([`Model::park_frame_for`]), or as one point
-    /// inside the display's or the visible frame's side (where macOS may clamp a request
-    /// asked further out), within [`PARK_LANDED_SLACK`]. macOS keeps the asked `x` (measured)
-    /// but moves `y` (a title strip kept above the visible bottom or below the menu bar, by
-    /// the app's title height), and an app may resize a parked window, so only that side is
-    /// compared. A user's drag stops short of it: the pointer stops at the screen's edge, and
-    /// the window the grab's offset inside it. When unsure the frame counts as a park: not
-    /// recording a user's frame keeps the older one, recording a park would bring the window
-    /// back at the corner.
-    fn lands_parked(&self, w: &WindowState, frame: Rect) -> bool {
-        let d = self.display(w.meta.display);
-        let park = self.park_frame_for(w);
-        let visible = if d.visible.is_degenerate() { d.frame } else { d.visible };
-        if d.corner.right() {
-            let edge = park.x.min(d.frame.max_x() - 1.0).min(visible.max_x() - 1.0);
-            frame.x >= edge - PARK_LANDED_SLACK
-        } else {
-            let edge = park.max_x().max(d.frame.x + 1.0).max(visible.x + 1.0);
-            frame.max_x() <= edge + PARK_LANDED_SLACK
-        }
-    }
-
-    /// Where the model left window `id`: its park frame while parked (where bringing it back
-    /// starts from), else its last frame. `meta.frame` alone does not say it for a parked
-    /// window: its frames are ignored while parked ([`Model::window_frame_changed`]), so it
-    /// keeps the frame the window had before it was parked.
-    pub fn frame_left(&self, id: WindowId) -> Option<Rect> {
-        let w = self.windows.get(&id)?;
-        Some(if w.parked { self.park_frame_for(w) } else { w.meta.frame })
+        actions.push(Action::Hide { id });
     }
 
     /// Brings one window to its restore frame, fitted into the stage area first, within reach
@@ -1066,7 +1022,7 @@ impl Model {
         let Some(w) = self.windows.get(&id) else {
             return;
         };
-        let frame = self.display(w.meta.display).reach(w.restore);
+        let frame = self.within_reach(w.meta.display, w.restore);
         if let Some(w) = self.windows.get_mut(&id) {
             w.parked = false;
         }

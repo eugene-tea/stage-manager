@@ -96,7 +96,7 @@ use std::time::{Duration, Instant};
 
 use super::geometry::Rect;
 use super::model::StageId;
-use super::park::Corner;
+use super::corner::park::Corner;
 
 /// An app this long without a new window (after its first) has settled: its pending
 /// windows are given up on.

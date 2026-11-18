@@ -3,7 +3,7 @@
 //! patch's picture is a ScreenCaptureKit still of the corner block showing only the
 //! desktop-level windows (the wallpaper, Finder's icons, widgets;
 //! [`crate::platform::desktop_shot`]), so it matches the screen by construction. The
-//! exactness gate of the file's picture ([`super::wallpaper::decide`], the icons under the
+//! exactness gate of the file's picture ([`crate::engine::wallpaper::decide`], the icons under the
 //! corner in [`super::corner_patch::visibility`]) falls away while a still stands for the
 //! corner; the file's picture is the fallback without one.
 //!
@@ -33,7 +33,7 @@
 
 use std::time::Duration;
 
-use super::geometry::Rect;
+use crate::engine::geometry::Rect;
 
 /// The longest a shown patch keeps its picture while a new still is on its way: past it, the
 /// file's picture where it may stand, else the slivers (a still that does not come).

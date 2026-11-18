@@ -164,7 +164,7 @@ mod tests {
             self.d.open(&meta);
             let obs = self.d.obs();
             let a = self.m.add_window(meta, &Decision { action, placement: Placement::AsIs, ..Decision::default() }, &obs);
-            self.d.apply(&a);
+            self.d.apply(&self.m, &a);
         }
 
         fn at(&self, ms: u64) -> Instant {
@@ -178,7 +178,7 @@ mod tests {
         fn switch_to_window(&mut self, id: u32) -> Vec<Action> {
             let obs = self.d.obs();
             let a = self.m.switch_to(self.stage(id), &obs);
-            self.d.apply(&a);
+            self.d.apply(&self.m, &a);
             a
         }
 
@@ -202,7 +202,7 @@ mod tests {
             }
             let obs = self.d.obs();
             let a = self.m.reveal_desktop(&obs);
-            self.d.apply(&a);
+            self.d.apply(&self.m, &a);
             a
         }
 
@@ -214,7 +214,7 @@ mod tests {
             }
             let obs = self.d.obs();
             let a = self.m.app_activated(FINDER_PID, &obs);
-            self.d.apply(&a);
+            self.d.apply(&self.m, &a);
             (cause, a)
         }
 
@@ -226,7 +226,7 @@ mod tests {
             }
             let obs = self.d.obs();
             let a = self.m.window_focused(w(1), &obs);
-            self.d.apply(&a);
+            self.d.apply(&self.m, &a);
             (cause, a)
         }
 
@@ -234,7 +234,7 @@ mod tests {
         fn card_click(&mut self, stage: StageId) -> Vec<Action> {
             let obs = self.d.obs();
             let a = self.m.switch_to(stage, &obs);
-            self.d.apply(&a);
+            self.d.apply(&self.m, &a);
             a
         }
 

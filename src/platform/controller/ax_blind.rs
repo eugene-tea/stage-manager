@@ -115,10 +115,13 @@ impl Controller {
             listed: ob.windows().len(),
             ..Facts::default()
         };
-        if facts.listed > 0 || !facts.trusted {
+        // Nothing observed (standing down for Apple's Stage Manager, a logout's hold, before
+        // observation starts): no window can count as shown nor its app as answering, so the
+        // window list is not read (it was every second while standing down).
+        if facts.listed > 0 || !facts.trusted || !ob.observing() {
             return facts;
         }
-        let list = windows::on_screen();
+        let list = windows::wake_on_screen();
         facts.regular = session::real_windows(&list, |w| ob.wants(w.pid)).count();
         let real: Vec<&windows::CgWindow> = session::real_windows(&list, |w| ob.observes(w.pid)).collect();
         facts.shown = real.len();

@@ -531,6 +531,31 @@ impl Observer {
         self.activated_at.get(&pid).copied()
     }
 
+    /// The running regular apps activated since this observer started, the most recent
+    /// first (⌘Tab's switcher lists the running apps in that order: round cmd-tab).
+    pub fn apps_by_recent_activation(&self) -> Vec<i32> {
+        let mut seen: Vec<(Instant, i32)> =
+            self.activated_at.iter().filter(|(pid, _)| self.apps.contains_key(pid)).map(|(pid, at)| (*at, *pid)).collect();
+        seen.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        seen.into_iter().map(|(_, pid)| pid).collect()
+    }
+
+    /// How many regular apps run (the apps ⌘Tab's switcher lists).
+    pub fn regular_app_count(&self) -> usize {
+        self.apps.len()
+    }
+
+    /// True when app `pid` runs with the regular activation policy (as this observer knows).
+    pub fn is_regular_app(&self, pid: i32) -> bool {
+        self.apps.contains_key(&pid)
+    }
+
+    /// When app `pid` launched, if this observer heard its launch notice (not an app running
+    /// at its start, nor one first known by an activation).
+    pub fn launched_at(&self, pid: i32) -> Option<Instant> {
+        self.known.get(&pid).filter(|(_, how)| *how == "launched").map(|(at, _)| *at)
+    }
+
     /// When the last regular app launched, if one did since this observer started.
     pub fn last_launch(&self) -> Option<Instant> {
         self.last_launch
@@ -662,6 +687,17 @@ impl Observer {
             tracing::warn!("Accessibility revoked; observation stopped");
             self.stop();
         }
+    }
+
+    /// True when app `app` is one the app may manage (not ours, not macOS's own, on the
+    /// `STAGE_MANAGER_ONLY` list when there is one).
+    pub fn admits(&self, app: &AppInfo) -> bool {
+        self.allowed(app)
+    }
+
+    /// [`Observer::admits`] for app `pid` as last reported (false for a pid not known).
+    pub fn admits_pid(&self, pid: i32) -> bool {
+        self.apps.get(&pid).is_some_and(|a| self.allowed(a))
     }
 
     fn allowed(&self, app: &AppInfo) -> bool {
@@ -1012,7 +1048,8 @@ impl Observer {
         if !self.observing || self.windows.is_empty() {
             return;
         }
-        let list = windows::list_windows();
+        // The tick's read, shared with its other duties ([`windows::wake_list`]).
+        let list = windows::wake_list();
         // Nothing on screen at all: the window server answered nothing (or the session is not
         // the console's): no observation.
         let blind = !list.iter().any(|w| w.onscreen);
@@ -1127,6 +1164,27 @@ impl Observer {
         ids
     }
 
+    /// Re-reads app `pid`'s window list now and tracks the windows not tracked yet, without
+    /// reporting them as [`WinEvent::Found`]: the caller places them (a window tab selected,
+    /// which its app announces with no notification: round tab-lost). Logged at info each.
+    pub fn rescan_app_now(&mut self, pid: i32) -> Vec<u32> {
+        self.track_app_windows(pid, "window found (a tab selected)")
+    }
+
+    /// [`Observer::rescan_app_now`] with the log's words `why` (the Apple mode: a window
+    /// reopened while its app is hidden).
+    pub fn track_app_windows(&mut self, pid: i32, why: &'static str) -> Vec<u32> {
+        if !self.observing {
+            return Vec::new();
+        }
+        let cg = cg_lookup();
+        let ids = self.rescan_app_quietly(pid, &cg);
+        for &id in &ids {
+            self.log_window(why, id);
+        }
+        ids
+    }
+
     /// After a Space change: re-reads every observed app's window list (most apps list only
     /// the current Space's windows) and returns the windows tracked for the first time,
     /// without reporting them as [`WinEvent::Found`]: the controller places them as the
@@ -1181,6 +1239,25 @@ impl Observer {
     /// exists is tested at the next pass ([`Self::reap_gone`]).
     pub fn suspect(&self, pid: i32) {
         self.gone.borrow_mut().suspect(pid);
+    }
+
+    /// Why the tick stays brisk for the observer ([`crate::engine::tick_pace`]): a tracked
+    /// window missing from the window server's list waits for its second look
+    /// ([`Self::sweep_closed`]), an app whose windows were not listed yet is rescanned
+    /// ([`Self::retry_pending`]), an app whose call failed waits for its pid's test
+    /// ([`Self::reap_gone`]). `None` when nothing does.
+    pub fn tick_waits(&self) -> Option<&'static str> {
+        if !self.observing {
+            None
+        } else if !self.vanished.missing().is_empty() {
+            Some("a window missing from the list")
+        } else if !self.recheck.is_empty() {
+            Some("windows not listed yet")
+        } else if !self.gone.borrow().is_empty() {
+            Some("an app whose call failed")
+        } else {
+            None
+        }
     }
 
     /// Apps gone without a termination notice (round missed-quit, [`crate::engine::gone`]):
@@ -1302,6 +1379,9 @@ impl Observer {
     /// Handles an NSWorkspace event.
     pub fn on_app_event(&mut self, event: AppEvent, callback: Callback) {
         match event {
+            // Only the Apple mode acts on it (the WM thread hands it on); the launch notice
+            // comes next.
+            AppEvent::WillLaunch(app) => tracing::debug!(pid = app.pid, bundle = app.bundle_or_unknown(), "app about to launch"),
             AppEvent::Launched(app) => {
                 self.log_app("app launched", &app);
                 let now = Instant::now();
@@ -1521,6 +1601,26 @@ mod tests {
     }
 
     unsafe extern "C-unwind" fn no_callback(_: NonNull<AXObserver>, _: NonNull<AXUIElement>, _: NonNull<CFString>, _: *mut c_void) {}
+
+    /// Round cmd-tab: ⌘Tab's switcher lists the running apps most recently used first; the
+    /// observer knows that order for the apps activated since it started.
+    #[test]
+    fn running_apps_come_most_recently_activated_first() {
+        let info = |pid: i32| AppInfo { pid, bundle_id: Some(format!("com.example.app{pid}")), name: None };
+        let mut ob = Observer::new(1, None);
+        ob.set_apps(vec![info(10), info(20), info(30)], no_callback);
+        let t0 = Instant::now();
+        ob.on_app_event(AppEvent::Activated(info(20), t0), no_callback);
+        ob.on_app_event(AppEvent::Activated(info(10), t0 + Duration::from_millis(5)), no_callback);
+        assert_eq!(ob.apps_by_recent_activation(), vec![10, 20], "30 never activated: its place is not known");
+        assert_eq!(ob.regular_app_count(), 3);
+        assert!(ob.is_regular_app(30) && !ob.is_regular_app(99));
+        ob.on_app_event(AppEvent::Activated(info(20), t0 + Duration::from_millis(9)), no_callback);
+        assert_eq!(ob.apps_by_recent_activation(), vec![20, 10]);
+        ob.on_app_event(AppEvent::Terminated(info(20)), no_callback);
+        assert_eq!(ob.apps_by_recent_activation(), vec![10], "quit: out of the switcher");
+        assert_eq!(ob.regular_app_count(), 2);
+    }
 
     /// The 11-10 login: an app answered the first registration and then none (each waited out
     /// the messaging timeout on the WM thread). The first timeout ends the try, wherever it

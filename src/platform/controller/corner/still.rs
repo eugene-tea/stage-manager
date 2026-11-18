@@ -1,15 +1,16 @@
 //! The still of the desktop in the park corner, on the WM thread (round desktop-still-patch,
-//! [`crate::engine::patch_still`]; round 8L3 for a switch's cover): kept fresh at every corner
+//! [`crate::engine::corner::patch_still`]; round 8L3 for a switch's cover): kept fresh at every corner
 //! patch plan while the patch or a switch's cover wants it, and what the patch finds of it
 //! ([`Controller::corner_still`]); a press on the desktop or a release in the corner takes a
 //! new one shortly ([`Controller::corner_touched`]).
 
 use std::time::Instant;
 
-use super::{Controller, cover_desktop_forced, input};
+use super::super::{Controller, input};
+use super::cover::cover_desktop_forced;
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::Display;
-use crate::engine::patch_still::{self as ps, Still, TakeFacts};
+use crate::engine::corner::patch_still::{self as ps, Still, TakeFacts};
 use crate::platform::{desktop, desktop_shot, windows};
 
 /// What [`Controller::corner_still`] found.
@@ -81,11 +82,11 @@ impl Controller {
     /// A mouse-up at `at` (WM thread): while the patch draws a still, one in the corner or on
     /// the desktop (no window there) takes a new still shortly: an icon selected, deselected
     /// or dropped there shows as it is.
-    pub(super) fn corner_touched(&self, at: Point, now: Instant) {
+    pub(in crate::platform::controller) fn corner_touched(&self, at: Point, now: Instant) {
         // The screen pressed on: its own still (round displays-2).
         let Some(d) = self.model.as_ref().and_then(|m| m.displays().iter().find(|d| d.frame.contains(at)).copied()) else { return };
         let screen = d.id.0;
-        if !self.patches.get(&screen).and_then(|t| t.sent.as_ref()).is_some_and(|p| p.still.is_some() || p.hold) {
+        if !self.corner.patches.get(&screen).and_then(|t| t.sent.as_ref()).is_some_and(|p| p.still.is_some() || p.hold) {
             return;
         }
         let in_corner = desktop_shot::zone(d.frame, d.corner).contains(at);

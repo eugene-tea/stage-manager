@@ -85,6 +85,7 @@ fn stage(m: &Model, id: u32) -> StageId {
     m.stage_of(w(id)).expect("in a stage")
 }
 
+both_engines! {
 #[test]
 fn the_rule_is_under_half_the_area_and_the_saved_size_fitting_the_screen() {
     assert!(owes(SMALL_PLAN, SAVED_PLAN, VISIBLE), "the owner's case");
@@ -229,4 +230,5 @@ fn an_owed_frame_stays_owed_when_its_screen_comes_back_under_another_id() {
     let chat = stage(&m, 22);
     let a = m.switch_to(chat, &Observation::default());
     assert_eq!(set_frame(&a, 22), Some(SAVED_TEAM), "{a:?}");
+}
 }

@@ -87,6 +87,25 @@ pub fn bgra(image: &CGImage, space: Option<&CGColorSpace>) -> Option<(Vec<u8>, u
     draw_into(&[image], w, h, space).map(|b| (b, w, h))
 }
 
+/// `image` drawn at `w` x `h` pixels, in its own colour space (device RGB when a bitmap cannot
+/// use it): a window's picture at the size a card asks for ([`super::capture_fast`]).
+pub fn scaled(image: &CGImage, w: usize, h: usize) -> Option<CFRetained<CGImage>> {
+    if w == 0 || h == 0 || w > 16_384 || h > 16_384 {
+        return None;
+    }
+    let info = CGImageAlphaInfo::PremultipliedFirst.0 | CGImageByteOrderInfo::Order32Little.0;
+    let make = |space: &CGColorSpace| {
+        // SAFETY: CG allocates the bitmap (null data, bytes per row computed); 8-bit BGRA.
+        unsafe { CGBitmapContextCreate(std::ptr::null_mut::<c_void>(), w, h, 8, 0, Some(space), info) }
+    };
+    let own = CGImage::color_space(Some(image));
+    let fallback = CGColorSpace::new_device_rgb();
+    let ctx = own.as_deref().and_then(make).or_else(|| fallback.as_deref().and_then(make))?;
+    CGContext::set_interpolation_quality(Some(&ctx), CGInterpolationQuality::Medium);
+    CGContext::draw_image(Some(&ctx), CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(w as f64, h as f64)), Some(image));
+    CGBitmapContextCreateImage(Some(&ctx))
+}
+
 /// `top` laid over `base`, both stretched to `base`'s pixel size, in `base`'s colour space.
 pub fn over(base: &CGImage, top: &CGImage) -> Option<CFRetained<CGImage>> {
     let (w, h) = (CGImage::width(Some(base)), CGImage::height(Some(base)));
@@ -131,6 +150,16 @@ pub(crate) mod tests {
         assert_eq!(least_alpha(&px), 128);
         assert_eq!(mean_of(&px), [40.0, 30.0, 20.0, 191.5]);
         assert_eq!(least_alpha(&[]), 0);
+    }
+
+    #[test]
+    fn a_picture_drawn_smaller_keeps_its_colour() {
+        let big = picture(400, 300, [0.2, 0.6, 0.8, 1.0], false);
+        let small = scaled(&big, 40, 30).expect("scaled");
+        assert_eq!((CGImage::width(Some(&small)), CGImage::height(Some(&small))), (40, 30));
+        let (a, b) = (mean_rgba(&big).expect("big"), mean_rgba(&small).expect("small"));
+        assert!(a.iter().zip(b).all(|(x, y)| (x - y).abs() < 2.0), "{a:?} vs {b:?}");
+        assert!(scaled(&big, 0, 30).is_none());
     }
 
     #[test]

@@ -47,6 +47,20 @@ Advanced shows how.
 - **Motion:** every animation's timing, measured from Apple's.
 - **More shortcuts:** new stage, pin a window, show or hide the strip.
 
+## Three ways to keep stages
+
+macOS has no public way to hide a window and keep it ready, so three ways are built:
+
+| | Accessibility | Spaces | With Apple's |
+|---|:---:|:---:|:---:|
+| Setting (`[windows]`) | `engine = "accessibility"` (default) | `engine = "spaces"` | `apple_stage_manager_on = "integrate"` |
+| Strip drawn by | Stage Manager | Stage Manager | Apple |
+| Every addition on the strip | ✓ | ✓ | — |
+| Hidden windows leave the screen | — | ✓ | ✓ |
+| CPU at rest, with the system's share | about 4.9 % | about 1.2 % | — |
+
+[Three ways to keep stages](docs/MODES.md) has the full comparison and its notes.
+
 ## First launch
 
 Apple's Stage Manager has to be turned off first (the app offers to do it). **Accessibility**
@@ -61,6 +75,7 @@ check on GitHub, which can be turned off.
 - [Info page](https://eugene-tea.github.io/stage-manager/)
 - [User guide](docs/GUIDE.md): install, use, settings, troubleshooting
 - [Configuration reference](docs/CONFIG.md): every option
+- [Three ways to keep stages](docs/MODES.md): Accessibility, Spaces and integrated with Apple's, compared
 - [Accessibility](.github/ACCESSIBILITY.md): VoiceOver, the keyboard, Reduce Motion, and what's missing
 - [Development](docs/DEVELOPMENT.md): build, test, release
 - [Notes for AI agents](docs/AGENTS.md): for an assistant changing the settings

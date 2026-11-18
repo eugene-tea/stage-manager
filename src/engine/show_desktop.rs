@@ -7,12 +7,12 @@
 //! once-a-second look saw Show Desktop's own window gone, after macOS had slid the windows
 //! back: the slivers were bare until then (the owner's log: 1.2 s).
 //!
-//! - **With a still of the desktop** ([`super::patch_still`]) the patch shows what the
+//! - **With a still of the desktop** ([`super::corner::patch_still`]) the patch shows what the
 //!   desktop shows there, icons and widgets included, so it has no reason of its own to hide:
 //!   it is planned through Show Desktop as at any time ([`gate`]). The rules that keep it
 //!   from showing over a window still hold there: it shows only while ordered just above the
 //!   parked windows (every shown window reaching it, pushed aside or not, listed in front of
-//!   it), or where no shown window reaches it ([`super::corner_patch::visibility`]), so a
+//!   it), or where no shown window reaches it ([`super::corner::corner_patch::visibility`]), so a
 //!   pushed window's edge in the corner (10-13) is never under it.
 //! - **With the file's picture** (no Screen Recording) it hides through Show Desktop as
 //!   before, and comes back at the first sign of the close ([`CloseWatch`]).
@@ -124,7 +124,7 @@ pub struct RevealFacts {
     /// Show Desktop is closing ([`CloseWatch`]).
     pub closing: bool,
     /// A still of the desktop stands for the corner now
-    /// ([`super::patch_still::Still::Ready`]).
+    /// ([`super::corner::patch_still::Still::Ready`]).
     pub still: bool,
     /// Where the panel is listed ([`panel_place`]).
     pub panel: PanelPlace,
@@ -164,13 +164,13 @@ pub const HOLD_AFTER: Duration = Duration::from_secs(2);
 
 /// The patch's rectangle while Show Desktop is up: what of each parked window (`parts`, its
 /// bounds as listed, wherever Show Desktop put it) shows on `display`, grown by `reach` (its
-/// shadow; [`super::corner_patch::patch_rect`]), each kept within `cap` (the still's block),
+/// shadow; [`super::corner::corner_patch::patch_rect`]), each kept within `cap` (the still's block),
 /// together. `None` when nothing of them shows within the cap.
-pub fn pushed_rect(parts: &[Rect], display: Rect, reach: super::corner_patch::Reach, cap: Rect) -> Option<Rect> {
+pub fn pushed_rect(parts: &[Rect], display: Rect, reach: super::corner::corner_patch::Reach, cap: Rect) -> Option<Rect> {
     let area = cap.intersect(&display)?;
     parts
         .iter()
-        .filter_map(|p| super::corner_patch::patch_rect(std::slice::from_ref(p), display, reach))
+        .filter_map(|p| super::corner::corner_patch::patch_rect(std::slice::from_ref(p), display, reach))
         .filter_map(|r| r.intersect(&area))
         .reduce(|a, b| a.union(&b))
 }
@@ -188,9 +188,9 @@ pub struct CoverLook<'a> {
     pub in_use: Option<Rect>,
     /// The main display.
     pub display: Rect,
-    /// The parked windows' shadow reach ([`super::corner_patch::DEFAULT_REACH`], or
+    /// The parked windows' shadow reach ([`super::corner::corner_patch::DEFAULT_REACH`], or
     /// `[windows] corner_patch_reach`).
-    pub reach: super::corner_patch::Reach,
+    pub reach: super::corner::corner_patch::Reach,
     /// What the patch may cover: the park corner's square within the still's block.
     pub cap: Rect,
     /// This look's time.
@@ -205,7 +205,7 @@ pub enum Cover {
     /// The rectangle held through Show Desktop.
     Held(Rect),
     /// The slivers' rectangle again, from this look on: taken as it is (not kept at the bigger
-    /// one in use, [`super::corner_patch::steady_rect`]).
+    /// one in use, [`super::corner::corner_patch::steady_rect`]).
     Released,
 }
 
@@ -449,25 +449,25 @@ mod tests {
 
     #[test]
     fn the_pushed_parts_are_covered_with_their_shadow_within_the_still() {
-        let r = pushed_rect(&[PUSHED], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP).expect("a part shows");
+        let r = pushed_rect(&[PUSHED], MAIN, crate::engine::corner::corner_patch::Reach::even(60.0), CAP).expect("a part shows");
         assert_eq!(r, Rect::new(2410.0, 1250.0, 150.0, 190.0), "90x130 grown by 60, kept on the display");
         // Two windows: one rectangle holding both.
         let other = Rect::new(2500.0, 1360.0, 900.0, 700.0);
-        let both = pushed_rect(&[PUSHED, other], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP).expect("parts");
+        let both = pushed_rect(&[PUSHED, other], MAIN, crate::engine::corner::corner_patch::Reach::even(60.0), CAP).expect("parts");
         assert!(both.contains_rect(&r) && both.contains_rect(&Rect::new(2440.0, 1300.0, 120.0, 140.0)), "{both:?}");
         // Pushed further than the still's block holds: only the block is covered.
         let far = Rect::new(2100.0, 1000.0, 1500.0, 1100.0);
-        assert_eq!(pushed_rect(&[far], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP), Some(CAP));
+        assert_eq!(pushed_rect(&[far], MAIN, crate::engine::corner::corner_patch::Reach::even(60.0), CAP), Some(CAP));
         // A part wholly outside the block (a window listed mid-screen) adds nothing.
         let mid = Rect::new(800.0, 400.0, 600.0, 400.0);
-        assert_eq!(pushed_rect(&[mid, PUSHED], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP), Some(r));
-        assert_eq!(pushed_rect(&[mid], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP), None);
+        assert_eq!(pushed_rect(&[mid, PUSHED], MAIN, crate::engine::corner::corner_patch::Reach::even(60.0), CAP), Some(r));
+        assert_eq!(pushed_rect(&[mid], MAIN, crate::engine::corner::corner_patch::Reach::even(60.0), CAP), None);
         // Off the display: nothing.
-        assert_eq!(pushed_rect(&[Rect::new(2600.0, 1300.0, 500.0, 500.0)], MAIN, crate::engine::corner_patch::Reach::even(60.0), CAP), None);
+        assert_eq!(pushed_rect(&[Rect::new(2600.0, 1300.0, 500.0, 500.0)], MAIN, crate::engine::corner::corner_patch::Reach::even(60.0), CAP), None);
     }
 
     fn look<'a>(up: bool, parked: &'a [(u32, Rect)], in_zone: &'a HashSet<u32>, now: Instant) -> CoverLook<'a> {
-        CoverLook { up, parked, in_zone, in_use: Some(PATCH), display: MAIN, reach: crate::engine::corner_patch::Reach::even(60.0), cap: CAP, now }
+        CoverLook { up, parked, in_zone, in_use: Some(PATCH), display: MAIN, reach: crate::engine::corner::corner_patch::Reach::even(60.0), cap: CAP, now }
     }
 
     #[test]

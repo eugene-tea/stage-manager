@@ -64,6 +64,12 @@ running from anywhere else: `make run` stops only the dev copy's own process.
 `make check` runs the unit tests and clippy; both must be clean. The engine (`src/engine`,
 `src/config.rs`) is pure Rust with no Objective-C types, so most logic is tested there.
 
+The model's tests run once per window engine: a test inside `both_engines! { .. }`
+(`src/engine/testkit.rs`) becomes `<name>::corner` and `<name>::spaces`, and the test model
+and the fake desk (`Desk`) hide windows the way that engine does. A test of the park
+corner's own geometry goes in `corner_nuance! { .. }` and runs on the Corner engine only;
+the Spaces engine's own tests are in `src/engine/spaces.rs`.
+
 `scripts/test-stages.sh` runs the scripted checks against the real app, driving it through
 its ctl socket and reading the window server's view of the windows:
 
@@ -105,6 +111,45 @@ menu's Quit (`ctl debug-menu-quit`) installs 99.0.0 without reopening it. It man
 and refuses to run beside a running Stage Manager; run it while at the Mac (an automatic
 install goes by itself after 120 s with no input).
 
+### Measuring cost
+
+`scripts/measure.sh` measures what the app costs, the same way each time, under each window
+engine and with the app not running (the floor), three runs each by default, and prints the
+median and spread of every number (`scripts/measure_stages.py` says what each scenario reads):
+
+```sh
+scripts/measure.sh                        # rest sample switch call launch; off, corner, spaces
+scripts/measure.sh rest sample            # CPU, wakeups and POWER at rest; where the time goes
+RUNS=1 ENGINES="corner spaces" scripts/measure.sh switch
+scripts/measure.sh --summary /tmp/sm-measure.XXXXXX   # the table again
+```
+
+- **rest**: four stages of two fixture windows, a minute untouched: the app's CPU time over
+  wall time and wakeups (`proc_pid_rusage`), `top`'s POWER, the window server's and replayd's
+  CPU. **sample**: the next minute under `sample`, split by what started the work (a timer
+  and the function it calls, an Accessibility notice, Core Animation's commit, a capture
+  reply) and by its kind.
+- **switch**: card clicks and Dock clicks timed from the command to the last incoming window
+  at its frame (`probe-spaces settle` reads the windows every ms), then again unsampled for
+  the CPU of each switch.
+- **call**: a call stand-in (the fixture's `--frame-clock`: a floating window that draws on
+  every display refresh and counts the refreshes it missed) at rest and while other stages
+  are activated.
+- **launch**: how long a newly opened app's window shows over the stage being left.
+- **hidden** (by name only): a window drawing on every display refresh (the fixture's
+  `--frame-clock-normal`) hidden in its stage and shown again by `ctl switch`: whether it
+  drew while hidden, how soon it draws again after the show, refreshes missed after.
+
+`scripts/measure_engines.py` runs it for the park corner and the Spaces engine alone, with
+captures off, three stages and `ctl switch` switches, and prints one table, corner against
+spaces, with every number in `target/measure-engines.json` (UX-SPEC, "Window engines
+measured"); `--dry-run` prints the plan and launches nothing, and
+`python3 scripts/test_measure_unit.py` checks its parts offline.
+
+Captures are on in every run, as installed; sign with a Developer ID (`CERT_NAME`) so the dev
+copy keeps its Screen Recording grant. The numbers go to `measure.jsonl` in `OUT` (a new
+`/tmp/sm-measure.*` by default), with each `sample` file; neither belongs in the repo.
+
 ### The fixture app
 
 `make fixture` builds `target/SM Fixture.app` (`dev.eugene.stagemanager.fixture`): numbered
@@ -136,7 +181,7 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 | `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
 | `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
 | `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only: `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
-| `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` toggle Apple's Stage Manager (it restores the setting on exit) |
+| `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` (the stand-down) and `scripts/test_apple.py` (the Apple mode: `mirror`, `switch`) toggle Apple's Stage Manager (each restores the setting on exit) |
 
 ## The ctl socket
 

@@ -1,7 +1,7 @@
 //! Finder's desktop icons, read through public Accessibility on a helper thread of their own
 //! ([`start_read`]): the corner patch draws the desktop picture only, so it stays off while
 //! an icon lies under it, or while where the icons lie is not known
-//! ([`crate::engine::corner_patch::desktop_icons`], [`crate::engine::corner_patch::item_reach`]).
+//! ([`crate::engine::corner::corner_patch::desktop_icons`], [`crate::engine::corner::corner_patch::item_reach`]).
 //!
 //! Finder's application element lists one `AXScrollArea` per display's desktop, holding an
 //! `AXGroup` (the icon view; scroll bars are its other children) whose `AXImage` children are
@@ -23,7 +23,7 @@ use std::sync::mpsc;
 
 use super::ax::AxElement;
 use super::windows::FINDER_BUNDLE_ID;
-use crate::engine::corner_patch::{AxNode, DesktopIcons, MAX_ICONS, desktop_icons, finder_desktop_on, roles};
+use crate::engine::corner::corner_patch::{AxNode, DesktopIcons, MAX_ICONS, desktop_icons, finder_desktop_on, roles};
 
 /// The Accessibility timeout for each message to Finder.
 pub const FINDER_AX_TIMEOUT_SECONDS: f32 = 0.1;

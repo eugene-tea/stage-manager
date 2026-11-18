@@ -266,7 +266,7 @@ fn process_gone(pid: i32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::observe_retry::FAST_EVERY;
+    use crate::engine::observe_retry::LAUNCH_EVERY;
     use std::sync::Mutex;
     use std::sync::atomic::AtomicU32;
 
@@ -321,10 +321,10 @@ mod tests {
         };
         let (note, at) = answered;
         assert!(matches!(note, Note::Answered { pid: LATE, retry, .. } if retry.misses() == 2));
-        // Two misses at the fast cadence: about 2 × 150 ms, never behind the stuck app's
-        // 250 ms waits (it would be 750 ms and more if they took turns).
+        // Two misses at a just-opened app's cadence: about 2 × 40 ms, never behind the stuck
+        // app's 250 ms waits (it would be 750 ms and more if they took turns).
         let took = at.duration_since(t0);
-        assert!(took >= FAST_EVERY * 2, "asked on the schedule ({took:?})");
+        assert!(took >= LAUNCH_EVERY * 2, "asked on the schedule ({took:?})");
         assert!(took < Duration::from_millis(600), "not behind the stuck app ({took:?})");
         assert!(probes.running(STUCK));
         probes.stop(STUCK);

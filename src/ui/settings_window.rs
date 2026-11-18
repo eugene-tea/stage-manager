@@ -148,8 +148,10 @@ pub struct SettingsValues {
     pub version: String,
     pub login: LoginStatus,
     pub app: AppConfig,
-    /// Apple's Stage Manager is on (we stand down).
+    /// Apple's Stage Manager is on (we stand down, or follow it).
     pub apple_on: bool,
+    /// `[windows] apple_stage_manager_on = "integrate"`: Stage Manager follows Apple's while it is on.
+    pub follows_apple: bool,
     /// Apple's "Show recent apps in Stage Manager" (`AutoHide = 0`).
     pub show_recent_apps: bool,
     /// Apple's "Show windows from an application: All at Once" (`AppWindowGroupingBehavior = 1`).
@@ -185,6 +187,7 @@ impl SettingsValues {
             login,
             app: config.app,
             apple_on: flag("GloballyEnabled", 0) != 0,
+            follows_apple: config.windows.with_apple == crate::engine::stand_down::WithApple::Augment,
             show_recent_apps: flag("AutoHide", 0) == 0,
             all_at_once: flag("AppWindowGroupingBehavior", 1) != 0,
             wallpaper_only_in_stage_manager: flag("EnableStandardClickToShowDesktop", 1) == 0,
@@ -203,7 +206,7 @@ impl SettingsValues {
     }
 
     /// What decides the panes' rows (a change rebuilds them; anything else updates in place).
-    fn shape(&self) -> (u8, bool, bool, bool, bool) {
+    fn shape(&self) -> (u8, bool, bool, bool, bool, bool) {
         let login = match self.login {
             LoginStatus::On => 0,
             LoginStatus::NeedsApproval => 1,
@@ -212,7 +215,7 @@ impl SettingsValues {
             LoginStatus::Late => 4,
         };
         // The Shift row says what Shift does, which the new-apps switch flips.
-        (login, self.apple_on, self.config_error.is_some(), self.animations_on, self.new_apps_join_current)
+        (login, self.apple_on, self.follows_apple, self.config_error.is_some(), self.animations_on, self.new_apps_join_current)
     }
 }
 
@@ -621,11 +624,21 @@ fn general(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwitch>, 
     (login, icon, updates, install)
 }
 
+/// What the Stage Manager pane says while Apple's Stage Manager is on: what this app does
+/// meanwhile, standing down or following it (`[windows] apple_stage_manager_on`).
+pub fn apple_on_detail(follows: bool) -> &'static str {
+    if follows {
+        "On. This app follows its stages: the stage hotkeys, rules and saved stages work on them, and it shows no strip of its own."
+    } else {
+        "On. This app stands down until Apple's is off: it arranges nothing and shows no strip."
+    }
+}
+
 /// The Stage Manager pane: Apple's Customize sheet.
 fn stage_manager(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwitch>, Retained<NSPopUpButton>) {
     let mut apple = Row::new("Apple's Stage Manager", None);
     if v.apple_on {
-        apple = apple.detail("On. This app stands down until Apple's is off: it arranges nothing and shows no strip.");
+        apple = apple.detail(apple_on_detail(v.follows_apple));
         let off = m.button("Turn Off", tag::TURN_OFF);
         off.setAccessibilityLabel(Some(&NSString::from_str("Turn Off Apple's Stage Manager")));
         apple.trailing.push(view(&off));
@@ -1111,12 +1124,14 @@ mod tests {
             SettingsValues { login: LoginStatus::NeedsApproval, ..base.clone() },
             SettingsValues { login: LoginStatus::Late, ..base.clone() },
             SettingsValues { apple_on: true, ..base.clone() },
+            SettingsValues { apple_on: true, follows_apple: true, ..base.clone() },
             SettingsValues { config_error: Some("bad".into()), ..base.clone() },
             SettingsValues { animations_on: false, ..base.clone() },
             SettingsValues { new_apps_join_current: true, ..base.clone() },
         ] {
             assert_ne!(base.shape(), other.shape());
         }
+        assert!(apple_on_detail(true).contains("follows") && apple_on_detail(false).contains("stands down"), "apple_stage_manager_on = integrate says what it does instead");
     }
 
     #[test]

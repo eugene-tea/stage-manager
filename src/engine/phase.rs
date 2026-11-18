@@ -16,7 +16,7 @@
 //!   still be the old Space's for a moment after the arrival, so nothing is inferred from it;
 //! - **the Desktop's slide** as the corner patch's plan reads it from the list (the parked
 //!   windows shifted sideways together before the Space change's notice): the plan stays as
-//!   it was for at most [`super::corner_patch::SLIDE_HOLD`].
+//!   it was for at most [`super::corner::corner_patch::SLIDE_HOLD`].
 //!
 //! Mission Control, App Exposé and Show Desktop stay their own machine
 //! ([`super::overview::OverviewWatch`]): one can show in any phase (over a steady Desktop, over

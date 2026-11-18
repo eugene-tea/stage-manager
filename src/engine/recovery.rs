@@ -6,7 +6,7 @@
 //! Accessibility; this module decides, without touching anything:
 //!
 //! - a window is **stranded** when it sits in the main display's park zone at one of the
-//!   corners that count ([`ScanDisplays::corners`]; [`super::park::is_parked_in_at`]: the full frame's or
+//!   corners that count ([`ScanDisplays::corners`]; [`super::corner::park::is_parked_in_at`]: the full frame's or
 //!   the visible frame's, since macOS keeps a parked window above a bottom Dock) and does not
 //!   show on another display either (so a window on a second display to the bottom-right of
 //!   the main one is left alone);
@@ -32,7 +32,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::geometry::Rect;
-use super::park::{Corner, PARK_MARGIN, Slivers, choose_corner, clamp_to_visible, is_parked_in_at_with};
+use super::corner::park::{Corner, PARK_MARGIN, Slivers, choose_corner, clamp_to_visible, is_parked_in_at_with};
 use super::persist::{SavedRole, SavedWindow, StateFile};
 use super::stage_area::same_frame;
 use super::window_match::{Key, match_windows};
@@ -98,7 +98,7 @@ impl ScanDisplays {
     }
 
     /// True when `frame` is in a park zone at any corner that counts (the main display's,
-    /// [`super::park::is_parked_in_at`], slivers included, or another managed display's
+    /// [`super::corner::park::is_parked_in_at`], slivers included, or another managed display's
     /// own), whatever shows on other displays. For frames we put windows at (never a
     /// sliver) and windows we know.
     pub fn parks(&self, frame: Rect) -> bool {
@@ -336,6 +336,11 @@ pub struct Registered {
 /// windows).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ParkedFile {
+    /// The window engine the app ran ([`EngineKind`]): how the guardian brings its windows
+    /// back. Left out for the Corner engine, so its files read as they always did and a file
+    /// of an earlier version is the Corner engine's.
+    #[serde(default, skip_serializing_if = "EngineKind::is_corner")]
+    pub engine: EngineKind,
     /// The main display's visible frame when written.
     pub visible: Option<Rect>,
     /// The registered windows.
@@ -354,6 +359,74 @@ pub struct ParkedFile {
     /// app runs.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub logout: bool,
+    /// The Spaces engine's stage Spaces, each with the Desktop its windows go back to: what
+    /// another process (the guardian) needs to bring the windows out of them while the app
+    /// still holds them (the window server ends them only with the app). Left out when
+    /// empty, so the Corner engine's file reads as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<StageSpace>,
+}
+
+/// A stage Space of the Spaces engine, as the parked file names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageSpace {
+    /// The window server's Space id.
+    pub space: u64,
+    /// The Desktop (a Space id too) its windows were on when hidden.
+    pub desktop: u64,
+}
+
+/// Which window engine hides a stage's windows (docs/ARCHITECTURE.md, "Window engines").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineKind {
+    /// The Accessibility park corner.
+    #[default]
+    Corner,
+    /// A hidden window-server Space per stage per screen: a hidden window keeps its frame,
+    /// off screen. Its pure half is [`super::spaces`]; its platform half is S3's.
+    Spaces,
+    /// Apple's Stage Manager arranges the windows and this app follows it
+    /// (`[windows] apple_stage_manager_on = "integrate"`): nothing is hidden by this app. Its pure half is
+    /// [`super::apple`]; its platform half `platform::apple`.
+    Apple,
+}
+
+impl EngineKind {
+    /// Its name in logs and files.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Corner => "corner",
+            Self::Spaces => "spaces",
+            Self::Apple => "apple",
+        }
+    }
+
+    /// True when a window at `frame` is still where this engine hid it, out of anyone's
+    /// reach, as far as what is `known` of the window allows: what the guardian's watch and
+    /// every bring-back's last look wait for. The Corner engine: in a park zone of `displays`
+    /// and not meaningfully on another display ([`is_stranded`]). The Spaces engine: a window
+    /// it registered, by the same rule (a window parked for ⌘Tab's lend waits at the park
+    /// corner as the Corner engine parks, and stays there when the app ends, review A-8);
+    /// never any other window by its frame.
+    pub fn stranded(self, frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
+        match self {
+            Self::Corner => is_stranded(frame, displays, known),
+            // No frame says a window is in a stage Space, and none is left in one once its
+            // app is gone: the window server ends the Spaces with the process that made them.
+            // A lend's park is the one place a hidden window of this engine has a frame of
+            // its own, and that window is registered (the model counts it hidden).
+            Self::Spaces => known == Known::Registered && is_stranded(frame, displays, known),
+            // Nothing of the Apple mode's is hidden: only a window a release before it held
+            // (registered, in a park corner) waits to come back.
+            Self::Apple => known == Known::Registered && is_stranded(frame, displays, known),
+        }
+    }
+
+    /// True for the Corner engine (the parked file leaves it out).
+    pub fn is_corner(&self) -> bool {
+        *self == Self::Corner
+    }
 }
 
 impl ParkedFile {
@@ -367,7 +440,7 @@ impl ParkedFile {
         }
         Ok(match serde_json::from_slice(bytes)? {
             Any::File(f) => f,
-            Any::List(windows) => Self { visible: None, windows, corners: Vec::new(), zones: Vec::new(), logout: false },
+            Any::List(windows) => Self { windows, ..Self::default() },
         })
     }
 }
@@ -403,7 +476,7 @@ pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
 mod tests {
     use super::*;
     use crate::engine::geometry::Size;
-    use crate::engine::park::{MACOS_KEEPS_TITLE, is_parked, park_frame, park_frame_at};
+    use crate::engine::corner::park::{MACOS_KEEPS_TITLE, is_parked, park_frame, park_frame_at};
     use crate::engine::persist::{SavedSpace, SavedStage, SavedWindow};
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 1440.0, 900.0);
@@ -686,15 +759,23 @@ mod tests {
     #[test]
     fn the_parked_file_round_trips_and_reads_the_older_list() {
         let f = ParkedFile {
+            engine: EngineKind::Corner,
             visible: Some(Rect::new(0.0, 25.0, 1440.0, 799.0)),
             windows: vec![Registered { id: 4, pid: 9, restore: Rect::new(10.0, 40.0, 300.0, 200.0), child: false, fitted: true, fitted_at: None, unvouched: false, ordered_out: false }],
             corners: vec![Corner::BottomLeft],
             zones: vec![ParkZone { frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0), visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0), corners: vec![Corner::BottomLeft] }],
             logout: false,
+            spaces: vec![],
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
         assert!(!String::from_utf8_lossy(&json).contains("logout"), "written only at an unclean quit for a logout");
+        assert!(!String::from_utf8_lossy(&json).contains("engine"), "the Corner engine's file reads as before the engines");
+        assert!(!String::from_utf8_lossy(&json).contains("spaces"), "no stage Space: no key");
+        let spaces = ParkedFile { engine: EngineKind::Spaces, spaces: vec![StageSpace { space: 836, desktop: 3 }], ..f.clone() };
+        let json = serde_json::to_vec(&spaces).unwrap_or_default();
+        assert!(String::from_utf8_lossy(&json).contains(r#""spaces":[{"space":836,"desktop":3}]"#));
+        assert_eq!(ParkedFile::from_json(&json).ok(), Some(spaces));
         // An unclean quit at a logout says so (round logout-cancel).
         let at_logout = ParkedFile { logout: true, windows: vec![], ..f.clone() };
         let json = serde_json::to_vec(&at_logout).unwrap_or_default();

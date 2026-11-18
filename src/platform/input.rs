@@ -5,8 +5,9 @@
 //! - The monitor (main thread) reports every left mouse-down (wallpaper clicks, the start of
 //!   a window drag), left mouse-up (the end of a window drag), right or other button press
 //!   (a user action: it ends the login's settling, nothing more) and key-down, each with the
-//!   Shift and Command flags the user held. Global monitors never see our own windows'
-//!   events.
+//!   Shift and Command flags the user held, and ⌘ pressed or let go
+//!   ([`InputKind::CommandKey`]: ⌘Tab's switcher activates its app at ⌘'s release, round
+//!   cmd-tab). Global monitors never see our own windows' events.
 //! - [`Triggers`] remembers the latest of those user actions, so a window or an activation
 //!   that arrives a little later can tell whether the user held Shift when they caused it
 //!   ("hold Shift to bring things here"). A trigger with Command held is the app switcher
@@ -17,7 +18,7 @@
 //!   ([`drag`]).
 
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
@@ -48,6 +49,11 @@ pub enum InputKind {
     OtherMouseDown,
     /// A key pressed.
     KeyDown,
+    /// ⌘ pressed (`cmd` true) or let go (`cmd` false): reported only when ⌘'s state changes,
+    /// never for another modifier, so ⇧ or ⌥ while typing costs nothing. ⌘Tab's switcher
+    /// shows while ⌘ is held after a Tab and activates its app at ⌘'s release
+    /// ([`crate::engine::switcher`]).
+    CommandKey,
 }
 
 /// One user action in another app, global top-left coordinates.
@@ -75,9 +81,18 @@ pub struct InputEvent {
 }
 
 /// The Tab key's virtual key code.
-pub const KEY_TAB: u16 = 48;
+pub const KEY_TAB: u16 = crate::engine::switcher::KEY_TAB;
 /// The ` key's virtual key code (⌘` cycles an app's windows).
-pub const KEY_GRAVE: u16 = 50;
+pub const KEY_GRAVE: u16 = crate::engine::switcher::KEY_GRAVE;
+
+/// ⌘'s state as last reported ([`InputKind::CommandKey`]); main thread.
+static COMMAND_HELD: AtomicBool = AtomicBool::new(false);
+
+/// True when a modifier change with ⌘ `held` now is worth a report: ⌘'s state changed since
+/// the last one (`was`).
+fn command_changed(was: bool, held: bool) -> bool {
+    was != held
+}
 
 impl InputEvent {
     /// A key-down of an app or window switcher, ⌘Tab or ⌘`: the next activation may switch
@@ -101,16 +116,17 @@ impl Drop for InputMonitor {
 }
 
 /// Calls `sink` (main thread) for every left mouse down/up, right or other mouse down and key
-/// down in another app, and `moved` with the pointer (global, top-left) for every mouse move
-/// over another app's window or the desktop.
-pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved: impl Fn(Point) + 'static) -> Option<InputMonitor> {
+/// down in another app. Mouse moves have a monitor of their own ([`monitor_moves`]), made
+/// only while a strip may show (round idle-subsystems: each move wakes the main thread).
+pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Option<InputMonitor> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| {
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event = unsafe { event.as_ref() };
-        if event.r#type() == NSEventType::MouseMoved {
-            let at = NSEvent::mouseLocation();
-            moved(point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)));
-            return;
+        if event.r#type() == NSEventType::FlagsChanged {
+            let held = event.modifierFlags().contains(NSEventModifierFlags::Command);
+            if !command_changed(COMMAND_HELD.swap(held, Ordering::Relaxed), held) {
+                return;
+            }
         }
         let Some(kind) = kind_of(event.r#type()) else { return };
         if kind == InputKind::MouseUp {
@@ -121,6 +137,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
         // clickCount and keyCode raise on the other kind of event: ask each only its own.
         let (clicks, key) = match kind {
             InputKind::KeyDown => (0, Some(event.keyCode())),
+            InputKind::CommandKey => (0, None),
             InputKind::MouseDown | InputKind::MouseUp | InputKind::OtherMouseDown => (event.clickCount() as i64, None),
         };
         sink(InputEvent {
@@ -139,8 +156,20 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static, moved
         | NSEventMask::RightMouseDown
         | NSEventMask::OtherMouseDown
         | NSEventMask::KeyDown
-        | NSEventMask::MouseMoved;
+        | NSEventMask::FlagsChanged;
     let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(mask, &block)?;
+    Some(InputMonitor { token })
+}
+
+/// Calls `moved` (main thread) with the pointer (global, top-left) for every mouse move over
+/// another app's window or the desktop, while the monitor it returns lives.
+pub fn monitor_moves(mtm: MainThreadMarker, moved: impl Fn(Point) + 'static) -> Option<InputMonitor> {
+    let block = RcBlock::new(move |_event: NonNull<NSEvent>| {
+        super::costs::bump(super::costs::Cost::MouseMove);
+        let at = NSEvent::mouseLocation();
+        moved(point_to_top_left(Point::new(at.x, at.y), primary_height(mtm)));
+    });
+    let token = NSEvent::addGlobalMonitorForEventsMatchingMask_handler(NSEventMask::MouseMoved, &block)?;
     Some(InputMonitor { token })
 }
 
@@ -158,6 +187,7 @@ fn kind_of(t: NSEventType) -> Option<InputKind> {
         NSEventType::LeftMouseUp => Some(InputKind::MouseUp),
         NSEventType::RightMouseDown | NSEventType::OtherMouseDown => Some(InputKind::OtherMouseDown),
         NSEventType::KeyDown => Some(InputKind::KeyDown),
+        NSEventType::FlagsChanged => Some(InputKind::CommandKey),
         _ => None,
     }
 }
@@ -175,6 +205,12 @@ pub struct Modifiers {
 pub fn live_modifiers() -> Modifiers {
     let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
     Modifiers { shift: flags.contains(CGEventFlags::MaskShift), cmd: flags.contains(CGEventFlags::MaskCommand) }
+}
+
+/// True when ⌘ is held now, by a person's keyboard or a posted event (the session's combined
+/// state; any thread): ⌘Tab's switcher closed with its release unheard is found so.
+pub fn command_held() -> bool {
+    CGEventSource::flags_state(CGEventSourceStateID::CombinedSessionState).contains(CGEventFlags::MaskCommand)
 }
 
 /// Where the pointer is now, global top-left coordinates (any thread).
@@ -211,6 +247,12 @@ pub fn since_last_press() -> Duration {
 /// Left mouse-ups the monitor has seen (another app's, any source): a synthetic drag posts
 /// none until its own release, so one seen while it runs is the user's ([`drag`]).
 static LEFT_UPS: AtomicU64 = AtomicU64::new(0);
+
+/// Left mouse-ups the monitor has seen so far (any thread): one more since a press of ours
+/// is the person's release ([`drag`], the Apple mode's drag route).
+pub fn left_ups() -> u64 {
+    LEFT_UPS.load(Ordering::Relaxed)
+}
 
 /// True while the left mouse button is down (any thread).
 pub fn left_button_down() -> bool {
@@ -297,7 +339,7 @@ pub fn path_is_safe(path: &[Point], pids: &[i32], press: bool) -> Result<(), Str
     // click-through and its card's press was refused (round displays-live-1).
     let cards: Vec<Rect> = strip_model::every_published_card().into_iter().map(|(_, r)| r).collect();
     // The Dock draws its bar in one window as large as its display, clear and click-through
-    // away from the bar (engine::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
+    // away from the bar (engine::corner::sliver::DockBar; with auto-hide on, seen 11-05 at 2560x1440):
     // it counts only on the bar's own frame, read through Accessibility, and wherever that
     // frame is unknown. macOS's click-through overlays (the screenshot tool's, Notification
     // Center's full-screen window off its own elements: desktop::seen_through, asked at each
@@ -491,6 +533,35 @@ pub fn click(p: Point, shift: bool) -> Result<(), String> {
         let _ = CGWarpMouseCursorPosition(back);
     }
     Ok(())
+}
+
+/// A synthetic left press at `p` held `hold`, then its release, posted on a thread of its
+/// own: the caller (the WM thread, `ctl debug-dock-click BUNDLE real`) returns at once, so
+/// the press and the release reach the input monitor and the controller as a person's do,
+/// and the Dock activates the app on the release. Only for a Dock item the caller hit-tested
+/// as a `STAGE_MANAGER_ONLY` app's (the Dock is no test window, so [`path_is_safe`] would
+/// refuse it). The pointer goes back where it was.
+pub fn dock_item_click(p: Point, hold: Duration) -> Result<(), String> {
+    let back = pointer_home();
+    std::thread::Builder::new()
+        .name("test-dock-click".into())
+        .spawn(move || {
+            let posted = move_first(p, false)
+                .and_then(|()| post_mouse(CGEventType::LeftMouseDown, p, false))
+                .and_then(|()| {
+                    std::thread::sleep(hold);
+                    post_mouse(CGEventType::LeftMouseUp, p, false)
+                });
+            if let Err(e) = posted {
+                tracing::warn!("test Dock click: {e}");
+            }
+            std::thread::sleep(Duration::from_millis(60));
+            if let Some(back) = back {
+                let _ = CGWarpMouseCursorPosition(back);
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| format!("no thread for the click: {e}"))
 }
 
 /// A synthetic left-button drag along `waypoints` (straight segments), only when every point
@@ -821,6 +892,16 @@ mod tests {
 
     fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {
         InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, clicks, key, stamp: 0.0 }
+    }
+
+    #[test]
+    fn only_a_change_of_command_is_reported() {
+        assert!(command_changed(false, true), "⌘ pressed");
+        assert!(command_changed(true, false), "⌘ let go");
+        assert!(!command_changed(true, true), "⇧ pressed with ⌘ held");
+        assert!(!command_changed(false, false), "⇧ or ⌥ alone");
+        assert_eq!(kind_of(NSEventType::FlagsChanged), Some(InputKind::CommandKey));
+        assert!(!event(InputKind::CommandKey, true, 0, None).is_switcher_key(), "⌘ alone is no switcher key");
     }
 
     #[test]

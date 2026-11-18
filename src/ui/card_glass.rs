@@ -14,7 +14,9 @@
 //!   reader keeps what only changes with a file), when the clock's frame boundary passes or
 //!   the appearance changed, and [`SETTLE`] after a Space change (at the change itself
 //!   NSWorkspace may still name the Desktop left's picture: no read until then). A new
-//!   backdrop recolours the strip shown ([`super::strip::glass_changed`]).
+//!   backdrop recolours the strip shown ([`super::strip::glass_changed`]). Not while the
+//!   strip shows over windows ([`set_over_windows`]: its cards are solid) once its Desktop's
+//!   picture has been read; back over the desktop, it is read at once.
 //! - **Each Desktop its own**: each Desktop may have a picture of its own, so each keeps the
 //!   backdrop last read there, and a strip colours its cards from its Desktop's (a Desktop
 //!   not read yet: the one read last). A Desktop shown again is never painted from the one
@@ -71,6 +73,8 @@ struct Screen {
     reader: Reader,
     /// Its strip's glass is on.
     wanted: bool,
+    /// Its strip shows over windows: its cards are solid, the wallpaper unseen.
+    over_windows: bool,
     /// The last read: when, its clock boundary, its appearance, the Desktop shown then.
     read: Option<(Instant, Option<Instant>, bool, Option<u64>)>,
     /// The picture rendered or being rendered (the job's key at [`SAMPLE_SCALE`]).
@@ -95,6 +99,22 @@ impl Screen {
         match self.desktops.get(&space) {
             Some((_, shown)) => shown.clone(),
             None => self.shown.clone(),
+        }
+    }
+
+    /// Whether its wallpaper is read (at the poll, after a Space change): its glass wanted,
+    /// and not over windows with the picture of the Desktop shown read already (a Desktop
+    /// never read is read meanwhile, so its cards have their own colours once the strip is
+    /// over the desktop again).
+    fn polled(&self) -> bool {
+        self.wanted && !(self.over_windows && self.read_here())
+    }
+
+    /// The Desktop shown has a backdrop read there (or, not known, any was read).
+    fn read_here(&self) -> bool {
+        match self.space_now() {
+            Some(space) => self.desktops.contains_key(&space) || self.read.is_some_and(|r| r.3 == Some(space)),
+            None => self.read.is_some(),
         }
     }
 
@@ -161,14 +181,48 @@ pub fn set_space(display: u32, space: u64) {
     });
 }
 
-/// `display`'s strip's glass is `on` (its style, at each snapshot): a first read happens at
-/// the next poll.
+/// `display`'s strip's glass is `on` (its style, at each snapshot), and the strip has cards
+/// to show (`[strip] visible`, not standing down for Apple's Stage Manager): while it has not,
+/// no wallpaper is read (until 1.9 every 2 s whatever the strip showed). The backdrops read
+/// before are kept; one wanted again is read at once, right after the snapshot that wants it
+/// (a picture changed meanwhile repaints the cards once rendered, as after a Desktop change),
+/// then at the poll as before. A first read at launch happens at the next poll.
 pub fn set_wanted(display: u32, on: bool) {
-    STATE.with(|s| {
-        if let Ok(mut s) = s.try_borrow_mut() {
-            s.screens.entry(display).or_default().wanted = on;
-        }
+    change(display, |d| d.wanted = on);
+}
+
+/// `display`'s strip shows over windows (`over`: its cards are solid) or is back over the
+/// desktop. Over windows its wallpaper is not read once the Desktop shown has been
+/// ([`Screen::polled`]); the backdrops read before are kept, and back over the desktop it is
+/// read at once, as a glass wanted again ([`set_wanted`]).
+pub fn set_over_windows(display: u32, over: bool) {
+    change(display, |d| d.over_windows = over);
+}
+
+/// Changes `display`'s screen with `f`; a screen read before whose wallpaper is read again
+/// now ([`Screen::polled`]) is read at once.
+fn change(display: u32, f: impl FnOnce(&mut Screen)) {
+    let again = STATE.with(|s| {
+        let Ok(mut s) = s.try_borrow_mut() else { return false };
+        let d = s.screens.entry(display).or_default();
+        let was = d.polled();
+        f(d);
+        wanted_again(was, d.polled(), d.read.is_some())
     });
+    if again {
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let Some(mtm) = MainThreadMarker::new() else { return };
+            if read(mtm, display) == Read::Same {
+                super::strip::glass_changed(display);
+            }
+        });
+    }
+}
+
+/// Whether a glass wanted again (`was` off, `on` now) is read at once: when it was read
+/// before (`read_before`; the first read waits for the poll, as at launch).
+fn wanted_again(was: bool, on: bool, read_before: bool) -> bool {
+    !was && on && read_before
 }
 
 /// The displays changed (`kept`: the strips' display keys still there): the glass of a
@@ -181,9 +235,9 @@ pub fn displays_changed(kept: &[u32]) {
     });
 }
 
-/// The screens whose glass is wanted now.
+/// The screens whose wallpaper is read now ([`Screen::polled`]).
 fn wanted() -> Vec<u32> {
-    STATE.with(|s| s.try_borrow().map(|s| s.screens.iter().filter(|(_, d)| d.wanted).map(|(k, _)| *k).collect()).unwrap_or_default())
+    STATE.with(|s| s.try_borrow().map(|s| s.screens.iter().filter(|(_, d)| d.polled()).map(|(k, _)| *k).collect()).unwrap_or_default())
 }
 
 /// The app's poll (each second): reads each screen's wallpaper again when its last read is
@@ -433,6 +487,50 @@ mod tests {
 
     fn on(d: &mut Screen, space: u64) {
         d.space = Some((space, Instant::now() - SETTLE));
+    }
+
+    #[test]
+    fn a_strip_that_shows_no_card_reads_no_wallpaper_and_reads_it_at_once_when_it_shows_again() {
+        // The poll reads only the screens whose glass is wanted.
+        STATE.with(|s| s.borrow_mut().screens.clear());
+        set_wanted(7, true);
+        assert_eq!(wanted(), vec![7]);
+        set_wanted(7, false);
+        assert!(wanted().is_empty(), "hidden or standing down: nothing read at the poll");
+        // Wanted again after a read: read at once, before the next poll; never on the first.
+        assert!(wanted_again(false, true, true));
+        assert!(!wanted_again(false, true, false), "never read: the poll's first read, as at launch");
+        assert!(!wanted_again(true, true, true), "wanted all along: the poll's pace");
+        assert!(!wanted_again(true, false, true));
+        // A minute at rest, Apple's Stage Manager on: reads before (every READ_EVERY) and now.
+        let before = 60 / READ_EVERY.as_secs();
+        assert_eq!((before, wanted().len() as u64 * before), (30, 0));
+        STATE.with(|s| s.borrow_mut().screens.clear());
+    }
+
+    #[test]
+    fn over_windows_no_wallpaper_is_read_once_its_desktops_is_and_back_over_the_desktop_it_is_read_at_once() {
+        let mut d = Screen { wanted: true, ..Screen::default() };
+        on(&mut d, 1);
+        d.over_windows = true;
+        assert!(d.polled(), "never read: read meanwhile, ready for the desktop");
+        d.read = Some((Instant::now(), None, false, Some(1)));
+        d.show(Some("orange".into()), Some(shown(200)));
+        d.remember();
+        assert!(!d.polled(), "over windows, this Desktop's picture read: no read");
+        on(&mut d, 2);
+        assert!(d.polled(), "another Desktop never read: read while over windows");
+        on(&mut d, 1);
+        assert!(!d.polled());
+        // Back over the desktop: polled again, and read at once (it was read before).
+        let was = d.polled();
+        d.over_windows = false;
+        assert!(d.polled() && wanted_again(was, d.polled(), d.read.is_some()));
+        // Its backdrop kept all along: the glass comes back with its colours at once.
+        assert!(d.backdrop_for(1).is_some());
+        // The glass not wanted (hidden, standing down): never read, over windows or not.
+        let off = Screen { wanted: false, over_windows: false, ..Screen::default() };
+        assert!(!off.polled());
     }
 
     #[test]

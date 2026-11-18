@@ -3,7 +3,10 @@
 //! left-edge reveal.
 //!
 //! The strip feeds this with the pointer position and the current time; it answers whether the
-//! strip shows. The pointer is polled (every ~60 ms) only while [`Decision::poll`] says so: a
+//! strip shows. The edge reveals the strip once the pointer **rests** there: any move by more
+//! than [`REST_TOLERANCE`] starts the dwell again, as on Apple's (recorded 11-16: a pointer
+//! jiggled a point at a time at the edge kept its strip hidden; the strip came once it stood
+//! still). The pointer is polled (every ~60 ms) only while [`Decision::poll`] says so: a
 //! clock runs (the rest at the edge, the delay after leaving) or the strip is revealed (the
 //! pointer is then over the strip's own window, which the global monitor never hears).
 //! Otherwise the global monitor's mouse moves wake it ([`Visibility::wakes`]): a 60 ms timer
@@ -46,6 +49,10 @@ impl Default for Timing {
         Self::from_style(&crate::config::StripStyle::default().reveal)
     }
 }
+
+/// How far the pointer may move at the edge and still count as resting there, in points: a
+/// move of a whole point starts the dwell again ([`Visibility::step`]).
+pub const REST_TOLERANCE: f64 = 0.5;
 
 /// What drives visibility right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +113,18 @@ pub fn lifted(l: Lift) -> bool {
     l.always || l.card_drag || l.transition || l.edge_reveal
 }
 
+/// Whether the strip shows over windows, its cards solid with no glass (the owner's rule,
+/// 11-18: Apple's cards revealed over a light window and over a dark one are fully solid, no
+/// tint, nothing of the window behind): the strip on and covered by a window (`mode` is
+/// [`Mode::EdgeOnly`] because of `covered`, the edge revealing it over that window, or hidden
+/// behind it at the edge, ready to show so), or held up for a switch under way (`held`) when it
+/// was over windows before (`was`: the leaving windows cover it until their snapshots land in
+/// solid cards). Apple's "hide recent apps" (`AutoHide`) with nothing covering the strip is not
+/// over windows: the strip comes in over the desktop and keeps the glass.
+pub fn over_windows(mode: Mode, covered: bool, held: bool, was: bool) -> bool {
+    (mode == Mode::EdgeOnly && covered) || (held && was)
+}
+
 /// Whether any of `frames` (the active stage's shown windows) hides the strip whose area is
 /// `strip` (global coordinates): it reaches into the strip's area and its left edge is within
 /// [`COVER_EDGE`] of the strip's left edge (or past it). A window over the cards but further
@@ -127,6 +146,9 @@ pub struct Decision {
 #[derive(Clone, Debug, Default)]
 pub struct Visibility {
     dwell_since: Option<Instant>,
+    /// Where the pointer came to rest at the edge: the dwell runs from then while it stays
+    /// within [`REST_TOLERANCE`] of it.
+    rest_at: Option<Point>,
     left_since: Option<Instant>,
     revealed: bool,
     /// The last step was [`Mode::Shown`]: a strip in plain view that a window now covers
@@ -172,6 +194,7 @@ impl Visibility {
     pub fn reveal_now(&mut self) {
         self.revealed = true;
         self.dwell_since = None;
+        self.rest_at = None;
         self.left_since = None;
     }
 
@@ -212,6 +235,7 @@ impl Visibility {
                 if std::mem::take(&mut self.was_shown) && pointer.is_some_and(|p| strip.contains(p)) {
                     self.revealed = true;
                     self.dwell_since = None;
+                    self.rest_at = None;
                     self.left_since = None;
                 }
                 let on_tab = |p: &Point| self.tab.is_some_and(|t| t.contains(*p));
@@ -230,16 +254,23 @@ impl Visibility {
                         }
                     }
                 } else {
-                    let at_edge = pointer.is_some_and(|p| self.at_edge(p, strip) || on_tab(&p));
-                    if at_edge {
+                    let resting = pointer.filter(|p| self.at_edge(*p, strip) || on_tab(p));
+                    if let Some(p) = resting {
+                        // A move starts the rest again: the dwell counts from the last one.
+                        if self.rest_at.is_none_or(|r| (p.x - r.x).abs() > REST_TOLERANCE || (p.y - r.y).abs() > REST_TOLERANCE) {
+                            self.rest_at = Some(p);
+                            self.dwell_since = Some(now);
+                        }
                         let since = *self.dwell_since.get_or_insert(now);
                         if now.duration_since(since) >= self.timing.edge_dwell {
                             self.revealed = true;
                             self.dwell_since = None;
+                            self.rest_at = None;
                             self.left_since = None;
                         }
                     } else {
                         self.dwell_since = None;
+                        self.rest_at = None;
                     }
                 }
                 Decision { shown: self.revealed, poll: self.revealed || self.dwell_since.is_some() }
@@ -251,6 +282,25 @@ impl Visibility {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_strip_is_over_windows_while_a_window_covers_it_and_through_a_switch_from_there() {
+        // (user_visible, hide_recent_apps, covered, held, was) -> over windows
+        let cases = [
+            ((true, false, true, false, false), true, "revealed at the edge over a covering window"),
+            ((true, true, true, false, false), true, "auto-hide and a covering window: over the window"),
+            ((true, true, false, false, false), false, "auto-hide over the desktop: the glass"),
+            ((true, false, false, false, false), false, "at rest over the desktop"),
+            ((false, false, true, false, false), false, "hidden by the user"),
+            ((true, false, false, true, true), true, "a switch from over windows to a stage clear of the strip"),
+            ((true, false, false, true, false), false, "a switch held up, never over windows"),
+            ((true, false, false, false, true), false, "the switch landed: back to the glass"),
+        ];
+        for ((visible, auto_hide, covered, held, was), want, why) in cases {
+            let mode = Mode::of(visible, auto_hide, covered);
+            assert_eq!(over_windows(mode, covered, held, was), want, "{why}");
+        }
+    }
 
     const STRIP: Rect = Rect::new(0.0, 30.0, 200.0, 1410.0);
 
@@ -410,6 +460,29 @@ mod tests {
         let docked = Rect::new(70.0, 30.0, 200.0, 1410.0);
         assert!(!v.wakes(Point::new(-600.0, 500.0), &docked));
         assert!(v.wakes(Point::new(2.0, 500.0), &docked));
+    }
+
+    /// Apple's strip comes only once the pointer rests at the edge (recorded 11-16): a pointer
+    /// moved a point every 50 ms there never reveals it; standing still, it does after the
+    /// dwell, counted from the last move.
+    #[test]
+    fn the_edge_reveals_only_once_the_pointer_rests() {
+        let mut v = Visibility::default();
+        let t = Instant::now();
+        for i in 0..60u64 {
+            let p = Some(Point::new((i % 2) as f64, 700.0 + (i % 3) as f64));
+            assert!(!v.step(Mode::EdgeOnly, p, &STRIP, ms(t, i * 50)).shown, "jiggled at {} ms", i * 50);
+        }
+        // The last move at 3000 ms: still, it comes after the dwell from there.
+        let still = Some(Point::new(1.0, 700.0));
+        assert!(!v.step(Mode::EdgeOnly, still, &STRIP, ms(t, 3000)).shown);
+        assert!(!v.step(Mode::EdgeOnly, still, &STRIP, ms(t, 3100)).shown);
+        assert!(v.step(Mode::EdgeOnly, still, &STRIP, ms(t, 3140)).shown);
+        // A fraction of a point (a scaled pointer's rounding) is still a rest.
+        let mut v = Visibility::default();
+        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.0)), &STRIP, t).shown);
+        assert!(!v.step(Mode::EdgeOnly, Some(Point::new(0.3, 500.4)), &STRIP, ms(t, 60)).shown);
+        assert!(v.step(Mode::EdgeOnly, Some(Point::new(0.0, 500.2)), &STRIP, ms(t, 140)).shown);
     }
 
     #[test]

@@ -62,11 +62,11 @@ use std::time::{Duration, Instant};
 use objc2_app_kit::NSRunningApplication;
 
 use super::ax::{AxElement, AxError, AxResult, names};
-use super::{desktop, enhanced_ui, hidden_tabs, logging, observe, paths, windows};
+use super::{desktop, enhanced_ui, hidden_tabs, logging, observe, paths, window_engine, windows};
 use crate::engine::geometry::Rect;
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers::{self, LEFTOVER_BUDGET, LEFTOVERS_MAX, REGISTRY_RETRY_BUDGET, RESTORE_RETRY, Remembered, UNPARK_POLL, UNPARK_SETTLE};
-use crate::engine::park::Corner;
+use crate::engine::corner::park::Corner;
 use crate::engine::persist::StateFile;
 use crate::engine::model::Display;
 use crate::engine::recovery::{self, Known, LiveWindow, ParkZone, ParkedFile, Registered, ScanDisplays};
@@ -424,7 +424,10 @@ fn write_parked_file(listed: &[Registered]) {
     let logout = LOGOUT_QUIT.load(Ordering::SeqCst);
     let empty = listed.is_empty() && !logout;
     let file =
-        ParkedFile { visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout };
+        {
+            let engine = window_engine::current();
+            ParkedFile { engine: engine.kind(), visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout, spaces: engine.parked_spaces() }
+        };
     let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
@@ -444,6 +447,13 @@ fn write_parked_file(listed: &[Registered]) {
         Ok(()) => *written = Some(file),
         Err(e) => tracing::warn!("cannot write {}: {e}", path.display()),
     }
+}
+
+/// Writes the parked file again from the registry as it is: the engine that runs changed
+/// (a fallback mid-run), so the guardian brings the windows back that engine's way.
+pub fn rewrite_parked_file() {
+    let listed = registered(&lock_registry());
+    write_parked_file(&listed);
 }
 
 /// What the app process `pid` left in its parked file: its registered windows and the main
@@ -721,6 +731,10 @@ pub struct Ours {
     /// in the park zone at the check goes back there before any `state.json` frame (its
     /// registry entry left as done with the batch).
     pub unparked: BTreeMap<u32, Rect>,
+    /// The app of each window in [`Self::unparked`]: a window unknown to this run in the park
+    /// zone, of the same app and size, goes back to that frame, its tab group's
+    /// ([`leftovers::group_frame`], round tab-quit).
+    pub unparked_apps: BTreeMap<u32, i32>,
     /// Windows parked on purpose as the check runs ([`parked_on_purpose`]): left where they
     /// are ([`Self::left_alone`]). Empty for a check right after an unpark (nothing is parked
     /// on purpose then); a later look for a stand-down's leftovers, made while the app
@@ -741,7 +755,7 @@ impl Ours {
 
     /// What is known from the registry's ids, the model's windows and `state.json`.
     pub fn from_parts(registered: BTreeSet<u32>, managed: BTreeSet<u32>, state: Option<StateFile>) -> Self {
-        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new(), parked_now: BTreeSet::new() }
+        Self { registered, managed, state, destroyed: BTreeSet::new(), shown_managed: BTreeSet::new(), unparked: BTreeMap::new(), unparked_apps: BTreeMap::new(), parked_now: BTreeSet::new() }
     }
 
     /// `self`, leaving the windows `parked_now` where they are ([`Self::parked_now`]).
@@ -761,6 +775,19 @@ impl Ours {
     pub fn with_unparked(mut self, unparked: BTreeMap<u32, Rect>) -> Self {
         self.unparked = unparked;
         self
+    }
+
+    /// `self`, with the app of each window the controller's latest unpark restored
+    /// ([`Self::unparked_apps`]).
+    pub fn with_unparked_apps(mut self, apps: BTreeMap<u32, i32>) -> Self {
+        self.unparked_apps = apps;
+        self
+    }
+
+    /// The frames the latest unpark restored windows of app `pid` to, for a tab group's
+    /// frame ([`leftovers::group_frame`]).
+    pub fn unparked_of(&self, pid: i32) -> impl Iterator<Item = (i32, Rect)> + '_ {
+        self.unparked.iter().filter(move |(id, _)| self.unparked_apps.get(id) == Some(&pid)).map(move |(_, r)| (pid, *r))
     }
 
     /// `self`, with what the hidden-tab test needs from the model (8J): the registered
@@ -806,6 +833,7 @@ impl Ours {
         self.shown_managed = now.shown_managed;
         // A later unpark's frame is the fresher one.
         self.unparked.extend(now.unparked);
+        self.unparked_apps.extend(now.unparked_apps);
         // What is parked on purpose is `now`'s alone.
         self.parked_now = now.parked_now;
         if self.state.is_none() {
@@ -918,7 +946,7 @@ pub fn install_panic_hook() {
         if GUARDED.try_with(Cell::get).unwrap_or(false) {
             return;
         }
-        emergency_unpark("panic");
+        window_engine::current().bring_all_back("panic");
         // A capture in flight at exit makes macOS alert about screen access.
         super::capture::quiesce(std::time::Duration::from_secs(1));
         logging::write_counts("panic");
@@ -996,7 +1024,7 @@ fn nanosleep(d: Duration) {
 /// registry's best-effort unpark, a short one; then the handler may finish the abort. A lock
 /// held by the aborting thread only makes this wait out the handler's bound.
 fn unpark_for_abort() {
-    let r = unpark_registry(Duration::from_millis(100), Duration::ZERO);
+    let r = window_engine::current().bring_back_briefly();
     enhanced_ui::restore_all("SIGABRT");
     ABORT_UNPARKED.store(true, Ordering::SeqCst);
     tracing::error!(restored = r.map(|r| r.restored), failed = r.map(|r| r.failed), "SIGABRT: the registry unparked from the signal watcher; the guardian covers the rest");
@@ -1406,8 +1434,9 @@ fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
 
 /// Brings back every window in `left` (listed in the park zone after an unpark) before
 /// `deadline`: to its registry frame, else the frame the unpark restored it to
-/// ([`Ours::unparked`]), else the frame it was taken with from an old guardian, else its
-/// `state.json` frame, else centered ([`leftovers::leftover_frame`]), through the
+/// ([`Ours::unparked`]), else the frame it was taken with from an old guardian, else its tab
+/// group's ([`leftovers::group_frame`]), else its `state.json` frame, else centered
+/// ([`leftovers::leftover_frame`]), through the
 /// registry's element or the app's own list.
 /// A window is tried only when its try fits in the time left ([`leftovers::leftover_fits`]),
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
@@ -1446,11 +1475,17 @@ fn bring_back(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours:
                 continue;
             }
         };
-        let remembered = Remembered {
+        let mut remembered = Remembered {
             registry: entry.as_ref().map(|e| e.restore),
             unparked: ours.unparked.get(&w.id).copied(),
             taken: taken_entry(w.id).map(|r| r.restore),
+            group: None,
         };
+        // Unknown to this run, the same app and size as a window the unpark put back: the
+        // tab group's selected tab, put back with its group (round tab-quit).
+        if remembered.first().is_none() {
+            remembered.group = leftovers::group_frame(w.pid, w.bounds, ours.unparked_of(w.pid));
+        }
         // The title only matters for a state.json match (no frame remembered).
         let title = if remembered.first().is_none() { element.title().unwrap_or_default() } else { String::new() };
         let live = LiveWindow { id: Some(w.id), bundle_id: bundle.clone().unwrap_or_default(), title, frame: w.bounds };

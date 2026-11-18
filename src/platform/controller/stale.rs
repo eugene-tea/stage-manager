@@ -12,7 +12,7 @@
 //! closed.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::Controller;
 use crate::engine::hidden_tab::{self, Candidate, TabListed};
@@ -79,6 +79,10 @@ fn maybe_tab(list: &[CgWindow], id: u32) -> bool {
     let listed: Vec<TabListed> = list.iter().map(tab).collect();
     list.iter().find(|w| w.id == id).is_some_and(|w| hidden_tab::may_be_hidden_tab(&tab(w), &listed, Candidate::Destroyed))
 }
+
+/// An app that took this long to say whether one hidden window's handle lives is not asked
+/// about its other hidden windows in the same look ([`Controller::check_stale_handles`]).
+const SLOW_ANSWER: Duration = Duration::from_millis(100);
 
 impl Controller {
     /// One write of ours to window `id` of app `pid` through `element` (the observer's,
@@ -198,6 +202,12 @@ impl Controller {
         let Some(m) = &self.model else { return };
         let now = Instant::now();
         let onscreen: HashSet<u32> = list.iter().filter(|w| w.onscreen).map(|w| w.id).collect();
+        // The windows the engine hides off the list (the Spaces engine's) are looked at too:
+        // the window server lists one its app closed exactly as before, off screen in its
+        // stage Space (measured 11-14), so only its handle says it is gone. An app slow to
+        // answer for one of them is not asked about its others in this look.
+        let off_list = self.engine.present_off_screen();
+        let mut slow: HashSet<i32> = HashSet::new();
         let candidates: Vec<(u32, i32)> = m
             .windows()
             .filter(|w| (w.sticky || m.is_shown_space(w.space)) && !onscreen.contains(&w.meta.id.0))
@@ -213,7 +223,16 @@ impl Controller {
             if hidden || self.busy_apps.borrow().busy(pid, now) || ob.noted_closed(id) {
                 continue;
             }
-            if ob.handle_dead(id) {
+            let of_hidden = off_list.contains(&id);
+            if of_hidden && slow.contains(&pid) {
+                continue;
+            }
+            let began = Instant::now();
+            let dead = ob.handle_dead(id);
+            if of_hidden && began.elapsed() >= SLOW_ANSWER {
+                slow.insert(pid);
+            }
+            if dead {
                 self.look_up_dead(ob, id, pid, Some(list));
             } else {
                 self.stale.sightings.clear(id);

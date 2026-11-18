@@ -19,6 +19,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use super::geometry::Rect;
+use super::hidden_tab::{same_place, same_size};
 use super::persist::StateFile;
 use super::recovery::{FrameSource, LiveWindow, ScanDisplays, plan_sourced, safe_restore};
 
@@ -218,16 +219,36 @@ pub struct Remembered {
     pub unparked: Option<Rect>,
     /// The frame an old guardian handed it over with (round 8N).
     pub taken: Option<Rect>,
+    /// Its tab group's frame ([`group_frame`], round tab-quit): a window unknown to this run,
+    /// of the same app and size as one the unpark just put back. Not the window's own frame:
+    /// [`leftover_frame`] takes it after a `state.json` frame saved for this very window.
+    pub group: Option<Rect>,
 }
 
 impl Remembered {
-    /// The freshest frame remembered, with where it comes from.
+    /// The freshest frame remembered for the window itself, with where it comes from (its
+    /// tab group's is not: [`leftover_frame`]).
     pub fn first(&self) -> Option<(Rect, LeftoverSource)> {
         self.registry
             .map(|r| (r, LeftoverSource::Registry))
             .or(self.unparked.map(|r| (r, LeftoverSource::Unparked)))
             .or(self.taken.map(|r| (r, LeftoverSource::Registry)))
     }
+}
+
+/// The frame of the tab group a window found in the park zone belongs to (round tab-quit):
+/// among the windows the unpark just put back (`unparked`: app and frame), those of its app
+/// `pid` whose size is its `size` ([`same_size`]), when they all went to one place
+/// ([`same_place`]). macOS window tabs are windows of one size; a group parked whose other
+/// tab is selected while it waits leaves that tab at the park spot, unknown to the model, and
+/// the hidden tab, the model's, goes back at the quit. The tab selected goes to the same
+/// frame. Before, it went to whatever `state.json` frame its title matched (the safety drill
+/// after the tabs phase, 11-15: Fixture 3 at 300,218 600x392, its group at 80,78 520x392).
+/// Two places, or none, say nothing.
+pub fn group_frame(pid: i32, size: Rect, unparked: impl IntoIterator<Item = (i32, Rect)>) -> Option<Rect> {
+    let mut frames = unparked.into_iter().filter(|&(p, r)| p == pid && same_size(r, size)).map(|(_, r)| r);
+    let first = frames.next()?;
+    frames.all(|r| same_place(r, first)).then_some(first)
 }
 
 /// Where a window still parked after the unpark goes back to.
@@ -239,6 +260,9 @@ pub enum LeftoverSource {
     /// The frame the unpark restored it to a moment before (its app carried the move out
     /// late, or not at all).
     Unparked,
+    /// Its tab group's frame: a window of its app and size the unpark put back
+    /// ([`group_frame`]).
+    Group,
     /// Its window's frame in `state.json`.
     Saved,
     /// Nothing known: centered on the visible frame.
@@ -251,6 +275,7 @@ impl LeftoverSource {
         match self {
             Self::Registry => "registry",
             Self::Unparked => "unpark",
+            Self::Group => "tab group",
             Self::Saved => "state.json",
             Self::Centered => "centered",
         }
@@ -258,21 +283,38 @@ impl LeftoverSource {
 }
 
 /// The frame a window still parked goes back to: the freshest frame this run `remembered`
-/// (made safe), else its `state.json` frame (its window id first, then exact bundle id and
-/// title, then bundle id when one candidate is left: [`super::window_match`]), else
-/// centered; always on the visible frame and never in a park zone.
+/// for it (made safe), else its `state.json` frame (its window id first, then exact bundle id
+/// and title, then bundle id when one candidate is left: [`super::window_match`]), else
+/// centered; always on the visible frame and never in a park zone. Its tab group's frame
+/// ([`Remembered::group`]) comes after a `state.json` frame saved for this very window (by
+/// its id) and before one matched by title or app (the review of 1.9, C-4: two unrelated
+/// windows of one app and size, one unparked, put the other on top of it although
+/// `state.json` named it).
 pub fn leftover_frame(remembered: Remembered, live: &LiveWindow, state: Option<&StateFile>, displays: &ScanDisplays) -> (Rect, LeftoverSource) {
     if let Some((r, source)) = remembered.first() {
         return (safe_restore(r, displays), source);
     }
-    match plan_sourced(std::slice::from_ref(live), state, displays).first() {
+    let planned = plan_sourced(std::slice::from_ref(live), state, displays).first().map(|&(_, frame, source)| (frame, source));
+    if let Some(group) = remembered.group {
+        let own = state.is_some_and(|s| saved_by_id(s, live)) && matches!(planned, Some((_, FrameSource::Saved)));
+        if !own {
+            return (safe_restore(group, displays), LeftoverSource::Group);
+        }
+    }
+    match planned {
         // No registered frames are given here: the caller's come first (`remembered`).
-        Some((_, frame, FrameSource::Saved | FrameSource::Registered)) => (*frame, LeftoverSource::Saved),
-        Some((_, frame, FrameSource::Centered)) => (*frame, LeftoverSource::Centered),
+        Some((frame, FrameSource::Saved | FrameSource::Registered)) => (frame, LeftoverSource::Saved),
+        Some((frame, FrameSource::Centered)) => (frame, LeftoverSource::Centered),
         // The window server's frame and the scan's park test disagree (it was listed in the
         // zone): centered all the same.
         None => (safe_restore(Rect::new(f64::NAN, 0.0, live.frame.w, live.frame.h), displays), LeftoverSource::Centered),
     }
+}
+
+/// True when `state` saved window `live` itself: its window id and app.
+fn saved_by_id(state: &StateFile, live: &LiveWindow) -> bool {
+    let Some(id) = live.id else { return false };
+    !live.bundle_id.is_empty() && state.all_stages().flat_map(|st| st.windows.iter()).any(|s| s.window == Some(id) && s.bundle_id == live.bundle_id)
 }
 
 /// How a restore is tried again while its app is busy.
@@ -400,7 +442,7 @@ mod tests {
         // Judged ordered out, then let go by every record (seen gone since): a clean quit.
         assert_eq!(quit_end(quit_left(true, 0, &none, &none, &none, &panel)), QuitEnd::Clean);
     }
-    use crate::engine::park::{Corner, is_parked};
+    use crate::engine::corner::park::{Corner, is_parked};
     use crate::engine::persist::{SavedRole, SavedSpace, SavedStage, SavedWindow};
     use crate::engine::recovery::{Known, is_stranded};
 
@@ -574,10 +616,63 @@ mod tests {
         let renamed = live("com.apple.mail", "Inbox (3)", mail.frame);
         assert_eq!(leftover_frame(unparked, &renamed, None, &d), (fresh, LeftoverSource::Unparked), "never centered");
         let failed = Rect::new(80.0, 50.0, 1500.0, 1100.0);
-        let both = Remembered { registry: Some(failed), unparked: Some(fresh), taken: Some(older) };
+        let both = Remembered { registry: Some(failed), unparked: Some(fresh), taken: Some(older), group: None };
         assert_eq!(leftover_frame(both, &mail, Some(&st), &d), (failed, LeftoverSource::Registry), "the registry first");
         let taken = Remembered { unparked: Some(fresh), taken: Some(older), ..Remembered::default() };
         assert_eq!(taken.first(), Some((fresh, LeftoverSource::Unparked)), "this run's unpark before an old guardian's frame");
+    }
+
+    /// Round tab-quit (11-15, the safety drill after the tabs phase): the fixture's group
+    /// parked, Fixture 3 selected while it waited; the quit put the hidden tab Fixture 1 back
+    /// at 80,78 520x392 and found Fixture 3 in the corner, unknown. It goes to its group's
+    /// frame, not the `state.json` frame of another run's "Fixture 3" (300,218 600x392).
+    #[test]
+    fn a_tab_left_in_the_corner_goes_to_its_groups_frame_before_any_saved_one() {
+        let d = displays();
+        const FIXTURE: i32 = 54826;
+        let group = Rect::new(80.0, 78.0, 520.0, 392.0);
+        let tab = live("dev.example.fixture", "Fixture 3", Rect::new(2559.0, 1408.0, 520.0, 392.0));
+        let st = state(vec![saved("dev.example.fixture", "Fixture 3", Rect::new(300.0, 218.0, 600.0, 392.0))]);
+        let lone = Rect::new(190.0, 148.0, 560.0, 422.0);
+        let found = group_frame(FIXTURE, tab.frame, [(FIXTURE, group), (FIXTURE, lone)]);
+        assert_eq!(found, Some(group));
+        let remembered = Remembered { group: found, ..Remembered::default() };
+        assert_eq!(leftover_frame(remembered, &tab, Some(&st), &d), (group, LeftoverSource::Group));
+        // Another app's window of that size, or one of another size, says nothing.
+        assert_eq!(group_frame(FIXTURE, tab.frame, [(1, group), (FIXTURE, lone)]), None);
+        // Two windows of that size put back at two places: no group is known.
+        let other = Rect::new(700.0, 300.0, 521.0, 391.0);
+        assert_eq!(group_frame(FIXTURE, tab.frame, [(FIXTURE, group), (FIXTURE, other)]), None);
+        // Two at one place (two tabs of the group put back): that place.
+        assert_eq!(group_frame(FIXTURE, tab.frame, [(FIXTURE, group), (FIXTURE, group)]), Some(group));
+        // A frame this run remembers for the window itself comes first.
+        let fresh = Rect::new(120.0, 60.0, 520.0, 392.0);
+        let both = Remembered { unparked: Some(fresh), group: found, ..Remembered::default() };
+        assert_eq!(leftover_frame(both, &tab, Some(&st), &d), (fresh, LeftoverSource::Unparked));
+    }
+
+    /// The review of 1.9, C-4: two unrelated windows of one app and one size (two default-size
+    /// documents). One, managed, the unpark put back at P; the other, left in the corner by an
+    /// earlier copy, `state.json` saved by its own window id at Q. It goes to Q, not on top of
+    /// the first; matched only by title, or with no `state.json`, the group's frame stands.
+    #[test]
+    fn a_leftover_saved_by_its_own_id_goes_to_its_saved_frame_before_a_groups() {
+        let d = displays();
+        const APP: i32 = 4100;
+        let p = Rect::new(200.0, 120.0, 800.0, 600.0);
+        let q = Rect::new(900.0, 400.0, 800.0, 600.0);
+        let mut doc = live("com.example.editor", "Untitled 2", Rect::new(2559.0, 1408.0, 800.0, 600.0));
+        doc.id = Some(77);
+        let group = group_frame(APP, doc.frame, [(APP, p)]);
+        assert_eq!(group, Some(p), "the same app and size: taken for a tab group");
+        let remembered = Remembered { group, ..Remembered::default() };
+        let by_id = state(vec![SavedWindow { window: Some(77), ..saved("com.example.editor", "Untitled 2", q) }]);
+        assert_eq!(leftover_frame(remembered, &doc, Some(&by_id), &d), (q, LeftoverSource::Saved), "its own saved frame");
+        let by_title = state(vec![saved("com.example.editor", "Untitled 2", q)]);
+        assert_eq!(leftover_frame(remembered, &doc, Some(&by_title), &d), (p, LeftoverSource::Group), "a title match is weaker than the group");
+        assert_eq!(leftover_frame(remembered, &doc, None, &d), (p, LeftoverSource::Group));
+        let other_app = state(vec![SavedWindow { window: Some(77), ..saved("com.example.other", "Untitled 2", q) }]);
+        assert_eq!(leftover_frame(remembered, &doc, Some(&other_app), &d), (p, LeftoverSource::Group), "the id of another app's window");
     }
 
     #[test]

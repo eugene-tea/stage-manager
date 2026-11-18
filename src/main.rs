@@ -44,6 +44,10 @@
 //!   overlay draws it (`platform::shadow_profile`); `--appearance dark|light|system` draws
 //!   the probe's windows in that appearance, `--background GREY` fills them with a grey,
 //!   `--corner PT` draws the comparison at that corner radius.
+//! - `stage-manager probe-spaces <read|cycle|hide|transform|affine|place-new|watch|key|dock-click|cleanup>
+//!   [fixture bundle id] [--route bridged|classic]` runs the Spaces spike on a fixture's
+//!   windows (`platform::spaces_probe`): a window-server Space made, the windows hidden in it
+//!   and shown, its transform stepped, timed to the window list.
 //! - `stage-manager debug-post-space left|right [numpad]` (test only, `STAGE_MANAGER_TEST=1`,
 //!   launched through LaunchServices so it has the app's Accessibility) types the Desktop
 //!   switch shortcut once and exits: the Spaces check's way to switch while the app is down.
@@ -85,6 +89,8 @@ fn main() -> ExitCode {
         #[cfg(target_os = "macos")]
         Some("probe-shadow") => stage_manager::platform::shadow_probe::run(&args[2..]),
         #[cfg(target_os = "macos")]
+        Some("probe-spaces") => stage_manager::platform::spaces_probe::run(&args[2..]),
+        #[cfg(target_os = "macos")]
         Some("probe-icons") => stage_manager::ui::app_icons::probe(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
@@ -96,7 +102,7 @@ fn main() -> ExitCode {
         None => app::run(),
         _ => {
             eprintln!(
-                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>...|--all | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | probe-icons [--for S] | --version]"
+                "usage: stage-manager [ctl <command...> | mark [NOTE...] | log <summary|path> [DATE] | config <check [FILE] | --print-defaults | --explain KEY | --reference> | preview <settings|settings-apple|welcome|welcome-apple|welcome-done|about|update|uptodate> [--dark|--light] [--pane PANE] [--png FILE] | strip-demo | probe-windows [--every MS --for MS [--focus]] <bundle-id>...|--all | probe-screen | probe-patch [--out FILE.png] [--rect X,Y,W,H] | probe-glass --rect X,Y,W,H... | probe-park <fixture-bundle-id> | probe-shadow [--settle MS] [--size W,H] [--only corner|middle] [--profile [--dump DIR] | --compare] [--appearance dark|light|system] [--background GREY] [--corner PT] | probe-icons [--for S] | probe-spaces <read|cycle|hide|transform|affine|place-new|watch|key|dock-click|cleanup> [fixture-bundle-id] [--route bridged|classic] | --version]"
             );
             ExitCode::from(2)
         }
@@ -136,7 +142,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::{fullscreen, leftovers, logout_watch};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, window_engine, windows};
     use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -186,6 +192,8 @@ mod app {
         settings: RawSettings,
         strip_visible: bool,
         config_error: Option<String>,
+        /// `[windows] apple_stage_manager_on = "integrate"` in the config in force.
+        follows_apple: bool,
         last_mark: Option<String>,
         hotkeys: Option<HotkeyConfig>,
         thumbnail_interval_ms: Option<u64>,
@@ -221,13 +229,12 @@ mod app {
             let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };
             wm_input.send(WmCommand::Input(event, drop));
         };
-        // Mouse moves go to the strip on this thread: off its cards the strip lets clicks
-        // through, so it learns where the pointer is from the global monitor there.
-        let monitor = input::monitor(mtm, on_input, strip::pointer_moved);
+        // Mouse moves have a monitor of the strip's own, made while a strip may show
+        // ([`strip::pointer_moved`]).
+        let monitor = input::monitor(mtm, on_input);
         if monitor.is_none() {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }
-        strip::set_moves_fed(monitor.is_some());
         monitor
     }
 
@@ -249,6 +256,7 @@ mod app {
                 capture_refused: self.capture_refused,
                 accessibility_blind: self.ax_blind,
                 apple_stage_manager_on: native_settings::apple_stage_manager_enabled(&self.settings),
+                follows_apple: self.follows_apple,
                 config_error: self.config_error.clone(),
                 mark_shown: logging::verbose_now(),
                 last_mark: self.last_mark.clone(),
@@ -318,7 +326,7 @@ mod app {
             for (i, d) in displays.iter().enumerate() {
                 tracing::info!(id = d.id.0, key = %d.key.text(), frame = %d.frame, visible = %d.visible, corner = ?d.corner, main = i == 0, "display");
                 let others: Vec<_> = displays.iter().filter(|o| o.id != d.id).map(|o| o.frame).collect();
-                let choice = stage_manager::engine::park::choose_corner(d.frame, d.visible, &others);
+                let choice = stage_manager::engine::corner::park::choose_corner(d.frame, d.visible, &others);
                 if choice.overlap > 0.0 {
                     tracing::warn!(
                         id = d.id.0,
@@ -338,8 +346,10 @@ mod app {
         fn on_ui(&mut self, update: UiUpdate) {
             match update {
                 UiUpdate::Config { error, config, hotkeys, thumbnail_interval_ms, capture: on } => {
+                    let follows = config.windows.with_apple == stage_manager::engine::stand_down::WithApple::Augment;
                     shell::config_changed(error.clone(), *config);
                     self.config_error = error;
+                    self.follows_apple = follows;
                     capture::set_enabled(on);
                     if self.thumbnail_interval_ms != Some(thumbnail_interval_ms) {
                         strip::set_thumbnail_interval(thumbnail_interval_ms);
@@ -435,8 +445,9 @@ mod app {
     /// registry's quick retries share one budget ([`leftovers::REGISTRY_RETRY_BUDGET`], then
     /// one try a window), the leftovers check at most [`leftovers::LEFTOVERS_MAX`].
     fn registry_then_leftovers(reason: &str) -> bool {
-        let registry = safety::emergency_unpark(reason);
-        let leftovers = safety::leftovers_back(reason, Default::default());
+        let engine = window_engine::current();
+        let registry = engine.bring_all_back(reason);
+        let leftovers = engine.bring_back_rest(reason, safety::Ours::now(Default::default()), true).is_none();
         // Windows taken from an old guardian (round 8N) not seen to yet: the guardian waits;
         // when they are all that is left, passed on with a warning (no error).
         let rest_back = registry && (leftovers || safety::left_not_taken() == 0) && safety::registry_len() == 0;
@@ -578,6 +589,15 @@ mod app {
                 tracing::warn!("debug-panic: panicking on the main thread");
                 DispatchQueue::main().exec_async(|| panic!("debug-panic requested over ctl"));
                 json!({ "ok": true, "panicking": true })
+            }
+            Command::DebugEngineFail(word) => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-engine-fail needs STAGE_MANAGER_TEST=1");
+                }
+                use stage_manager::platform::spaces::engine::{self as spaces_engine, FailMode};
+                let Some(mode) = FailMode::parse(&word) else { return ctl::error_reply("debug-engine-fail takes next, hide, show, all or off") };
+                spaces_engine::shared().fail_calls(mode);
+                json!({ "ok": true, "engine": window_engine::current().kind().name(), "mode": word })
             }
             Command::DebugClick { x, y, shift } => {
                 if std::env::var_os(TEST_ENV).is_none() {
@@ -849,6 +869,12 @@ mod app {
         let app = NSApplication::sharedApplication(mtm);
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
+        // Which window engine runs (1.9): the launch probe (a trial Space with a panel of
+        // our own) and `[windows] engine`, decided here at every launch, before any window
+        // is managed; logged with the reason, in `ctl state`.
+        let engine_config = stage_manager::config::last_good::read_in_force(&paths::config_file()).windows.engine;
+        window_engine::choose_at_launch(mtm, engine_config);
+
         controller::set_ui_sink(|update| {
             DispatchQueue::main().exec_async(move || with_app(|app| app.on_ui(update)));
         });
@@ -919,6 +945,8 @@ mod app {
             stage_manager::platform::window_look::appearance_changed();
             // The cards' app icons follow it, as the Dock's do.
             stage_manager::ui::strip::icons_changed();
+            // And their pictures: the windows redraw in the new look.
+            stage_manager::ui::strip::pictures_changed();
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::appearance_changed(mtm);
             }
@@ -973,6 +1001,7 @@ mod app {
             settings,
             strip_visible: true,
             config_error: None,
+            follows_apple: false,
             last_mark: None,
             hotkeys: None,
             thumbnail_interval_ms: None,
@@ -1043,13 +1072,18 @@ mod app {
             .flat_map(|bundle| NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(bundle)))
             .map(|a| a.processIdentifier())
             .collect();
+        // Under the Spaces engine's test switch each window also says whether the window
+        // server lists it in a stage Space (`staged`); the Corner engine's output is as ever.
+        let spaces = stage_manager::platform::spaces::engine::from_env() == Some(stage_manager::platform::window_engine::EngineKind::Spaces);
         let look = || {
             let list = windows::list_windows();
             let z = windows::z_order(&list);
-            list.iter()
-                .filter(|w| all || pids.contains(&w.pid))
+            let wanted: Vec<&windows::CgWindow> = list.iter().filter(|w| all || pids.contains(&w.pid)).collect();
+            let staged = if spaces { stage_manager::platform::spaces::engine::staged(&wanted.iter().map(|w| w.id).collect::<Vec<_>>()) } else { Default::default() };
+            wanted
+                .iter()
                 .map(|w| {
-                    json!({
+                    let mut out = json!({
                         "id": w.id,
                         "pid": w.pid,
                         "layer": w.layer,
@@ -1057,7 +1091,11 @@ mod app {
                         "alpha": w.alpha,
                         "bounds": w.bounds,
                         "z": z.get(&w.id),
-                    })
+                    });
+                    if spaces {
+                        out["staged"] = json!(staged.contains(&w.id));
+                    }
+                    out
                 })
                 .collect::<Vec<_>>()
         };

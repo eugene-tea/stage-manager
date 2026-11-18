@@ -2,11 +2,14 @@
 //! its shadow (round window-appearance; the classification and the cache are
 //! [`crate::ui::shadow_look`]'s).
 //!
-//! A window's capture ([`super::capture`]) also asks for this reading when it is due
-//! ([`due`]): never read, read before the system's appearance last changed
-//! ([`appearance_changed`]), or [`REFRESH`] seconds ago; one window a capture round at most
-//! (a round every 1.5 s or more), so never every window at once at launch or after the
-//! appearance changed. The reading is a second still of the
+//! A window's capture ([`super::capture`]) also asks for this reading ([`to_read`]): every
+//! window of the round with no reading (never read, or read before the system's appearance
+//! last changed: [`appearance_changed`]), a few at most ([`UNREAD_AT_ONCE`]), else one window
+//! read [`REFRESH`] seconds ago or more; so a stage's windows are read at their card's capture
+//! or a hover, never every window at once at launch or after the appearance changed. Since
+//! rounds come at events (1.9), one window a round left a stage's other windows unread, and a
+//! switch's pictures took the system's appearance (round sm-landing); the strip also asks
+//! after each switch lands ([`super::capture::read_looks`]). The reading is a second still of the
 //! same window with the same filter, its shadow not ignored and its child windows left out, at
 //! half a pixel a point ([`probe_size`]: at most 512 px on the longer side, a twentieth of the
 //! pixels of a full-size snapshot at 2x); it is read on ScreenCaptureKit's queue and only its
@@ -15,6 +18,7 @@
 //! reading.
 //!
 //! [`REFRESH`]: crate::ui::shadow_look::REFRESH
+//! [`UNREAD_AT_ONCE`]: crate::ui::shadow_look::UNREAD_AT_ONCE
 //! [`probe_size`]: crate::ui::shadow_look::probe_size
 
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -35,10 +39,15 @@ fn now() -> f64 {
     EPOCH.elapsed().as_secs_f64()
 }
 
-/// When window `id`'s look is to be read now: the generation to record it under.
-pub fn due(id: u32) -> Option<u64> {
-    let c = cache();
-    c.due(id, now()).then(|| c.generation())
+/// Which of `ids` to read now ([`LookCache::to_read`]), each with the generation to record
+/// it under; they count as asked for (not asked again until answered or a while later).
+pub fn to_read(ids: &[u32]) -> Vec<(u32, u64)> {
+    let mut c = cache();
+    let t = now();
+    let ids = c.to_read(ids, t, shadow_look::UNREAD_AT_ONCE);
+    c.asked(&ids, t);
+    let generation = c.generation();
+    ids.into_iter().map(|id| (id, generation)).collect()
 }
 
 /// The system's appearance changed (Light, Dark or Auto): every window is read again at its

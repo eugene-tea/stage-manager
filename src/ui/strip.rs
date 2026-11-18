@@ -21,7 +21,15 @@
 //!   [`StripEvent::IconClicked`] on its app icon.
 //! - Cards glide to new slots on the spring; the strip **slides** out to the left when
 //!   hidden, the cards moving in 3D (they widen as they leave, as Apple's do).
-//! - Thumbnails come from [`capture`], refreshed every `thumbnail_interval_ms`.
+//! - **Brought back at the edge** (`[reveal] flat`, Apple's: [`edge_flat`]): a strip hidden
+//!   by a window (or by "Show recent apps" off) that the pointer brings back turns its cards
+//!   flat at once, still off the screen, and slides in; every projection and hit test then
+//!   reads flat metrics ([`Metrics::flat`]). Hiding again, each plane turns back on a
+//!   keyframed transform under the usual slide, along Apple's pose; a window moving off the
+//!   strip meanwhile turns them back in place.
+//! - Thumbnails come from [`capture`] at events (1.9): a window newly on a card (its stage
+//!   left), the strip coming into view, and the pointer on a card (its windows taken again);
+//!   also every `thumbnail_interval_ms` when that is set (0, the default: no timer).
 //! - **Glass** (`[cards] window_opacity`, on: Apple's let the wallpaper through): each
 //!   window's picture is drawn at that opacity over its plane, whose background is the
 //!   wallpaper's mean behind the thumbnail, toned ([`crate::ui::glass_math`], from the
@@ -29,7 +37,10 @@
 //!   short fade; a new picture of the wallpaper repaints the strip shown; another Desktop's
 //!   pane laid out ahead keeps its colours until it shows. No picture of the wallpaper:
 //!   opaque cards. The card under the pointer (or a dragged card's target) eases to
-//!   `[cards] hover_window_opacity` (solid) with its growth, and back on leave.
+//!   `[cards] hover_window_opacity` (solid) with its growth, and back on leave. While the
+//!   strip shows over windows (a window covers it: revealed at the edge, or hidden there) every
+//!   card is solid, as Apple's, eased there and back on the same fade
+//!   ([`strip_visibility::over_windows`]).
 //! - **Level** (`[strip] level`): Apple's strip sits below windows, so a window moved over
 //!   it covers it (and auto-hide slides it away), also while the window is dragged over it.
 //!   It is lifted above windows only while a card is dragged and while the edge reveals it
@@ -105,7 +116,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
-use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSTimer, NSValue};
+use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSTimer, NSValue};
 use objc2_quartz_core::{
     CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CASpringAnimation, CATextLayer,
     CATransaction, CATransform3D, CATransformLayer, NSValueCATransform3DAdditions, kCAAlignmentCenter, kCAAlignmentLeft,
@@ -124,6 +135,7 @@ use crate::ui::overlay::GlassLook;
 use crate::ui::app_icons;
 use crate::ui::card_glass;
 use crate::ui::display_options;
+use crate::ui::edge_flat;
 use crate::ui::assistive;
 use crate::ui::strip_access;
 use crate::ui::strip_reach;
@@ -131,6 +143,7 @@ use crate::ui::panels;
 use crate::ui::strip_layout::{self, CardLayout, Grip, Metrics};
 use crate::ui::strip_model::{self, CardChange, CardSnapshot, StripDrop, StripEvent, StripSnapshot};
 use crate::ui::strip_visibility::{self, Mode, Timing, Visibility};
+use crate::ui::window_drop;
 
 #[path = "strip_motion.rs"]
 mod motion;
@@ -286,15 +299,15 @@ fn with_other<S, R>(
     })
 }
 
-/// Runs `f` on the first strip (the main display's first) whose column holds `p`, if any.
-fn with_strip_at<R>(p: Point, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
-    let main = with_strip(|s| s.geometry.global.contains(p)).unwrap_or(false);
-    if main {
+/// Runs `f` with the strip that takes a window released at `p` ([`Strip::takes_drop_at`]):
+/// the main display's first, then the others'.
+fn with_strip_taking<R>(p: Point, f: impl FnOnce(&mut Strip) -> R) -> Option<R> {
+    if with_strip(|s| s.takes_drop_at(p)).unwrap_or(false) {
         return with_strip(f);
     }
     OTHERS.with(|o| {
         let mut others = o.try_borrow_mut().ok()?;
-        let s = others.values_mut().find(|s| s.geometry.global.contains(p))?;
+        let s = others.values_mut().find(|s| s.takes_drop_at(p))?;
         Some(f(s))
     })
 }
@@ -337,7 +350,7 @@ fn present_waiting_others() {
             let strip = others.entry(screen).or_insert_with(|| {
                 let interval = THUMB_INTERVAL.with(Cell::get);
                 tracing::info!(screen, "strip: a strip for another display");
-                Strip::new(mtm, Duration::from_millis(interval.max(1)), screen)
+                Strip::new(mtm, crate::platform::capture::interval_of(interval), screen)
             });
             strip.present(snapshot);
         }
@@ -362,6 +375,9 @@ pub fn displays_changed(ids: &[u32]) {
     kept.push(strip_model::MAIN_STRIP);
     strip_model::retain_cards_of(&kept);
     card_glass::displays_changed(&kept);
+    if let Some(mtm) = MainThreadMarker::new() {
+        moves_of_strips(mtm, &kept);
+    }
     strip_model::retain_panel_statuses_of(&kept);
     close_strips_gone();
 }
@@ -436,12 +452,14 @@ fn hand_over<S, T>(
 /// Main thread, once.
 pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     THUMB_INTERVAL.with(|i| i.set(thumbnail_interval_ms));
-    let strip = Strip::new(mtm, Duration::from_millis(thumbnail_interval_ms.max(1)), strip_model::MAIN_STRIP);
+    let strip = Strip::new(mtm, crate::platform::capture::interval_of(thumbnail_interval_ms), strip_model::MAIN_STRIP);
     STRIP.with(|s| *s.borrow_mut() = Some(strip));
     // Reduce Motion and Reduce Transparency: read now, followed live; the glass repaints.
     display_options::install(|| with_strips(Strip::display_options_changed));
     // VoiceOver or Switch Control: the cards hit-testable where they rest while one is on.
     assistive::install(|| with_strips(Strip::update_access));
+    // A switch's pictures taken at the switch (the Spaces engine) come in as the others.
+    crate::platform::switch_shots::set_deliver(snapshot_arrived);
     strip_model::set_presenter(|snapshot| {
         DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
@@ -482,14 +500,15 @@ pub fn stand_down(why: &str) {
 /// Changes the thumbnail refresh interval (config reload). Main thread.
 pub fn set_thumbnail_interval(ms: u64) {
     THUMB_INTERVAL.with(|i| i.set(ms));
-    with_strips(|s| s.capturer.set_interval(Duration::from_millis(ms.max(1))));
+    with_strips(|s| s.capturer.set_interval(crate::platform::capture::interval_of(ms)));
 }
 
-/// Where a window released at `p` (global, top-left origin) goes: `None` when it is not over
-/// the strip (the user hid the strip, or `p` is outside the strip column), else the slot under
-/// `p`, the same one the strip's gap shows. Main thread.
+/// Where a window released at `p` (global, top-left origin) goes: `None` when no strip takes
+/// it there (the user hid the strip, `p` is out of its reach, or the window hid the strip:
+/// [`window_drop::taken_in`], the same test that shows its card), else the slot under `p`,
+/// the same one the strip's gap shows. Main thread.
 pub fn drop_slot(p: Point) -> Option<StripDrop> {
-    with_strip_at(p, |s| s.snapshot.user_visible.then(|| StripDrop { before: s.real_stage(s.drop_slot_at(p).before) })).flatten()
+    with_strip_taking(p, |s| StripDrop { before: s.real_stage(s.drop_slot_at(p).before) })
 }
 
 /// The pointer moved to `p` (global, top-left origin) over another app's window or the
@@ -502,9 +521,66 @@ pub fn pointer_moved(p: Point) {
 /// instead of polling the pointer. Without it (no monitor) the edge is polled as before.
 static MOVES_FED: AtomicBool = AtomicBool::new(false);
 
-/// Says whether the global monitor's mouse moves reach [`pointer_moved`]. Main thread.
-pub fn set_moves_fed(fed: bool) {
-    MOVES_FED.store(fed, Ordering::Relaxed);
+/// The mouse moves' monitor ([`crate::platform::input::monitor_moves`]) and the strips that
+/// want it: made while a strip may show cards (`[strip] visible`, not standing down for
+/// Apple's Stage Manager) or a window is dragged, gone otherwise (round idle-subsystems: until
+/// 1.9 every mouse move of the session woke the main thread, the Apple mode's too).
+#[derive(Default)]
+struct Moves {
+    /// The strips (display keys) that want the moves now.
+    wanting: std::collections::BTreeSet<u32>,
+    monitor: Option<crate::platform::input::InputMonitor>,
+}
+
+thread_local! {
+    static MOVES: RefCell<Moves> = RefCell::new(Moves::default());
+}
+
+/// Whether the moves' monitor is to be made (`Some(true)`), let go (`Some(false)`) or left as
+/// it is, for the strips `wanting` it and whether it is made (`made`).
+fn moves_step(wanting: usize, made: bool) -> Option<bool> {
+    match (wanting > 0, made) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
+/// The strip of `display` wants the pointer's moves (`on`) or not: the monitor made or let go
+/// as the strips want, before the snapshot is laid out (a strip hidden at the edge decides
+/// whether to poll the pointer from it, [`MOVES_FED`]). Main thread.
+fn want_moves(mtm: MainThreadMarker, display: u32, on: bool) {
+    MOVES.with(|m| {
+        let Ok(mut m) = m.try_borrow_mut() else { return };
+        if on {
+            m.wanting.insert(display);
+        } else {
+            m.wanting.remove(&display);
+        }
+        match moves_step(m.wanting.len(), m.monitor.is_some()) {
+            Some(true) => {
+                m.monitor = crate::platform::input::monitor_moves(mtm, pointer_moved);
+                if m.monitor.is_none() {
+                    tracing::warn!("cannot monitor mouse moves: the strip's edge polls the pointer");
+                }
+                tracing::debug!(made = m.monitor.is_some(), "strip: the mouse moves' monitor made (a strip may show)");
+            }
+            Some(false) => {
+                m.monitor = None;
+                tracing::debug!("strip: the mouse moves' monitor let go (no strip shows)");
+            }
+            None => {}
+        }
+        MOVES_FED.store(m.monitor.is_some(), Ordering::Relaxed);
+    });
+}
+
+/// The strips of displays no longer there want no moves.
+fn moves_of_strips(mtm: MainThreadMarker, kept: &[u32]) {
+    let gone: Vec<u32> = MOVES.with(|m| m.try_borrow().map(|m| m.wanting.iter().copied().filter(|d| !kept.contains(d)).collect()).unwrap_or_default());
+    for display in gone {
+        want_moves(mtm, display, false);
+    }
 }
 
 /// What the strip draws now, for a scripted test (`ctl debug-strip`): the cards in slot
@@ -975,8 +1051,10 @@ struct Geometry {
     global: Rect,
     /// Height of the primary display (for flipping Cocoa y).
     primary_height: f64,
-    /// The style resolved for this display.
+    /// The style resolved for this display, in the pose the cards are drawn in (flat: no turn).
     m: Metrics,
+    /// The cards' turn when they are turned (radians), whatever the pose.
+    turn: f64,
 }
 
 impl Geometry {
@@ -1009,7 +1087,32 @@ impl Geometry {
         let m = Metrics::new(style, size, k, display_middle - top);
         let panel = NSRect::new(visible.origin, NSSize::new(m.panel_width(), visible.size.height));
         let global = Rect::new(visible.origin.x, top, m.width, visible.size.height);
-        Self { screen: frame, panel, global, primary_height, m }
+        let turn = m.tilt;
+        Self { screen: frame, panel, global, primary_height, m, turn }
+    }
+
+    /// The same geometry with the cards drawn flat (the strip brought back at the edge,
+    /// [`Metrics::flat`]) or turned.
+    fn posed(mut self, flat: bool) -> Self {
+        self.m.tilt = if flat { 0.0 } else { self.turn };
+        self
+    }
+
+    /// The metrics of the cards turned, whatever the pose drawn now.
+    fn turned(&self) -> Metrics {
+        Metrics { tilt: self.turn, ..self.m.clone() }
+    }
+
+    /// The flight's eye in the panel's coordinates ([`motion_math::Flight`]), level with the
+    /// strip's.
+    fn flight_eye(&self) -> motion_math::Eye {
+        let left = self.screen.origin.x - self.panel.origin.x;
+        motion_math::Flight::over(left, Size::new(self.screen.size.width, self.screen.size.height), self.m.eye.y).eye
+    }
+
+    /// The strip's eye in the panel's coordinates.
+    fn strip_eye(&self) -> motion_math::Eye {
+        motion_math::Eye { at: self.m.eye, distance: self.m.perspective }
     }
 
     /// The whole panel in global top-left coordinates: the column and the room right of it
@@ -1147,6 +1250,52 @@ impl CardLayers {
         }
     }
 
+    /// Turns every plane as `m` draws it (flat or turned), at once; after `hold` seconds where
+    /// it is drawn now (a strip fading out under Reduce Motion turns once faded).
+    fn turn_planes(&self, m: &Metrics, hold: f64) {
+        let key = NSString::from_str("transform");
+        for (_, plane) in &self.planes {
+            // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
+            let now = unsafe { plane.presentationLayer() }.map_or_else(|| plane.transform(), |p| p.transform());
+            plane.removeAnimationForKey(&key);
+            plane.setTransform(turn(m));
+            if hold > 0.0 {
+                let v = transform_value(now);
+                plane.addAnimation_forKey(&ease("transform", &v, &v, hold), Some(&key));
+            }
+        }
+    }
+
+    /// Turns every plane of a flat card back as the strip slides from where it is drawn to
+    /// `dx` on `s` ([`edge_flat::hide_keyframes`]: Apple's pose, seen through the flight's
+    /// eye, under the slide), ending turned as `m` draws it. Call before [`Self::slide_to`]:
+    /// the slide is read from where it is drawn now.
+    fn turn_back_sliding(&self, m: &Metrics, eyes: (motion_math::Eye, motion_math::Eye), s: motion_math::Spring, dx: f64) {
+        let Some(space) = self.depths.first().map(|d| &d.space) else { return };
+        // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
+        let from_dx = unsafe { space.presentationLayer() }.map_or_else(|| space.sublayerTransform(), |p| p.sublayerTransform()).m41;
+        // Core Animation's own length for the slide's spring, so the turn ends with it.
+        let probe = spring(s, "transform", &transform_value(identity()), &transform_value(identity()));
+        let duration = probe.duration();
+        let key = NSString::from_str("transform");
+        for ((_, plane), depth) in self.planes.iter().zip(&self.depths) {
+            let at = plane.position();
+            let unit = depth.unit.position();
+            let size = plane.bounds().size;
+            let base = motion_math::Plane {
+                left_mid: Point::new(unit.x + at.x, unit.y + at.y),
+                size: Size::new(size.width, size.height),
+                tilt: 0.0,
+                corner: plane.cornerRadius(),
+            };
+            let keys = edge_flat::hide_keyframes(base, m.tilt, from_dx, dx, eyes, s, duration);
+            let times: Vec<Retained<NSNumber>> = keys.iter().map(|(f, _)| NSNumber::new_f64(*f)).collect();
+            let values: Vec<Retained<AnyObject>> = keys.iter().map(|(_, p)| crate::ui::overlay::as_value(transform_value(parts_transform(edge_flat::layer_parts(&base, p))))).collect();
+            plane.setTransform(turn(m));
+            plane.addAnimation_forKey(&crate::ui::overlay::keyframes("transform", &values, &NSArray::from_retained_slice(&times), duration), Some(&key));
+        }
+    }
+
     /// Slides every depth to `dx`: on the spring `s`, or at once.
     fn slide_to(&self, s: Option<motion_math::Spring>, m: &Metrics, dx: f64) {
         for d in self.all_depths() {
@@ -1229,6 +1378,14 @@ fn turn(m: &Metrics) -> CATransform3D {
     CATransform3D::new_rotation(m.tilt, 0.0, 1.0, 0.0)
 }
 
+/// A plane layer's transform for `l` ([`edge_flat::layer_parts`]): scaled, turned about its
+/// left edge (its anchor), then moved.
+fn parts_transform(l: edge_flat::LayerParts) -> CATransform3D {
+    CATransform3D::new_scale(l.scale.0, l.scale.1, 1.0)
+        .concat(CATransform3D::new_rotation(l.tilt, 0.0, 1.0, 0.0))
+        .concat(CATransform3D::new_translation(l.shift.0, l.shift.1, 0.0))
+}
+
 fn spring(s: motion_math::Spring, key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
     let anim = CASpringAnimation::animationWithKeyPath(Some(&NSString::from_str(key)));
     anim.setMass(s.mass);
@@ -1307,6 +1464,15 @@ fn set_badge(badge: &CALayer, label: &CATextLayer, number: usize, origin: Point)
     // SAFETY: an NSString is a valid `string` value.
     unsafe { label.setString(Some(&NSString::from_str(&text))) };
     label.setFrame(CGRect::new(CGPoint::new(0.0, 2.0), CGSize::new(w, 14.0)));
+}
+
+/// Moves `layer`'s `transform` to `to` along the spring, from what is drawn now.
+fn spring_transform(s: motion_math::Spring, layer: &CALayer, to: CATransform3D) {
+    // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
+    let from = unsafe { layer.presentationLayer() }.map_or_else(|| layer.transform(), |p| p.transform());
+    layer.setTransform(to);
+    let anim = spring(s, "transform", &transform_value(from), &transform_value(to));
+    layer.addAnimation_forKey(&anim, Some(&NSString::from_str("transform")));
 }
 
 /// Moves `layer`'s `sublayerTransform` to `to` along the spring, from what is drawn now.
@@ -1456,6 +1622,22 @@ pub fn icons_changed() {
     for after in ICONS_AGAIN {
         let when = dispatch2::DispatchTime::try_from(after).unwrap_or(dispatch2::DispatchTime::NOW);
         let _ = DispatchQueue::main().after(when, || with_strips(Strip::repaint_icons));
+    }
+}
+
+/// How long after an appearance change every card's pictures are taken again: an app redraws
+/// its windows in the new look some time after the notification, a busy or hidden one later
+/// (11-16: the morning's change to light left cards dark until the pointer reached them), so
+/// three rounds, the last one late.
+const PICTURES_AGAIN: [Duration; 3] = [super::corner_patch::SETTLE, Duration::from_millis(1500), Duration::from_secs(5)];
+
+/// The appearance changed (main thread): every strip's thumbnails and its switch snapshots
+/// are taken again ([`PICTURES_AGAIN`]); with no timer (`thumbnail_interval_ms = 0`) nothing
+/// else would until the pointer reached a card or its stage moved.
+pub fn pictures_changed() {
+    for after in PICTURES_AGAIN {
+        let when = dispatch2::DispatchTime::try_from(after).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = DispatchQueue::main().after(when, || with_strips(Strip::capture_again));
     }
 }
 
@@ -1967,6 +2149,12 @@ struct Strip {
     /// Apps' names by pid, for the cards' VoiceOver labels.
     app_names: HashMap<i32, String>,
     visibility: Visibility,
+    /// The cards are drawn flat: the strip was brought back at the left edge
+    /// (`[reveal] flat`, [`edge_flat`]); they turn back as it hides.
+    flat: bool,
+    /// The strip shows over windows ([`strip_visibility::over_windows`]): its cards are solid,
+    /// no glass ([`Glass::picture`]), and no wallpaper is read for them meanwhile.
+    over_windows: bool,
     poll_timer: Option<Retained<NSTimer>>,
     /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
     /// global monitor to the edge or the tab looks again.
@@ -2019,6 +2207,8 @@ impl Strip {
             icons: app_icons::IconCache::default(),
             app_names: HashMap::new(),
             visibility: Visibility::default(),
+            flat: false,
+            over_windows: false,
             poll_timer: None,
             edge_waits: false,
             capturer,
@@ -2073,7 +2263,8 @@ impl Strip {
     /// How far left the cards sit when hidden: `[motion] slide_distance`, or further when
     /// the widest card needs it to leave the screen whole ([`Metrics::hide_distance`]).
     fn hidden_dx(&self) -> f64 {
-        let m = self.m();
+        // The cards are hidden turned (a flat strip turns back as it hides).
+        let m = self.geometry.turned();
         -(self.style.motion.slide_distance * m.k).max(self.geometry.global.w + 30.0).max(m.hide_distance())
     }
 
@@ -2128,8 +2319,11 @@ impl Strip {
             // (the strip was built with the defaults, so `hide_delay_ms` never applied).
             self.visibility.set_timing(Timing::from_style(&self.style.reveal));
         }
-        card_glass::set_wanted(self.display, self.glass().on());
-        let geometry = Geometry::for_display(self.mtm, self.display, &self.style);
+        // No wallpaper read for a strip that shows no card (hidden, standing down, or no
+        // card to show), no mouse move heard for a hidden one.
+        card_glass::set_wanted(self.display, self.glass().on() && snapshot.user_visible && !snapshot.cards.is_empty());
+        want_moves(self.mtm, self.display, snapshot.user_visible || snapshot.window_drag.is_some());
+        let geometry = Geometry::for_display(self.mtm, self.display, &self.style).posed(self.flat);
         if geometry != self.geometry {
             tracing::debug!(k = geometry.m.k, tilt = geometry.m.tilt.to_degrees(), d = geometry.m.perspective, "strip geometry");
             self.geometry = geometry;
@@ -2192,6 +2386,9 @@ impl Strip {
         }
         if let Some(note) = self.snapshot.late.clone() {
             self.late_shown(note.id, Some(&note.shown), Some(&note.active));
+        }
+        if let Some((id, window)) = self.snapshot.under_now {
+            self.shown_in_place(id, window);
         }
         self.after_snapshot();
         // Cards moved under a resting pointer: the pane catches clicks where they are now.
@@ -2276,6 +2473,8 @@ impl Strip {
     /// Dock click to an app on Desktop 3 left Mail's slot empty on Desktop 1).
     fn leave_pane(&mut self) {
         self.release_held_cards();
+        // Its cards wait on their Desktop turned, as a hidden strip's do.
+        self.pose_now(false);
         self.pressed = None;
         self.squeezed = None;
         self.set_hover(None);
@@ -2570,6 +2769,9 @@ impl Strip {
 
     /// See [`probe`].
     fn probe(&self) -> serde_json::Value {
+        // What this run loop turn changed is committed first, so the drawn state read below
+        // matches the model it is reported with (`shown`, `flat`).
+        CATransaction::flush();
         let g = self.geometry.global;
         let root = &self.pane.root;
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
@@ -2634,8 +2836,9 @@ impl Strip {
                         let glass = l.glass.iter().find(|(w, _)| w == id).and_then(|(_, g)| g.as_ref()).map(|g| {
                             serde_json::json!({ "under": g.rgb.map(|c| (c * 255.0 * 100.0).round() / 100.0), "opacity": g.opacity, "image_opacity": image.opacity() })
                         });
-                        // `opacity`: the plane's own (a window lifted off the card fades).
-                        serde_json::json!({ "window": id, "plane": in_root(plane), "opacity": plane.opacity(), "image": in_root(image), "shows": shows(image), "glass": glass })
+                        // `opacity`: the plane's own (a window lifted off the card fades);
+                        // `left_edge`: its top and bottom, global (the card-layout check).
+                        serde_json::json!({ "window": id, "plane": in_root(plane), "left_edge": left_edge(plane), "opacity": plane.opacity(), "image": in_root(image), "shows": shows(image), "glass": glass })
                     })
                     .collect();
                 Some(serde_json::json!({
@@ -2689,6 +2892,8 @@ impl Strip {
             }),
             "merge_onto": self.merge_onto(),
             "shown": self.pane.shown,
+            // The cards drawn flat: the strip brought back at the edge (`[reveal] flat`).
+            "flat": self.flat,
             "overlay_top_down": self.motion_top_down(),
         })
     }
@@ -2890,15 +3095,14 @@ impl Strip {
 
     /// The cards' glass as the style sets it.
     fn glass(&self) -> Glass {
-        let c = &self.style.cards;
         // Reduce Transparency: solid cards, as macOS's own materials turn opaque.
-        let opacity = if display_options::reduce_transparency() { 1.0 } else { c.window_opacity };
-        Glass { opacity, hover_opacity: c.hover_window_opacity, saturation: c.backdrop_saturation, brightness: c.backdrop_brightness }
+        Glass::of(&self.style.cards, display_options::reduce_transparency())
     }
 
     /// The glass behind `slot`'s picture on `layout`, from the wallpaper behind the thumbnail
-    /// as drawn (turned, at rest), the picture at the card's opacity for its hover now
-    /// ([`Glass::picture`]); `None` with the glass off or no picture of the wallpaper.
+    /// as drawn (turned, at rest), the picture at the card's opacity for its hover now and
+    /// solid over windows ([`Glass::picture`]); `None` with the glass off or no picture of
+    /// the wallpaper.
     fn glass_at(&self, layout: &CardLayout, slot: &strip_layout::ThumbSlot) -> Option<GlassLook> {
         let glass = self.glass();
         if !glass.on() {
@@ -2908,7 +3112,7 @@ impl Strip {
         let g = self.geometry.global;
         let r = self.m().projected_bounds(layout.frame.x + slot.rect.x, layout.frame.y + slot.rect.y, slot.rect.w, slot.rect.h);
         let rgb = glass.under(shown.backdrop.mean(r.translate(g.x, g.y))?);
-        Some(GlassLook { color: shown.color(rgb), rgb, opacity: glass.picture(self.grown(layout.stage)) as f32 })
+        Some(GlassLook { color: shown.color(rgb), rgb, opacity: glass.picture(self.grown(layout.stage), self.over_windows) as f32 })
     }
 
     /// The glass window `id` shows on the card of `layout` (its own thumbnail, else the
@@ -2974,11 +3178,37 @@ impl Strip {
 
     /// A new picture of the wallpaper (or none): the strip shown takes its colours.
     fn repaint_glass(&mut self) {
-        let fade = self.style.animation.seconds(GLASS_FADE_MS);
+        self.repaint_glass_over(self.style.animation.seconds(GLASS_FADE_MS));
+    }
+
+    /// Every card's glass painted again, a change easing over `seconds` (none: at once).
+    fn repaint_glass_over(&mut self, seconds: f64) {
         let stages: Vec<u64> = self.pane.cards.keys().copied().collect();
         for stage in stages {
-            self.paint_glass(stage, Ease::Out(fade));
+            self.paint_glass(stage, Ease::Out(seconds));
         }
+    }
+
+    /// The strip shows over windows now (`over`) or not ([`strip_visibility::over_windows`]):
+    /// its cards turn solid or back to the glass on the glass's fade when the strip was in
+    /// view (`was_shown`), at once while it was off the screen; the wallpaper is read again
+    /// once it is back over the desktop ([`card_glass::set_over_windows`]).
+    fn set_over_windows(&mut self, over: bool, was_shown: bool) {
+        if self.over_windows == over {
+            return;
+        }
+        self.over_windows = over;
+        tracing::debug!(over, was_shown, "strip over windows: the cards {}", if over { "solid" } else { "glass" });
+        card_glass::set_over_windows(self.display, over);
+        let seconds = if was_shown && !self.instant { self.style.animation.seconds(GLASS_FADE_MS) } else { 0.0 };
+        self.repaint_glass_over(seconds);
+    }
+
+    /// Every card's thumbnails and the switch snapshots taken again ([`pictures_changed`]).
+    fn capture_again(&mut self) {
+        tracing::debug!(display = self.display, "the appearance changed: every picture is taken again");
+        self.capturer.capture_now();
+        self.capture_snapshots_again();
     }
 
     /// Every card's app icons fetched again, in the look the Dock shows now ([`icons_changed`]).
@@ -3232,6 +3462,15 @@ impl Strip {
             Vec::new()
         };
         self.capturer.set_targets(targets);
+    }
+
+    /// Takes card `stage`'s thumbnails again now (the pointer reached it): with no timer
+    /// (`thumbnail_interval_ms = 0`), what keeps a card a while in the strip current.
+    fn refresh_thumbnails(&mut self, stage: u64) {
+        let ids: Vec<u32> = self.layouts.iter().filter(|l| l.stage == stage).flat_map(|l| l.thumbs.iter().map(|t| t.id)).collect();
+        if !ids.is_empty() {
+            self.capturer.recapture(&ids);
+        }
     }
 
     // -- pointer ----------------------------------------------------------------------------
@@ -3908,9 +4147,11 @@ impl Strip {
         if card == self.hovered {
             return;
         }
-        if card.is_some() {
-            // The pointer is on a card: a switch may follow.
+        if let Some(stage) = card {
+            // The pointer is on a card: a switch may follow, and its thumbnails are taken
+            // again (cards at events, no timer).
             self.prefetch(card);
+            self.refresh_thumbnails(stage);
         }
         let previous = std::mem::replace(&mut self.hovered, card);
         if self.squeezed.is_some() && self.squeezed != card && self.pressed.is_none() {
@@ -3959,6 +4200,26 @@ impl Strip {
 
     fn pointer(&self) -> Point {
         self.geometry.global_point(NSEvent::mouseLocation())
+    }
+
+    /// Whether this strip takes the dragged window with the pointer at `p` (global): its card
+    /// shows and a release drops it ([`window_drop::taken_in`], from where it was at the last
+    /// step).
+    fn takes_window_at(&self, p: Point) -> bool {
+        self.snapshot.window_drag.is_some()
+            && self.snapshot.user_visible
+            && window_drop::taken_in(self.drop_over, p, &self.geometry.global, self.geometry.m.k, self.dragged_frame(p))
+    }
+
+    /// Whether a window released at `p` (global) drops into this strip: the dragged window's
+    /// test ([`Self::takes_window_at`]); a release the strip has not heard of as a drag yet,
+    /// over its column.
+    fn takes_drop_at(&self, p: Point) -> bool {
+        if self.snapshot.window_drag.is_some() {
+            self.takes_window_at(p)
+        } else {
+            self.snapshot.user_visible && self.geometry.global.contains(p)
+        }
     }
 
     /// True when the strip is on but a window of the active stage at the screen's left edge
@@ -4039,12 +4300,21 @@ impl Strip {
     }
 
     fn update_visibility(&mut self) {
-        let covered = strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global);
+        let was_shown = self.pane.shown;
+        let window_drag = self.snapshot.window_drag.is_some();
+        let drag_pointer = window_drag.then(|| self.pointer());
+        // A window dragged toward the strip ([`window_drop`]): taken in by where the pointer
+        // is (its card shows, the gap opens under the pointer, the strip shows under the
+        // window), with a margin on the way out; until then it hides the strip as any window
+        // of the stage does, and one that hides it is no drop (Apple's, 11-09).
+        let over = drag_pointer.filter(|p| self.takes_window_at(*p));
+        let drop_over = over.is_some();
+        let drag_hides = drag_pointer.is_some_and(|p| window_drop::hides(drop_over, &self.geometry.global, self.dragged_frame(p)));
+        let covered = strip_visibility::hides_strip(&self.snapshot.active_frames, &self.geometry.global) || drag_hides;
         let mode = Mode::of(self.snapshot.user_visible, self.snapshot.hide_recent_apps, covered);
         self.visibility.set_tab(self.pane.tab.shown.then(|| self.geometry.tab()));
         self.visibility.set_screen_left(self.geometry.screen.origin.x);
-        let window_drag = self.snapshot.window_drag.is_some();
-        let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| self.pointer());
+        let pointer = (mode == Mode::EdgeOnly || window_drag).then(|| drag_pointer.unwrap_or_else(|| self.pointer()));
         let edge_pointer = pointer.filter(|_| mode == Mode::EdgeOnly);
         // A strip in plain view stays under the pointer only for the switch its own card click
         // started (the clicked card stays squeezed until it lands).
@@ -4052,14 +4322,11 @@ impl Strip {
             self.visibility.forget_shown();
         }
         let decision = self.visibility.step(mode, edge_pointer, &self.geometry.global, Instant::now());
-        // A window dragged over the strip column shows it (under the window) and opens the gap
-        // under the pointer.
-        let over = pointer.filter(|p| window_drag && self.snapshot.user_visible && self.geometry.global.contains(*p));
-        let drop_over = over.is_some();
         let before = over.and_then(|p| self.drop_slot_at(p).before);
         if drop_over != self.drop_over || (drop_over && before != self.drop_before) {
             if drop_over != self.drop_over {
-                tracing::debug!(drop_over, "window drag over the strip");
+                let x = drag_pointer.map(|p| (p.x - self.geometry.global.x).round());
+                tracing::debug!(drop_over, ?x, drag_hides, "window drag over the strip");
             }
             self.drop_over = drop_over;
             self.drop_before = before;
@@ -4071,8 +4338,24 @@ impl Strip {
         let shown = decision.shown || drop_over || (card_dragging && self.pane.shown);
         if shown != self.pane.shown {
             tracing::debug!(shown, ?mode, "strip visibility");
+            // Brought back at the edge, Apple's cards turn flat at once, still off the screen,
+            // then slide in (recorded 11-16).
+            let flat = edge_flat::turns_flat(self.pane.shown, shown, decision.shown && mode == Mode::EdgeOnly && !drop_over, self.style.reveal.flat);
+            if flat {
+                self.pose_now(true);
+            }
             self.slide(shown, true);
+            if flat {
+                // The flat pose and the slide's first frame go out in one commit, now: left to
+                // the run loop's end, a `ctl debug-strip` answered in between read the cards
+                // still turned at their hidden place (live 11-17, one sample of 160).
+                CATransaction::flush();
+            }
             self.update_targets();
+        } else if self.flat && mode != Mode::EdgeOnly {
+            // Nothing hides the strip any more (the window moved off it, the user's toggle):
+            // its cards turn back where they are.
+            self.turn_in_place();
         }
         // Below windows (Apple's) unless something needs it on top (`strip_visibility::lifted`):
         // a card being dragged, or the edge revealing it over a window that covers it; a window
@@ -4082,6 +4365,9 @@ impl Strip {
         // has landed (10-13, a laptop: a card click to a stage clear of the strip dropped it
         // at once, under the window leaving).
         let held_up = self.pane.lifted == Some(true) && (self.transition_starting || self.motion_running());
+        // Over windows the cards are solid (the owner's rule, 11-18), held so through a switch
+        // from there until its snapshots land, as the lift is.
+        self.set_over_windows(strip_visibility::over_windows(mode, covered, held_up, self.over_windows), was_shown);
         self.set_lifted(strip_visibility::lifted(strip_visibility::Lift {
             always: self.style.level == StripLevel::AboveWindows,
             card_drag: card_dragging,
@@ -4136,6 +4422,11 @@ impl Strip {
             self.set_hover(None);
             self.card_drag = None;
         }
+        // A strip brought back flat turns back as it hides.
+        let from_flat = !shown && std::mem::replace(&mut self.flat, false);
+        if from_flat {
+            self.geometry = self.geometry.clone().posed(false);
+        }
         let dx = self.current_dx();
         let slide = self.slide_spring().filter(|_| animated);
         let m = self.m().clone();
@@ -4157,15 +4448,69 @@ impl Strip {
             root.addAnimation_forKey(&ease("opacity", &NSNumber::new_f32(from), &NSNumber::new_f32(to), fade), Some(&fading));
             for layers in self.pane.cards.values() {
                 layers.jump_to(&m, dx, if shown { 0.0 } else { fade });
+                if from_flat {
+                    layers.turn_planes(&m, fade);
+                }
             }
         } else {
             root.removeAnimationForKey(&fading);
             root.setOpacity(1.0);
+            let eyes = (self.geometry.strip_eye(), self.geometry.flight_eye());
             for layers in self.pane.cards.values() {
+                if from_flat {
+                    match slide {
+                        Some(s) => layers.turn_back_sliding(&m, eyes, s, dx),
+                        None => layers.turn_planes(&m, 0.0),
+                    }
+                }
                 layers.slide_to(slide, &m, dx);
             }
         }
         CATransaction::commit();
+    }
+
+    /// Draws the cards flat (the strip brought back at the edge) or turned, at once: the
+    /// metrics every projection and hit test reads, and every plane's turn.
+    fn pose_now(&mut self, flat: bool) {
+        if self.flat == flat {
+            return;
+        }
+        self.flat = flat;
+        self.geometry = self.geometry.clone().posed(flat);
+        tracing::debug!(flat, "strip cards' pose");
+        let m = self.m().clone();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for layers in self.pane.cards.values() {
+            layers.turn_planes(&m, 0.0);
+        }
+        CATransaction::commit();
+        self.publish_cards();
+    }
+
+    /// A strip brought back flat that nothing hides any more: its cards turn back in place on
+    /// the slide's spring (Apple's not recorded), at once without animation.
+    fn turn_in_place(&mut self) {
+        self.flat = false;
+        self.geometry = self.geometry.clone().posed(false);
+        tracing::debug!("strip cards turn back in place");
+        let m = self.m().clone();
+        let spring = self.slide_spring().filter(|_| !self.reduced());
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for layers in self.pane.cards.values() {
+            for (_, plane) in &layers.planes {
+                match spring {
+                    Some(s) => spring_transform(s, plane, turn(&m)),
+                    None => {
+                        plane.removeAnimationForKey(&NSString::from_str("transform"));
+                        plane.setTransform(turn(&m));
+                    }
+                }
+            }
+        }
+        CATransaction::commit();
+        self.publish_cards();
     }
 
     fn set_polling(&mut self, on: bool) {
@@ -4236,6 +4581,14 @@ fn click_adds(flags: NSEventModifierFlags) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mouse_moves_are_heard_only_while_a_strip_may_show() {
+        assert_eq!(moves_step(1, false), Some(true), "a strip shows: the monitor made");
+        assert_eq!(moves_step(2, true), None);
+        assert_eq!(moves_step(0, true), Some(false), "hidden, or standing down for Apple's: let go");
+        assert_eq!(moves_step(0, false), None);
+    }
 
     /// A laptop docked to a screen that becomes the main one: the main strip's panes on the
     /// laptop's other Desktops close (that screen gets a strip of its own). With the lid

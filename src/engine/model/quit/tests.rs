@@ -4,7 +4,7 @@
 use super::*;
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Model, Observation, WindowMeta};
-use crate::engine::park::park_frame;
+use crate::engine::corner::park::park_frame;
 use crate::engine::persist::{LaunchHints, StateFile};
 use crate::engine::restore::{QUIT_KEEP, Restore};
 use crate::engine::rules::Decision;
@@ -70,6 +70,7 @@ fn layout(f: &StateFile) -> Layout {
     (stages, sp.active_index, sp.strip_slots.clone(), keys)
 }
 
+both_engines! {
 #[test]
 fn an_apps_quit_keeps_its_stage_in_the_file_at_its_real_frame() {
     let mut m = desk();
@@ -165,7 +166,7 @@ fn the_kept_stages_come_back_after_the_restart_even_clamped_against_the_corner()
         assert_eq!(st.restore, frame, "window {id}: its saved frame");
         assert!(m.restored_grade(w(id)).is_some_and(|g| g.confident()), "window {id}: matched by title and app");
     }
-    assert!(a_chat.iter().any(|a| matches!(a, Action::Park { id, .. } if *id == w(61))), "Chat's stage is inactive: parked there, never left in the corner");
+    assert!(a_chat.iter().any(|a| matches!(a, Action::Hide { id } if *id == w(61))), "Chat's stage is inactive: parked there, never left in the corner");
     let after = layout(&m.to_state());
     assert_eq!(after.0, before.0, "the stages as before the restart");
     assert_eq!(after.1, before.1, "the editor's stage in front");
@@ -227,6 +228,7 @@ fn a_stage_that_left_goes_back_before_the_first_stage_made_after_it() {
     let w: Vec<(&str, usize, bool)> = stages[0].windows.iter().map(|w| (w.title.as_str(), w.z, w.key)).collect();
     assert_eq!(w, [("Two C", 0, true), ("Two A", 1, false)]);
 }
+}
 
 // ----- a quit found late (round missed-quit) ---------------------------------------------------
 
@@ -278,6 +280,7 @@ fn relaunched_same_session(mut file: StateFile) -> Model {
     m
 }
 
+both_engines! {
 #[test]
 fn an_app_found_gone_quits_as_with_a_notice_and_its_next_launch_joins_the_current_stage() {
     // 10-23: Home quit with its last window and no notice came. Its process found gone runs
@@ -331,6 +334,7 @@ fn without_its_quit_the_dead_apps_window_was_saved_live_and_came_back_to_its_old
     assert_ne!(m.stage_of(w(92)), editor, "not the current stage");
     assert_eq!(m.main_active_stage(), m.stage_of(w(92)), "switched there");
 }
+}
 
 /// After a restart (the home app quit at the logout, a few seconds before the save), the
 /// restore window open: the stages rebuilt pending, none of the apps reopened yet.
@@ -354,6 +358,7 @@ fn saved_titles(m: &Model, bundle: &str) -> Vec<String> {
     file.spaces.iter().flat_map(|s| &s.stages).flat_map(|s| &s.windows).filter(|x| x.bundle_id == bundle).map(|x| x.title.clone()).collect()
 }
 
+both_engines! {
 #[test]
 fn a_saved_window_whose_app_was_not_reopened_is_given_up_when_the_restore_window_ends() {
     // The gap of round missed-quit (item 3), closed: after a restart, a saved window whose app
@@ -434,10 +439,13 @@ fn an_app_launched_in_the_restore_window_keeps_its_minute() {
     assert_eq!(dropped, 1, "its minute up: Notes.txt given up");
     assert_eq!(m.pending_count(), 0);
 }
+}
 
+both_engines! {
 /// W2 (the review of 10-29): Chat saves its own window frames. Its window was parked
 /// when it quit, so it wrote the park frame, and an hour later it reopens the window in the
-/// corner. The window takes the frame it had at the quit (by app and title, else the app's
+/// corner. Under the Spaces engine too (the review of 1.9, C-2): the park frame was saved
+/// under a Corner run before (an upgrade, a fallback), and the window was born a sliver. The window takes the frame it had at the quit (by app and title, else the app's
 /// only one left), not the center; once, and not past a day.
 #[test]
 fn an_app_reopening_its_window_in_the_corner_gets_its_frame_back_within_a_day() {
@@ -468,7 +476,9 @@ fn an_app_reopening_its_window_in_the_corner_gets_its_frame_back_within_a_day() 
     add(&mut m, win(51, 22, CHAT, "Team", elsewhere));
     assert_eq!(m.window(w(51)).map(|x| x.restore), Some(elsewhere), "where its app put it");
 }
+}
 
+both_engines! {
 /// An app quits on a Desktop that then takes another id (a provisional Desktop adopted as a
 /// saved one): its kept windows follow, or a logout within the two minutes saves the Desktop
 /// without them.
@@ -481,4 +491,5 @@ fn a_quit_apps_windows_follow_their_desktop_when_it_is_relabelled() {
     m.relabel_space(old, new);
     assert!(m.space_has_quit(new), "the entry is the renamed Desktop's");
     assert!(!m.space_has_quit(old));
+}
 }

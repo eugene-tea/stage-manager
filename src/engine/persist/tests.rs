@@ -53,6 +53,7 @@ fn ids(a: &AssignedStage) -> Vec<u32> {
     a.windows.iter().map(|w| w.id.0).collect()
 }
 
+both_engines! {
 #[test]
 fn json_round_trip() {
     let s = state(
@@ -385,7 +386,7 @@ fn save_rematch_and_apply_rebuilds_the_same_stages() {
         assert!(
             actions
                 .iter()
-                .any(|x| matches!(x, Action::Park { id: i, .. } if i.0 == id)),
+                .any(|x| matches!(x, Action::Hide { id: i } if i.0 == id)),
             "park {id}"
         );
     }
@@ -418,7 +419,9 @@ fn restore_frames_only_when_asked() {
     }));
     assert!(acts.contains(&Action::Focus { id: WindowId(1) }));
 }
+}
 
+corner_nuance! {
 #[test]
 fn a_live_window_found_in_the_park_zone_gets_its_saved_frame() {
     let s = state(
@@ -439,7 +442,9 @@ fn a_live_window_found_in_the_park_zone_gets_its_saved_frame() {
         Some(s.stages[0].windows[0].frame)
     );
 }
+}
 
+both_engines! {
 #[test]
 fn declared_stages_merge_with_saved_ones() {
     let s = state(
@@ -495,7 +500,9 @@ fn a_saved_stage_not_on_screen_stays_pending_and_an_empty_one_is_dropped() {
     assert_eq!((back.len(), back[0].title.as_str()), (1, "X"));
     assert!(back[0].pending.is_some());
 }
+}
 
+corner_nuance! {
 #[test]
 fn a_stuck_unmatched_window_on_the_active_stage_is_brought_back() {
     let s = state(vec![(None, vec![])], Some(0));
@@ -510,6 +517,7 @@ fn a_stuck_unmatched_window_on_the_active_stage_is_brought_back() {
         _ => None,
     });
     assert!(set.is_some_and(|f| !parked_at(f)));
+}
 }
 
 // ----- first start: Apple's grouping ------------------------------------------------------
@@ -535,6 +543,7 @@ fn members_of(m: &Model, id: u32) -> Vec<u32> {
     m.stage(s).expect("stage").windows.iter().map(|w| w.0).collect()
 }
 
+both_engines! {
 #[test]
 fn first_start_gives_every_app_its_own_stage_frontmost_active_recent_first() {
     let live = [
@@ -558,11 +567,11 @@ fn first_start_gives_every_app_its_own_stage_frontmost_active_recent_first() {
     assert_eq!(cards, [vec![2, 1], vec![4]], "most recently used first");
     for id in [1, 2, 4] {
         assert!(
-            acts.iter().any(|x| matches!(x, Action::Park { id: i, .. } if i.0 == id)),
+            acts.iter().any(|x| matches!(x, Action::Hide { id: i } if i.0 == id)),
             "park {id}"
         );
     }
-    assert!(!acts.iter().any(|x| matches!(x, Action::Park { id: i, .. } if i.0 == 3)));
+    assert!(!acts.iter().any(|x| matches!(x, Action::Hide { id: i } if i.0 == 3)));
 }
 
 #[test]
@@ -657,9 +666,11 @@ fn an_empty_saved_active_stage_gives_way_to_the_frontmost_new_app() {
     assert_eq!(m.main_active_stage(), m.stage_of(WindowId(2)));
     assert_eq!(m.stages().len(), 2);
 }
+}
 
 // ----- keeping windows clear of the strip at launch ----------------------------------------
 
+both_engines! {
 #[test]
 fn first_start_fits_every_window_of_every_stage_and_saves_the_pre_fit_frame() {
     use crate::engine::stage_area::FitOptions;
@@ -696,11 +707,13 @@ fn first_start_fits_every_window_of_every_stage_and_saves_the_pre_fit_frame() {
     let old = json.replace("\"original\"", "\"ignored_unknown\"");
     assert!(StateFile::from_json(&old).is_ok());
 }
+}
 
 fn saved_id(bundle: &str, title: &str, z: usize, id: u32) -> SavedWindow {
     SavedWindow { window: Some(id), ..saved(bundle, title, z) }
 }
 
+both_engines! {
 #[test]
 fn a_saved_window_is_found_by_its_id_before_its_title() {
     // Two windows of one app whose titles swapped since the save (an editor's tabs): each
@@ -818,9 +831,11 @@ fn the_session_is_kept_in_the_file() {
     let none = StateFile::single(SavedSpace::default());
     assert!(!none.to_json().expect("encodes").contains("session"), "absent when unknown");
 }
+}
 
 // ----- fields added for the restore (design 8D, section 5) -----------------------------------
 
+both_engines! {
 #[test]
 fn the_restore_fields_round_trip() {
     let mut s = state(
@@ -849,6 +864,7 @@ fn the_restore_fields_round_trip() {
     for absent in ["pending", "fp", "last_active", "last_seen", "saved_at", "display"] {
         assert!(!plain.contains(absent), "{absent} in {plain}");
     }
+}
 }
 
 /// `state.json` as v1.2.0 writes it: no restore fields.
@@ -921,6 +937,7 @@ mod v1_2_0 {
     }
 }
 
+both_engines! {
 #[test]
 fn a_1_2_0_file_loads_and_1_2_0_reads_this_builds_file() {
     let old = StateFile::from_json(FILE_1_2_0).expect("a 1.2.0 file loads");
@@ -1020,6 +1037,7 @@ fn a_same_session_load_marks_nothing_and_another_session_marks_everything_pendin
     assert_eq!(later.pending_windows(), 1);
     assert_eq!(later.spaces[0].stages[0].windows[0].pending, Some(Pending { since: "A".into() }));
 }
+}
 
 // ----- windows of apps that quit (round 8H) ---------------------------------------------------
 
@@ -1039,6 +1057,7 @@ fn titles(f: &StateFile) -> Vec<Vec<String>> {
     f.spaces[0].stages.iter().map(|s| s.windows.iter().map(|w| w.title.clone()).collect()).collect()
 }
 
+both_engines! {
 #[test]
 fn a_window_that_quit_within_two_minutes_of_the_save_waits_after_a_restart() {
     let t = 1_760_600_000;
@@ -1093,4 +1112,5 @@ fn quit_at_round_trips_and_1_2_0_reads_it_as_a_saved_window() {
     let mut old = StateFile::from_json(FILE_1_2_0).expect("a 1.2.0 file loads");
     assert_eq!(old.settle_quit(true), (0, 0));
     assert_eq!(old.spaces[0].stages[0].windows.len(), 1);
+}
 }

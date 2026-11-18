@@ -24,8 +24,8 @@ use super::windows::CgWindow;
 use crate::engine::displays::{ScreenKey, number_duplicates};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{Display, DisplayId};
-use crate::engine::park::{CornerChoice, choose_corner};
-use crate::engine::sliver::DockBar;
+use crate::engine::corner::park::{CornerChoice, choose_corner};
+use crate::engine::corner::sliver::DockBar;
 
 /// Converts an AppKit rectangle (bottom-left origin of the primary screen, `y` up) into
 /// global top-left coordinates, given the primary screen's height.
@@ -249,7 +249,7 @@ pub fn looked_through(through: Through, pid: i32, element_pid: impl FnOnce() -> 
 }
 
 /// True when `bounds` holds the whole of `screen`, within a point.
-fn covers_screen(bounds: Rect, screen: Rect) -> bool {
+pub(crate) fn covers_screen(bounds: Rect, screen: Rect) -> bool {
     !screen.is_degenerate()
         && bounds.x <= screen.x + 1.0
         && bounds.y <= screen.y + 1.0

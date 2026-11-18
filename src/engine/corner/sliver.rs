@@ -25,8 +25,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use super::geometry::{Point, Rect};
-use super::overview::DOCK_LAYER;
+use crate::engine::geometry::{Point, Rect};
+use crate::engine::overview::DOCK_LAYER;
 use super::park::{Corner, MACOS_KEEPS_TITLE, PARK_MARGIN};
 
 /// How far above the visible frame's bottom (or below its top, for a top corner) the zone
@@ -325,7 +325,7 @@ impl PressGate {
 mod tests {
     use super::*;
     use crate::engine::geometry::Size;
-    use crate::engine::park::park_frame_at;
+    use crate::engine::corner::park::park_frame_at;
 
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
     const VISIBLE: Rect = Rect::new(0.0, 30.0, 2560.0, 1410.0);

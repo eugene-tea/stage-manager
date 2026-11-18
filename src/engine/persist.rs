@@ -1224,8 +1224,7 @@ impl Model {
         let windows = &self.stage(active)?.windows;
         let hidden = |id: &WindowId| {
             self.windows.get(id).is_some_and(|w| {
-                let d = self.display(w.meta.display);
-                !w.parked && d.corner_piece(w.meta.frame) && !d.parks(w.meta.frame)
+                !w.parked && self.shows_a_piece(w.meta.display, w.meta.frame) && !self.listed_hidden(w.meta.display, w.meta.frame)
             })
         };
         (!windows.is_empty() && windows.iter().all(hidden)).then_some(active)
@@ -1242,8 +1241,9 @@ impl Model {
         ids.extend(self.children_in(Home::Stage(stage)));
         for id in ids {
             // Owed its saved frame (`saved_size.rs`): shown in front now, so it gets it now.
+            // Just put in from the window list: asked as a window first seen (C-2).
             let stuck = self.owes_saved_size(id)
-                || self.windows.get(&id).is_some_and(|w| self.display(w.meta.display).hides(w.meta.frame));
+                || self.windows.get(&id).is_some_and(|w| self.found_out_of_sight(w.meta.display, w.meta.frame));
             if stuck {
                 self.restore_window(id, actions);
             }
@@ -1266,7 +1266,7 @@ impl Model {
         desktop: Option<u64>,
     ) {
         let display = self.known_display(meta.display);
-        let live_parked = self.display(display).hides(meta.frame);
+        let live_parked = self.found_out_of_sight(display, meta.frame);
         let fit = self.frames_fit(display, desktop);
         let base = if (restore_frames && saved.grade.confident()) || (live_parked && fit) || meta.frame.is_degenerate() {
             saved.frame

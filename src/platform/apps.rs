@@ -21,7 +21,7 @@ use objc2_app_kit::{
     NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
     NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidHideApplicationNotification,
     NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidTerminateApplicationNotification,
-    NSWorkspaceDidUnhideApplicationNotification, NSWorkspaceWillPowerOffNotification,
+    NSWorkspaceDidUnhideApplicationNotification, NSWorkspaceWillLaunchApplicationNotification, NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationName,
@@ -49,6 +49,9 @@ impl AppInfo {
 /// An `NSWorkspace` application event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEvent {
+    /// An app is about to launch (every activation policy: the Apple mode hides a newly
+    /// opened app this early, `platform::apple::launch_hide`, and asks the policy itself).
+    WillLaunch(AppInfo),
     Launched(AppInfo),
     Terminated(AppInfo),
     /// The app became frontmost; the instant is when the main thread got the notice (the
@@ -97,33 +100,40 @@ impl Drop for WorkspaceObservers {
     }
 }
 
-/// A notification name, the event it becomes, and whether only regular apps count.
-type Route = (&'static NSNotificationName, fn(AppInfo) -> AppEvent, bool);
+/// A notification name, the event it becomes, whether only regular apps count, and whether
+/// it changes which apps run (a launch or a quit: [`super::dock::apps_changed`]).
+type Route = (&'static NSNotificationName, fn(AppInfo) -> AppEvent, bool, bool);
 
-/// Observes launch / terminate / activate / hide / unhide on the main queue and calls `sink`
-/// with plain values. All but terminate report regular apps only; terminate reports every app
-/// (the receiver ignores pids it does not know).
+/// Observes will-launch / launch / terminate / activate / hide / unhide on the main queue and
+/// calls `sink` with plain values. All but will-launch and terminate report regular apps only;
+/// those two report every app (the receiver ignores pids it does not know, and the Apple
+/// mode's hide at a launch asks the policy itself).
 pub fn observe_workspace(sink: impl Fn(AppEvent) + 'static) -> WorkspaceObservers {
     let center = NSWorkspace::sharedWorkspace().notificationCenter();
     let sink = std::rc::Rc::new(sink);
     let main_queue = NSOperationQueue::mainQueue();
     // SAFETY: the notification names are valid framework statics.
-    let names: [Route; 5] = unsafe {
+    let names: [Route; 6] = unsafe {
         [
-            (NSWorkspaceDidLaunchApplicationNotification, AppEvent::Launched, true),
-            (NSWorkspaceDidTerminateApplicationNotification, AppEvent::Terminated, false),
-            (NSWorkspaceDidActivateApplicationNotification, |a| AppEvent::Activated(a, Instant::now()), true),
-            (NSWorkspaceDidHideApplicationNotification, AppEvent::Hidden, true),
-            (NSWorkspaceDidUnhideApplicationNotification, AppEvent::Unhidden, true),
+            (NSWorkspaceWillLaunchApplicationNotification, AppEvent::WillLaunch, false, true),
+            (NSWorkspaceDidLaunchApplicationNotification, AppEvent::Launched, true, true),
+            (NSWorkspaceDidTerminateApplicationNotification, AppEvent::Terminated, false, true),
+            (NSWorkspaceDidActivateApplicationNotification, |a| AppEvent::Activated(a, Instant::now()), true, false),
+            (NSWorkspaceDidHideApplicationNotification, AppEvent::Hidden, true, false),
+            (NSWorkspaceDidUnhideApplicationNotification, AppEvent::Unhidden, true, false),
         ]
     };
     let mut tokens = Vec::new();
-    for (name, make, regular_only) in names {
+    for (name, make, regular_only, changes_apps) in names {
         let sink = sink.clone();
         let block = RcBlock::new(move |note: NonNull<NSNotification>| {
             // SAFETY: AppKit passes a live notification for the duration of the block.
             let note = unsafe { note.as_ref() };
             let Some(app) = running_app_of(note) else { return };
+            if changes_apps {
+                // Any app, regular or not: the running apps' paths are read again.
+                super::dock::apps_changed();
+            }
             if regular_only && !is_regular(&app) {
                 return;
             }

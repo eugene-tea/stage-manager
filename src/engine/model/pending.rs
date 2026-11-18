@@ -32,9 +32,9 @@ use std::collections::HashSet;
 
 use super::pool::Scope;
 use super::{Action, DisplayId, Home, Kin, Model, Observation, SpaceId, StageId, WindowId, WindowMeta, WindowRole, WindowState};
-use crate::engine::park::clamp_to_visible;
+use crate::engine::corner::park::clamp_to_visible;
 use crate::engine::persist::{LaunchFrames, LaunchHints, Pending, SavedRole, SavedSpace, SavedWindow, live_key, rematch_on};
-use crate::engine::restore::{Restore, Summary, clamped_at_corner, slot_for};
+use crate::engine::restore::{Restore, Summary, slot_for};
 use crate::engine::stage_area::same_frame;
 use crate::engine::window_match::{Grade, LowRule, Saved, assign};
 
@@ -651,7 +651,7 @@ impl Model {
                 owner.push(i);
             }
         }
-        let parked = self.display(meta.display).parks(meta.frame);
+        let parked = self.seen_hidden(meta);
         let pick = assign(&keys, &[live_key(meta, parked)], LowRule::default()).into_iter().next().flatten()?;
         pick.grade.confident().then(|| owner[pick.saved])
     }
@@ -695,7 +695,7 @@ impl Model {
             }
             self.drop_if_dead(from, &mut actions);
         }
-        let mut assignment = rematch_on(&saved, &moved, |m| self.display(m.display).parks(m.frame));
+        let mut assignment = rematch_on(&saved, &moved, |m| self.seen_hidden(m));
         self.skip_pooled_out(saved.id, &mut assignment);
         let showing = self.active_stage_in(target).is_some_and(|a| self.stage(a).is_some_and(|s| !s.windows.is_empty()));
         if showing {
@@ -749,7 +749,7 @@ impl Model {
         actions: &mut Vec<Action>,
     ) -> Placed {
         let display: DisplayId = self.known_display(meta.display);
-        let live_parked = self.display(display).hides(meta.frame);
+        let live_parked = self.found_out_of_sight(display, meta.frame);
         let sure = grade.confident();
         // Saved frames only on the screen of the saved size they were saved on; there a live
         // frame in a park zone takes the saved one even from a doubtful match. On another it
@@ -861,8 +861,7 @@ impl Model {
         for m in metas {
             self.restore.by_apple += 1;
             self.note_rescore(m);
-            let d = self.display(self.known_display(m.display));
-            if !d.parks(m.frame) && clamped_at_corner(m.frame, d.visible, d.corner) {
+            if self.clamped_at_hiding(self.known_display(m.display), m.frame) {
                 self.restore.corner += 1;
                 tracing::info!(id = m.id.0, bundle = %m.bundle_id, "restore: a window matching no saved one came back clamped against the park corner; left where it is");
             }

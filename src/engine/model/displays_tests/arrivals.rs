@@ -26,6 +26,7 @@ fn arrive_both(e: &mut Env, shown: &[WindowMeta], absent: &[u32], laptop_shown: 
     e.run(a);
 }
 
+both_engines! {
 #[test]
 fn windows_moved_to_another_desktop_are_taken_at_the_second_arrival_with_a_second_screen() {
     // Most of a Desktop's windows moved to the Studio's other Desktop (Mission Control): seen
@@ -78,6 +79,7 @@ fn a_window_on_every_desktop_becomes_sticky_with_a_second_screen() {
     assert!(e.m.is_sticky(WindowId(7)), "on every Desktop of its screen, three times in a row");
     assert_eq!(e.m.window(WindowId(7)).map(|w| w.home), Some(Home::Pinned));
 }
+}
 
 /// The measured desk's laptop given a second Desktop (a notes window 8 in front, a mail
 /// window 9 in a card), then shown its first one again. Returns the second Desktop.
@@ -108,6 +110,7 @@ fn second_listed(e: &Env) -> Vec<WindowMeta> {
     [8u32, 9].iter().map(|id| WindowMeta { frame: e.d.frames[&WindowId(*id)], ..e.m.window(WindowId(*id)).expect("known").meta.clone() }).collect()
 }
 
+both_engines! {
 #[test]
 fn a_focus_held_for_another_screens_desktop_acts_once_that_screen_arrives() {
     // ⌘-Tab to mail, on the laptop's other Desktop: the focus comes before the notice and is
@@ -155,7 +158,7 @@ fn a_desktop_arranged_ahead_on_another_screen_is_settled_by_that_screens_arrival
     assert_ne!(e.space_of(STUDIO), ahead.space);
     let mut settled_early = e.m.clone();
     let undone = settled_early.undo_ahead(&ahead);
-    assert!(undone.iter().any(|a| matches!(a, Action::Park { id, .. } if *id == WindowId(9))), "settled at the Studio's arrival, mail was parked again: {undone:?}");
+    assert!(undone.iter().any(|a| matches!(a, Action::Hide { id } if *id == WindowId(9))), "settled at the Studio's arrival, mail was parked again: {undone:?}");
     let listed = second_listed(&e);
     let a = e.m.arrive(LAPTOP, &listed, &[WindowId(5)], &LaunchHints::default());
     e.run(a);
@@ -211,4 +214,5 @@ fn the_remaining_screen_reported_again_keeps_the_closed_screens_stages_whole() {
     assert_eq!((e.stage_of(6), e.stage_of(5)), (finder, chrome), "the same stages");
     assert_ne!(e.stage_of(5), e.stage_of(9), "Chrome's laptop window keeps its own stage, not its app's stage here");
     assert_eq!(e.m.active_stage(STUDIO), Some(finder), "the laptop's front in front");
+}
 }

@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::park::Corner;
+use super::corner::park::Corner;
 use super::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded};
 use super::vanished::Vanished;
 pub use super::vanished::LOOK_APART;
@@ -410,7 +410,7 @@ mod tests {
     }
 
     fn parked() -> Rect {
-        crate::engine::park::park_frame(crate::engine::geometry::Size::new(600.0, 400.0), SCREEN)
+        crate::engine::corner::park::park_frame(crate::engine::geometry::Size::new(600.0, 400.0), SCREEN)
     }
 
     fn listed(id: u32, pid: i32, bounds: Rect, onscreen: bool, allowed: bool) -> Listed {

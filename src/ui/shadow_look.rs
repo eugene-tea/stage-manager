@@ -230,6 +230,14 @@ pub const REFRESH: f64 = 20.0;
 /// Windows remembered before the cache starts over.
 const CAP: usize = 1024;
 
+/// The most windows with no reading read in one go ([`LookCache::to_read`]): a stage's
+/// windows, never every window at launch or after the system's appearance changed.
+pub const UNREAD_AT_ONCE: usize = 4;
+
+/// A window asked for and not answered yet is not asked again before this (seconds): a
+/// reading takes one listing and one small still, well under a second.
+pub const ASK_WAIT: f64 = 2.0;
+
 /// One window's last reading.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Entry {
@@ -246,6 +254,8 @@ struct Entry {
 pub struct LookCache {
     entries: HashMap<u32, Entry>,
     generation: u64,
+    /// Windows asked for ([`Self::asked`]) and when, until their reading is recorded.
+    asked: HashMap<u32, f64>,
 }
 
 impl LookCache {
@@ -266,10 +276,51 @@ impl LookCache {
         self.entries.get(&id).is_none_or(|e| e.generation != self.generation || now - e.at >= REFRESH)
     }
 
+    /// True when window `id` has no reading of this generation: never read, or read before
+    /// the last appearance change. A snapshot of it would take the system's appearance.
+    pub fn unread(&self, id: u32) -> bool {
+        self.entries.get(&id).is_none_or(|e| e.generation != self.generation)
+    }
+
+    /// Which of `ids` to read at `now` (1.9, round sm-landing: a switch's pictures took the
+    /// system's appearance because one window a capture round was read, and rounds come at
+    /// events only): every one with no reading ([`Self::unread`]), up to `max`; when none is
+    /// unread, the first one due again ([`Self::due`], one at most, as before). A window
+    /// asked for less than [`ASK_WAIT`] ago and not answered is left out.
+    pub fn to_read(&self, ids: &[u32], now: f64, max: usize) -> Vec<u32> {
+        let waiting = |id: &u32| self.asked.get(id).is_some_and(|at| now - at < ASK_WAIT);
+        let mut seen = Vec::new();
+        let unread: Vec<u32> = ids
+            .iter()
+            .copied()
+            .filter(|id| {
+                let fresh = !seen.contains(id);
+                seen.push(*id);
+                fresh && self.unread(*id) && !waiting(id)
+            })
+            .take(max)
+            .collect();
+        if !unread.is_empty() {
+            return unread;
+        }
+        ids.iter().copied().find(|id| self.due(*id, now) && !waiting(id)).into_iter().collect()
+    }
+
+    /// Windows `ids` were asked for at `now` ([`Self::to_read`] leaves them out a while).
+    pub fn asked(&mut self, ids: &[u32], now: f64) {
+        if self.asked.len() >= CAP {
+            self.asked.clear();
+        }
+        for id in ids {
+            self.asked.insert(*id, now);
+        }
+    }
+
     /// Records window `id`'s reading taken in `generation` at `now`; a reading from before
     /// the last appearance change is dropped. No evidence keeps the last look of this
     /// generation (it is not read again before [`REFRESH`]). True when the look changed.
     pub fn record(&mut self, id: u32, generation: u64, look: Option<Look>, now: f64) -> bool {
+        self.asked.remove(&id);
         if generation != self.generation {
             return false;
         }
@@ -292,6 +343,7 @@ impl LookCache {
     /// Forgets window `id` (closed).
     pub fn forget(&mut self, id: u32) {
         self.entries.remove(&id);
+        self.asked.remove(&id);
     }
 }
 
@@ -424,5 +476,32 @@ mod tests {
         assert!(c.record(7, c.generation(), Some(Look { dark: false, key: true }), 33.0));
         c.forget(7);
         assert!(c.due(7, 34.0));
+    }
+
+    /// Windows with no reading are all read in one go (a stage's, at its card's capture,
+    /// at a hover, after a switch), a few at most; with none unread, one due again; a
+    /// window asked for waits for its answer.
+    #[test]
+    fn windows_with_no_reading_are_read_together() {
+        let mut c = LookCache::default();
+        let light = Some(Look { dark: false, key: false });
+        assert_eq!(c.to_read(&[1, 2, 3], 0.0, UNREAD_AT_ONCE), vec![1, 2, 3], "a stage of three, none read: all three");
+        assert_eq!(c.to_read(&[1, 2, 3, 4, 5, 6], 0.0, UNREAD_AT_ONCE), vec![1, 2, 3, 4], "a few at most");
+        assert_eq!(c.to_read(&[1, 1, 2], 0.0, 2), vec![1, 2], "each once");
+        c.asked(&[1, 2], 0.0);
+        assert_eq!(c.to_read(&[1, 2, 3], 1.0, UNREAD_AT_ONCE), vec![3], "asked and not answered: not asked again");
+        assert_eq!(c.to_read(&[1, 2], 1.0 + ASK_WAIT, UNREAD_AT_ONCE), vec![1, 2], "never answered: asked again");
+        let g = c.generation();
+        for id in [1, 2, 3] {
+            c.record(id, g, light, 5.0);
+        }
+        assert!(c.to_read(&[1, 2, 3], 6.0, UNREAD_AT_ONCE).is_empty(), "all read, none due");
+        c.record(4, g, None, 5.0);
+        assert!(!c.unread(4), "read with no evidence counts as read");
+        assert_eq!(c.to_read(&[1, 2, 3], 5.0 + REFRESH, UNREAD_AT_ONCE), vec![1], "none unread: one due again");
+        assert_eq!(c.to_read(&[1, 9], 5.0 + REFRESH, UNREAD_AT_ONCE), vec![9], "an unread one goes before one due again");
+        c.appearance_changed();
+        assert!(c.unread(1));
+        assert_eq!(c.to_read(&[1, 2, 3], 7.0, UNREAD_AT_ONCE), vec![1, 2, 3], "after a change of appearance: all of the stage again");
     }
 }

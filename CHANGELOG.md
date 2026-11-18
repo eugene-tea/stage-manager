@@ -1,5 +1,111 @@
 # Changelog
 
+## 1.9.0 — 2026-11-18
+
+- New mode: `[windows] engine = "spaces"` keeps each hidden stage in a Space of macOS's own
+  instead of the screen's corner. At rest the app and the system together use about a
+  quarter of the CPU the park corner does (about 1.2 % of one core against 4.9 %), and
+  nothing waits in the corner. It is tried at every launch and falls back to the park corner
+  (`"accessibility"`, the default) wherever the trial fails, or for the rest of a run in which
+  a window is not where it was put; the log says which one runs. ⌘Tab, Dock clicks, Desktops,
+  a second display, Quit and a crash bring windows where the park corner does. Read at
+  launch.
+- The cards are solid while the strip is shown over windows, as with Apple's Stage Manager:
+  revealed at the screen's edge over a window that covers it, the cards are no longer tinted by
+  the wallpaper. Over the desktop the wallpaper is still let through.
+- A window dragged toward the strip is taken in as with Apple's Stage Manager: its card is shown
+  next to the pointer once the pointer is within about 290 points of the screen's edge, and it
+  is no longer shown for a window whose left edge reaches the screen's edge, which hides the
+  strip instead and is not dropped into it. The card is no longer shown and hidden over and over
+  while the pointer wavers at the edge of that area.
+- New setting `[windows] apple_stage_manager_on` (`"pause"` or `"integrate"`). With `"integrate"`,
+  Stage Manager follows Apple's Stage Manager while it is on instead of stepping aside: the
+  stage hotkeys and `ctl switch N` bring stage N of Apple's strip to the front, and
+  `ctl state` lists Apple's stages. `"pause"`, the default, keeps the behaviour as it
+  was.
+- With `[windows] apple_stage_manager_on = "integrate"`, `ctl merge N`, `ctl send N`, `ctl new` and the
+  send and new-stage hotkeys move windows between Apple's stages, by a Shift-click well
+  inside a thumbnail as Apple's strip draws it (clear of the thumbnails and app icons drawn
+  over it) or a drag of the title bar onto it; nothing is posted while the
+  user clicks, types or holds a key. A newly opened app that a rule's `current`,
+  `[stages] new_apps_join_current` or Shift wants in the stage in front joins it: the app is
+  hidden as it launches, so Apple's Stage Manager keeps the stage in front, then brought in.
+  The same goes for a running app with no window that opens one as it is activated (a Dock
+  click on Notes or Activity Monitor): it is hidden as it activates, shown again a moment
+  later, and brought in. Finder is left to Apple's Stage Manager. When the app's window shows before the
+  hide takes, the stage that was in front comes back as it was, its windows in their order
+  and in one go, with the app's window on top.
+- New setting `[stages] restore_apple_stages`, on by default. With `[windows] apple_stage_manager_on =
+  "integrate"`, Apple's stages are put back as saved after a restart or a new login, once the
+  reopened windows have shown; under "All at Once" an app's windows stay in one stage.
+  `ctl apple restore` puts back the stages saved when the following started.
+- With `[windows] apple_stage_manager_on = "integrate"`, each screen's stages are followed apart and a
+  stage hotkey or `ctl` command acts on one screen only; stages of a Desktop not shown are
+  kept and left alone; nothing is done while a full-screen app shows. The menu, the welcome
+  and Settings say that Apple's Stage Manager is followed instead of offering to turn it
+  off.
+- A card of several apps spreads its windows as Apple's strip does (fitted to cards measured
+  on Apple's), so a smaller window behind a wider one stays readable; it was hidden behind
+  it. New setting `[strip] card_layout` (`"apple"`, the default, `"stacked"` or
+  `"spread_covered"`, applied when the config file is saved): `"stacked"` keeps the fixed
+  offsets as before; `"spread_covered"` spreads only a card
+  where a window would show less than 30 % of itself. The `[cards] spread_*` keys hold the
+  spread's measured numbers.
+- The strip brought back at the left edge shows its cards flat, facing the screen, at the
+  size they have before the turn, and turns them back as it slides away, as Apple's does
+  (`[reveal] flat`; false keeps them turned). It comes once the pointer rests at the edge: a
+  pointer still moving there no longer brings it.
+- A window tab selected (Terminal, Finder, any app with window tabs) belongs to the stage
+  of its tab group: it takes the place of the tab it hides, and goes with its stage when
+  another stage is chosen. A tab selected was let go with no stage, and selected again it
+  could stay on the Desktop under the next stage.
+- A window tab selected while its stage waits hidden (a tab closed there, or selected by its
+  app) is hidden with the stage and comes back at its tab group's frame, at a stage change
+  and at quit. The tab hidden was put back at quit instead, and the tab selected left in the
+  corner was then put back at the saved frame of another window with its title.
+- Card pictures are taken when a stage leaves for its card, when the strip comes into view
+  and when the pointer reaches a card, no longer every 1.5 seconds, and every window picture
+  comes from the window server directly: much less CPU at rest. `[strip]
+  thumbnail_interval_ms` brings back a refresh timer.
+- Less CPU while nothing happens: the app's housekeeping, which ran four times a second,
+  runs every two seconds once no window, app or click has changed anything for a few
+  seconds (every 0.75 seconds with the park corner while windows are parked), and reads the
+  window list once per round instead of two or three times. A window or an app that closes
+  without the usual notice is still handled, up to two seconds later when nothing else
+  happens.
+- Less CPU in each mode, most of all with Apple's Stage Manager on: what a mode has no use
+  for stops until the mode changes. With the strip following the Dock (`[strip] order =
+  "dock"`), the running apps are looked up only after an app opens or quits, not every two
+  seconds. While no strip shows (hidden, or Apple's Stage Manager on) the desktop picture
+  behind the cards is not read (nor while the strip has no card) and mouse moves are not
+  followed; the strip shown again keeps its last pictures until new ones, taken at once,
+  land. The event taps for parked windows' edges and for minimizing run only while there is
+  something to catch, so presses and keys no longer pass through the app while Apple's
+  Stage Manager is on, while no window is parked, or with `minimize_to_strip = false`. The
+  corner patch is put away when Apple's Stage Manager comes on. `ctl state` counts what is
+  asked of macOS since the launch (`costs`).
+- A newly opened app gets its own stage as its first window shows. The window sat over
+  the stage shown for up to a second first: an app just launched from the Dock is not ready
+  to be watched at its first ask and was asked again a second later, and a window that
+  shows a moment after macOS announces it waited for the next once-a-second look.
+- A window's picture in a switch takes the shadow of the appearance its app draws it in
+  again, for every window of a stage: since card pictures are taken at events, only one
+  window was read each time, and the others flew with the system's shadow (a dark window on
+  a light system landed with a light shadow that flipped to its own).
+- An app brought forward with ⌘Tab or the Dock brings its stage also when an earlier stage
+  change to that app never made it frontmost and another stage has come in front since: the
+  activation was taken for the late answer to that earlier change for up to five seconds.
+- Just after the app is started, the first switch to another Desktop stays there: the app
+  macOS brings forward as that Desktop slides in was taken for an app of the Desktop being
+  left, its stage there was brought forward, and the screen slid back.
+- Card pictures follow a change between light and dark appearance: every card's pictures
+  are taken again shortly after the change, and again a few seconds later for apps that
+  redraw late. Cards kept the old appearance until the pointer reached them or their stage
+  was shown.
+- Stages come back after Apple's Stage Manager has been turned on and off again: they are
+  set aside while Apple's arranges the windows, and each window goes back to its stage and
+  its saved frame. Every stage came back as one stage per app, at the frames Apple's left.
+
 ## 1.8.5 — 2026-11-12
 
 - Quit (the menu's, or ⌘Q) chosen at a moment the app is busy is tried again for a few

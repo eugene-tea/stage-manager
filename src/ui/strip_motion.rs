@@ -6,7 +6,11 @@
 //!   `[animation] snapshot_interval_ms`, and at once when the pointer reaches a card or presses
 //!   one, so they are fresh when a switch starts), plus the hovered card's windows. A window's
 //!   last snapshot before it parks stays in the cache (`snapshot_cache_mb`) and is what grows
-//!   back when its stage returns; a card's thumbnail stands in when there is none. With
+//!   back when its stage returns; a card's thumbnail stands in when there is none. Under an
+//!   engine that hides in one step ([`strip_model::StripSnapshot::pictures_at_switch`]: the Spaces
+//!   engine) nothing is captured on the interval: the controller captures the outgoing
+//!   windows at the switch, before it sends the transition, and they reach the cache as any
+//!   other snapshot ([`crate::platform::switch_shots`]). With
 //!   captures off (`[strip] capture = false`, `STAGE_MANAGER_NO_CAPTURE`) or refused by
 //!   macOS, plain ghosts (a light card) move instead.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
@@ -68,6 +72,7 @@ use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2_app_kit::{NSEvent, NSEventMask};
@@ -76,10 +81,13 @@ use objc2_foundation::{MainThreadMarker, NSRunLoop, NSRunLoopCommonModes, NSTime
 
 use super::{Ghost as CardGhost, Strip, with_strip_of};
 use crate::config::SnapshotShadow;
-use crate::engine::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
+use crate::engine::corner::corner_patch::{CoverPicture, HoldFacts, SwitchCover, cover_holds};
 use crate::engine::geometry::{Point, Rect, Size};
+use crate::engine::landing_order;
 use crate::platform::capture::{self, Capturer, Picture, Target};
+use crate::platform::window_engine::{Stretch, StretchDone, StretchNote};
 use crate::platform::windows;
+use crate::ui::landing_math;
 use crate::ui::motion_math::{
     Plane, SnapshotCache, Spring, Toward, path_settle_time, settle_time, shows_at, shrink_spring,
     switch_spring, travel, unveil_time,
@@ -89,6 +97,7 @@ use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, GlassLook, 
 use crate::ui::shadow_math::handover;
 use crate::ui::strip_layout::CardLayout;
 use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, ShadowReport, StripEvent, Transition, TransitionReport};
+use crate::ui::window_drop;
 use crate::ui::window_shadow::{self, DEFAULT_CORNER, WindowShadow};
 
 /// The interval used when `snapshot_interval_ms = 0` (captures only on demand).
@@ -126,6 +135,18 @@ const LATE_MAX: f64 = 0.4;
 /// now the switch's focus has made it key and its app has redrawn it (Mail took its activation
 /// ~130 ms in). The new picture cross-fades in while the snapshot still grows.
 const RECAPTURE_AFTER: f64 = 0.18;
+/// The least of a flight a window's last stretch leaves to fly (seconds): less, and its picture
+/// lands as before (round sm-landing).
+const STRETCH_MIN: f64 = 0.05;
+/// A stretch's handover comes at least this long before the unveil (seconds), else its
+/// picture lands as before: the controller shows the window at the unveil.
+const STRETCH_BEFORE_UNVEIL: f64 = 0.02;
+/// How often a stretch's transform is set (seconds): 120 a second, a step a frame or finer
+/// (S4: 144 steps at 8.33 ms, none late, ~20 µs a call).
+const STRETCH_STEP: f64 = 1.0 / 120.0;
+/// How near the window server must list an incoming window to its frame for it to fly its
+/// last stretch (points): it lands there with no move.
+const LISTED_SLACK: f64 = 0.5;
 /// How long the incoming snapshots take to fade out at the landing (seconds): what still
 /// differs from the window under them (a look captured before, the window's own late redraw)
 /// melts instead of flipping in one frame. They sit within a tenth of a point of their windows
@@ -190,6 +211,27 @@ struct Running {
     /// The landing was due once already (its outgoing snapshots settled): a landing moved
     /// earlier needs a timer of its own.
     settled: bool,
+    /// The incoming pictures in panels of their own (round sm-landing: [`Running::order`]),
+    /// each group with its panel's key.
+    sides: Vec<(u32, GhostGroup)>,
+    /// The arriving stage's windows front to back as they end ([`Transition::order`]).
+    order: Vec<u32>,
+    /// Its windows on screen at their place: shown in place already, or flying the last
+    /// stretch themselves. Each picture still flying passes under the nearest one in front
+    /// of it ([`landing_math::anchors`]).
+    real: Vec<u32>,
+    /// The window the overlay itself is under ([`Transition::under`]).
+    under: Option<u32>,
+    /// The handover tolerance when the incoming windows fly their last stretch themselves
+    /// (the Spaces engine and the `live` variants, [`landing_math::Landing`]): each picture is in a panel
+    /// of its own then, ordered again as windows take over.
+    live: Option<f64>,
+    /// When the motion started (the flights' clock for their stretches).
+    started: Option<Instant>,
+    /// Incoming windows whose stretch is planned, and those that took over from their
+    /// picture ([`Strip::stretch_note`]).
+    stretched: Vec<u32>,
+    taken: Vec<u32>,
 }
 
 /// A switch's incoming motion before it starts: everything starts on one frame, as Apple's
@@ -214,6 +256,8 @@ struct Rise {
 struct Fading {
     /// Their group (removed with them).
     group: GhostGroup,
+    /// Their side panels' groups (round sm-landing), fading with it.
+    sides: Vec<GhostGroup>,
     /// Kept until the group goes.
     _ghosts: Vec<Ghost>,
     timer: Retained<NSTimer>,
@@ -312,6 +356,9 @@ impl Motion {
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
         f.group.remove();
+        for g in &f.sides {
+            g.remove();
+        }
         objc2_quartz_core::CATransaction::commit();
         if self.overlay_idle() {
             self.overlay.hide();
@@ -663,6 +710,8 @@ impl Strip {
             return;
         }
         self.place_overlay();
+        // A side panel left by a transition cut short goes (its pictures went with it).
+        self.motion.overlay.clear_sides();
         let under = t.under;
         let style = self.style.animation.clone();
         let spring = self.spring();
@@ -718,6 +767,7 @@ impl Strip {
                             at_unveil: None,
                             shown_ms: None,
                             handover_ms: None,
+                            stretch_ms: None,
                             shadow: Some(note),
                         });
                         tracing::debug!(id, tile = ?m.tile, start = %at_rect, "a minimized window's picture comes out of its Dock tile");
@@ -773,6 +823,7 @@ impl Strip {
                 at_unveil: None,
                 shown_ms: None,
                 handover_ms: None,
+                stretch_ms: None,
                 shadow: shadow_note,
             });
             waiting.push((ghosts.len(), end, glass, toward));
@@ -783,7 +834,21 @@ impl Strip {
             }
         }
         // The incoming snapshots go into one group, above the outgoing ones (made with the first).
-        // They start growing with the outgoing ones ([`Rise`]).
+        // They start growing with the outgoing ones ([`Rise`]). Ordered by where their windows
+        // end (the test switch's variants, round sm-landing): a picture whose window ends
+        // behind a real window goes in a panel under it; flying the last stretch live, each in
+        // a panel of its own, ordered again as windows take over.
+        let landing = landing_math::Landing::current();
+        let live = landing.live().filter(|_| crossfade.is_none() && t.late.is_empty() && !t.pictures_land && crate::platform::window_engine::current().lands_live());
+        if t.pictures_land && landing.live().is_some() {
+            tracing::debug!(id = t.id, "transition: the windows land behind their pictures: another app's window would stay in front of the key's until its focus");
+        }
+        let ordered = landing.ordered() && crossfade.is_none();
+        let incoming_ids: Vec<u32> = t.incoming.iter().map(|w| w.window.id).collect();
+        let anchor_of: HashMap<u32, Option<u32>> = if ordered { landing_math::anchors(&t.order, &t.in_place, &incoming_ids).into_iter().collect() } else { HashMap::new() };
+        let rank_of = |w: u32| t.order.iter().position(|x| *x == w).unwrap_or(t.order.len() + incoming_ids.iter().position(|x| *x == w).unwrap_or(0));
+        let mut sides: Vec<(u32, GhostGroup)> = Vec::new();
+        let mtm = MainThreadMarker::new();
         let mut incoming: Option<GhostGroup> = None;
         let mut rising = Vec::new();
         for w in &t.incoming {
@@ -798,13 +863,29 @@ impl Strip {
             // fades in there (its group, from transparent).
             let (start, glass, amount) = if crossfade.is_some() { (end, None, 1.0) } else { (start, glass, 0.0) };
             let (shadow, shadow_note) = self.ghost_shadow(id, image.as_ref(), w.window.frame, key_in == Some(id), amount);
-            let group = incoming.get_or_insert_with(|| {
-                let g = self.motion.overlay.group();
-                if crossfade.is_some() {
-                    g.set_opacity(0.0);
-                }
-                g
-            });
+            // Its side panel (key, the window it goes under), when it needs one.
+            let below = landing_math::side_of(anchor_of.get(&id).copied().flatten(), under);
+            let side = match (live, mtm) {
+                (Some(_), Some(_)) => Some((id, rank_of(id), below)),
+                (None, Some(_)) => below.map(|b| (b, rank_of(b), Some(b))),
+                _ => None,
+            };
+            if let (Some((key, rank, below)), Some(mtm)) = (side, mtm)
+                && !sides.iter().any(|(k, _)| *k == key)
+            {
+                tracing::debug!(id, key, ?below, "transition: an incoming picture flies in a panel of its own, ordered by where its window ends");
+                sides.push((key, self.motion.overlay.side_group(mtm, key, rank, below)));
+            }
+            let group = match side.and_then(|(key, ..)| sides.iter().find(|(k, _)| *k == key)) {
+                Some((_, g)) => g,
+                None => incoming.get_or_insert_with(|| {
+                    let g = self.motion.overlay.group();
+                    if crossfade.is_some() {
+                        g.set_opacity(0.0);
+                    }
+                    g
+                }),
+            };
             let ghost = self.motion.overlay.ghost(id, image.as_ref(), start, &shadow, 1.0, Some(group));
             // From its card's look.
             ghost.set_glass(glass.as_ref(), 1.0);
@@ -824,6 +905,7 @@ impl Strip {
                 at_unveil: None,
                 shown_ms: None,
                 handover_ms: None,
+                stretch_ms: None,
                 shadow: Some(shadow_note),
             });
             ghosts.push(ghost);
@@ -831,9 +913,10 @@ impl Strip {
         }
         self.fade_in_cards(&fade_in);
         if ghosts.is_empty() {
-            for g in incoming.iter().chain(&outgoing) {
+            for g in incoming.iter().chain(&outgoing).chain(sides.iter().map(|(_, g)| g)) {
                 g.remove();
             }
+            self.motion.overlay.clear_sides();
             strip_model::cover(t.id, cover);
             return;
         }
@@ -955,6 +1038,14 @@ impl Strip {
                 shown_land: None,
                 final_land: None,
                 settled: false,
+                sides,
+                order: t.order.clone(),
+                real: t.in_place.clone(),
+                under,
+                live,
+                started: None,
+                stretched: Vec::new(),
+                taken: Vec::new(),
             });
         if rises_now {
             self.start_motion(id, false);
@@ -1039,6 +1130,10 @@ impl Strip {
                     } else if off > 0.25 {
                         g.spring_to(to, spring, Toward::Window);
                         g.spring_shadow(1.0, spring);
+                        // Its stretch was planned on the path it left: no longer wanted.
+                        if r.stretched.contains(window) && !r.taken.contains(window) {
+                            crate::platform::window_engine::current().cancel_stretch(*window);
+                        }
                     }
                 }
             }
@@ -1055,6 +1150,22 @@ impl Strip {
 
     /// The outgoing windows of transition `id` have parked (the controller's note): the motion
     /// starts.
+    /// Window `window` of transition `id`'s arriving stage shows in place only now
+    /// ([`super::strip_model::StripSnapshot::under_now`]): while that transition runs, the
+    /// overlay goes just under it, so the snapshots still moving pass behind it (S3b: the
+    /// stage left behind shrank over a just-opened app's window let out mid-motion).
+    pub(super) fn shown_in_place(&mut self, id: u64, window: u32) {
+        if self.motion.running.as_ref().is_none_or(|r| r.id != id) {
+            return;
+        }
+        tracing::debug!(id, window, "transition: a window shows in place mid-motion; the snapshots pass under it");
+        self.motion.overlay.show_under(Some(window));
+        if let Some(r) = self.motion.running.as_mut().filter(|r| r.live.is_some() && !r.real.contains(&window)) {
+            r.real.push(window);
+            self.reanchor(id);
+        }
+    }
+
     pub(super) fn outgoing_parked(&mut self, id: u64) {
         self.outgoing_parked_as(id, false);
     }
@@ -1143,6 +1254,7 @@ impl Strip {
             }
         }
         let started = Instant::now();
+        r.started = Some(started);
         r.unveil_at = rise.unveil.map(|u| started + Duration::from_secs_f64(u));
         r.lands_after = rise.unveil.map(|u| started + Duration::from_secs_f64(u + rise.wait + AFTER_UNVEIL));
         if let Some(u) = rise.unveil.filter(|_| rise.late) {
@@ -1160,11 +1272,153 @@ impl Strip {
         }
         let outgoing = r.waiting.len();
         let motion_ms = started.saturating_duration_since(r.drawn_at).as_millis() as u64;
+        if let Some(tolerance) = r.live {
+            let windows: Vec<u32> = rise.ghosts.iter().filter_map(|(i, ..)| r.ghosts.get(*i).map(|g| g.window)).collect();
+            self.plan_stretches(id, &windows, tolerance);
+        }
         tracing::debug!(id, motion_ms, waited_out, outgoing, incoming = rise.ghosts.len(), "transition: the motion starts, the outgoing and the incoming snapshots on one frame");
         strip_model::update_transition(id, |t| {
             t.motion_ms = Some(motion_ms);
             t.motion_waited_out = Some(waited_out);
         });
+    }
+
+    /// Plans the last stretch of transition `id`'s incoming `windows` (the live variants under
+    /// the Spaces engine, round sm-landing): each whose picture flies on a path whose flat
+    /// drawing stays within `tolerance` points of it for good from some moment on, with at
+    /// least [`STRETCH_MIN`] left, and whose window is listed at its frame (a window to be
+    /// moved there first lands as before), hands its flight's transforms from then on to the
+    /// engine ([`crate::platform::window_engine::WindowEngine::fly_stretch`]); the engine tells
+    /// back ([`Self::stretch_note`]).
+    fn plan_stretches(&mut self, id: u64, windows: &[u32], tolerance: f64) {
+        let display = self.display;
+        let origin = self.motion.overlay.origin();
+        let engine = crate::platform::window_engine::current();
+        let listed = windows::describe(windows);
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        // The stretches first, then their ranks among them (round landing-order): they fly
+        // together, shown, stepped and landed back to front.
+        let mut planned: Vec<(Stretch, [f64; 3])> = Vec::new();
+        let mut candidates = Vec::new();
+        for &w in windows {
+            let Some(frame) = r.arrived.iter().find(|(a, _)| *a == w).map(|(_, f)| *f) else { continue };
+            let Some((flown, flight_started)) = r.ghosts.iter().find(|g| g.window == w).and_then(|g| g.flown()) else { continue };
+            if !listed.iter().any(|l| l.id == w && travel(l.bounds, frame) <= LISTED_SLACK) {
+                tracing::debug!(id, window = w, %frame, "transition: the window is not where it lands; its picture lands");
+                continue;
+            }
+            let Some(at) = landing_math::handover_time(&flown, tolerance, STRETCH_MIN) else {
+                tracing::debug!(id, window = w, "transition: no stretch to fly; its picture lands");
+                continue;
+            };
+            // The controller shows the window at the unveil: a handover after it never comes.
+            let handover = flight_started + Duration::from_secs_f64(at);
+            let unveils_first = |h: Instant| r.unveil_at.is_some_and(|u| h + Duration::from_secs_f64(STRETCH_BEFORE_UNVEIL) >= u);
+            if unveils_first(handover) {
+                tracing::debug!(id, window = w, handover_ms = (at * 1000.0).round() as u64, "transition: the unveil comes before the stretch would; its picture lands");
+                continue;
+            }
+            candidates.push((w, frame, flown, flight_started, at));
+        }
+        // Handed over back to front (`landing_order::handovers_back_first`): a window waits
+        // for those behind it to take over, unless that wait would meet the unveil.
+        let ids: Vec<u32> = candidates.iter().map(|c| c.0).collect();
+        let ranks = landing_order::ranks(&r.order, &ids);
+        let clock = candidates.iter().map(|c| c.3).min();
+        let own: Vec<(usize, f64)> = candidates
+            .iter()
+            .zip(&ranks)
+            .map(|(c, (_, rank))| (*rank, clock.map_or(c.4, |k| c.3.duration_since(k).as_secs_f64() + c.4)))
+            .collect();
+        let moved = landing_order::handovers_back_first(&own);
+        for ((w, frame, flown, flight_started, own_at), later) in candidates.into_iter().zip(moved) {
+            let since_clock = clock.map_or(0.0, |k| flight_started.duration_since(k).as_secs_f64());
+            let later_at = (later - since_clock).max(own_at);
+            let unveils_first = |a: f64| r.unveil_at.is_some_and(|u| flight_started + Duration::from_secs_f64(a + STRETCH_BEFORE_UNVEIL) >= u);
+            let at = if later_at > own_at && !unveils_first(later_at) { later_at } else { own_at };
+            if at > own_at {
+                tracing::debug!(id, window = w, own_ms = (own_at * 1000.0).round() as u64, handover_ms = (at * 1000.0).round() as u64, "transition: the window takes over after the windows behind it");
+            }
+            let steps: Vec<(Instant, landing_math::Affine)> = landing_math::stretch(&flown, origin, frame, at, STRETCH_STEP)
+                .into_iter()
+                .map(|(t, m)| (flight_started + Duration::from_secs_f64(t), m))
+                .collect();
+            let miss = landing_math::flat_miss(&flown.drawn_at(at));
+            planned.push((Stretch { window: w, frame, steps, rank: 0, convoy: None }, [at, flown.duration, miss]));
+        }
+        let ids: Vec<u32> = planned.iter().map(|p| p.0.window).collect();
+        let ranks = landing_order::ranks(&r.order, &ids);
+        let convoy = landing_order::convoy_for(planned.len());
+        for ((mut stretch, [at, duration, miss]), (w, rank)) in planned.into_iter().zip(ranks) {
+            stretch.rank = rank;
+            stretch.convoy = convoy.clone();
+            let done: StretchDone = std::sync::Arc::new(move |window, note| {
+                DispatchQueue::main().exec_async(move || {
+                    // The controller hears every end, its transition still running or not:
+                    // a window that landed is focused again there (round S7b).
+                    if let Some(landed) = note.ended() {
+                        strip_model::emit(StripEvent::StretchEnded { id, window, landed });
+                    }
+                    with_strip_of(display, |s| s.stretch_note(id, window, note));
+                });
+            });
+            let n = stretch.steps.len();
+            if engine.fly_stretch(stretch, done) {
+                tracing::debug!(id, window = w, rank, handover_ms = (at * 1000.0).round() as u64, flight_ms = (duration * 1000.0).round() as u64, miss = format!("{miss:.2}"), steps = n, "transition: the window flies the last stretch itself");
+                r.stretched.push(w);
+            } else if let Some(c) = &convoy {
+                // Never planned: nothing in front waits for it.
+                c.mark(rank, landing_order::Leg::Gone);
+            }
+        }
+    }
+
+    /// What became of incoming window `window`'s stretch in transition `id` (the engine's
+    /// note): taken over, its picture goes (its side panel with it) and the pictures still
+    /// flying are ordered again around it; not taken, its picture lands as before.
+    pub(super) fn stretch_note(&mut self, id: u64, window: u32, note: StretchNote) {
+        let display = self.display;
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else {
+            tracing::debug!(id, window, ?note, "transition: a stretch's note after its transition");
+            return;
+        };
+        match note {
+            StretchNote::Shown => {
+                for g in r.ghosts.iter().filter(|g| g.window == window) {
+                    g.remove();
+                }
+                r.taken.push(window);
+                if !r.real.contains(&window) {
+                    r.real.push(window);
+                }
+                r.unshown.retain(|w| *w != window);
+                let now = Instant::now();
+                let stretch_ms = r.started.map(|s| now.saturating_duration_since(s).as_millis() as u64);
+                tracing::debug!(id, window, stretch_ms, "transition: the window took over from its picture");
+                strip_model::update_transition(id, |t| {
+                    for g in t.ghosts.iter_mut().filter(|g| !g.outgoing && g.window == window) {
+                        g.stretch_ms = stretch_ms;
+                    }
+                });
+                Self::replan_landing(r, now, display);
+                self.motion.overlay.drop_side(window);
+                self.reanchor(id);
+            }
+            StretchNote::Skipped(why) => tracing::debug!(id, window, why, "transition: the window did not take over; its picture lands"),
+            StretchNote::Landed => tracing::debug!(id, window, "transition: the window landed on its Desktop"),
+            StretchNote::Stopped => tracing::debug!(id, window, "transition: the window's stretch was stopped"),
+        }
+    }
+
+    /// Orders transition `id`'s incoming pictures still flying in panels of their own again:
+    /// each just under the nearest real window in front of it ([`Running::real`]).
+    fn reanchor(&mut self, id: u64) {
+        let Some(r) = self.motion.running.as_ref().filter(|r| r.id == id) else { return };
+        let flying: Vec<u32> = r.sides.iter().map(|(k, _)| *k).filter(|k| !r.taken.contains(k) && r.ghosts.iter().any(|g| g.window == *k)).collect();
+        let moves: Vec<(u32, Option<u32>)> = landing_math::anchors(&r.order, &r.real, &flying).into_iter().map(|(p, a)| (p, landing_math::side_of(a, r.under))).collect();
+        for (picture, below) in moves {
+            self.motion.overlay.anchor_side(picture, below);
+        }
     }
 
     /// Transition `id`'s incoming snapshots are within a point of their windows as shown:
@@ -1345,6 +1599,12 @@ impl Strip {
         self.motion.capturer.recapture(&[key]);
     }
 
+    /// Every kept snapshot taken again as soon as the current round ends (the appearance
+    /// changed: [`super::pictures_changed`]).
+    pub(super) fn capture_snapshots_again(&mut self) {
+        self.motion.capturer.capture_now();
+    }
+
     /// Transition `id` has landed: the snapshots go and the held cards show, in one frame
     /// (the incoming snapshots fade out over their windows, [`LANDING_FADE`]); not before its
     /// incoming windows show under their snapshots (else it looks again then).
@@ -1398,6 +1658,12 @@ impl Strip {
         let display = self.display;
         let Some(mut r) = self.motion.running.take() else { return };
         self.capturer.hold_until(None);
+        // Landed: the looks of its windows that have none are read now, off the motion (a
+        // picture with no reading takes the system's appearance; round sm-landing).
+        if landed {
+            let windows: Vec<u32> = r.ghosts.iter().map(|g| g.window).filter(|w| *w != 0).collect();
+            capture::read_looks(&windows);
+        }
         for t in &r.timers {
             t.invalidate();
         }
@@ -1423,6 +1689,7 @@ impl Strip {
         let (fade, gone): (Vec<Ghost>, Vec<Ghost>) =
             std::mem::take(&mut r.ghosts).into_iter().partition(|g| landed && g.grouped() && arrived.iter().any(|(w, _)| *w == g.window));
         let group = r.incoming.take();
+        let sides: Vec<GhostGroup> = std::mem::take(&mut r.sides).into_iter().map(|(_, g)| g).collect();
         objc2_quartz_core::CATransaction::begin();
         objc2_quartz_core::CATransaction::setDisableActions(true);
         for g in gone.iter().chain(&r.corner) {
@@ -1431,6 +1698,18 @@ impl Strip {
         if let Some(g) = r.outgoing.take() {
             g.remove();
         }
+        // The side panels' pictures fade with the overlay's (or go at once).
+        let sides = if fade.is_empty() {
+            for g in &sides {
+                g.remove();
+            }
+            Vec::new()
+        } else {
+            for g in &sides {
+                g.fade_out(LANDING_FADE);
+            }
+            sides
+        };
         let group = match group {
             Some(g) if !fade.is_empty() => {
                 g.fade_out(LANDING_FADE);
@@ -1440,6 +1719,8 @@ impl Strip {
                 g.remove();
                 None
             }
+            // Every incoming picture in a side panel: the first side group stands for the
+            // landing's fade (the others go with it).
             None => None,
         };
         for stage in &r.held {
@@ -1448,16 +1729,27 @@ impl Strip {
             }
         }
         objc2_quartz_core::CATransaction::commit();
+        let (group, sides) = match group {
+            Some(g) => (Some(g), sides),
+            None => {
+                let mut sides = sides;
+                let first = (!sides.is_empty()).then(|| sides.remove(0));
+                (first, sides)
+            }
+        };
         if let Some(group) = group {
             // One landing fades at a time: an older one still fading goes now.
             if let Some(old) = self.motion.fading.take() {
                 old.timer.invalidate();
                 old.group.remove();
+                for g in &old.sides {
+                    g.remove();
+                }
             }
             let timer = after(LANDING_FADE, move || {
                 with_strip_of(display, |s| s.motion.drop_fading());
             });
-            self.motion.fading = Some(Fading { group, _ghosts: fade, timer });
+            self.motion.fading = Some(Fading { group, sides, _ghosts: fade, timer });
         }
         if let Some((ghost, facts, ghost_screen)) = hold {
             tracing::debug!(id = r.id, cover = %facts.cover, "transition: landed; the corner's cover stays until the corner patch shows");
@@ -1497,7 +1789,8 @@ impl Strip {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
         let a = self.style.animation.clone();
-        let interval = (a.snapshot_interval_ms > 0).then_some(a.snapshot_interval_ms);
+        // Pictures taken at the switch (the Spaces engine): none on a timer.
+        let interval = (a.snapshot_interval_ms > 0 && !self.snapshot.pictures_at_switch).then_some(a.snapshot_interval_ms);
         if self.motion.interval_ms != Some(interval.unwrap_or(0)) {
             self.motion.interval_ms = Some(interval.unwrap_or(0));
             self.motion.capturer.set_interval(interval.map_or(ON_DEMAND, Duration::from_millis));
@@ -1606,14 +1899,30 @@ impl Strip {
         }
         self.motion.cache.insert(id, picture, bytes);
         strip_model::publish_snapshots(self.display, self.motion.cache.ids());
+        strip_model::note_snapshot(id);
         if dragged == Some((true, false)) {
             tracing::debug!(window = id, "card drag: the window's full-size snapshot arrived; the ghost turns into the window");
             self.mouse_dragged();
         }
     }
 
-    /// While a window is dragged with the pointer over the strip column (`over`, global), its
-    /// card follows the pointer above everything; elsewhere it goes.
+    /// Where the button went down on the dragged window (review R1-ui 7), else where the
+    /// pointer was when the strip first heard of the drag (global).
+    fn window_drag_grab(&self) -> Option<Point> {
+        let w = self.snapshot.window_drag?;
+        self.snapshot.window_drag_grab.or_else(|| self.motion.drag_seen.filter(|s| s.0 == w.id).map(|s| s.1))
+    }
+
+    /// The dragged window's frame with the pointer at `p` (global), moved from its frame at the
+    /// press with the pointer ([`window_drop::live_frame`]); `None` with no window dragged.
+    pub(super) fn dragged_frame(&self, p: Point) -> Option<Rect> {
+        let w = self.snapshot.window_drag?;
+        Some(window_drop::live_frame(w.frame, self.window_drag_grab()?, p))
+    }
+
+    /// While the strip takes the dragged window (`over`: the pointer, global;
+    /// [`window_drop::taken_in`]), its card follows the pointer above everything; elsewhere
+    /// it goes.
     pub(super) fn window_drag_card(&mut self, over: Option<Point>) {
         let (Some(p), Some(w)) = (over, self.snapshot.window_drag) else {
             if self.motion.window_card.take().is_some_and(|c| {
@@ -1628,9 +1937,9 @@ impl Strip {
         let m = self.m().clone();
         // The grab point: where the button went down on the window (review R1-ui 7), else
         // where the pointer was when the strip first heard of the drag.
-        let seen = self.snapshot.window_drag_grab.unwrap_or_else(|| self.motion.drag_seen.filter(|s| s.0 == w.id).map_or(p, |s| s.1));
+        let seen = self.window_drag_grab().unwrap_or(p);
         let f = w.frame;
-        let grab = if f.w > 1.0 && f.h > 1.0 { ((seen.x - f.x) / f.w, (seen.y - f.y) / f.h) } else { (0.5, 0.05) };
+        let grab = window_drop::grab_share(f, seen);
         let corner = self.style.cards.corner_radius * m.k;
         if self.motion.window_card.as_ref().is_none_or(|c| c.window != w.id) {
             // The card goes above every window: a cover held over the corner, and landed

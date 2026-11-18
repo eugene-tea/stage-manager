@@ -53,12 +53,13 @@ use std::time::{Duration, Instant};
 
 use super::ax::AxElement;
 use super::safety::{self, guarded};
-use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, session, windows};
+use super::{ctl, enhanced_ui, handoff, hidden_tabs, observe, paths, session, window_engine, windows};
+use crate::engine::geometry::Rect;
 use crate::engine::guard_watch::{Event, LockSeen, Look, Release, Watch, Waiting};
 use crate::engine::handoff::{Answer, Offering};
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::logout_watch;
-use crate::engine::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded};
+use crate::engine::recovery::{Known, Listed, Registered, ScanDisplays};
 use crate::logbook::UNCLEAN_EXIT;
 use crate::logbook::counters::{self, Count};
 
@@ -253,6 +254,9 @@ pub fn run(args: &[String]) -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let file = safety::read_parked_file(parent as u32);
+    // Its windows come back the way the app hid them: the engine the file names is this
+    // process's from here on (the watch and its scans ask `window_engine::current`).
+    window_engine::install(window_engine::of(file.engine));
     // An unclean quit at a logout (round logout-cancel): the cancel is listened for from the
     // exit on, through the recovery watch, then waited for as after a clean quit.
     let listen = logout_watch::after_exit(None, file.logout).listen;
@@ -265,18 +269,12 @@ pub fn run(args: &[String]) -> ExitCode {
             "guardian: the app quit for a logout, restart or shutdown with windows still away; listening for a cancel while they are brought back (one opens Stage Manager again)"
         );
     }
-    // The park zone sits above a bottom Dock: the app's visible frame, not a guess.
-    match file.visible {
-        Some(v) => safety::assume_visible_frame(v),
-        None => tracing::warn!("guardian: the app left no visible frame; guessing one (a Dock at the bottom may hide parked windows from the scan)"),
-    }
-    // Windows may sit at any corner the app parked them in this run, on any of its screens.
-    safety::assume_corners(&file.corners);
-    safety::assume_zones(&file.zones);
+    // Where the app hid its windows, as its file says it (the Corner engine: its park zones).
+    window_engine::current().assume(&file);
     let registered = file.windows;
     tracing::warn!(parent, registered = registered.len(), visible = ?file.visible, corners = ?file.corners, "guardian: {UNCLEAN_EXIT}; running the recovery scan");
     let scope = scan_scope(&registered);
-    let (r, _) = safety::recovery_scan_with("guardian", &scope);
+    let (r, _) = window_engine::current().recover("guardian", &scope);
     tracing::warn!(checked = r.checked, restored = r.restored, failed = r.failed, "guardian: recovery scan done");
     install_stop_handlers();
     // The window server lists moved windows at their new frames a moment later.
@@ -346,7 +344,7 @@ fn scan_scope(registered: &[Registered]) -> safety::ScanScope {
 /// The watch after the scan: see the module docs. `pause` waits between two passes (and
 /// listens for a logout's cancel meanwhile, after an unclean quit at a logout).
 fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope, pause: &mut dyn FnMut(Duration)) {
-    let mut w = Watch::new(registered);
+    let mut w = Watch::new(registered).run_by(window_engine::current().kind());
     let mut reported: Option<Vec<(u32, bool)>> = None;
     let mut attempts: HashMap<u32, Attempts> = HashMap::new();
     let mut asked: Option<Instant> = None;
@@ -357,7 +355,7 @@ fn watch(parent: u32, registered: &[Registered], scope: &safety::ScanScope, paus
         let sig = STOP_SIGNAL.load(Ordering::SeqCst);
         if sig != 0 {
             tracing::warn!(signal = sig, "guardian: told to stop; one last scan");
-            let (r, _) = safety::recovery_scan_with("guardian: stopping", scope);
+            let (r, _) = window_engine::current().recover("guardian: stopping", scope);
             tracing::warn!(restored = r.restored, failed = r.failed, "guardian: stopped");
             return;
         }
@@ -622,6 +620,11 @@ pub(crate) fn reach(
 ) {
     // Each app's enhanced UI off once for all the windows brought back (round enhanced-ui).
     let _quiet = enhanced_ui::Batch::open();
+    let engine = window_engine::current();
+    // Whether a window is still away is the watch's engine's to say (the app's watch of taken
+    // windows asks the park corner's, the review of 1.9, C-3); the scan is the running one's.
+    let kind = w.engine();
+    let stranded = |f: Rect, x: &Waiting| kind.stranded(f, displays, x.known());
     let mut scanned: Vec<Waiting> = Vec::new();
     for x in windows {
         let a = attempts.entry(x.id).or_default();
@@ -638,7 +641,7 @@ pub(crate) fn reach(
             }
         };
         match element.frame() {
-            Ok(f) if !is_stranded(f, displays, x.known()) => {
+            Ok(f) if !stranded(f, &x) => {
                 if let Some(e) = w.read_through_ax(x.id, f, false, displays) {
                     log(&e);
                     continue;
@@ -654,7 +657,7 @@ pub(crate) fn reach(
         match Watch::restore_frame(&x, displays) {
             Some(frame) => match element.set_frame(frame) {
                 Ok(()) => match element.frame() {
-                    Ok(f) if !is_stranded(f, displays, x.known()) => {
+                    Ok(f) if !stranded(f, &x) => {
                         tracing::warn!(id = x.id, pid = x.pid, to = %f, "{who}: its Desktop shows; window brought back");
                         if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
                             log(&e);
@@ -671,11 +674,11 @@ pub(crate) fn reach(
     if scanned.is_empty() {
         return;
     }
-    let r = safety::recovery_scan(&format!("{who}: a Desktop with parked windows shows"));
+    let (r, _) = engine.recover(&format!("{who}: a Desktop with parked windows shows"), &safety::ScanScope::default());
     tracing::info!(restored = r.restored, failed = r.failed, "{who}: scanned the shown Desktop");
     for x in scanned {
         match safety::ax_window(x.pid, x.id).and_then(|e| e.frame().map_err(|e| format!("its frame cannot be read ({e})"))) {
-            Ok(f) if !is_stranded(f, displays, x.known()) => {
+            Ok(f) if !stranded(f, &x) => {
                 if let Some(e) = w.read_through_ax(x.id, f, true, displays) {
                     log(&e);
                 }
@@ -756,6 +759,7 @@ fn describe(w: &Waiting) -> String {
 ///
 /// A registered window is never judged either.
 fn left_alone_found(w: &Watch, list: &[windows::CgWindow], listed: &[Listed], displays: &ScanDisplays) -> BTreeMap<u32, Release> {
+    let engine = window_engine::current();
     let found: Vec<&windows::CgWindow> = list
         .iter()
         .filter(|c| {
@@ -763,7 +767,7 @@ fn left_alone_found(w: &Watch, list: &[windows::CgWindow], listed: &[Listed], di
                 && !c.onscreen
                 && !w.is_registered(c.id)
                 && listed.iter().any(|l| l.id == c.id && l.allowed)
-                && is_stranded(c.bounds, displays, Known::Unknown)
+                && engine.stranded(c.bounds, displays, Known::Unknown)
         })
         .collect();
     if found.is_empty() {

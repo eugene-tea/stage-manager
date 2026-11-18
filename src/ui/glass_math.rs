@@ -27,6 +27,12 @@
 //! at `[cards] hover_window_opacity` (`h`, 1: solid, as Apple's hovered card turns), eased
 //! with its growth and back on leave ([`Glass::picture`]); the under stays.
 //!
+//! **Over windows.** While the strip shows over windows (a window covers it and the edge
+//! reveals it, [`crate::ui::strip_visibility::over_windows`]), every card is solid, as Apple's
+//! (the owner's screenshots, 11-18: no tint over a light window nor a dark one): the pictures
+//! at 1, eased there and back on the glass's fade; the under stays behind them, unseen, as a
+//! hovered card's.
+//!
 //! **The backdrop** ([`Backdrop`]): the wallpaper as a small grid of mean colours (a summed
 //! table), so a thumbnail's mean is four lookups however large it is.
 
@@ -53,15 +59,26 @@ impl Glass {
     /// Apple's, as fitted (module notes).
     pub const APPLE: Glass = Glass { opacity: 0.78, hover_opacity: 1.0, saturation: 0.95, brightness: 0.78 };
 
+    /// The glass of `[cards]` `c`; with macOS's Reduce Transparency the cards are solid, as
+    /// macOS's own materials turn opaque.
+    pub fn of(c: &crate::config::CardStyle, reduce_transparency: bool) -> Glass {
+        let opacity = if reduce_transparency { 1.0 } else { c.window_opacity };
+        Glass { opacity, hover_opacity: c.hover_window_opacity, saturation: c.backdrop_saturation, brightness: c.backdrop_brightness }
+    }
+
     /// True when the cards let anything through.
     pub fn on(&self) -> bool {
         self.opacity < 1.0
     }
 
     /// A window's picture's opacity on a card drawn `grown` (hovered, or a dragged card's
-    /// target) or at rest. The card eases between the two with its growth, on the same curve
-    /// and time, so the glass and the size move as one.
-    pub fn picture(&self, grown: bool) -> f64 {
+    /// target) or at rest, the strip `over_windows` or not. The card eases between the two
+    /// with its growth, on the same curve and time, so the glass and the size move as one.
+    /// Over windows every card is solid, grown or not.
+    pub fn picture(&self, grown: bool, over_windows: bool) -> f64 {
+        if over_windows {
+            return 1.0;
+        }
         (if grown { self.hover_opacity } else { self.opacity }).clamp(0.0, 1.0)
     }
 
@@ -252,12 +269,12 @@ mod tests {
     #[test]
     fn a_hovered_card_turns_solid_and_its_rest_comes_back_on_leave() {
         let g = Glass::APPLE;
-        assert_eq!((g.picture(false), g.picture(true)), (0.78, 1.0), "Apple's: solid when hovered");
+        assert_eq!((g.picture(false, false), g.picture(true, false)), (0.78, 1.0), "Apple's: solid when hovered");
         let (page, under) = ([0.0; 3], [0.4; 3]);
-        assert_eq!(Glass { opacity: g.picture(true), ..g }.card(page, under), page, "the window alone: no wallpaper");
+        assert_eq!(Glass { opacity: g.picture(true, false), ..g }.card(page, under), page, "the window alone: no wallpaper");
         let off = Glass { hover_opacity: g.opacity, ..g };
-        assert_eq!(off.picture(true), off.picture(false), "hover_window_opacity = window_opacity: no fade");
-        assert_eq!(Glass { hover_opacity: 1.5, ..g }.picture(true), 1.0, "clamped");
+        assert_eq!(off.picture(true, false), off.picture(false, false), "hover_window_opacity = window_opacity: no fade");
+        assert_eq!(Glass { hover_opacity: 1.5, ..g }.picture(true, false), 1.0, "clamped");
     }
 
     #[test]
@@ -275,6 +292,45 @@ mod tests {
         for amount in [0.75, 0.5, 0.25, 0.0] {
             assert_eq!(ghost_mix(amount, 1.0).0, 1.0, "the picture never fades at {amount}");
         }
+    }
+
+    #[test]
+    fn cards_over_windows_are_solid_and_at_rest_over_the_desktop_let_the_wallpaper_through() {
+        use crate::ui::strip_visibility::{Mode, over_windows};
+        let c = crate::config::StripStyle::default().cards;
+        // (covered, auto-hide, Reduce Transparency, hovered) -> the picture's opacity
+        let cases = [
+            ((false, false, false, false), 0.78, "at rest over the desktop: Apple's glass"),
+            ((false, false, false, true), 1.0, "hovered: solid"),
+            ((true, false, false, false), 1.0, "revealed over a covering window: solid"),
+            ((true, false, false, true), 1.0, "hovered over a window: solid"),
+            ((false, true, false, false), 0.78, "auto-hide over the desktop: the glass"),
+            ((true, true, false, false), 1.0, "auto-hide over a covering window: solid"),
+            ((false, false, true, false), 1.0, "Reduce Transparency: solid"),
+            ((true, false, true, false), 1.0, "Reduce Transparency over a window: solid"),
+        ];
+        for ((covered, auto_hide, reduce, hovered), want, why) in cases {
+            let over = over_windows(Mode::of(true, auto_hide, covered), covered, false, false);
+            let g = Glass::of(&c, reduce);
+            assert!((g.picture(hovered, over) - want).abs() < 1e-12, "{why}");
+            assert_eq!(g.on(), !reduce, "the glass stays configured on: {why}");
+        }
+    }
+
+    #[test]
+    fn a_snapshot_over_windows_shrinks_into_a_solid_card_and_grows_out_of_one() {
+        // The card's look over windows: the picture at 1. Its snapshot never fades the
+        // picture on the way, so no tint shows mid-switch, and lands on the window alone.
+        let card = Glass::APPLE.picture(false, true);
+        let (page, wall) = (0.95, 0.3);
+        for amount in [0.0, 0.25, 0.5, 0.75, 1.0, 1.2] {
+            let (p, u) = ghost_mix(amount, card);
+            assert_eq!(p, 1.0, "the picture opaque at {amount}");
+            let drawn = p * page + (1.0 - p) * (u * wall);
+            assert!((drawn - page).abs() < 1e-12, "no wallpaper at {amount}");
+        }
+        // At rest over the desktop the snapshot takes the glass, as before.
+        assert!((ghost_mix(1.0, Glass::APPLE.picture(false, false)).0 - 0.78).abs() < 1e-12);
     }
 
     #[test]

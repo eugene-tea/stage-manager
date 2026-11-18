@@ -7,13 +7,18 @@
 //! `pin [ID]`, `merge N`, `reveal`, `unpark-all`, `reload`, `mark [NOTE…]` (a problem mark
 //! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
-//! environment, `debug-panic` panics on the main thread (a safety drill), `debug-click X Y
+//! environment, `debug-panic` panics on the main thread (a safety drill), `debug-engine-fail
+//! [next|hide|show|all|off]` makes the Spaces engine's next hide or show (or every bridged
+//! call) fail as a refusing window server would (the fallback drill), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
-//! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE` clicks a fixture's Dock item as the Dock-click
-//! prediction sees it, `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
+//! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
+//! prediction sees it, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
+//! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
+//! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
+//! as the Dock shows it (its items' titles, the one selected), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
@@ -71,6 +76,107 @@ use super::space_keys::{Direction, Expose};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::handoff::{self, Offer, Trust};
 
+/// `debug-cmd-tab`: a posted ⌘Tab ([`crate::platform::switcher_probe`]), or the last one's
+/// report: `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` (1 Tab, 300 ms
+/// held, Tabs 40 ms apart by default), `debug-cmd-tab result`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CmdTabProbe {
+    /// Post one.
+    Start {
+        /// ⌘ let go on the selection (an activation); else Escape first (none).
+        release: bool,
+        /// How many Tabs (1-9).
+        tabs: u8,
+        /// From the last Tab to Escape or ⌘'s release (ms, at most 5000).
+        hold_ms: u64,
+        /// Between one Tab's release and the next Tab (ms, at most 2000; round cmdtab-park:
+        /// a person browsing the switcher tabs every ~200 ms).
+        gap_ms: u64,
+        /// Put the selected app's window home as the switcher shows (`nolend`: macOS's own
+        /// way, measured).
+        lend: bool,
+    },
+    /// The last probe's report.
+    Result,
+}
+
+impl CmdTabProbe {
+    fn parse(mode: &str, rest: &[&str]) -> Result<Self, String> {
+        let release = match mode {
+            "cancel" => false,
+            "release" => true,
+            other => return Err(format!("expected cancel, release or result, got {other:?}")),
+        };
+        let (lend, numbers) = match rest {
+            [numbers @ .., "nolend"] => (false, numbers),
+            numbers => (true, numbers),
+        };
+        let number = |w: &str| w.parse::<u64>().map_err(|_| format!("expected a number, got {w:?}"));
+        let (tabs, hold_ms, gap_ms) = match numbers {
+            [] => (1, 300, 40),
+            [tabs] => (number(tabs)?, 300, 40),
+            [tabs, hold] => (number(tabs)?, number(hold)?, 40),
+            [tabs, hold, gap] => (number(tabs)?, number(hold)?, number(gap)?),
+            _ => return Err("debug-cmd-tab takes cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]".into()),
+        };
+        if !(1..=9).contains(&tabs) || hold_ms > 5000 || gap_ms > 2000 {
+            return Err("debug-cmd-tab: 1-9 Tabs, a hold of at most 5000 ms, Tabs at most 2000 ms apart".into());
+        }
+        Ok(Self::Start { release, tabs: tabs as u8, hold_ms, gap_ms, lend })
+    }
+}
+
+/// One route of the Apple mode run once by hand (`ctl apple try ROUTE TARGET`, needs
+/// `STAGE_MANAGER_TEST=1`): the live check's diagnostics and its tripwires, the routes tried
+/// and rejected that are to do nothing still (docs/STRATEGIES.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppleTry {
+    /// `focus ID`: the focus route on window ID.
+    Focus(u32),
+    /// `shift-click ID`: the Shift-click route on window ID's thumbnail.
+    ShiftClick(u32),
+    /// `drag ID`: the drag route on window ID (in the stage in front).
+    Drag(u32),
+    /// `ax-press ID`: rejected, `AXPress` on the strip item holding window ID.
+    AxPress(u32),
+    /// `ax-add ID`: rejected, `AXAddToStage` on the strip item holding window ID.
+    AxAddToStage(u32),
+    /// `pid-click ID`: rejected, a Shift-click on window ID's thumbnail posted to
+    /// WindowManager's pid alone.
+    PidClick(u32),
+    /// `shift-focus ID`: rejected, the focus route on window ID with Shift held.
+    ShiftFocus(u32),
+}
+
+impl AppleTry {
+    fn parse(route: &str, target: &str) -> Result<Self, String> {
+        let id = || target.parse::<u32>().map_err(|_| format!("expected a window id, got {target:?}"));
+        match route {
+            "focus" => Ok(Self::Focus(id()?)),
+            "shift-click" => Ok(Self::ShiftClick(id()?)),
+            "drag" => Ok(Self::Drag(id()?)),
+            "ax-press" => Ok(Self::AxPress(id()?)),
+            "ax-add" => Ok(Self::AxAddToStage(id()?)),
+            "pid-click" => Ok(Self::PidClick(id()?)),
+            "shift-focus" => Ok(Self::ShiftFocus(id()?)),
+            _ => Err(format!("apple try takes focus, shift-click, drag, ax-press, ax-add, pid-click or shift-focus, got {route:?}")),
+        }
+    }
+
+    /// Its name, as typed.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Focus(_) => "focus",
+            Self::ShiftClick(_) => "shift-click",
+            Self::Drag(_) => "drag",
+            Self::AxPress(_) => "ax-press",
+            Self::AxAddToStage(_) => "ax-add",
+            Self::PidClick(_) => "pid-click",
+            Self::ShiftFocus(_) => "shift-focus",
+        }
+    }
+}
+
 /// A parsed ctl command.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -101,6 +207,11 @@ pub enum Command {
     Pin(Option<u32>),
     /// Move stage N's windows into the active stage (a shift-click on its card).
     Merge(usize),
+    /// The Apple mode: one route run once by hand (needs `STAGE_MANAGER_TEST=1`).
+    AppleTry(AppleTry),
+    /// The Apple mode: the stages saved when the mode started (`state-apple.json` as it was
+    /// then) put back on Apple's Stage Manager.
+    AppleRestore,
     /// Reveal the desktop (a wallpaper click).
     Reveal,
     /// Bring every parked window back onscreen (the stages stay).
@@ -114,6 +225,9 @@ pub enum Command {
     Mark(String),
     /// Panic on the main thread (safety drill; needs `STAGE_MANAGER_TEST=1`).
     DebugPanic,
+    /// Test only: the Spaces engine's calls fail as named (`next`, `hide`, `show`, `all`,
+    /// `off`; the fallback drill).
+    DebugEngineFail(String),
     /// Test only: quit the way the menu's Quit item does (from inside a menu action).
     DebugMenuQuit,
     /// Test builds with the `update-test` feature: check for an update and install it as
@@ -201,11 +315,21 @@ pub enum Command {
     },
     /// Finds the Dock item of a `STAGE_MANAGER_ONLY` app, feeds it to the controller as a
     /// click on it (the Dock-click prediction runs as for a real click), then presses it
-    /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`).
+    /// (`AXPress`) (needs `STAGE_MANAGER_TEST=1`). With `real`, a synthetic press and release
+    /// are posted at the item instead, on a thread of their own, so the press, the release and
+    /// the Dock's own activation race as a person's click does.
     DebugDockClick {
         /// The app's bundle id.
         bundle: String,
+        /// A posted press and release, not the controller fed and `AXPress`.
+        real: bool,
     },
+    /// A posted ⌘Tab and what answered it, or the last one's report (needs
+    /// `STAGE_MANAGER_TEST=1`; round cmd-tab, [`crate::platform::switcher_probe`]).
+    DebugCmdTab(CmdTabProbe),
+    /// ⌘Tab's switcher as the Dock's Accessibility shows it now: the items' titles, the one
+    /// selected (needs `STAGE_MANAGER_TEST=1`; round cmd-tab).
+    DebugSwitcher,
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
     DebugClose {
@@ -288,12 +412,18 @@ impl Command {
             ["new", rest @ ..] if rest.len() <= 1 => Ok(Self::New(window_id(rest.first())?)),
             ["pin", rest @ ..] if rest.len() <= 1 => Ok(Self::Pin(window_id(rest.first())?)),
             ["merge", n] => Ok(Self::Merge(number(n)?)),
+            ["apple", "try", route, target] => AppleTry::parse(route, target).map(Self::AppleTry),
+            ["apple", "restore"] => Ok(Self::AppleRestore),
             ["reveal"] => Ok(Self::Reveal),
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
             ["settings"] => Ok(Self::Settings),
             ["mark", note @ ..] => Ok(Self::Mark(note.join(" "))),
             ["debug-panic"] => Ok(Self::DebugPanic),
+            ["debug-engine-fail", rest @ ..] if rest.len() <= 1 => match rest.first().copied().unwrap_or("next") {
+                w @ ("next" | "hide" | "show" | "all" | "off") => Ok(Self::DebugEngineFail(w.to_string())),
+                _ => Err("debug-engine-fail takes next, hide, show, all or off".into()),
+            },
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
             ["debug-update"] => Ok(Self::DebugUpdate),
             ["debug-drag", rest @ ..] => {
@@ -381,7 +511,11 @@ impl Command {
                 };
                 Ok(Self::DebugFullscreen { id, on })
             }
-            ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string() }),
+            ["debug-switcher"] => Ok(Self::DebugSwitcher),
+            ["debug-cmd-tab", "result"] => Ok(Self::DebugCmdTab(CmdTabProbe::Result)),
+            ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
+            ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: false }),
+            ["debug-dock-click", bundle, "real"] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: true }),
             ["adopted", ids @ ..] => ids
                 .iter()
                 .map(|id| id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}")))
@@ -852,6 +986,13 @@ mod tests {
         assert_eq!(Command::parse("new 12"), Ok(Command::New(Some(12))));
         assert_eq!(Command::parse("pin 12"), Ok(Command::Pin(Some(12))));
         assert_eq!(Command::parse("merge 2"), Ok(Command::Merge(2)));
+        assert_eq!(Command::parse("apple try ax-press 2"), Ok(Command::AppleTry(AppleTry::AxPress(2))));
+        assert_eq!(Command::parse("apple try shift-click 4711"), Ok(Command::AppleTry(AppleTry::ShiftClick(4711))));
+        assert_eq!(Command::parse("apple try shift-focus 12"), Ok(Command::AppleTry(AppleTry::ShiftFocus(12))));
+        assert!(Command::parse("apple try ax-press first").is_err(), "a window id");
+        assert!(Command::parse("apple try teleport 3").is_err());
+        assert_eq!(Command::parse("apple restore"), Ok(Command::AppleRestore));
+        assert!(Command::parse("apple restore now").is_err());
         assert_eq!(Command::parse("reveal"), Ok(Command::Reveal));
         assert_eq!(Command::parse("debug-toggle-strip"), Ok(Command::DebugToggleStrip));
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));
@@ -860,6 +1001,9 @@ mod tests {
         assert_eq!(Command::parse("mark"), Ok(Command::Mark(String::new())));
         assert_eq!(Command::parse("mark  strip  gone "), Ok(Command::Mark("strip gone".into())));
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));
+        assert_eq!(Command::parse("debug-engine-fail"), Ok(Command::DebugEngineFail("next".into())));
+        assert_eq!(Command::parse("debug-engine-fail all"), Ok(Command::DebugEngineFail("all".into())));
+        assert!(Command::parse("debug-engine-fail sometimes").is_err());
         assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
         assert_eq!(
             Command::parse("debug-click 60 700.5 shift"),
@@ -913,8 +1057,39 @@ mod tests {
         assert!(Command::parse("debug-frame 7 200 300 800").is_err());
         assert_eq!(
             Command::parse("debug-dock-click dev.example.app"),
-            Ok(Command::DebugDockClick { bundle: "dev.example.app".into() })
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: false })
         );
+        assert_eq!(
+            Command::parse("debug-dock-click dev.example.app real"),
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: true })
+        );
+        assert!(Command::parse("debug-dock-click dev.example.app fake").is_err());
+        assert_eq!(
+            Command::parse("debug-cmd-tab cancel"),
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 1, hold_ms: 300, gap_ms: 40, lend: true }))
+        );
+        assert_eq!(
+            Command::parse("debug-cmd-tab release 2 40 nolend"),
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 2, hold_ms: 40, gap_ms: 40, lend: false }))
+        );
+        assert_eq!(
+            Command::parse("debug-cmd-tab release 1 0"),
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: true, tabs: 1, hold_ms: 0, gap_ms: 40, lend: true }))
+        );
+        assert_eq!(Command::parse("debug-cmd-tab result"), Ok(Command::DebugCmdTab(CmdTabProbe::Result)));
+        assert_eq!(Command::parse("debug-switcher"), Ok(Command::DebugSwitcher));
+        assert!(Command::parse("debug-switcher now").is_err());
+        assert!(Command::parse("debug-cmd-tab").is_err());
+        assert!(Command::parse("debug-cmd-tab press").is_err());
+        assert!(Command::parse("debug-cmd-tab cancel 0").is_err(), "no Tab");
+        assert!(Command::parse("debug-cmd-tab cancel 1 9000").is_err(), "held too long");
+        assert_eq!(
+            Command::parse("debug-cmd-tab cancel 2 300 250"),
+            Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 2, hold_ms: 300, gap_ms: 250, lend: true })),
+            "browsing: Tabs 250 ms apart"
+        );
+        assert!(Command::parse("debug-cmd-tab cancel 2 300 3000").is_err(), "Tabs too far apart");
+        assert!(Command::parse("debug-cmd-tab cancel 1 300 40 7").is_err());
         assert!(Command::parse("debug-dock-click").is_err());
         assert!(Command::parse("debug-click 60 70 alt").is_err());
         assert_eq!(Command::parse("space"), Ok(Command::Space));
