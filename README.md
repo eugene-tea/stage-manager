@@ -47,6 +47,19 @@ Advanced shows how.
 - **Motion:** every animation's timing, measured from Apple's.
 - **More shortcuts:** new stage, pin a window, show or hide the strip.
 
+## Three ways to keep stages
+
+macOS has no public way to hide a window and keep it ready, so three ways are built, each
+with its trade-offs:
+
+- **Park corner** (the default): hidden windows wait in a corner of the screen, every addition works.
+- **Spaces** (in testing): hidden windows go to a hidden Space of the window server; faster, on
+  undocumented calls.
+- **Following Apple's Stage Manager** (`[windows] with_apple = "augment"`): Apple's draws the
+  strip and arranges the windows; hotkeys, moving windows between stages and restore are added on top.
+
+[Three ways to keep stages](docs/MODES.md) compares them in one table.
+
 ## First launch
 
 Apple's Stage Manager has to be turned off first (the app offers to do it). **Accessibility**
@@ -61,6 +74,7 @@ check on GitHub, which can be turned off.
 - [Info page](https://eugene-tea.github.io/stage-manager/)
 - [User guide](docs/GUIDE.md): install, use, settings, troubleshooting
 - [Configuration reference](docs/CONFIG.md): every option
+- [Three ways to keep stages](docs/MODES.md): the park corner, Spaces and following Apple's, compared
 - [Accessibility](.github/ACCESSIBILITY.md): VoiceOver, the keyboard, Reduce Motion, and what's missing
 - [Development](docs/DEVELOPMENT.md): build, test, release
 - [Notes for AI agents](docs/AGENTS.md): for an assistant changing the settings
