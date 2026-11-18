@@ -116,7 +116,7 @@ PRESS_MORE_S = 1.0         # each press more (only an item's front takes a click
 OPEN_HERE_MAX_S = 3.0      # launch to the first window (~0.9 s), the settle, one press (~0.8 s)
 OPEN_RUNNING_MAX_S = 3.5   # the hide (~1.1 s), the unhide into the strip (~0.7 s), one press (~0.8 s)
 RESTORE_MAX_S = 8.0        # a drag (~0.9 s) and a press (~0.8 s), a focus, Apple's motions and settles
-ROUNDTRIP_MAX_S = 3.5      # Apple's switch (~0.7 s), the switch back (~0.7 s), one press (~0.7 s), reads
+ROUNDTRIP_MAX_S = 5.0      # first run live 11-18: the job done at 3.1 s, the list showing it at 3.9-4.4 s (three Apple motions, the settles, one press)
 PHASES = ("mirror", "switch", "rejected", "merge", "split", "pointer", "open-here", "open-running",
           "roundtrip-order", "restore")
 
