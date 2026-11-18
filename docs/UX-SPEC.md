@@ -655,18 +655,23 @@ picture carries and where its appearance came from. macOS also draws a thin whit
 each window's edge, with the shadow (a capture that leaves the shadow out lacks it): a point
 wide at a tenth in Dark Mode (0.08 on an inactive window), half a point in light, where it
 shows only on dark content. The picture carries it too, over its edge and corner, coming
-and going with the window's shadow; without it every edge steps lighter at the handover. The hairline and the rim follow the curve macOS's shadow
+in with the window's shadow and staying until the picture goes (the window's own line is
+under the picture until then); without it every edge steps lighter at the handover. The hairline and the rim follow the curve macOS's shadow
 follows, measured on the dark hairline (nearly opaque, so a tenth of a point shows): Core
 Animation's continuous corner with a longer tail, the hairline a band just outside it, sharp
 where the edge runs along the pixels and softer at 45 degrees; the radius is read from how
 much of the picture's diagonal is clear (a filled shape grown by a spread would put a darker
 notch at every corner). A window's own
 shadow appears in one frame, so the picture keeps its shadow until the window server lists
-the window on screen at its frame (asked every half frame from the unveil), then fades it
-over 50 ms from a frame later, never before 50 ms past the unveil: both shadows for a few
-frames read about 2 levels darker, while a shadow faded before its window shows reads 16
-lighter for 80 ms (a window can reach the screen a frame after a fade centred on the unveil
-has ended). The picture goes only after that, 300 ms past
+the window on screen at its frame (asked every half frame from the unveil), then drops it
+in one step: a shadow faded before its window shows reads 16 levels lighter for 80 ms, one
+faded after it overlaps the window's own for several frames (Known gaps has what is left).
+Where a picture's shadow lies on the picture of a window arriving under it, it stays until
+the pictures fade: the window's own shadow falls on the window under, which that picture
+covers until then. Dropped there too, the picture under was bare from the handover to the
+fade's end (a recording, 11-18, at 60 fps, a stage of two overlapping windows: 43 % lighter
+beside the front window's edge for seven frames, back over ten more, 30 % on the second
+switch). The picture goes only after the handover, 300 ms past
 the unveil at the most; an outgoing picture's shadow comes in over twice
 `[animation] cover_ms` as its window leaves. The cards' thumbnails are not captured while a
 switch's pictures move (a round of captures is the window server's work, and drops a frame).
@@ -1164,6 +1169,12 @@ screen-capture service reads 0 and the window server, measured with other apps o
   about a frame later. macOS gives no way to drop another app's window shadow, and no
   signal comes before the window is on screen; dropping it earlier by a guess shows a
   lighter edge instead (11-01). Measured 11-09 at 60 fps on VS Code, Safari and Finder.
+- In the Spaces mode, the window a card click brings to the front can show one frame of a
+  lighter shadow as it lands (12 % lighter beside its edge, out to 45 pt; a recording,
+  11-18, at 60 fps, both switches). macOS makes an app active only once its window is on a
+  Desktop, so the window is shown with an inactive window's smaller shadow and takes the
+  key window's a frame or two later, after its picture has handed over the key window's.
+  A switch that an app's activation starts (⌘Tab, the Dock) has the app active already.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.

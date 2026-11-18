@@ -9,6 +9,9 @@
   applies at the next launch is marked so, with a Relaunch button: every window is brought
   back, and Stage Manager is opened again. While Apple's Stage Manager is on and Stage Manager
   is paused, no mode is selected and the line says so.
+- A window's shadow on the window behind it no longer goes and comes back at the end of a
+  switch. In a stage of overlapping windows, the front window's shadow on the one behind was
+  dropped as the windows landed and faded back in over the next third of a second.
 
 ## 1.9.0 — 2026-11-18
 
