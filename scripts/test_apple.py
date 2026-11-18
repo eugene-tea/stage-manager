@@ -20,10 +20,11 @@ Phases (all by default, or name them):
           add. A red here means a macOS update made a rejected route work: see
           docs/STRATEGIES.md, "Tried and rejected".
   merge   `ctl merge N`: Bravo's stage of one, then a stage of three, brought into the stage
-          in front by one Shift-click per window, all in one Shift press, back to front (the
-          stage of three keeps its order over Charlie's window); timed to the moment
-          the window list shows them joined (the job's own "done" printed as info); the
-          pointer back where it was.
+          in front by one Shift-click per window; only an item's front takes a click (the
+          eighth probe, 11-17), so the stage of three, one item, takes three presses, one
+          window each, and its order is put back after (it keeps its order over Charlie's
+          window); timed to the moment the window list shows them joined (the job's own
+          "done" printed as info); the pointer back where it was.
   split   Under All at Once (AppWindowGroupingBehavior 1, read only) `ctl new` for a window
           of Alpha's, its sibling staying, is refused with the reason and posts nothing
           (Apple's keeps an app's windows in one stage); Bravo merged into Alpha's stage is
@@ -40,7 +41,7 @@ Each fixture window opens at a frame of its own (FRAMES).
           Alpha is in front joins Alpha's stage (time from the launch to the moment the window
           list shows one stage, the job's "done" as info, the route that ran, Alpha's windows
           never moving with the hide route); Bravo opened again with two windows: both join,
-          in one Shift press.
+          one press each (one item: its front, then the other), Bravo's two on top.
   open-running A running app's reopened window: Charlie opened with no hang on SIGURG, its
           window closed (SIGURG), so it runs with no window; a `current` rule for it in the
           scratch config; Alpha in front; `open` of Charlie (an activation of the running
@@ -111,6 +112,7 @@ DOMAIN, KEY = "com.apple.WindowManager", "GloballyEnabled"
 FOLLOW_MAX_S = 1.0
 SWITCH_MAX_S = 1.5
 MERGE_MAX_S = 1.5          # one Shift press and Apple's motion (~0.8 s), a read, ctl's poll
+PRESS_MORE_S = 1.0         # each press more (only an item's front takes a click: one window of an item a press, the eighth probe 11-17)
 OPEN_HERE_MAX_S = 3.0      # launch to the first window (~0.9 s), the settle, one press (~0.8 s)
 OPEN_RUNNING_MAX_S = 3.5   # the hide (~1.1 s), the unhide into the strip (~0.7 s), one press (~0.8 s)
 RESTORE_MAX_S = 8.0        # a drag (~0.9 s) and a press (~0.8 s), a focus, Apple's motions and settles
@@ -480,7 +482,7 @@ def phase_rejected():
             check(not set(alpha) & set(s["apple"]["current"]), "shift-focus: still does not add Bravo to Alpha's stage (else docs/STRATEGIES.md)")
 
 
-def merge_into_front(n, want, what):
+def merge_into_front(n, want, what, presses=1):
     """`ctl merge n`, timed to the moment the window list shows `want` in front (what is seen),
     then waited out for the job's own account. Returns (state once idle, seconds to joined)."""
     p0 = pointer()
@@ -494,7 +496,8 @@ def merge_into_front(n, want, what):
     last = ((s or {}).get("apple") or {}).get("last") or {}
     check(joined is not None, f"merge {n}: {what} ({took:.2f} s to the list showing it)")
     say(f"  info merge {n}: done at {last.get('ms')} ms, {last.get('clicks')} clicks in {last.get('presses')} presses")
-    check(took <= MERGE_MAX_S, f"merge {n}: within about one motion ({took:.2f} s, at most {MERGE_MAX_S} s)")
+    limit = MERGE_MAX_S + PRESS_MORE_S * (presses - 1)
+    check(took <= limit, f"merge {n}: within about {presses} motion(s) ({took:.2f} s, at most {limit} s)")
     p1 = pointer()
     check(near(p1, p0), f"merge {n}: the pointer back where it was ({p0} -> {p1})")
     check(not last.get("given_up"), f"merge {n}: done, not given up ({last.get('given_up')})")
@@ -502,7 +505,7 @@ def merge_into_front(n, want, what):
 
 
 def phase_merge():
-    say("\n== merge: ctl merge N, one Shift press per gather ==")
+    say("\n== merge: ctl merge N, a Shift press per round of item fronts ==")
     separate()
     if not bring_front("Alpha"):
         check(False, "Alpha in front before the merge")
@@ -516,7 +519,8 @@ def phase_merge():
     if s:
         last = s["apple"].get("last") or {}
         check(last.get("clicks") == 1, f"merge {n}: one Shift-click ({last.get('clicks')})")
-    # A stage of three into Charlie's: three clicks, back to front, in one press.
+    # A stage of three into Charlie's, one item: three clicks, one a press (only an item's
+    # front takes a click), then the order put back.
     if not bring_front("Charlie"):
         check(False, "Charlie in front before the second merge")
         return
@@ -525,12 +529,13 @@ def phase_merge():
     if not check(n is not None, f"Alpha's and Bravo's stage of three is stage {n}"):
         return
     order = list(others(s)[n - 1])
-    s, _ = merge_into_front(n, sorted(["Alpha 1", "Alpha 2", "Bravo 1", "Charlie 1"]), "a stage of three brought in")
+    s, _ = merge_into_front(n, sorted(["Alpha 1", "Alpha 2", "Bravo 1", "Charlie 1"]), "a stage of three brought in", presses=3)
     if s:
         last = s["apple"].get("last") or {}
         check(last.get("clicks") == 3, f"merge {n}: three Shift-clicks ({last.get('clicks')})")
-        check(last.get("presses") == 1, f"merge {n}: in one Shift press ({last.get('presses')})")
-        # Clicked back to front, each landing on top: the three in their order, over Charlie.
+        check(last.get("presses") == 3, f"merge {n}: one a Shift press, each the item's front ({last.get('presses')})")
+        # Each landing on top, then the order put back by focuses: the three in their order,
+        # over Charlie.
         front = s["apple"]["current"]
         check(front[:3] == order, f"merge {n}: the three in the order they had ({titles_in_order(s, order)} -> {titles_in_order(s, front)})")
 
@@ -715,10 +720,17 @@ def phase_open_here():
             say(f"  info {name}: route {route}, done at {last.get('ms')} ms, first window at {last.get('first_window_ms')} ms, {last.get('clicks')} clicks in {last.get('presses')} presses")
             check(route in ("hide", "round_trip"), f"{name}: the route said ({route})")
             check(not last.get("given_up"), f"{name}: not given up ({last.get('given_up')})")
-            check(took <= OPEN_HERE_MAX_S, f"{name}: within about {OPEN_HERE_MAX_S:.0f} s ({took:.2f} s)")
+            limit = OPEN_HERE_MAX_S + PRESS_MORE_S * (windows - 1)
+            check(took <= limit, f"{name}: within about {limit:.0f} s ({took:.2f} s)")
+            # The app's windows on top of the stage in front, its order put back after the
+            # presses (its front focused last).
+            cur = ((s or {}).get("apple") or {}).get("current") or []
+            top = titles_in_order(s or {}, cur[:windows])
+            check(len(top) == windows and all(t.startswith(name + " ") for t in top), f"{name}: its windows on top of the stage in front ({titles_in_order(s or {}, cur)})")
             if route == "hide":
                 check(not moved, f"{name}: the stage in front's windows never moved (the hide route)")
-                check(last.get("clicks") == windows and last.get("presses") == 1, f"{name}: one Shift-click per window, one press ({last.get('clicks')} in {last.get('presses')})")
+                # One item of the app's windows: its front a press, the other at the next.
+                check(last.get("clicks") == windows and last.get("presses") == windows, f"{name}: one Shift-click per window, one press each ({last.get('clicks')} in {last.get('presses')})")
     finally:
         write_config()
         ctl("reload")
