@@ -1226,7 +1226,11 @@ def dock_home_cases(d1, d2):
        change, to Desktop 1, the Fixture stage in front there.
     3. **A card click for an app with a window shown on another Desktop** (06:42:57: VS Code
        went to its window on Desktop 1 after the landing): Fixture 1-2 shown on Desktop 1,
-       Fixture 3's card clicked on Desktop 2: no Space change, Fixture 3's stage in front."""
+       Fixture 3's card clicked on Desktop 2: no Space change, Fixture 3's stage in front.
+    4. **The active app, its other window set aside by a wallpaper click on another Desktop**
+       (a log of 11-18 11:36: Dock clicks on VS Code did nothing): the Fixture stage in front
+       on Desktop 1, then `ctl reveal` there; the fixture app active on Desktop 2. One Dock
+       click: one Space change, to Desktop 1, the Fixture stage in front, the reveal ended."""
     if not AUTO:
         ts.skip("Dock home (real Dock clicks and a card click)", "hands-free only (--auto)")
         return
@@ -1392,6 +1396,49 @@ def _dock_home_cases(d1, d2):
     check(x.get("space") == d2 and x["active"] == stage_holding(x, "Fixture 3"),
           f"dock home 3: Fixture 3's stage in front on Desktop 2 ({ts.stage_titles(x)})")
     go("d1", "Switch to Desktop 1")
+    if current_space() != d1:
+        return
+
+    # 4. Desktop 1: the Fixture stage in front, then revealed (a wallpaper click's reveal);
+    # Desktop 2: the fixture app active.
+    x = state()
+    fixture = stage_holding(x, "Fixture 1")
+    if not check(fixture is not None, "dock home 4: Desktop 1 has the Fixture stage"):
+        return
+    ctl("switch", fixture)
+    ts.wait_state(lambda y: y["active"] == fixture, "the Fixture stage in front", timeout=4)
+    ctl("reveal")
+    x = ts.wait_state(lambda y: y.get("desktop_revealed") and any(w["title"] == "Fixture 1" and w["parked"] for w in y["windows"]),
+                      "Desktop 1 revealed, Fixture 1-2 set aside", timeout=4)
+    if not check(x is not None, "dock home 4: Desktop 1 revealed, Fixture 1-2 set aside"):
+        return
+    go("d2", "Switch to Desktop 2")
+    x = state()
+    f3 = stage_holding(x, "Fixture 3")
+    if x.get("space") == d2 and f3 is not None and x["active"] != f3:
+        ctl("switch", f3)
+    x = ts.wait_state(lambda y: y.get("space") == d2 and y["active"] == stage_holding(y, "Fixture 3"), "Fixture 3's stage", timeout=4)
+    if not check(x is not None, "dock home 4: the fixture app active on Desktop 2 (Fixture 3's stage in front)"):
+        return
+    time.sleep(1.0)
+    WATCH.pause()
+    t0 = time.time()
+    r = ctl("debug-dock-click", ts.FIX_ID, "real")
+    check(r.get("ok"), f"dock home 4: the fixture app's Dock item got a posted click ({r.get('error') or 'ok'})")
+    arrived = ts.wait_until(lambda: (lambda y: y if y.get("space") == d1 and y["active"] == stage_holding(y, "Fixture 1") else None)(state()),
+                            4, "Desktop 1 with the Fixture stage in front")
+    time.sleep(1.0)
+    changes = space_changes_since(t0)
+    x = state()
+    check(arrived is not None, f"dock home 4: one click took macOS to the revealed Desktop 1 with the Fixture stage in front (now Space {current_space()})")
+    check(len(changes) == 1 and changes[0][1] == d1, f"dock home 4: exactly one Space change, to Desktop 1 ({changes})")
+    check(not x.get("desktop_revealed"), "dock home 4: the reveal on Desktop 1 ended")
+    if ts.SPACES:
+        lines = [line for _, line in log_events(t0)]
+        check(any("arranged at the press" in line for line in lines),
+              "dock home 4: the app's log says the revealed Desktop was arranged at the press")
+    if current_space() != d1:
+        go("d1", "Switch to Desktop 1")
 
 
 def cmd_tab_cases(d1, d2):
