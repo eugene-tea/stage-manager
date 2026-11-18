@@ -49,6 +49,14 @@
 //! decides at the activation, as before (`⌘ let go … lent=false` in the log, with the time
 //! from the Tab).
 //!
+//! **A mouse pick** (round cmdtab-mouse-pick): with ⌘ held, hovering an icon moves the
+//! switcher's selection (the Dock's notice is read as any other) and a click dismisses it,
+//! activating that app. The keys know nothing of the mouse. Once the Dock's list was seen,
+//! a selection step that finds it gone keeps the Dock's last reading and starts the
+//! activation wait ([`switcher::choose`], [`switcher::Choice::Gone`],
+//! [`switcher::UNREAD_WAIT`]); a guess from the keys there took the window put home back as
+//! the click activated its app, and macOS slid to the other Desktop and back (live 11-18).
+//!
 //! [`Model::dock_home`]: crate::engine::model::Model::dock_home
 //! [`WindowEngine::lend_home`]: crate::platform::window_engine::WindowEngine::lend_home
 //! [`WindowEngine::parked_lend`]: crate::platform::window_engine::WindowEngine::parked_lend
@@ -63,7 +71,7 @@ use super::slide_watch::LendNote;
 use crate::engine::corner;
 use crate::engine::lend_park::ParkAsk;
 use crate::engine::model::{AppFacts, WindowId};
-use crate::engine::switcher::{self, Act, Heard, Key, LetGo, Switcher};
+use crate::engine::switcher::{self, Act, Choice, Heard, Key, LetGo, List, Switcher};
 use crate::platform::ctl::CmdTabProbe;
 use crate::platform::input::{self, InputEvent, InputKind};
 use crate::platform::observe::Observer;
@@ -119,6 +127,12 @@ pub(super) struct SwitcherWatch {
     ax_tried: Option<i32>,
     /// ⌘ let go with the switcher up: when, and whether a window was put home by then.
     released: Option<(Instant, bool)>,
+    /// The Dock's list was seen shown since the first Tab: a step that finds it gone then is
+    /// the switcher's end, not a selection ([`switcher::choose`]).
+    listed: bool,
+    /// The last app activated, and when: the slide watch names the app a ⌘Tab activated
+    /// when it is not the one selected ([`Self::switcher_activated`]).
+    activated: Option<(i32, Instant)>,
     /// `ctl debug-cmd-tab … nolend`: nothing put home for this switcher (the probe's measure
     /// of macOS's own way).
     lend_off: bool,
@@ -156,12 +170,12 @@ impl Controller {
         if heard != Heard::Nothing || self.switcher.keys.is_open() {
             switcher_probe::note("heard", format!("{key:?} -> {heard:?}"));
         }
-        self.switcher_heard(ob, heard, now);
+        self.switcher_heard(ob, heard, true, now);
     }
 
-    /// What the switcher did (`heard`) carried out: the selection read, the window put home or
-    /// taken back.
-    fn switcher_heard(&mut self, ob: &Observer, heard: Heard, now: Instant) {
+    /// What the switcher did (`heard`; `by_key`: told by a key, else by the Dock or the tick)
+    /// carried out: the selection read, the window put home or taken back.
+    fn switcher_heard(&mut self, ob: &Observer, heard: Heard, by_key: bool, now: Instant) {
         match heard {
             Heard::Nothing => return,
             Heard::Selected { steps, first } => {
@@ -169,11 +183,20 @@ impl Controller {
                     self.switcher.opened = Some(now);
                     self.switcher.selected = None;
                     self.switcher.released = None;
+                    self.switcher.listed = false;
                     self.switcher.dock = dock::dock_pid();
                     self.watch_dock();
                 }
                 self.switcher.last_key = Some(now);
-                self.switcher.selected = self.switcher_selection(ob, steps, now);
+                match self.switcher_selection(ob, steps, by_key, now) {
+                    Choice::Dock(pid) => self.switcher.selected = Some((pid, By::Dock)),
+                    Choice::Guess(pid) => self.switcher.selected = pid.map(|p| (p, By::Keys)),
+                    Choice::Keep => return,
+                    Choice::Gone => {
+                        self.switcher_list_gone(now, true);
+                        return;
+                    }
+                }
             }
             Heard::Released { steps } => {
                 let lent = self.lent.is_some_and(|l| l.switcher.is_some());
@@ -202,7 +225,9 @@ impl Controller {
             // Watched for a Desktop slide from ⌘'s release ([`Self::slide_watch_cmd_tab`]).
             let lent = self.lent.is_some_and(|l| l.pid == pid && l.switcher.is_some());
             let since_tab_ms = self.switcher.opened.map(|t| ms(t, now));
-            self.slide_watch_cmd_tab(ob, pid, lent, since_tab_ms, now);
+            let opened = self.switcher.opened;
+            let activated = self.switcher.activated.filter(|(_, t)| opened.is_some_and(|o| *t >= o)).map(|(p, _)| p);
+            self.slide_watch_cmd_tab(ob, pid, lent, since_tab_ms, activated, now);
         }
         match heard {
             Heard::Released { .. } | Heard::Cancelled => {
@@ -216,24 +241,35 @@ impl Controller {
         }
     }
 
-    /// The app the switcher selects `steps` from the app in front: the Dock's answer when it
-    /// gives one (the button's title as a running app's name, else its place in the order of
-    /// activations), else the prediction from the keys; logged with who decided.
-    fn switcher_selection(&mut self, ob: &Observer, steps: Option<i32>, now: Instant) -> Option<(i32, By)> {
+    /// Whose word the selection `steps` from the app in front takes (`by_key`: the step came
+    /// from a key, else from a Dock notice): the Dock's answer when it gives one (the
+    /// button's title as a running app's name, else its place in the order of activations),
+    /// else the prediction from the keys, unless the Dock's list already showed
+    /// ([`switcher::choose`]); logged with who decided.
+    fn switcher_selection(&mut self, ob: &Observer, steps: Option<i32>, by_key: bool, now: Instant) -> Choice {
         let read = self.switcher.dock.map_or(switcher_ax::Read::NoSwitcher, switcher_ax::read);
         let (order, running) = self.switcher_order(ob);
         let predicted = steps.and_then(|s| switcher::predict(&order, running, s));
         let docked = read.pid().or_else(|| read.index().and_then(|i| order.get(i).copied()));
-        let chosen = match (docked, predicted) {
-            (Some(pid), _) => Some((pid, By::Dock)),
-            (None, Some(pid)) => Some((pid, By::Keys)),
-            (None, None) => None,
+        let list = match read {
+            switcher_ax::Read::NoSwitcher => List::Gone,
+            switcher_ax::Read::Unanswered => List::Unanswered,
+            switcher_ax::Read::Shown { .. } => List::Shown,
+        };
+        let choice = switcher::choose(docked, list, self.switcher.listed, by_key, predicted);
+        self.switcher.listed |= list == List::Shown;
+        let chosen = match choice {
+            Choice::Dock(pid) => Some((pid, By::Dock)),
+            Choice::Guess(pid) => pid.map(|p| (p, By::Keys)),
+            Choice::Keep | Choice::Gone => self.switcher.selected,
         };
         let took_ms = ms(now, Instant::now());
         tracing::info!(
             steps,
+            step = if by_key { "a key" } else { "the Dock's notice" },
             selected = ?chosen.map(|(pid, _)| pid),
             by = chosen.map(|(_, by)| by.name()),
+            choice = choice.name(),
             dock = read.name(),
             dock_pid = ?docked,
             dock_index = ?read.index(),
@@ -244,8 +280,8 @@ impl Controller {
             took_ms,
             "cmd-tab: the switcher selects an app"
         );
-        switcher_probe::note("selected", format!("{chosen:?} dock={} predicted={predicted:?} took_ms={took_ms}", read.name()));
-        chosen
+        switcher_probe::note("selected", format!("{chosen:?} {} dock={} predicted={predicted:?} took_ms={took_ms}", choice.name(), read.name()));
+        choice
     }
 
     /// The apps most recently activated first, the app in front first, as far as this run saw
@@ -423,24 +459,41 @@ impl Controller {
                     tracing::info!("cmd-tab: the Dock shows the switcher although its Tab was not heard");
                 }
                 let steps = self.switcher.keys.steps();
-                self.switcher_heard(ob, Heard::Selected { steps, first: false }, now);
+                self.switcher_heard(ob, Heard::Selected { steps, first: false }, false, now);
             }
             "AXUIElementDestroyed" if self.switcher.keys.is_open() => {
                 if self.switcher.dock.is_some_and(|d| switcher_ax::read(d) != switcher_ax::Read::NoSwitcher) {
                     return;
                 }
-                // ⌘'s release may be on its way (the list goes ~1 ms after the key, the
-                // monitor's event comes later; Escape is never heard): it decides the keys;
-                // else the fast tick after GONE_WAIT. The window put home waits for its app's
-                // activation from now on (or from ⌘'s release, the later).
-                self.switcher.keys.list_gone(now);
-                if let Some(go) = self.lent.as_mut().and_then(|l| l.switcher.as_mut()) {
-                    go.let_go(now);
-                }
-                tracing::debug!("cmd-tab: the Dock's switcher list is gone; the key on its way decides");
+                self.switcher_list_gone(now, false);
             }
             _ => {}
         }
+    }
+
+    /// The Dock's switcher list is gone with the switcher up for the keys: at its own notice
+    /// (`unread` false), or found gone at a selection step ([`Choice::Gone`], `unread`: a
+    /// mouse pick dismissed it with ⌘ held; its notice may come late or not at all, live
+    /// 11-18). ⌘'s release may be on its way (the list goes ~1 ms after the key, the
+    /// monitor's event comes later; Escape is never heard): it decides the keys; else the
+    /// fast tick after GONE_WAIT. The window put home waits for its app's activation from now
+    /// on (or from ⌘'s release, the later), [`switcher::UNREAD_WAIT`] when unread.
+    fn switcher_list_gone(&mut self, now: Instant, unread: bool) {
+        self.switcher.keys.list_gone(now);
+        let lent = self.lent.as_mut().and_then(|l| l.switcher.as_mut().map(|go| (l.pid, l.window.0, go)));
+        if let Some((pid, window, go)) = lent {
+            go.let_go(now);
+            go.unread |= unread;
+            if unread {
+                tracing::info!(
+                    pid,
+                    window,
+                    activated = go.activated,
+                    "cmd-tab: the Dock's switcher list is gone (a pick with the mouse): the window put home stays only if its app is activated now"
+                );
+            }
+        }
+        tracing::debug!(unread, "cmd-tab: the Dock's switcher list is gone; the key on its way decides");
     }
 
     /// True while the Dock's list is gone and its key not heard yet (at most
@@ -459,6 +512,7 @@ impl Controller {
     /// App `pid` activated: a window put home for the switcher for that app is kept for the
     /// activation's switch ([`LetGo`]).
     pub(super) fn switcher_activated(&mut self, pid: i32) {
+        self.switcher.activated = Some((pid, Instant::now()));
         if let Some(go) = self.lent.as_mut().filter(|l| l.pid == pid).and_then(|l| l.switcher.as_mut())
             && !go.activated
         {
@@ -474,7 +528,7 @@ impl Controller {
         let heard = self.switcher.keys.gone_due(now);
         if heard != Heard::Nothing {
             tracing::info!("cmd-tab: the Dock's switcher is gone and no key came for it: taken as the release");
-            self.switcher_heard(ob, heard, now);
+            self.switcher_heard(ob, heard, false, now);
         }
     }
 
@@ -493,7 +547,7 @@ impl Controller {
             self.switcher.keys.reset();
             let heard = if quiet { Heard::Lost } else { Heard::Released { steps } };
             tracing::info!(quiet, "cmd-tab: the switcher is taken for closed (⌘ not held, or no key for a minute), its release unheard");
-            self.switcher_heard(ob, heard, now);
+            self.switcher_heard(ob, heard, false, now);
             if quiet {
                 self.switcher.selected = None;
                 self.switcher.opened = None;

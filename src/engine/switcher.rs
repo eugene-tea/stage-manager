@@ -234,6 +234,12 @@ pub fn predict(order: &[Pid], running: usize, steps: i32) -> Option<Pid> {
 /// release: the activation does.
 pub const ACTIVATION_WAIT: Duration = Duration::from_millis(200);
 
+/// The wait of [`ACTIVATION_WAIT`] once the switcher went with no reading of its end
+/// ([`Choice::Gone`]: a mouse pick dismissed it, with ⌘ still held): a click's activation
+/// comes at the mouse's release, later than a key's. Counted, as [`ACTIVATION_WAIT`] is, from
+/// the later of the list gone and ⌘'s release (heard, or taken after [`GONE_WAIT`]).
+pub const UNREAD_WAIT: Duration = Duration::from_millis(400);
+
 /// A window put home for the switcher, as the switcher's end and its app's activation leave
 /// it ([`LetGo::step`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -243,6 +249,9 @@ pub struct LetGo {
     pub at: Option<Instant>,
     /// Its app was activated since it was put home.
     pub activated: bool,
+    /// The switcher went unread ([`Choice::Gone`]): its activation is waited for
+    /// [`UNREAD_WAIT`], not [`ACTIVATION_WAIT`].
+    pub unread: bool,
 }
 
 /// What becomes of a window put home for the switcher, at a look.
@@ -274,11 +283,67 @@ impl LetGo {
             None => lent_at,
         };
         let since = now.saturating_duration_since(base);
+        let wait = if self.unread { UNREAD_WAIT } else { ACTIVATION_WAIT };
         match self.activated {
             true if since >= lend_wait => LetGoStep::NoSwitch,
-            false if since >= ACTIVATION_WAIT => LetGoStep::NoActivation,
+            false if since >= wait => LetGoStep::NoActivation,
             _ => LetGoStep::Keep,
         }
+    }
+}
+
+/// What the Dock's Accessibility showed at a selection step, for [`choose`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum List {
+    /// The switcher's list shows (its selection named or not).
+    Shown,
+    /// No switcher list in the Dock.
+    Gone,
+    /// The Dock left the call unanswered.
+    Unanswered,
+}
+
+/// Whose word a selection step takes ([`choose`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    /// The switcher's own selection, read from the Dock.
+    Dock(Pid),
+    /// The keys and the order of activations ([`predict`]; `None`: not known).
+    Guess(Option<Pid>),
+    /// The Dock gave no reading at its own notice: the last reading stands, nothing moves.
+    Keep,
+    /// The Dock's list, seen this switcher, is gone: the last reading stands, and the window
+    /// put home waits for its app's activation ([`LetGo::unread`], [`UNREAD_WAIT`]). A click
+    /// in the switcher dismisses it with ⌘ still held; the keys' steps know nothing of the
+    /// mouse (hovering an icon moves the selection), so a guess from them would take the
+    /// window back as the click activates its app (live 11-18).
+    Gone,
+}
+
+impl Choice {
+    /// For the log.
+    pub fn name(self) -> &'static str {
+        match self {
+            Choice::Dock(_) => "the Dock's reading",
+            Choice::Guess(_) => "the guess from the keys",
+            Choice::Keep => "the last reading stands: the Dock gave none",
+            Choice::Gone => "the last reading stands: the Dock's list is gone",
+        }
+    }
+}
+
+/// Whose word a selection step takes: `docked` the app the Dock's read names, `list` what it
+/// showed, `listed` the Dock's list was seen shown since the first Tab, `by_key` the step
+/// came from a key (else from a Dock notice), `predicted` the keys' guess. Before the Dock's
+/// list first shows (~180 ms after the first Tab) the keys are all there is; once it showed,
+/// a guess never stands in for a reading, except after a key with the Dock silent.
+pub fn choose(docked: Option<Pid>, list: List, listed: bool, by_key: bool, predicted: Option<Pid>) -> Choice {
+    match docked {
+        Some(pid) => Choice::Dock(pid),
+        None if !listed => Choice::Guess(predicted),
+        None if list == List::Gone => Choice::Gone,
+        None if by_key => Choice::Guess(predicted),
+        None => Choice::Keep,
     }
 }
 
@@ -500,10 +565,62 @@ mod tests {
         assert_eq!(lent.step(false, ms(700), t0, lend_wait), LetGoStep::Keep, "activated: past the activation wait, kept");
         assert_eq!(lent.step(false, ms(1401), t0, lend_wait), LetGoStep::NoSwitch, "activated, but no switch in the Dock's wait");
         // The activation before ⌘ up is heard (both orders reach the WM thread).
-        let mut early = LetGo { at: None, activated: true };
+        let mut early = LetGo { activated: true, ..LetGo::default() };
         assert_eq!(early.step(true, ms(900), t0, lend_wait), LetGoStep::Keep);
         early.let_go(ms(410));
         assert_eq!(early.step(false, ms(700), t0, lend_wait), LetGoStep::Keep);
+    }
+
+    #[test]
+    fn a_guess_never_stands_in_for_the_docks_reading_once_its_list_showed() {
+        use List::*;
+        assert_eq!(choose(Some(7), Shown, false, true, Some(9)), Choice::Dock(7), "a reading wins");
+        assert_eq!(choose(Some(7), Shown, true, false, Some(9)), Choice::Dock(7));
+        assert_eq!(choose(None, Gone, false, true, Some(9)), Choice::Guess(Some(9)), "the first Tab, before the list shows");
+        assert_eq!(choose(None, Gone, false, false, None), Choice::Guess(None));
+        assert_eq!(choose(None, Gone, true, false, Some(9)), Choice::Gone, "a notice after a mouse pick: the list is gone");
+        assert_eq!(choose(None, Gone, true, true, Some(9)), Choice::Gone);
+        assert_eq!(choose(None, Unanswered, true, false, Some(9)), Choice::Keep, "the Dock silent at its own notice");
+        assert_eq!(choose(None, Shown, true, false, Some(9)), Choice::Keep, "a selection that names no app");
+        assert_eq!(choose(None, Unanswered, true, true, Some(9)), Choice::Guess(Some(9)), "a key moved it, the Dock silent");
+    }
+
+    /// Live 11-18: ⌘ held, VS Code read from the Dock and its window put home; a click on it
+    /// dismissed the switcher, the next Dock notice found no list and the keys guessed Mail
+    /// (steps 1: the mouse moves nothing for them). The guess took the window back as the
+    /// click activated VS Code, and macOS slid away and back.
+    #[test]
+    fn a_mouse_pick_keeps_the_window_put_home_for_its_activation() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let lend_wait = Duration::from_millis(1000);
+        let (code, mail, w) = (757, 765, WindowId(3077));
+        let sel = Heard::Selected { steps: Some(1), first: false };
+        // A reading from the Dock that moves on: back at once, as before.
+        assert_eq!(
+            choose(Some(mail), List::Shown, true, false, Some(mail)),
+            Choice::Dock(mail)
+        );
+        assert_eq!(plan(sel, Some(mail), Some((code, w)), |_| None), vec![Act::TakeBack { window: w, why: "the switcher's selection moved on" }]);
+        // The list gone: the guess is no selection; the last reading (VS Code) stands, and the
+        // window waits for its app's activation.
+        assert_eq!(choose(None, List::Gone, true, false, Some(mail)), Choice::Gone);
+        let mut go = LetGo::default();
+        go.let_go(ms(0));
+        go.unread = true;
+        assert_eq!(go.step(true, ms(33), t0, lend_wait), LetGoStep::Keep);
+        // VS Code activated by the click (+33 ms): kept for its switch, past every wait.
+        let mut kept = go;
+        kept.activated = true;
+        assert_eq!(kept.step(false, ms(500), t0, lend_wait), LetGoStep::Keep, "its switch takes it");
+        // ⌘'s release (taken after GONE_WAIT) still names VS Code: released, not taken back.
+        assert_eq!(plan(Heard::Released { steps: Some(1) }, Some(code), Some((code, w)), |_| None), vec![Act::Release { window: w }]);
+        // No activation of VS Code (a click elsewhere): back once the cap passes.
+        assert_eq!(go.step(true, ms(399), t0, lend_wait), LetGoStep::Keep, "past ACTIVATION_WAIT, inside the cap");
+        assert_eq!(go.step(true, ms(400), t0, lend_wait), LetGoStep::NoActivation, "the cap: back");
+        go.let_go(ms(150));
+        assert_eq!(go.step(false, ms(549), t0, lend_wait), LetGoStep::Keep, "from ⌘'s release, the later");
+        assert_eq!(go.step(false, ms(550), t0, lend_wait), LetGoStep::NoActivation);
     }
 
     #[test]

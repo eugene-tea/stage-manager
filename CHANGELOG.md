@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- With `engine = "spaces"`, a pick with the mouse in the ⌘Tab switcher no longer slides to
+  another Desktop and back.
+
 ## 1.9.1 — 2026-11-18
 
 - With `engine = "spaces"`, Mission Control and App Exposé show every stage's windows again,

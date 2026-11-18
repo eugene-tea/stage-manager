@@ -117,8 +117,18 @@ impl Controller {
     }
 
     /// ⌘ let go with the switcher up on app `pid` (`lent`: a window of it is home for the
-    /// switcher now; `since_tab_ms`: from the first Tab): the watch starts.
-    pub(super) fn slide_watch_cmd_tab(&mut self, ob: &crate::platform::observe::Observer, pid: i32, lent: bool, since_tab_ms: Option<u64>, now: Instant) {
+    /// switcher now; `since_tab_ms`: from the first Tab; `activated`: an app already activated
+    /// since the first Tab, as a click in the switcher does before ⌘'s release): the watch
+    /// starts.
+    pub(super) fn slide_watch_cmd_tab(
+        &mut self,
+        ob: &crate::platform::observe::Observer,
+        pid: i32,
+        lent: bool,
+        since_tab_ms: Option<u64>,
+        activated: Option<i32>,
+        now: Instant,
+    ) {
         let noted = self.slide_watch.lend.take().filter(|(p, ..)| *p == pid);
         if !self.slide_watched() {
             return;
@@ -139,6 +149,9 @@ impl Controller {
             app_here: app_on(m, pid, before),
         };
         self.slide_watch_begin(start, now);
+        if let Some(activated) = activated {
+            self.slide_watch_activated(ob, activated);
+        }
     }
 
     /// A new activation watched; one still watched is written first with what it knows.
@@ -164,7 +177,7 @@ impl Controller {
         let ahead = self.ahead_space();
         let Some(w) = self.slide_watch.watch.as_ref() else { return };
         let s = w.start();
-        let there = self.model.as_ref().is_some_and(|m| app_on(m, s.pid, to));
+        let there = self.model.as_ref().is_some_and(|m| app_on(m, w.pid(), to));
         let expected = ahead == Some(to) || s.predicted == Some(to.0) || (!s.app_here && there);
         if let Some(w) = self.slide_watch.watch.as_mut() {
             w.arrived(now, from.0, to.0, expected);
@@ -180,16 +193,16 @@ impl Controller {
     }
 
     /// App `pid` activated.
-    pub(super) fn slide_watch_activated(&mut self, pid: i32) {
+    pub(super) fn slide_watch_activated(&mut self, ob: &crate::platform::observe::Observer, pid: i32) {
         if let Some(w) = self.slide_watch.watch.as_mut() {
-            w.activated(pid);
+            w.activated(pid, ob.bundle_id(pid));
         }
     }
 
     /// A switch found incoming windows `shown` already on screen (the safety net): noted when
     /// one of them is the watched app's.
     pub(super) fn slide_watch_shown_early(&mut self, shown: &[u32]) {
-        let Some(pid) = self.slide_watch.watch.as_ref().map(|w| w.start().pid) else { return };
+        let Some(pid) = self.slide_watch.watch.as_ref().map(Watch::pid) else { return };
         let ours = self
             .model
             .as_ref()

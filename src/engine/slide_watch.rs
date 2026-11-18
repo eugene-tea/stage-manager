@@ -211,12 +211,15 @@ pub struct Watch {
     already_shown: bool,
     /// An activation of the app was notified.
     activated: bool,
+    /// ⌘Tab only: the first app activated, when not the one selected (its pid and bundle):
+    /// the switcher's selection was a guess, or a click picked another app.
+    other: Option<(i32, Option<String>)>,
 }
 
 impl Watch {
     /// A watch from the release at `at`.
     pub fn new(start: Start, at: Instant) -> Self {
-        Self { start, at, changes: Vec::new(), person: None, notices: 0, noticed: None, already_shown: false, activated: false }
+        Self { start, at, changes: Vec::new(), person: None, notices: 0, noticed: None, already_shown: false, activated: false, other: None }
     }
 
     /// The activation's facts.
@@ -255,10 +258,23 @@ impl Watch {
         self.already_shown = true;
     }
 
-    /// An activation of app `pid` was notified.
-    pub fn activated(&mut self, pid: i32) {
+    /// An activation of app `pid` (`bundle`, when known) was notified. After ⌘Tab, the
+    /// first activation of another app before the one selected names the app activated
+    /// ([`Self::pid`]; the line's `bundle`, with `guessed=` the one selected).
+    pub fn activated(&mut self, pid: i32, bundle: Option<&str>) {
         if pid == self.start.pid {
             self.activated = true;
+        } else if self.start.via == Via::CmdTab && !self.activated && self.other.is_none() {
+            self.other = Some((pid, bundle.map(str::to_string)));
+        }
+    }
+
+    /// The app this activation went to: the one activated when another than the one selected
+    /// was (⌘Tab), else the one selected.
+    pub fn pid(&self) -> i32 {
+        match &self.other {
+            Some((pid, _)) if !self.activated => *pid,
+            _ => self.start.pid,
         }
     }
 
@@ -293,10 +309,15 @@ impl Watch {
         let o = self.outcome();
         let num = |v: Option<u64>| v.map_or_else(|| "n/a".to_string(), |v| v.to_string());
         let parked = s.parked.map_or("n/a", |p| if p { "true" } else { "false" });
+        // The app activated wins over the one selected; `guessed=` says the one selected.
+        let (bundle, guessed) = match &self.other {
+            Some((_, other)) if !self.activated => (other.as_deref(), Some(s.bundle.as_deref().unwrap_or("n/a"))),
+            _ => (s.bundle.as_deref(), None),
+        };
         let mut line = format!(
             "via={} bundle={} parked={} park_ms={} press_to_release_ms={} put_home={} already_shown_fallback={} desktop_before={} desktop_after={} slid={} slid_back={} away_ms={} outcome={} by={} predicted={} app_here={} activated={} notices={}",
             s.via.name(),
-            s.bundle.as_deref().unwrap_or("n/a"),
+            bundle.unwrap_or("n/a"),
             parked,
             num(s.park_ms),
             num(s.press_to_release_ms),
@@ -311,9 +332,12 @@ impl Watch {
             o.by.map_or("n/a", Person::name),
             num(s.predicted),
             s.app_here,
-            self.activated,
+            self.activated || guessed.is_some(),
             self.notices,
         );
+        if let Some(guessed) = guessed {
+            line.push_str(&format!(" guessed={guessed}"));
+        }
         if let Some(why) = s.why {
             line.push_str(&format!(" why=\"{why}\""));
         }
@@ -524,7 +548,7 @@ mod tests {
         s.put_home = false;
         s.bundle = None;
         let mut w = Watch::new(s, t0);
-        w.activated(42);
+        w.activated(42, None);
         assert_eq!(
             w.line(),
             "via=cmdtab bundle=n/a parked=n/a park_ms=n/a press_to_release_ms=80 put_home=false already_shown_fallback=false desktop_before=1 desktop_after=1 slid=false slid_back=false away_ms=n/a outcome=none by=n/a predicted=n/a app_here=true activated=true notices=0"
@@ -540,6 +564,37 @@ mod tests {
         assert!(line.starts_with("via=dock bundle=com.example.editor parked=false park_ms=12 "), "{line}");
         assert!(line.contains(" already_shown_fallback=true desktop_before=1 desktop_after=2 slid=true slid_back=false "), "{line}");
         assert!(line.ends_with(" notices=1 why=\"the park did not take in time\""), "{line}");
+    }
+
+    /// Live 11-18: ⌘Tab's selection was a guess (Mail) while a click activated VS Code; the
+    /// line named Mail. The app activated wins, the guess is said after it.
+    #[test]
+    fn after_cmd_tab_the_line_names_the_app_activated() {
+        let t0 = Instant::now();
+        let mut s = start(Via::CmdTab);
+        s.bundle = Some("com.example.mail".into());
+        let mut w = Watch::new(s.clone(), t0);
+        w.activated(7, Some("com.example.editor"));
+        w.activated(42, None);
+        assert_eq!(w.pid(), 42, "its app activated after all: the selection stands");
+        assert!(w.line().starts_with("via=cmdtab bundle=com.example.mail "), "{}", w.line());
+        assert!(!w.line().contains("guessed="));
+        let mut w = Watch::new(s.clone(), t0);
+        w.activated(7, Some("com.example.editor"));
+        w.activated(8, Some("com.example.notes"));
+        assert_eq!(w.pid(), 7, "the first other app activated");
+        let line = w.line();
+        assert!(line.starts_with("via=cmdtab bundle=com.example.editor "), "{line}");
+        assert!(line.contains(" activated=true ") && line.ends_with(" guessed=com.example.mail"), "{line}");
+        // The same activation is its app's: no guess said.
+        let mut w = Watch::new(s.clone(), t0);
+        w.activated(42, None);
+        assert!(w.line().contains(" activated=true notices=0") && !w.line().contains("guessed="));
+        // A Dock click names the app clicked, whatever else is activated.
+        let mut w = Watch::new(start(Via::Dock), t0);
+        w.activated(7, Some("com.example.mail"));
+        assert_eq!(w.pid(), 42);
+        assert!(w.line().starts_with("via=dock bundle=com.example.editor ") && w.line().contains(" activated=false "));
     }
 
     #[test]
