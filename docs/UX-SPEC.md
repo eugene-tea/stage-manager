@@ -232,7 +232,11 @@ stage, animated as a card click: the stage you leave shrinks into the strip and 
 windows grow from their card. The keyboard goes to the app's window at once. In a stage
 shared with other apps, the activated app's window comes in front with the keyboard,
 whichever window was focused when the stage was left; a click on a waiting window's edge
-does the same for that window.
+does the same for that window. A stage comes in whole: when one of its windows is already on
+screen at its place as the switch starts, none grows from the card and the rest shows at
+once with it (a recording, 11-18: under `engine = "spaces"` one window of a Dock-clicked
+stage sat there 145 ms before the other flew in; that window now waits out of sight until
+the switch).
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an

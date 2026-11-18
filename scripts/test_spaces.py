@@ -1216,7 +1216,10 @@ def dock_home_cases(d1, d2):
     1. **An inactive app with a stage on the Desktop shown and a window shown on another**
        (Mail at 06:29:52): Fixture 3 hidden behind Bravo's stage on Desktop 2, Fixture 1-2
        shown on Desktop 1. A Dock click on the fixture app: no Space change, Fixture 3's
-       stage in front on Desktop 2.
+       stage in front on Desktop 2. Under the Spaces engine Fixture 3 is put home at the
+       press parked at the screen's corner, never on screen at its frame before its switch
+       (round dock-put-home); 1b: with the park not asked it shows early and its stage then
+       shows at once, no picture growing from the card.
     2. **The active app, its other window in a stage of another Desktop** (06:32:34: the
        first click did nothing, the second went): the fixture app active on Desktop 2,
        Fixture 1-2 hidden behind Alpha's stage on Desktop 1. One Dock click: one Space
@@ -1232,6 +1235,61 @@ def dock_home_cases(d1, d2):
         _dock_home_cases(d1, d2)
     finally:
         WATCH.desk("d1" if current_space() == d1 else "d2")
+
+
+def _dock_home_click(d2, label, park_fails):
+    """One real Dock click on the fixture app with Fixture 3 hidden behind Bravo's stage on
+    Desktop 2 (case 1): no Space change, Fixture 3's stage in front. Under the Spaces engine
+    the window is put home at the press, parked first (round dock-put-home): never on screen
+    at its frame before its stage's switch, which grows its picture from the card. With
+    `park_fails` (the park not asked: `debug-engine-fail park`) it shows at its frame before
+    the switch, which then draws no incoming picture (rounds skip-shown-incoming and
+    dock-put-home). False when the rest of the cases cannot go on."""
+    before = {w["id"]: w["bounds"] for w in probe_all()}
+    sampler = _frames_sampler(3000) if ts.SPACES else None
+    t0 = time.time()
+    r = ctl("debug-dock-click", ts.FIX_ID, "real")
+    check(r.get("ok"), f"{label}: the fixture app's Dock item got a posted click ({r.get('error') or 'ok'})")
+    time.sleep(2.5)
+    changes = space_changes_since(t0)
+    x = state()
+    check(not changes, f"{label}: no Space change after the Dock click ({changes})")
+    check(x.get("space") == d2 and x["active"] == stage_holding(x, "Fixture 3"),
+          f"{label}: Fixture 3's stage in front on Desktop 2 ({ts.stage_titles(x)})")
+    if not ts.SPACES:
+        return current_space() == d2
+    samples, display = _sampled(sampler, label)
+    events = log_events(t0)
+    lines = [line for _, line in events]
+    f3 = next((w["id"] for w in x["windows"] if w["title"] == "Fixture 3"), None)
+    home = next(((t, line) for t, line in events if "put home before the release" in line), None)
+    if not check(home is not None, f"{label}: the app's log says Fixture 3 was put home at the press"):
+        return current_space() == d2
+    parked = "parked=true" in home[1]
+    park_ms = re.search(r"park_ms=(\d+)", home[1])
+    say(f"    {label}: window {f3} put home (parked={parked}, park {park_ms.group(1) if park_ms else '?'} ms)")
+    skipped = any("incoming window already shown: no grow-in" in line and f"window={f3} " in line + " " for line in lines)
+    picture = any("transition ghost" in line and f"window={f3} outgoing=false" in line for line in lines)
+    # From the lend to the switch's pictures on screen: what anyone could see of the window.
+    moving = next((t for t, line in events if "the motion starts" in line or "transition covered" in line), None)
+    shown, seen_parked = ([], [])
+    if samples and f3 and moving:
+        shown, seen_parked = _seen_at_frame(samples, f3, display, home[0], moving - 0.01)
+        say(f"    {label}: before the switch, on screen parked {len(seen_parked)} sample(s), at a frame of its own {shown[:4]}")
+    if park_fails:
+        check(not parked, f"{label}: the park was not asked (log: parked=false)")
+        check(skipped, f"{label}: the switch skips Fixture 3's grow-in, already shown (window {f3})")
+        check(not picture, f"{label}: no incoming picture of Fixture 3")
+        check(not any("transition ghost" in line and "outgoing=false" in line for line in lines),
+              f"{label}: no incoming picture at all: the stage shows at once")
+    else:
+        check(parked, f"{label}: Fixture 3 was parked off the screen before it was put home (log: parked=true)")
+        check(not shown, f"{label}: Fixture 3 never on screen at its frame before its stage's switch ({len(shown)} sample(s): {shown[:4]})")
+        check(not skipped and picture, f"{label}: Fixture 3 grows from its card with its stage (a picture, not skipped)")
+    after = _listed_frame(f3) if f3 else None
+    check(after and before.get(f3) and ts.close(after, before[f3]),
+          f"{label}: after the switch Fixture 3 sits at its frame ({after and ts.fmt(after)}, was {before.get(f3) and ts.fmt(before[f3])})")
+    return current_space() == d2
 
 
 def _dock_home_cases(d1, d2):
@@ -1255,27 +1313,20 @@ def _dock_home_cases(d1, d2):
     if not check(x is not None, "dock home 1: Bravo's stage in front on Desktop 2, Fixture 3 hidden, Fixture 1-2 shown on Desktop 1"):
         return
     time.sleep(1.0)  # past the echo window of the switch's own activation
-    t0 = time.time()
-    r = ctl("debug-dock-click", ts.FIX_ID, "real")
-    check(r.get("ok"), f"dock home 1: the fixture app's Dock item got a posted click ({r.get('error') or 'ok'})")
-    time.sleep(2.5)
-    changes = space_changes_since(t0)
-    x = state()
-    check(not changes, f"dock home 1: no Space change after the Dock click ({changes})")
-    check(x.get("space") == d2 and x["active"] == stage_holding(x, "Fixture 3"),
-          f"dock home 1: Fixture 3's stage in front on Desktop 2 ({ts.stage_titles(x)})")
-    if ts.SPACES:
-        lines = [line for _, line in log_events(t0)]
-        check(any("put home before the release" in line for line in lines),
-              "dock home 1: the app's log says Fixture 3 was put home at the press")
-        # Round skip-shown-incoming (the owner's log, 11-18 10:41:33): put home at the press,
-        # Fixture 3 is shown at its frame before its stage's switch, which grows no picture
-        # over it.
-        f3 = next((w["id"] for w in x["windows"] if w["title"] == "Fixture 3"), None)
-        check(any("incoming window already shown: no grow-in" in line and f"window={f3} " in line + " " for line in lines),
-              f"dock home 1: the switch skips Fixture 3's grow-in, already shown (window {f3})")
-        check(not any("transition ghost" in line and f"window={f3} outgoing=false" in line for line in lines),
-              "dock home 1: no incoming picture of Fixture 3")
+    if not _dock_home_click(d2, "dock home 1", park_fails=False):
+        return
+    if ts.SPACES and current_space() == d2:
+        # 1b (round dock-put-home): the same click with the park not taken (an app that does
+        # not move its window in time): Fixture 3 shows at its frame before the switch, which
+        # then grows nothing from the card (the whole stage at once).
+        ctl("switch", bravo)
+        x = ts.wait_state(lambda y: y["active"] == bravo and any(w["title"] == "Fixture 3" and w["parked"] for w in y["windows"]),
+                          "Bravo's stage in front, Fixture 3 hidden", timeout=4)
+        if check(x is not None, "dock home 1b: Bravo's stage in front again, Fixture 3 hidden"):
+            time.sleep(1.0)
+            ctl("debug-engine-fail", "park")
+            _dock_home_click(d2, "dock home 1b", park_fails=True)
+            ctl("debug-engine-fail", "off")
     if current_space() != d2:
         return
 

@@ -285,15 +285,16 @@ impl Controller {
 
     /// The park asked for window `window`'s lend (round cmdtab-park): its frame's size at its
     /// display's park corner ([`corner::park_frame_of`], the Corner engine's geometry and
-    /// request), moved through its element; `must`: lend even when the park does not take.
+    /// request), moved through its element; `must`: lend even when the park does not take;
+    /// `ax_seconds`: how long its move may wait for the app (`None`: the engine's bound).
     /// `None` when the model or the observer does not know the window (lent unparked then).
-    fn lend_park(&self, ob: &Observer, window: WindowId, must: bool) -> Option<LendPark> {
+    pub(super) fn lend_park(&self, ob: &Observer, window: WindowId, must: bool, ax_seconds: Option<f32>) -> Option<LendPark> {
         let m = self.model.as_ref()?;
         let w = m.window(window)?;
         let display = *m.display(w.meta.display);
         let element = ob.element(window.0).or_else(|| ob.window(window.0).map(|o| o.element.clone()))?;
         let at = corner::park_frame_of(w.meta.frame, &display, m.options().park);
-        Some(LendPark { ask: ParkAsk { at, display, frame: w.meta.frame, must }, window: element })
+        Some(LendPark { ask: ParkAsk { at, display, frame: w.meta.frame, must }, window: element, ax_seconds })
     }
 
     /// Carries out one act of the switcher's plan (`first`: the switcher's first selection).
@@ -304,7 +305,7 @@ impl Controller {
                     // A Dock press's window still home goes back first.
                     let _ = self.engine.take_back(prev.window);
                 }
-                let park = self.lend_park(ob, window, first);
+                let park = self.lend_park(ob, window, first, None);
                 let asked = park.is_some();
                 let lend = self.engine.lend_home(window, park);
                 let parked = lend.parked.unwrap_or(false);
