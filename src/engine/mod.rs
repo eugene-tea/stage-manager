@@ -45,6 +45,7 @@ pub mod settings;
 pub mod show_desktop;
 pub mod slow_task;
 pub mod slide_hold;
+pub mod slide_watch;
 pub mod solar_settle;
 pub mod spaces;
 pub mod stale_activation;
