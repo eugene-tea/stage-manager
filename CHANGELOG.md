@@ -28,11 +28,11 @@
   kept and left alone; nothing is done while a full-screen app shows. The menu, the welcome
   and Settings say that Apple's Stage Manager is followed instead of offering to turn it
   off.
-- New setting `[strip] card_layout` (`"stacked"`, `"apple"` or `"spread_covered"`, applied
-  when the config file is saved). It chooses how a card of several apps places its windows:
-  `"stacked"`, the default, at the fixed offsets as before, where a window behind a wider one
-  can hide; `"apple"` spreads them as Apple's strip does (fitted to cards measured on
-  Apple's), so the window behind stays readable; `"spread_covered"` spreads only a card
+- A card of several apps spreads its windows as Apple's strip does (fitted to cards measured
+  on Apple's), so a smaller window behind a wider one stays readable; it was hidden behind
+  it. New setting `[strip] card_layout` (`"apple"`, the default, `"stacked"` or
+  `"spread_covered"`, applied when the config file is saved): `"stacked"` keeps the fixed
+  offsets as before; `"spread_covered"` spreads only a card
   where a window would show less than 30 % of itself. The `[cards] spread_*` keys hold the
   spread's measured numbers.
 - The strip brought back at the left edge shows its cards flat, facing the screen, at the

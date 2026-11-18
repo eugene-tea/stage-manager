@@ -1156,7 +1156,7 @@ from a hidden stage; its results replace this table once run.
 - Not measured yet on Apple's: a card of four or more apps, which side a third app's window takes when it sits on the
   other side of the front window from the second app's (stacked and the spread alike: the
   second's side; the spread measured so 11-16). How far the other app's window peeks out is
-  measured for the spread (11-16, `card_layout = "apple"`); stacked, the default, it is
+  measured for the spread (11-16, `card_layout = "apple"`, the default); stacked, it is
   always the fixture's 42 and 15 pt, on its side of the screen.
 - The spread (`card_layout = "apple"`) still to measure: a card of two windows of one app
   and one of another (ours spreads every window by its place in front-to-back order), the

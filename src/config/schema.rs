@@ -213,8 +213,8 @@ pub const KEYS: &[KeyDef] = &[
         "With order = \"in_place\" or \"dock\", the active stage's place: \"close\" shows no card and the cards below close up; \"gap\" leaves its slot empty so no other card moves; \"card\" shows it as a highlighted card."),
     k("strip", "level", Kind::Choice(&["below_windows", "above_windows"]), "\"below_windows\"",
         "Where the strip sits: \"below_windows\" is Apple's (a window moved over it covers it); \"above_windows\" keeps it over windows."),
-    k("strip", "card_layout", Kind::Choice(&["stacked", "apple", "spread_covered"]), "\"stacked\"",
-        "How a card of several apps places its windows: \"stacked\" at the fixed offsets below (second_app_dx and the rest), so a window behind a wider one can hide; \"apple\" spreads them as Apple's does (spread_*: a window behind stays readable); \"spread_covered\" stacks them unless a window would show less than spread_covered_share of itself, then spreads. Cards of one app step stack_dx either way."),
+    k("strip", "card_layout", Kind::Choice(&["apple", "stacked", "spread_covered"]), "\"apple\"",
+        "How a card of several apps places its windows: \"apple\" spreads them as Apple's does (spread_*: a window behind stays readable); \"stacked\" at the fixed offsets below (second_app_dx and the rest), so a window behind a wider one can hide; \"spread_covered\" stacks them unless a window would show less than spread_covered_share of itself, then spreads. Cards of one app step stack_dx either way."),
     k("strip", "reorder", Kind::Bool, "true",
         "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). Off while order = \"dock\"."),
     k("strip", "merge_on_drop", Kind::Bool, "true",
@@ -626,6 +626,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-45.toml"),
     include_str!("legacy/default-46.toml"),
     include_str!("legacy/default-47.toml"),
+    include_str!("legacy/default-48.toml"),
 ];
 
 #[cfg(test)]

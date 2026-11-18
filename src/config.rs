@@ -330,10 +330,10 @@ pub enum StripLevel {
 pub enum CardArrangement {
     /// Stacked at the fixed offsets of the 11-09 measurements (`second_app_dx` and the rest):
     /// a window behind a wider one can hide behind it.
-    #[default]
     Stacked,
     /// Apple's spread, measured 11-16 (`spread_*`): each window stepped out by a share of the
-    /// one beside it, a narrower one further.
+    /// one beside it, a narrower one further. The default, as Apple's.
+    #[default]
     Apple,
     /// Stacked, unless a window shows less than `spread_covered_share` of itself: then spread.
     SpreadCovered,
@@ -1005,9 +1005,9 @@ impl Config {
                     _ => StripLevel::BelowWindows,
                 },
                 card_layout: match v.text("strip.card_layout") {
-                    "apple" => CardArrangement::Apple,
+                    "stacked" => CardArrangement::Stacked,
                     "spread_covered" => CardArrangement::SpreadCovered,
-                    _ => CardArrangement::Stacked,
+                    _ => CardArrangement::Apple,
                 },
                 reorder: v.flag("strip.reorder"),
                 merge_on_drop: v.flag("strip.merge_on_drop"),
@@ -1497,7 +1497,7 @@ mod tests {
         assert!(c.sugar.shift_brings_here, "invisible until Shift is held");
         assert!(c.windows.minimize_to_strip);
         assert_eq!(c.style.level, StripLevel::BelowWindows, "a window moved over the strip covers it");
-        assert_eq!(c.style.card_layout, CardArrangement::Stacked, "stacked until the owner picks a spread");
+        assert_eq!(c.style.card_layout, CardArrangement::Apple, "spread as Apple's, a window behind readable");
         for (text, layout) in [("apple", CardArrangement::Apple), ("spread_covered", CardArrangement::SpreadCovered), ("stacked", CardArrangement::Stacked)] {
             let p = parse(&format!("[strip]\ncard_layout = \"{text}\"\n"));
             assert_eq!(p.config.style.card_layout, layout);
