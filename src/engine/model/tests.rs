@@ -920,6 +920,42 @@ fn one_at_a_time_follows_the_focused_window_even_when_present() {
 }
 }
 
+both_engines! {
+/// 11-18: a pick in Mission Control activates the app of a hidden stage's window. Mission
+/// Control shows, so the platform passes no frame ([`Observation::frames`] empty: its layout
+/// is not the windows' frames); the front stage's window goes out keeping its own frame, and
+/// comes back at it when its app is activated again. Had the switch taken the layout's
+/// frame, the window would come back at that size.
+#[test]
+fn a_pick_in_mission_control_keeps_the_front_windows_own_frames() {
+    let own = Rect::new(350.0, 44.0, 1300.0, 900.0);
+    let laid_out = Rect::new(18.0, 780.0, 480.0, 332.0);
+    for (frames, back_at) in [(false, own), (true, laid_out)] {
+        let mut e = Env::new();
+        e.add(WindowMeta { frame: own, ..meta(1, 10, "com.example.a") }, RuleAction::Current);
+        e.add(meta(2, 11, "com.example.b"), RuleAction::New);
+        let a = e.m.app_activated(10, &e.d.obs());
+        e.run(a);
+        assert!(!e.d.parked(w(1)) && e.d.parked(w(2)), "the first stage in front");
+        assert_eq!(e.d.frames[&w(1)], own);
+        // The pick: window 2's app, Mission Control showing.
+        let mut obs = Observation { focused: Some(w(2)), ..e.d.obs() };
+        if frames {
+            obs.frames.insert(w(1), laid_out);
+        } else {
+            obs.frames.clear();
+        }
+        let a = e.m.app_activated(11, &obs);
+        e.run(a);
+        assert!(e.d.parked(w(1)) && !e.d.parked(w(2)), "the picked window's stage in front");
+        let a = e.m.app_activated(10, &Observation { focused: Some(w(1)), ..e.d.obs() });
+        e.run(a);
+        assert!(!e.d.parked(w(1)));
+        assert_eq!(e.d.frames[&w(1)], back_at, "frames taken: {frames}");
+    }
+}
+}
+
 /// The stage an activation of `pid` switches to with `focused` (None: no switch).
 fn activation_answer(e: &Env, pid: Pid, focused: Option<WindowId>) -> Option<StageId> {
     let mut m = e.m.clone();

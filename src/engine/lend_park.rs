@@ -78,7 +78,8 @@ pub struct ParkAsk {
     /// The window's display: its park zone tells a park that took.
     pub display: Display,
     /// The window's frame as the model knows it: where it goes back when the window server
-    /// does not list it before the park.
+    /// does not list it before the park, or lists it at another size (Mission Control's
+    /// layout, shrunk: a lend moves the window, it never resizes it).
     pub frame: Rect,
     /// Lend even when the park does not take (the first Tab: a quick ⌘Tab has no other
     /// chance, and a slide is worse than a window seen for a moment).
@@ -127,13 +128,18 @@ pub fn at_origin(listed: Rect, want: Rect) -> bool {
     (listed.x - want.x).abs() <= NEAR && (listed.y - want.y).abs() <= NEAR
 }
 
+/// True when `a` and `b` have one size (within [`NEAR`]).
+fn same_size(a: Rect, b: Rect) -> bool {
+    (a.w - b.w).abs() <= NEAR && (a.h - b.h).abs() <= NEAR
+}
+
 /// Lends the window: parked first while still hidden when `park` asks it, then put home.
 /// Without a park only home.
 pub fn lend(mac: &mut impl LendSteps, park: Option<ParkAsk>) -> LendDone {
     let Some(ask) = park else {
         return LendDone { home: mac.put_home(), parked: None, owed: None };
     };
-    let before = mac.listed();
+    let before = mac.listed().filter(|r| same_size(*r, ask.frame));
     let parked_at = Parked { at: ask.at, frame: before.unwrap_or(ask.frame), display: ask.display };
     let landed = mac.move_to(ask.at);
     let took = landed.is_some_and(|r| ask.display.parks(r));
@@ -415,6 +421,20 @@ mod tests {
         let mut mac = Fake { at: None, ..Fake::new(frame()) };
         let done = lend(&mut mac, Some(ask(true)));
         assert_eq!(done.parked, Some(false));
+    }
+
+    /// Listed at another size before the park (Mission Control's layout shrinks the windows
+    /// it shows, 11-18: 1949x1288 listed at 718x474), the listing is not the window's frame:
+    /// a take back restores the model's, so a window put back ends hidden at its own frame.
+    #[test]
+    fn a_listing_at_another_size_is_not_the_frame_restored() {
+        let shrunk = Rect::new(18.0, 780.0, 718.0, 474.0);
+        let mut mac = Fake::new(shrunk);
+        let done = lend(&mut mac, Some(ask(false)));
+        assert_eq!(done.owed.map(|p| p.frame), Some(frame()), "the model's frame, never the layout's");
+        let back = take_back(&mut mac, done.owed);
+        assert_eq!(back.restored, Some(true));
+        assert_eq!(mac.at.map(|r| (r.x, r.y)), Some((frame().x, frame().y)), "its own origin again");
     }
 
     /// After a crash with a parked lend on the Desktop (no stage Space holds it), the

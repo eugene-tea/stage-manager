@@ -482,8 +482,7 @@ fn show_desktop_is_up_while_listed_or_expected_never_for_mission_control() {
 }
 
 /// 11-09: a frame read while Show Desktop has the windows aside, or as they slide back, is
-/// macOS's: expected from the click, listed, and a settle after it closed. Mission Control
-/// moves no window's frame.
+/// macOS's: expected from the click, listed, and a settle after it closed.
 #[test]
 fn show_desktop_moves_windows_while_expected_listed_and_a_settle_after_it_closed() {
     let t0 = Instant::now();
@@ -496,8 +495,25 @@ fn show_desktop_moves_windows_while_expected_listed_and_a_settle_after_it_closed
     assert_eq!(w.see(None, ms(t0, 6000)), Change::Ended(Overview::ShowDesktop));
     assert!(w.moves_windows(ms(t0, 6000)) && w.moves_windows(ms(t0, 6999)), "the windows slide back");
     assert!(!w.moves_windows(ms(t0, 7000)), "back in place a settle after");
+}
+
+/// 11-18: Mission Control and App Exposé list every window of the Desktop shrunk into their
+/// layout (a 1949x1288 window at 718x474) and fly them back as they close: no frame is
+/// taken while one shows and for a settle after; one listed too long to be trusted no longer
+/// holds the frames back.
+#[test]
+fn mission_control_moves_windows_while_shown_and_a_settle_after_it_closed() {
+    let t0 = Instant::now();
     let mut m = OverviewWatch::default();
+    assert!(!m.moves_windows(t0));
     m.see(Some(Overview::MissionControl), t0);
-    m.see(None, ms(t0, 500));
-    assert!(!m.moves_windows(t0) && !m.moves_windows(ms(t0, 600)));
+    assert!(m.moves_windows(t0) && m.moves_windows(ms(t0, 1700)), "shown: its layout, not the frames");
+    assert_eq!(m.see(None, ms(t0, 1750)), Change::Ended(Overview::MissionControl));
+    assert!(m.moves_windows(ms(t0, 1750)) && m.moves_windows(ms(t0, 2749)), "the windows fly back");
+    assert!(!m.moves_windows(ms(t0, 2750)), "back in place a settle after");
+    let mut stuck = OverviewWatch::default();
+    stuck.see(Some(Overview::MissionControl), t0);
+    let late = t0 + OVERVIEW_STUCK;
+    assert_eq!(stuck.see(Some(Overview::MissionControl), late), Change::Stuck(Overview::MissionControl));
+    assert!(!stuck.moves_windows(late), "listed too long: no longer trusted, the frames are taken again");
 }
