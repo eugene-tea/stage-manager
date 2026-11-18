@@ -9,7 +9,7 @@ them.
 
 ## Comparison
 
-✓ yes · — no · ◐ in part (see the notes below the table)
+✓ yes · — no, or not measured · ◐ in part (see the notes below the table)
 
 | | Accessibility | Spaces | Integrated with Apple's |
 |---|:---:|:---:|:---:|
@@ -36,12 +36,13 @@ them.
 | Works with apps that refuse or limit a window move | — | ✓ | ✓ |
 | Pointer never moved by the app | ✓ | ✓ | — ⁵ |
 | Documented macOS interfaces only | ✓ | — ⁶ | ◐ ⁷ |
-| ***Cost*** ⁸ | | | |
-| Stage Manager's CPU at rest | 1.07 % | 0.35 % | about 1 % ⁹ |
-| Screen-capture service at rest | 1.23 % | 0 % | not measured |
-| Window server's extra CPU at rest | +2.58 % | +0.86 % | not measured |
-| All together, at rest | about 4.9 % | about 1.2 % | not measured |
-| Time awake per minute at rest | 500 ms | 125 ms | not measured |
+| ***Cost at rest*** ⁸ | | | |
+| **Total, with the system's share** | **about 4.9 %** | **about 1.2 %** | — |
+| Stage Manager itself (what Activity Monitor shows) | 1.07 % | 0.35 % | about 1 % ⁹ |
+| macOS's screen-capture service | 1.23 % | 0 % | — |
+| Window server, above its own load | +2.58 % | +0.86 % | — |
+| Time awake per minute | 500 ms | 125 ms | — |
+| ***Speed*** | | | |
 | A card click until the windows land | about 860 ms | about 850 ms | about 700 ms (Apple's motion) |
 
 1. Apple's Stage Manager takes changes only from the pointer, so the window is moved with a
@@ -69,9 +70,11 @@ them.
    is drawn, as measured on macOS 27, and a macOS update can change that. The live tests
    recheck it.
 8. Percent of one CPU core, on an Apple silicon Mac with macOS 27, test windows only, the
-   median of three runs (11-14). The window server's extra CPU is counted above
-   its own 4.00 % with Stage Manager quit. Most of the switch time is the animation, which is
-   the same in each.
+   median of three runs (11-14). Most of the cost of Accessibility is in macOS's own processes
+   (the screen-capture service, for the pictures that play the motion, and the window server),
+   so Activity Monitor's line for Stage Manager shows only about a fifth of it. The window
+   server is counted above its own 4.00 % with Stage Manager quit. Most of the switch time is
+   the animation, which is the same in each.
 9. An average over a day of everyday use (11-18), not a measurement at rest, so it isn't
    directly comparable with the other two columns.
 
