@@ -19,7 +19,10 @@
 //! prediction sees it, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
 //! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
-//! as the Dock shows it (its items' titles, the one selected), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
+//! as the Dock shows it (its items' titles, the one selected), `debug-mission-control
+//! status|lend|back|mode off|shown|key|config` drives Mission Control's lends under the Spaces
+//! engine by hand (the probe: every hidden window put home now and kept out, taken back, the
+//! mode for this run), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
@@ -328,6 +331,10 @@ pub enum Command {
     /// A posted ⌘Tab and what answered it, or the last one's report (needs
     /// `STAGE_MANAGER_TEST=1`; round cmd-tab, [`crate::platform::switcher_probe`]).
     DebugCmdTab(CmdTabProbe),
+    /// Mission Control's lends under the Spaces engine, for the probe (needs
+    /// `STAGE_MANAGER_TEST=1`; round spaces-mission-control): `status`, `lend`, `back`,
+    /// `mode off|shown|key|config`.
+    DebugMissionControl(Vec<String>),
     /// ⌘Tab's switcher as the Dock's Accessibility shows it now: the items' titles, the one
     /// selected (needs `STAGE_MANAGER_TEST=1`; round cmd-tab).
     DebugSwitcher,
@@ -513,6 +520,12 @@ impl Command {
                 Ok(Self::DebugFullscreen { id, on })
             }
             ["debug-switcher"] => Ok(Self::DebugSwitcher),
+            ["debug-mission-control", rest @ ..] => match rest {
+                ["status" | "lend" | "back"] | ["mode", "off" | "shown" | "key" | "config"] => {
+                    Ok(Self::DebugMissionControl(rest.iter().map(|w| (*w).to_string()).collect()))
+                }
+                _ => Err("debug-mission-control takes status, lend, back, or mode off|shown|key|config".into()),
+            },
             ["debug-cmd-tab", "result"] => Ok(Self::DebugCmdTab(CmdTabProbe::Result)),
             ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
             ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: false }),
@@ -1080,6 +1093,13 @@ mod tests {
         );
         assert_eq!(Command::parse("debug-cmd-tab result"), Ok(Command::DebugCmdTab(CmdTabProbe::Result)));
         assert_eq!(Command::parse("debug-switcher"), Ok(Command::DebugSwitcher));
+        assert_eq!(Command::parse("debug-mission-control lend"), Ok(Command::DebugMissionControl(vec!["lend".into()])));
+        assert_eq!(
+            Command::parse("debug-mission-control mode key"),
+            Ok(Command::DebugMissionControl(vec!["mode".into(), "key".into()]))
+        );
+        assert!(Command::parse("debug-mission-control").is_err());
+        assert!(Command::parse("debug-mission-control mode sometimes").is_err());
         assert!(Command::parse("debug-switcher now").is_err());
         assert!(Command::parse("debug-cmd-tab").is_err());
         assert!(Command::parse("debug-cmd-tab press").is_err());

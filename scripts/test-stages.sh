@@ -5,7 +5,7 @@
 # base ID so no other fixture run is disturbed), then runs the phases.
 #
 #   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 restore strip native visible
-#                                          # parity motion slots expose capture raise park offscreen
+#                                          # parity motion slots expose mission capture raise park offscreen
 #                                          # enhanced stale handles displays screens engine
 #   scripts/test-stages.sh engine          # which window engine runs: each launch's probe and choice,
 #                                          # the fallback mid-run to the Corner engine (round sm-probe)
@@ -36,6 +36,13 @@
 #   SM_ENGINE=spaces scripts/test-stages.sh cmdtab-probe    # ⌘Tab posted, Escape before ⌘'s release (nothing activated):
 #                                          # does the Dock show the switcher's selection, what the input
 #                                          # monitor and an event tap see (round cmd-tab; not a default phase)
+#   SM_ENGINE=spaces scripts/test-stages.sh mission         # Mission Control and App Exposé show the hidden stages'
+#                                          # windows and put them back; a pick; kill -9 with them out
+#                                          # (round spaces-mission-control; skips under the park corner)
+#   SM_ENGINE=spaces scripts/test-stages.sh mission-probe   # does Mission Control lay out a hidden window put on
+#                                          # the Desktop before its key, after it shows, at the key? Prints
+#                                          # what each outcome means (not a default phase; SM_SHOTS=<dir> adds
+#                                          # by-eye screenshots)
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
 #                                          # Desktops and toggles full screen; nobody at the Mac

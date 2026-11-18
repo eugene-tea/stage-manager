@@ -148,7 +148,9 @@ gets a stage of its own. Sheets and dialogs always stay with their window.
 Each Desktop (Space) has its own stages and its own strip, as with Apple's. Clicking a card
 never changes the Desktop. When ⌘-Tab or the Dock takes you to another Desktop, its stage is
 ready when it arrives. Full-screen apps have no strip. Mission Control hides the strip, just
-as it hides Apple's.
+as it hides Apple's, and shows the windows of every stage. With `[windows] engine =
+"spaces"` the hidden stages' windows are put on the Desktop for it and taken back when it
+closes (`[windows] mission_control_stages`; [MODES.md](MODES.md) says what is left open).
 
 A window you move to another Desktop (in Mission Control, say) goes where a new window of
 its app would open there: with that app's windows if it has a stage on that Desktop, else in

@@ -375,7 +375,23 @@ showing most of it (macOS's rule).
   window of the other screens, on Desktops not shown too, which a quit does safely.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
-is back on the same Desktop when they end. Where Show Desktop pushes a window (while it
+is back on the same Desktop when they end. Mission Control and App Exposé show every
+stage's windows, as Apple's Stage Manager does (a report, 11-18: under `engine = "spaces"` only the
+stage in front showed, a hidden stage's windows being on no Desktop).
+Under `engine = "spaces"` the hidden stages' windows of the Desktops shown are put on their
+Desktop while one of them shows, parked at the screen's corner first so that none shows at
+its frame, most recent stage first, in batches of 40 ms; a window whose app does not move it
+within 50 ms stays hidden. When it closes they go back into their stage Spaces and their
+frames are set again; a window picked there is activated by macOS and the activation's
+switch brings its stage in front, so it and, for 1.5 s, the windows of the app in front are
+left to that switch. `[windows] mission_control_stages`: `"shown"` (the default) lends once
+Mission Control is listed, found within about 30 ms of its keyboard shortcut (the user's
+own, read from Keyboard Shortcuts, or the keyboard's Mission Control key) and otherwise at
+the next tick (up to 0.25 s while something happens, 2 s at rest: a gesture, a hot corner
+and the Dock's item announce nothing); `"key"` lends at the shortcut itself and takes the
+windows back when nothing shows within 1.5 s; `"off"` lends nothing. Not measured yet:
+whether Mission Control lays out a window that arrives after it opened (`scripts/test-stages.sh
+mission-probe`; the log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
 shows, expected from a wallpaper click, and for a second after it closes, as the windows
 slide back) is never taken as the window's frame: a switch then keeps each window's own. The strip never appears in ⌘-Tab or the ⌘\`
 window cycle.
@@ -1179,6 +1195,11 @@ screen-capture service reads 0 and the window server, measured with other apps o
   Desktop, so the window is shown with an inactive window's smaller shadow and takes the
   key window's a frame or two later, after its picture has handed over the key window's.
   A switch that an app's activation starts (⌘Tab, the Dock) has the app active already.
+- In the Spaces mode, a hidden stage's window dragged to another Desktop inside Mission
+  Control goes back into its stage when Mission Control closes; in the default mode it
+  moves. Opened by a gesture, a hot corner or the Dock, Mission Control gets the hidden
+  stages' windows up to two seconds late, and an app's hidden dialogs and panels are not
+  shown there.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.

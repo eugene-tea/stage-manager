@@ -406,6 +406,8 @@ impl Controller {
         }
         let now = Instant::now();
         switcher_probe::note("dock notice", name);
+        // The Dock draws Mission Control too: its notice may come as it opens.
+        self.upkeep_dock_notice(name, now);
         match name {
             "AXCreated" | "AXSelectedChildrenChanged" => {
                 if !self.switcher.keys.is_open() {

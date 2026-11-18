@@ -44,12 +44,15 @@ pub(super) struct SpacesUpkeep {
     /// After a fallback from this engine: what it left in its stage Spaces is swept again
     /// until nothing is left ([`Controller::check_engine`]).
     pub(super) left_behind: bool,
+    /// Mission Control's lends: the hidden stages' windows on their Desktop while it shows
+    /// ([`super::mission_control`]).
+    pub(super) mission: super::mission_control::MissionWatch,
 }
 
 impl SpacesUpkeep {
     /// Nothing kept.
     pub(super) fn new() -> Self {
-        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None, frames_owed: BTreeMap::new(), left_behind: false }
+        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None, frames_owed: BTreeMap::new(), left_behind: false, mission: super::mission_control::MissionWatch::default() }
     }
 }
 

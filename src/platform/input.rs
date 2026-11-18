@@ -71,6 +71,9 @@ pub struct InputEvent {
     pub other_modifiers: bool,
     /// Control held (⌃-arrow: macOS's Desktop and Mission Control keys by default).
     pub control: bool,
+    /// Option held (one of Mission Control's shortcuts is told from the key and exactly its
+    /// modifiers: [`crate::engine::mission_control::trigger`]).
+    pub option: bool,
     /// For a mouse event, macOS's click count: 2 for the second click of a double click
     /// (within the user's double-click interval, near the first), 1 for a single click; 0
     /// for a key.
@@ -161,6 +164,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Op
             cmd: flags.contains(NSEventModifierFlags::Command),
             other_modifiers: flags.intersects(NSEventModifierFlags::Option | NSEventModifierFlags::Control),
             control: flags.contains(NSEventModifierFlags::Control),
+            option: flags.contains(NSEventModifierFlags::Option),
             clicks,
             key,
             stamp: event.timestamp(),
@@ -906,7 +910,7 @@ mod tests {
     }
 
     fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {
-        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, control: false, clicks, key, stamp: 0.0 }
+        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, control: false, option: false, clicks, key, stamp: 0.0 }
     }
 
     #[test]

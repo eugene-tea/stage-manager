@@ -26,6 +26,7 @@ pub mod lend_park;
 pub mod logout_watch;
 pub mod minimize;
 pub mod minimize_press;
+pub mod mission_control;
 pub mod model;
 pub mod not_ours;
 pub mod observe_retry;

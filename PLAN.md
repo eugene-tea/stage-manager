@@ -82,6 +82,18 @@ UX-SPEC, "Known gaps".
   set aside at the stand-down (CHANGELOG). Left: a live check of the round trip with the
   owner turning Apple's on and off by hand (the suite's toggle writes
   `com.apple.WindowManager`, which is not done on the owner's Mac).
+- **Mission Control under the Spaces engine: measure, then decide the default.** Built
+  (`[windows] mission_control_stages`, CHANGELOG): the hidden stages' windows are lent to the
+  Desktop while Mission Control or App Exposé shows. Run `SM_ENGINE=spaces
+  scripts/test-stages.sh mission-probe` (it prints what each outcome means), then `mission`.
+  Mission Control takes late windows: keep `"shown"`. Only windows there at the key: make
+  `"key"` the default. Neither: `"off"`, and keep hidden windows on the Desktop another way.
+  Left after that: a faster sign for a gesture, a hot corner and the Dock's item (up to 2 s
+  at rest now; the log says whether a notice of the Dock's comes first, and the Dock's
+  notices are observed only after the first ⌘ press); a hidden window dragged to another
+  Desktop inside Mission Control (it goes back to its stage); hidden dialogs and panels
+  (standard windows only are lent); App Exposé lends every hidden window, not only the app
+  in front's.
 - **Video calls in a hidden stage (Spaces engine).** A stage's windows off every Desktop
   count as hidden to their apps: Google Meet in Safari stops drawing other people's video and
   its card shows grey tiles (11-16); Apple's keeps them playing. Option, the owner's call: a

@@ -439,6 +439,10 @@ pub struct WindowsConfig {
     /// `[windows] apple_stage_manager_on`: what the app does while Apple's Stage Manager is on (stand
     /// down, or follow it: [`crate::engine::stand_down::WithApple`]). Read on every reload.
     pub with_apple: crate::engine::stand_down::WithApple,
+    /// `[windows] mission_control_stages`: whether, and when, the hidden stages' windows are
+    /// put on their Desktop for Mission Control under the Spaces engine
+    /// ([`crate::engine::mission_control::Mode`]). Read on every reload.
+    pub mission_control: crate::engine::mission_control::Mode,
     /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
     /// shadow side by side ([`crate::engine::corner::corner_patch::DEFAULT_REACH`]), or one number for
     /// every side ([`WindowsConfig::patch_reach`]).
@@ -1147,6 +1151,7 @@ impl Config {
                 corner_patch_reach: v.auto("windows.corner_patch_reach"),
                 engine: crate::engine::engine_choice::ConfigEngine::parse(v.text("windows.engine")),
                 with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.apple_stage_manager_on")),
+                mission_control: crate::engine::mission_control::Mode::parse(v.text("windows.mission_control_stages")),
             },
             displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
             rules: RuleSet::new(rules, defaults),
@@ -1496,6 +1501,11 @@ mod tests {
         assert!(!c.style.scale_to_display && c.style.scale == 1.0);
         assert!(c.sugar.shift_brings_here, "invisible until Shift is held");
         assert!(c.windows.minimize_to_strip);
+        assert_eq!(
+            c.windows.mission_control,
+            crate::engine::mission_control::Mode::Shown,
+            "under the Spaces engine Mission Control shows every stage's windows, as Apple's; nothing moves before it shows"
+        );
         assert_eq!(c.style.level, StripLevel::BelowWindows, "a window moved over the strip covers it");
         assert_eq!(c.style.card_layout, CardArrangement::Apple, "spread as Apple's, a window behind readable");
         for (text, layout) in [("apple", CardArrangement::Apple), ("spread_covered", CardArrangement::SpreadCovered), ("stacked", CardArrangement::Stacked)] {

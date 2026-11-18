@@ -152,6 +152,7 @@ mod corner;
 mod dock_order;
 mod fallback;
 mod landing_focus;
+mod mission_control;
 mod raise_order;
 mod slide_watch;
 mod spaces;
@@ -592,7 +593,7 @@ fn offered_at_notice(waiting: impl IntoIterator<Item = u32>, listed: &HashSet<u3
 /// `debug-space`, `debug-expose`, ...) never reach the WM thread's `ctl`, so they leave the
 /// motion alone too (`mark` asks `state` and `dump`).
 fn ctl_lands_switch(cmd: &Command) -> bool {
-    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher)
+    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher | Command::DebugMissionControl(_))
 }
 
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
@@ -3675,6 +3676,8 @@ impl Controller {
             InputKind::KeyDown => {
                 // The switcher's selection first: its window put home before ⌘'s release.
                 self.switcher_key(ob, &event, now);
+                // One of Mission Control's shortcuts: the engine's upkeep may have work for it.
+                self.upkeep_key(ob, &event, now);
                 if event.is_desktop_key() {
                     self.slide_watch_person(crate::engine::slide_watch::Person::DesktopKey);
                 }
@@ -6576,6 +6579,12 @@ impl Controller {
                     None => json!({ "ok": false, "error": "the Dock does not run" }),
                 }
             }
+            Command::DebugMissionControl(words) => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-mission-control needs STAGE_MANAGER_TEST=1" });
+                }
+                self.upkeep_debug_mission_control(ob, &words)
+            }
             Command::DebugCmdTab(probe) => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-cmd-tab needs STAGE_MANAGER_TEST=1" });
@@ -6831,6 +6840,7 @@ impl Controller {
         (state["accessibility_blind"], state["accessibility_blind_since"]) = self.ax_blind_json();
         state["displays"] = Value::Array(displays_json);
         state["strays"] = Value::Array(strays);
+        state["mission_control"] = self.status_mission_control();
         // Windows whose handle died judged closed once, waiting for a second look.
         state["stale_closing"] = json!(self.stale.waiting());
         // Keep stages in place (9B): the order, the active stage's mode and its empty slot.
