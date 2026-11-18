@@ -2208,9 +2208,9 @@ impl Strip {
             // (the strip was built with the defaults, so `hide_delay_ms` never applied).
             self.visibility.set_timing(Timing::from_style(&self.style.reveal));
         }
-        // No wallpaper read, no mouse move heard for a strip that shows no card (hidden, or
-        // standing down).
-        card_glass::set_wanted(self.display, self.glass().on() && snapshot.user_visible);
+        // No wallpaper read for a strip that shows no card (hidden, standing down, or no
+        // card to show), no mouse move heard for a hidden one.
+        card_glass::set_wanted(self.display, self.glass().on() && snapshot.user_visible && !snapshot.cards.is_empty());
         want_moves(self.mtm, self.display, snapshot.user_visible || snapshot.window_drag.is_some());
         let geometry = Geometry::for_display(self.mtm, self.display, &self.style);
         if geometry != self.geometry {

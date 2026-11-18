@@ -161,8 +161,8 @@ pub fn set_space(display: u32, space: u64) {
     });
 }
 
-/// `display`'s strip's glass is `on` (its style, at each snapshot), and the strip may show
-/// cards (`[strip] visible`, not standing down for Apple's Stage Manager): while it may not,
+/// `display`'s strip's glass is `on` (its style, at each snapshot), and the strip has cards
+/// to show (`[strip] visible`, not standing down for Apple's Stage Manager): while it has not,
 /// no wallpaper is read (until 1.9 every 2 s whatever the strip showed). The backdrops read
 /// before are kept; one wanted again is read at once, right after the snapshot that wants it
 /// (a picture changed meanwhile repaints the cards once rendered, as after a Desktop change),
