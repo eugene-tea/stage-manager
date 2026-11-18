@@ -1542,6 +1542,13 @@ impl WindowEngine for SpacesEngine {
         self.holds(id.0)
     }
 
+    /// Held in its stage Space (not put home), flying its last stretch, or parked for a lend:
+    /// a window put home at a Dock press shows at its frame on its Desktop while still held
+    /// (11-18 10:41:33, the owner's log: its stage's switch grew a picture over it).
+    fn keeps_out_of_view(&self, id: WindowId, _d: &Display, _listed: Rect) -> bool {
+        self.off_desktop(id.0) || self.state().parked.contains_key(&id.0)
+    }
+
     /// While the engine holds it and its app has a window on a Desktop not shown: a window
     /// in a stage Space is on no Desktop for macOS, which would follow the app to that
     /// other Desktop (S3c). An app with no window elsewhere takes macOS nowhere, so the
