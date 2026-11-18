@@ -59,6 +59,7 @@ use serde_json::{Value, json};
 
 use super::Controller;
 use super::arrival::Lent;
+use super::slide_watch::LendNote;
 use crate::engine::corner;
 use crate::engine::lend_park::ParkAsk;
 use crate::engine::model::{AppFacts, WindowId};
@@ -197,6 +198,12 @@ impl Controller {
         for act in acts {
             self.switcher_act(ob, act, first, now);
         }
+        if let (Heard::Released { .. }, Some(pid)) = (heard, selected) {
+            // Watched for a Desktop slide from ⌘'s release ([`Self::slide_watch_cmd_tab`]).
+            let lent = self.lent.is_some_and(|l| l.pid == pid && l.switcher.is_some());
+            let since_tab_ms = self.switcher.opened.map(|t| ms(t, now));
+            self.slide_watch_cmd_tab(ob, pid, lent, since_tab_ms, now);
+        }
         match heard {
             Heard::Released { .. } | Heard::Cancelled => {
                 self.switcher.selected = None;
@@ -308,6 +315,7 @@ impl Controller {
                 let park = self.lend_park(ob, window, first, None);
                 let asked = park.is_some();
                 let lend = self.engine.lend_home(window, park);
+                self.slide_watch_lend(pid, LendNote { home: lend.home, parked: lend.parked, asked, park_ms: lend.park_ms });
                 let parked = lend.parked.unwrap_or(false);
                 if lend.home {
                     self.lent = Some(Lent { window, pid, at: now, switcher: Some(LetGo::default()) });
