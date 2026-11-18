@@ -46,16 +46,15 @@
   window list once per round instead of two or three times. A window or an app that closes
   without the usual notice is still handled, up to two seconds later when nothing else
   happens.
-- Less CPU while nothing happens, most of all with Apple's Stage Manager on: what a mode
-  has no use for stops until the mode changes. With the strip following the Dock
-  (`[strip] order = "dock"`), the running apps are looked up only after an app opens or
-  quits, not every two seconds. While no strip shows (hidden, or Apple's Stage Manager on)
-  the desktop picture behind the cards is not read (nor while the strip has no card) and
-  mouse moves are not followed; the
-  strip shown again keeps its last pictures until new ones, taken at once, land. The event
-  taps for parked windows' edges and for minimizing run only while there is something to
-  catch, so presses and keys no longer pass through the app while Apple's Stage Manager is
-  on, while no window is parked, or with `minimize_to_strip = false`. The
+- Less CPU in each mode, most of all with Apple's Stage Manager on: what a mode has no use
+  for stops until the mode changes. With the strip following the Dock (`[strip] order =
+  "dock"`), the running apps are looked up only after an app opens or quits, not every two
+  seconds. While no strip shows (hidden, or Apple's Stage Manager on) the desktop picture
+  behind the cards is not read (nor while the strip has no card) and mouse moves are not
+  followed; the strip shown again keeps its last pictures until new ones, taken at once,
+  land. The event taps for parked windows' edges and for minimizing run only while there is
+  something to catch, so presses and keys no longer pass through the app while Apple's
+  Stage Manager is on, while no window is parked, or with `minimize_to_strip = false`. The
   corner patch is put away when Apple's Stage Manager comes on. `ctl state` counts what is
   asked of macOS since the launch (`costs`).
 - New setting `[windows] engine` (`"auto"` or `"accessibility"`, read at launch). It
