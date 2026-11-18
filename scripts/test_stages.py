@@ -2190,7 +2190,25 @@ def phase_native():
     s = state()
     check(active_titles(s) == {"Alpha 1"}, f"Alpha 1 alone again ({stage_titles(s)})")
     pre = by_title(s)["Alpha 1"]["restore"]
+    # Held 500 pt right of its left edge, the window reaches the screen's edge with the pointer
+    # still far out: the strip hides under it, no card shows and the release is no drop
+    # (Apple's, recorded 11-09: the strip takes a window by where the pointer is, within about
+    # 290 pt of the edge, and only while the window has not hidden it).
     grab = (pre["x"] + 500, pre["y"] + 12)
+    before_log = len(log_text())
+    r = ctl("debug-drag", *grab, grab[0] - 60, grab[1], vis["x"] + 60, grab[1])
+    if not blocked(r, "a window held far from its left edge, dragged to the strip"):
+        time.sleep(1.0)
+        s = state()
+        check(not by_title(s)["Alpha 1"]["parked"] and active_titles(s) == {"Alpha 1"},
+              f"held far from its left edge, Alpha 1 is no drop and stays in its stage ({stage_titles(s)})")
+        check("window dropped on the strip" not in log_text()[before_log:], "nothing logged as dropped on the strip")
+    ctl("debug-frame", by_title(state())["Alpha 1"]["id"], *big)
+    time.sleep(1.5)
+    s = state()
+    pre = by_title(s)["Alpha 1"]["restore"]
+    # Held near its left edge, the pointer reaches the strip before the window hides it.
+    grab = (pre["x"] + 150, pre["y"] + 12)
     r = ctl("debug-drag", *grab, grab[0] - 60, grab[1], vis["x"] + 60, grab[1])
     if not blocked(r, "the window drop onto the strip (the drag, its own stage, its saved frame, its card)"):
         check(r.get("ok"), f"dragged Alpha 1 by its title bar onto the strip ({r.get('error', 'ok')}{whose(r.get('error'))})")
@@ -3359,7 +3377,9 @@ def phase_motion():
     s = state()
     first = s["strip_cards"][0]["frame"] if s.get("strip_cards") else None
     pre = by_title(s)["Fixture 5"]["restore"]
-    grab = (pre["x"] + 300, pre["y"] + 12)
+    # Near its left edge: held further in, the window would hide the strip before the pointer
+    # reached it (`window_drop`).
+    grab = (pre["x"] + 150, pre["y"] + 12)
     target = (vis["x"] + 60, (first["y"] - 6) if first else vis["y"] + 40)
     f5_id = by_title(s)["Fixture 5"]["id"]
     out, seen = drag_sampled([grab, (grab[0] - 60, grab[1]), target], "Fixture 5 onto the strip",
@@ -4324,7 +4344,7 @@ def phase_slots():
         if not check(bool(shown), f"a shown window to drag ({frac})"):
             continue
         f = shown[0]["restore"]
-        grab = (f["x"] + 300, f["y"] + 12)
+        grab = (f["x"] + 150, f["y"] + 12)
         target = (vis["x"] + 60, vis["y"] + vis["h"] * frac)
         words = [str(round(v, 1)) for p in (grab, (grab[0] - 60, grab[1]), target) for v in p] + ["hold=1500"]
         proc = subprocess.Popen([BIN, "ctl", "debug-drag", *words], env=ENV, stdout=subprocess.PIPE, text=True)
