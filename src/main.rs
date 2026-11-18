@@ -229,13 +229,12 @@ mod app {
             let drop = if event.kind == InputKind::MouseUp { strip::drop_slot(event.at) } else { None };
             wm_input.send(WmCommand::Input(event, drop));
         };
-        // Mouse moves go to the strip on this thread: off its cards the strip lets clicks
-        // through, so it learns where the pointer is from the global monitor there.
-        let monitor = input::monitor(mtm, on_input, strip::pointer_moved);
+        // Mouse moves have a monitor of the strip's own, made while a strip may show
+        // ([`strip::pointer_moved`]).
+        let monitor = input::monitor(mtm, on_input);
         if monitor.is_none() {
             tracing::warn!("cannot monitor input; wallpaper clicks, window drops on the strip and Shift sugar are off");
         }
-        strip::set_moves_fed(monitor.is_some());
         monitor
     }
 

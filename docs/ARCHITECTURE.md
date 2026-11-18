@@ -68,6 +68,18 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   tick is a full pass. The tick's duties share one read of each window list
   (`windows::wake`), read again after any window write of ours. `ctl state`'s `tick`
   counts brisk and rest ticks.
+- **Idle subsystems** (1.9): what a mode has no use for does not run. The Apple mode and the
+  stand-down run no controller of ours (no Dock order, corner upkeep, lock poll or park
+  checks); the Apple mode's closed-window sweep runs only on the list its mirror read in
+  that tick. Both event taps (`platform::tap_switch`) are on only while they have something
+  to catch: the inert slivers' while windows are parked with the shield on, the minimize
+  tap's while the WM thread arranges and `minimize_to_strip` holds. With no strip showing
+  cards (hidden, or standing down) the strip lets go of the mouse moves' monitor and the
+  card glass reads no wallpaper; capture workers with no targets sleep until given work.
+  The Dock order's running-app paths are asked of LaunchServices after a launch or a quit
+  (`dock::running_by_path`). `ctl state`'s `costs` counts window list queries,
+  LaunchServices calls, Dock reads, captures, wallpaper reads, lock polls, tap events and
+  mouse moves since the launch.
 
 ## Window engines (1.9, in progress)
 

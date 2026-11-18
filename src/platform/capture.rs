@@ -127,6 +127,25 @@ pub type Deliver = fn(u32, Picture);
 const ROUND_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest wait between checks while nothing is due (grant changes, shutdown).
 const IDLE_CHECK: Duration = Duration::from_secs(1);
+/// Longest wait with nothing to capture (no strip shows a card, the Apple mode, standing
+/// down): every change that could give the worker work wakes it ([`Capturer::set_targets`],
+/// the switch, the pace's resume, a shutdown); this only bounds a missed one. Until 1.9 each
+/// worker (two a strip) woke every [`IDLE_CHECK`] for nothing.
+const IDLE_EMPTY: Duration = Duration::from_secs(60);
+
+/// How long the worker waits before it looks again: with no targets [`IDLE_EMPTY`] (nothing
+/// can be due), else [`IDLE_CHECK`] at most, less for a hold's end (`held`) or a retry due
+/// (`next_retry`).
+fn idle_wait(no_targets: bool, held: Option<Duration>, next_retry: Option<Duration>) -> Duration {
+    if no_targets && next_retry.is_none() {
+        return held.map_or(IDLE_EMPTY, |h| h.min(IDLE_EMPTY));
+    }
+    let mut wait = held.map_or(IDLE_CHECK, |h| h.min(IDLE_CHECK));
+    if let Some(r) = next_retry {
+        wait = wait.min(r.max(Duration::from_millis(10)));
+    }
+    wait
+}
 /// After the last capture answered, how long [`quiesce`] still keeps the process alive, so
 /// replayd finishes its approval bookkeeping while the app's path can be resolved.
 const SETTLE: Duration = Duration::from_millis(250);
@@ -609,10 +628,7 @@ fn run(shared: Arc<Worker>, deliver: Deliver, ask: bool) {
                 let held = s.held_until.map(|t| t.saturating_duration_since(Instant::now())).filter(|d| !d.is_zero());
                 let ready = on && held.is_none() && !s.targets.is_empty() && CGPreflightScreenCaptureAccess();
                 let due_in = last_full.map_or(Duration::ZERO, |t| s.interval.saturating_sub(t.elapsed()));
-                let mut wait = held.map_or(IDLE_CHECK, |h| h.min(IDLE_CHECK));
-                if let Some(r) = next_retry {
-                    wait = wait.min(r.max(Duration::from_millis(10)));
-                }
+                let mut wait = idle_wait(s.targets.is_empty(), held, next_retry);
                 // Paused (nobody sees the screen: woken when that ends) or backing off.
                 let paced = if ready { pace().wait(Instant::now()) } else { Some(Duration::ZERO) };
                 if let Some(left) = paced.filter(|d| !d.is_zero()) {
@@ -1571,6 +1587,55 @@ mod tests {
         assert!(!expects_pictures(ON, false, false), "no access: no round is ever issued");
         assert!(!expects_pictures(ON, true, true));
         assert!(!expects_pictures(OFF, false, true));
+    }
+
+    /// Nothing to capture (no card shown, the Apple mode, standing down): the worker sleeps
+    /// until it is given work, a minute at most; with targets it looks every second as before.
+    #[test]
+    fn a_worker_with_nothing_to_capture_sleeps_until_it_is_given_work() {
+        assert_eq!(idle_wait(true, None, None), IDLE_EMPTY);
+        assert_eq!(idle_wait(false, None, None), IDLE_CHECK);
+        let soon = Duration::from_millis(300);
+        assert_eq!(idle_wait(true, Some(soon), None), soon, "a hold's end is looked at");
+        assert_eq!(idle_wait(false, None, Some(soon)), soon, "a retry due");
+        assert_eq!(idle_wait(false, None, Some(Duration::ZERO)), Duration::from_millis(10));
+        // Wake-ups a minute of the two workers of a strip that shows nothing: before, now.
+        let per_minute = |d: Duration| 2 * (60_000 / d.as_millis() as u64);
+        assert_eq!((per_minute(IDLE_CHECK), per_minute(idle_wait(true, None, None))), (120, 2));
+    }
+
+    /// The strip hidden (or standing down for Apple's Stage Manager) takes the targets away;
+    /// shown again, every card it shows is captured at once, the worker woken: the pictures
+    /// kept meanwhile show until the new ones land, none waits for the minute's backstop.
+    #[test]
+    fn a_strip_shown_again_has_every_card_captured_at_once() {
+        let c = Capturer { shared: Arc::new((Mutex::new(Shared::default()), Condvar::new())) };
+        let cards = vec![Target { id: 1, width: 100, height: 60 }, Target { id: 2, width: 100, height: 60 }];
+        c.set_targets(cards.clone());
+        if let Ok(mut s) = c.shared.0.lock() {
+            s.captured.extend([1, 2]);
+        }
+        c.set_targets(Vec::new());
+        let idle = c.shared.0.lock().map(|s| idle_wait(s.targets.is_empty(), None, None)).unwrap_or_default();
+        assert_eq!(idle, IDLE_EMPTY, "hidden: nothing to capture, the worker sleeps");
+        // set_targets notifies the worker (a wait of a minute ends at once).
+        let (lock, cv) = &*c.shared;
+        let woken = std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let Ok(g) = lock.lock() else { return false };
+                let Ok((g, timeout)) = cv.wait_timeout_while(g, IDLE_EMPTY, |s| s.targets.is_empty()) else { return false };
+                drop(g);
+                !timeout.timed_out()
+            });
+            // Shown again (a moment later, as the slide starts).
+            std::thread::sleep(Duration::from_millis(20));
+            c.set_targets(cards.clone());
+            waiter.join().unwrap_or(false)
+        });
+        assert!(woken, "the worker wakes when the strip shows, not at the backstop");
+        let s = c.shared.0.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(s.captured.is_empty(), "every card shown is taken again at once");
+        assert_eq!(s.targets, cards);
     }
 
     /// U5: a probe that told nothing is not repeated on the same window while another waits.
