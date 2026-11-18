@@ -424,7 +424,7 @@ pub const KEYS: &[KeyDef] = &[
         "After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's \"Reopen windows when logging back in\"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch."),
     k("stages", "new_apps_join_current", Kind::Bool, "false",
         "A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule."),
-    k("stages", "restore_with_apple", Kind::Bool, "true",
+    k("stages", "restore_apple_stages", Kind::Bool, "true",
         "With [windows] apple_stage_manager_on = \"integrate\", after a restart or a new login Apple's Stage Manager's stages are put back as they were, once their windows have reopened: a window of each stage brought to the front, the stage's other windows Shift-clicked in from Apple's strip and windows of other stages dragged out of it (the pointer jumps for each and comes back; nothing is posted during a click, typing or a held key). An app's windows stay in one stage under \"Show windows from an application: All at Once\". Off: Apple's Stage Manager arranges the reopened windows its own way. `ctl apple restore` puts back the stages saved when Stage Manager started following Apple's."),
     // [restore]
     k("restore", "saved_size", Kind::Bool, "true",
@@ -627,6 +627,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-46.toml"),
     include_str!("legacy/default-47.toml"),
     include_str!("legacy/default-48.toml"),
+    include_str!("legacy/default-49.toml"),
 ];
 
 #[cfg(test)]

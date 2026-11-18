@@ -25,7 +25,7 @@
 //! said, and the rest go on. It runs through the job queue and the gate like every step of
 //! the mode; windows gone meanwhile are skipped.
 //!
-//! **By itself after a restart** ([`AutoRestore`], `[stages] restore_with_apple`, on by
+//! **By itself after a restart** ([`AutoRestore`], `[stages] restore_apple_stages`, on by
 //! default: functionality Apple's never built, it changes nothing Apple's does until its
 //! stages are put back as they were): when the mode starts in a new window server session
 //! (the saved file's session is another), it waits until the restore window's windows have

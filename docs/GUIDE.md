@@ -306,7 +306,7 @@ Stage Manager's own two ways of hiding windows.
   Manager (hiding it hides the desktop too): its new window takes a stage of its own, as
   in Apple's.
 - After a restart or a new login, Apple's stages are put back as they were saved
-  (`[stages] restore_with_apple`, on by default), once the reopened windows have shown: a
+  (`[stages] restore_apple_stages`, on by default), once the reopened windows have shown: a
   window of each stage is brought to the front, the stage's other windows are Shift-clicked
   in from Apple's strip, and windows of other stages are dragged out of it. Under "All at
   Once" an app's windows stay in one stage. A stage that is already as saved is left alone;

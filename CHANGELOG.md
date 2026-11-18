@@ -24,7 +24,7 @@
   later, and brought in. Finder is left to Apple's Stage Manager. When the app's window shows before the
   hide takes, the stage that was in front comes back as it was, its windows in their order
   and in one go, with the app's window on top.
-- New setting `[stages] restore_with_apple`, on by default. With `[windows] apple_stage_manager_on =
+- New setting `[stages] restore_apple_stages`, on by default. With `[windows] apple_stage_manager_on =
   "integrate"`, Apple's stages are put back as saved after a restart or a new login, once the
   reopened windows have shown; under "All at Once" an app's windows stay in one stage.
   `ctl apple restore` puts back the stages saved when the following started.

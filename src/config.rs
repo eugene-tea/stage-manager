@@ -492,12 +492,12 @@ pub struct StagesConfig {
     pub new_apps_join_current: bool,
     /// With `[windows] apple_stage_manager_on = "integrate"`, after a restart or a new login Apple's stages
     /// are put back as saved once their windows have reopened (on by default).
-    pub restore_with_apple: bool,
+    pub restore_apple_stages: bool,
 }
 
 impl Default for StagesConfig {
     fn default() -> Self {
-        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false, restore_with_apple: true }
+        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false, restore_apple_stages: true }
     }
 }
 
@@ -1155,7 +1155,7 @@ impl Config {
                 names,
                 restore_after_restart: v.flag("stages.restore_after_restart"),
                 new_apps_join_current: v.flag("stages.new_apps_join_current"),
-                restore_with_apple: v.flag("stages.restore_with_apple"),
+                restore_apple_stages: v.flag("stages.restore_apple_stages"),
             },
             restore: RestoreConfig { saved_size: v.flag("restore.saved_size") },
             sugar: SugarConfig {
@@ -1446,10 +1446,10 @@ mod tests {
     }
 
     #[test]
-    fn restore_with_apple_is_on_by_default_and_can_be_turned_off() {
-        assert!(Config::default().stages.restore_with_apple, "functionality Apple's never built ships on");
-        let p = parse("[stages]\nrestore_with_apple = false\n");
-        assert!(!p.config.stages.restore_with_apple && p.warnings.is_empty(), "{:?}", p.warnings);
+    fn restore_apple_stages_is_on_by_default_and_can_be_turned_off() {
+        assert!(Config::default().stages.restore_apple_stages, "functionality Apple's never built ships on");
+        let p = parse("[stages]\nrestore_apple_stages = false\n");
+        assert!(!p.config.stages.restore_apple_stages && p.warnings.is_empty(), "{:?}", p.warnings);
     }
 
     #[test]

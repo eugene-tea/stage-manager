@@ -39,7 +39,7 @@
 //!
 //! **Restore** ([`crate::engine::apple::restore`]): `state-apple.json` as it was when the mode
 //! started is kept; `ctl apple restore` puts its stages back; after a restart (a new window
-//! server session) with `[stages] restore_with_apple` on, it runs by itself once the restore
+//! server session) with `[stages] restore_apple_stages` on, it runs by itself once the restore
 //! window's windows have shown, and the save waits for it (the saved stages are not written
 //! over by Apple's fresh arrangement meanwhile).
 
@@ -215,9 +215,9 @@ impl AppleController {
         let after_restart = file.as_ref().is_some_and(|f| f.session.is_some() && f.session.as_deref() != current);
         let saved = file.map(|f| f.for_session(current).0);
         let windows = saved.as_ref().map_or(0, restore::saved_windows);
-        let on = store.config().stages.restore_with_apple;
+        let on = store.config().stages.restore_apple_stages;
         let auto = (after_restart && on && windows > 0).then(|| AutoRestore::new(Instant::now(), apps::login_started()));
-        tracing::info!(saved_windows = windows, after_restart, restore_with_apple = on, waits = auto.is_some(), "apple mode: the stages saved before");
+        tracing::info!(saved_windows = windows, after_restart, restore_apple_stages = on, waits = auto.is_some(), "apple mode: the stages saved before");
         Self {
             store,
             config_error,
@@ -604,8 +604,8 @@ impl AppleController {
     /// window's windows have shown ([`AutoRestore::due`]).
     fn auto_restore(&mut self, ob: &mut Observer, now: Instant) {
         let Some(mut auto) = self.auto else { return };
-        if !self.store.config().stages.restore_with_apple {
-            tracing::info!("apple mode: [stages] restore_with_apple turned off: the stages saved before are not put back");
+        if !self.store.config().stages.restore_apple_stages {
+            tracing::info!("apple mode: [stages] restore_apple_stages turned off: the stages saved before are not put back");
             self.auto = None;
             self.save.mark(now);
             return;
