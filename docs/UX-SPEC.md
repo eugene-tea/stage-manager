@@ -1134,9 +1134,22 @@ column "off" is its own load with Stage Manager quit; the difference is what eac
 | App CPU per switch, ms | | 113 | 91 |
 | Missed refreshes of a call window during switches | | 0 | 0 |
 
-Most of a switch is the animation, the same in both. `scripts/measure_engines.py` repeats
-the comparison on a later build and adds a new app's overlap and an animating window shown
-from a hidden stage; its results replace this table once run.
+Most of a switch is the animation, the same in both.
+
+The same comparison on 1.9.0 (11-18, `scripts/measure_engines.py`, window captures off, so the
+screen-capture service reads 0 and the window server, measured with other apps open and no
+"off" run, is left out):
+
+| | corner | spaces |
+|---|---|---|
+| App CPU at rest | 0.56 | 0.36 |
+| App wake-ups a second at rest | 4.3 | 3.6 |
+| `ctl switch` to the last window in place, ms (median / p90) | 49 / 58 | 27 / 35 |
+| App CPU per switch, ms | 40 | 29 |
+| A new app's window over the stage left (launches of 10, ms) | 10, 58 | 0 |
+| A new app's window on screen, ms | 174 | 226 |
+| An animating window shown from a hidden stage: drawing again, ms | 161 | 153 |
+| Missed refreshes of a call window, at rest and switching | 0 | 0 |
 
 ## Known gaps
 
