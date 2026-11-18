@@ -49,16 +49,17 @@ Advanced shows how.
 
 ## Three ways to keep stages
 
-macOS has no public way to hide a window and keep it ready, so three ways are built, each
-with its trade-offs:
+macOS has no public way to hide a window and keep it ready, so three ways are built:
 
-- **Accessibility** (the default): hidden windows wait in a corner of the screen; every addition works.
-- **Spaces** (`[windows] engine = "spaces"`): hidden windows go to a hidden Space of
-  the window server; faster, on undocumented calls.
-- **Integrated with Apple's Stage Manager** (`[windows] apple_stage_manager_on = "integrate"`): Apple's draws the
-  strip and arranges the windows; hotkeys, moving windows between stages and restore are added on top.
+| | Accessibility | Spaces | With Apple's |
+|---|:---:|:---:|:---:|
+| Setting (`[windows]`) | `engine = "accessibility"` (default) | `engine = "spaces"` | `apple_stage_manager_on = "integrate"` |
+| Strip drawn by | Stage Manager | Stage Manager | Apple |
+| Every addition on the strip | ✓ | ✓ | — |
+| Hidden windows leave the screen | — | ✓ | ✓ |
+| CPU at rest, with the system's share | about 4.9 % | about 1.2 % | — |
 
-[Three ways to keep stages](docs/MODES.md) compares them in one table.
+[Three ways to keep stages](docs/MODES.md) has the full comparison and its notes.
 
 ## First launch
 

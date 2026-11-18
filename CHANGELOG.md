@@ -1,7 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.9.0 — 2026-11-18
 
+- New mode: `[windows] engine = "spaces"` keeps each hidden stage in a Space of macOS's own
+  instead of the screen's corner. At rest the app and the system together use about a
+  quarter of the CPU the park corner does (about 1.2 % of one core against 4.9 %), and
+  nothing waits in the corner. It is tried at every launch and falls back to the park corner
+  (`"accessibility"`, the default) wherever the trial fails, or for the rest of a run in which
+  a window is not where it was put; the log says which one runs. ⌘Tab, Dock clicks, Desktops,
+  a second display, Quit and a crash bring windows where the park corner does. Read at
+  launch.
 - The cards are solid while the strip is shown over windows, as with Apple's Stage Manager:
   revealed at the screen's edge over a window that covers it, the cards are no longer tinted by
   the wallpaper. Over the desktop the wallpaper is still let through.
@@ -76,12 +84,6 @@
   Stage Manager is on, while no window is parked, or with `minimize_to_strip = false`. The
   corner patch is put away when Apple's Stage Manager comes on. `ctl state` counts what is
   asked of macOS since the launch (`costs`).
-- New setting `[windows] engine` (`"accessibility"` or `"spaces"`, read at launch). It
-  chooses how hidden windows are kept: `"accessibility"`, the default, always uses the park
-  corner and never tries Spaces, a way out if windows misbehave on a stage change;
-  `"spaces"` hides each stage in a Space of macOS's own wherever a trial at launch shows
-  that it works, writes the trial's result to the log, and uses the park corner otherwise
-  and for the rest of a run in which a window is not where it was put.
 - A newly opened app gets its own stage as its first window shows. The window sat over
   the stage shown for up to a second first: an app just launched from the Dock is not ready
   to be watched at its first ask and was asked again a second later, and a window that
@@ -93,78 +95,9 @@
 - An app brought forward with ⌘Tab or the Dock brings its stage also when an earlier stage
   change to that app never made it frontmost and another stage has come in front since: the
   activation was taken for the late answer to that earlier change for up to five seconds.
-
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), a click on an app's
-  Dock item or its card no longer takes the screen to another Desktop and back when the app
-  has a stage on the Desktop shown and a window on another Desktop; ⌘Tab no longer does
-  when that other window is hidden too. A click on the Dock item of the app in front whose
-  other window waits in a stage of another Desktop goes there at the first click, not the
-  second.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), a stage brought in
-  front by ⌘Tab while the screen slides to another Desktop and back keeps its windows. After
-  a few such slides they were taken for windows shown on every Desktop: they left their
-  stage, stayed on screen over every other stage, and a drag of one onto the strip did
-  nothing. A window on screen that no stage holds now joins the stage in front when it is
-  dragged onto the strip, or when a card is clicked or an app is brought forward while the
-  stage in front shows nothing; a window shown on every Desktop can be dragged onto the
-  strip too.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), the first click on
-  the Dock item of the app in front goes to its window in a stage of another Desktop every
-  time. The other Desktop, made ready when the button went down, was sometimes put back
-  before the button came up, and a second click was needed.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), ⌘Tab to an app whose
-  windows on the Desktop shown all wait in a stage, while it has a window shown on another
-  Desktop, no longer takes the screen to that Desktop and back: while the app switcher
-  selects the app, its stage's window is made ready on the Desktop shown, and taken back
-  when the selection moves on or the switcher is cancelled.
-  That window is kept off the screen at the display's corner while the switcher shows, so
-  a window passed over in the switcher no longer flickers in and out behind the stage shown.
 - Just after the app is started, the first switch to another Desktop stays there: the app
   macOS brings forward as that Desktop slides in was taken for an app of the Desktop being
   left, its stage there was brought forward, and the screen slid back.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), Quit is answered in
-  its usual time after a stage change whose window was shown before it could fly its last stretch
-  itself; the app waited eight seconds and then brought the windows back another way.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), a window brought
-  forward with ⌘Tab no longer stays at the display's corner when its app was busy as its
-  stage came in front: its move to its place is tried again until it is taken. A window
-  the app switcher passed over whose app moved it to the corner late is put back as well.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), a window brought in
-  by a stage change on a second display ends on that display's Desktop. It was put on the
-  first display's Desktop as its flight ended.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), two apps opened at
-  the same moment (at login, a restored session) no longer leave a new window of one unseen
-  until Stage Manager quits, and a just-opened app's first window no longer shows up to ten
-  seconds late now and then.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), a hidden window the
-  change to the park corner mid-run could not bring back at once is tried again every two
-  seconds; it stayed unseen until Stage Manager quit.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), a window waiting at
-  the display's corner for the app switcher is brought back when Stage Manager ends
-  unexpectedly, as with the park corner; it stayed there until the next launch.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), a press on the Dock
-  that is no click (or whose release went unseen) while the app switcher shows no longer
-  undoes what ⌘Tab made ready: the app chosen took the screen to its other Desktop.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), a new window opened
-  exactly where a hidden window of its app sits (a window filling the screen, say) stays
-  where it opened. It was taken for a window tab selected: it went into the hidden window's
-  stage, and the hidden window came out on the Desktop.
-- With macOS's Spaces keeping the hidden windows (still a test opt-in), windows an earlier
-  copy using the park corner left there (it stopped unexpectedly, or was an earlier version)
-  come out of the corner when their Desktop shows, as does a window an app reopens at a
-  corner frame it saved then. They stayed in the corner as slivers counted shown.
-- With macOS's Spaces keeping the hidden windows and the windows themselves flying the end
-  of a stage change (both test opt-ins), overlapping windows of the stage coming in keep
-  their order as they fly and land: the window behind lands first and no longer ends on top
-  of the one in front. Two overlapping windows of two apps flickered, trading places, as
-  they flew in.
-- With macOS's Spaces keeping the hidden windows and the windows themselves flying the end
-  of a stage change (both test opt-ins), a window of the stage coming in no longer shows in
-  front of the window it belongs behind for a moment as they land: the window in front takes
-  over from its picture only after the ones behind it, and where the window in front belongs
-  to an app with a window on another Desktop, or a window is added with a Shift-click to a
-  stage where another app's window stands, the windows land behind their pictures and the
-  pictures go once the order is right.
 - Card pictures follow a change between light and dark appearance: every card's pictures
   are taken again shortly after the change, and again a few seconds later for apps that
   redraw late. Cards kept the old appearance until the pointer reached them or their stage
