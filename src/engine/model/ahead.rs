@@ -60,6 +60,9 @@ pub struct Ahead {
     key: Option<WindowId>,
     /// Both stages' recency before (`previous`, `stage`).
     recency: (u64, u64),
+    /// The desktop reveal the arrangement ended there (`previous` was its empty stage, gone
+    /// once left): the stage the reveal had set aside. An undo sets the reveal up again.
+    reveal_from: Option<StageId>,
 }
 
 /// A stage made active ahead on its Desktop, with its recency then: the moves sent for it
@@ -100,22 +103,34 @@ impl Model {
     /// stage active there is parked, `id`'s stage brought back (no raise, no focus: nothing
     /// acts on a Desktop not shown but moves). `obs`, when the Desktop is already on screen
     /// (the Space change notice), saves the stage left as a switch does: its windows' order
-    /// as the window list shows them and its front window as its key. `None`, changing nothing, when there is
-    /// nothing to arrange or it could not be undone: an unknown, pinned or sticky window, a
-    /// Desktop shown now, a stage already active, a desktop reveal there, or a stage active
-    /// there that holds no window (leaving it would drop it).
+    /// as the window list shows them and its front window as its key. A desktop reveal there
+    /// (its empty stage active) ends: the stage it set aside, or another, comes in front, as
+    /// Apple's does for an app's activation on a revealed Desktop; an undo reveals again.
+    /// `None`, changing nothing, when there is nothing to arrange or it could not be undone:
+    /// an unknown, pinned or sticky window, a Desktop shown now, a stage already active, or
+    /// a stage active there that holds no window and is no reveal's (leaving it would drop
+    /// it).
     pub fn arrange_ahead(&mut self, id: WindowId, obs: Option<&Observation>) -> Option<(Ahead, Vec<Action>)> {
         let window = self.resolve_standard(id)?;
         let w = self.windows.get(&window)?;
         let Home::Stage(stage) = w.home else { return None };
         let space = w.space;
-        if w.sticky || self.is_shown_space(space) || self.revealed.contains_key(&space) {
+        if w.sticky || self.is_shown_space(space) {
             return None;
         }
         let previous = self.active.get(&space).copied()?;
-        if previous == stage || self.stage(previous).is_none_or(|s| s.windows.is_empty() || s.space != space) {
+        if previous == stage {
             return None;
         }
+        // A wallpaper click there set every window aside: the window's app is activated
+        // (a Dock click, ⌘Tab), and Apple's ends the reveal and shows the stage. Left, the
+        // reveal's empty stage goes; an undo sets the reveal up again.
+        let reveal_from = match self.revealed.get(&space).copied() {
+            Some(r) if r.desktop == previous && self.reveal_stands_empty(space, previous) => Some(r.from),
+            Some(_) => return None,
+            None if self.stage(previous).is_none_or(|s| s.windows.is_empty() || s.space != space) => return None,
+            None => None,
+        };
         let last = |m: &Self, s: StageId| m.stage(s).map_or(0, |s| s.last_active);
         let ahead = Ahead {
             window,
@@ -125,6 +140,7 @@ impl Model {
             slots: self.slots.get(&space).cloned().unwrap_or_default(),
             key: self.stage(stage).and_then(|s| s.key),
             recency: (last(self, previous), last(self, stage)),
+            reveal_from,
         };
         if let Some(s) = self.stage_mut(stage) {
             s.key = Some(window);
@@ -309,13 +325,21 @@ impl Model {
     /// The predicted Desktop arrived with the stage arranged ahead still active: raises its
     /// windows back to front and focuses the window the user went there for (on the Desktop
     /// shown now). When that window is no longer in the stage (closed or moved meanwhile), the
-    /// stage that was active comes back instead, with its strip slots, as a switch does.
+    /// stage that was active comes back instead, with its strip slots, as a switch does (the
+    /// reveal it ended is set up again).
     /// Nothing when the Desktop is not shown or its active stage changed since.
     pub fn finish_ahead(&mut self, ahead: &Ahead) -> Vec<Action> {
         if !self.is_shown_space(ahead.space) || self.active.get(&ahead.space) != Some(&ahead.stage) {
             return Vec::new();
         }
         if !self.stage(ahead.stage).is_some_and(|s| s.windows.contains(&ahead.window)) {
+            if let Some(from) = ahead.reveal_from {
+                // Emptied, the stage active is a bare desktop already.
+                if self.stage(ahead.stage).is_some_and(|s| s.windows.is_empty()) {
+                    return Vec::new();
+                }
+                return self.reveal_ahead_again(ahead, from);
+            }
             if self.stage(ahead.previous).is_none_or(|s| s.space != ahead.space) {
                 return Vec::new();
             }
@@ -335,22 +359,47 @@ impl Model {
     /// stage that was active is gone).
     pub fn undo_ahead(&mut self, ahead: &Ahead) -> Vec<Action> {
         let space = ahead.space;
-        if self.is_shown_space(space)
-            || self.active.get(&space) != Some(&ahead.stage)
-            || self.stage(ahead.previous).is_none_or(|s| s.space != space)
-        {
+        if self.is_shown_space(space) || self.active.get(&space) != Some(&ahead.stage) {
+            return Vec::new();
+        }
+        if let Some(from) = ahead.reveal_from {
+            let actions = self.reveal_ahead_again(ahead, from);
+            self.restore_key(ahead);
+            return actions;
+        }
+        if self.stage(ahead.previous).is_none_or(|s| s.space != space) {
             return Vec::new();
         }
         let mut actions = self.switch_in(space, ahead.stage, ahead.previous, None);
         actions.retain(|a| !matches!(a, Action::Raise { .. } | Action::Focus { .. }));
-        if let Some(s) = self.stage_mut(ahead.stage) {
-            s.key = ahead.key.filter(|k| s.windows.contains(k)).or(s.windows.first().copied());
-            s.last_active = ahead.recency.1;
-        }
+        self.restore_key(ahead);
         if let Some(s) = self.stage_mut(ahead.previous) {
             s.last_active = ahead.recency.0;
         }
         self.restore_slots(ahead);
+        actions
+    }
+
+    /// The key window and recency `ahead`'s stage had before it was arranged.
+    fn restore_key(&mut self, ahead: &Ahead) {
+        if let Some(s) = self.stage_mut(ahead.stage) {
+            s.key = ahead.key.filter(|k| s.windows.contains(k)).or(s.windows.first().copied());
+            s.last_active = ahead.recency.1;
+        }
+    }
+
+    /// The desktop reveal `ahead` ended, set up again on its Desktop: its stage parked into
+    /// the strip, a fresh empty stage active, the reveal remembering `from` (the stage it had
+    /// set aside, when still there; else `ahead`'s stage), the strip's slots as before. No
+    /// raise or focus.
+    fn reveal_ahead_again(&mut self, ahead: &Ahead, from: StageId) -> Vec<Action> {
+        let space = ahead.space;
+        let mut actions = Vec::new();
+        self.park_stage(ahead.stage, &mut actions);
+        let from = if self.stage(from).is_some_and(|s| s.space == space) { from } else { ahead.stage };
+        self.reveal_with(space, ahead.stage, from);
+        self.restore_slots(ahead);
+        actions.push(Action::StateChanged);
         actions
     }
 
