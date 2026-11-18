@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.9.1 — 2026-11-18
 
 - With `engine = "spaces"`, Mission Control and App Exposé show every stage's windows again,
   as they do in the default mode and with Apple's Stage Manager; they showed only the stage
