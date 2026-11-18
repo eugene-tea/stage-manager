@@ -17,6 +17,7 @@ pub mod glass_math;
 pub mod glyph;
 pub mod landing_math;
 pub mod minimize_motion;
+pub mod mode_pick;
 pub mod motion_math;
 pub mod overlay;
 pub mod panels;

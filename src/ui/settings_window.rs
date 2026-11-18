@@ -12,8 +12,10 @@
 //! - **Stages:** stages back after a restart, new apps in the current stage, Shift brings apps
 //!   here, merge by dropping a card on a card, the strip order (Apple's, in place, the Dock's).
 //! - **Windows:** keeping windows clear of the strip, animation speed, keyboard shortcuts.
-//! - **Advanced:** the config file (open, reveal) and the note that an AI agent is the
-//!   easiest way to change anything else, with Copy Instructions for Agents.
+//! - **Advanced:** the mode (Accessibility · Spaces · With Apple's, [`super::mode_pick`]) with
+//!   its words and, when the engine chosen is not the one running, Relaunch; the config file
+//!   (open, reveal) and the note that an AI agent is the easiest way to change anything else,
+//!   with Copy Instructions for Agents.
 //!
 //! The toolbar is built by hand (an `NSToolbar` with a delegate, the panes swapped as the
 //! window's content view) rather than with `NSTabViewController`: every pane is built once and
@@ -36,12 +38,13 @@ use objc2::runtime::NSObjectProtocol;
 use objc2::{DefinedClass, MainThreadOnly, Message, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSBackingStoreType, NSButton, NSColor, NSControlStateValueOn, NSImage, NSPopUpButton, NSScreen, NSScrollView,
-    NSSlider, NSSwitch, NSTextAlignment, NSTickMarkPosition, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
+    NSSegmentSwitchTracking, NSSegmentedControl, NSSlider, NSSwitch, NSTextAlignment, NSTickMarkPosition, NSToolbar, NSToolbarDelegate, NSToolbarDisplayMode,
     NSToolbarItem, NSView, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSObject, NSPoint, NSRect, NSSize, NSString, NSTimer};
 
 use super::form::{self, ActionTarget, FlippedView, Form, Row, Style};
+use super::mode_pick::{Mode, ModeFacts, ModeView};
 use crate::config::{AppConfig, Config, FitMode};
 use crate::engine::model::StripOrder;
 use crate::platform::login_item::LoginStatus;
@@ -126,7 +129,7 @@ impl Pane {
             Pane::StageManager => &[TURN_OFF, RECENT, GROUPING, DESKTOP_DOCK],
             Pane::Stages => &[RESTORE, NEW_APPS, SHIFT, MERGE, ORDER],
             Pane::Windows => &[FIT, SPEED, HOTKEYS],
-            Pane::Advanced => &[REVEAL, OPEN, COPY],
+            Pane::Advanced => &[MODE, RELAUNCH, REVEAL, OPEN, COPY],
         }
     }
 
@@ -176,6 +179,9 @@ pub struct SettingsValues {
     pub config_path: String,
     /// The config file's error, if it has one.
     pub config_error: Option<String>,
+    /// What the mode picker shows (Settings → Advanced). The engine running is not in the
+    /// config: [`SettingsValues::new`] leaves it unknown, the shell sets it.
+    pub mode: ModeFacts,
 }
 
 impl SettingsValues {
@@ -202,11 +208,17 @@ impl SettingsValues {
             animations_on: config.style.animation.animates(),
             config_path,
             config_error,
+            mode: ModeFacts {
+                apple_on: flag("GloballyEnabled", 0) != 0,
+                follows_apple: config.windows.with_apple == crate::engine::stand_down::WithApple::Augment,
+                engine: config.windows.engine,
+                running: None,
+            },
         }
     }
 
     /// What decides the panes' rows (a change rebuilds them; anything else updates in place).
-    fn shape(&self) -> (u8, bool, bool, bool, bool, bool) {
+    fn shape(&self) -> ((u8, bool, bool, bool, bool, bool), ModeView) {
         let login = match self.login {
             LoginStatus::On => 0,
             LoginStatus::NeedsApproval => 1,
@@ -215,7 +227,8 @@ impl SettingsValues {
             LoginStatus::Late => 4,
         };
         // The Shift row says what Shift does, which the new-apps switch flips.
-        (login, self.apple_on, self.follows_apple, self.config_error.is_some(), self.animations_on, self.new_apps_join_current)
+        // The mode picker's words and Relaunch follow its view.
+        ((login, self.apple_on, self.follows_apple, self.config_error.is_some(), self.animations_on, self.new_apps_join_current), self.mode.view())
     }
 }
 
@@ -238,6 +251,10 @@ pub enum Change {
     ShiftBringsHere(bool),
     /// `[strip] order` (the Strip order popup).
     StripOrder(StripOrder),
+    /// A mode chosen in the picker (Settings → Advanced).
+    Mode(Mode),
+    /// Relaunch, beside a mode that applies after one.
+    Relaunch,
     Fit(FitMode),
     Hotkeys(bool),
     Speed(f64),
@@ -270,13 +287,15 @@ mod tag {
     pub const RESTORE: isize = 19;
     pub const NEW_APPS: isize = 20;
     pub const ORDER: isize = 21;
+    pub const MODE: isize = 22;
+    pub const RELAUNCH: isize = 23;
     /// The toolbar items: `PANE + n` for the nth pane.
     pub const PANE: isize = 100;
     /// Every control's tag.
     #[cfg(test)]
-    pub const ALL: [isize; 21] = [
+    pub const ALL: [isize; 23] = [
         LOGIN, LOGIN_ITEMS, ICON, UPDATES, CHECK, TURN_OFF, RECENT, GROUPING, DESKTOP_DOCK, MERGE, SHIFT, FIT, HOTKEYS, SPEED,
-        OPEN, REVEAL, COPY, INSTALL, RESTORE, NEW_APPS, ORDER,
+        OPEN, REVEAL, COPY, INSTALL, RESTORE, NEW_APPS, ORDER, MODE, RELAUNCH,
     ];
 }
 
@@ -300,6 +319,8 @@ fn tag_of(change: &Change) -> isize {
         Change::MergeOnDrop(_) => tag::MERGE,
         Change::ShiftBringsHere(_) => tag::SHIFT,
         Change::StripOrder(_) => tag::ORDER,
+        Change::Mode(_) => tag::MODE,
+        Change::Relaunch => tag::RELAUNCH,
         Change::Fit(_) => tag::FIT,
         Change::Hotkeys(_) => tag::HOTKEYS,
         Change::Speed(_) => tag::SPEED,
@@ -341,6 +362,7 @@ struct Controls {
     merge: Retained<NSSwitch>,
     shift: Retained<NSSwitch>,
     order: Retained<NSPopUpButton>,
+    mode: Retained<NSSegmentedControl>,
     fit: Retained<NSPopUpButton>,
     hotkeys: Retained<NSSwitch>,
     speed: Retained<NSSlider>,
@@ -472,6 +494,8 @@ fn change_for(c: &Controls, t: isize) -> Option<Change> {
         tag::MERGE => Change::MergeOnDrop(on(&c.merge)),
         tag::SHIFT => Change::ShiftBringsHere(on(&c.shift)),
         tag::ORDER => order_change(c.order.indexOfSelectedItem()),
+        tag::MODE => Change::Mode(Mode::of_index(c.mode.selectedSegment())?),
+        tag::RELAUNCH => Change::Relaunch,
         tag::FIT => Change::Fit(FIT_MODES[(c.fit.indexOfSelectedItem().max(0) as usize).min(2)]),
         tag::HOTKEYS => Change::Hotkeys(on(&c.hotkeys)),
         tag::SPEED => {
@@ -584,6 +608,22 @@ impl Maker<'_> {
     fn popup(&self, items: &[&str], selected: usize, t: isize) -> Retained<NSPopUpButton> {
         self.ours(t);
         form::popup(self.mtm, items, selected, self.target, t)
+    }
+
+    /// A segmented control of `labels`, one selectable, segment `selected` chosen (`None`:
+    /// none).
+    fn segments(&self, labels: &[&str], selected: Option<usize>, t: isize) -> Retained<NSSegmentedControl> {
+        self.ours(t);
+        let c = NSSegmentedControl::new(self.mtm);
+        c.setSegmentCount(labels.len() as isize);
+        for (i, l) in labels.iter().enumerate() {
+            c.setLabel_forSegment(&NSString::from_str(l), i as isize);
+        }
+        c.setTrackingMode(NSSegmentSwitchTracking::SelectOne);
+        c.setSelectedSegment(selected.map_or(-1, |i| i as isize));
+        c.sizeToFit();
+        form::wire(&c, self.target, t);
+        c
     }
 }
 
@@ -720,8 +760,41 @@ fn windows(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSPopUpButt
     (fit, speed, hotkeys)
 }
 
-/// The Advanced pane: the config file.
-fn advanced(f: &mut Form, m: &Maker, v: &SettingsValues) -> Retained<NSButton> {
+/// The mode picker's segment for `view` (-1: none).
+fn mode_segment(view: &ModeView) -> isize {
+    view.selected.map_or(-1, |m| m.index() as isize)
+}
+
+/// The words under the mode picker, `width` wide, with Relaunch at their trailing edge when
+/// the engine chosen is not the one running: the view and its height.
+fn mode_below(m: &Maker, width: f64, view: &ModeView) -> (Retained<NSView>, f64) {
+    let relaunch = view.relaunch().then(|| m.button("Relaunch", tag::RELAUNCH));
+    let text_w = relaunch.as_ref().map_or(width, |b| width - b.frame().size.width - 12.0).max(120.0);
+    let (words, h) = form::wrapping(m.mtm, &view.line(), text_w, 11.0, &NSColor::secondaryLabelColor());
+    let button_h = relaunch.as_ref().map_or(0.0, |b| b.frame().size.height);
+    let height = h.max(button_h) + 4.0;
+    let below = FlippedView::new(m.mtm, NSSize::new(width, height));
+    words.setFrameOrigin(NSPoint::new(0.0, 4.0));
+    below.addSubview(&words);
+    if let Some(b) = relaunch {
+        let size = b.frame().size;
+        b.setFrameOrigin(NSPoint::new(width - size.width, (4.0 + (h - size.height) / 2.0).max(0.0).round()));
+        b.setAccessibilityHelp(Some(&NSString::from_str(&view.line())));
+        below.addSubview(&b);
+    }
+    (below.into_super(), height)
+}
+
+/// The Advanced pane: the mode, then the config file.
+fn advanced(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSegmentedControl>, Retained<NSButton>) {
+    let shown = v.mode.view();
+    let titles: Vec<&str> = Mode::ALL.iter().map(|m| m.title()).collect();
+    let mode = m.segments(&titles, shown.selected.map(Mode::index), tag::MODE);
+    mode.setAccessibilityLabel(Some(&NSString::from_str("Mode")));
+    mode.setAccessibilityHelp(Some(&NSString::from_str(&shown.line())));
+    let mut mode_row = Row::new("Mode", Some(view(&mode)));
+    mode_row.below = Some(mode_below(m, f.row_inner(), &shown));
+    f.group(vec![mode_row]);
     let mut file_row = Row::new("Every option lives in a config file.", None).detail(v.config_path.clone());
     file_row.trailing.push(view(&m.button("Reveal in Finder", tag::REVEAL)));
     file_row.trailing.push(view(&m.button("Open Config File…", tag::OPEN)));
@@ -738,7 +811,7 @@ fn advanced(f: &mut Form, m: &Maker, v: &SettingsValues) -> Retained<NSButton> {
     );
     f.group(rows);
     f.footnote("Changes apply at once and are saved in the config file, keeping its comments.");
-    copy
+    (mode, copy)
 }
 
 /// The tallest content a pane shows without scrolling: most of the screen's visible height,
@@ -780,10 +853,10 @@ fn build(mtm: MainThreadMarker, v: &SettingsValues, target: &ActionTarget) -> (V
     let (fit, speed, hotkeys) = windows(&mut f, &maker(Pane::Windows), v);
     add(Pane::Windows, f);
     let mut f = Form::with_style(mtm, WIDTH, Style::Plain);
-    let copy = advanced(&mut f, &maker(Pane::Advanced), v);
+    let (mode, copy) = advanced(&mut f, &maker(Pane::Advanced), v);
     add(Pane::Advanced, f);
 
-    let controls = Controls { login, icon, updates, install, recent, grouping, restore, new_apps, merge, shift, order, fit, hotkeys, speed, copy };
+    let controls = Controls { login, icon, updates, install, recent, grouping, restore, new_apps, merge, shift, order, mode, fit, hotkeys, speed, copy };
     (panes, controls)
 }
 
@@ -944,6 +1017,7 @@ pub fn apply(values: SettingsValues) {
         set_switch(&c.merge, values.merge_on_drop);
         set_switch(&c.shift, values.shift_brings_here);
         c.order.selectItemAtIndex(order_index(values.strip_order) as isize);
+        c.mode.setSelectedSegment(mode_segment(&values.mode.view()));
         c.fit.selectItemAtIndex(FIT_MODES.iter().position(|m| *m == values.fit).unwrap_or(0) as isize);
         set_switch(&c.hotkeys, values.hotkeys);
         c.speed.setDoubleValue(speed_stop(values.speed) as f64);
@@ -1104,6 +1178,33 @@ mod tests {
         assert_eq!(order_change(-1), Change::StripOrder(StripOrder::Native), "no selection: Apple's");
     }
 
+    /// The mode picker reads the config's two keys and Apple's switch; the engine running
+    /// comes from the shell. A change of what it shows rebuilds its words and Relaunch.
+    #[test]
+    fn the_mode_picker_reads_the_config_and_apples_switch() {
+        use crate::engine::engine_choice::ConfigEngine;
+        use crate::engine::recovery::EngineKind;
+        use super::super::mode_pick::{Note, Running};
+        let values = |text: &str, apple: i64| {
+            let config = Config::parse(text).expect("parses").config;
+            let raw: RawSettings = [("GloballyEnabled".to_string(), apple)].into_iter().collect();
+            SettingsValues::new(&config, &raw, LoginStatus::Off, "~/x".into(), None, "1.0.0".into())
+        };
+        let v = values("", 0);
+        assert_eq!(v.mode, ModeFacts { apple_on: false, follows_apple: false, engine: ConfigEngine::Accessibility, running: None });
+        assert_eq!(v.mode.view().selected, Some(Mode::Accessibility), "the default: Accessibility");
+        assert_eq!(values("[windows]\nengine = \"spaces\"", 0).mode.view().selected, Some(Mode::Spaces));
+        assert_eq!(values("[windows]\napple_stage_manager_on = \"integrate\"", 1).mode.view().selected, Some(Mode::WithApple));
+        assert_eq!(values("", 1).mode.view().note, Note::Paused);
+        let mut chosen = values("[windows]\nengine = \"spaces\"", 0);
+        let base = SettingsValues { mode: ModeFacts { running: Some(Running { kind: EngineKind::Spaces, fell_back: false }), ..chosen.mode }, ..chosen.clone() };
+        chosen.mode.running = Some(Running { kind: EngineKind::Corner, fell_back: false });
+        assert_eq!(chosen.mode.view().note, Note::Relaunch);
+        assert_ne!(base.shape(), chosen.shape(), "Relaunch appears: rebuilt");
+        assert_eq!(mode_segment(&base.mode.view()), 1);
+        assert_eq!(mode_segment(&values("", 1).mode.view()), -1, "paused: no segment");
+    }
+
     #[test]
     fn only_row_changes_rebuild_the_form() {
         let config = Config::default();
@@ -1143,6 +1244,7 @@ mod tests {
         assert_eq!(Pane::Windows.tags(), [tag::FIT, tag::SPEED, tag::HOTKEYS]);
         assert!(Pane::StageManager.tags().contains(&tag::GROUPING) && Pane::StageManager.tags().contains(&tag::RECENT));
         assert!(Pane::Advanced.tags().contains(&tag::OPEN) && Pane::General.tags().contains(&tag::CHECK));
+        assert_eq!(Pane::Advanced.tags()[..2], [tag::MODE, tag::RELAUNCH], "the mode at the top of Advanced");
         for p in Pane::ALL {
             assert_eq!(Pane::from_id(p.id()), Some(p), "the remembered id reads back");
             assert_eq!(Pane::of_item_tag(p.item_tag()), Some(p));
@@ -1182,6 +1284,8 @@ mod tests {
             Change::MergeOnDrop(true),
             Change::ShiftBringsHere(true),
             Change::StripOrder(StripOrder::Dock),
+            Change::Mode(Mode::Spaces),
+            Change::Relaunch,
             Change::Fit(FitMode::Move),
             Change::Hotkeys(true),
             Change::Speed(2.0),

@@ -1,6 +1,8 @@
 //! The app's shell: everything around window management that a Mac app is expected to do.
 //! About, Settings, the welcome, update checks and installs, launch at login, the approvals,
-//! and Apple's Stage Manager (stand down, offer to turn it off). Main thread only.
+//! and Apple's Stage Manager (stand down, offer to turn it off), the mode picker's choices
+//! (Settings → Advanced: the config's engine, Apple's Stage Manager on or off, a Relaunch).
+//! Main thread only.
 //!
 //! Updates (8C): a newer release is offered as "Install and Relaunch / Later / Skip This
 //! Version" (or Download where this copy cannot replace itself). Install downloads and
@@ -34,6 +36,7 @@ use objc2_foundation::{MainThreadMarker, NSArray, NSBundle, NSString, NSTimer, N
 
 use super::alert::{self, AlertSpec, Place};
 use super::app_menu::{self, AppEvent};
+use super::mode_pick::{Mode, ModeFacts, Running};
 use super::settings_window::{self, Change, Pane, SettingsValues};
 use super::status_menu::MenuAction;
 use super::welcome::{self, WelcomeAction};
@@ -60,8 +63,11 @@ pub const DESKTOP_DOCK_URL: &str = "x-apple.systempreferences:com.apple.Desktop-
 const FIRST_CHECK_DELAY: f64 = 30.0;
 /// How often an automatic check is considered (it runs when a day has passed).
 const CHECK_TICK: f64 = 3600.0;
-/// How long a turn-off of Apple's Stage Manager has to show before the fallback.
+/// How long a turn-off (or turn-on) of Apple's Stage Manager has to show before the fallback.
 const TURN_OFF_WAIT: f64 = 2.0;
+/// How long the mode picker shows a choice before macOS reads it back
+/// ([`ModeFacts::held`]): the turn-off's wait and the poll's second, with room.
+const MODE_HOLD: Duration = Duration::from_secs(4);
 /// How often a ready update looks for a quiet moment.
 const QUIET_TICK: f64 = 1.0;
 /// When the note of an update that did not go in shows (after the launch settles).
@@ -143,6 +149,9 @@ struct Shell {
     /// Counts the activation policy's switches: a pending retry of the switch back to
     /// accessory runs only while no newer switch came ([`Shell::back_to_accessory`]).
     policy_serial: u64,
+    /// The mode picker's last choice and when: shown as taken until macOS reads it back, for
+    /// [`MODE_HOLD`] at most.
+    mode_asked: Option<(Mode, Instant)>,
     _timers: Vec<Retained<NSTimer>>,
 }
 
@@ -356,6 +365,7 @@ pub fn install(mtm: MainThreadMarker, wm: WmHandle, hooks: Hooks, permissions: P
         first_check_done: false,
         reopen: ReopenSwitch::default(),
         policy_serial: 0,
+        mode_asked: None,
         _timers: Vec::new(),
     };
     SHELL.with(|s| *s.borrow_mut() = Some(shell));
@@ -515,7 +525,7 @@ impl Shell {
         welcome::show(self.mtm, rows, |action| {
             later(move || match action {
                 WelcomeAction::Allow(a) => allow(a),
-                WelcomeAction::TurnOffApple => turn_off_apple(Asker::User),
+                WelcomeAction::TurnOffApple => set_apple(false, Asker::User),
                 WelcomeAction::OpenSettings => show_settings(),
                 WelcomeAction::Done => {}
             })
@@ -528,14 +538,49 @@ impl Shell {
             Some(b) => format!("{version} ({b})"),
             None => version,
         };
-        SettingsValues::new(
+        let mut values = SettingsValues::new(
             &self.config,
             &self.raw,
             login_item::status(),
             display_path(&paths::config_file()),
             self.config_error.clone(),
             version,
-        )
+        );
+        values.mode.running = running_engine();
+        let asked = self.mode_asked.filter(|(_, at)| at.elapsed() < MODE_HOLD).map(|(m, _)| m);
+        values.mode = values.mode.held(asked);
+        values
+    }
+
+    /// A mode chosen in Settings → Advanced: the config's engine or `"integrate"` written,
+    /// Apple's Stage Manager turned on or off ([`ModeFacts::writes`]); the picker shows the
+    /// choice meanwhile ([`MODE_HOLD`]).
+    fn choose_mode(&mut self, mode: Mode) {
+        let facts = ModeFacts { apple_on: self.apple_on(), follows_apple: self.follows_apple(), engine: self.config.windows.engine, running: running_engine() };
+        let w = facts.writes(mode);
+        tracing::info!(mode = mode.title(), engine = w.engine.map(|e| e.name()), integrate = w.integrate, apple = ?w.apple, "settings: mode chosen");
+        self.mode_asked = Some((mode, Instant::now()));
+        // Integrate before Apple's goes on: never a pause (every window back) in between.
+        if w.integrate {
+            self.write_config("windows.apple_stage_manager_on", "\"integrate\"");
+        }
+        if let Some(e) = w.engine {
+            self.write_config("windows.engine", &format!("\"{}\"", e.name()));
+        }
+        match w.apple {
+            Some(on) => later(move || set_apple(on, Asker::Settings)),
+            None => self.refresh_settings(),
+        }
+        // The hold ends: the picker shows what macOS reads by then.
+        let when = dispatch2::DispatchTime::try_from(MODE_HOLD + Duration::from_millis(100)).unwrap_or(dispatch2::DispatchTime::NOW);
+        let _ = dispatch2::DispatchQueue::main().after(when, || {
+            with(|s| {
+                if s.mode_asked.is_some_and(|(_, at)| at.elapsed() >= MODE_HOLD) {
+                    s.mode_asked = None;
+                }
+                s.refresh_settings();
+            });
+        });
     }
 
     fn refresh_settings(&self) {
@@ -604,7 +649,7 @@ impl Shell {
             Change::AutoUpdates(on) => self.write_config("app.check_for_updates", if on { "true" } else { "false" }),
             Change::InstallUpdates(on) => self.write_config("app.install_updates", if on { "true" } else { "false" }),
             Change::CheckNow => later(|| check(Asker::Settings)),
-            Change::TurnOffApple => later(|| turn_off_apple(Asker::Settings)),
+            Change::TurnOffApple => later(|| set_apple(false, Asker::Settings)),
             Change::ShowRecentApps(on) => self.write_apple("AutoHide", i64::from(!on)),
             Change::AllAtOnce(all) => self.write_apple("AppWindowGroupingBehavior", i64::from(all)),
             Change::OpenDesktopAndDock => open_url(DESKTOP_DOCK_URL),
@@ -613,6 +658,11 @@ impl Shell {
             Change::MergeOnDrop(on) => self.write_config("strip.merge_on_drop", if on { "true" } else { "false" }),
             Change::ShiftBringsHere(on) => self.write_config("sugar.shift_brings_here", if on { "true" } else { "false" }),
             Change::StripOrder(order) => self.write_config("strip.order", &format!("\"{}\"", order.name())),
+            Change::Mode(mode) => self.choose_mode(mode),
+            Change::Relaunch => {
+                let hooks = self.hooks;
+                later(move || app_menu::relaunches(move || (hooks.quit)()));
+            }
             Change::Fit(mode) => {
                 let v = match mode {
                     FitMode::Off => "\"off\"",
@@ -699,7 +749,7 @@ pub fn menu(action: MenuAction) {
         MenuAction::CheckForUpdates => check(menu_asker()),
         MenuAction::Settings => show_settings(),
         MenuAction::Allow(a) => allow(a),
-        MenuAction::TurnOffAppleStageManager => turn_off_apple(menu_asker()),
+        MenuAction::TurnOffAppleStageManager => set_apple(false, menu_asker()),
         MenuAction::MarkProblem | MenuAction::Quit => {}
     }
 }
@@ -1240,36 +1290,52 @@ fn show_update_note() {
     );
 }
 
-/// Turns Apple's Stage Manager off (the user's click), then checks within about 2 s that it
-/// stopped: `GloballyEnabled` reads back 0 and `WindowManager` shows no more windows than
-/// before. Otherwise System Settings → Desktop & Dock opens with a one-line hint (a sheet on
-/// Settings when `by` clicked there).
-pub fn turn_off_apple(by: Asker) {
+/// The engine the launch chose, as the mode picker reads it ([`Running`]; `None` before the
+/// choice, or in a tool).
+fn running_engine() -> Option<Running> {
+    crate::platform::window_engine::choice().map(|c| Running {
+        kind: c.kind,
+        fell_back: c.fallback.is_some() || c.probe.as_ref().is_some_and(|p| !p.ok),
+    })
+}
+
+/// Turns Apple's Stage Manager off or on (`on`: the mode picker's With Apple's) at the
+/// user's click, then checks within about 2 s that it took: `GloballyEnabled` reads back as
+/// asked and, turning off, `WindowManager` shows no more windows than before (turning on, its
+/// strip may have no card to show, so the setting alone decides). Otherwise System Settings →
+/// Desktop & Dock opens with a one-line hint (a sheet on Settings when `by` clicked there).
+pub fn set_apple(on: bool, by: Asker) {
     let before = native_settings::window_manager_windows();
-    let written = native_settings::turn_off_apple_stage_manager();
+    let written = native_settings::set_apple_stage_manager(on);
     if let Err(e) = &written {
-        tracing::warn!("cannot turn Apple's Stage Manager off: {e}");
+        tracing::warn!(on, "cannot turn Apple's Stage Manager on or off: {e}");
+        // The picker shows the facts again at once.
+        with(|s| {
+            s.mode_asked = None;
+            s.refresh_settings();
+        });
     }
     let check = RcBlock::new(move |_t: NonNull<NSTimer>| {
         let raw = native_settings::read();
-        let off = !native_settings::apple_stage_manager_enabled(&raw);
+        let reads_on = native_settings::apple_stage_manager_enabled(&raw);
         let now = native_settings::window_manager_windows();
-        let stopped = off && (now == 0 || now < before);
-        tracing::info!(off, wm_windows_before = before, wm_windows_now = now, stopped, "turning Apple's Stage Manager off");
+        let took = if on { reads_on } else { !reads_on && (now == 0 || now < before) };
+        tracing::info!(on, reads_on, wm_windows_before = before, wm_windows_now = now, took, "turning Apple's Stage Manager on or off");
         // The app's poll reads the change (the one reader): app, WM thread, menu, windows.
         if let Some(h) = with(|s| s.hooks) {
             later(move || (h.poll_now)());
         }
-        if !stopped {
+        if !took {
             open_url(DESKTOP_DOCK_URL);
             if let Some(mtm) = MainThreadMarker::new() {
+                let (title, text) = apple_hint(on);
                 present(
                     mtm,
                     by,
                     AlertSpec {
                         key: "apple",
-                        title: "Turn off Stage Manager in Desktop & Dock".into(),
-                        text: "macOS kept Apple's Stage Manager on. In the Desktop & Dock settings that just opened, turn Stage Manager off.".into(),
+                        title: title.into(),
+                        text: text.into(),
                         buttons: vec!["OK".into()],
                         cancel: Some(0),
                         warning: false,
@@ -1283,6 +1349,15 @@ pub fn turn_off_apple(by: Asker) {
     let wait = if written.is_ok() { TURN_OFF_WAIT } else { 0.0 };
     // SAFETY: the block runs once on the main run loop, which keeps the timer.
     let _ = unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(wait, false, &check) };
+}
+
+/// The hint when macOS kept Apple's Stage Manager as it was: its title and text.
+fn apple_hint(on: bool) -> (&'static str, &'static str) {
+    if on {
+        ("Turn on Stage Manager in Desktop & Dock", "macOS kept Apple's Stage Manager off. In the Desktop & Dock settings that just opened, turn Stage Manager on.")
+    } else {
+        ("Turn off Stage Manager in Desktop & Dock", "macOS kept Apple's Stage Manager on. In the Desktop & Dock settings that just opened, turn Stage Manager off.")
+    }
 }
 
 /// How long the turn-off waits before judging (for the docs and tests).

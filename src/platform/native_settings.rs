@@ -6,8 +6,8 @@
 //!
 //! Writes ([`write`]) happen only on a user's click in Settings or a prompt: "Show recent
 //! apps" (`AutoHide`) and "Show windows from an application" (`AppWindowGroupingBehavior`),
-//! the same keys Apple's own Customize sheet writes, and turning Apple's Stage Manager off
-//! (`GloballyEnabled`). Never `EnableStandardClickToShowDesktop` (it changes macOS beyond
+//! the same keys Apple's own Customize sheet writes, and turning Apple's Stage Manager off,
+//! or on with the mode picker's With Apple's (`GloballyEnabled`). Never `EnableStandardClickToShowDesktop` (it changes macOS beyond
 //! Stage Manager). Unit tests and test runs (`STAGE_MANAGER_HOME`) never write, unless
 //! `SM_TEST_TOGGLE_APPLE_SM=1` (the owner's opt-in live test).
 
@@ -144,7 +144,13 @@ pub fn write(key: &str, value: i64) -> Result<(), String> {
 
 /// Turns Apple's Stage Manager off (`GloballyEnabled = false`), on the user's click only.
 pub fn turn_off_apple_stage_manager() -> Result<(), String> {
-    write(GLOBALLY_ENABLED, 0)
+    set_apple_stage_manager(false)
+}
+
+/// Turns Apple's Stage Manager on or off (`GloballyEnabled`), on the user's click only (the
+/// mode picker's With Apple's turns it on, the other modes and Turn Off turn it off).
+pub fn set_apple_stage_manager(on: bool) -> Result<(), String> {
+    write(GLOBALLY_ENABLED, i64::from(on))
 }
 
 /// On-screen windows of Apple's `WindowManager` process (layer 0 or above): its strip's
@@ -193,6 +199,7 @@ mod tests {
         assert!(write_refusal().is_some());
         assert!(write("AutoHide", 1).is_err());
         assert!(turn_off_apple_stage_manager().is_err());
+        assert!(set_apple_stage_manager(true).is_err(), "nor turn it on");
         assert!(write("EnableStandardClickToShowDesktop", 0).is_err(), "never written");
     }
 
