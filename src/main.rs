@@ -459,12 +459,16 @@ mod app {
         let reason = stage_manager::ui::app_menu::system_quit_reason();
         let (head_start, logout_reason) = (wm_thread::quit_after_head_start(), reason.is_some_and(logout_watch::logout_reason));
         let user_quit = stage_manager::ui::app_menu::user_quit();
+        let relaunch = stage_manager::ui::app_menu::relaunch_asked();
         // A quit at a logout: the guardian waits for its cancel, which opens the app again
-        // (round logout-cancel-relaunch); never after the user's own Quit.
-        let marker = logout_watch::quit_marker(head_start, logout_reason, user_quit);
+        // (round logout-cancel-relaunch); never after the user's own Quit. The user's
+        // Relaunch: the guardian opens it again at once after a clean exit.
+        let marker = logout_watch::quit_marker(head_start, logout_reason, user_quit, relaunch);
         let for_logout = marker == logout_watch::LOGOUT_MARK;
         if for_logout {
             tracing::info!(reason = %logout_watch::four_cc(reason.unwrap_or(0)), clean = ok, "quit for a logout, restart or shutdown: the guardian opens the app again if it is cancelled");
+        } else if relaunch {
+            tracing::info!(clean = ok, "quit to relaunch: the guardian opens the app again after a clean exit");
         }
         if ok {
             safety::mark_clean_exit(marker);
