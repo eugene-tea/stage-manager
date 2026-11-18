@@ -46,6 +46,7 @@ use objc2_core_graphics::{
 };
 
 use super::ax::{AxElement, names};
+use super::tap_switch::TapSwitch;
 use super::wm_thread::{WmCommand, WmHandle};
 use crate::engine::geometry::Point;
 use crate::engine::minimize_press::{
@@ -115,6 +116,9 @@ static WM: OnceLock<WmHandle> = OnceLock::new();
 static GATE: Mutex<ButtonGate<AxElement>> = Mutex::new(ButtonGate::new());
 static PORT: AtomicPtr<CFMachPort> = AtomicPtr::new(std::ptr::null_mut());
 static STARTED: AtomicBool = AtomicBool::new(false);
+/// On only while the WM thread arranges and a minimize is caught ([`sync`]): off in the Apple
+/// mode, while standing down, during a logout's hold and with `minimize_to_strip = false`.
+static SWITCH: TapSwitch = TapSwitch::new();
 /// macOS switched the tap off for user input: it stays off until secure input ends.
 static OFF_BY_INPUT: AtomicBool = AtomicBool::new(false);
 /// When the WM tick last switched the tap on after user input.
@@ -144,23 +148,45 @@ pub fn set_handle(h: WmHandle) {
 /// Starts the tap once windows are published and arranged.
 pub fn admit(on: bool) {
     ADMITTED.store(on, Ordering::Relaxed);
-    if on && SET.lock().is_ok_and(|s| s.as_ref().is_some_and(|s| s.on)) {
-        start();
-    }
+    sync();
 }
 
 /// Hands the tap the windows a minimize is caught on. Cheap; call after every change. Starts
 /// the tap the first time it is on while the WM thread arranges ([`admit`]).
 pub fn publish(set: Minimizable) {
-    let on = set.on;
     if let Ok(mut s) = SET.lock()
         && s.as_ref() != Some(&set)
     {
         *s = Some(set);
     }
-    if on && ADMITTED.load(Ordering::Relaxed) {
+    sync();
+}
+
+/// Starts the tap the first time it has something to catch, and switches it on and off with
+/// that after ([`TapSwitch`]): while nothing is caught no press or key goes through it.
+fn sync() {
+    let wanted = ADMITTED.load(Ordering::Relaxed) && SET.lock().is_ok_and(|s| s.as_ref().is_some_and(|s| s.on));
+    SWITCH.set_wanted(wanted);
+    if wanted {
         start();
+    } else {
+        // Off by our word now: a tap macOS switched off for secure input waits for nothing.
+        OFF_BY_INPUT.store(false, Ordering::Relaxed);
     }
+    SWITCH.apply(port(), HOLDING.load(Ordering::Relaxed), true);
+}
+
+/// Whether the tap is switched on now (`ctl state`, tests).
+pub fn tap_on() -> bool {
+    SWITCH.enabled()
+}
+
+/// The tap's port while its run loop runs.
+fn port() -> Option<&'static CFMachPort> {
+    let port = PORT.load(Ordering::SeqCst);
+    // SAFETY: the port is kept alive by the tap thread while its run loop runs (stored before
+    // it starts, cleared after it ends; it runs for the life of the process).
+    unsafe { port.as_ref() }
 }
 
 /// macOS refused the tap once (noted once a run; tried again at each start).
@@ -229,8 +255,8 @@ fn run() -> bool {
     // SAFETY: the common-modes constant is a valid static.
     rl.add_source(Some(&source), unsafe { kCFRunLoopCommonModes });
     PORT.store((&*port as *const CFMachPort).cast_mut(), Ordering::SeqCst);
-    CGEvent::tap_enable(&port, true);
-    tracing::info!("minimize: the event tap runs (the yellow button and Cmd-M go straight to the strip)");
+    SWITCH.made(&port);
+    tracing::info!(on = SWITCH.enabled(), "minimize: the event tap runs (the yellow button and Cmd-M go straight to the strip)");
     CFRunLoop::run();
     PORT.store(std::ptr::null_mut(), Ordering::SeqCst);
     drop(port);
@@ -267,7 +293,7 @@ fn note(n: Note) {
 /// True while macOS keeps the tap off for user input (secure input): the WM tick switches it
 /// on again once secure input is over ([`refresh`]).
 pub fn off_for_secure_input() -> bool {
-    OFF_BY_INPUT.load(Ordering::Relaxed)
+    OFF_BY_INPUT.load(Ordering::Relaxed) && SWITCH.wanted()
 }
 
 /// From the WM thread's tick: switches a tap that macOS switched off for user input on again
@@ -275,7 +301,7 @@ pub fn off_for_secure_input() -> bool {
 pub fn refresh() {
     let now = Instant::now();
     let last = BACK_ON_AT.lock().map(|t| *t).unwrap_or(None);
-    if super::corner::sliver_tap::back_on(OFF_BY_INPUT.load(Ordering::Relaxed), last, now, super::corner::sliver_tap::secure_input_on) {
+    if SWITCH.wanted() && super::corner::sliver_tap::back_on(OFF_BY_INPUT.load(Ordering::Relaxed), last, now, super::corner::sliver_tap::secure_input_on) {
         let port = PORT.load(Ordering::SeqCst);
         // SAFETY: the port is kept alive by the tap thread while its run loop runs (stored
         // before it starts, cleared after it ends; it runs for the life of the process).
@@ -523,15 +549,14 @@ unsafe extern "C-unwind" fn callback(
             }
             return event.as_ptr();
         }
-        let port = PORT.load(Ordering::SeqCst);
-        // SAFETY: the port is kept alive by the tap thread while it runs (stored before the
-        // run loop starts, cleared after it ends).
-        if let Some(port) = unsafe { port.as_ref() } {
-            CGEvent::tap_enable(port, true);
+        if let Some(port) = port()
+            && SWITCH.on_again(port)
+        {
             note(Note::OnAgain);
         }
         return event.as_ptr();
     }
+    super::costs::bump(super::costs::Cost::TapEvent);
     // SAFETY: the event is live for the callback's duration.
     let ev = unsafe { event.as_ref() };
     let swallow = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -543,5 +568,9 @@ unsafe extern "C-unwind" fn callback(
         }
     }))
     .unwrap_or(false);
+    if kind == CGEventType::LeftMouseUp && !SWITCH.wanted() {
+        // Kept on for a press held when nothing was caught any more: off once released.
+        SWITCH.apply(port(), HOLDING.load(Ordering::Relaxed), false);
+    }
     if swallow { std::ptr::null_mut() } else { event.as_ptr() }
 }

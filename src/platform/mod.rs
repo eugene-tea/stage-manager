@@ -58,6 +58,7 @@ pub mod spaces_probe;
 pub mod switch_shots;
 pub mod switcher_ax;
 pub mod switcher_probe;
+pub mod tap_switch;
 pub mod update_check;
 pub mod updater;
 pub mod wallpaper;

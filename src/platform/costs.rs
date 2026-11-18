@@ -80,12 +80,18 @@ pub fn get(cost: Cost) -> u64 {
     COUNTS[cost.index()].load(Ordering::Relaxed)
 }
 
-/// `ctl state`'s `costs`: every count since the launch.
+/// `ctl state`'s `costs`: every count since the launch, and which of our event taps are
+/// switched on now (`taps_on`: they are on only while they have something to judge,
+/// [`super::tap_switch`]).
 pub fn status() -> serde_json::Value {
     let mut out = serde_json::Map::new();
     for c in ALL {
         out.insert(c.key().to_string(), get(c).into());
     }
+    out.insert(
+        "taps_on".to_string(),
+        serde_json::json!({ "slivers": super::corner::sliver_tap::tap_on(), "minimize": super::minimize_tap::tap_on() }),
+    );
     serde_json::Value::Object(out)
 }
 
