@@ -547,9 +547,10 @@ sent once more, and one still not there, or three set right by that retry within
 ends the Spaces way for the rest of the run: every window it hid comes back onto its
 Desktop, the park corner takes over and hides again the windows that were hidden, and the
 next launch probes again. `[windows] engine = "accessibility"` keeps the park corner and
-never probes (GUIDE, Troubleshooting). Until the Spaces way is measured against the corner
-(CPU, switch time), `"auto"` also keeps the park corner unless `STAGE_MANAGER_SPACES=1` is
-set; the probe still runs and logs its verdict at every launch.
+never probes (GUIDE, Troubleshooting); `"spaces"` takes the Spaces way wherever the probe
+passes. Until the Spaces way is measured against the corner ("Window engines measured",
+below), `"auto"` keeps the park corner; the probe still runs and logs its verdict at every
+launch.
 
 **Updates.** Apple's Stage Manager updates with macOS; ours updates itself (GUIDE, Updates).
 A downloaded update also installs when you quit Stage Manager: the menu's Quit, or ⌘Q in
@@ -1086,6 +1087,21 @@ set to move its cursor with the mouse pointer.
   Studio Display's, as reviewers counted; ours gives the same.
 - Reduce Motion on Apple's: a switch is a cross-fade of about 80 ms, a minimize a fade out in place of
   about 130 ms. Ours fades 200 ms, worked out from the accessibility guidance rather than copied.
+
+## Window engines measured
+
+The park corner against the Spaces way on fixture windows (`scripts/measure_engines.py`, one
+app run per engine on a copy of the config, captures off). Not run yet: the numbers go here
+once it is.
+
+| | corner | spaces |
+|---|---|---|
+| App CPU at rest (60 s, 3 stages) | | |
+| WindowServer CPU over the same span | | |
+| Switch time, median / p90 (`ctl switch` to the last window at its final frame) | | |
+| A new app's overlap (its window shown over the old stage) | | |
+| Energy Impact (`top` POWER, the app, at rest and switching) | | |
+| Dropped frames of an animating window shown from a hidden stage | | |
 
 ## Known gaps
 

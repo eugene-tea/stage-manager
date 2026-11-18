@@ -1145,10 +1145,7 @@ impl Config {
                 park_drop: v.num("windows.park_drop"),
                 corner_patch: v.flag("windows.corner_patch"),
                 corner_patch_reach: v.auto("windows.corner_patch_reach"),
-                engine: match v.text("windows.engine") {
-                    "accessibility" => crate::engine::engine_choice::ConfigEngine::Accessibility,
-                    _ => crate::engine::engine_choice::ConfigEngine::Auto,
-                },
+                engine: crate::engine::engine_choice::ConfigEngine::parse(v.text("windows.engine")),
                 with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.with_apple")),
             },
             displays: DisplaysConfig { main_only: v.flag("displays.main_only") },

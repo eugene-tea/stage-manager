@@ -394,8 +394,8 @@ pub const KEYS: &[KeyDef] = &[
         "A press on the strip macOS keeps on screen of a parked window (the bottom-right corner) does nothing, as Apple's parked windows cannot be grabbed; false lets it reach the app (its stage comes on release)."),
     KeyDef {
         applies: Applies::Restart,
-        ..k("windows", "engine", Kind::Choice(&["auto", "accessibility"]), "\"auto\"",
-            "How a stage's windows are hidden: \"auto\" lets each launch try the window server's own Spaces and keep them only where a trial with a window of the app's own works, with the Accessibility park corner otherwise and for the rest of a run in which a Space call fails; \"accessibility\" always uses the park corner and never tries Spaces (a way out if windows go missing or flicker on a switch). In this version \"auto\" still uses the park corner. Read at launch.")
+        ..k("windows", "engine", Kind::Choice(&["auto", "spaces", "accessibility"]), "\"auto\"",
+            "How a stage's windows are hidden: \"auto\" uses the Accessibility park corner in this version, with a trial of the window server's own Spaces run and logged at each launch, and will pick Spaces where that trial works once they are measured; \"spaces\" puts each hidden stage in a Space of the window server's own where the trial at launch works, with the park corner otherwise and for the rest of a run in which a Space call fails; \"accessibility\" always uses the park corner and never tries Spaces (a way out if windows go missing or flicker on a switch). Read at launch.")
     },
     k("windows", "with_apple", Kind::Choice(&["stand_down", "augment"]), "\"stand_down\"",
         "What Stage Manager does while Apple's Stage Manager is on: \"stand_down\" brings every window back and arranges nothing until Apple's is off; \"augment\" follows Apple's stages instead: the stage hotkeys and `ctl switch` switch between them, and Stage Manager shows no strip of its own. With Apple's off, Stage Manager runs its own stages either way."),
@@ -625,6 +625,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-44.toml"),
     include_str!("legacy/default-45.toml"),
     include_str!("legacy/default-46.toml"),
+    include_str!("legacy/default-47.toml"),
 ];
 
 #[cfg(test)]

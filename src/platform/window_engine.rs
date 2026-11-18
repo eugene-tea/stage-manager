@@ -363,7 +363,9 @@ fn lock_choice() -> std::sync::MutexGuard<'static, Option<Choice>> {
 /// Corner engine, chooses ([`engine_choice::choose`]), installs the engine and logs the
 /// choice with its reason. Main thread, once AppKit is up, before the WM thread starts.
 pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
-    let asked = Asked { config, opted_in: opted_in(), test: super::spaces::engine::from_env() };
+    let asked = Asked { config, test: super::spaces::engine::from_env() };
+    // `"spaces"` opens the landing variants as a test run does: the review build (11-14).
+    crate::ui::landing_math::Landing::open_for_review(config == ConfigEngine::Spaces);
     let probe = asked.probes().then(|| super::spaces::probe::run(mtm));
     match &probe {
         Some(p) if p.ok => tracing::info!(ms = format!("{:.1}", p.ms), steps = p.steps, "window engine: launch probe passed: {}", p.reason),
@@ -379,12 +381,6 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     install(of(choice.kind));
     *lock_choice() = Some(choice.clone());
     choice
-}
-
-/// The hidden opt-in for the Spaces engine under `[windows] engine = "auto"`, until it is
-/// measured: `STAGE_MANAGER_SPACES=1`.
-fn opted_in() -> bool {
-    std::env::var("STAGE_MANAGER_SPACES").is_ok_and(|v| v.trim() == "1")
 }
 
 /// The Corner engine from now on, for the rest of the run: a running engine's checks failed

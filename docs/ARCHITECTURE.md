@@ -75,10 +75,15 @@ How a stage's windows are hidden, shown and animated is one strategy with two
 implementations. The **Corner engine** is today's: Accessibility moves to the park corner,
 pictures for the motion. The **Spaces engine** puts each inactive stage in a hidden Space of
 the window server's own. Everything else is written once and never asks which engine runs.
-The Corner engine is the default. The Spaces engine is built; a launch runs it only when
-the launch probe passes and either the hidden opt-in (`STAGE_MANAGER_SPACES=1`) or the
-live suite's test switch (`STAGE_MANAGER_ENGINE=spaces` in a fixture run) asks for it, until
-the measurements are in (PLAN, 1.9).
+The Corner engine is the default. `[windows] engine` (read at launch,
+`engine::engine_choice`) has three values: `"auto"`, the default, runs the Corner engine in
+this version, with the launch probe run and its verdict logged, and will pick the Spaces
+engine where the probe passes once the measurements are in (PLAN, 1.9;
+`scripts/measure_engines.py`, UX-SPEC "Window engines measured"); `"spaces"` runs the Spaces
+engine when the launch probe passes, else the Corner engine, and the Corner engine for the
+rest of a run whose checks fail; `"accessibility"` runs the Corner engine and never probes.
+The live suite's test switch (`STAGE_MANAGER_ENGINE=spaces|corner`, honoured with
+`STAGE_MANAGER_ONLY` only) comes ahead of the config.
 
 ```mermaid
 flowchart TD
@@ -296,7 +301,7 @@ coming into view, the pointer reaching a card; a failed one twice more, 3 s apar
 engine keeps its full-size pictures fresh every 2 s, the same way.
 
 The landing, behind a test switch for now (round sm-landing; `ui/landing_math.rs`, pure;
-`STAGE_MANAGER_LANDING` with `STAGE_MANAGER_ONLY` or `STAGE_MANAGER_SPACES=1`, default today's): **ordered** puts each
+`STAGE_MANAGER_LANDING` with `STAGE_MANAGER_ONLY` or under `[windows] engine = "spaces"`, default today's): **ordered** puts each
 incoming picture whose window ends behind a real window in place (the model's order after
 the batch, `Transition::order` and `in_place`) in a side panel of the overlay's own frame
 and eye, ordered just under that window (`ui/overlay.rs`), both engines; **live** (the Spaces
