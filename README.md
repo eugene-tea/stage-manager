@@ -53,8 +53,8 @@ macOS has no public way to hide a window and keep it ready, so three ways are bu
 with its trade-offs:
 
 - **Park corner** (the default): hidden windows wait in a corner of the screen, every addition works.
-- **Spaces** (in testing): hidden windows go to a hidden Space of the window server; faster, on
-  undocumented calls.
+- **Spaces** (in testing, `[windows] engine = "spaces"`): hidden windows go to a hidden Space of
+  the window server; faster, on undocumented calls.
 - **Following Apple's Stage Manager** (`[windows] with_apple = "augment"`): Apple's draws the
   strip and arranges the windows; hotkeys, moving windows between stages and restore are added on top.
 
