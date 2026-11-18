@@ -136,6 +136,15 @@ scripts/measure.sh --summary /tmp/sm-measure.XXXXXX   # the table again
   every display refresh and counts the refreshes it missed) at rest and while other stages
   are activated.
 - **launch**: how long a newly opened app's window shows over the stage being left.
+- **hidden** (by name only): a window drawing on every display refresh (the fixture's
+  `--frame-clock-normal`) hidden in its stage and shown again by `ctl switch`: whether it
+  drew while hidden, how soon it draws again after the show, refreshes missed after.
+
+`scripts/measure_engines.py` runs it for the park corner and the Spaces engine alone, with
+captures off, three stages and `ctl switch` switches, and prints one table, corner against
+spaces, with every number in `target/measure-engines.json` (UX-SPEC, "Window engines
+measured"); `--dry-run` prints the plan and launches nothing, and
+`python3 scripts/test_measure_unit.py` checks its parts offline.
 
 Captures are on in every run, as installed; sign with a Developer ID (`CERT_NAME`) so the dev
 copy keeps its Screen Recording grant. The numbers go to `measure.jsonl` in `OUT` (a new
