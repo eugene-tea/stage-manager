@@ -94,10 +94,10 @@ macOS does with the windows of another Desktop. Nothing is left in a corner, and
 asked to move its windows, so a switch costs about 2 ms per window whatever the app.
 
 The calls are the window server's own and are undocumented. A macOS update can change them,
-so each launch tests them with a window of its own first, health checks keep watching, and the
+so each launch tests them with a window of its own first, health checks keep watching, and
 Accessibility takes over whenever they fail, so `engine = "spaces"` is safe to try on any
-Mac. The log says which engine runs and why. Spaces is being measured against Accessibility
-(CPU, switch time, a new app's first moment, energy) before it becomes the default.
+Mac. The log says which engine runs and why. At rest it costs about a quarter of what
+Accessibility does (the Cost rows above), with the same switch time.
 
 ## Integrated with Apple's Stage Manager
 
