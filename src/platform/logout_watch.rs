@@ -111,7 +111,7 @@ pub fn look(ears: &Ears, watch: &mut Option<Watch>, stopped: &dyn Fn() -> Option
                     "guardian: the logout was cancelled after the app quit: opening Stage Manager again (it restores the stages saved at the logout)"
                 );
                 *watch = None;
-                relaunch();
+                relaunch("the cancelled logout");
                 return;
             }
             Next::End(why) => {
@@ -150,8 +150,9 @@ fn log_end(why: End, since_quit: Duration) {
     tracing::info!(since_quit_s = since_quit.as_secs(), "guardian: {}", why.words());
 }
 
-/// Opens the bundle this guardian runs from again, unless this is a test run.
-fn relaunch() {
+/// Opens the bundle this guardian runs from again, unless this is a test run: after a
+/// cancelled logout, and after the user's Relaunch (`why` says which, for the log).
+pub(crate) fn relaunch(why: &str) {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
         Err(e) => {
@@ -186,7 +187,7 @@ fn relaunch() {
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => {
-                tracing::info!(bundle = %bundle.display(), "guardian: Stage Manager opened again after the cancelled logout");
+                tracing::info!(bundle = %bundle.display(), "guardian: Stage Manager opened again after {why}");
                 return;
             }
             Ok(Some(status)) => {

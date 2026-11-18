@@ -399,6 +399,8 @@ pub const KEYS: &[KeyDef] = &[
     },
     k("windows", "apple_stage_manager_on", Kind::Choice(&["pause", "integrate"]), "\"pause\"",
         "What Stage Manager does while Apple's Stage Manager is on: \"pause\" brings every window back and arranges nothing until Apple's is off; \"integrate\" follows Apple's stages instead: the stage hotkeys and `ctl switch` switch between them, and Stage Manager shows no strip of its own. With Apple's off, Stage Manager runs its own stages either way."),
+    k("windows", "mission_control_stages", Kind::Choice(&["off", "shown", "key"]), "\"shown\"",
+        "With [windows] engine = \"spaces\": Mission Control and App Exposé show every stage's windows, as Apple's Stage Manager does and as they do with \"accessibility\". \"shown\" puts the hidden stages' windows on the Desktop, out of view at the screen's corner, once Mission Control shows, and back into their stages when it closes; \"key\" already at its keyboard shortcut; \"off\" leaves them hidden, so Mission Control shows only the stage in front."),
     // [displays]
     KeyDef {
         applies: Applies::Restart,
@@ -628,6 +630,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-47.toml"),
     include_str!("legacy/default-48.toml"),
     include_str!("legacy/default-49.toml"),
+    include_str!("legacy/default-50.toml"),
 ];
 
 #[cfg(test)]

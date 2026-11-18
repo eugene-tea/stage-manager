@@ -1727,23 +1727,30 @@ impl Model {
         if let Some(s) = self.stage_mut(current) {
             s.last_active = t;
         }
+        self.reveal_with(space, current, current);
+        actions.push(Action::StateChanged);
+        actions
+    }
+
+    /// The body of a reveal on `space` once stage `left`'s windows are parked: a fresh empty
+    /// stage made active, `left` entering the strip, the reveal remembering `from` (the stage
+    /// a second wallpaper click brings back).
+    pub(crate) fn reveal_with(&mut self, space: SpaceId, left: StageId, from: StageId) {
         let desktop = self.create_stage(space, None);
         self.active.insert(space, desktop);
         let t = self.tick();
         if let Some(s) = self.stage_mut(desktop) {
             s.last_active = t;
         }
-        self.strip_enter(space, current);
-        self.revealed.insert(
-            space,
-            Reveal {
-                from: current,
-                desktop,
-            },
-        );
+        self.strip_enter(space, left);
+        self.revealed.insert(space, Reveal { from, desktop });
         self.normalize_slots();
-        actions.push(Action::StateChanged);
-        actions
+    }
+
+    /// True when `stage`, the empty stage a reveal made active on `space`, is still that: on
+    /// `space`, no window in it or waiting for it.
+    pub(crate) fn reveal_stands_empty(&self, space: SpaceId, stage: StageId) -> bool {
+        self.stage(stage).is_some_and(|s| s.space == space && s.windows.is_empty()) && !self.has_pending(stage)
     }
 
     fn is_most_recent_inactive(&self, space: SpaceId, stage: StageId) -> bool {

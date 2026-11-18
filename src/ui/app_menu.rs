@@ -15,7 +15,9 @@
 //!   ([`system_quit_reason`]); the user's own Quit (the menus' item, ⌘Q) is kept apart
 //!   ([`user_quit`]): a cancelled logout opens the app again after the one, never the other
 //!   (round logout-cancel-relaunch). A user's Quit that cannot run at once is tried again
-//!   the same way for 5 s ([`user_quits`]), then given up with a log line.
+//!   the same way for 5 s ([`user_quits`]), then given up with a log line. A Relaunch
+//!   (Settings → Advanced, a mode that applies at the next launch) is a quit of its own
+//!   ([`relaunches`]): marked apart, tried the same way, and its guardian opens the app again.
 //! - **Main menu:** an accessory app shows no menu bar, but its main menu's key equivalents
 //!   still work while one of its windows is key: ⌘, (Settings), ⌘Q (Quit, the safe one),
 //!   ⌘W and ⌘M, and the edit keys for text.
@@ -58,6 +60,9 @@ static QUIT_REASON: AtomicU32 = AtomicU32::new(0);
 /// Set when the user chose Quit (a menu's item, ⌘Q).
 static USER_QUIT: AtomicBool = AtomicBool::new(false);
 
+/// Set when the user chose Relaunch (Settings → Advanced).
+static RELAUNCH: AtomicBool = AtomicBool::new(false);
+
 /// The system quit event's reason (`keyAEQuitReason`), when one came with a reason.
 pub fn system_quit_reason() -> Option<u32> {
     Some(QUIT_REASON.load(Ordering::SeqCst)).filter(|r| *r != 0)
@@ -66,6 +71,11 @@ pub fn system_quit_reason() -> Option<u32> {
 /// Whether the user chose Quit (a menu's item, ⌘Q), not the system.
 pub fn user_quit() -> bool {
     USER_QUIT.load(Ordering::SeqCst)
+}
+
+/// Whether the quit under way is the user's Relaunch: the guardian opens the app again.
+pub fn relaunch_asked() -> bool {
+    RELAUNCH.load(Ordering::SeqCst)
 }
 
 /// The user chose Quit (a menu's item, ⌘Q).
@@ -82,22 +92,31 @@ pub fn note_user_quit() {
 /// marked as the user's for each try only; it was dropped, and the app stayed open after a
 /// click on Quit.
 pub fn user_quits(run: impl Fn() + Send + Sync + 'static) {
-    try_user_quit(Arc::new(run), 1, after_quit_retry);
+    try_quit(&USER_QUIT, "Quit", Arc::new(run), 1, after_quit_retry);
 }
 
-/// One try of the user's Quit, and the next one `later` unless it was the last.
-fn try_user_quit(run: Arc<dyn Fn() + Send + Sync>, attempt: u32, later: fn(Box<dyn FnOnce() + Send>)) {
-    note_user_quit();
+/// The user's Relaunch (Settings → Advanced): marked as a relaunch, not as their Quit (a
+/// ready update is not installed at it), then `run` (the app's Quit), tried again as
+/// [`user_quits`] does. Its clean exit tells the guardian to open the app again.
+pub fn relaunches(run: impl Fn() + Send + Sync + 'static) {
+    tracing::info!("relaunching (the user's click)");
+    try_quit(&RELAUNCH, "Relaunch", Arc::new(run), 1, after_quit_retry);
+}
+
+/// One try of the user's Quit or Relaunch (`mark` set for the try only), and the next one
+/// `later` unless it was the last.
+fn try_quit(mark: &'static AtomicBool, what: &'static str, run: Arc<dyn Fn() + Send + Sync>, attempt: u32, later: fn(Box<dyn FnOnce() + Send>)) {
+    mark.store(true, Ordering::SeqCst);
     run();
-    USER_QUIT.store(false, Ordering::SeqCst);
+    mark.store(false, Ordering::SeqCst);
     if attempt >= QUIT_ATTEMPTS {
-        tracing::warn!("the user's Quit never ran; choose Quit again");
+        tracing::warn!("the user's {what} never ran; choose {what} again");
         return;
     }
     if attempt == 1 {
-        tracing::warn!("the user's Quit could not run at once; trying again");
+        tracing::warn!("the user's {what} could not run at once; trying again");
     }
-    later(Box::new(move || try_user_quit(run, attempt + 1, later)));
+    later(Box::new(move || try_quit(mark, what, run, attempt + 1, later)));
 }
 
 /// Runs `f` on the main queue after [`QUIT_RETRY`].
@@ -306,9 +325,29 @@ mod tests {
             TRIES.fetch_add(1, Ordering::SeqCst);
             AS_USER.fetch_add(u32::from(user_quit()), Ordering::SeqCst);
         };
-        try_user_quit(Arc::new(run), 1, at_once);
+        try_quit(&USER_QUIT, "Quit", Arc::new(run), 1, at_once);
         assert_eq!(TRIES.load(Ordering::SeqCst), QUIT_ATTEMPTS, "tried for 5 s, then given up");
         assert_eq!(AS_USER.load(Ordering::SeqCst), QUIT_ATTEMPTS, "the Quit that runs reads it as the user's");
         assert!(!user_quit(), "it never ran, and the mark is gone");
+    }
+
+    /// A Relaunch is marked apart from the user's Quit (no update installs at it), for the
+    /// try only, and tried again the same way.
+    #[test]
+    fn a_relaunch_is_marked_as_one_for_its_try_only() {
+        static TRIES: AtomicU32 = AtomicU32::new(0);
+        static AS_RELAUNCH: AtomicU32 = AtomicU32::new(0);
+        fn at_once(f: Box<dyn FnOnce() + Send>) {
+            assert!(!relaunch_asked(), "between tries the mark is gone");
+            f();
+        }
+        let run = || {
+            TRIES.fetch_add(1, Ordering::SeqCst);
+            AS_RELAUNCH.fetch_add(u32::from(relaunch_asked()), Ordering::SeqCst);
+        };
+        try_quit(&RELAUNCH, "Relaunch", Arc::new(run), 1, at_once);
+        assert_eq!(TRIES.load(Ordering::SeqCst), QUIT_ATTEMPTS);
+        assert_eq!(AS_RELAUNCH.load(Ordering::SeqCst), QUIT_ATTEMPTS, "the Quit that runs reads it as a relaunch");
+        assert!(!relaunch_asked());
     }
 }

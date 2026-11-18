@@ -26,7 +26,10 @@ file never repeats one.
 | Show items on desktop | Read, but not acted on (see the differences). |
 
 Settings changes "Show recent apps" and "Show windows from an application" the same way
-Apple's own Customize sheet does.
+Apple's own Customize sheet does. Its mode picker (Advanced → Mode: Accessibility, Spaces,
+With Apple's) is the user's ask to change Stage Manager on or off: With Apple's turns Apple's
+on (with `apple_stage_manager_on = "integrate"` written first, so nothing pauses in
+between), the other two turn it off if it is on. Nothing else in the app turns it on.
 
 ## Where we match Apple
 
@@ -229,7 +232,11 @@ stage, animated as a card click: the stage you leave shrinks into the strip and 
 windows grow from their card. The keyboard goes to the app's window at once. In a stage
 shared with other apps, the activated app's window comes in front with the keyboard,
 whichever window was focused when the stage was left; a click on a waiting window's edge
-does the same for that window.
+does the same for that window. A stage comes in whole: when one of its windows is already on
+screen at its place as the switch starts, none grows from the card and the rest shows at
+once with it (a recording, 11-18: under `engine = "spaces"` one window of a Dock-clicked
+stage sat there 145 ms before the other flew in; that window now waits out of sight until
+the switch).
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an
@@ -368,7 +375,23 @@ showing most of it (macOS's rule).
   window of the other screens, on Desktops not shown too, which a quit does safely.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
-is back on the same Desktop when they end. Where Show Desktop pushes a window (while it
+is back on the same Desktop when they end. Mission Control and App Exposé show every
+stage's windows, as Apple's Stage Manager does (a report, 11-18: under `engine = "spaces"` only the
+stage in front showed, a hidden stage's windows being on no Desktop).
+Under `engine = "spaces"` the hidden stages' windows of the Desktops shown are put on their
+Desktop while one of them shows, parked at the screen's corner first so that none shows at
+its frame, most recent stage first, in batches of 40 ms; a window whose app does not move it
+within 50 ms stays hidden. When it closes they go back into their stage Spaces and their
+frames are set again; a window picked there is activated by macOS and the activation's
+switch brings its stage in front, so it and, for 1.5 s, the windows of the app in front are
+left to that switch. `[windows] mission_control_stages`: `"shown"` (the default) lends once
+Mission Control is listed, found within about 30 ms of its keyboard shortcut (the user's
+own, read from Keyboard Shortcuts, or the keyboard's Mission Control key) and otherwise at
+the next tick (up to 0.25 s while something happens, 2 s at rest: a gesture, a hot corner
+and the Dock's item announce nothing); `"key"` lends at the shortcut itself and takes the
+windows back when nothing shows within 1.5 s; `"off"` lends nothing. Not measured yet:
+whether Mission Control lays out a window that arrives after it opened (`scripts/test-stages.sh
+mission-probe`; the log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
 shows, expected from a wallpaper click, and for a second after it closes, as the windows
 slide back) is never taken as the window's frame: a switch then keeps each window's own. The strip never appears in ⌘-Tab or the ⌘\`
 window cycle.
@@ -587,7 +610,7 @@ passed every check again and is the release that check finds (otherwise: from sc
 while any process keeps the display awake (a film, a call: macOS's own sign that someone
 watches with no input) it waits, then counts its 120 s from the end of that.
 An alert that comes from a Settings control (Check for Updates… and the install it leads
-to, a setting that can't be saved, Turn Off) is a sheet on the Settings window while it is
+to, a setting that can't be saved, Turn Off, a mode Apple's Stage Manager did not take) is a sheet on the Settings window while it is
 up, as Apple's HIG asks; the menu bar's counts as one from Settings while Settings is
 frontmost. The automatic check's notices and the others stand free, as before.
 
@@ -652,18 +675,23 @@ picture carries and where its appearance came from. macOS also draws a thin whit
 each window's edge, with the shadow (a capture that leaves the shadow out lacks it): a point
 wide at a tenth in Dark Mode (0.08 on an inactive window), half a point in light, where it
 shows only on dark content. The picture carries it too, over its edge and corner, coming
-and going with the window's shadow; without it every edge steps lighter at the handover. The hairline and the rim follow the curve macOS's shadow
+in with the window's shadow and staying until the picture goes (the window's own line is
+under the picture until then); without it every edge steps lighter at the handover. The hairline and the rim follow the curve macOS's shadow
 follows, measured on the dark hairline (nearly opaque, so a tenth of a point shows): Core
 Animation's continuous corner with a longer tail, the hairline a band just outside it, sharp
 where the edge runs along the pixels and softer at 45 degrees; the radius is read from how
 much of the picture's diagonal is clear (a filled shape grown by a spread would put a darker
 notch at every corner). A window's own
 shadow appears in one frame, so the picture keeps its shadow until the window server lists
-the window on screen at its frame (asked every half frame from the unveil), then fades it
-over 50 ms from a frame later, never before 50 ms past the unveil: both shadows for a few
-frames read about 2 levels darker, while a shadow faded before its window shows reads 16
-lighter for 80 ms (a window can reach the screen a frame after a fade centred on the unveil
-has ended). The picture goes only after that, 300 ms past
+the window on screen at its frame (asked every half frame from the unveil), then drops it
+in one step: a shadow faded before its window shows reads 16 levels lighter for 80 ms, one
+faded after it overlaps the window's own for several frames (Known gaps has what is left).
+Where a picture's shadow lies on the picture of a window arriving under it, it stays until
+the pictures fade: the window's own shadow falls on the window under, which that picture
+covers until then. Dropped there too, the picture under was bare from the handover to the
+fade's end (a recording, 11-18, at 60 fps, a stage of two overlapping windows: 43 % lighter
+beside the front window's edge for seven frames, back over ten more, 30 % on the second
+switch). The picture goes only after the handover, 300 ms past
 the unveil at the most; an outgoing picture's shadow comes in over twice
 `[animation] cover_ms` as its window leaves. The cards' thumbnails are not captured while a
 switch's pictures move (a round of captures is the window server's work, and drops a frame).
@@ -1161,6 +1189,17 @@ screen-capture service reads 0 and the window server, measured with other apps o
   about a frame later. macOS gives no way to drop another app's window shadow, and no
   signal comes before the window is on screen; dropping it earlier by a guess shows a
   lighter edge instead (11-01). Measured 11-09 at 60 fps on VS Code, Safari and Finder.
+- In the Spaces mode, the window a card click brings to the front can show one frame of a
+  lighter shadow as it lands (12 % lighter beside its edge, out to 45 pt; a recording,
+  11-18, at 60 fps, both switches). macOS makes an app active only once its window is on a
+  Desktop, so the window is shown with an inactive window's smaller shadow and takes the
+  key window's a frame or two later, after its picture has handed over the key window's.
+  A switch that an app's activation starts (⌘Tab, the Dock) has the app active already.
+- In the Spaces mode, a hidden stage's window dragged to another Desktop inside Mission
+  Control goes back into its stage when Mission Control closes; in the default mode it
+  moves. Opened by a gesture, a hot corner or the Dock, Mission Control gets the hidden
+  stages' windows up to two seconds late, and an app's hidden dialogs and panels are not
+  shown there.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.

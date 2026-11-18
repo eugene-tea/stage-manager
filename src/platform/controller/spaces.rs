@@ -44,12 +44,15 @@ pub(super) struct SpacesUpkeep {
     /// After a fallback from this engine: what it left in its stage Spaces is swept again
     /// until nothing is left ([`Controller::check_engine`]).
     pub(super) left_behind: bool,
+    /// Mission Control's lends: the hidden stages' windows on their Desktop while it shows
+    /// ([`super::mission_control`]).
+    pub(super) mission: super::mission_control::MissionWatch,
 }
 
 impl SpacesUpkeep {
     /// Nothing kept.
     pub(super) fn new() -> Self {
-        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None, frames_owed: BTreeMap::new(), left_behind: false }
+        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None, frames_owed: BTreeMap::new(), left_behind: false, mission: super::mission_control::MissionWatch::default() }
     }
 }
 
@@ -116,7 +119,7 @@ impl Controller {
             // for the strangers only when the tidy ended a Space).
             let alive: HashSet<u32> = windows::wake_list().iter().map(|w| w.id).collect();
             spaces.tidy(&alive, |stage| m.stages().iter().any(|s| s.id.0 == stage));
-            spaces.let_strangers_out(&windows::wake_list());
+            spaces.let_strangers_out(&windows::wake_list(), |id| m.window(WindowId(id)).is_some());
         }
     }
 

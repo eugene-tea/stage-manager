@@ -59,6 +59,7 @@ use serde_json::{Value, json};
 
 use super::Controller;
 use super::arrival::Lent;
+use super::slide_watch::LendNote;
 use crate::engine::corner;
 use crate::engine::lend_park::ParkAsk;
 use crate::engine::model::{AppFacts, WindowId};
@@ -197,6 +198,12 @@ impl Controller {
         for act in acts {
             self.switcher_act(ob, act, first, now);
         }
+        if let (Heard::Released { .. }, Some(pid)) = (heard, selected) {
+            // Watched for a Desktop slide from ⌘'s release ([`Self::slide_watch_cmd_tab`]).
+            let lent = self.lent.is_some_and(|l| l.pid == pid && l.switcher.is_some());
+            let since_tab_ms = self.switcher.opened.map(|t| ms(t, now));
+            self.slide_watch_cmd_tab(ob, pid, lent, since_tab_ms, now);
+        }
         match heard {
             Heard::Released { .. } | Heard::Cancelled => {
                 self.switcher.selected = None;
@@ -285,15 +292,16 @@ impl Controller {
 
     /// The park asked for window `window`'s lend (round cmdtab-park): its frame's size at its
     /// display's park corner ([`corner::park_frame_of`], the Corner engine's geometry and
-    /// request), moved through its element; `must`: lend even when the park does not take.
+    /// request), moved through its element; `must`: lend even when the park does not take;
+    /// `ax_seconds`: how long its move may wait for the app (`None`: the engine's bound).
     /// `None` when the model or the observer does not know the window (lent unparked then).
-    fn lend_park(&self, ob: &Observer, window: WindowId, must: bool) -> Option<LendPark> {
+    pub(super) fn lend_park(&self, ob: &Observer, window: WindowId, must: bool, ax_seconds: Option<f32>) -> Option<LendPark> {
         let m = self.model.as_ref()?;
         let w = m.window(window)?;
         let display = *m.display(w.meta.display);
         let element = ob.element(window.0).or_else(|| ob.window(window.0).map(|o| o.element.clone()))?;
         let at = corner::park_frame_of(w.meta.frame, &display, m.options().park);
-        Some(LendPark { ask: ParkAsk { at, display, frame: w.meta.frame, must }, window: element })
+        Some(LendPark { ask: ParkAsk { at, display, frame: w.meta.frame, must }, window: element, ax_seconds })
     }
 
     /// Carries out one act of the switcher's plan (`first`: the switcher's first selection).
@@ -304,9 +312,10 @@ impl Controller {
                     // A Dock press's window still home goes back first.
                     let _ = self.engine.take_back(prev.window);
                 }
-                let park = self.lend_park(ob, window, first);
+                let park = self.lend_park(ob, window, first, None);
                 let asked = park.is_some();
                 let lend = self.engine.lend_home(window, park);
+                self.slide_watch_lend(pid, LendNote { home: lend.home, parked: lend.parked, asked, park_ms: lend.park_ms });
                 let parked = lend.parked.unwrap_or(false);
                 if lend.home {
                     self.lent = Some(Lent { window, pid, at: now, switcher: Some(LetGo::default()) });
@@ -397,6 +406,8 @@ impl Controller {
         }
         let now = Instant::now();
         switcher_probe::note("dock notice", name);
+        // The Dock draws Mission Control too: its notice may come as it opens.
+        self.upkeep_dock_notice(name, now);
         match name {
             "AXCreated" | "AXSelectedChildrenChanged" => {
                 if !self.switcher.keys.is_open() {

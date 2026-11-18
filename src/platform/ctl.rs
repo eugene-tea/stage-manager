@@ -8,8 +8,9 @@
 //! in the day's log; `stage-manager mark [NOTE…]` is its client, [`run_mark`]). Without an `ID`, `send`, `new`
 //! and `pin` act on the focused window. With `STAGE_MANAGER_TEST=1` in the app's
 //! environment, `debug-panic` panics on the main thread (a safety drill), `debug-engine-fail
-//! [next|hide|show|all|off]` makes the Spaces engine's next hide or show (or every bridged
-//! call) fail as a refusing window server would (the fallback drill), `debug-click X Y
+//! [next|hide|show|park|all|off]` makes the Spaces engine's next hide or show (or every bridged
+//! call) fail as a refusing window server would (the fallback drill; `park`: the next lend's
+//! park is not asked, as of an app that does not move its window in time), `debug-click X Y
 //! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
@@ -18,7 +19,10 @@
 //! prediction sees it, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
 //! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
-//! as the Dock shows it (its items' titles, the one selected), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
+//! as the Dock shows it (its items' titles, the one selected), `debug-mission-control
+//! status|lend|back|mode off|shown|key|config` drives Mission Control's lends under the Spaces
+//! engine by hand (the probe: every hidden window put home now and kept out, taken back, the
+//! mode for this run), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
@@ -327,6 +331,10 @@ pub enum Command {
     /// A posted ⌘Tab and what answered it, or the last one's report (needs
     /// `STAGE_MANAGER_TEST=1`; round cmd-tab, [`crate::platform::switcher_probe`]).
     DebugCmdTab(CmdTabProbe),
+    /// Mission Control's lends under the Spaces engine, for the probe (needs
+    /// `STAGE_MANAGER_TEST=1`; round spaces-mission-control): `status`, `lend`, `back`,
+    /// `mode off|shown|key|config`.
+    DebugMissionControl(Vec<String>),
     /// ⌘Tab's switcher as the Dock's Accessibility shows it now: the items' titles, the one
     /// selected (needs `STAGE_MANAGER_TEST=1`; round cmd-tab).
     DebugSwitcher,
@@ -421,8 +429,8 @@ impl Command {
             ["mark", note @ ..] => Ok(Self::Mark(note.join(" "))),
             ["debug-panic"] => Ok(Self::DebugPanic),
             ["debug-engine-fail", rest @ ..] if rest.len() <= 1 => match rest.first().copied().unwrap_or("next") {
-                w @ ("next" | "hide" | "show" | "all" | "off") => Ok(Self::DebugEngineFail(w.to_string())),
-                _ => Err("debug-engine-fail takes next, hide, show, all or off".into()),
+                w @ ("next" | "hide" | "show" | "park" | "all" | "off") => Ok(Self::DebugEngineFail(w.to_string())),
+                _ => Err("debug-engine-fail takes next, hide, show, park, all or off".into()),
             },
             ["debug-menu-quit"] => Ok(Self::DebugMenuQuit),
             ["debug-update"] => Ok(Self::DebugUpdate),
@@ -512,6 +520,12 @@ impl Command {
                 Ok(Self::DebugFullscreen { id, on })
             }
             ["debug-switcher"] => Ok(Self::DebugSwitcher),
+            ["debug-mission-control", rest @ ..] => match rest {
+                ["status" | "lend" | "back"] | ["mode", "off" | "shown" | "key" | "config"] => {
+                    Ok(Self::DebugMissionControl(rest.iter().map(|w| (*w).to_string()).collect()))
+                }
+                _ => Err("debug-mission-control takes status, lend, back, or mode off|shown|key|config".into()),
+            },
             ["debug-cmd-tab", "result"] => Ok(Self::DebugCmdTab(CmdTabProbe::Result)),
             ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
             ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: false }),
@@ -1003,6 +1017,7 @@ mod tests {
         assert_eq!(Command::parse("debug-panic"), Ok(Command::DebugPanic));
         assert_eq!(Command::parse("debug-engine-fail"), Ok(Command::DebugEngineFail("next".into())));
         assert_eq!(Command::parse("debug-engine-fail all"), Ok(Command::DebugEngineFail("all".into())));
+        assert_eq!(Command::parse("debug-engine-fail park"), Ok(Command::DebugEngineFail("park".into())));
         assert!(Command::parse("debug-engine-fail sometimes").is_err());
         assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
         assert_eq!(
@@ -1078,6 +1093,13 @@ mod tests {
         );
         assert_eq!(Command::parse("debug-cmd-tab result"), Ok(Command::DebugCmdTab(CmdTabProbe::Result)));
         assert_eq!(Command::parse("debug-switcher"), Ok(Command::DebugSwitcher));
+        assert_eq!(Command::parse("debug-mission-control lend"), Ok(Command::DebugMissionControl(vec!["lend".into()])));
+        assert_eq!(
+            Command::parse("debug-mission-control mode key"),
+            Ok(Command::DebugMissionControl(vec!["mode".into(), "key".into()]))
+        );
+        assert!(Command::parse("debug-mission-control").is_err());
+        assert!(Command::parse("debug-mission-control mode sometimes").is_err());
         assert!(Command::parse("debug-switcher now").is_err());
         assert!(Command::parse("debug-cmd-tab").is_err());
         assert!(Command::parse("debug-cmd-tab press").is_err());

@@ -1503,7 +1503,7 @@ mod tests {
         use input::{InputEvent, InputKind};
         let event = |kind, cmd, other_modifiers| {
             WmCommand::Input(
-                InputEvent { kind, at: Point::new(10.0, 10.0), shift: false, cmd, other_modifiers, clicks: 0, key: None, stamp: 0.0 },
+                InputEvent { kind, at: Point::new(10.0, 10.0), shift: false, cmd, other_modifiers, control: false, option: false, clicks: 0, key: None, stamp: 0.0 },
                 None,
             )
         };

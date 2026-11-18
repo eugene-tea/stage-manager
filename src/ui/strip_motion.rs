@@ -39,7 +39,8 @@
 //!   picture ([`LANDING_FADE`], their [`GhostGroup`]: never a lower one through an upper
 //!   one). Each hands its shadow over to its window's once the window server
 //!   shows the window at its frame, polled from the unveil ([`Strip::poll_shown`]), and the
-//!   landing waits for that too. The incoming key window is captured again once it is key
+//!   landing waits for that too; over the pictures standing under it the shadow stays until
+//!   they go, the window's own being covered there ([`kept_at_handover`]). The incoming key window is captured again once it is key
 //!   ([`RECAPTURE_AFTER`]), its picture cross-fading in mid-flight. Late windows (an app we
 //!   hid, unhidden after the unveil: [`Transition::late`]) show once the app is unhidden and
 //!   land once drawn in their key look ([`Strip::late_shown`]); the late key window shows
@@ -94,7 +95,7 @@ use crate::ui::motion_math::{
 };
 use crate::ui::minimize_motion;
 use crate::ui::overlay::{CardShadow, Ghost, GhostGroup, GhostShadow, GlassLook, Overlay};
-use crate::ui::shadow_math::handover;
+use crate::ui::shadow_math::{handover, kept_at_handover, pictures_bottom_up};
 use crate::ui::strip_layout::CardLayout;
 use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, ShadowReport, StripEvent, Transition, TransitionReport};
 use crate::ui::window_drop;
@@ -1499,8 +1500,9 @@ impl Strip {
     }
 
     /// Transition `id`'s incoming windows `windows` show at their frames now (`seen`: the
-    /// window server said so; else the wait ran out): each snapshot's shadow goes at once,
-    /// and once every incoming window shows the landing is planned
+    /// window server said so; else the wait ran out): each snapshot's shadow goes at once
+    /// (but over the pictures under it, [`kept_at_handover`]), and once every incoming window
+    /// shows the landing is planned
     /// ([`Self::replan_landing`]). Kept for `ctl state` ([`GhostReport::shown_ms`]).
     fn windows_shown(&mut self, id: u64, windows: &[u32], seen: bool) {
         let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
@@ -1513,9 +1515,27 @@ impl Strip {
         let now = Instant::now();
         let since = r.unveil_at.map_or(0.0, |u| now.saturating_duration_since(u).as_secs_f64());
         // In one step: the window and the change reach the display on about the same frame
-        // (motion_math's Handover: measured 11-09, a fade overlapped both shadows).
+        // (motion_math's Handover: measured 11-09, a fade overlapped both shadows). Not over
+        // the pictures standing under it: the window's own shadow falls on the windows under
+        // those, covered until the landing's fade, so there the snapshot's stays and goes with
+        // the pictures (11-18: dropped whole, the picture under was bare until the fade's end).
+        let stack = Self::pictures_standing(r);
         for g in r.ghosts.iter().filter(|g| windows.contains(&g.window)) {
-            g.fade_shadow(1.0, 0.0, 0.0, 0.0);
+            let own = r.arrived.iter().find(|(w, _)| *w == g.window).map(|(_, f)| *f);
+            let under: Vec<(Rect, f64)> = stack
+                .iter()
+                .take_while(|w| **w != g.window)
+                .filter_map(|w| {
+                    let frame = r.arrived.iter().find(|(a, _)| a == w).map(|(_, f)| *f)?;
+                    let corner = r.ghosts.iter().find(|u| u.window == *w).map(|u| u.target.corner)?;
+                    Some((frame, corner))
+                })
+                .collect();
+            let kept = own.map_or_else(Vec::new, |own| kept_at_handover(own, &under, g.shadow_reach()));
+            if !kept.is_empty() {
+                tracing::debug!(id, window = g.window, parts = kept.len(), "transition: the snapshot's shadow stays over the pictures under it until they go");
+            }
+            g.hand_shadow_over(&kept);
         }
         r.shown_land = Some(r.shown_land.map_or(now, |l| l.max(now)));
         let (shown_ms, handover_ms) = ((since * 1000.0).round() as u64, (since * 1000.0).round() as u64);
@@ -1527,6 +1547,19 @@ impl Strip {
             }
         });
         Self::replan_landing(r, now, self.display);
+    }
+
+    /// Transition `r`'s incoming windows whose pictures stand in the overlay, bottom to top
+    /// ([`pictures_bottom_up`]): not a window that took over from its picture, nor a plain
+    /// ghost (its window shows through it).
+    fn pictures_standing(r: &Running) -> Vec<u32> {
+        let added: Vec<u32> = r
+            .ghosts
+            .iter()
+            .filter(|g| g.pictured() && !r.taken.contains(&g.window) && r.arrived.iter().any(|(w, _)| *w == g.window))
+            .map(|g| g.window)
+            .collect();
+        pictures_bottom_up(&added, &r.order, !r.sides.is_empty())
     }
 
     /// Plans transition `r`'s landing once every incoming window shows and every late one is

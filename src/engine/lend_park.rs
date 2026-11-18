@@ -25,6 +25,16 @@
 //! and the platform drops the move notices of a window parked for a lend until its frame is
 //! set again ([`crate::platform::window_engine::WindowEngine::parked_lend`]).
 //!
+//! **A Dock press** (round dock-put-home) lends the same way. Put home at its full frame it
+//! showed under the front stage's windows from the press, and in front of them from the
+//! release (macOS raises the activated app's windows), ~145 ms before its stage's switch
+//! began (a recording, 11-18 10:59:48). Parked first, it is on its Desktop for macOS and
+//! out of sight, and its stage comes in whole with the switch. The press gives less time
+//! than the switcher (the release came 54 to 155 ms after the lend, 30 clicks 11-15 to
+//! 11-18), so its park's move waits less for the app ([`DOCK_PARK_SECONDS`]) and the lend
+//! is made whether the park took or not ([`ParkAsk::must`]): a window seen early is the
+//! lesser harm, a lend after the release lets macOS slide to another Desktop.
+//!
 //! The calls go through [`LendSteps`] so the order is tested without a window server.
 
 use super::geometry::Rect;
@@ -33,6 +43,19 @@ use super::model::Display;
 /// How far (points) a window's listed origin may be from the one asked and still count as
 /// there (Accessibility and the window server round).
 pub const NEAR: f64 = 1.0;
+
+/// How long a Dock press's park may wait for the app to move its window (seconds): ⌘Tab's
+/// parks took 5 to 17 ms (93 lends, 11-15 to 11-18), and the Dock acts at the release, 54 ms
+/// after the lend at the earliest (30 clicks, the same days). Past it the window is put home
+/// where it is.
+pub const DOCK_PARK_SECONDS: f32 = 0.03;
+
+/// True when a window parked for a lend (`p`), listed at `listed`, is away from the frame it
+/// had before the park: out of sight at the park, or on its way. Listed at that frame, the
+/// park did not take (yet): put home, it is in view there.
+pub fn away(listed: Rect, p: Parked) -> bool {
+    !at_origin(listed, p.frame)
+}
 
 /// The calls a lend and a take back make on one window, in the order this module decides.
 pub trait LendSteps {
@@ -55,7 +78,8 @@ pub struct ParkAsk {
     /// The window's display: its park zone tells a park that took.
     pub display: Display,
     /// The window's frame as the model knows it: where it goes back when the window server
-    /// does not list it before the park.
+    /// does not list it before the park, or lists it at another size (Mission Control's
+    /// layout, shrunk: a lend moves the window, it never resizes it).
     pub frame: Rect,
     /// Lend even when the park does not take (the first Tab: a quick ⌘Tab has no other
     /// chance, and a slide is worse than a window seen for a moment).
@@ -81,7 +105,7 @@ pub struct Parked {
 pub struct LendDone {
     /// On its Desktop now (lent).
     pub home: bool,
-    /// The park asked: whether it took (`None`: none asked, a Dock press's lend).
+    /// The park asked: whether it took (`None`: none asked).
     pub parked: Option<bool>,
     /// Its frame owed: a park was sent (also when the lend was not made and the frame could
     /// not be seen restored).
@@ -104,13 +128,18 @@ pub fn at_origin(listed: Rect, want: Rect) -> bool {
     (listed.x - want.x).abs() <= NEAR && (listed.y - want.y).abs() <= NEAR
 }
 
+/// True when `a` and `b` have one size (within [`NEAR`]).
+fn same_size(a: Rect, b: Rect) -> bool {
+    (a.w - b.w).abs() <= NEAR && (a.h - b.h).abs() <= NEAR
+}
+
 /// Lends the window: parked first while still hidden when `park` asks it, then put home.
-/// Without a park (a Dock press: it lasts ~100 ms and its stage comes in front) only home.
+/// Without a park only home.
 pub fn lend(mac: &mut impl LendSteps, park: Option<ParkAsk>) -> LendDone {
     let Some(ask) = park else {
         return LendDone { home: mac.put_home(), parked: None, owed: None };
     };
-    let before = mac.listed();
+    let before = mac.listed().filter(|r| same_size(*r, ask.frame));
     let parked_at = Parked { at: ask.at, frame: before.unwrap_or(ask.frame), display: ask.display };
     let landed = mac.move_to(ask.at);
     let took = landed.is_some_and(|r| ask.display.parks(r));
@@ -298,9 +327,35 @@ mod tests {
         assert!(mac.seen.is_empty());
     }
 
-    /// A Dock press's lend parks nothing: home at its frame, as before.
+    /// A Dock press's lend (round dock-put-home): parked while still hidden, so it is never
+    /// listed on its Desktop at its frame before its stage's switch; an app that does not
+    /// move its window in time (refused, or the bounded call timed out) is lent all the same,
+    /// in view at its frame, which the switch's plan is told ([`away`]).
     #[test]
-    fn a_dock_press_lend_is_only_home() {
+    fn a_dock_press_lend_parks_first_and_lends_whatever_the_park_did() {
+        let a = ask(true);
+        let mut mac = Fake::new(frame());
+        let done = lend(&mut mac, Some(a));
+        assert_eq!((done.home, done.parked), (true, Some(true)));
+        assert!(!mac.seen.is_empty() && mac.seen.iter().all(|r| a.display.parks(*r)), "only ever seen parked: {:?}", mac.seen);
+        let parked = done.owed.expect("its frame owed");
+        assert!(away(mac.at.expect("listed"), parked), "out of sight: its picture grows with its stage's");
+        // The press was no click: back unseen, its frame restored.
+        assert_eq!(take_back(&mut mac, done.owed), BackDone { back: true, restored: Some(true), moved_off: false });
+        assert!(mac.seen.iter().all(|r| a.display.parks(*r)), "never seen at its frame: {:?}", mac.seen);
+        for (moves, times_out) in [(false, false), (true, true)] {
+            let mut mac = Fake::new(frame());
+            (mac.moves, mac.times_out) = (moves, times_out);
+            let done = lend(&mut mac, Some(a));
+            assert_eq!((done.home, done.parked), (true, Some(false)), "the Dock acts at the release: lent in time, seen or not");
+            let parked = done.owed.expect("the move may come late: its restore owed");
+            assert!(!away(mac.at.expect("listed"), parked), "in view at its frame: no picture grows over it");
+        }
+    }
+
+    /// A lend with no park asked: home at its frame.
+    #[test]
+    fn a_lend_without_a_park_is_only_home() {
         let mut mac = Fake::new(frame());
         assert_eq!(lend(&mut mac, None), LendDone { home: true, parked: None, owed: None }, "no park sent: nothing owed");
         assert_eq!(mac.calls, ["home"]);
@@ -366,6 +421,20 @@ mod tests {
         let mut mac = Fake { at: None, ..Fake::new(frame()) };
         let done = lend(&mut mac, Some(ask(true)));
         assert_eq!(done.parked, Some(false));
+    }
+
+    /// Listed at another size before the park (Mission Control's layout shrinks the windows
+    /// it shows, 11-18: 1949x1288 listed at 718x474), the listing is not the window's frame:
+    /// a take back restores the model's, so a window put back ends hidden at its own frame.
+    #[test]
+    fn a_listing_at_another_size_is_not_the_frame_restored() {
+        let shrunk = Rect::new(18.0, 780.0, 718.0, 474.0);
+        let mut mac = Fake::new(shrunk);
+        let done = lend(&mut mac, Some(ask(false)));
+        assert_eq!(done.owed.map(|p| p.frame), Some(frame()), "the model's frame, never the layout's");
+        let back = take_back(&mut mac, done.owed);
+        assert_eq!(back.restored, Some(true));
+        assert_eq!(mac.at.map(|r| (r.x, r.y)), Some((frame().x, frame().y)), "its own origin again");
     }
 
     /// After a crash with a parked lend on the Desktop (no stage Space holds it), the

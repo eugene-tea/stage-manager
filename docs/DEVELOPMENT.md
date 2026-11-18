@@ -75,7 +75,7 @@ its ctl socket and reading the window server's view of the windows:
 
 ```sh
 scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore strip native
-                                          # visible parity motion slots expose capture raise park
+                                          # visible parity motion slots expose mission capture raise park
                                           # offscreen enhanced stale handles displays
 scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
@@ -226,8 +226,10 @@ handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` wi
 
 ## Other tools
 
-- `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--pane PANE] [--png FILE]`
+- `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--pane PANE] [--mode MODE] [--png FILE]`
   opens one of the app's windows alone, or draws it to a PNG, without managing anything.
+  `--mode accessibility|spaces|apple|paused|relaunch|fell-back` sets what the Advanced pane's
+  mode picker shows.
 - `stage-manager strip-demo` runs the strip alone, fed from the live window list, and never
   moves a window. Its variables (`STAGE_MANAGER_DEMO_*`, and an offscreen render with
   `--features debug-render`) are described in `src/ui/strip_demo.rs`.
@@ -267,6 +269,40 @@ random key made once and kept owner-only in the config folder, `title-key`, so a
 title cannot be confirmed from a log alone) unless `[log] titles = true`;
 lines name windows by id, pid and bundle id. `ctl dump` and `ctl state` still answer with
 titles. Logs still name your apps and your stages: never commit one.
+
+### The slide watch
+
+Under the Spaces engine every Dock click on an app's item and every ⌘Tab release is watched
+for a Desktop slide nobody asked for (`src/engine/slide_watch.rs`): macOS's "switch to a
+Space with open windows for the application" taking the screen to another Desktop although
+the stage's window was put home for the click. Nothing in behaviour changes, nothing is
+polled, and the Corner engine writes nothing. Read a day with
+`grep 'slide-watch' ~/Library/Logs/Stage\ Manager/*.log`.
+
+- `slide-watch: outcome` (one per activation, written at the first tick, input or Desktop
+  change once its outcome is known: 1.5 s after the release, up to 3 s while a Desktop
+  change waits to be recognized or a slide to come back): `via=dock|cmdtab`, `bundle`,
+  `parked=true|false|n/a` (the window put home was parked at the corner first; `n/a`:
+  nothing was put home), `park_ms` (what the park took), `press_to_release_ms` (Dock: press
+  to release; ⌘Tab: first Tab to ⌘'s release), `put_home`, `already_shown_fallback` (the
+  switch found the app's incoming window already on screen and showed its stage at once),
+  `desktop_before`, `desktop_after` (the main screen's), `slid`, `slid_back`, `away_ms` (how
+  long the screen was away before it came back), `outcome=none|expected|person|slid`, `by`
+  (the person's `desktop-key` or `mission-control`), `predicted` (the Desktop predicted at
+  the press), `app_here`, `activated` (an activation of the app was notified: a ⌘Tab with
+  `activated=false` was most likely cancelled), `notices`, and `why` when the park was
+  skipped or did not take, or the window could not be put home.
+- A Desktop change within 1.5 s of the release counts as `expected` when it goes to a
+  Desktop arranged ahead for the click, the Desktop predicted at the press, or (the app
+  having no window on the Desktop left) a Desktop with one of its windows; as `person` when
+  Mission Control or App Exposé showed, or a ⌃-arrow key was heard, before it; else as
+  `slid`. A trackpad swipe is not heard, and macOS may keep its ⌃-arrow shortcuts from the
+  app: a swipe or key right after a click reads as a slide.
+- `slide-watch: summary` (each hour with activity, `at=hour`; and `at=quit` when every
+  window is brought back: the quit, a stand-down, a logout): counts since the launch,
+  `dock_clicks`, `dock_parked`, `dock_fell_back`, `dock_slid`, `dock_slid_back`,
+  `dock_slowest_park_ms`, the same for `cmdtab_`, and `new` (outcomes since the last
+  summary). `ctl state` has the same counts under `slide_watch`.
 
 ## Configuration keys
 

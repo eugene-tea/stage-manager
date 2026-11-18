@@ -16,8 +16,12 @@
 //!   handover ([`ShadowLayers::fade`]) holding the image's layer, whose opacity is the amount
 //!   of the window's shadow shown (0 on a card, 1 at the window), moved on the switch's
 //!   spring with the plane ([`ShadowLayers::spring_amount`]).
+//!   At an incoming snapshot's handover the shadow goes in one step, except over the
+//!   pictures standing under it, where it stays until the pictures go
+//!   ([`ShadowLayers::hand_over`]: a mask on the image's layer).
 //! - **The inner rim** ([`crate::ui::shadow_math::InnerRim`]): over the picture, the same
-//!   pair (a handover layer holding the rim's), so it comes and goes with the shadow. The rim
+//!   pair (a handover layer holding the rim's), so it comes in with the shadow; at an
+//!   incoming handover it stays, the window's own being under the picture. The rim
 //!   is a nine-part image on macOS's corner curve ([`crate::ui::shadow_math::render_rim`]),
 //!   laid out at the window's size and scaled to the plane as the picture is
 //!   ([`crate::ui::shadow_math::rim_scale`]), so it keeps to the picture's edge and corner all
@@ -395,6 +399,45 @@ impl ShadowLayers {
             let anim = crate::ui::overlay::spring_anim(spring, "opacity", &NSNumber::new_f64(from), &NSNumber::new_f64(to), duration);
             layer.addAnimation_forKey(&anim, Some(&NSString::from_str("opacity")));
         }
+    }
+
+    /// How far past the plane the shadow's image reaches (points, every side).
+    pub fn extent(&self) -> f64 {
+        self.extent
+    }
+
+    /// An incoming snapshot's handover to its window's own shadow, at once (in the caller's
+    /// transaction): the shadow goes, except over `kept`, the pictures standing under it
+    /// (rectangles on the plane, points, each with its corner's radius:
+    /// [`crate::ui::shadow_math::kept_at_handover`]), where the window's own shadow is
+    /// covered until those pictures go. The inner rim stays: the window's own is under the
+    /// snapshot's picture until that goes too.
+    pub fn hand_over(&self, kept: &[(CGRect, f64)]) {
+        let key = NSString::from_str("opacity");
+        self.handover.removeAnimationForKey(&key);
+        if kept.is_empty() {
+            self.handover.setOpacity(0.0);
+            return;
+        }
+        // On the image's layer, which has the shadow's bounds: the plane's corner is at
+        // (extent, extent) there.
+        let mask = CALayer::new();
+        mask.setAnchorPoint(CGPoint::new(0.0, 0.0));
+        mask.setPosition(CGPoint::new(0.0, 0.0));
+        mask.setBounds(self.image.bounds());
+        let opaque = objc2_core_graphics::CGColor::new_srgb(0.0, 0.0, 0.0, 1.0);
+        for (rect, corner) in kept {
+            let part = CALayer::new();
+            part.setAnchorPoint(CGPoint::new(0.0, 0.0));
+            part.setPosition(CGPoint::new(rect.origin.x + self.extent, rect.origin.y + self.extent));
+            part.setBounds(CGRect::new(CGPoint::new(0.0, 0.0), rect.size));
+            part.setBackgroundColor(Some(&opaque));
+            part.setCornerRadius(corner.max(0.0));
+            mask.addSublayer(&part);
+        }
+        // SAFETY: the mask is a new layer with no superlayer, as a mask must be.
+        unsafe { self.image.setMask(Some(&mask)) };
+        self.handover.setOpacity(1.0);
     }
 
     /// The handover: the shadow and the rim go from `from` to `to` (1 shown, 0 gone),

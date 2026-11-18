@@ -15,6 +15,14 @@
 //! ([`display_of`]): a switch on a second screen is aimed at that screen's cards (round
 //! displays-lid: before, every switch read the main screen's strip, and a card click on the
 //! laptop found its windows in no engine slot).
+//!
+//! An incoming window already shown at its arrival frame when the switch is planned (on
+//! screen there, not kept out of view by the engine) is taken out of the transition
+//! ([`already_shown`], [`skip_shown`]): no picture grows over a window already in view,
+//! whatever showed it (round skip-shown-incoming; a Dock press's lend under the Spaces
+//! engine, 11-15 to 11-18). The rest of its stage is taken out with it and shows at once
+//! (round dock-put-home; a recording, 11-18: one window of the stage sat there while the
+//! other flew in from the card): a stage comes in whole, flying or not.
 
 use std::collections::{HashMap, HashSet};
 
@@ -153,6 +161,86 @@ pub fn plan(m: &Model, actions: &[Action], before: &Before, live: impl Fn(u32) -
     Some(Transition { id, outgoing, incoming, sent: None, under: None, corner: None, key_out, key_in, late: Vec::new(), minimized: None, order: Vec::new(), in_place: Vec::new(), pictures_land: false })
 }
 
+/// How far (points, on any edge or side) a window the window server lists on screen may be
+/// from its arrival frame and still count as already shown there ([`already_shown`]).
+pub const SHOWN_SLACK: f64 = 4.0;
+
+/// What is known of an incoming window when its switch is planned: where the window server
+/// lists it on screen, and whether the engine keeps it out of view.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sighting {
+    /// Its frame in the on-screen window list (an app window, not transparent); `None` when
+    /// that list leaves it out (minimized, its app hidden, on a Space not shown).
+    pub listed: Option<Rect>,
+    /// True when the engine keeps it out of view now (parked in a corner, held in a stage
+    /// Space off every Desktop, parked for a lend).
+    pub engine_hides: bool,
+}
+
+/// Whether an incoming window is already shown at its arrival frame, and why not.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Shown {
+    /// On screen within [`SHOWN_SLACK`] of its arrival frame, and the engine does not hide
+    /// it: no picture grows over it (`off`: its largest edge or side difference, points).
+    AtFrame { off: f64 },
+    /// Not in the on-screen list.
+    NotListed,
+    /// The engine keeps it out of view.
+    EngineHides,
+    /// On screen, but away from its arrival frame (`off` points): its picture grows to it.
+    Elsewhere { off: f64 },
+}
+
+/// Whether a window arriving at `frame`, as `seen`, is already shown there (the safety net
+/// of round skip-shown-incoming: a switch never plays the grow-in over a window the person
+/// already sees, whatever showed it; a Dock press's lend, 11-15 to 11-18).
+pub fn already_shown(frame: Rect, seen: Sighting) -> Shown {
+    let Some(listed) = seen.listed else { return Shown::NotListed };
+    if seen.engine_hides {
+        return Shown::EngineHides;
+    }
+    let off = (listed.x - frame.x).abs().max((listed.y - frame.y).abs()).max((listed.w - frame.w).abs()).max((listed.h - frame.h).abs());
+    if off.is_finite() && off <= SHOWN_SLACK { Shown::AtFrame { off } } else { Shown::Elsewhere { off } }
+}
+
+/// What [`skip_shown`] took out of a transition.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Skipped {
+    /// The incoming windows already shown at their frames, with their offsets (points).
+    pub shown: Vec<(u32, f64)>,
+    /// The other incoming windows, taken out with them: shown at once, no grow-in.
+    pub rest: Vec<u32>,
+}
+
+impl Skipped {
+    /// True when nothing was taken out (no incoming window was already shown).
+    pub fn is_empty(&self) -> bool {
+        self.shown.is_empty()
+    }
+}
+
+/// When any incoming window of `t` is already shown (`shown` says [`Shown::AtFrame`]), the
+/// whole incoming side is taken out: the windows shown stay as they are, the rest of the
+/// stage shows at once with them (no picture, their frames, raises and focus run with the
+/// batch), so a stage never comes in half popped, half flying. The outgoing side plays as
+/// planned. No incoming window shown: nothing changes. The key incoming window goes with
+/// the side (no picture carries its key look).
+pub fn skip_shown(t: &mut Transition, mut shown: impl FnMut(&MovingWindow) -> Shown) -> Skipped {
+    let mut out = Skipped::default();
+    for w in &t.incoming {
+        match shown(w) {
+            Shown::AtFrame { off } => out.shown.push((w.window.id, off)),
+            _ => out.rest.push(w.window.id),
+        }
+    }
+    if out.shown.is_empty() {
+        return Skipped::default();
+    }
+    t.incoming.clear();
+    t.key_in = None;
+    out
+}
+
 /// The stage ids of `slots`, top to bottom (for the logs).
 pub fn order(slots: &[(u64, Vec<u32>)]) -> Vec<u64> {
     slots.iter().map(|s| s.0).collect()
@@ -182,7 +270,7 @@ mod tests {
     use crate::engine::model::{ActiveCard, Display, ModelOptions, Observation, StageId, StripOrder, WindowId};
     use crate::engine::corner::park::Corner;
     use crate::engine::rules::{Decision, Placement, RuleAction};
-    use crate::engine::testkit::{Desk, meta, model_with, w};
+    use crate::engine::testkit::{Desk, both_engines, meta, model_with, w};
 
     struct Env {
         m: Model,
@@ -560,5 +648,140 @@ mod tests {
         let t = e.click(target).expect("a transition");
         assert_aims(&e, &t, &before, "the 5K");
         assert!(t.incoming.iter().all(|g| g.slot == Some(slot)));
+    }
+
+    // The safety net (round skip-shown-incoming): an incoming window already shown at its
+    // frame gets no picture.
+
+    const AT: Rect = Rect::new(350.0, 46.0, 2004.0, 1286.0);
+
+    fn seen(listed: Option<Rect>, engine_hides: bool) -> Sighting {
+        Sighting { listed, engine_hides }
+    }
+
+    #[test]
+    fn a_window_on_screen_at_its_frame_is_already_shown() {
+        assert_eq!(already_shown(AT, seen(Some(AT), false)), Shown::AtFrame { off: 0.0 });
+        // A few points off (a title bar macOS nudged, a rounding): still shown there.
+        let nudged = Rect::new(AT.x + 3.0, AT.y - 2.0, AT.w + 4.0, AT.h);
+        assert_eq!(already_shown(AT, seen(Some(nudged), false)), Shown::AtFrame { off: 4.0 });
+    }
+
+    #[test]
+    fn a_window_on_screen_elsewhere_still_grows_to_its_frame() {
+        let moved = AT.translate(0.0, 40.0);
+        assert_eq!(already_shown(AT, seen(Some(moved), false)), Shown::Elsewhere { off: 40.0 });
+        let smaller = Rect::new(AT.x, AT.y, AT.w - 300.0, AT.h);
+        assert_eq!(already_shown(AT, seen(Some(smaller), false)), Shown::Elsewhere { off: 300.0 });
+        // Raised by macOS in the park corner (an activation): its picture grows.
+        let corner = Rect::new(2550.0, 1430.0, AT.w, AT.h);
+        assert!(matches!(already_shown(AT, seen(Some(corner), false)), Shown::Elsewhere { .. }));
+    }
+
+    #[test]
+    fn a_window_the_engine_hides_is_not_shown_even_at_its_frame() {
+        // Parked, held in a stage Space or flying its last stretch (listed at its frame
+        // there): the engine's word wins over the frame.
+        assert_eq!(already_shown(AT, seen(Some(AT), true)), Shown::EngineHides);
+    }
+
+    #[test]
+    fn a_window_off_screen_is_not_shown() {
+        assert_eq!(already_shown(AT, seen(None, false)), Shown::NotListed);
+        assert_eq!(already_shown(AT, seen(None, true)), Shown::NotListed);
+    }
+
+    #[test]
+    fn one_window_shown_takes_the_whole_incoming_side_out() {
+        let mut e = Env::new(3, 6);
+        e.add(8, 103, RuleAction::Current);
+        let target = e.stage_of(1);
+        let mut t = e.click(target).expect("a transition");
+        let target2 = e.stage_of(3);
+        let mut t2 = e.click(target2).expect("a transition");
+        // Some shown: one of two incoming windows (the key). Both are taken out, the key too.
+        let ids = |t: &Transition| t.incoming.iter().map(|g| g.window.id).collect::<Vec<_>>();
+        assert_eq!(ids(&t2).len(), 2, "stage 3 brings back windows 3 and 8: {:?}", ids(&t2));
+        let key = t2.key_in.expect("a key window");
+        let other = ids(&t2).into_iter().find(|id| *id != key).expect("a second window");
+        let outgoing = t2.outgoing.clone();
+        let skipped = skip_shown(&mut t2, |g| if g.window.id == key { Shown::AtFrame { off: 1.0 } } else { Shown::NotListed });
+        assert_eq!(skipped, Skipped { shown: vec![(key, 1.0)], rest: vec![other] });
+        assert!(t2.incoming.is_empty(), "the rest of the stage shows at once: no grow-in for it either");
+        assert_eq!(t2.key_in, None, "the key window is in place: no picture carries its key look");
+        assert_eq!(t2.outgoing, outgoing, "the outgoing side is untouched");
+        // None shown: nothing changes.
+        let before = t.clone();
+        assert!(skip_shown(&mut t, |_| Shown::Elsewhere { off: 50.0 }).is_empty());
+        assert!(skip_shown(&mut t, |_| Shown::EngineHides).is_empty());
+        assert_eq!(t, before);
+        // All shown: only the outgoing side plays.
+        let skipped = skip_shown(&mut t, |_| Shown::AtFrame { off: 0.0 });
+        assert_eq!(skipped.shown.len(), before.incoming.len());
+        assert!(skipped.rest.is_empty());
+        assert!(t.incoming.is_empty() && !t.outgoing.is_empty());
+        assert_eq!(t.outgoing, before.outgoing);
+    }
+
+    #[test]
+    fn a_window_that_is_not_the_key_shown_takes_the_key_out_too() {
+        let mut e = Env::new(3, 6);
+        e.add(8, 103, RuleAction::Current);
+        let _ = e.click(e.stage_of(1));
+        let mut t = e.click(e.stage_of(3)).expect("a transition");
+        let key = t.key_in.expect("a key window");
+        let other = t.incoming.iter().map(|g| g.window.id).find(|id| *id != key).expect("a second window");
+        let skipped = skip_shown(&mut t, |g| if g.window.id == other { Shown::AtFrame { off: 0.0 } } else { Shown::EngineHides });
+        assert_eq!(skipped, Skipped { shown: vec![(other, 0.0)], rest: vec![key] });
+        assert!(t.incoming.is_empty() && t.key_in.is_none() && !t.outgoing.is_empty());
+    }
+
+    both_engines! {
+        /// The owner's log, 11-18 10:41:33: a Dock press on an app whose stage's window
+        /// waits hidden showed that window at its frame before the switch (the Spaces
+        /// engine's lend; under the Corner engine, any return to its frame the model missed),
+        /// and the switch grew a picture from the card over it. On the fake desk: the window
+        /// shown at its frame gets no picture, the stage's other window none either (a
+        /// recording, 11-18 10:59:48: it flew in beside the one already there), and the stage
+        /// left still shrinks into its card.
+        #[test]
+        fn a_window_shown_before_its_switch_gets_no_grow_in() {
+            for shown_first in [false, true] {
+                // Windows 1 and 8 in a stage now hidden; window 3's stage in front.
+                let mut e = Env::new(0, 6);
+                e.add(1, 101, RuleAction::Current);
+                e.add(8, 101, RuleAction::Current);
+                e.add(2, 102, RuleAction::New);
+                e.add(3, 103, RuleAction::New);
+                let target = e.stage_of(1);
+                assert_eq!(e.stage_of(8), target);
+                assert!(e.d.parked(w(1)) && e.d.parked(w(8)), "the stage waits hidden");
+                if shown_first {
+                    // Shown at its frame, as the model last knew it (the lend).
+                    e.d.stage_space.remove(&w(1));
+                    let frame = e.m.window(w(1)).expect("known").meta.frame;
+                    e.d.frames.insert(w(1), frame);
+                    assert!(!e.d.parked(w(1)));
+                }
+                let mut t = e.click(target).expect("a transition");
+                let listed = e.d.clone();
+                // What the desk showed before the switch: `e.d` has applied it since, so the
+                // sighting reads the desk as it was (window 1 alone, if shown first).
+                let skipped = skip_shown(&mut t, |g| {
+                    let on = shown_first && g.window.id == 1;
+                    already_shown(g.window.frame, Sighting { listed: on.then(|| listed.frames[&w(1)]), engine_hides: !on })
+                });
+                let incoming: Vec<u32> = t.incoming.iter().map(|g| g.window.id).collect();
+                assert_eq!(t.outgoing.iter().map(|g| g.window.id).collect::<Vec<_>>(), vec![3], "the stage left shrinks as before");
+                if shown_first {
+                    assert_eq!(skipped.shown.iter().map(|s| s.0).collect::<Vec<_>>(), vec![1]);
+                    assert_eq!(skipped.rest, vec![8], "the hidden window shows at once with it");
+                    assert!(incoming.is_empty(), "no grow-in for either: {incoming:?}");
+                } else {
+                    assert!(skipped.is_empty());
+                    assert_eq!(incoming.len(), 2, "both grow: {incoming:?}");
+                }
+            }
+        }
     }
 }

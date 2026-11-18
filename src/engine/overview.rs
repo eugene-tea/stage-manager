@@ -167,8 +167,6 @@ pub struct OverviewWatch {
     stuck: bool,
     /// When Show Desktop was last expected from a wallpaper click ([`Self::expect_show_desktop`]).
     expected: Option<Instant>,
-    /// When Show Desktop was last seen gone ([`Self::moves_windows`]).
-    desktop_ended: Option<Instant>,
 }
 
 impl OverviewWatch {
@@ -208,9 +206,6 @@ impl OverviewWatch {
                 self.showing = None;
                 self.stuck = false;
                 self.ended = Some(now);
-                if was == Overview::ShowDesktop {
-                    self.desktop_ended = Some(now);
-                }
                 Change::Ended(was)
             }
             (None, None) => Change::None,
@@ -262,15 +257,21 @@ impl OverviewWatch {
         }
     }
 
-    /// True while macOS's Show Desktop may have the windows pushed aside: it is listed (also
-    /// one listed too long to be trusted: the windows may still be aside), expected from a
-    /// wallpaper click, or closed less than [`OVERVIEW_SETTLE`] ago (the windows slide back).
-    /// A frame read then is Show Desktop's, never the window's own (11-09: a window pushed off
-    /// the right edge was read at the close and kept there as its frame).
+    /// True while macOS may have the windows somewhere other than their frames: Show Desktop
+    /// pushes them aside (listed, also one listed too long to be trusted: the windows may
+    /// still be aside; or expected from a wallpaper click), Mission Control and App Exposé
+    /// list every window of the Desktop shrunk into their layout (shown, not one listed too
+    /// long to be trusted), and for [`OVERVIEW_SETTLE`] after either closes the windows are
+    /// on their way back. A frame read then is the overview's, never the window's own (11-09:
+    /// a window pushed off the right edge was read at Show Desktop's close and kept there as
+    /// its frame; 11-18: an activation from a pick in Mission Control read the front stage's
+    /// windows at their places in its layout, a 1949x1288 window at 718x474, and the next
+    /// switch to their stage brought them back at that size).
     pub fn moves_windows(&self, now: Instant) -> bool {
         self.showing.is_some_and(|(k, _)| k == Overview::ShowDesktop)
+            || self.showing() == Some(Overview::MissionControl)
             || self.expected.is_some_and(|t| now.duration_since(t) < REVEAL_EXPECTED)
-            || self.desktop_ended.is_some_and(|t| now.duration_since(t) < OVERVIEW_SETTLE)
+            || self.ended.is_some_and(|t| now.duration_since(t) < OVERVIEW_SETTLE)
     }
 
     /// True once, when an expectation's time is up at `now` with no Show Desktop listed since

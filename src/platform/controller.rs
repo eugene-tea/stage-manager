@@ -152,7 +152,9 @@ mod corner;
 mod dock_order;
 mod fallback;
 mod landing_focus;
+mod mission_control;
 mod raise_order;
+mod slide_watch;
 mod spaces;
 mod stale;
 mod switch_pictures;
@@ -591,7 +593,7 @@ fn offered_at_notice(waiting: impl IntoIterator<Item = u32>, listed: &HashSet<u3
 /// `debug-space`, `debug-expose`, ...) never reach the WM thread's `ctl`, so they leave the
 /// motion alone too (`mark` asks `state` and `dump`).
 fn ctl_lands_switch(cmd: &Command) -> bool {
-    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher)
+    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher | Command::DebugMissionControl(_))
 }
 
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
@@ -1053,6 +1055,9 @@ pub struct Controller {
     verify: Option<arrival::Verify>,
     /// The latest Dock press's prediction, until a Space change shows where it went.
     dock_seen: Option<arrival::DockSeen>,
+    /// The slide watch: each Dock click and ⌘Tab release under the Spaces engine, judged for
+    /// a Desktop slide nobody asked for and logged ([`slide_watch`]).
+    slide_watch: slide_watch::SlideWatch,
     /// A window put on the Desktop shown at a Dock press, still counted hidden, until its
     /// stage comes in front or it goes back ([`arrival::Lent`]).
     lent: Option<arrival::Lent>,
@@ -1296,6 +1301,7 @@ impl Controller {
             unminimizing: HashMap::new(),
             verify: None,
             dock_seen: None,
+            slide_watch: slide_watch::SlideWatch::default(),
             lent: None,
             switcher: switcher::SwitcherWatch::default(),
             defer_present: false,
@@ -2092,7 +2098,8 @@ impl Controller {
     /// [`Self::transition_for`]), then moved the way the engine says ([`WindowEngine::animate`]).
     /// An activation's focus is `run`'s ([`ActivationRun::focus`]). `early_corner`: the
     /// corner's cover as the activation found it, and the window list it read (none read, or
-    /// moved since: both read again).
+    /// moved since: both read again). An incoming window already shown at its frame takes
+    /// the incoming side out of the transition ([`Self::skip_shown_incoming`]).
     fn execute_animated_rest(
         &mut self,
         ob: &Observer,
@@ -2108,9 +2115,51 @@ impl Controller {
         // The windows already in place stay out of the transition: no snapshot grows over them.
         let Some(mut t) = self.transition_for(ob, &actions) else { return self.execute(ob, actions) };
         t.incoming.retain(|w| !first.contains(&w.window.id));
-        match self.engine.animate(&t) {
-            Motion::Pictures => self.switch_behind_pictures(ob, actions, t, run, early_corner, anim.cover_ms),
+        // The window list, read once for the plan (the wake's, when one is open).
+        let (early_cover, list) = match early_corner {
+            Some((cover, list)) => (Some(cover), list),
+            None => (None, windows::wake_on_screen().to_vec()),
+        };
+        let shown = self.skip_shown_incoming(&mut t, &list);
+        if !shown.is_empty() {
+            self.slide_watch_shown_early(&shown);
         }
+        if t.incoming.is_empty() && t.outgoing.is_empty() {
+            return self.execute(ob, actions);
+        }
+        match self.engine.animate(&t) {
+            Motion::Pictures => self.switch_behind_pictures(ob, actions, t, run, early_cover, list),
+        }
+    }
+
+    /// An incoming window of `t` already shown at its frame: in `list` (the on-screen
+    /// windows) within [`transition_plan::SHOWN_SLACK`] of it, and not kept out of view by
+    /// the engine ([`WindowEngine::keeps_out_of_view`]). No picture grows over such a window
+    /// and it stays as it is; its show, raise and focus run with the batch as before (round
+    /// skip-shown-incoming: a Dock press's lend showed the window before its switch, and the
+    /// switch grew a picture over it). When there is one, the rest of the incoming stage is
+    /// taken out too and shows at once with the batch, in its order (round dock-put-home: a
+    /// stage never comes in half popped, half flying); the outgoing side plays as planned.
+    /// Returns the windows found already shown.
+    fn skip_shown_incoming(&self, t: &mut Transition, list: &[windows::CgWindow]) -> Vec<u32> {
+        let Some(m) = self.model.as_ref() else { return Vec::new() };
+        let engine = &self.engine;
+        let skipped = transition_plan::skip_shown(t, |g| {
+            let id = WindowId(g.window.id);
+            let listed = list.iter().find(|w| w.id == id.0 && w.layer == 0 && w.alpha > 0.0).map(|w| w.bounds);
+            let display = m.window(id).and_then(|s| m.displays().iter().find(|d| d.id == s.meta.display));
+            // A window on no screen the model knows: counted hidden, its picture grows.
+            let engine_hides = listed.is_some_and(|r| display.is_none_or(|d| engine.keeps_out_of_view(id, d, r)));
+            transition_plan::already_shown(g.window.frame, transition_plan::Sighting { listed, engine_hides })
+        });
+        for (window, off) in &skipped.shown {
+            tracing::info!(id = t.id, window, off, reason = "on screen at its frame and not hidden by the engine", "transition: incoming window already shown: no grow-in");
+        }
+        if !skipped.rest.is_empty() {
+            let shown: Vec<u32> = skipped.shown.iter().map(|s| s.0).collect();
+            tracing::info!(id = t.id, ?shown, rest = ?skipped.rest, "transition: part of the incoming stage already shown: the rest shown at once");
+        }
+        skipped.shown.iter().map(|s| s.0).collect()
     }
 
     /// A switch played with pictures ([`Motion::Pictures`]), the Corner engine's choreography:
@@ -2118,24 +2167,26 @@ impl Controller {
     /// transition sent to the strip and its pictures waited for (shared,
     /// [`Self::send_transition`]), then the hides behind the outgoing pictures and the
     /// arrivals held hidden until the strip unveils them ([`Self::flush_pending_as`]).
+    /// `early_cover`: the corner's cover as an activation found it (none: found here);
+    /// `list`: the on-screen windows read for the plan.
     fn switch_behind_pictures(
         &mut self,
         ob: &Observer,
         actions: Vec<Action>,
         mut t: Transition,
         run: ActivationRun,
-        early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)>,
-        cover_ms: u64,
+        early_cover: Option<Option<SwitchCover>>,
+        list: Vec<windows::CgWindow>,
     ) -> usize {
         let id = t.id;
+        let cover_ms = self.store.config().style.animation.cover_ms;
         // A new switch: the last one's windows owe no focus when they land.
         self.landing_focus = None;
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
         let outgoing: HashSet<u32> = t.outgoing.iter().map(|w| w.window.id).collect();
-        let (corner, list) = match early_corner {
-            Some((corner, list)) => (corner, list),
+        let (corner, list) = match early_cover {
+            Some(corner) => (corner, list),
             None => {
-                let list = windows::on_screen();
                 let activated: HashSet<u32> = run.fallback.intersection(&arriving).copied().collect();
                 let corner = self.switch_cover(&arriving, &outgoing, &activated, &list);
                 if let Err(r) = &corner
@@ -2796,11 +2847,12 @@ impl Controller {
                     // again under them ([`Self::reconcile_parked`]).
                     self.hidden_moved_by_user(id);
                 }
-                // Show Desktop pushing the windows aside (or sliding them back) is macOS's move,
-                // never the window's own frame (11-09).
+                // Show Desktop pushing the windows aside (or sliding them back), or Mission
+                // Control laying them out, is macOS's move, never the window's own frame (11-09,
+                // 11-18).
                 let aside = !ours && !input::left_button_down() && self.overview.moves_windows(now);
                 if aside {
-                    tracing::trace!(id, "a move while Show Desktop has the windows aside: not the window's frame");
+                    tracing::trace!(id, "a move while Show Desktop or Mission Control has the windows aside: not the window's frame");
                 }
                 // Parked for ⌘Tab's lend (round cmdtab-park), or its frame not set again yet:
                 // the park's and the restore's moves are ours, never the window's frame.
@@ -2993,6 +3045,7 @@ impl Controller {
                 crate::platform::switcher_probe::note("activated", format!("pid={pid} notice_age_ms={}", fired.elapsed().as_millis()));
                 // A window put home for ⌘Tab's switcher is kept only for its app's activation.
                 self.switcher_activated(pid);
+                self.slide_watch_activated(pid);
                 // Its enhanced UI is read again at its next move (round enhanced-ui).
                 enhanced_ui::forget(pid);
                 // Before the echo check: a window of the app that shows now is placed whoever
@@ -3512,6 +3565,7 @@ impl Controller {
     /// over the visible strip, which slot a dragged window goes to.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent, drop: Option<StripDrop>) {
         let now = Instant::now();
+        self.slide_watch_step(now);
         if event.kind == InputKind::CommandKey {
             // ⌘ pressed or let go: only ⌘Tab's switcher cares (its release activates).
             self.switcher_key(ob, &event, now);
@@ -3623,6 +3677,11 @@ impl Controller {
             InputKind::KeyDown => {
                 // The switcher's selection first: its window put home before ⌘'s release.
                 self.switcher_key(ob, &event, now);
+                // One of Mission Control's shortcuts: the engine's upkeep may have work for it.
+                self.upkeep_key(ob, &event, now);
+                if event.is_desktop_key() {
+                    self.slide_watch_person(crate::engine::slide_watch::Person::DesktopKey);
+                }
                 // ⌘Tab's own app switch brings its stage; nothing else comes forward for it.
                 if event.is_switcher_key() {
                     self.end_restore(ob, "an app switcher key", End::Switcher);
@@ -4094,6 +4153,7 @@ impl Controller {
             overview::Change::None => {}
             overview::Change::Began(kind) => {
                 tracing::info!("{} shows: no Space is inferred from the window list until it closes", kind.name());
+                self.slide_watch_person(crate::engine::slide_watch::Person::MissionControl);
                 self.hidden_changed();
             }
             overview::Change::Ended(kind) => {
@@ -4209,6 +4269,7 @@ impl Controller {
         self.space_changes += 1;
         counters::bump(Count::SpaceChange);
         tracing::debug!(changes = self.space_changes, "Space change notified");
+        self.slide_watch_notice(now);
         self.space_checked = now;
         self.pressed_obs = None;
         self.switcher_space_changed(now);
@@ -4375,6 +4436,7 @@ impl Controller {
             "Space changed"
         );
         log_arrival_lets(&note);
+        self.slide_watch_arrived(before, after);
         self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
         let (more, predicted) = self.settle_ahead(ob, list, main.id, after, Instant::now());
@@ -5996,6 +6058,7 @@ impl Controller {
     /// known to the leftovers check that follows ([`Self::safety_ours`]), and the stages are
     /// saved before that check reads `state.json` (the review of 10-29, S1).
     pub fn unpark_all(&mut self, ob: &mut Observer) -> usize {
+        self.slide_watch_quit();
         self.flush_pending(ob);
         // A tab selected since the last check, its group hidden: the tab selected comes back
         // at the group's frame, not the hidden tab (round tab-quit).
@@ -6073,6 +6136,7 @@ impl Controller {
     /// Housekeeping, about every 250 ms: debounced save, config polling, strip refresh.
     pub fn tick(&mut self, ob: &mut Observer) {
         let now = Instant::now();
+        self.slide_watch_step(now);
         self.publish_minimizable(ob);
         if let Some(s) = self.phase.switching().filter(|s| s.overdue(now)) {
             tracing::warn!(id = s.id, max_ms = s.max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
@@ -6516,6 +6580,12 @@ impl Controller {
                     None => json!({ "ok": false, "error": "the Dock does not run" }),
                 }
             }
+            Command::DebugMissionControl(words) => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-mission-control needs STAGE_MANAGER_TEST=1" });
+                }
+                self.upkeep_debug_mission_control(ob, &words)
+            }
             Command::DebugCmdTab(probe) => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-cmd-tab needs STAGE_MANAGER_TEST=1" });
@@ -6765,10 +6835,13 @@ impl Controller {
         state["tick"] = super::wm_thread::tick_status();
         // What the app asked of macOS since the launch (round idle-subsystems).
         state["costs"] = super::costs::status();
+        // Dock clicks and ⌘Tab releases watched for a Desktop slide (the Spaces engine), by `via`.
+        state["slide_watch"] = self.slide_watch_json();
         // Accessibility lists no window for the session (round ax-blind), since (Unix s).
         (state["accessibility_blind"], state["accessibility_blind_since"]) = self.ax_blind_json();
         state["displays"] = Value::Array(displays_json);
         state["strays"] = Value::Array(strays);
+        state["mission_control"] = self.status_mission_control();
         // Windows whose handle died judged closed once, waiting for a second look.
         state["stale_closing"] = json!(self.stale.waiting());
         // Keep stages in place (9B): the order, the active stage's mode and its empty slot.
@@ -7159,16 +7232,21 @@ fn observed_frames(reads: &[FrameRead], listed: &HashMap<u32, Rect>, settling: b
         .collect()
 }
 
-/// The frames an observation takes (`frames`, read now): none while macOS's Show Desktop may
-/// have the windows pushed aside (`aside`, [`OverviewWatch::moves_windows`]: listed, expected
-/// from a wallpaper click, or sliding back after its close), so the model keeps each window's
-/// own frame. 11-09: an activation right at Show Desktop's close took a window's listed frame,
-/// pushed off the right edge (2408,42 for 452,55), as its own, and every switch to its stage
-/// brought it back there. A parked window macOS pushes out of the park zone then is left to
-/// [`Controller::reconcile_parked`], which waits for the overview's settle.
+/// The frames an observation takes (`frames`, read now): none while macOS may have the
+/// windows somewhere other than their frames (`aside`, [`OverviewWatch::moves_windows`]: Show
+/// Desktop listed, expected from a wallpaper click, or sliding back after its close; Mission
+/// Control or App Exposé shown, or flying the windows back after its close), so the model
+/// keeps each window's own frame. 11-09: an activation right at Show Desktop's close took a
+/// window's listed frame, pushed off the right edge (2408,42 for 452,55), as its own, and
+/// every switch to its stage brought it back there. 11-18: a pick in Mission Control
+/// activated an app of a hidden stage, and the switch took the front stage's windows at their
+/// places in Mission Control's layout (350,44 1949x1288 listed at 18,780 718x474): the next
+/// switch to their stage brought them back at that size. A parked window macOS pushes out of
+/// the park zone then is left to [`Controller::reconcile_parked`], which waits for the
+/// overview's settle.
 fn frames_unless_aside(frames: HashMap<WindowId, Rect>, aside: bool) -> HashMap<WindowId, Rect> {
     if aside && !frames.is_empty() {
-        tracing::debug!(windows = frames.len(), "Show Desktop has the windows aside: their frames are not taken; each keeps its own");
+        tracing::debug!(windows = frames.len(), "Show Desktop, Mission Control or App Exposé has the windows aside: their frames are not taken; each keeps its own");
         return HashMap::new();
     }
     frames
@@ -7357,6 +7435,29 @@ mod tests {
         watch.see(None, t0 + Duration::from_millis(300));
         assert!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_millis(400))).is_empty(), "sliding back");
         assert_eq!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_secs(2))), read, "settled: read again");
+    }
+
+    /// 11-18 12:04:04: a pick in Mission Control (a hidden stage's window) activated its app;
+    /// the window server listed the front stage's windows at their places in Mission
+    /// Control's layout, the activation took them for their frames and the switch kept them
+    /// as their restore frames. While Mission Control shows, and as its windows fly back, no
+    /// frame is taken: the switch keeps each window's own (the tracked frame).
+    #[test]
+    fn a_frame_mission_control_set_is_never_taken() {
+        use crate::engine::overview::{Overview, OverviewWatch};
+        let tracked = Rect::new(350.0, 44.0, 1949.0, 1288.0);
+        let laid_out = Rect::new(18.0, 780.0, 718.0, 474.0);
+        let studio = Rect::new(0.0, 0.0, 2560.0, 1440.0);
+        let read: HashMap<WindowId, Rect> =
+            [(WindowId(77), activation_frame(tracked, Some(laid_out), studio, false, false))].into();
+        assert_eq!(read[&WindowId(77)], laid_out, "the window server's bounds win an activation");
+        let t0 = Instant::now();
+        let mut watch = OverviewWatch::default();
+        watch.see(Some(Overview::MissionControl), t0);
+        assert!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_millis(1100))).is_empty(), "shown: nothing taken");
+        watch.see(None, t0 + Duration::from_millis(1750));
+        assert!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_millis(2000))).is_empty(), "flying back");
+        assert_eq!(frames_unless_aside(read.clone(), watch.moves_windows(t0 + Duration::from_secs(3))), read, "settled: read again");
     }
 
     /// 11-09: an app's windows found together go front to back, so the one it opened last (in

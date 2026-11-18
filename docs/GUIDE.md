@@ -148,7 +148,9 @@ gets a stage of its own. Sheets and dialogs always stay with their window.
 Each Desktop (Space) has its own stages and its own strip, as with Apple's. Clicking a card
 never changes the Desktop. When ⌘-Tab or the Dock takes you to another Desktop, its stage is
 ready when it arrives. Full-screen apps have no strip. Mission Control hides the strip, just
-as it hides Apple's.
+as it hides Apple's, and shows the windows of every stage. With `[windows] engine =
+"spaces"` the hidden stages' windows are put on the Desktop for it and taken back when it
+closes (`[windows] mission_control_stages`; [MODES.md](MODES.md) says what is left open).
 
 A window you move to another Desktop (in Mission Control, say) goes where a new window of
 its app would open there: with that app's windows if it has a stage on that Desktop, else in
@@ -341,8 +343,13 @@ Applications and Settings appears. The buttons along its top switch between five
   holding Shift to choose the stage, merging stages by dropping cards, and the strip order
   (Apple's, Keep in Place or Follow the Dock).
 - **Windows:** keeping windows clear of the strip, animation speed, and keyboard shortcuts.
-- **Advanced:** the config file (open it, or reveal it in Finder), and help for asking an AI
-  assistant to change it.
+- **Advanced:** the mode, the way stages are kept: **Accessibility**, **Spaces** or **With
+  Apple's** ([MODES.md](MODES.md) compares them), with a line on what the one chosen does and
+  costs. With Apple's turns Apple's Stage Manager on and follows it; Accessibility and Spaces
+  turn it off if it is on. A new engine applies after a relaunch, and **Relaunch** appears
+  beside it: every window comes back, and Stage Manager opens again. While Apple's Stage
+  Manager is on and Stage Manager is paused, no mode is selected. Below the mode: the config
+  file (open it, or reveal it in Finder), and help for asking an AI assistant to change it.
 
 Changes apply at once.
 

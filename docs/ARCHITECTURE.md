@@ -365,7 +365,13 @@ macOS should go to is put on its Desktop first: an arrangement ahead for another
 made at the press, and for an app whose stage on the Desktop shown is hidden while it shows
 a window elsewhere, that stage's window is put home for a while, still counted hidden
 (`WindowEngine::lend_home`, `Model::dock_home`), and taken back when no switch to its stage
-follows. ⌘Tab has the same shape: the switcher shows while ⌘ is held after a Tab and
+follows. It is moved to its park frame at the screen's corner first, while still in its
+stage Space (`engine::lend_park`, as for ⌘Tab): macOS counts a window on a Desktop wherever
+it is, and at its own frame it showed before its stage's switch (under the front windows
+from the press, in front of them from the release). The park's move waits 30 ms for the app
+at most; past that the window is put home where it is, and the switch, finding an incoming
+window already on screen at its frame, shows the whole stage at once instead of growing it
+from the card (`transition_plan::skip_shown`). ⌘Tab has the same shape: the switcher shows while ⌘ is held after a Tab and
 activates its app at ⌘'s release, so the same window is put home while the switcher selects
 the app (`engine::switcher` follows the keys the input monitor hears, ⌘ pressed and let go
 among them). The first Tab's app is predicted from the order of activations and put home at
@@ -374,6 +380,17 @@ once (macOS picks the Desktop 3-12 ms after ⌘'s release; the Dock lists the sw
 its `AXCreated` and `AXSelectedChildrenChanged` notices) corrects it while the switcher
 shows (`platform/controller/switcher.rs`, `platform/switcher_ax.rs`). It is taken back when
 the selection moves on, at Escape, or when ⌘ is let go on another app.
+
+Mission Control and App Exposé lay out only the windows of the Desktop, so under the Spaces
+engine the same lend is made for every hidden window of the Desktops shown while one of them
+shows (`engine::mission_control` decides when, `platform/controller/mission_control.rs`
+carries it out on the fast tick, 40 ms of lends at a time, each window parked first). It is
+found from macOS's own window over the display (`engine::overview`); one of its shortcuts
+heard by the input monitor, or a notice of the Dock's, only brings that look to the fast
+tick (`[windows] mission_control_stages = "key"` lends at the shortcut itself). At the close
+the windows go back into their stage Spaces, but a picked window's stage, which the
+activation's switch shows. The engine counts each as lent and parked, so a hide, a show, a
+quit's sweep and the guardian's scan of the park corner bring it back like ⌘Tab's.
 
 ```mermaid
 sequenceDiagram

@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.9.1 — 2026-11-18
+
+- With `engine = "spaces"`, Mission Control and App Exposé show every stage's windows again,
+  as they do in the default mode and with Apple's Stage Manager; they showed only the stage
+  in front. While one of them shows, the hidden stages' windows are put on the Desktop, out
+  of sight at the screen's corner, and go back into their stages when it closes. A window
+  picked there brings its stage in front. New setting `[windows] mission_control_stages`:
+  `"shown"` (the default) does this once Mission Control shows, `"key"` already at its
+  keyboard shortcut, `"off"` leaves hidden stages out. Opened with a trackpad gesture, a hot
+  corner or the Dock, the other stages' windows can join up to two seconds late.
+- A window picked in Mission Control or App Exposé no longer leaves the stage in front
+  shrunk: picking a hidden stage's window switched stages, and the stage that went out came
+  back later with its windows at the size Mission Control showed them. No window's frame is
+  read from the screen while Mission Control or App Exposé shows, or as the windows fly back.
+- Settings → Advanced opens with the mode: Accessibility, Spaces or With Apple's, a choice of
+  three segments with a line on what the chosen one does and costs. With Apple's turns Apple's
+  Stage Manager on and follows it (`apple_stage_manager_on = "integrate"`); Accessibility and
+  Spaces set `[windows] engine` and turn Apple's Stage Manager off if it is on. An engine that
+  applies at the next launch is marked so, with a Relaunch button: every window is brought
+  back, and Stage Manager is opened again. While Apple's Stage Manager is on and Stage Manager
+  is paused, no mode is selected and the line says so.
+- With `engine = "spaces"`, an app's window with an attached panel (Calendar's, for one) no
+  longer flashes onto the Desktop every few seconds while its stage is hidden: the panel stays
+  hidden with its window, and is shown and brought back with it.
+- A window's shadow on the window behind it no longer goes and comes back at the end of a
+  switch. In a stage of overlapping windows, the front window's shadow on the one behind was
+  dropped as the windows landed and faded back in over the next third of a second.
+- A window already on screen when its stage is chosen no longer flies in from its card as if
+  it were hidden: it stays where it is, and the rest of its stage shows with it at once. With
+  `engine = "spaces"`, a Dock click on an app whose window waited in a stage showed that
+  window first and then played its grow-in over it.
+- With `engine = "spaces"`, a Dock click on an app whose stage is hidden while the app has a
+  window on another Desktop no longer shows one window of that stage about a seventh of a
+  second before the switch. The window is still put on the Desktop at the press, so that
+  macOS stays there, but out of sight at the screen's corner, as for ⌘Tab; the whole stage
+  then grows from its card together. An app that does not move its window within 30 ms shows
+  it early as before, and its stage then appears at once.
+- With `engine = "spaces"`, a Dock click (or ⌘Tab) on an app whose stage a wallpaper click
+  set aside on another Desktop now goes to that Desktop and brings the stage back, as Apple's
+  does: the reveal ends there. The click did nothing before: the app's window was kept off
+  every Desktop, so macOS had nowhere to go. If macOS stays where it is after all, the other
+  Desktop is left revealed as it was.
+- With `engine = "spaces"`, a window that closed while its frame was still owed is given up
+  after three tries; it was retried every second for as long as the window server listed it.
+
 ## 1.9.0 — 2026-11-18
 
 - New mode: `[windows] engine = "spaces"` keeps each hidden stage in a Space of macOS's own

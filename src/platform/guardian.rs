@@ -2,7 +2,8 @@
 //! launch in its own session, it waits for the app to exit (kqueue `NOTE_EXIT`). After a
 //! clean exit (the app's clean-exit marker) it has nothing to do, unless the app quit for a
 //! logout: it then waits a while for the logout's cancel, which opens the app again
-//! ([`super::logout_watch`], round logout-cancel-relaunch). Otherwise (an unclean quit at a
+//! ([`super::logout_watch`], round logout-cancel-relaunch); or to relaunch (Settings →
+//! Advanced → Relaunch): it opens the app again at once. Otherwise (an unclean quit at a
 //! logout listens for that cancel throughout, the parked file saying so, round
 //! logout-cancel):
 //!
@@ -244,10 +245,17 @@ pub fn run(args: &[String]) -> ExitCode {
     if let Ok(text) = std::fs::read_to_string(&marker) {
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_file(&parked_file);
+        let plan = logout_watch::after_exit(Some(&text), false);
         // A quit at a logout: a cancel opens the app again (round logout-cancel-relaunch).
-        if logout_watch::after_exit(Some(&text), false).listen {
+        if plan.listen {
             install_stop_handlers();
             super::logout_watch::run(parent as u32, &stop_signal);
+            return ExitCode::SUCCESS;
+        }
+        // The user's Relaunch (Settings → Advanced): every window is back; open the app again.
+        if plan.reopen {
+            tracing::info!(parent, "guardian: the app quit to relaunch; opening it again");
+            super::logout_watch::relaunch("the user's Relaunch");
             return ExitCode::SUCCESS;
         }
         tracing::debug!(parent, "guardian: clean exit; nothing to do");

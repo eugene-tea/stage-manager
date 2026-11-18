@@ -244,6 +244,8 @@ pub struct Ghost {
     flight: f64,
     /// It stacks in a [`GhostGroup`] (it goes with the group).
     grouped: bool,
+    /// It shows a picture of its window ([`Self::pictured`]).
+    pictured: bool,
     /// Its current flight and when it started ([`Self::spring_to`]; none while it sits).
     flown: Option<(Flown, std::time::Instant)>,
 }
@@ -386,6 +388,7 @@ impl Ghost {
     fn show(&mut self, picture: &Picture, place: bool) {
         // SAFETY: a CGImage is valid layer contents.
         unsafe { self.image.setContents(Some(as_object(&*picture.image))) };
+        self.pictured = true;
         if place {
             self.extent = picture.extent;
             let (position, bounds) = image_frame(&self.extent, self.plane.bounds());
@@ -399,6 +402,7 @@ impl Ghost {
         if let Some(picture) = self.pending.take() {
             // SAFETY: a CGImage is valid layer contents.
             unsafe { self.image.setContents(Some(as_object(&*picture.image))) };
+            self.pictured = true;
             self.extent = picture.extent;
         }
     }
@@ -483,6 +487,31 @@ impl Ghost {
             s.fade(from, to, begin, duration);
         }
         CATransaction::commit();
+    }
+
+    /// An incoming snapshot's handover to its window's own shadow, at once: the shadow goes,
+    /// except over `kept`, the pictures standing under it (rectangles from the plane's
+    /// top-left corner, points, each with its corner's radius), where it stays until the
+    /// pictures go ([`ShadowLayers::hand_over`]).
+    pub fn hand_shadow_over(&self, kept: &[(Rect, f64)]) {
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        if let Some(s) = &self.shadow {
+            let kept: Vec<(CGRect, f64)> = kept.iter().map(|(r, c)| (CGRect::new(CGPoint::new(r.x, r.y), CGSize::new(r.w, r.h)), *c)).collect();
+            s.hand_over(&kept);
+        }
+        CATransaction::commit();
+    }
+
+    /// How far past its plane the window's shadow reaches (points; 0 with none).
+    pub fn shadow_reach(&self) -> f64 {
+        self.shadow.as_ref().map_or(0.0, ShadowLayers::extent)
+    }
+
+    /// True when it shows a picture of its window (a plain ghost, drawn with captures off, is
+    /// a translucent card: the window under it shows through).
+    pub fn pictured(&self) -> bool {
+        self.pictured
     }
 
     /// Where the ghost is drawn now (Core Animation's presentation of it; its target when
@@ -1166,6 +1195,7 @@ impl Overlay {
             origin_x: self.flight.origin_x,
             flight: 0.0,
             grouped: group.is_some(),
+            pictured: picture.is_some(),
             flown: None,
         };
         g.set(at);
@@ -1211,7 +1241,7 @@ impl Overlay {
         plane.addSublayer(&body);
         let depth = self.stack(&plane, true, None);
         let glass = glass_layer();
-        let mut g = Ghost { window: 0, depth, plane, body, image: img, glass, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, strip: self.strip_eye(), origin_x: self.flight.origin_x, flight: 0.0, grouped: false, flown: None };
+        let mut g = Ghost { window: 0, depth, plane, body, image: img, glass, shadow: None, card_opacity: 0.0, extent: Extent::NONE, pending: None, target: at, strip: self.strip_eye(), origin_x: self.flight.origin_x, flight: 0.0, grouped: false, pictured: true, flown: None };
         g.set(at);
         g
     }

@@ -38,8 +38,17 @@
 //!   darker, where neither shows it is lighter. No fade removes that step, it can only
 //!   spread it: [`handover`] centres the snapshot's fade on the expected moment, which
 //!   halves the worst error there ([`handover_error`]).
+//! - **Over another picture.** Where an incoming snapshot's shadow lies on the picture of a
+//!   window arriving under it, the window's own shadow does not show yet: it falls on the
+//!   window under, which that picture covers until the landing's fade. There the snapshot's
+//!   shadow stays at the handover and goes with the pictures ([`kept_at_handover`]). Dropped
+//!   whole, it left the picture under bare from the handover to the fade's end (a recording,
+//!   11-18, at 60 fps: 43 % lighter beside the edge for seven frames, back over ten more, at
+//!   every switch to a stage of two overlapping windows, in either mode).
 
 use std::sync::OnceLock;
+
+use crate::engine::geometry::Rect;
 
 /// One part of a window shadow: the window's shape grown by `spread`, moved down by
 /// `offset_y`, blurred by a Gaussian whose sigma is `blur`, at `opacity`. Points.
@@ -620,6 +629,34 @@ pub fn handover_error(a: f64, t: f64, shown: f64, begin: f64, duration: f64) -> 
     if t >= shown { f + a * (1.0 - f) - a } else { f - a }
 }
 
+/// Where the shadow of an incoming snapshot whose window is at `own` stays when it is handed
+/// over to the window's own: over each picture standing under it (`under`: the frames of
+/// the incoming windows whose pictures are below it in the overlay, each with its corner's
+/// radius), as far as the shadow reaches (`reach` points past `own` on every side). Relative
+/// to `own`'s top-left corner, each with its picture's corner, in `under`'s order. Empty:
+/// nothing is under it, the whole shadow goes.
+///
+/// The part of a picture under the snapshot's own picture is kept too: nothing of the shadow
+/// shows there either way.
+pub fn kept_at_handover(own: Rect, under: &[(Rect, f64)], reach: f64) -> Vec<(Rect, f64)> {
+    let reach = reach.max(0.0);
+    let shadow = Rect::new(own.x - reach, own.y - reach, own.w + 2.0 * reach, own.h + 2.0 * reach);
+    under.iter().filter_map(|(u, corner)| shadow.intersect(u).map(|r| (r.translate(-own.x, -own.y), *corner))).collect()
+}
+
+/// The windows whose pictures stand in a switch's overlay, bottom to top: `added` in the
+/// order their pictures were added (the last on top), or, when the pictures are ordered by
+/// where their windows end (`ranked`: each in a panel of its own), by `order`, the stage's
+/// windows front to back, one not in it under the others.
+pub fn pictures_bottom_up(added: &[u32], order: &[u32], ranked: bool) -> Vec<u32> {
+    let mut stack = added.to_vec();
+    if ranked {
+        // Stable: windows `order` does not name keep the order they were added in.
+        stack.sort_by_key(|w| std::cmp::Reverse(order.iter().position(|o| o == w).unwrap_or(order.len())));
+    }
+    stack
+}
+
 /// How the inner rim, laid out at the window's `window` size (points) so its corner and width
 /// are the window's, is scaled to a plane of `plane` size: as the snapshot's picture is, so
 /// the rim stays on the picture's edge and corner all the way (`(1, 1)` at the window).
@@ -947,5 +984,53 @@ mod tests {
         assert!(worst_for(0.0) >= a * (1.0 - a) - 1e-9, "shown before the fade: the whole darker step");
         assert_eq!(handover_error(a, 0.0, 0.1, begin, duration), 0.0);
         assert!(handover_error(a, 0.25, 0.1, begin, duration).abs() < 1e-12);
+    }
+
+    /// A recording of 11-18, in points: the key window in front, the stage's other window
+    /// behind it, out past its right and bottom edges.
+    #[test]
+    fn a_shadow_stays_over_the_picture_under_it_at_the_handover() {
+        let front = Rect::new(350.0, 46.0, 2004.0, 1286.0);
+        let behind = Rect::new(1118.0, 407.0, 1266.0, 985.0);
+        let kept = kept_at_handover(front, &[(behind, 16.0)], 46.0);
+        // The window behind as far as the shadow reaches, from the front window's corner.
+        assert_eq!(kept, vec![(Rect::new(768.0, 361.0, 1266.0, 971.0), 16.0)]);
+        // Past the front window's bottom edge, on the window behind: kept.
+        assert!(kept[0].0.contains(crate::engine::geometry::Point::new(1000.0, 1286.0 + 10.0)));
+        // Left of the front window, on the wallpaper: the window's own shadow shows there.
+        assert!(!kept[0].0.contains(crate::engine::geometry::Point::new(-10.0, 600.0)));
+        // The window behind hands its own over whole: nothing stands under it.
+        assert!(kept_at_handover(behind, &[], 46.0).is_empty());
+    }
+
+    #[test]
+    fn a_shadow_with_no_picture_under_it_goes_whole() {
+        let own = Rect::new(100.0, 100.0, 800.0, 600.0);
+        assert!(kept_at_handover(own, &[], 46.0).is_empty());
+        // A picture past the shadow's reach.
+        assert!(kept_at_handover(own, &[(Rect::new(1000.0, 100.0, 400.0, 300.0), 16.0)], 46.0).is_empty());
+        // One it only touches.
+        assert!(kept_at_handover(own, &[(Rect::new(946.0, 100.0, 400.0, 300.0), 16.0)], 46.0).is_empty());
+        // One within reach of its right edge: the strip of it the shadow falls on.
+        assert_eq!(kept_at_handover(own, &[(Rect::new(920.0, 100.0, 400.0, 300.0), 10.0)], 46.0), vec![(Rect::new(820.0, 0.0, 26.0, 300.0), 10.0)]);
+    }
+
+    #[test]
+    fn every_picture_under_a_shadow_keeps_its_part_with_its_corner() {
+        let own = Rect::new(500.0, 300.0, 600.0, 400.0);
+        let under = [(Rect::new(200.0, 200.0, 400.0, 400.0), 16.0), (Rect::new(0.0, 0.0, 50.0, 50.0), 8.0), (Rect::new(900.0, 600.0, 500.0, 500.0), 10.0)];
+        let kept = kept_at_handover(own, &under, 40.0);
+        assert_eq!(kept, vec![(Rect::new(-40.0, -40.0, 140.0, 340.0), 16.0), (Rect::new(400.0, 300.0, 240.0, 140.0), 10.0)]);
+    }
+
+    #[test]
+    fn pictures_stack_as_added_or_by_the_stages_order() {
+        // One overlay: the last added is on top.
+        assert_eq!(pictures_bottom_up(&[108, 77], &[108, 77], false), vec![108, 77]);
+        // Panels ranked by where the windows end (front to back): the front one on top.
+        assert_eq!(pictures_bottom_up(&[77, 108, 5], &[77, 5, 108], true), vec![108, 5, 77]);
+        // One the order does not name goes under the others, as added.
+        assert_eq!(pictures_bottom_up(&[9, 77, 8, 108], &[77, 108], true), vec![9, 8, 108, 77]);
+        assert!(pictures_bottom_up(&[], &[1], true).is_empty());
     }
 }
