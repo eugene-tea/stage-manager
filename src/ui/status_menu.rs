@@ -135,7 +135,7 @@ pub struct MenuState {
     pub accessibility_blind: bool,
     /// Apple's Stage Manager is on (`GloballyEnabled = 1`).
     pub apple_stage_manager_on: bool,
-    /// Stage Manager follows Apple's while it is on (`[windows] with_apple = "augment"`)
+    /// Stage Manager follows Apple's while it is on (`[windows] apple_stage_manager_on = "integrate"`)
     /// instead of standing down.
     pub follows_apple: bool,
     /// config.toml failed to load (the last good config stays in force).
@@ -230,8 +230,8 @@ pub const AX_BLIND_LINE: &str = "macOS isn't reporting windows. Log out or resta
 /// The menu item while Apple's Stage Manager is on.
 pub const APPLE_ITEM: &str = "Turn Off Apple's Stage Manager";
 
-/// The menu's line while Apple's Stage Manager is on and followed (`[windows] with_apple =
-/// "augment"`): what Stage Manager does instead of standing down.
+/// The menu's line while Apple's Stage Manager is on and followed (`[windows] apple_stage_manager_on =
+/// "integrate"`): what Stage Manager does instead of standing down.
 pub const APPLE_FOLLOWED_LINE: &str = "Following Apple's Stage Manager";
 
 /// The Mark a Problem item's title: when the last mark went in, if any.

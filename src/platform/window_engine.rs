@@ -6,7 +6,7 @@
 //! ([`super::corner::engine::CornerEngine`], today's Accessibility park corner), the Spaces
 //! engine ([`super::spaces::engine::SpacesEngine`], 1.9), and the Apple mode's null-hide
 //! engine ([`super::apple::engine::AppleEngine`]: Apple's Stage Manager arranges, nothing of
-//! ours is hidden; installed at the release while `[windows] with_apple = "augment"`, the
+//! ours is hidden; installed at the release while `[windows] apple_stage_manager_on = "integrate"`, the
 //! launch's choice installed again at the resume). Shared code asks the engine and never
 //! which one runs; what only one engine needs stays inside it.
 //!
@@ -359,11 +359,13 @@ fn lock_choice() -> std::sync::MutexGuard<'static, Option<Choice>> {
     CHOICE.lock().unwrap_or_else(|p| p.into_inner())
 }
 
-/// The app's launch: runs the launch probe unless `config` or the test switch asks for the
-/// Corner engine, chooses ([`engine_choice::choose`]), installs the engine and logs the
+/// The app's launch: runs the launch probe when `config` or the test switch asks for the
+/// Spaces engine, chooses ([`engine_choice::choose`]), installs the engine and logs the
 /// choice with its reason. Main thread, once AppKit is up, before the WM thread starts.
 pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
-    let asked = Asked { config, opted_in: opted_in(), test: super::spaces::engine::from_env() };
+    let asked = Asked { config, test: super::spaces::engine::from_env() };
+    // `"spaces"` opens the landing variants as a test run does: the review build (11-14).
+    crate::ui::landing_math::Landing::open_for_review(config == ConfigEngine::Spaces);
     let probe = asked.probes().then(|| super::spaces::probe::run(mtm));
     match &probe {
         Some(p) if p.ok => tracing::info!(ms = format!("{:.1}", p.ms), steps = p.steps, "window engine: launch probe passed: {}", p.reason),
@@ -379,12 +381,6 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     install(of(choice.kind));
     *lock_choice() = Some(choice.clone());
     choice
-}
-
-/// The hidden opt-in for the Spaces engine under `[windows] engine = "auto"`, until it is
-/// measured: `STAGE_MANAGER_SPACES=1`.
-fn opted_in() -> bool {
-    std::env::var("STAGE_MANAGER_SPACES").is_ok_and(|v| v.trim() == "1")
 }
 
 /// The Corner engine from now on, for the rest of the run: a running engine's checks failed

@@ -192,7 +192,7 @@ mod app {
         settings: RawSettings,
         strip_visible: bool,
         config_error: Option<String>,
-        /// `[windows] with_apple = "augment"` in the config in force.
+        /// `[windows] apple_stage_manager_on = "integrate"` in the config in force.
         follows_apple: bool,
         last_mark: Option<String>,
         hotkeys: Option<HotkeyConfig>,

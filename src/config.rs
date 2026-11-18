@@ -436,7 +436,7 @@ pub struct WindowsConfig {
     /// `[windows] engine`: which window engines a launch may choose from (read at launch,
     /// [`crate::engine::engine_choice`]).
     pub engine: crate::engine::engine_choice::ConfigEngine,
-    /// `[windows] with_apple`: what the app does while Apple's Stage Manager is on (stand
+    /// `[windows] apple_stage_manager_on`: what the app does while Apple's Stage Manager is on (stand
     /// down, or follow it: [`crate::engine::stand_down::WithApple`]). Read on every reload.
     pub with_apple: crate::engine::stand_down::WithApple,
     /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
@@ -490,7 +490,7 @@ pub struct StagesConfig {
     /// own (off by default, Apple's rule); Shift held then gives the app a stage of its own.
     /// Restored windows and the restore window keep Apple's rule.
     pub new_apps_join_current: bool,
-    /// With `[windows] with_apple = "augment"`, after a restart or a new login Apple's stages
+    /// With `[windows] apple_stage_manager_on = "integrate"`, after a restart or a new login Apple's stages
     /// are put back as saved once their windows have reopened (on by default).
     pub restore_with_apple: bool,
 }
@@ -1145,11 +1145,8 @@ impl Config {
                 park_drop: v.num("windows.park_drop"),
                 corner_patch: v.flag("windows.corner_patch"),
                 corner_patch_reach: v.auto("windows.corner_patch_reach"),
-                engine: match v.text("windows.engine") {
-                    "accessibility" => crate::engine::engine_choice::ConfigEngine::Accessibility,
-                    _ => crate::engine::engine_choice::ConfigEngine::Auto,
-                },
-                with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.with_apple")),
+                engine: crate::engine::engine_choice::ConfigEngine::parse(v.text("windows.engine")),
+                with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.apple_stage_manager_on")),
             },
             displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
             rules: RuleSet::new(rules, defaults),

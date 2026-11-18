@@ -1331,7 +1331,7 @@ impl Controller {
         notify_config(self.store.config(), self.config_error.clone());
     }
 
-    /// `[windows] with_apple` as the config in force has it (re-read at every reload).
+    /// `[windows] apple_stage_manager_on` as the config in force has it (re-read at every reload).
     pub fn with_apple(&self) -> crate::engine::stand_down::WithApple {
         self.store.config().windows.with_apple
     }
@@ -6571,8 +6571,8 @@ impl Controller {
                     _ => json!({ "ok": false, "error": format!("window {id} is not a shown managed window") }),
                 }
             }
-            Command::AppleTry(t) => json!({ "ok": false, "error": format!("apple try {} works only while Apple's Stage Manager is on with [windows] with_apple = \"augment\"", t.name()) }),
-            Command::AppleRestore => json!({ "ok": false, "error": "apple restore works only while Apple's Stage Manager is on with [windows] with_apple = \"augment\"" }),
+            Command::AppleTry(t) => json!({ "ok": false, "error": format!("apple try {} works only while Apple's Stage Manager is on with [windows] apple_stage_manager_on = \"integrate\"", t.name()) }),
+            Command::AppleRestore => json!({ "ok": false, "error": "apple restore works only while Apple's Stage Manager is on with [windows] apple_stage_manager_on = \"integrate\"" }),
             Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugEngineFail(_) | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
             | Command::DebugHover { .. }
             | Command::DebugPointerBack

@@ -19,7 +19,7 @@ file never repeats one.
 
 | System Settings → Desktop & Dock | What Stage Manager does |
 |---|---|
-| Stage Manager on or off | The two cannot run together. While Apple's is on, Stage Manager steps aside: every window comes back, the strip hides and nothing is arranged. It offers to turn Apple's off, and changes the setting only when you click. With `[windows] with_apple = "augment"` (off by default) it follows Apple's stages instead of stepping aside: Apple's draws the strip and arranges the windows, and the stage hotkeys and `ctl switch` bring one of its stages to the front, `ctl merge` and the send hotkeys move windows between its stages (a posted Shift-click on a thumbnail, a drag onto the strip: the pointer jumps for about a frame and comes back, never while the user clicks, drags or holds keys), a newly opened app the rules or Shift want here joins the stage in front, and after a restart or a new login Apple's stages are put back as saved once the windows have reopened (`[stages] restore_with_apple`, on; `ctl apple restore` at any time); each screen's stages are followed apart and a step acts on one screen only, stages of a Desktop not shown are left alone, nothing is done while a full-screen app shows, and Apple's keeps its own strip order (docs/STRATEGIES.md). The menu then says "Following Apple's Stage Manager" in place of the offer to turn it off. |
+| Stage Manager on or off | The two cannot run together. While Apple's is on, Stage Manager steps aside: every window comes back, the strip hides and nothing is arranged. It offers to turn Apple's off, and changes the setting only when you click. With `[windows] apple_stage_manager_on = "integrate"` (off by default) it follows Apple's stages instead of stepping aside: Apple's draws the strip and arranges the windows, and the stage hotkeys and `ctl switch` bring one of its stages to the front, `ctl merge` and the send hotkeys move windows between its stages (a posted Shift-click on a thumbnail, a drag onto the strip: the pointer jumps for about a frame and comes back, never while the user clicks, drags or holds keys), a newly opened app the rules or Shift want here joins the stage in front, and after a restart or a new login Apple's stages are put back as saved once the windows have reopened (`[stages] restore_with_apple`, on; `ctl apple restore` at any time); each screen's stages are followed apart and a step acts on one screen only, stages of a Desktop not shown are left alone, nothing is done while a full-screen app shows, and Apple's keeps its own strip order (docs/STRATEGIES.md). The menu then says "Following Apple's Stage Manager" in place of the offer to turn it off. |
 | Show recent apps | Off hides the strip until the pointer reaches the left edge. |
 | Show windows from an application | All at Once or One at a Time, as below. |
 | Click wallpaper to reveal desktop | With "Only in Stage Manager", a wallpaper click puts the stage into the strip, as Apple's does. With "Always", macOS itself moves every window aside (Apple's Stage Manager is off while ours runs) and Stage Manager stays out of the way: macOS answers that click before any other app can, and only that setting stops it, which Stage Manager never writes. Settings says so beside its button to System Settings. |
@@ -547,9 +547,9 @@ sent once more, and one still not there, or three set right by that retry within
 ends the Spaces way for the rest of the run: every window it hid comes back onto its
 Desktop, the park corner takes over and hides again the windows that were hidden, and the
 next launch probes again. `[windows] engine = "accessibility"` keeps the park corner and
-never probes (GUIDE, Troubleshooting). Until the Spaces way is measured against the corner
-(CPU, switch time), `"auto"` also keeps the park corner unless `STAGE_MANAGER_SPACES=1` is
-set; the probe still runs and logs its verdict at every launch.
+never probes, and is the default (GUIDE, Troubleshooting); `"spaces"` runs the probe at
+every launch and takes the Spaces way wherever it passes. The two are measured against each
+other in "Window engines measured", below.
 
 **Updates.** Apple's Stage Manager updates with macOS; ours updates itself (GUIDE, Updates).
 A downloaded update also installs when you quit Stage Manager: the menu's Quit, or ⌘Q in
@@ -803,7 +803,7 @@ until used; the rest are off.
 | Parked windows' edges ignore clicks; the wallpaper patch covers them | on |
 | Rules for new windows: a named stage, a new stage, pinned to every stage, or ignored; centered or cascaded | off until a rule is written |
 | Keyboard shortcuts to switch, send, pin and show the strip | off |
-| Follow Apple's Stage Manager while it is on: its stages switched by the stage hotkeys and `ctl switch` (`[windows] with_apple = "augment"`) | off |
+| Follow Apple's Stage Manager while it is on: its stages switched by the stage hotkeys and `ctl switch` (`[windows] apple_stage_manager_on = "integrate"`) | off |
 | While following Apple's Stage Manager, its stages come back after a restart or a new login (`[stages] restore_with_apple`) | on |
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
@@ -1086,6 +1086,21 @@ set to move its cursor with the mouse pointer.
   Studio Display's, as reviewers counted; ours gives the same.
 - Reduce Motion on Apple's: a switch is a cross-fade of about 80 ms, a minimize a fade out in place of
   about 130 ms. Ours fades 200 ms, worked out from the accessibility guidance rather than copied.
+
+## Window engines measured
+
+The park corner against the Spaces way on fixture windows (`scripts/measure_engines.py`, one
+app run per engine on a copy of the config, captures off). Not run yet: the numbers go here
+once it is.
+
+| | corner | spaces |
+|---|---|---|
+| App CPU at rest (60 s, 3 stages) | | |
+| WindowServer CPU over the same span | | |
+| Switch time, median / p90 (`ctl switch` to the last window at its final frame) | | |
+| A new app's overlap (its window shown over the old stage) | | |
+| Energy Impact (`top` POWER, the app, at rest and switching) | | |
+| Dropped frames of an animating window shown from a hidden stage | | |
 
 ## Known gaps
 

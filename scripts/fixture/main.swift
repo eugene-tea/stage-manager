@@ -89,6 +89,10 @@
 //                                      <frame ms>" is appended to F (scripts/measure_stages.py's
 //                                      call stand-in, round sm-measure). Give it its own bundle
 //                                      ID, off STAGE_MANAGER_ONLY, so it is never managed
+//   --frame-clock-normal | FIXTURE_FRAME_CLOCK_NORMAL=1  the clock window at the normal level: a
+//                                      standard window Stage Manager manages like any other, to be
+//                                      hidden in a stage and shown again (give it a bundle ID on
+//                                      STAGE_MANAGER_ONLY; scripts/measure_stages.py's hidden scenario)
 //   --enhanced-ui | FIXTURE_ENHANCED_UI=1  the app's AXEnhancedUserInterface starts on (as an
 //                                      assistive client leaves Chrome's: the owner's 11-03); it is
 //                                      readable and settable through Accessibility, and while
@@ -156,6 +160,7 @@ struct Options {
     var enhancedUI = false
     var enhancedUIFile: String? = nil
     var frameClock: String? = nil
+    var frameClockNormal = false
     var reopen = false
 
     static func parseColors(_ text: String) -> [NSColor] {
@@ -210,6 +215,7 @@ struct Options {
         if env["FIXTURE_ENHANCED_UI"] == "1" { o.enhancedUI = true }
         if let f = env["FIXTURE_ENHANCED_UI_FILE"], !f.isEmpty { o.enhancedUIFile = f }
         if let f = env["FIXTURE_FRAME_CLOCK"], !f.isEmpty { o.frameClock = f }
+        if env["FIXTURE_FRAME_CLOCK_NORMAL"] == "1" { o.frameClockNormal = true }
         if env["FIXTURE_REOPEN"] == "1" { o.reopen = true }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
@@ -240,6 +246,7 @@ struct Options {
             case "--enhanced-ui": o.enhancedUI = true
             case "--enhanced-ui-file": if let f = args.next() { o.enhancedUIFile = f }
             case "--frame-clock": if let f = args.next() { o.frameClock = f }
+            case "--frame-clock-normal": o.frameClockNormal = true
             case "--reopen": o.reopen = true
             default: if let n = Int(a) { o.windows = n }
             }
@@ -571,14 +578,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// `--frame-clock`: the call stand-in's window (see [`FrameClockView`]).
+    /// `--frame-clock`: the call stand-in's window (see [`FrameClockView`]), floating; with
+    /// `--frame-clock-normal` a standard window at the normal level.
     func openFrameClock(_ path: String, area: NSRect) {
         let w = NSWindow(
             contentRect: NSRect(x: area.maxX - 500, y: area.maxY - 290, width: 480, height: 270),
             styleMask: [.titled, .closable], backing: .buffered, defer: false)
         w.title = "\(options.title) Clock"
         w.isReleasedWhenClosed = false
-        w.level = .floating
+        w.level = options.frameClockNormal ? .normal : .floating
         w.contentView = FrameClockView(frame: .zero, path: path)
         w.orderFrontRegardless()
         windows.append(w)

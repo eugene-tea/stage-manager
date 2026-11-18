@@ -190,6 +190,9 @@ pub enum Landing {
     Live { tolerance: f64 },
 }
 
+/// Set by [`Landing::open_for_review`].
+static REVIEW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The handover tolerance of `live` (points): a fifth of a point at 2x is under half a pixel.
 pub const LIVE_TOLERANCE: f64 = 1.0;
 /// `live-early`: a larger miss, a longer stretch.
@@ -197,8 +200,8 @@ pub const LIVE_EARLY_TOLERANCE: f64 = 4.0;
 /// `live-late`: a smaller miss, a shorter stretch.
 pub const LIVE_LATE_TOLERANCE: f64 = 0.25;
 
-/// The environment variable that picks a variant (only with `STAGE_MANAGER_ONLY` or the
-/// Spaces engine's opt-in `STAGE_MANAGER_SPACES=1`).
+/// The environment variable that picks a variant (only with `STAGE_MANAGER_ONLY` or under
+/// `[windows] engine = "spaces"`: [`Landing::open_for_review`]).
 pub const LANDING_ENV: &str = "STAGE_MANAGER_LANDING";
 
 impl Landing {
@@ -214,8 +217,9 @@ impl Landing {
         })
     }
 
-    /// The variant asked for (`only`: `STAGE_MANAGER_ONLY`, or a stand-in under the Spaces
-    /// opt-in; `word`: [`LANDING_ENV`]): honoured only in a test or review run; else today's.
+    /// The variant asked for (`only`: `STAGE_MANAGER_ONLY`, or a stand-in under
+    /// `[windows] engine = "spaces"`; `word`: [`LANDING_ENV`]): honoured only in a test or
+    /// review run; else today's.
     pub fn from(only: Option<&str>, word: Option<&str>) -> Self {
         if only.is_none_or(|o| o.trim().is_empty()) {
             return Self::Pictures;
@@ -223,13 +227,19 @@ impl Landing {
         word.and_then(Self::parse).unwrap_or(Self::Pictures)
     }
 
+    /// Opens [`LANDING_ENV`] in a run that is no test run: the launch calls it before the
+    /// first [`Self::current`], true under `[windows] engine = "spaces"` (the review build of
+    /// 11-14 asked for the landing variants with the Spaces engine).
+    pub fn open_for_review(open: bool) {
+        REVIEW.store(open, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// The variant of this process's environment (read once).
     pub fn current() -> Self {
         static L: std::sync::OnceLock<Landing> = std::sync::OnceLock::new();
         *L.get_or_init(|| {
-            // The Spaces engine's hidden opt-in also opens it: the owner's review build (11-14).
             let only = std::env::var("STAGE_MANAGER_ONLY").ok();
-            let review = std::env::var("STAGE_MANAGER_SPACES").is_ok_and(|v| v.trim() == "1");
+            let review = REVIEW.load(std::sync::atomic::Ordering::Relaxed);
             let gate = only.or_else(|| review.then(|| "spaces review".to_string()));
             Self::from(gate.as_deref(), std::env::var(LANDING_ENV).ok().as_deref())
         })

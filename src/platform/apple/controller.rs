@@ -1,6 +1,6 @@
 //! The Apple mode's conductor ([`AppleController`]): what the WM thread drives instead of the
 //! app's own [`crate::platform::controller::Controller`] while Apple's Stage Manager is on
-//! and `[windows] with_apple = "augment"` (`platform::conductor`).
+//! and `[windows] apple_stage_manager_on = "integrate"` (`platform::conductor`).
 //!
 //! It arranges nothing itself. It reads Apple's arrangement (the window list at every read,
 //! WindowManager's Accessibility as the slow check: [`crate::engine::apple::mirror`]), keeps
@@ -255,7 +255,7 @@ impl AppleController {
         }
     }
 
-    /// `[windows] with_apple` as the config in force has it.
+    /// `[windows] apple_stage_manager_on` as the config in force has it.
     pub fn with_apple(&self) -> WithApple {
         self.store.config().windows.with_apple
     }
@@ -1248,7 +1248,7 @@ impl AppleController {
                 let known = self.model_window_ids();
                 json!({ "ok": true, "adopted": ids.into_iter().filter(|id| known.contains(id)).collect::<Vec<_>>() })
             }
-            other => json!({ "ok": false, "error": format!("{} does nothing while Apple's Stage Manager arranges the windows (with_apple = \"augment\")", ctl_name(&other)) }),
+            other => json!({ "ok": false, "error": format!("{} does nothing while Apple's Stage Manager arranges the windows (apple_stage_manager_on = \"integrate\")", ctl_name(&other)) }),
         }
     }
 
@@ -1257,8 +1257,8 @@ impl AppleController {
     pub fn state_json(&self) -> Value {
         let engine = json!({
             "kind": EngineKind::Apple.name(),
-            "why": "Apple's Stage Manager is on and [windows] with_apple = \"augment\"",
-            "with_apple": self.with_apple().name(),
+            "why": "Apple's Stage Manager is on and [windows] apple_stage_manager_on = \"integrate\"",
+            "apple_stage_manager_on": self.with_apple().name(),
         });
         let now = Instant::now();
         let apple = json!({

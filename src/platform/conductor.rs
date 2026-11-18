@@ -1,6 +1,6 @@
 //! The WM thread's one door to whoever conducts the windows ([`Conductor`]): the app's own
 //! [`Controller`] (its stages, Corner or Spaces), or the Apple mode's [`AppleController`]
-//! while Apple's Stage Manager is on and `[windows] with_apple = "augment"`
+//! while Apple's Stage Manager is on and `[windows] apple_stage_manager_on = "integrate"`
 //! (docs/STRATEGIES.md, "Apple-augmented"). Each call the WM thread makes is one `match`
 //! here, as the model's door (`engine/model/hiding.rs`) and the controller's upkeep door
 //! (`controller/upkeep.rs`) are; no other file asks which one conducts. The controller is
@@ -50,7 +50,7 @@ impl Conductor {
         matches!(self, Self::Apples(_))
     }
 
-    /// `[windows] with_apple` as the config in force has it.
+    /// `[windows] apple_stage_manager_on` as the config in force has it.
     pub fn with_apple(&self) -> WithApple {
         match self {
             Self::Ours(c) => c.with_apple(),

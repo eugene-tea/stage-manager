@@ -1,5 +1,5 @@
 //! Which window engine runs (docs/ARCHITECTURE.md, "Window engines"): decided on every Mac
-//! at every launch from the config, the launch probe and two switches, never from a list of
+//! at every launch from the config, the launch probe and the test switch, never from a list of
 //! macOS versions; and the checks while running that end a run of the Spaces engine early.
 //! Pure: the platform runs the probe ([`crate::platform::spaces::probe`]) and installs the
 //! engine ([`crate::platform::window_engine::choose_at_launch`]).
@@ -14,20 +14,29 @@ use super::recovery::EngineKind;
 /// `[windows] engine`: which engines the app may run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ConfigEngine {
-    /// The window server's Spaces where the launch probe says they work, else the
-    /// Accessibility corner.
-    #[default]
-    Auto,
     /// The Accessibility corner only; the probe is not run.
+    #[default]
     Accessibility,
+    /// The window server's Spaces where the launch probe passes, else the Accessibility
+    /// corner (and for the rest of a run whose checks fail).
+    Spaces,
 }
 
 impl ConfigEngine {
     /// The config's word for it.
     pub fn name(self) -> &'static str {
         match self {
-            Self::Auto => "auto",
             Self::Accessibility => "accessibility",
+            Self::Spaces => "spaces",
+        }
+    }
+
+    /// The value for the config's `word` (`accessibility` for anything else: the schema
+    /// has refused it already).
+    pub fn parse(word: &str) -> Self {
+        match word.trim() {
+            "spaces" => Self::Spaces,
+            _ => Self::Accessibility,
         }
     }
 }
@@ -51,22 +60,19 @@ pub struct ProbeVerdict {
 pub struct Asked {
     /// `[windows] engine`.
     pub config: ConfigEngine,
-    /// The hidden opt-in (`STAGE_MANAGER_SPACES=1`): until the Spaces engine is measured
-    /// (1.9, S6), `auto` runs it only with this set.
-    pub opted_in: bool,
     /// The live suite's switch (`STAGE_MANAGER_ENGINE`, honoured with `STAGE_MANAGER_ONLY`
-    /// only): the engine a test run asks for, ahead of the config and the opt-in.
+    /// only): the engine a test run asks for, ahead of the config.
     pub test: Option<EngineKind>,
 }
 
 impl Asked {
-    /// True when the launch probe runs: always, unless the config or the test switch asks
-    /// for the Corner engine (the way out never touches the window server's Space calls).
+    /// True when the launch probe runs: when the config or the test switch asks for the
+    /// Spaces engine (the Corner engine never touches the window server's Space calls).
     pub fn probes(&self) -> bool {
         match self.test {
             Some(EngineKind::Corner | EngineKind::Apple) => false,
             Some(EngineKind::Spaces) => true,
-            None => self.config == ConfigEngine::Auto,
+            None => self.config == ConfigEngine::Spaces,
         }
     }
 }
@@ -91,11 +97,10 @@ pub fn choose(asked: Asked, probe: Option<ProbeVerdict>) -> Choice {
         // The Apple mode is no launch's choice (it follows Apple's Stage Manager while it is on).
         Some(EngineKind::Corner | EngineKind::Apple) => return corner("the test switch asks for it".into(), probe),
         Some(EngineKind::Spaces) => "the test switch asks for it",
-        None if asked.config == ConfigEngine::Accessibility => return corner("[windows] engine = \"accessibility\"".into(), probe),
-        None if !asked.opted_in => {
-            return corner("auto: the Spaces engine runs only with STAGE_MANAGER_SPACES=1 until it is measured".into(), probe);
-        }
-        None => "auto, STAGE_MANAGER_SPACES=1",
+        None => match asked.config {
+            ConfigEngine::Accessibility => return corner("[windows] engine = \"accessibility\"".into(), probe),
+            ConfigEngine::Spaces => "[windows] engine = \"spaces\"",
+        },
     };
     match probe {
         Some(p) if p.ok => Choice { kind: EngineKind::Spaces, why: format!("{wants_spaces}; the launch probe passed"), probe: Some(p), fallback: None },
@@ -167,44 +172,69 @@ mod tests {
         Some(ProbeVerdict { ok: false, reason: "the trial window stayed on its Desktop".into(), ms: 60.0, steps: String::new() })
     }
 
+    fn asked(config: ConfigEngine, test: Option<EngineKind>) -> Asked {
+        Asked { config, test }
+    }
+
+    const CONFIGS: [ConfigEngine; 2] = [ConfigEngine::Accessibility, ConfigEngine::Spaces];
+
     #[test]
-    fn auto_runs_the_corner_engine_until_the_opt_in_and_still_probes() {
-        let asked = Asked::default();
-        assert!(asked.probes(), "the verdict is logged at every launch");
-        let c = choose(asked, passed());
-        assert_eq!(c.kind, EngineKind::Corner);
-        assert!(c.why.contains("STAGE_MANAGER_SPACES"), "{}", c.why);
-        assert_eq!(c.probe, passed(), "the verdict is kept for ctl state");
+    fn the_config_words_parse_and_name_each_other() {
+        for c in CONFIGS {
+            assert_eq!(ConfigEngine::parse(c.name()), c);
+        }
+        assert_eq!(ConfigEngine::parse("nonsense"), ConfigEngine::Accessibility);
+        assert_eq!(ConfigEngine::parse("auto"), ConfigEngine::Accessibility, "never released: no alias");
+        assert_eq!(ConfigEngine::default(), ConfigEngine::Accessibility);
     }
 
     #[test]
-    fn auto_with_the_opt_in_runs_spaces_only_when_the_probe_passes() {
-        let asked = Asked { opted_in: true, ..Asked::default() };
-        assert_eq!(choose(asked, passed()).kind, EngineKind::Spaces);
-        let c = choose(asked, failed());
+    fn spaces_runs_the_spaces_engine_when_the_probe_passes() {
+        let a = asked(ConfigEngine::Spaces, None);
+        assert!(a.probes());
+        let c = choose(a, passed());
+        assert_eq!(c.kind, EngineKind::Spaces);
+        assert!(c.why.contains("\"spaces\"") && c.why.contains("passed"), "{}", c.why);
+        assert_eq!(c.fallback, None);
+    }
+
+    #[test]
+    fn spaces_runs_the_corner_engine_when_the_probe_fails_and_says_why() {
+        let a = asked(ConfigEngine::Spaces, None);
+        let c = choose(a, failed());
         assert_eq!(c.kind, EngineKind::Corner);
         assert!(c.why.contains("the trial window stayed on its Desktop"), "the reason is said: {}", c.why);
-        assert_eq!(choose(asked, None).kind, EngineKind::Corner);
+        assert_eq!(c.probe, failed(), "the verdict is kept for ctl state");
+        assert_eq!(choose(a, None).kind, EngineKind::Corner, "a probe that did not run is no pass");
     }
 
     #[test]
-    fn accessibility_is_the_way_out_and_runs_no_probe() {
-        let asked = Asked { config: ConfigEngine::Accessibility, opted_in: true, test: None };
-        assert!(!asked.probes());
-        let c = choose(asked, None);
+    fn accessibility_is_the_default_and_runs_no_probe() {
+        let a = Asked::default();
+        assert_eq!(a, asked(ConfigEngine::Accessibility, None));
+        assert!(!a.probes());
+        let c = choose(a, None);
         assert_eq!(c.kind, EngineKind::Corner);
         assert!(c.why.contains("accessibility"));
     }
 
     #[test]
-    fn the_test_switch_comes_first_but_spaces_still_needs_the_probe() {
-        let spaces = Asked { config: ConfigEngine::Accessibility, opted_in: false, test: Some(EngineKind::Spaces) };
-        assert!(spaces.probes());
-        assert_eq!(choose(spaces, passed()).kind, EngineKind::Spaces);
-        assert_eq!(choose(spaces, failed()).kind, EngineKind::Corner);
-        let corner = Asked { opted_in: true, test: Some(EngineKind::Corner), ..Asked::default() };
-        assert!(!corner.probes());
-        assert_eq!(choose(corner, None).kind, EngineKind::Corner);
+    fn the_test_switch_comes_ahead_of_every_config_value() {
+        for config in CONFIGS {
+            let spaces = asked(config, Some(EngineKind::Spaces));
+            assert!(spaces.probes(), "{config:?}");
+            let c = choose(spaces, passed());
+            assert_eq!(c.kind, EngineKind::Spaces, "{config:?}");
+            assert!(c.why.contains("test switch"), "{}", c.why);
+            assert_eq!(choose(spaces, failed()).kind, EngineKind::Corner, "{config:?}: Spaces still needs the probe");
+            for kind in [EngineKind::Corner, EngineKind::Apple] {
+                let other = asked(config, Some(kind));
+                assert!(!other.probes(), "{config:?} {kind:?}");
+                let c = choose(other, None);
+                assert_eq!(c.kind, EngineKind::Corner, "{config:?} {kind:?}");
+                assert!(c.why.contains("test switch"), "{}", c.why);
+            }
+        }
     }
 
     #[test]

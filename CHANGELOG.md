@@ -2,12 +2,12 @@
 
 ## Unreleased
 
-- New setting `[windows] with_apple` (`"stand_down"` or `"augment"`). With `"augment"`,
+- New setting `[windows] apple_stage_manager_on` (`"pause"` or `"integrate"`). With `"integrate"`,
   Stage Manager follows Apple's Stage Manager while it is on instead of stepping aside: the
   stage hotkeys and `ctl switch N` bring stage N of Apple's strip to the front, and
-  `ctl state` lists Apple's stages. `"stand_down"`, the default, keeps the behaviour as it
+  `ctl state` lists Apple's stages. `"pause"`, the default, keeps the behaviour as it
   was.
-- With `[windows] with_apple = "augment"`, `ctl merge N`, `ctl send N`, `ctl new` and the
+- With `[windows] apple_stage_manager_on = "integrate"`, `ctl merge N`, `ctl send N`, `ctl new` and the
   send and new-stage hotkeys move windows between Apple's stages, by a Shift-click well
   inside a thumbnail as Apple's strip draws it (clear of the thumbnails and app icons drawn
   over it) or a drag of the title bar onto it; nothing is posted while the
@@ -19,11 +19,11 @@
   later, and brought in. Finder is left to Apple's Stage Manager. When the app's window shows before the
   hide takes, the stage that was in front comes back as it was, its windows in their order
   and in one go, with the app's window on top.
-- New setting `[stages] restore_with_apple`, on by default. With `[windows] with_apple =
-  "augment"`, Apple's stages are put back as saved after a restart or a new login, once the
+- New setting `[stages] restore_with_apple`, on by default. With `[windows] apple_stage_manager_on =
+  "integrate"`, Apple's stages are put back as saved after a restart or a new login, once the
   reopened windows have shown; under "All at Once" an app's windows stay in one stage.
   `ctl apple restore` puts back the stages saved when the following started.
-- With `[windows] with_apple = "augment"`, each screen's stages are followed apart and a
+- With `[windows] apple_stage_manager_on = "integrate"`, each screen's stages are followed apart and a
   stage hotkey or `ctl` command acts on one screen only; stages of a Desktop not shown are
   kept and left alone; nothing is done while a full-screen app shows. The menu, the welcome
   and Settings say that Apple's Stage Manager is followed instead of offering to turn it
@@ -57,11 +57,12 @@
   window list once per round instead of two or three times. A window or an app that closes
   without the usual notice is still handled, up to two seconds later when nothing else
   happens.
-- New setting `[windows] engine` (`"auto"` or `"accessibility"`, read at launch). It
-  chooses how hidden windows are kept: `"accessibility"` always uses the park corner and
-  never tries macOS's own Spaces, a way out if windows misbehave on a stage change. In this
-  version `"auto"` also uses the park corner; each launch checks whether Spaces would work
-  and writes the result to the log.
+- New setting `[windows] engine` (`"accessibility"` or `"spaces"`, read at launch). It
+  chooses how hidden windows are kept: `"accessibility"`, the default, always uses the park
+  corner and never tries Spaces, a way out if windows misbehave on a stage change;
+  `"spaces"` hides each stage in a Space of macOS's own wherever a trial at launch shows
+  that it works, writes the trial's result to the log, and uses the park corner otherwise
+  and for the rest of a run in which a window is not where it was put.
 - A newly opened app gets its own stage as its first window shows. The window sat over
   the stage shown for up to a second first: an app just launched from the Dock is not ready
   to be watched at its first ask and was asked again a second later, and a window that

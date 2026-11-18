@@ -24,7 +24,8 @@ Scenarios (all by default, in this order):
   `ctl debug-dock-click`), timed from the command's start to the last incoming window at
   its frame for good, read from the window server every ms (`probe-spaces settle`); then the
   same number of each unsampled, for our CPU, the window server's and replayd's over
-  SM_SWITCH_CPU_S (1.5) seconds from the command. Not with `off`.
+  SM_SWITCH_CPU_S (1.5) seconds from the command. SM_SWITCH_WAYS picks the ways ("card dock"
+  by default; `ctl`: `ctl switch N`, no input posted). Median and p90. Not with `off`.
 - call: a call stand-in (the fixture's --frame-clock: a floating window drawing on every
   display refresh, counting the refreshes it missed; its own bundle ID, never managed) in
   front, SM_REST_S seconds at rest, then SM_SWITCHES activations of the other stages' apps
@@ -32,6 +33,15 @@ Scenarios (all by default, in this order):
 - launch: Alpha's stage in front, Charlie opened SM_LAUNCHES (10) times while
   `probe-spaces overlap` reads the on-screen list every ms (the live suite's launch phase):
   how long Charlie's window shows over Alpha's stage. Not with `off`.
+- hidden (by name only; SM_STAGES 3 at most): Charlie's frame clock as a standard window
+  (`--frame-clock-normal`) in a stage of its own, SM_HIDDEN_ROUNDS (8) times hidden for
+  SM_HIDDEN_S (5) seconds by `ctl switch` to the first stage, then shown by `ctl switch`
+  back: whether it kept drawing while hidden (refreshes a second), how long after the
+  command it drew again and drew smoothly again (the first line after the pause, and the
+  first with no gap over two refreshes; lines come every 0.25 s), and the refreshes it
+  missed and its longest gap in the SM_AFTER_S (1.5) seconds after it was back. Its own
+  display-link callbacks only: frames the window server composites are not seen. Not with
+  `off`.
 
 The app runs from the dev copy with captures on (as installed; SM_CAPTURE=0 turns them off), STAGE_MANAGER_ONLY the
 fixtures, in a scratch home; fixture windows only, at frames clear of the strip.
@@ -39,6 +49,7 @@ fixtures, in a scratch home; fixture windows only, at frames clear of the strip.
 
 import ctypes
 import json
+import math
 import os
 import re
 import statistics
@@ -47,6 +58,8 @@ import sys
 import time
 
 SCENARIOS = ["rest", "sample", "switch", "call", "launch"]
+# Run only when named (the default list above is what scripts/measure.sh has always run).
+BY_NAME = ["hidden"]
 
 
 def parse_args(argv):
@@ -63,7 +76,7 @@ def parse_args(argv):
             o["out"] = next(it)
         elif a == "--run":
             o["run"] = int(next(it))
-        elif a in SCENARIOS:
+        elif a in SCENARIOS + BY_NAME:
             o["scenarios"].append(a)
         else:
             sys.exit(f"unknown argument {a}\n{__doc__}")
@@ -73,7 +86,8 @@ def parse_args(argv):
     return o
 
 
-ARGS = parse_args(sys.argv[1:])
+# Imported (scripts/measure_engines.py, the unit tests): the pure helpers only, nothing run.
+ARGS = parse_args(sys.argv[1:]) if __name__ == "__main__" else {"cmd": "lib"}
 if ARGS["cmd"] == "run":
     # test_stages reads the engine once, at import.
     os.environ["SM_ENGINE"] = "corner" if ARGS["engine"] == "off" else ARGS["engine"]
@@ -86,6 +100,10 @@ REST_S = float(os.environ.get("SM_REST_S") or 60)
 SWITCHES = int(os.environ.get("SM_SWITCHES") or 20)
 SWITCH_CPU_S = float(os.environ.get("SM_SWITCH_CPU_S") or 1.5)
 LAUNCHES = int(os.environ.get("SM_LAUNCHES") or 10)
+SWITCH_WAYS = (os.environ.get("SM_SWITCH_WAYS") or "card dock").split()
+HIDDEN_ROUNDS = int(os.environ.get("SM_HIDDEN_ROUNDS") or 8)
+HIDDEN_S = float(os.environ.get("SM_HIDDEN_S") or 5)
+AFTER_S = float(os.environ.get("SM_AFTER_S") or 1.5)
 # SM_CAPTURE=0 runs the app with window captures off (STAGE_MANAGER_NO_CAPTURE): what is left
 # once nothing is captured between switches. Use another OUT for it.
 CAPTURE = (os.environ.get("SM_CAPTURE") or "1") != "0"
@@ -230,7 +248,7 @@ class Span:
 # ----- set-up ----------------------------------------------------------------------------
 
 OUT = ARGS.get("out")
-JSONL = os.path.join(OUT, "measure.jsonl")
+JSONL = os.path.join(OUT, "measure.jsonl") if OUT else None
 ENGINE = ARGS.get("engine")
 RUN = ARGS.get("run")
 CLOCK_ID = (os.environ.get("SM_FIXTURE_ID") or "dev.eugene.stagemanager.fixture.stages") + ".clock"
@@ -569,6 +587,19 @@ def scenario_sample():
 
 # ----- switch ----------------------------------------------------------------------------
 
+def ctl_switch(number):
+    """The command line of `ctl switch <number>`."""
+    return [T.BIN, "ctl", "switch", str(number)]
+
+
+def p90(xs):
+    """The 90th percentile (nearest rank) of the numbers in `xs`, or None."""
+    xs = sorted(x for x in xs if x is not None)
+    if not xs:
+        return None
+    return round(xs[max(0, math.ceil(0.9 * len(xs)) - 1)], 1)
+
+
 def specs(ws):
     return ";".join(f"{w['id']},{w['restore']['x']:.1f},{w['restore']['y']:.1f},{w['restore']['w']:.1f},{w['restore']['h']:.1f}" for w in ws)
 
@@ -578,11 +609,14 @@ def stage_windows(s, number):
 
 
 def next_target(s, i, how):
-    """The switch's command and target stage: a card (slots in turn) or a Dock item (the
-    other stages' apps in turn)."""
+    """The switch's command and target stage: a card (slots in turn), a Dock item (the
+    other stages' apps in turn) or `ctl switch` (the other stages in turn; no input posted)."""
     cards = s.get("strip_cards") or []
     if not cards:
         return None, None
+    if how == "ctl":
+        target = cards[i % len(cards)]["number"]
+        return ctl_switch(target), target
     if how == "card":
         c = cards[i % len(cards)]
         f = c["frame"]
@@ -645,19 +679,19 @@ def med(xs):
 def scenario_switch():
     if ENGINE == "off":
         return None
-    say(f"\n== switch ({ENGINE}, run {RUN}): {SWITCHES} card clicks and {SWITCHES} Dock clicks, timed, then for CPU ==")
+    say(f"\n== switch ({ENGINE}, run {RUN}): {SWITCHES} each of {', '.join(SWITCH_WAYS)}, timed, then for CPU ==")
     if not T.app_pid():
         stages_up()
         time.sleep(2)
     data = {}
-    for how in ("card", "dock"):
+    for how in SWITCH_WAYS:
         timed = timed_switches(how)
         cpu = cpu_switches(how)
         ok = [o for o in timed if o.get("ok") and o.get("switched")]
         ends = [o["last_in_ms"] for o in ok if o.get("last_in_ms") is not None]
         data[how] = {
             "n": len(timed), "switched": len(ok), "settled": len(ends),
-            "end_ms_median": med(ends), "end_ms_min": min(ends, default=None), "end_ms_max": max(ends, default=None),
+            "end_ms_median": med(ends), "end_ms_p90": p90(ends), "end_ms_min": min(ends, default=None), "end_ms_max": max(ends, default=None),
             "end_ms": ends,
             "out_ms_median": med([o.get("last_out_ms") for o in ok]),
             "cmd_ms_median": med([o.get("cmd_ms") for o in ok]),
@@ -668,7 +702,7 @@ def scenario_switch():
             "replayd_ms_median": med([m.get("replayd_cpu_ms") for m in cpu]),
             "window_s": SWITCH_CPU_S,
         }
-        say(f"  {how}: end median {data[how]['end_ms_median']} ms ({data[how]['end_ms_min']}-{data[how]['end_ms_max']}), "
+        say(f"  {how}: end median {data[how]['end_ms_median']} ms, p90 {data[how]['end_ms_p90']} ms ({data[how]['end_ms_min']}-{data[how]['end_ms_max']}), "
             f"{len(ends)} of {len(timed)} settled; CPU over {SWITCH_CPU_S} s: app {data[how]['app_ms_median']} ms, "
             f"window server {data[how]['ws_ms_median']} ms, replayd {data[how]['replayd_ms_median']} ms")
     return record("switch", data)
@@ -690,7 +724,12 @@ def clock_lines(path):
 
 
 def clock_between(path, t0, t1):
-    rows = [r for r in clock_lines(path) if t0 <= r[0] <= t1]
+    return clock_span(clock_lines(path), t0, t1)
+
+
+def clock_span(rows, t0, t1):
+    """The frame clock's counts over `t0`..`t1` (unix seconds) from its lines `rows`."""
+    rows = [r for r in rows if t0 <= r[0] <= t1]
     if len(rows) < 2:
         return {"ok": False}
     a, b = rows[0], rows[-1]
@@ -772,6 +811,94 @@ def scenario_launch():
     })
 
 
+# ----- hidden ----------------------------------------------------------------------------
+
+def hidden_round(rows, t_hide, t_show, after_s):
+    """One round of the hidden scenario from the frame clock's lines `rows`: hidden by the
+    command at `t_hide`, shown by the one at `t_show` (unix seconds).
+    - `hidden_fps`: refreshes drawn a second while hidden (0: macOS stopped calling it);
+    - `back_ms`: from the show command to the clock's first line after it (a paused clock
+      writes at its first refresh back; a running one within 0.25 s anyway);
+    - `smooth_ms`: to its first line after that with no gap over two refreshes;
+    - `after`: its counts over `after_s` seconds from its first line back ([`clock_span`])."""
+    frame_ms = statistics.median(r[4] for r in rows) if rows else None
+    before = [r for r in rows if r[0] <= t_hide]
+    during = [r for r in rows if t_hide < r[0] < t_show]
+    start = before[-1] if before else (during[0] if during else None)
+    end = during[-1] if during else start
+    span = t_show - t_hide
+    hidden_fps = round((end[1] - start[1]) / span, 1) if start and end and span > 0 else None
+    back = [r for r in rows if r[0] >= t_show]
+    if not back:
+        return {"ok": False, "error": "no line from the clock after it was shown", "hidden_fps": hidden_fps}
+    first = back[0]
+    smooth = next((r for r in back[1:] if frame_ms and r[3] <= 2 * frame_ms + 0.5), None)
+    return {
+        "ok": True,
+        "hidden_fps": hidden_fps,
+        "paused": hidden_fps is not None and hidden_fps < 1.0,
+        "back_ms": round((first[0] - t_show) * 1000, 1),
+        "first_gap_ms": round(first[3], 1),
+        "smooth_ms": round((smooth[0] - t_show) * 1000, 1) if smooth else None,
+        "after": clock_span(rows, first[0], first[0] + after_s),
+    }
+
+
+def scenario_hidden():
+    if ENGINE == "off":
+        return None
+    say(f"\n== hidden ({ENGINE}, run {RUN}): a drawing window hidden {HIDDEN_S:.0f} s in its stage and shown, {HIDDEN_ROUNDS} times ==")
+    if STAGES > 3:
+        return record("hidden", {"ok": False, "error": "the clock is Charlie's: run with SM_STAGES=3 at most"})
+    stages_up()
+    first_stage = T.state()["active"]
+    path = os.path.join(OUT, f"hidden-clock-{ENGINE}-{RUN}.txt")
+    if os.path.exists(path):
+        os.remove(path)
+    T.stop_extra("c")
+    subprocess.run(["open", "-n", "-g", T.EXTRA["c"][1], "--args", "--windows", "0", "--title", "Charlie", "--background",
+                    "--frame-clock", path, "--frame-clock-normal"], check=True)
+    if not T.wait_until(lambda: len(clock_lines(path)) > 4, 15, "Charlie's frame clock"):
+        return record("hidden", {"ok": False, "error": "the frame clock did not start"})
+    s = T.wait_state(lambda x: "Charlie Clock" in T.by_title(x), "Charlie's clock managed", timeout=8)
+    if s is None:
+        return record("hidden", {"ok": False, "error": "Charlie's clock was never managed"})
+    home = T.by_title(s)["Charlie Clock"]["home"]
+    if home == first_stage or sum(1 for w in s["windows"] if w["home"] == home) != 1:
+        n = 1 + max(st["number"] for st in s["stages"])
+        T.do("send", n, T.by_title(s)["Charlie Clock"]["id"])
+        home = T.by_title(T.state())["Charlie Clock"]["home"]
+    T.do("switch", home)
+    time.sleep(SETTLE_S)
+    rounds = []
+    for i in range(HIDDEN_ROUNDS):
+        t_hide = time.time()
+        T.ctl("switch", first_stage)
+        time.sleep(HIDDEN_S)
+        t_show = time.time()
+        T.ctl("switch", home)
+        time.sleep(AFTER_S + 1.0)
+        o = hidden_round(clock_lines(path), t_hide, t_show, AFTER_S)
+        o["shown"] = T.state()["active"] == home
+        rounds.append(o)
+        a = o.get("after") or {}
+        say(f"  round {i + 1}: {o.get('hidden_fps')} refreshes/s hidden; back {o.get('back_ms')} ms, smooth {o.get('smooth_ms')} ms; "
+            f"then {a.get('missed')} missed, longest gap {a.get('longest_gap_ms')} ms" + ("" if o["shown"] else " NOT SHOWN"))
+        time.sleep(1.0)
+    T.stop_extra("c")
+    ok = [o for o in rounds if o.get("ok") and o.get("shown")]
+    return record("hidden", {
+        "ok": bool(ok), "n": len(rounds), "measured": len(ok), "hidden_s": HIDDEN_S,
+        "paused": sum(1 for o in ok if o.get("paused")),
+        "hidden_fps_median": med([o.get("hidden_fps") for o in ok]),
+        "back_ms_median": med([o.get("back_ms") for o in ok]), "back_ms_p90": p90([o.get("back_ms") for o in ok]),
+        "smooth_ms_median": med([o.get("smooth_ms") for o in ok]), "smooth_ms_p90": p90([o.get("smooth_ms") for o in ok]),
+        "after_missed_median": med([(o.get("after") or {}).get("missed") for o in ok]),
+        "after_longest_gap_ms_median": med([(o.get("after") or {}).get("longest_gap_ms") for o in ok]),
+        "rounds": rounds,
+    })
+
+
 # ----- summary ---------------------------------------------------------------------------
 
 def spread(xs):
@@ -804,8 +931,9 @@ def summary(out):
     add("rest: window server POWER (top)", "rest", g("top_ws_power"))
     add("rest: replayd CPU %", "rest", g("replayd_cpu_pct"))
     add("sample: active ms in 60 s", "sample", g("active_ms"))
-    for how in ("card", "dock"):
+    for how in ("card", "dock", "ctl"):
         add(f"switch {how}: click to last frame ms", "switch", g(how, "end_ms_median"))
+        add(f"switch {how}: click to last frame ms, p90", "switch", g(how, "end_ms_p90"))
         add(f"switch {how}: outgoing gone ms", "switch", g(how, "out_ms_median"))
         add(f"switch {how}: app CPU ms/switch", "switch", g(how, "app_ms_median"))
         add(f"switch {how}: window server CPU ms/switch", "switch", g(how, "ws_ms_median"))
@@ -817,6 +945,10 @@ def summary(out):
     add("launch: launches overlapped", "launch", g("overlapped"))
     add("launch: overlap ms", "launch", g("overlap_ms_median"))
     add("launch: new window on screen ms", "launch", g("first_new_ms_median"))
+    add("hidden: refreshes/s while hidden", "hidden", g("hidden_fps_median"))
+    add("hidden: drawing again after the show ms", "hidden", g("back_ms_median"))
+    add("hidden: drawing smoothly again ms", "hidden", g("smooth_ms_median"))
+    add("hidden: missed refreshes after the show", "hidden", g("after_missed_median"))
     widths = [max(len(str(l[i])) for l in lines) for i in range(len(lines[0]))]
     for i, l in enumerate(lines):
         print("| " + " | ".join(str(c).ljust(w) for c, w in zip(l, widths)) + " |")
@@ -850,7 +982,8 @@ def main():
         return 1
     say(f"home: {T.HOME}; engine {ENGINE}; run {RUN}; out {OUT}")
     front = T.frontmost_bundle()
-    fns = {"rest": scenario_rest, "sample": scenario_sample, "switch": scenario_switch, "call": scenario_call, "launch": scenario_launch}
+    fns = {"rest": scenario_rest, "sample": scenario_sample, "switch": scenario_switch, "call": scenario_call, "launch": scenario_launch,
+           "hidden": scenario_hidden}
     code = 0
     try:
         for sc in ARGS["scenarios"]:

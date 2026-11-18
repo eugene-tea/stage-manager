@@ -150,7 +150,7 @@ pub struct SettingsValues {
     pub app: AppConfig,
     /// Apple's Stage Manager is on (we stand down, or follow it).
     pub apple_on: bool,
-    /// `[windows] with_apple = "augment"`: Stage Manager follows Apple's while it is on.
+    /// `[windows] apple_stage_manager_on = "integrate"`: Stage Manager follows Apple's while it is on.
     pub follows_apple: bool,
     /// Apple's "Show recent apps in Stage Manager" (`AutoHide = 0`).
     pub show_recent_apps: bool,
@@ -625,7 +625,7 @@ fn general(f: &mut Form, m: &Maker, v: &SettingsValues) -> (Retained<NSSwitch>, 
 }
 
 /// What the Stage Manager pane says while Apple's Stage Manager is on: what this app does
-/// meanwhile, standing down or following it (`[windows] with_apple`).
+/// meanwhile, standing down or following it (`[windows] apple_stage_manager_on`).
 pub fn apple_on_detail(follows: bool) -> &'static str {
     if follows {
         "On. This app follows its stages: the stage hotkeys, rules and saved stages work on them, and it shows no strip of its own."
@@ -1131,7 +1131,7 @@ mod tests {
         ] {
             assert_ne!(base.shape(), other.shape());
         }
-        assert!(apple_on_detail(true).contains("follows") && apple_on_detail(false).contains("stands down"), "with_apple = augment says what it does instead");
+        assert!(apple_on_detail(true).contains("follows") && apple_on_detail(false).contains("stands down"), "apple_stage_manager_on = integrate says what it does instead");
     }
 
     #[test]

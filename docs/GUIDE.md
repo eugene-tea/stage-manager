@@ -265,9 +265,9 @@ with it, and each screen's corner has its own, drawn from that screen's desktop.
 ### With Apple's Stage Manager on
 
 While Apple's Stage Manager is on, Stage Manager brings every window back and arranges
-nothing until it is off. With `[windows] with_apple = "augment"` it follows Apple's stages
-instead. Apple's Stage Manager draws the strip and arranges the windows; Stage Manager shows
-no strip of its own.
+nothing until it is off (`[windows] apple_stage_manager_on = "pause"`, the default). With
+`"integrate"` it follows Apple's stages instead. Apple's Stage Manager draws the strip and
+arranges the windows; Stage Manager shows no strip of its own.
 
 - The stage hotkeys (`[hotkeys] switch`) and `ctl switch N` bring stage N of Apple's strip
   to the front, counted from the top (then the stages the strip has no room for), without
@@ -508,7 +508,10 @@ was, and the next launch checks the corner again.
 
 **Windows flicker or go missing when the stage changes.** With `[windows] engine =
 "accessibility"`, hidden windows always wait in the park corner and macOS's own Spaces are
-never tried. Read at launch: quit Stage Manager and open it again after changing it.
+never tried; this is the default. `"spaces"` hides each stage in a Space of macOS's own
+instead, wherever a trial at launch shows that it works, and goes back to the park corner
+for the rest of the run if a window is ever not where it was put. The setting is read at
+launch: Stage Manager has to be quit and opened again after it is changed.
 
 Some limits to know about:
 
