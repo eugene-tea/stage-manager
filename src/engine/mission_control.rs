@@ -546,7 +546,7 @@ impl Lends {
     }
 
     /// The next window to put home.
-    pub fn next(&mut self) -> Option<WindowId> {
+    pub fn next_window(&mut self) -> Option<WindowId> {
         self.queue.pop_front()
     }
 
@@ -748,14 +748,14 @@ mod tests {
         assert!(!l.look_due(t + ms(120)), "no watch while it shows: the tick looks for its close");
         l.plan(vec![w(1), w(2), w(3)], t + ms(70));
         assert_eq!(l.wanted(), None);
-        assert_eq!(l.next(), Some(w(1)));
+        assert_eq!(l.next_window(), Some(w(1)));
         l.lent(out(1), 6);
         assert_eq!(l.round_done(t + ms(80)), None, "two to go");
-        assert_eq!(l.next(), Some(w(2)));
+        assert_eq!(l.next_window(), Some(w(2)));
         // Its park did not take: not put home.
-        assert_eq!(l.next(), Some(w(3)));
+        assert_eq!(l.next_window(), Some(w(3)));
         l.lent(out(3), 9);
-        assert_eq!(l.next(), None);
+        assert_eq!(l.next_window(), None);
         let done = l.round_done(t + ms(110)).expect("the round's summary");
         assert_eq!((done.by, done.asked, done.lent, done.took, done.park_ms), (By::Shown, 3, 2, ms(40), 15));
         assert_eq!(l.round_done(t + ms(120)), None, "said once");
@@ -790,7 +790,7 @@ mod tests {
         assert!(!l.hint(Hint::Dock, t + ms(8)), "the key stays the hint");
         assert!(!l.hint(Hint::Key(Trigger::AppWindows), t + ms(300)), "nor do its repeats while held replace it");
         l.plan(vec![w(1)], t + ms(5));
-        assert_eq!(l.next(), Some(w(1)));
+        assert_eq!(l.next_window(), Some(w(1)));
         l.lent(out(1), 7);
         assert_eq!(l.round_done(t + ms(15)).map(|d| d.by), Some(By::Key));
         assert!(!l.guess_over(t + ms(900)));
@@ -804,7 +804,7 @@ mod tests {
         let t = t + ms(5000);
         assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
         l.plan(vec![w(1)], t);
-        assert_eq!(l.next(), Some(w(1)));
+        assert_eq!(l.next_window(), Some(w(1)));
         l.lent(out(1), 7);
         l.round_done(t + ms(10));
         assert_eq!(l.saw(true, t + ms(60)), Some(Edge::Shown(Some((Hint::Key(Trigger::MissionControl), ms(60))))));
@@ -828,7 +828,7 @@ mod tests {
         l.ask();
         assert_eq!(l.wanted(), Some(By::Asked));
         l.plan(vec![w(1)], t + ms(600));
-        assert_eq!(l.next(), Some(w(1)));
+        assert_eq!(l.next_window(), Some(w(1)));
         l.lent(out(1), 5);
         assert_eq!(l.round_done(t + ms(610)).map(|d| d.by), Some(By::Asked));
         assert!(l.saw(true, t + ms(700)).is_some());
@@ -847,10 +847,10 @@ mod tests {
         let mut l = Lends::default();
         assert!(l.saw(true, t).is_some());
         l.plan(vec![w(1), w(2)], t);
-        assert_eq!(l.next(), Some(w(1)));
+        assert_eq!(l.next_window(), Some(w(1)));
         l.lent(out(1), 5);
         l.set_mode(Mode::Off);
-        assert_eq!(l.next(), None, "no more lends");
+        assert_eq!(l.next_window(), None, "no more lends");
         assert!(l.saw(false, t + ms(900)).is_some());
         assert!(l.closing(t + ms(900)).is_some());
     }
@@ -861,7 +861,7 @@ mod tests {
         let mut l = Lends::default();
         l.saw(true, t);
         l.plan(vec![w(1)], t);
-        l.next();
+        l.next_window();
         l.lent(out(1), 5);
         l.round_done(t + ms(10));
         l.saw(false, t + ms(1000));
@@ -870,7 +870,7 @@ mod tests {
         assert_eq!(l.closing(t + ms(1030)), None, "it shows again: nothing goes back");
         assert_eq!(l.wanted(), Some(By::Shown), "and what hid meanwhile is put home too");
         l.plan(vec![w(1), w(2)], t + ms(1030));
-        assert_eq!(l.next(), Some(w(2)), "the one out already is not lent twice");
+        assert_eq!(l.next_window(), Some(w(2)), "the one out already is not lent twice");
     }
 
     #[test]

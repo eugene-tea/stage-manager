@@ -75,7 +75,7 @@ its ctl socket and reading the window server's view of the windows:
 
 ```sh
 scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore strip native
-                                          # visible parity motion slots expose capture raise park
+                                          # visible parity motion slots expose mission capture raise park
                                           # offscreen enhanced stale handles displays
 scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined

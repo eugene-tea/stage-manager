@@ -381,6 +381,17 @@ its `AXCreated` and `AXSelectedChildrenChanged` notices) corrects it while the s
 shows (`platform/controller/switcher.rs`, `platform/switcher_ax.rs`). It is taken back when
 the selection moves on, at Escape, or when ⌘ is let go on another app.
 
+Mission Control and App Exposé lay out only the windows of the Desktop, so under the Spaces
+engine the same lend is made for every hidden window of the Desktops shown while one of them
+shows (`engine::mission_control` decides when, `platform/controller/mission_control.rs`
+carries it out on the fast tick, 40 ms of lends at a time, each window parked first). It is
+found from macOS's own window over the display (`engine::overview`); one of its shortcuts
+heard by the input monitor, or a notice of the Dock's, only brings that look to the fast
+tick (`[windows] mission_control_stages = "key"` lends at the shortcut itself). At the close
+the windows go back into their stage Spaces, but a picked window's stage, which the
+activation's switch shows. The engine counts each as lent and parked, so a hide, a show, a
+quit's sweep and the guardian's scan of the park corner bring it back like ⌘Tab's.
+
 ```mermaid
 sequenceDiagram
     participant App as New app

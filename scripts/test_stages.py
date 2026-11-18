@@ -9822,8 +9822,387 @@ def phase_edgeflat():
           f"hidden again, its cards turned (shown {last.get('shown')}, flat {last.get('flat')}, edges {f and edges(f[0])})")
 
 
+# ----- Mission Control under the Spaces engine (round spaces-mission-control) -------------
+
+MISSION_MOVED = 8.0
+
+
+def mission_listed():
+    """The fixtures' windows on layer 0 by id (the main fixture's and Alpha's), as the window
+    server lists them now (`staged`: in a stage Space, its own word)."""
+    return {w["id"]: w for w in fixture_windows([FIX_ID, EXTRA["a"][0]])[0]}
+
+
+def mission_moved(b, parked):
+    """engine::mission_control::laid_out: listed away from where it was parked, or resized."""
+    return any(abs(b[k] - parked[k]) > MISSION_MOVED for k in ("x", "y", "w", "h"))
+
+
+def mission_status():
+    return (ctl("debug-mission-control", "status").get("mission_control") or {})
+
+
+def mission_setup(label, alpha=False):
+    """Fixture 1 in the stage in front, Fixture 2 and 3 each hidden in a stage of its own
+    (with `alpha`, Alpha 1, another app's window, hidden in a fourth), under the Spaces
+    engine with the test commands on. (state, {title: id}, the hidden titles) or Nones."""
+    stop_app()
+    stop_all_fixtures()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(3, "--frames", "360,140,640,420;520,220,640,420;680,300,640,420")
+    if alpha:
+        start_extra("a", 1)
+    titles = ["Fixture 2", "Fixture 3"] + (["Alpha 1"] if alpha else [])
+    s = start_app(len(titles) + 1, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None and s["engine"]["kind"] == "spaces", f"{label}: the Spaces engine runs with the fixtures' {len(titles) + 1} windows"):
+        return None, None, None
+    t = by_title(s)
+    do("new", t["Fixture 2"]["id"])
+    do("new", t["Fixture 3"]["id"])
+    want = sorted([[k] for k in ["Fixture 1"] + titles])
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == want, "each window in a stage of its own")
+    if not check(s is not None, f"{label}: each window in a stage of its own ({stage_titles(state())})"):
+        return None, None, None
+    do("switch", number_of(s, "Fixture 1"))
+    s = wait_state(lambda x: active_titles(x) == {"Fixture 1"}, "Fixture 1's stage in front")
+    if not check(s is not None, f"{label}: Fixture 1 in front, {', '.join(titles)} each hidden in a stage"):
+        return None, None, None
+    ids = {title: w["id"] for title, w in by_title(s).items()}
+    hidden = wait_until(lambda: all(mission_listed().get(ids[k], {}).get("staged") for k in titles), 4,
+                        "the hidden windows in their stage Spaces")
+    if not check(bool(hidden), f"{label}: the window server lists {', '.join(titles)} in stage Spaces"):
+        return None, None, None
+    if not make_fixture_front(s):
+        check(False, f"{label}: a fixture is frontmost (so Escape reaches only a fixture); front is {frontmost_bundle()}")
+        return None, None, None
+    return s, ids, titles
+
+
+def mission_open(which, label):
+    """Types Mission Control's (or App Exposé's) own shortcut through the app and waits for
+    macOS's cover in the window list. (when the key was asked, the covers seen) or None."""
+    before = {o["id"] for o in screen_overlays()}
+    t0 = time.time()
+    r = ctl("debug-expose", which)
+    if not check(r.get("ok"), f"{label}: shortcut typed ({r.get('key', r.get('error'))})"):
+        return None
+    seen = wait_until(lambda: [o for o in screen_overlays() if o["id"] not in before], 3, f"{label}: Mission Control to show")
+    if not check(bool(seen), f"{label}: macOS's cover is listed ({[(o['owner'], o['layer']) for o in seen or []]})"):
+        ctl("debug-expose", "escape")
+        return None
+    return t0, before
+
+
+def mission_close(before, label):
+    ctl("debug-expose", "escape")
+    gone = wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in before], 5, f"{label}: Mission Control to end")
+    time.sleep(EXPOSE_SETTLE)
+    return bool(gone)
+
+
+def mission_sample(ids, seconds, t0):
+    """The windows `ids` as listed, several times a second for `seconds`: (seconds since t0, {id: probe entry})."""
+    out, end = [], time.time() + seconds
+    while time.time() < end:
+        ws = mission_listed()
+        out.append((time.time() - t0, {i: ws[i] for i in ids if i in ws}))
+        time.sleep(0.05)
+    return out
+
+
+def mission_laid_out(samples, parked):
+    """Per window of `parked` ({id: bounds listed at its park}): the first moment (s) the list
+    shows it on its Desktop away from its park, or None when it never left it."""
+    first = {}
+    for t, ws in samples:
+        for i, b in parked.items():
+            w = ws.get(i)
+            if w and not w.get("staged") and mission_moved(w["bounds"], b) and i not in first:
+                first[i] = t
+    return {i: first.get(i) for i in parked}
+
+
+def mission_back(ids, titles, frames, label):
+    """The windows `titles` back in their stage Spaces at the frames they had, nothing out."""
+    def back():
+        ws = mission_listed()
+        return all(ws.get(ids[k], {}).get("staged") for k in titles) and not mission_status().get("out")
+    ok = wait_until(back, 5, f"{label}: {', '.join(titles)} back in their stage Spaces")
+    ws = mission_listed()
+    check(bool(ok), f"{label}: {', '.join(titles)} are back in their stage Spaces, none left out "
+          f"(staged {[bool(ws.get(ids[k], {}).get('staged')) for k in titles]}, out {mission_status().get('out')})")
+    for k in titles:
+        b = ws.get(ids[k], {}).get("bounds")
+        check(b is not None and close(b, frames[ids[k]]), f"{label}: {k} sits at its frame again ({b and fmt(b)}, was {fmt(frames[ids[k]])})")
+    e = state()["engine"]
+    check(not e.get("lent_now") and not e.get("parked_lends"), f"{label}: the engine counts nothing lent or parked ({e.get('lent_now')}, {e.get('parked_lends')})")
+    return bool(ok)
+
+
+def mission_shot(name):
+    """A by-eye screenshot while Mission Control shows, only with $SM_SHOTS (never the repo)."""
+    d = os.environ.get("SM_SHOTS")
+    if not d:
+        return
+    os.makedirs(d, exist_ok=True)
+    path = os.path.join(d, f"mission-{name}.png")
+    subprocess.run(["screencapture", "-x", path], capture_output=True)
+    say(f"    by eye: {path}")
+
+
+def phase_mission_probe():
+    """Round spaces-mission-control, the probe (Spaces engine, `SM_ENGINE=spaces`; fixture
+    windows only; nobody typing): does Mission Control lay out a hidden stage's window that
+    is put on the Desktop, parked at the screen's corner, and does it matter when?
+
+    Fixture 1 shows; Fixture 2 and 3 wait in stage Spaces. Four rounds, each opened with
+    Mission Control's own shortcut typed through the app (`ctl debug-expose`) and left with
+    Escape; the window server's list is sampled several times a second while it shows:
+
+    1. **before**: the hidden windows put home first (`ctl debug-mission-control lend`), then
+       the key. Whether a parked window on the Desktop is laid out at all, and whether the
+       window list shows Mission Control's layout (Fixture 1, always there, is the control).
+    2. **after**: the key first, a second for its animation, then the lend. Whether Mission
+       Control takes a window that arrives once it is open.
+    3. **shown** (`mode shown`, the default): the app itself lends once it sees Mission
+       Control; the log's `mission-control:` lines give the times.
+    4. **key** (`mode key`): the app lends at the key already.
+
+    What each outcome means is printed at the end. Checked (pass or fail) is only safety:
+    after every round both windows are back in their stage Spaces at their frames, nothing
+    lent or parked, the same stage in front on the same Desktop. Not in the default phases."""
+    say("\n== mission-probe: does Mission Control lay out hidden stages' windows put on the Desktop? ==")
+    if not SPACES:
+        skip("mission-probe", "the Spaces engine's own: run with SM_ENGINE=spaces")
+        return
+    s, ids, titles = mission_setup("mission-probe")
+    if not s:
+        stop_app()
+        return
+    hidden = [ids[k] for k in titles]
+    front = ids["Fixture 1"]
+    frames = {i: w["bounds"] for i, w in mission_listed().items()}
+    space, active = s.get("space"), s.get("active")
+    results = {}
+
+    def judge(name, samples, parked, t_lend):
+        first = mission_laid_out(samples, parked)
+        control = any(mission_moved(ws[front]["bounds"], frames[front]) for _, ws in samples if front in ws)
+        results[name] = {"laid": [i for i, t in first.items() if t is not None], "of": len(parked), "control": control,
+                         "first": {i: (None if t is None else round((t - t_lend) * 1000)) for i, t in first.items()}}
+        say(f"    {name}: Mission Control moved {len(results[name]['laid'])} of {len(parked)} windows put home "
+            f"(ms after the lend: {results[name]['first']}); Fixture 1, always there, listed in its layout: {control}")
+
+    def safe(name):
+        mission_back(ids, titles, frames, f"mission-probe {name}")
+        x = state()
+        check(x.get("space") == space and x.get("active") == active, f"mission-probe {name}: the same stage in front on the same Desktop")
+
+    def parked_now():
+        ws = mission_listed()
+        return {i: ws[i]["bounds"] for i in hidden if i in ws and not ws[i].get("staged")}
+
+    # 1. before
+    say("  -- before: lent, then the key --")
+    ctl("debug-mission-control", "mode", "off")
+    r = ctl("debug-mission-control", "lend")
+    check(r.get("ok") and sorted(r.get("lent") or []) == sorted(hidden), f"mission-probe before: both hidden windows put home, parked ({r.get('lent')}, {r.get('ms')} ms; {r.get('error') or 'ok'})")
+    time.sleep(0.4)
+    parked = parked_now()
+    d = fixture_windows([FIX_ID])[1]
+    say(f"    parked at {[fmt(b) for b in parked.values()]} (in the park corner: {[is_parked(b, d) for b in parked.values()]})")
+    t_lend = time.time()
+    opened = mission_open("mission-control", "mission-probe before")
+    if opened:
+        samples = mission_sample(hidden + [front], 2.0, 0.0)
+        mission_shot("before")
+        judge("before", samples, parked, t_lend)
+        mission_close(opened[1], "mission-probe before")
+    r = ctl("debug-mission-control", "back")
+    say(f"    back: {r}")
+    safe("before")
+
+    # 2. after
+    say("  -- after: the key, then the lend --")
+    opened = mission_open("mission-control", "mission-probe after")
+    if opened:
+        time.sleep(1.0)
+        r = ctl("debug-mission-control", "lend")
+        t_lend = time.time()
+        say(f"    lend while Mission Control shows: {r}")
+        st = {o["id"]: dict(zip("xywh", o["parked"])) for o in mission_status().get("out") or [] if o.get("parked")}
+        samples = mission_sample(hidden + [front], 2.5, 0.0)
+        mission_shot("after")
+        judge("after", samples, st or parked, t_lend)
+        mission_close(opened[1], "mission-probe after")
+    r = ctl("debug-mission-control", "back")
+    say(f"    back: {r}")
+    safe("after")
+
+    # 3 and 4: the app's own lends.
+    for mode in ("shown", "key"):
+        say(f"  -- {mode}: the app lends by itself ([windows] mission_control_stages = \"{mode}\") --")
+        ctl("debug-mission-control", "mode", mode)
+        mark = len(log_text())
+        t_key = time.time()
+        opened = mission_open("mission-control", f"mission-probe {mode}")
+        if opened:
+            samples = mission_sample(hidden + [front], 2.5, 0.0)
+            st = {o["id"]: dict(zip("xywh", o["parked"])) for o in mission_status().get("out") or [] if o.get("parked")}
+            mission_shot(mode)
+            judge(mode, samples, st, t_key)
+            mission_close(opened[1], f"mission-probe {mode}")
+        lines = [ln.split("mission-control:", 1)[1].strip() for ln in log_text()[mark:].splitlines() if "mission-control:" in ln]
+        for ln in lines:
+            say(f"    log: {ln[:200]}")
+        results[mode] = dict(results.get(mode) or {}, heard=any(ln.startswith("trigger seen") for ln in lines),
+                             lent=any(ln.startswith("lent ") for ln in lines))
+        ctl("debug-mission-control", "mode", "off")
+        safe(mode)
+    ctl("debug-mission-control", "mode", "config")
+
+    def yes(name):
+        r = results.get(name) or {}
+        return bool(r.get("of")) and len(r.get("laid") or []) == r.get("of")
+
+    say("\n  mission-probe, what it means:")
+    b, a, sh, k = (results.get(n) or {} for n in ("before", "after", "shown", "key"))
+    if not b.get("control"):
+        say("  - The window list did not show Mission Control's layout even for Fixture 1: this measure is blind here. Judge by eye (run again with SM_SHOTS=<dir>).")
+    elif not yes("before"):
+        say("  - before: NO. A parked window put on the Desktop by the Space call is not laid out even when it is there first. Lending cannot work; the hidden windows would have to stay on the Desktop the Corner engine's way.")
+    else:
+        say("  - before: yes. A hidden window parked on the Desktop is laid out, as under the Corner engine.")
+        if yes("after"):
+            say("  - after: yes. Mission Control takes windows that arrive once it is open: \"shown\" (the default) is enough, and it covers gestures, hot corners and the Dock's item too. Keep the default; \"key\" adds nothing but an earlier start.")
+        else:
+            say("  - after: NO. Mission Control takes only the windows there when it opens.")
+            if yes("key"):
+                say("    key: yes. The lend at the key wins the race: make \"key\" the default. A gesture, a hot corner and the Dock's item still show only the stage in front.")
+            else:
+                say("    key: NO as well. No lend is early enough: set the default to \"off\" and keep the hidden windows on the Desktop some other way (the Corner engine's park while Spaces hides nothing, or lend at ⌃ pressed).")
+    for name, r in (("shown", sh), ("key", k)):
+        if r and not r.get("heard"):
+            say(f"  - {name}: the app's input monitor did not hear the posted key (no \"trigger seen\" line): the key's part is not measured by this run; press the real key and read the log.")
+        if r and not r.get("lent"):
+            say(f"  - {name}: the app made no lend (no \"lent\" line): see the log lines above.")
+    say(f"  raw: {json.dumps(results)}")
+    stop_app()
+    all_onscreen("mission-probe quit")
+
+
+def phase_mission():
+    """Round spaces-mission-control, the behaviour (Spaces engine, `SM_ENGINE=spaces`): with
+    `[windows] mission_control_stages = "shown"` (the default) Mission Control and App Exposé
+    show the hidden stages' windows, and nothing is left out after.
+
+    1. Mission Control by its key, then Escape: while it shows, Fixture 2 and 3 (hidden) are
+       out of their stage Spaces, on the Desktop, still counted hidden by the model; the log
+       says shown, the lend and its time, and how many Mission Control laid out. After
+       Escape: both back in their stage Spaces at their frames, the same stage in front, no
+       Space change, nothing lent or parked.
+    2. The same with App Exposé.
+    3. A pick: while Mission Control shows, Alpha (another app, its one window hidden in a
+       stage) is activated, as a click on its window there or on its Dock item activates it;
+       its stage comes in front with Alpha 1 at its frame, with no Space change, and Fixture
+       2 and 3 are back in their stage Spaces.
+    4. kill -9 while the windows are out (lent for the test, no Mission Control): the guardian
+       brings both back out of the park corner."""
+    say("\n== mission: Mission Control shows every stage's windows (Spaces engine) ==")
+    if not SPACES:
+        skip("mission", "the Spaces engine's own: with the park corner Mission Control shows every window already; run with SM_ENGINE=spaces")
+        return
+    s, ids, titles = mission_setup("mission", alpha=True)
+    if not s:
+        stop_app()
+        return
+    hidden = [ids[k] for k in titles]
+    n = len(hidden)
+    frames = {i: w["bounds"] for i, w in mission_listed().items()}
+    space, active = s.get("space"), s.get("active")
+    check(mission_status().get("mode") == "shown", f"mission: the default mode is \"shown\" ({mission_status().get('mode')})")
+    for which, label in (("mission-control", "Mission Control"), ("app-windows", "App Exposé")):
+        say(f"  -- {label} --")
+        mark = len(log_text())
+        changes = ctl("space").get("changes")
+        opened = mission_open(which, f"mission {label}")
+        if not opened:
+            break
+        out = wait_until(lambda: len(mission_status().get("out") or []) == n and mission_status(), 3, "every hidden window put home")
+        ws = mission_listed()
+        check(bool(out) and not any(ws.get(i, {}).get("staged") for i in hidden),
+              f"mission {label}: {', '.join(titles)} are on the Desktop while it shows (out {[o['id'] for o in (out or {}).get('out', [])]})")
+        x = state()
+        check(all(w["parked"] for w in x["windows"] if w["id"] in hidden) and x.get("active") == active,
+              f"mission {label}: the model still counts them hidden, the same stage in front")
+        time.sleep(1.2)
+        samples = mission_sample(hidden, 0.4, 0.0)
+        parked = {o["id"]: dict(zip("xywh", o["parked"])) for o in (out or {}).get("out", []) if o.get("parked")}
+        laid = [i for i, t in mission_laid_out(samples, parked).items() if t is not None]
+        if which == "mission-control":
+            check(sorted(laid) == sorted(hidden), f"mission {label}: it lays out every hidden window (moved from their park: {laid} of {hidden})")
+        else:
+            say(f"    App Exposé shows the front app's windows; laid out here: {laid} of {hidden} (the fixture's two are expected, Alpha's is another app's)")
+        mission_shot(which)
+        mission_close(opened[1], f"mission {label}")
+        mission_back(ids, titles, frames, f"mission {label}")
+        text = log_text()[mark:]
+        for what in ("mission-control: shown", f"mission-control: lent {n} windows", "mission-control: Mission Control lays out", "mission-control: closed", f"mission-control: put back {n} windows"):
+            check(what in text, f"mission {label}: the log says \"{what}\"")
+        x = state()
+        check(x.get("space") == space and x.get("active") == active and ctl("space").get("changes") == changes,
+              f"mission {label}: the same stage in front, no Space change")
+        consistent(f"after {label}")
+
+    say("  -- a pick --")
+    mark = len(log_text())
+    changes = ctl("space").get("changes")
+    opened = mission_open("mission-control", "mission pick")
+    if opened:
+        wait_until(lambda: len(mission_status().get("out") or []) == n, 3, "every hidden window put home")
+        time.sleep(1.0)
+        # A window in Mission Control cannot be clicked from here (its cover is topmost for a
+        # posted click's check): its app is activated instead, as the click activates it.
+        activate("a")
+        x = wait_state(lambda v: active_titles(v) == {"Alpha 1"}, "Alpha's stage in front", 5)
+        mission_close(opened[1], "mission pick")
+        check(x is not None, f"mission pick: Alpha's stage comes in front ({stage_titles(state()).get(state()['active'])})")
+        rest = ["Fixture 2", "Fixture 3"]
+        ws = wait_until(lambda: (lambda v: v if all(v.get(ids[k], {}).get("staged") for k in rest) and not v.get(ids["Alpha 1"], {}).get("staged") else None)(mission_listed()), 6,
+                        "Fixture 2 and 3 back in their stage Spaces, Alpha 1 shown")
+        check(bool(ws), "mission pick: Fixture 2 and 3 are back in their stage Spaces, Alpha 1 on the Desktop")
+        b = wait_until(lambda: (lambda v: v if v and close(v, frames[ids["Alpha 1"]]) else None)(mission_listed().get(ids["Alpha 1"], {}).get("bounds")), 4, "Alpha 1 at its frame")
+        check(bool(b), f"mission pick: Alpha 1 sits at its frame ({fmt(mission_listed()[ids['Alpha 1']]['bounds'])}, was {fmt(frames[ids['Alpha 1']])})")
+        gone = wait_until(lambda: not mission_status().get("out"), 4, "nothing left out")
+        check(bool(gone), f"mission pick: nothing left out ({mission_status().get('out')})")
+        text = log_text()[mark:]
+        check("picked: a hidden stage's window" in text, "mission pick: the log says a hidden stage's window was picked")
+        check(ctl("space").get("changes") == changes, "mission pick: no Space change")
+        consistent("after the pick")
+
+    say("  -- kill -9 with the windows out --")
+    ctl("debug-mission-control", "mode", "off")
+    r = ctl("debug-mission-control", "lend")
+    lent = r.get("lent") or []
+    wins, d = fixture_windows([FIX_ID, EXTRA["a"][0]])
+    at_park = [w["id"] for w in wins if w["id"] in lent and is_parked(w["bounds"], d)]
+    if check(bool(lent) and sorted(at_park) == sorted(lent), f"mission kill: the hidden windows are out, parked in the corner ({lent}, in the corner {at_park}; {r.get('error') or 'ok'})"):
+        pid = app_pid()
+        os.kill(pid, signal.SIGKILL)
+        wait_gone(pid)
+        back = wait_until(lambda: (lambda ws: ws if ws[0] and not any(is_parked(w["bounds"], ws[1]) or w.get("staged") for w in ws[0]) else None)(fixture_windows([FIX_ID, EXTRA["a"][0]])), 20,
+                          "every fixture window out of the park corner")
+        check(bool(back), "mission kill: the guardian brought every window out of the park corner")
+        for g in guardian_pids(pid):
+            wait_gone(g, 20)
+    stop_app()
+    all_onscreen("mission quit")
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -9844,7 +10223,8 @@ def main():
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
-             "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel}[p]()
+             "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel,
+             "mission": phase_mission, "mission-probe": phase_mission_probe}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

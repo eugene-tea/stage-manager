@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, Mission Control and App Exposé show every stage's windows again,
+  as they do in the default mode and with Apple's Stage Manager; they showed only the stage
+  in front. While one of them shows, the hidden stages' windows are put on the Desktop, out
+  of sight at the screen's corner, and go back into their stages when it closes. A window
+  picked there brings its stage in front. New setting `[windows] mission_control_stages`:
+  `"shown"` (the default) does this once Mission Control shows, `"key"` already at its
+  keyboard shortcut, `"off"` leaves hidden stages out. Opened with a trackpad gesture, a hot
+  corner or the Dock, the other stages' windows can join up to two seconds late.
 - Settings → Advanced opens with the mode: Accessibility, Spaces or With Apple's, a choice of
   three segments with a line on what the chosen one does and costs. With Apple's turns Apple's
   Stage Manager on and follows it (`apple_stage_manager_on = "integrate"`); Accessibility and

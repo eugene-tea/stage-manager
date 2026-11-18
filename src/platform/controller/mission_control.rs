@@ -152,7 +152,8 @@ impl Controller {
         let mode = self.mission_mode();
         self.spaces.mission.lends.set_mode(mode);
         let Some(main) = self.model.as_ref().map(|m| *m.main_display()) else { return };
-        if look {
+        // Nothing is inferred from what a locked screen lists.
+        if look && !self.locked {
             let list = windows::wake_on_screen();
             self.look_for_overview(&list, main.frame, now);
         }
@@ -207,7 +208,7 @@ impl Controller {
     fn mission_lend_batch(&mut self, ob: &Observer, budget: Option<Duration>) {
         let started = Instant::now();
         while budget.is_none_or(|b| started.elapsed() < b) {
-            let Some(id) = self.spaces.mission.lends.next() else { break };
+            let Some(id) = self.spaces.mission.lends.next_window() else { break };
             let Some(pid) = self.model.as_ref().and_then(|m| m.window(id)).map(|w| w.meta.pid) else { continue };
             // Never at its frame: a window whose park cannot be asked or does not take
             // stays hidden.
