@@ -140,54 +140,57 @@ fn three() -> (FakeWindowManager, Arrangement) {
     (f, a)
 }
 
+/// The eighth probe of 11-17: only an item's front window takes a click, so the window
+/// behind it in a stage of two has no point of its own, whatever part of it shows.
 #[test]
-fn the_mirror_finds_a_part_of_its_own_on_each_thumbnail_of_a_stage_of_two() {
+fn the_mirror_gives_a_point_to_an_items_front_only() {
     let (f, a) = three();
     let listed = f.listed();
     let bounds = |id: u32| listed.windows.iter().find(|w| w.id == id).map(|w| w.bounds).expect("listed");
-    let (front, back) = (bounds(1), bounds(2));
-    let p1 = a.click_at[&1];
-    let p2 = a.click_at[&2];
-    assert!(front.contains(p1), "{p1:?}");
-    assert!(back.contains(p2) && !front.contains(p2), "the back one where it shows: {p2:?}");
+    assert!(bounds(1).contains(a.click_at[&1]), "{:?}", a.click_at);
+    assert!(!a.click_at.contains_key(&2), "the window behind: no point: {:?}", a.click_at);
+    assert!(a.click_at.contains_key(&3), "a stage of one: its front");
     assert!(!a.click_at.contains_key(&4), "the window in front has no thumbnail");
 }
 
-/// The fourth probe of 11-16: a stage of two settled in the strip, both thumbnails
-/// Shift-clicked within one Shift press, both joined; no settle waited between them (live
-/// 11-16 before: a stage of three took 3.9 s, a settle after each click). Back to front: each
-/// lands on top, so the two keep their order over the stage in front.
+/// A stage of two in one item brought here: its front by one press, the other at a fresh read
+/// once Apple's add motion has settled (the eighth probe: only an item's front takes a click),
+/// each landing on top; then the order put back by a focus of the one wanted on top, the
+/// stage in front whole.
 #[test]
-fn a_stage_of_two_is_brought_here_in_one_shift_press_back_to_front() {
+fn a_stage_of_two_comes_in_front_first_then_its_order_is_put_back() {
     let (mut f, mut a) = three();
     let mut job = plan::merge(&a, 2, f.now()).expect("stage 2 is Alpha's");
-    let d = drive(&mut f, &mut a, &mut job, 6000);
+    let d = drive(&mut f, &mut a, &mut job, 8000);
     let report = d.end.expect("ended").expect("done");
-    assert_eq!(presses(&d.steps), vec![vec![2, 1]], "one press, a Shift-click per window, the back one first");
-    assert_eq!((report.clicks, report.presses), (2, 1));
+    assert_eq!(presses(&d.steps), vec![vec![1], vec![2]], "the item's front, then the other");
+    assert_eq!((report.clicks, report.presses, report.focuses), (2, 2, 1));
+    assert_eq!(f.focused, vec![1], "the order put back: the one wanted on top focused");
     assert_eq!(f.current(), &[1, 2, 4], "the two in their order, on top");
-    assert_eq!(f.ignored_mid_motion, 0, "no click mid-motion");
-    assert!(matches!(f.posted[..], [Posted::Clicks { own_shift: true, .. }]), "a Shift of ours around the press: {:?}", f.posted);
+    assert_eq!((f.ignored_mid_motion, f.back_refused), (0, 0), "no click mid-motion, none behind a front");
+    assert!(matches!(f.posted[..], [Posted::Clicks { own_shift: true, .. }, Posted::Clicks { own_shift: true, .. }]), "a Shift of ours around each press: {:?}", f.posted);
 }
 
-/// Live 11-16 (merge 1, a stage of three): one press for the three thumbnails of one item,
-/// each at a point of its own with the ones in front of it counted; and "done" at the first
-/// read that shows them in front, not a settle after it.
+/// Merge 1 of the live run of 11-17, a stage of three in one item: three presses, one window
+/// each, each at a fresh read; then its order put back, back to front, the one wanted on top
+/// last; done once the list shows it so.
 #[test]
-fn a_stage_of_three_comes_in_one_press_and_the_merge_is_done_once_the_list_shows_it_joined() {
+fn a_stage_of_three_in_one_item_comes_in_by_three_presses_and_its_order_is_put_back() {
     let mut f = FakeWindowManager::new();
     f.open_app(10, &[1, 2, 3]);
     f.open_app(20, &[4]);
     let mut a = settle(&mut f, &Arrangement::default());
     let points: Vec<_> = [1, 2, 3].iter().map(|w| a.click_at.get(w).copied()).collect();
-    assert!(points.iter().all(Option::is_some), "each of the three shows a part of its own: {points:?}");
+    assert!(points[0].is_some() && points[1..].iter().all(Option::is_none), "the item's front alone has a point: {points:?}");
     let mut job = plan::merge(&a, 1, f.now()).expect("stage 1 is the app's of three");
-    let d = drive(&mut f, &mut a, &mut job, 6000);
+    let d = drive(&mut f, &mut a, &mut job, 10_000);
     let r = d.end.expect("ended").expect("done");
-    assert_eq!(presses(&d.steps), vec![vec![3, 2, 1]], "back to front");
+    assert_eq!(presses(&d.steps), vec![vec![1], vec![2], vec![3]], "one per press, front first");
+    // In front after the presses: 3, 2, 1, 4. Back to front: 2, then 1 on top.
+    assert_eq!(f.focused, vec![2, 1]);
     assert_eq!(f.current(), &[1, 2, 3, 4], "in their order, on top");
-    let pressed = d.steps[0].0;
-    assert!(r.ms <= pressed + SETTLE.as_millis() as u64 + 100, "done {} ms after the press: Apple's motion and a read, no settle after it", r.ms - pressed);
+    assert_eq!(r.focuses, 2);
+    assert_eq!(f.back_refused, 0);
 }
 
 /// Thumbnails stacked exactly (windows at one frame, live 11-16): the one behind shows no
@@ -495,8 +498,10 @@ fn every_window_of_a_new_app_joins() {
         }
     });
     d.end.expect("ended").expect("done");
-    assert_eq!(sorted(&clicks(&d.steps)), vec![5, 6]);
-    assert_eq!(sorted(f.current()), vec![4, 5, 6, 7], "a window opened meanwhile joins too");
+    // One item of the app's two: its front, then the other once it is the item's front.
+    assert_eq!(presses(&d.steps), vec![vec![5], vec![6]]);
+    assert_eq!(f.current(), &[5, 6, 7, 4], "a window opened meanwhile joins too; the app's front on top, its order put back");
+    assert_eq!(f.back_refused, 0, "no click on a window behind its item's front");
 }
 
 #[test]
@@ -729,7 +734,7 @@ fn a_window_apple_draws_no_thumbnail_of_is_of_its_item_not_a_stage_of_its_own() 
     let a = settle(&mut f, &Arrangement::default());
     assert_eq!(a.strip.iter().map(|g| g.windows.clone()).collect::<Vec<_>>(), vec![vec![1, 2, 3, 4]], "front to back, the undrawn one at the back");
     assert!(a.remembered.is_empty(), "{:?}", a.remembered);
-    assert!(a.click_at.contains_key(&3) && !a.click_at.contains_key(&4), "{:?}", a.click_at);
+    assert!(a.click_at.contains_key(&1) && a.click_at.len() == 1, "the item's front alone has a point: {:?}", a.click_at);
     assert!(a.by_number(2).is_none(), "one stage to count");
 }
 
@@ -759,28 +764,74 @@ fn a_stage_of_four_left_for_a_new_app_comes_back_whole_in_its_order_with_the_app
     assert!(r.ms < 3000, "done in {} ms", r.ms);
 }
 
-/// Live 11-17: a press of three clicked front to back, the third click missed a thumbnail
-/// Apple's had laid out again around the ones taken. Clicked back to front, the ones still to
-/// click are in front, where the relayout leaves them, and each lands on top: one press, the
-/// stage in its order.
+/// The eighth probe of 11-17: a click on the part of its own a window behind its item's front
+/// shows takes nothing (the fake refuses it as Apple's does); the merge clicks each window once
+/// it is its item's front, the item laid out again after each press (live 11-17), and the
+/// stage ends in its order.
 #[test]
-fn a_press_goes_back_to_front_so_apples_relayout_moves_no_thumbnail_still_to_click() {
+fn a_click_behind_an_items_front_takes_nothing_and_the_merge_waits_for_each_to_be_front() {
     let mut f = FakeWindowManager::new();
     f.relayout = true;
     f.open_app(10, &[1, 2, 3]);
     f.open_app(20, &[4]);
     let mut a = settle(&mut f, &Arrangement::default());
-    // Front to back, as before: the item laid out again after the first click moves the rest.
+    // The part of its own the window behind shows: right of the front one.
+    let listed = f.listed();
+    let bounds = |id: u32| listed.windows.iter().find(|w| w.id == id).map(|w| w.bounds).expect("listed");
+    let (front, back) = (bounds(1), bounds(2));
+    let at = Point::new((front.max_x() + back.max_x()) / 2.0, back.center().y);
+    assert!(back.contains(at) && !front.contains(at));
     let mut before = f.clone();
-    let front_to_back: Vec<Press> = [1, 2, 3].iter().map(|w| Press { window: *w, at: a.click_at[w] }).collect();
-    before.post(&Posted::Clicks { presses: front_to_back, own_shift: true }).expect("posted");
-    assert_ne!(sorted(before.current()), vec![1, 2, 3, 4], "a click missed: {:?}", before.stages());
+    before.post(&Posted::Clicks { presses: vec![Press { window: 2, at }], own_shift: true }).expect("posted");
+    assert_eq!((before.current(), before.back_refused), (&[4][..], 1), "nothing joined: {:?}", before.stages());
     let mut job = plan::merge(&a, 1, f.now()).expect("planned");
-    let d = drive(&mut f, &mut a, &mut job, 6000);
+    let d = drive(&mut f, &mut a, &mut job, 10_000);
     let r = d.end.expect("ended").expect("done");
-    assert_eq!(presses(&d.steps), vec![vec![3, 2, 1]]);
-    assert_eq!(r.presses, 1);
+    assert_eq!(presses(&d.steps), vec![vec![1], vec![2], vec![3]]);
+    assert_eq!((r.presses, f.back_refused), (3, 0));
     assert_eq!(f.current(), &[1, 2, 3, 4], "in their order, on top");
+}
+
+/// "Open here" of an app with two windows, hidden at its launch: its item's front by one
+/// press, the other by the next, then the order put back, the app's front window focused last
+/// (the focus asked), on top of the stage it was asked into, which never moved.
+#[test]
+fn an_app_of_two_windows_opened_here_comes_in_by_two_presses_its_front_on_top() {
+    let (mut f, mut a) = three();
+    let mut job = plan::open_here(&a, 40, f.now()).expect("a stage in front");
+    job.hide_took(f.now());
+    f.launch(40, &[5, 6], true);
+    let d = drive_every(&mut f, &mut a, &mut job, 8000, FAST, |_, _| {});
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("hide"));
+    assert_eq!(presses(&d.steps), vec![vec![5], vec![6]], "front first, the other at a later read");
+    assert_eq!(f.current(), &[5, 6, 4], "the app's windows in their order on top");
+    assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)), "the app's front window focused last");
+    assert_eq!(r.focuses, 1, "the order put back by the focus asked: {:?}", d.steps);
+    assert!(!d.moved_in_front.contains(&4), "the stage in front never moved");
+}
+
+/// The round trip with an app of two windows (live 11-17): Apple's switched to the app's
+/// stage; one focus brings the stage that left back whole and in its order, then only the
+/// app's windows are pressed, its item's front first, the other at a later read, and the order
+/// put back, the app's front on top.
+#[test]
+fn the_round_trip_brings_the_stage_back_by_one_focus_then_presses_the_apps_windows_one_by_one() {
+    let mut f = FakeWindowManager::new();
+    f.open_app(20, &[5]);
+    f.open_app(10, &[1, 2]);
+    let mut a = settle(&mut f, &Arrangement::default());
+    let mut job = plan::open_here(&a, 40, f.now()).expect("a stage in front");
+    a.step_began(f.now());
+    f.launch(40, &[8, 9], false);
+    let d = drive_every(&mut f, &mut a, &mut job, 8000, FAST, |_, _| {});
+    let r = d.end.expect("ended").expect("done");
+    assert_eq!(r.route, Some("round_trip"));
+    assert_eq!(d.steps[0].1, Step::Focus(1), "the stage that left, by one switch to its front window");
+    assert_eq!(presses(&d.steps), vec![vec![8], vec![9]], "only the app's windows, its item's front first");
+    assert_eq!(f.current(), &[8, 9, 1, 2], "the stage in its order, the app's in theirs on top");
+    assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(8)));
+    assert_eq!(f.back_refused, 0);
 }
 
 /// The owner's smoke test of 11-17: Activity Monitor's window, shown again into the strip,

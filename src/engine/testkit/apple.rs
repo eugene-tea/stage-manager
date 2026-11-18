@@ -9,6 +9,8 @@
 //! does; a Shift-click on a
 //! visible part of a thumbnail adds that window alone to the stage in front, every click of
 //! one Shift press landing on what the strip showed at the press (the fourth probe of 11-16),
+//! but only on an item's front window: a click on the part of its own a window behind shows
+//! does nothing (the eighth probe of 11-17, [`FakeWindowManager::back_refused`] counts them),
 //! a press mid-motion is ignored, a click on a covered strip lands on nothing of Apple's (with
 //! [`FakeWindowManager::relayout`], each click lands on the item as Apple's lays it out again
 //! around the thumbnails left by the clicks before); an item draws three thumbnails, a
@@ -74,6 +76,9 @@ pub struct FakeWindowManager {
     pub interrupt_drags: bool,
     /// Posted clicks Apple's ignored because they came mid-motion.
     pub ignored_mid_motion: u32,
+    /// Posted clicks on a window behind another of its item, which Apple's ignores (the
+    /// eighth probe of 11-17).
+    pub back_refused: u32,
     /// Apple's answers no posted gesture (a macOS that changed).
     pub deaf: bool,
     /// "Show windows from an application: All at Once": a drag of a window whose app keeps
@@ -137,6 +142,7 @@ impl FakeWindowManager {
             hidden: BTreeSet::new(),
             interrupt_drags: false,
             ignored_mid_motion: 0,
+            back_refused: 0,
             deaf: false,
             stack: 16.0,
             item_room: 3,
@@ -443,13 +449,18 @@ impl FakeWindowManager {
     /// What a click at `at` lands on with the strip as laid out now, its motion not waited for
     /// ([`FakeWindowManager::relayout`]): the drawn thumbnails of each listed slot front to
     /// back, then its icon, as [`FakeWindowManager::listed`] orders them.
-    fn thumbnail_at_rest(&self, at: Point) -> Option<u32> {
+    fn thumbnail_at_rest(&mut self, at: Point) -> Option<u32> {
         if self.covered {
             return None;
         }
         for (slot, st) in self.stages.iter().enumerate().take(self.room) {
-            if let Some(id) = st.iter().take(self.item_room).enumerate().find(|(k, _)| self.thumb(slot, *k).contains(at)).map(|(_, id)| *id) {
-                return Some(id);
+            if let Some((k, id)) = st.iter().take(self.item_room).enumerate().find(|(k, _)| self.thumb(slot, *k).contains(at)) {
+                // Only the item's front takes a click.
+                if k > 0 {
+                    self.back_refused += 1;
+                    return None;
+                }
+                return Some(*id);
             }
             if self.icon(slot).contains(at) {
                 return None;
@@ -465,12 +476,17 @@ impl FakeWindowManager {
     }
 
     /// What a press at `at` lands on in the list now: the strip window whose thumbnail (or
-    /// its twin) is topmost there, `None` for anything else (a window in front, an icon,
-    /// nothing).
-    fn thumbnail_at(&self, at: Point) -> Option<u32> {
+    /// its twin) is topmost there when it is its item's front, `None` for anything else (a
+    /// window behind another of its item, counted; a window in front, an icon, nothing).
+    fn thumbnail_at(&mut self, at: Point) -> Option<u32> {
         let top = self.listed().windows.into_iter().find(|w| w.onscreen && w.bounds.contains(at))?;
         let id = if top.pid == MANAGER { top.id.checked_sub(9000).filter(|id| self.windows.contains_key(id))? } else { top.id };
-        self.stages.iter().take(self.room).any(|st| st.contains(&id)).then_some(id)
+        let st = self.stages.iter().take(self.room).find(|st| st.contains(&id))?;
+        if st.first() != Some(&id) {
+            self.back_refused += 1;
+            return None;
+        }
+        Some(id)
     }
 
     /// Apple's answer to a Shift-click on window `id`'s thumbnail: that window alone joins the
@@ -576,7 +592,10 @@ impl FakeWindowManager {
                     windows.push(app(*id, b, false));
                     continue;
                 }
-                if moving.is_none() {
+                // A thumbnail's twin is listed once it is at rest (one the motion does not move:
+                // a change elsewhere, a window opened in the stage in front).
+                let still = self.changed.as_ref().and_then(|(_, from)| from.get(id)).is_some_and(|f| *f == targets[id]);
+                if moving.is_none() || still {
                     windows.push(ListedWindow { id: 9000 + id, pid: MANAGER, layer: 0, bounds: b, onscreen: true });
                 }
                 windows.push(app(*id, b, true));

@@ -2,12 +2,12 @@
 //! a window's title bar ([`title_point`]) and the strip's column to drop it on
 //! ([`strip_drop`]). Pure geometry, top-left global coordinates.
 //!
-//! A thumbnail partly under another in its item (a stage of two: the front one over the back
-//! one, a live capture of 11-16: 85x97 at x = 32 over 87x97 at x = 15) or under its app icon
-//! (66x82 at x = -7) still shows a part of its own; a click there takes that window alone
-//! (a Shift-click adds only the window clicked). One fully under the others has no point of
-//! its own: it is clicked at the next settle, once the clicks of the press before took the
-//! ones over it away (a press goes back to front: the job's docs).
+//! A thumbnail partly under its app icon (66x82 at x = -7) or a window in front still shows a
+//! part of its own; a click there takes that window alone (a Shift-click adds only the window
+//! clicked). A thumbnail behind another of its item takes no click at all, whatever part of
+//! it shows (the eighth probe, 11-17): the mirror asks no point of it
+//! (`mirror::item_fronts`); it is clicked once the window in front of it has gone in and it
+//! is its item's front (the job's docs).
 //!
 //! **Only the drawn card takes a click.** The window list lists a thumbnail at the bounding box
 //! of its turned plane (the strip's perspective, [`crate::engine::perspective`]: a stage's

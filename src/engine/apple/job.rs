@@ -11,14 +11,23 @@
 //! - [`Goal::Front`]: a window in the stage in front, by the focus route.
 //! - [`Goal::Gather`]: windows (and, for a newly opened app, every window of the app as it
 //!   shows) in the stage in front, by a Shift-click per window on its thumbnail (a
-//!   Shift-click adds only the window clicked, a probe of 11-16), every window that shows a
-//!   point of its own at one settled read clicked in one Shift press (the fourth probe of
-//!   11-16: a stage of two, both clicked 50 ms apart, both joined), **back to front** within
-//!   each item: each click lands its window on top, so the windows keep the order they had,
-//!   and the back one, whose part of its own is the smallest, is clicked while the item is
-//!   still as read (live 11-17: clicked front to back, a stage came back reversed, and the
-//!   third click missed a sliver Apple's relayout had moved). A window fully under the others,
-//!   or one Apple draws no thumbnail of (an item shows three), is clicked at the next settle.
+//!   Shift-click adds only the window clicked, a probe of 11-16). **Only an item's front
+//!   window takes a click** (the eighth probe, 11-17: a window behind another of its item,
+//!   of one app or two, took no click alone nor after the front's in one press; the front
+//!   gone in, the one behind took it at a fresh read): a press takes one window per item, its
+//!   front, the fronts of several items in one press; the windows behind come in later
+//!   presses, each at a fresh read once Apple's add motion has settled (the mirror gives them
+//!   no point till then). A window Apple draws no thumbnail of (an item shows three) comes the
+//!   same way. Each click lands its window on top, so the stage in front ends in another order
+//!   (an item's back window on top of its front): **the order is put back** once every window
+//!   is in, by the focus route (raise, main, app frontmost: the eighth probe, a focus of a
+//!   window in the stage in front puts it on top, the stage whole; AXRaise alone, and with
+//!   AXMain, did nothing) on the windows out of place, back to front, the one wanted on top
+//!   last ([`Job::reorder`]). The order wanted: for a merge or a send, the windows brought in
+//!   on top in their order over the stage in front at the ask; for "open here", the app's
+//!   windows (in their order in the strip, front first) over the stage it was asked into; for
+//!   a restore, the saved order. A focus whose window has left the stage in front stops it,
+//!   said; a raise Apple's does not answer after [`TRIES`] is left, said.
 //!   **The stage that was in front left** (a newly opened app in front: Apple's switched to
 //!   its stage) is brought back whole by one focus of its front window, never Shift-clicked
 //!   back window by window: Apple's own switch puts back its windows in their order, the ones
@@ -291,6 +300,16 @@ pub struct Job {
     pub lenient: bool,
     /// The screen the job acts on (`None`: the main one).
     pub screen: Option<crate::engine::model::DisplayId>,
+    /// The order wanted in front ([`Job::reorder`]): the goal's windows it was taken for, the
+    /// windows wanted on top (front first), and the ones kept under them.
+    order_for: Vec<u32>,
+    order_top: Vec<u32>,
+    order_under: Vec<u32>,
+    /// A focus putting the order back ran: a window leaving the stage in front then stops the
+    /// job, said.
+    reordered: bool,
+    /// The order is left as it is (a raise not answered), said.
+    order_left: bool,
 }
 
 impl Job {
@@ -335,6 +354,11 @@ impl Job {
             waits_for: "the settle",
             lenient: false,
             screen: None,
+            order_for: Vec::new(),
+            order_top: Vec::new(),
+            order_under: Vec::new(),
+            reordered: false,
+            order_left: false,
         }
     }
 
@@ -551,7 +575,7 @@ impl Job {
                     if alone { Need::Met } else { Need::Step(Step::Focus(*w)) }
                 }
             },
-            Goal::Gather { windows, app, focus_app } => self.gather(windows, *app, *focus_app, cx, now),
+            Goal::Gather { windows, app, focus_app } => self.gather(windows, *app, *focus_app, None, cx, now),
             Goal::Stage { windows, others, front, all_at_once } => self.stage(windows, others, *front, *all_at_once, cx, now),
         }
     }
@@ -624,13 +648,85 @@ impl Job {
                 "windows {extras:?} stay with the stage of windows {t:?}: with \"Show windows from an application: All at Once\" Apple's Stage Manager keeps an app's windows together"
             ));
         }
-        self.gather(&t, None, false, cx, now)
+        self.gather(&t, None, false, Some(&t), cx, now)
+    }
+
+    /// The order wanted in front for the gather of `windows` ([`Job::reorder`], module docs)
+    /// taken at its first read: for a newly opened app (`app`) the windows asked are the ones
+    /// kept under its windows; else the ones in front then are kept under the rest.
+    fn seed_order(&mut self, windows: &[u32], app: Option<i32>, a: &Arrangement) {
+        if self.order_for == windows {
+            return;
+        }
+        self.order_for = windows.to_vec();
+        self.reordered = false;
+        self.order_left = false;
+        self.order_under = match app {
+            Some(_) => windows.to_vec(),
+            None => a.current.iter().copied().filter(|w| windows.contains(w)).collect(),
+        };
+        self.order_top = match app {
+            Some(_) => Vec::new(),
+            None => windows.iter().copied().filter(|w| !self.order_under.contains(w)).collect(),
+        };
+    }
+
+    /// The app's windows `ids` (front to back as the strip shows them), noted on top of the
+    /// order wanted after those noted before.
+    fn note_app_order(&mut self, ids: impl IntoIterator<Item = u32>) {
+        for id in ids {
+            if !self.order_top.contains(&id) {
+                self.order_top.push(id);
+            }
+        }
+    }
+
+    /// The order wanted in front, front to back: `order` when given (a restore's saved
+    /// order); else the windows wanted on top, then any other window of `app` in front, then
+    /// the ones kept under them.
+    fn wanted(&self, app: Option<i32>, order: Option<&[u32]>, a: &Arrangement) -> Vec<u32> {
+        if let Some(o) = order {
+            return o.to_vec();
+        }
+        let mut w = self.order_top.clone();
+        if let Some(pid) = app {
+            w.extend(a.seen.iter().filter(|(id, s)| s.full && s.pid == pid && !self.order_top.contains(id)).map(|(id, _)| *id));
+        }
+        w.extend(self.order_under.iter().copied().filter(|id| !self.order_top.contains(id)));
+        w
+    }
+
+    /// The next window to focus to put the stage in front in `wanted`'s order (module docs):
+    /// of the windows wanted that show in front at full size, those over the longest tail of
+    /// `wanted` already in its order there, the lowest first, so the one wanted on top goes
+    /// last; `None` once in order, or when the order is left (a raise Apple's did not answer
+    /// after [`TRIES`], said).
+    fn reorder(&mut self, wanted: &[u32], a: &Arrangement) -> Option<u32> {
+        if self.order_left {
+            return None;
+        }
+        let shown: Vec<u32> = a.seen.iter().filter(|(id, s)| s.full && wanted.contains(id)).map(|(id, _)| *id).collect();
+        let want: Vec<u32> = wanted.iter().copied().filter(|w| shown.contains(w)).collect();
+        let in_order = |tail: &[u32]| {
+            let mut it = shown.iter();
+            tail.iter().all(|w| it.any(|x| x == w))
+        };
+        let k = (0..=want.len()).find(|&k| in_order(&want[k..])).unwrap_or(want.len());
+        let next = *want.get(k.checked_sub(1)?)?;
+        if self.last.is_some_and(|r| r.key == (0, next) && r.tries >= TRIES) {
+            self.order_left = true;
+            self.note(format!("the order in front not put back: window {next} was not raised in {TRIES} focuses"));
+            return None;
+        }
+        self.reordered = true;
+        Some(next)
     }
 
     /// [`Goal::Gather`]'s need, after the settle (an app hidden by us is taken in ahead of it:
-    /// [`Job::pickup`]).
-    fn gather(&mut self, windows: &[u32], app: Option<i32>, focus_app: bool, cx: &Ctx, now: Instant) -> Need {
+    /// [`Job::pickup`]); `order`, when given, the order wanted in front at the end.
+    fn gather(&mut self, windows: &[u32], app: Option<i32>, focus_app: bool, order: Option<&[u32]>, cx: &Ctx, now: Instant) -> Need {
         let a = cx.mirror;
+        self.seed_order(windows, app, a);
         // Windows gone, and windows of a Desktop not shown (a focus would show it), are left.
         let mut want: Vec<u32> = windows.iter().copied().filter(|w| a.where_is(*w).is_some_and(|(p, _)| p != Where::Away)).collect();
         // The windows to keep, front to back (the stage in front at the ask, for "open here").
@@ -683,7 +779,20 @@ impl Job {
         }
         let in_front = |w: &u32| a.current.contains(w) || by_pid.get(w).is_some_and(|s| s.full);
         let missing: BTreeSet<u32> = want.iter().copied().filter(|w| !in_front(w)).collect();
+        if self.reordered && !missing.is_empty() {
+            // A focus putting the order back took a window out of the stage in front: stopped.
+            return Need::Fail(format!("windows {missing:?} left the stage in front as its order was put back"));
+        }
         if missing.is_empty() {
+            // The order put back first, the window wanted on top last (for "open here" the
+            // app's front window: its focus is the one asked).
+            let wanted = self.wanted(app, order, a);
+            if let Some(w) = self.reorder(&wanted, a) {
+                if focus_app && !self.focused_app && wanted.first() == Some(&w) {
+                    self.focus_pending = Some(w);
+                }
+                return Need::Step(Step::Focus(w));
+            }
             // Every window in front at this read: the app's front window focused at once (a
             // window of the stage in front: it switches nothing, no settle waited).
             if focus_app && !self.focused_app {
@@ -706,11 +815,14 @@ impl Job {
             self.switch_back = app.is_some();
             return Need::Step(Step::Focus(front));
         }
-        // Every window that shows a point of its own at this read, in one Shift press: back
-        // to front within each item (each lands on top: the order kept; the back one, whose
-        // part of its own is the smallest, clicked while the item is as read), the items top
-        // to bottom. Each point was taken with the windows listed in front of it counted (the
-        // gather's own not clicked yet too).
+        // The app's windows in the strip, front first: on top of the order wanted.
+        if let Some(pid) = app {
+            let strip: Vec<u32> = a.strip.iter().flat_map(|g| g.windows.iter().copied()).filter(|w| cx.pids.get(w) == Some(&pid)).collect();
+            self.note_app_order(strip.into_iter().chain(pid_order.iter().copied().filter(|w| by_pid.get(w).is_some_and(|s| s.thumb))));
+        }
+        // Every window that shows a point of its own at this read, in one Shift press: each
+        // item's front only (module docs), the items top to bottom; the windows behind at a
+        // later read. Each point was taken with the windows listed in front of it counted.
         let in_strip: Vec<u32> = a
             .strip
             .iter()
@@ -785,6 +897,9 @@ impl Job {
         }
         let thumbs: Vec<(u32, Seen)> = mine.iter().filter(|(_, s)| s.thumb).copied().collect();
         let front: Vec<(u32, Seen)> = mine.iter().filter(|(_, s)| s.full).copied().collect();
+        self.seed_order(&windows, Some(pid), a);
+        // The app's thumbnails, front first: on top of the order wanted.
+        self.note_app_order(thumbs.iter().map(|(w, _)| *w));
         if self.hidden && !self.unhidden && thumbs.is_empty() {
             if !front.is_empty() {
                 return None;
@@ -809,8 +924,9 @@ impl Job {
             if thumbs.iter().any(|(_, s)| s.still < STILL_FOR) {
                 return Some(self.wait("the app's thumbnail to rest"));
             }
-            // Every thumbnail of the app in one Shift press, back to front (the order kept).
-            let presses: Vec<Press> = thumbs.iter().rev().filter_map(|(w, s)| s.click_at.map(|at| Press { window: *w, at })).collect();
+            // Each item's front of the app's thumbnails in one Shift press (the windows behind
+            // have no point till then: module docs), the rest at a later read.
+            let presses: Vec<Press> = thumbs.iter().filter_map(|(w, s)| s.click_at.map(|at| Press { window: *w, at })).collect();
             if presses.is_empty() {
                 let hold = if thumbs.iter().any(|(_, s)| s.bounds.max_x() <= cx.screen.frame.x) { Hold::StripCovered } else { Hold::NoPoint };
                 if self.waiting.hold(hold, now) {
@@ -826,6 +942,12 @@ impl Job {
             }
             return Some(next);
         }
+        // A window of the app on its way between the strip and the stage in front (a window
+        // behind its item's front, laid out again once the front went in): waited for, so no
+        // window of the app is left in the strip.
+        if !front.is_empty() && mine.iter().any(|(_, s)| !s.full) {
+            return Some(self.wait("the app's thumbnail to rest"));
+        }
         if !front.is_empty() {
             // Not with the stage it was asked into (Apple's switched at the activation itself,
             // the stage in front leaving at once, live 11-17): the round trip after the settle.
@@ -836,6 +958,14 @@ impl Job {
             // In the stage in front: focused once at rest (a window there switches nothing).
             if front.iter().any(|(_, s)| s.still < STILL_FOR) {
                 return Some(self.wait("the app's window into the stage in front"));
+            }
+            // The order put back, the app's front window focused last (module docs).
+            let wanted = self.wanted(Some(pid), None, a);
+            if let Some(w) = self.reorder(&wanted, a) {
+                if focus_app && !self.focused_app && wanted.first() == Some(&w) {
+                    self.focus_pending = Some(w);
+                }
+                return Some(self.try_step_ahead(Step::Focus(w), cx, now));
             }
             if focus_app && !self.focused_app {
                 let w = front[0].0;

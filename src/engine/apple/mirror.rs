@@ -23,6 +23,12 @@
 //! Rules of [`fold`]:
 //!
 //! - **Current stage**: managed windows on screen with no twin, front to back.
+//! - **Only an item's front takes a click** (the eighth probe, 11-17): a Shift-click on the
+//!   part of its own a window behind another of its item shows does nothing, whether the two
+//!   are of one app or two, alone or after the front's click in one press; once the front one
+//!   has gone in front, the one behind is the item's front and takes it. So a thumbnail that
+//!   is not its item's front (another thumbnail listed in front of it in its item) has no
+//!   point ([`item_fronts`]).
 //! - **Windows Apple draws no thumbnail of**: an item shows three; a stage's fourth window
 //!   and on is listed off screen, thumbnail-sized, within the item (live 11-17: a stage of
 //!   four, its fourth at 69x63 inside the item's thumbnails). It belongs to that item, at its
@@ -591,6 +597,8 @@ fn by_ax(strip: &[Group], ax: &[Vec<u32>]) -> Vec<Group> {
 fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen: &Display) -> (BTreeMap<u32, Point>, BTreeMap<u32, Vec<Cover>>) {
     let mut out = BTreeMap::new();
     let mut covered = BTreeMap::new();
+    let drawn: Vec<(u32, Rect)> = thumbs.iter().filter_map(|&(id, i)| listed.windows.get(i).filter(|w| w.onscreen).map(|w| (id, w.bounds))).collect();
+    let fronts = item_fronts(&drawn);
     for &(id, i) in thumbs {
         let Some(w) = listed.windows.get(i) else { continue };
         if !w.onscreen {
@@ -607,7 +615,9 @@ fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen
             .collect();
         over.extend(icons.iter().map(|r| Over::Icon(*r)));
         let in_front: Vec<&ListedWindow> = in_front.into_iter().map(|(_, o)| o).collect();
-        match points::visible_point(w.bounds, &over, screen) {
+        // Behind another of its item: no click of its own (module docs).
+        let point = if fronts.contains(&id) { points::visible_point(w.bounds, &over, screen) } else { None };
+        match point {
             Some(p) => {
                 out.insert(id, p);
             }
@@ -624,6 +634,24 @@ fn click_points(listed: &Listed, thumbs: &[(u32, usize)], icons: &[Rect], screen
         }
     }
     (out, covered)
+}
+
+/// The front window of each strip item among `thumbs` (front to back as listed, with their
+/// bounds): thumbnails that overlap, directly or through another, make one item (as
+/// [`items`] groups them); the first listed of each is its front, the only one that takes a
+/// click (module docs).
+fn item_fronts(thumbs: &[(u32, Rect)]) -> BTreeSet<u32> {
+    let mut item: Vec<usize> = (0..thumbs.len()).collect();
+    for i in 0..thumbs.len() {
+        for j in 0..i {
+            if overlap(&thumbs[i].1, &thumbs[j].1) > 0.0 && item[i] != item[j] {
+                let (from, to) = (item[i].max(item[j]), item[i].min(item[j]));
+                item.iter_mut().filter(|k| **k == from).for_each(|k| *k = to);
+            }
+        }
+    }
+    // An item's label is the smallest index in it: its first listed.
+    thumbs.iter().enumerate().filter(|(i, _)| item[*i] == *i).map(|(_, (id, _))| *id).collect()
 }
 
 /// Windows Apple draws no thumbnail of (`hidden`: managed, listed off screen, thumbnail-sized,
