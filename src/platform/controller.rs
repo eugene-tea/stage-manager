@@ -2092,7 +2092,8 @@ impl Controller {
     /// [`Self::transition_for`]), then moved the way the engine says ([`WindowEngine::animate`]).
     /// An activation's focus is `run`'s ([`ActivationRun::focus`]). `early_corner`: the
     /// corner's cover as the activation found it, and the window list it read (none read, or
-    /// moved since: both read again).
+    /// moved since: both read again). An incoming window already shown at its frame is taken
+    /// out of the transition ([`Self::skip_shown_incoming`]).
     fn execute_animated_rest(
         &mut self,
         ob: &Observer,
@@ -2108,8 +2109,39 @@ impl Controller {
         // The windows already in place stay out of the transition: no snapshot grows over them.
         let Some(mut t) = self.transition_for(ob, &actions) else { return self.execute(ob, actions) };
         t.incoming.retain(|w| !first.contains(&w.window.id));
+        // The window list, read once for the plan (the wake's, when one is open).
+        let (early_cover, list) = match early_corner {
+            Some((cover, list)) => (Some(cover), list),
+            None => (None, windows::wake_on_screen().to_vec()),
+        };
+        self.skip_shown_incoming(&mut t, &list);
+        if t.incoming.is_empty() && t.outgoing.is_empty() {
+            return self.execute(ob, actions);
+        }
         match self.engine.animate(&t) {
-            Motion::Pictures => self.switch_behind_pictures(ob, actions, t, run, early_corner, anim.cover_ms),
+            Motion::Pictures => self.switch_behind_pictures(ob, actions, t, run, early_cover, list),
+        }
+    }
+
+    /// Takes out of `t` every incoming window already shown at its frame: in `list` (the
+    /// on-screen windows) within [`transition_plan::SHOWN_SLACK`] of it, and not kept out of
+    /// view by the engine ([`WindowEngine::keeps_out_of_view`]). No picture grows over such a
+    /// window and it stays as it is; its show, raise and focus run with the batch as before
+    /// (round skip-shown-incoming: a Dock press's lend showed the window before its switch,
+    /// and the switch grew a picture over it).
+    fn skip_shown_incoming(&self, t: &mut Transition, list: &[windows::CgWindow]) {
+        let Some(m) = self.model.as_ref() else { return };
+        let engine = &self.engine;
+        let skipped = transition_plan::skip_shown(t, |g| {
+            let id = WindowId(g.window.id);
+            let listed = list.iter().find(|w| w.id == id.0 && w.layer == 0 && w.alpha > 0.0).map(|w| w.bounds);
+            let display = m.window(id).and_then(|s| m.displays().iter().find(|d| d.id == s.meta.display));
+            // A window on no screen the model knows: counted hidden, its picture grows.
+            let engine_hides = listed.is_some_and(|r| display.is_none_or(|d| engine.keeps_out_of_view(id, d, r)));
+            transition_plan::already_shown(g.window.frame, transition_plan::Sighting { listed, engine_hides })
+        });
+        for (window, off) in skipped {
+            tracing::info!(id = t.id, window, off, reason = "on screen at its frame and not hidden by the engine", "transition: incoming window already shown: no grow-in");
         }
     }
 
@@ -2118,24 +2150,26 @@ impl Controller {
     /// transition sent to the strip and its pictures waited for (shared,
     /// [`Self::send_transition`]), then the hides behind the outgoing pictures and the
     /// arrivals held hidden until the strip unveils them ([`Self::flush_pending_as`]).
+    /// `early_cover`: the corner's cover as an activation found it (none: found here);
+    /// `list`: the on-screen windows read for the plan.
     fn switch_behind_pictures(
         &mut self,
         ob: &Observer,
         actions: Vec<Action>,
         mut t: Transition,
         run: ActivationRun,
-        early_corner: Option<(Option<SwitchCover>, Vec<windows::CgWindow>)>,
-        cover_ms: u64,
+        early_cover: Option<Option<SwitchCover>>,
+        list: Vec<windows::CgWindow>,
     ) -> usize {
         let id = t.id;
+        let cover_ms = self.store.config().style.animation.cover_ms;
         // A new switch: the last one's windows owe no focus when they land.
         self.landing_focus = None;
         let arriving: HashSet<u32> = t.incoming.iter().map(|w| w.window.id).collect();
         let outgoing: HashSet<u32> = t.outgoing.iter().map(|w| w.window.id).collect();
-        let (corner, list) = match early_corner {
-            Some((corner, list)) => (corner, list),
+        let (corner, list) = match early_cover {
+            Some(corner) => (corner, list),
             None => {
-                let list = windows::on_screen();
                 let activated: HashSet<u32> = run.fallback.intersection(&arriving).copied().collect();
                 let corner = self.switch_cover(&arriving, &outgoing, &activated, &list);
                 if let Err(r) = &corner

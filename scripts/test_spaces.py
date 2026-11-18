@@ -1268,6 +1268,14 @@ def _dock_home_cases(d1, d2):
         lines = [line for _, line in log_events(t0)]
         check(any("put home before the release" in line for line in lines),
               "dock home 1: the app's log says Fixture 3 was put home at the press")
+        # Round skip-shown-incoming (the owner's log, 11-18 10:41:33): put home at the press,
+        # Fixture 3 is shown at its frame before its stage's switch, which grows no picture
+        # over it.
+        f3 = next((w["id"] for w in x["windows"] if w["title"] == "Fixture 3"), None)
+        check(any("incoming window already shown: no grow-in" in line and f"window={f3} " in line + " " for line in lines),
+              f"dock home 1: the switch skips Fixture 3's grow-in, already shown (window {f3})")
+        check(not any("transition ghost" in line and f"window={f3} outgoing=false" in line for line in lines),
+              "dock home 1: no incoming picture of Fixture 3")
     if current_space() != d2:
         return
 

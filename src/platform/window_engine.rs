@@ -179,6 +179,17 @@ pub trait WindowEngine: Send + Sync {
         self.is_hidden(d, listed)
     }
 
+    /// True when window `id`, listed at `listed` on display `d`, is kept out of view by this
+    /// engine now: what a switch's plan asks before it lets an incoming window that is
+    /// already shown keep its place with no picture growing over it
+    /// ([`crate::ui::transition_plan::already_shown`]). By [`Self::hides_now`] unless the
+    /// engine knows better; the Spaces engine: held in its stage Space off every Desktop, or
+    /// parked for a lend (a window put home at a Dock press, at its frame on its Desktop, is
+    /// in view though still counted hidden).
+    fn keeps_out_of_view(&self, id: WindowId, d: &Display, listed: Rect) -> bool {
+        self.hides_now(id, d, listed)
+    }
+
     /// True when window `id`'s focus must wait until it is shown: focused (made main, its
     /// app frontmost) while this engine hides it, its app could take macOS to another
     /// Desktop. macOS activates an app on a Desktop where it has a window; a window kept off

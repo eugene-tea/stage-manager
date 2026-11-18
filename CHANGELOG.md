@@ -15,6 +15,10 @@
 - A window's shadow on the window behind it no longer goes and comes back at the end of a
   switch. In a stage of overlapping windows, the front window's shadow on the one behind was
   dropped as the windows landed and faded back in over the next third of a second.
+- A window already on screen when its stage is chosen no longer flies in from its card as if
+  it were hidden: it stays where it is, and only the stage's hidden windows grow from the
+  card. With `engine = "spaces"`, a Dock click on an app whose window waited in a stage
+  showed that window first and then played its grow-in over it.
 
 ## 1.9.0 — 2026-11-18
 
