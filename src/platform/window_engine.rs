@@ -2,10 +2,13 @@
 //! strip, the rules, `state.json`, the guardian protocol) and how a stage's windows are
 //! hidden, shown and brought back (docs/ARCHITECTURE.md, "Window engines").
 //!
-//! One strategy, [`WindowEngine`], with exactly two implementations planned: the Corner
-//! engine ([`super::corner::engine::CornerEngine`], today's Accessibility park corner) and the
-//! Spaces engine ([`super::spaces::engine::SpacesEngine`], 1.9). Shared code asks the engine and never which one
-//! runs; what only one engine needs stays inside it.
+//! One strategy, [`WindowEngine`], with three implementations: the Corner engine
+//! ([`super::corner::engine::CornerEngine`], today's Accessibility park corner), the Spaces
+//! engine ([`super::spaces::engine::SpacesEngine`], 1.9), and the Apple mode's null-hide
+//! engine ([`super::apple::engine::AppleEngine`]: Apple's Stage Manager arranges, nothing of
+//! ours is hidden; installed at the release while `[windows] with_apple = "augment"`, the
+//! launch's choice installed again at the resume). Shared code asks the engine and never
+//! which one runs; what only one engine needs stays inside it.
 //!
 //! **Which one runs** is decided at every launch ([`choose_at_launch`]: the config, the
 //! launch probe, the switches; [`crate::engine::engine_choice`]) and can change once while
@@ -418,6 +421,7 @@ pub fn of(kind: EngineKind) -> Arc<dyn WindowEngine> {
     match kind {
         EngineKind::Corner => Arc::new(super::corner::engine::CornerEngine),
         EngineKind::Spaces => super::spaces::engine::shared(),
+        EngineKind::Apple => Arc::new(super::apple::engine::AppleEngine),
     }
 }
 

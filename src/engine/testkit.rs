@@ -8,6 +8,8 @@
 //! one. A test that checks one engine's own geometry sits in [`corner_nuance!`] (the park
 //! corner) or in that engine's module (`engine::spaces::tests`) and names its engine.
 
+pub mod apple;
+
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -244,6 +246,8 @@ impl Desk {
                             self.stage_space.insert(id);
                         }
                     }
+                    // Apple's strip takes it: the model's hide is dropped, nothing moves.
+                    EngineKind::Apple => {}
                 },
                 Action::Raise { id } => self.raise(id),
                 Action::Focus { id } => {
@@ -281,6 +285,7 @@ impl Desk {
         match self.engine {
             EngineKind::Corner => self.frames.get(&id).is_some_and(|f| self.display.unwrap_or_else(display).parks(*f)),
             EngineKind::Spaces => self.stage_space.contains(&id),
+            EngineKind::Apple => false,
         }
     }
 }

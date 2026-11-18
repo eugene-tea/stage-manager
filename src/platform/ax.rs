@@ -11,8 +11,8 @@ use objc2_application_services::{
     AXCopyMultipleAttributeOptions, AXError as RawAxError, AXObserver, AXUIElement, AXValue, AXValueType,
 };
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType, CFURL, CFURLPathStyle, CGPoint,
-    CGSize, kCFRunLoopDefaultMode,
+    CFArray, CFBoolean, CFNumber, CFRetained, CFRunLoop, CFRunLoopSource, CFString, CFType, CFURL, CFURLPathStyle, CGPoint,
+    CGRect, CGSize, kCFRunLoopDefaultMode,
 };
 
 use crate::engine::geometry::{Point, Rect, Size};
@@ -579,6 +579,29 @@ impl AxElement {
     /// The boolean attribute `name` (`AXSelected`, …).
     pub fn flag(&self, name: &'static str) -> AxResult<bool> {
         self.bool_attr(name)
+    }
+
+    /// The string attribute `name` (`AXIdentifier`, …).
+    pub fn text(&self, name: &'static str) -> AxResult<String> {
+        self.string_attr(name)
+    }
+
+    /// The array of numbers attribute `name` holds (WindowManager's `AXWindowsIDs`); items
+    /// that are not whole numbers are left out.
+    pub fn numbers(&self, name: &'static str) -> AxResult<Vec<i64>> {
+        let v = self.attribute(name)?;
+        let array = v.downcast::<CFArray>().map_err(|_| AxError::WrongType(name))?;
+        // SAFETY: a CF array holds CF objects; each item is type-checked below.
+        let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
+        Ok(array.iter().filter_map(|item| item.downcast_ref::<CFNumber>().and_then(|n| n.as_i64())).collect())
+    }
+
+    /// The rectangle attribute `name` (`AXFrame`), top-left origin; a value that is not
+    /// finite is an error.
+    pub fn rect(&self, name: &'static str) -> AxResult<Rect> {
+        let r: CGRect = self.value_attr(name, AXValueType::CGRect)?;
+        let out = Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height);
+        if out.is_finite() { Ok(out) } else { Err(AxError::Value) }
     }
 
     /// The names of the attributes this element has (`AXUIElementCopyAttributeNames`; the

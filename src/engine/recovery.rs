@@ -386,6 +386,10 @@ pub enum EngineKind {
     /// A hidden window-server Space per stage per screen: a hidden window keeps its frame,
     /// off screen. Its pure half is [`super::spaces`]; its platform half is S3's.
     Spaces,
+    /// Apple's Stage Manager arranges the windows and this app follows it
+    /// (`[windows] with_apple = "augment"`): nothing is hidden by this app. Its pure half is
+    /// [`super::apple`]; its platform half `platform::apple`.
+    Apple,
 }
 
 impl EngineKind {
@@ -394,6 +398,7 @@ impl EngineKind {
         match self {
             Self::Corner => "corner",
             Self::Spaces => "spaces",
+            Self::Apple => "apple",
         }
     }
 
@@ -412,6 +417,9 @@ impl EngineKind {
             // A lend's park is the one place a hidden window of this engine has a frame of
             // its own, and that window is registered (the model counts it hidden).
             Self::Spaces => known == Known::Registered && is_stranded(frame, displays, known),
+            // Nothing of the Apple mode's is hidden: only a window a release before it held
+            // (registered, in a park corner) waits to come back.
+            Self::Apple => known == Known::Registered && is_stranded(frame, displays, known),
         }
     }
 

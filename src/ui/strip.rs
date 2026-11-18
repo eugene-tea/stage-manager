@@ -21,6 +21,12 @@
 //!   [`StripEvent::IconClicked`] on its app icon.
 //! - Cards glide to new slots on the spring; the strip **slides** out to the left when
 //!   hidden, the cards moving in 3D (they widen as they leave, as Apple's do).
+//! - **Brought back at the edge** (`[reveal] flat`, Apple's: [`edge_flat`]): a strip hidden
+//!   by a window (or by "Show recent apps" off) that the pointer brings back turns its cards
+//!   flat at once, still off the screen, and slides in; every projection and hit test then
+//!   reads flat metrics ([`Metrics::flat`]). Hiding again, each plane turns back on a
+//!   keyframed transform under the usual slide, along Apple's pose; a window moving off the
+//!   strip meanwhile turns them back in place.
 //! - Thumbnails come from [`capture`] at events (1.9): a window newly on a card (its stage
 //!   left), the strip coming into view, and the pointer on a card (its windows taken again);
 //!   also every `thumbnail_interval_ms` when that is set (0, the default: no timer).
@@ -107,7 +113,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
-use objc2_foundation::{MainThreadMarker, NSNumber, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSTimer, NSValue};
+use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, NSObjectProtocol, NSPoint, NSProcessInfo, NSRect, NSSize, NSString, NSTimer, NSValue};
 use objc2_quartz_core::{
     CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CASpringAnimation, CATextLayer,
     CATransaction, CATransform3D, CATransformLayer, NSValueCATransform3DAdditions, kCAAlignmentCenter, kCAAlignmentLeft,
@@ -126,6 +132,7 @@ use crate::ui::overlay::GlassLook;
 use crate::ui::app_icons;
 use crate::ui::card_glass;
 use crate::ui::display_options;
+use crate::ui::edge_flat;
 use crate::ui::assistive;
 use crate::ui::strip_access;
 use crate::ui::strip_reach;
@@ -979,8 +986,10 @@ struct Geometry {
     global: Rect,
     /// Height of the primary display (for flipping Cocoa y).
     primary_height: f64,
-    /// The style resolved for this display.
+    /// The style resolved for this display, in the pose the cards are drawn in (flat: no turn).
     m: Metrics,
+    /// The cards' turn when they are turned (radians), whatever the pose.
+    turn: f64,
 }
 
 impl Geometry {
@@ -1013,7 +1022,32 @@ impl Geometry {
         let m = Metrics::new(style, size, k, display_middle - top);
         let panel = NSRect::new(visible.origin, NSSize::new(m.panel_width(), visible.size.height));
         let global = Rect::new(visible.origin.x, top, m.width, visible.size.height);
-        Self { screen: frame, panel, global, primary_height, m }
+        let turn = m.tilt;
+        Self { screen: frame, panel, global, primary_height, m, turn }
+    }
+
+    /// The same geometry with the cards drawn flat (the strip brought back at the edge,
+    /// [`Metrics::flat`]) or turned.
+    fn posed(mut self, flat: bool) -> Self {
+        self.m.tilt = if flat { 0.0 } else { self.turn };
+        self
+    }
+
+    /// The metrics of the cards turned, whatever the pose drawn now.
+    fn turned(&self) -> Metrics {
+        Metrics { tilt: self.turn, ..self.m.clone() }
+    }
+
+    /// The flight's eye in the panel's coordinates ([`motion_math::Flight`]), level with the
+    /// strip's.
+    fn flight_eye(&self) -> motion_math::Eye {
+        let left = self.screen.origin.x - self.panel.origin.x;
+        motion_math::Flight::over(left, Size::new(self.screen.size.width, self.screen.size.height), self.m.eye.y).eye
+    }
+
+    /// The strip's eye in the panel's coordinates.
+    fn strip_eye(&self) -> motion_math::Eye {
+        motion_math::Eye { at: self.m.eye, distance: self.m.perspective }
     }
 
     /// The whole panel in global top-left coordinates: the column and the room right of it
@@ -1151,6 +1185,52 @@ impl CardLayers {
         }
     }
 
+    /// Turns every plane as `m` draws it (flat or turned), at once; after `hold` seconds where
+    /// it is drawn now (a strip fading out under Reduce Motion turns once faded).
+    fn turn_planes(&self, m: &Metrics, hold: f64) {
+        let key = NSString::from_str("transform");
+        for (_, plane) in &self.planes {
+            // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
+            let now = unsafe { plane.presentationLayer() }.map_or_else(|| plane.transform(), |p| p.transform());
+            plane.removeAnimationForKey(&key);
+            plane.setTransform(turn(m));
+            if hold > 0.0 {
+                let v = transform_value(now);
+                plane.addAnimation_forKey(&ease("transform", &v, &v, hold), Some(&key));
+            }
+        }
+    }
+
+    /// Turns every plane of a flat card back as the strip slides from where it is drawn to
+    /// `dx` on `s` ([`edge_flat::hide_keyframes`]: Apple's pose, seen through the flight's
+    /// eye, under the slide), ending turned as `m` draws it. Call before [`Self::slide_to`]:
+    /// the slide is read from where it is drawn now.
+    fn turn_back_sliding(&self, m: &Metrics, eyes: (motion_math::Eye, motion_math::Eye), s: motion_math::Spring, dx: f64) {
+        let Some(space) = self.depths.first().map(|d| &d.space) else { return };
+        // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
+        let from_dx = unsafe { space.presentationLayer() }.map_or_else(|| space.sublayerTransform(), |p| p.sublayerTransform()).m41;
+        // Core Animation's own length for the slide's spring, so the turn ends with it.
+        let probe = spring(s, "transform", &transform_value(identity()), &transform_value(identity()));
+        let duration = probe.duration();
+        let key = NSString::from_str("transform");
+        for ((_, plane), depth) in self.planes.iter().zip(&self.depths) {
+            let at = plane.position();
+            let unit = depth.unit.position();
+            let size = plane.bounds().size;
+            let base = motion_math::Plane {
+                left_mid: Point::new(unit.x + at.x, unit.y + at.y),
+                size: Size::new(size.width, size.height),
+                tilt: 0.0,
+                corner: plane.cornerRadius(),
+            };
+            let keys = edge_flat::hide_keyframes(base, m.tilt, from_dx, dx, eyes, s, duration);
+            let times: Vec<Retained<NSNumber>> = keys.iter().map(|(f, _)| NSNumber::new_f64(*f)).collect();
+            let values: Vec<Retained<AnyObject>> = keys.iter().map(|(_, p)| crate::ui::overlay::as_value(transform_value(parts_transform(edge_flat::layer_parts(&base, p))))).collect();
+            plane.setTransform(turn(m));
+            plane.addAnimation_forKey(&crate::ui::overlay::keyframes("transform", &values, &NSArray::from_retained_slice(&times), duration), Some(&key));
+        }
+    }
+
     /// Slides every depth to `dx`: on the spring `s`, or at once.
     fn slide_to(&self, s: Option<motion_math::Spring>, m: &Metrics, dx: f64) {
         for d in self.all_depths() {
@@ -1233,6 +1313,14 @@ fn turn(m: &Metrics) -> CATransform3D {
     CATransform3D::new_rotation(m.tilt, 0.0, 1.0, 0.0)
 }
 
+/// A plane layer's transform for `l` ([`edge_flat::layer_parts`]): scaled, turned about its
+/// left edge (its anchor), then moved.
+fn parts_transform(l: edge_flat::LayerParts) -> CATransform3D {
+    CATransform3D::new_scale(l.scale.0, l.scale.1, 1.0)
+        .concat(CATransform3D::new_rotation(l.tilt, 0.0, 1.0, 0.0))
+        .concat(CATransform3D::new_translation(l.shift.0, l.shift.1, 0.0))
+}
+
 fn spring(s: motion_math::Spring, key: &str, from: &AnyObject, to: &AnyObject) -> Retained<CASpringAnimation> {
     let anim = CASpringAnimation::animationWithKeyPath(Some(&NSString::from_str(key)));
     anim.setMass(s.mass);
@@ -1311,6 +1399,15 @@ fn set_badge(badge: &CALayer, label: &CATextLayer, number: usize, origin: Point)
     // SAFETY: an NSString is a valid `string` value.
     unsafe { label.setString(Some(&NSString::from_str(&text))) };
     label.setFrame(CGRect::new(CGPoint::new(0.0, 2.0), CGSize::new(w, 14.0)));
+}
+
+/// Moves `layer`'s `transform` to `to` along the spring, from what is drawn now.
+fn spring_transform(s: motion_math::Spring, layer: &CALayer, to: CATransform3D) {
+    // SAFETY: presentationLayer returns a copy of the layer's drawn state or nil.
+    let from = unsafe { layer.presentationLayer() }.map_or_else(|| layer.transform(), |p| p.transform());
+    layer.setTransform(to);
+    let anim = spring(s, "transform", &transform_value(from), &transform_value(to));
+    layer.addAnimation_forKey(&anim, Some(&NSString::from_str("transform")));
 }
 
 /// Moves `layer`'s `sublayerTransform` to `to` along the spring, from what is drawn now.
@@ -1987,6 +2084,9 @@ struct Strip {
     /// Apps' names by pid, for the cards' VoiceOver labels.
     app_names: HashMap<i32, String>,
     visibility: Visibility,
+    /// The cards are drawn flat: the strip was brought back at the left edge
+    /// (`[reveal] flat`, [`edge_flat`]); they turn back as it hides.
+    flat: bool,
     poll_timer: Option<Retained<NSTimer>>,
     /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
     /// global monitor to the edge or the tab looks again.
@@ -2039,6 +2139,7 @@ impl Strip {
             icons: app_icons::IconCache::default(),
             app_names: HashMap::new(),
             visibility: Visibility::default(),
+            flat: false,
             poll_timer: None,
             edge_waits: false,
             capturer,
@@ -2093,7 +2194,8 @@ impl Strip {
     /// How far left the cards sit when hidden: `[motion] slide_distance`, or further when
     /// the widest card needs it to leave the screen whole ([`Metrics::hide_distance`]).
     fn hidden_dx(&self) -> f64 {
-        let m = self.m();
+        // The cards are hidden turned (a flat strip turns back as it hides).
+        let m = self.geometry.turned();
         -(self.style.motion.slide_distance * m.k).max(self.geometry.global.w + 30.0).max(m.hide_distance())
     }
 
@@ -2149,7 +2251,7 @@ impl Strip {
             self.visibility.set_timing(Timing::from_style(&self.style.reveal));
         }
         card_glass::set_wanted(self.display, self.glass().on());
-        let geometry = Geometry::for_display(self.mtm, self.display, &self.style);
+        let geometry = Geometry::for_display(self.mtm, self.display, &self.style).posed(self.flat);
         if geometry != self.geometry {
             tracing::debug!(k = geometry.m.k, tilt = geometry.m.tilt.to_degrees(), d = geometry.m.perspective, "strip geometry");
             self.geometry = geometry;
@@ -2299,6 +2401,8 @@ impl Strip {
     /// Dock click to an app on Desktop 3 left Mail's slot empty on Desktop 1).
     fn leave_pane(&mut self) {
         self.release_held_cards();
+        // Its cards wait on their Desktop turned, as a hidden strip's do.
+        self.pose_now(false);
         self.pressed = None;
         self.squeezed = None;
         self.set_hover(None);
@@ -2593,6 +2697,9 @@ impl Strip {
 
     /// See [`probe`].
     fn probe(&self) -> serde_json::Value {
+        // What this run loop turn changed is committed first, so the drawn state read below
+        // matches the model it is reported with (`shown`, `flat`).
+        CATransaction::flush();
         let g = self.geometry.global;
         let root = &self.pane.root;
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.
@@ -2657,8 +2764,9 @@ impl Strip {
                         let glass = l.glass.iter().find(|(w, _)| w == id).and_then(|(_, g)| g.as_ref()).map(|g| {
                             serde_json::json!({ "under": g.rgb.map(|c| (c * 255.0 * 100.0).round() / 100.0), "opacity": g.opacity, "image_opacity": image.opacity() })
                         });
-                        // `opacity`: the plane's own (a window lifted off the card fades).
-                        serde_json::json!({ "window": id, "plane": in_root(plane), "opacity": plane.opacity(), "image": in_root(image), "shows": shows(image), "glass": glass })
+                        // `opacity`: the plane's own (a window lifted off the card fades);
+                        // `left_edge`: its top and bottom, global (the card-layout check).
+                        serde_json::json!({ "window": id, "plane": in_root(plane), "left_edge": left_edge(plane), "opacity": plane.opacity(), "image": in_root(image), "shows": shows(image), "glass": glass })
                     })
                     .collect();
                 Some(serde_json::json!({
@@ -2712,6 +2820,8 @@ impl Strip {
             }),
             "merge_onto": self.merge_onto(),
             "shown": self.pane.shown,
+            // The cards drawn flat: the strip brought back at the edge (`[reveal] flat`).
+            "flat": self.flat,
             "overlay_top_down": self.motion_top_down(),
         })
     }
@@ -4112,8 +4222,24 @@ impl Strip {
         let shown = decision.shown || drop_over || (card_dragging && self.pane.shown);
         if shown != self.pane.shown {
             tracing::debug!(shown, ?mode, "strip visibility");
+            // Brought back at the edge, Apple's cards turn flat at once, still off the screen,
+            // then slide in (recorded 11-16).
+            let flat = edge_flat::turns_flat(self.pane.shown, shown, decision.shown && mode == Mode::EdgeOnly && !drop_over, self.style.reveal.flat);
+            if flat {
+                self.pose_now(true);
+            }
             self.slide(shown, true);
+            if flat {
+                // The flat pose and the slide's first frame go out in one commit, now: left to
+                // the run loop's end, a `ctl debug-strip` answered in between read the cards
+                // still turned at their hidden place (live 11-17, one sample of 160).
+                CATransaction::flush();
+            }
             self.update_targets();
+        } else if self.flat && mode != Mode::EdgeOnly {
+            // Nothing hides the strip any more (the window moved off it, the user's toggle):
+            // its cards turn back where they are.
+            self.turn_in_place();
         }
         // Below windows (Apple's) unless something needs it on top (`strip_visibility::lifted`):
         // a card being dragged, or the edge revealing it over a window that covers it; a window
@@ -4177,6 +4303,11 @@ impl Strip {
             self.set_hover(None);
             self.card_drag = None;
         }
+        // A strip brought back flat turns back as it hides.
+        let from_flat = !shown && std::mem::replace(&mut self.flat, false);
+        if from_flat {
+            self.geometry = self.geometry.clone().posed(false);
+        }
         let dx = self.current_dx();
         let slide = self.slide_spring().filter(|_| animated);
         let m = self.m().clone();
@@ -4198,15 +4329,69 @@ impl Strip {
             root.addAnimation_forKey(&ease("opacity", &NSNumber::new_f32(from), &NSNumber::new_f32(to), fade), Some(&fading));
             for layers in self.pane.cards.values() {
                 layers.jump_to(&m, dx, if shown { 0.0 } else { fade });
+                if from_flat {
+                    layers.turn_planes(&m, fade);
+                }
             }
         } else {
             root.removeAnimationForKey(&fading);
             root.setOpacity(1.0);
+            let eyes = (self.geometry.strip_eye(), self.geometry.flight_eye());
             for layers in self.pane.cards.values() {
+                if from_flat {
+                    match slide {
+                        Some(s) => layers.turn_back_sliding(&m, eyes, s, dx),
+                        None => layers.turn_planes(&m, 0.0),
+                    }
+                }
                 layers.slide_to(slide, &m, dx);
             }
         }
         CATransaction::commit();
+    }
+
+    /// Draws the cards flat (the strip brought back at the edge) or turned, at once: the
+    /// metrics every projection and hit test reads, and every plane's turn.
+    fn pose_now(&mut self, flat: bool) {
+        if self.flat == flat {
+            return;
+        }
+        self.flat = flat;
+        self.geometry = self.geometry.clone().posed(flat);
+        tracing::debug!(flat, "strip cards' pose");
+        let m = self.m().clone();
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for layers in self.pane.cards.values() {
+            layers.turn_planes(&m, 0.0);
+        }
+        CATransaction::commit();
+        self.publish_cards();
+    }
+
+    /// A strip brought back flat that nothing hides any more: its cards turn back in place on
+    /// the slide's spring (Apple's not recorded), at once without animation.
+    fn turn_in_place(&mut self) {
+        self.flat = false;
+        self.geometry = self.geometry.clone().posed(false);
+        tracing::debug!("strip cards turn back in place");
+        let m = self.m().clone();
+        let spring = self.slide_spring().filter(|_| !self.reduced());
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        for layers in self.pane.cards.values() {
+            for (_, plane) in &layers.planes {
+                match spring {
+                    Some(s) => spring_transform(s, plane, turn(&m)),
+                    None => {
+                        plane.removeAnimationForKey(&NSString::from_str("transform"));
+                        plane.setTransform(turn(&m));
+                    }
+                }
+            }
+        }
+        CATransaction::commit();
+        self.publish_cards();
     }
 
     fn set_polling(&mut self, on: bool) {

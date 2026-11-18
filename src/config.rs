@@ -149,6 +149,25 @@ pub struct CardStyle {
     pub second_app_dy: f64,
     pub third_app_dx: f64,
     pub third_app_dy: f64,
+    /// `card_layout = "apple"`: the next window's left edge, this share of the width of the
+    /// window left of it further right.
+    pub spread_step: f64,
+    /// ...plus this share of how much narrower the right one is.
+    pub spread_narrow: f64,
+    /// A third window: on the second's side, this share of its own width in from the second.
+    pub spread_third: f64,
+    /// The windows lined up this far down each (0 top, 1 bottom).
+    pub spread_line: f64,
+    /// The window behind the front one raised this far, the third `spread_raise_third`.
+    pub spread_raise: f64,
+    pub spread_raise_third: f64,
+    /// The card's windows, top to bottom, held this tall...
+    pub spread_height: f64,
+    /// ...never smaller than this many card points per point of the window.
+    pub spread_min_scale: f64,
+    /// `card_layout = "spread_covered"`: a window showing less than this share of itself on
+    /// the stacked card spreads the card.
+    pub spread_covered_share: f64,
     pub hover_scale: f64,
     pub hover_ms: u64,
     /// A pressed card's size, of its resting one.
@@ -201,6 +220,8 @@ pub struct RevealStyle {
     pub delay_ms: u64,
     pub hide_delay_ms: u64,
     pub poll_ms: u64,
+    /// A strip brought back at the edge shows its cards flat (Apple's, recorded 11-16).
+    pub flat: bool,
     pub edge_tab: bool,
     pub launch_reveal: bool,
     pub launch_reveal_ms: u64,
@@ -304,11 +325,27 @@ pub enum StripLevel {
     AboveWindows,
 }
 
+/// `[strip] card_layout`: how a card of several apps places its windows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CardArrangement {
+    /// Stacked at the fixed offsets of the 11-09 measurements (`second_app_dx` and the rest):
+    /// a window behind a wider one can hide behind it.
+    #[default]
+    Stacked,
+    /// Apple's spread, measured 11-16 (`spread_*`): each window stepped out by a share of the
+    /// one beside it, a narrower one further.
+    Apple,
+    /// Stacked, unless a window shows less than `spread_covered_share` of itself: then spread.
+    SpreadCovered,
+}
+
 /// Everything the strip panel draws with; changes apply live.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StripStyle {
     /// Below or above windows.
     pub level: StripLevel,
+    /// How a card of several apps places its windows.
+    pub card_layout: CardArrangement,
     /// Cards can be dragged to another slot.
     pub reorder: bool,
     /// A card dropped onto another card merges the two stages.
@@ -399,6 +436,9 @@ pub struct WindowsConfig {
     /// `[windows] engine`: which window engines a launch may choose from (read at launch,
     /// [`crate::engine::engine_choice`]).
     pub engine: crate::engine::engine_choice::ConfigEngine,
+    /// `[windows] with_apple`: what the app does while Apple's Stage Manager is on (stand
+    /// down, or follow it: [`crate::engine::stand_down::WithApple`]). Read on every reload.
+    pub with_apple: crate::engine::stand_down::WithApple,
     /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
     /// shadow side by side ([`crate::engine::corner::corner_patch::DEFAULT_REACH`]), or one number for
     /// every side ([`WindowsConfig::patch_reach`]).
@@ -450,11 +490,14 @@ pub struct StagesConfig {
     /// own (off by default, Apple's rule); Shift held then gives the app a stage of its own.
     /// Restored windows and the restore window keep Apple's rule.
     pub new_apps_join_current: bool,
+    /// With `[windows] with_apple = "augment"`, after a restart or a new login Apple's stages
+    /// are put back as saved once their windows have reopened (on by default).
+    pub restore_with_apple: bool,
 }
 
 impl Default for StagesConfig {
     fn default() -> Self {
-        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false }
+        Self { names: Vec::new(), restore_after_restart: true, new_apps_join_current: false, restore_with_apple: true }
     }
 }
 
@@ -961,6 +1004,11 @@ impl Config {
                     "above_windows" => StripLevel::AboveWindows,
                     _ => StripLevel::BelowWindows,
                 },
+                card_layout: match v.text("strip.card_layout") {
+                    "apple" => CardArrangement::Apple,
+                    "spread_covered" => CardArrangement::SpreadCovered,
+                    _ => CardArrangement::Stacked,
+                },
                 reorder: v.flag("strip.reorder"),
                 merge_on_drop: v.flag("strip.merge_on_drop"),
                 width: v.num("strip.width"),
@@ -994,6 +1042,15 @@ impl Config {
                     second_app_dy: v.num("cards.second_app_dy"),
                     third_app_dx: v.num("cards.third_app_dx"),
                     third_app_dy: v.num("cards.third_app_dy"),
+                    spread_step: v.num("cards.spread_step"),
+                    spread_narrow: v.num("cards.spread_narrow"),
+                    spread_third: v.num("cards.spread_third"),
+                    spread_line: v.num("cards.spread_line"),
+                    spread_raise: v.num("cards.spread_raise"),
+                    spread_raise_third: v.num("cards.spread_raise_third"),
+                    spread_height: v.num("cards.spread_height"),
+                    spread_min_scale: v.num("cards.spread_min_scale"),
+                    spread_covered_share: v.num("cards.spread_covered_share"),
                     hover_scale: v.num("cards.hover_scale"),
                     hover_ms: v.uint("cards.hover_ms"),
                     press_scale: v.num("cards.press_scale"),
@@ -1030,6 +1087,7 @@ impl Config {
                     delay_ms: v.uint("reveal.delay_ms"),
                     hide_delay_ms: v.uint("reveal.hide_delay_ms"),
                     poll_ms: v.uint("reveal.poll_ms"),
+                    flat: v.flag("reveal.flat"),
                     edge_tab: v.flag("reveal.edge_tab"),
                     launch_reveal: v.flag("reveal.launch_reveal"),
                     launch_reveal_ms: v.uint("reveal.launch_reveal_ms"),
@@ -1091,6 +1149,7 @@ impl Config {
                     "accessibility" => crate::engine::engine_choice::ConfigEngine::Accessibility,
                     _ => crate::engine::engine_choice::ConfigEngine::Auto,
                 },
+                with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.with_apple")),
             },
             displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
             rules: RuleSet::new(rules, defaults),
@@ -1099,6 +1158,7 @@ impl Config {
                 names,
                 restore_after_restart: v.flag("stages.restore_after_restart"),
                 new_apps_join_current: v.flag("stages.new_apps_join_current"),
+                restore_with_apple: v.flag("stages.restore_with_apple"),
             },
             restore: RestoreConfig { saved_size: v.flag("restore.saved_size") },
             sugar: SugarConfig {
@@ -1389,6 +1449,13 @@ mod tests {
     }
 
     #[test]
+    fn restore_with_apple_is_on_by_default_and_can_be_turned_off() {
+        assert!(Config::default().stages.restore_with_apple, "functionality Apple's never built ships on");
+        let p = parse("[stages]\nrestore_with_apple = false\n");
+        assert!(!p.config.stages.restore_with_apple && p.warnings.is_empty(), "{:?}", p.warnings);
+    }
+
+    #[test]
     fn new_apps_join_current_is_off_by_default_and_can_be_turned_on() {
         assert!(!Config::default().stages.new_apps_join_current, "Apple's: a newly opened app gets a stage of its own");
         let p = parse("[stages]\nnew_apps_join_current = true\n");
@@ -1433,6 +1500,12 @@ mod tests {
         assert!(c.sugar.shift_brings_here, "invisible until Shift is held");
         assert!(c.windows.minimize_to_strip);
         assert_eq!(c.style.level, StripLevel::BelowWindows, "a window moved over the strip covers it");
+        assert_eq!(c.style.card_layout, CardArrangement::Stacked, "stacked until the owner picks a spread");
+        for (text, layout) in [("apple", CardArrangement::Apple), ("spread_covered", CardArrangement::SpreadCovered), ("stacked", CardArrangement::Stacked)] {
+            let p = parse(&format!("[strip]\ncard_layout = \"{text}\"\n"));
+            assert_eq!(p.config.style.card_layout, layout);
+        }
+        assert!(Config::parse("[strip]\ncard_layout = \"real\"\n").is_err(), "only the three");
         assert!(c.style.reorder, "invisible until a card is dragged");
         assert!(c.style.merge_on_drop, "invisible until a card is dropped on a card (the owner's word, 10-12)");
         assert_eq!(c.style.drag.merge_zone, 0.5);
@@ -1451,6 +1524,7 @@ mod tests {
         assert_eq!((d.appear_ms, d.window_grab_x, d.window_grab_y), (100, 96.0, 100.0), "Apple's card dragged out, measured 11-09");
         let r = &c.style.reveal;
         assert_eq!((r.delay_ms, r.poll_ms), (130, 30), "Apple's edge reveal, measured 11-09");
+        assert!(r.flat, "a strip brought back at the edge shows its cards flat, as Apple's (recorded 11-16)");
         assert_eq!(c.strip.capacity.for_height(1130.0, 1.0), 5, "the owner's laptop");
         assert_eq!(c.strip.capacity.for_height(1410.0, 1.0), 6, "5K");
     }

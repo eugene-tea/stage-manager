@@ -21,7 +21,7 @@ use objc2_app_kit::{
     NSApplicationActivationPolicy, NSApplicationDidChangeScreenParametersNotification, NSRunningApplication, NSWorkspace, NSWorkspaceActiveSpaceDidChangeNotification,
     NSWorkspaceApplicationKey, NSWorkspaceDidActivateApplicationNotification, NSWorkspaceDidHideApplicationNotification,
     NSWorkspaceDidLaunchApplicationNotification, NSWorkspaceDidTerminateApplicationNotification,
-    NSWorkspaceDidUnhideApplicationNotification, NSWorkspaceWillPowerOffNotification,
+    NSWorkspaceDidUnhideApplicationNotification, NSWorkspaceWillLaunchApplicationNotification, NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
     MainThreadMarker, NSDistributedNotificationCenter, NSNotification, NSNotificationCenter, NSNotificationName,
@@ -49,6 +49,9 @@ impl AppInfo {
 /// An `NSWorkspace` application event.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppEvent {
+    /// An app is about to launch (every activation policy: the Apple mode hides a newly
+    /// opened app this early, `platform::apple::launch_hide`, and asks the policy itself).
+    WillLaunch(AppInfo),
     Launched(AppInfo),
     Terminated(AppInfo),
     /// The app became frontmost; the instant is when the main thread got the notice (the
@@ -100,16 +103,18 @@ impl Drop for WorkspaceObservers {
 /// A notification name, the event it becomes, and whether only regular apps count.
 type Route = (&'static NSNotificationName, fn(AppInfo) -> AppEvent, bool);
 
-/// Observes launch / terminate / activate / hide / unhide on the main queue and calls `sink`
-/// with plain values. All but terminate report regular apps only; terminate reports every app
-/// (the receiver ignores pids it does not know).
+/// Observes will-launch / launch / terminate / activate / hide / unhide on the main queue and
+/// calls `sink` with plain values. All but will-launch and terminate report regular apps only;
+/// those two report every app (the receiver ignores pids it does not know, and the Apple
+/// mode's hide at a launch asks the policy itself).
 pub fn observe_workspace(sink: impl Fn(AppEvent) + 'static) -> WorkspaceObservers {
     let center = NSWorkspace::sharedWorkspace().notificationCenter();
     let sink = std::rc::Rc::new(sink);
     let main_queue = NSOperationQueue::mainQueue();
     // SAFETY: the notification names are valid framework statics.
-    let names: [Route; 5] = unsafe {
+    let names: [Route; 6] = unsafe {
         [
+            (NSWorkspaceWillLaunchApplicationNotification, AppEvent::WillLaunch, false),
             (NSWorkspaceDidLaunchApplicationNotification, AppEvent::Launched, true),
             (NSWorkspaceDidTerminateApplicationNotification, AppEvent::Terminated, false),
             (NSWorkspaceDidActivateApplicationNotification, |a| AppEvent::Activated(a, Instant::now()), true),

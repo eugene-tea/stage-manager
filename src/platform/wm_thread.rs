@@ -14,6 +14,13 @@
 //! ([`resume_plan`]), held windows are tried again and observation starts: the fresh
 //! controller builds stages from the windows on screen.
 //!
+//! With `[windows] with_apple = "augment"` the thread follows Apple's instead of standing down
+//! ([`augment_plan`]): every window back and the stages set aside as at a release, then the
+//! Apple mode's null-hide engine and its conductor ([`Conductor::Apples`]) in place of a fresh
+//! controller, observation kept running; Apple's off, the launch's engine and a fresh
+//! controller come back before observation starts afresh. A config reload while Apple's is on
+//! swaps the two ([`WmState::follow_with_apple`]).
+//!
 //! At a logout, restart or shutdown the thread stands down the same way ahead of macOS's quit,
 //! at the first of the logout's signals ([`Logout`], [`logout_plan`]; each signal logged with
 //! the ms since the first): every window back, the stages saved (kept for the next login),
@@ -48,7 +55,7 @@ use objc2_core_foundation::{
 
 use super::apps::{AppEvent, AppInfo};
 use super::ax::AxElement;
-use super::controller::Controller;
+use super::conductor::Conductor;
 use super::handoff::TakenWatch;
 use super::ctl::Command;
 use super::input::InputEvent;
@@ -63,7 +70,7 @@ use crate::engine::model::Display;
 use crate::engine::rescan::{Queued, Rescan, Why};
 use crate::engine::leftovers::{self, UNPARK_SETTLE};
 use crate::engine::slow_task::{self, SlowTasks};
-use crate::engine::stand_down::{Heard, Logout, Quit, Signal, StandDown, Step, Task, Work, logout_plan, release_plan, resume_plan};
+use crate::engine::stand_down::{Heard, Logout, Quit, Signal, StandDown, Step, Task, WithApple, Work, augment_plan, logout_plan, release_plan, resume_plan, to_augment_plan, to_stand_down_plan};
 use crate::engine::tick_pace::{self, Pace, TickPace};
 use crate::ui::strip_model::{StripDrop, StripEvent};
 
@@ -133,7 +140,7 @@ fn pace_tick(after_tick: bool) {
         let mut st = s.try_borrow_mut().ok()?;
         let st = st.as_mut()?;
         if after_tick {
-            st.rest = st.controller.tick_rest();
+            st.rest = st.conductor.tick_rest();
         }
         Some(st.pace.pace(now, st.tick_waits(now), st.rest))
     });
@@ -163,7 +170,7 @@ fn pace_tick(after_tick: bool) {
 /// Arms the fast tick while the controller wants it, else parks its timer far in the future
 /// (no wake-ups while nothing needs it).
 fn arm_fast_tick() {
-    let wanted = STATE.with(|s| s.borrow().as_ref().is_some_and(|s| s.controller.wants_fast_tick()));
+    let wanted = STATE.with(|s| s.borrow().as_ref().is_some_and(|s| s.conductor.wants_fast_tick()));
     FAST_TIMER.with(|t| {
         let Some(timer) = t.borrow().as_ref().cloned() else { return };
         let now = CFAbsoluteTimeGetCurrent();
@@ -356,7 +363,9 @@ impl WmHandle {
 /// Everything the WM thread owns.
 struct WmState {
     observer: Observer,
-    controller: Controller,
+    /// Who conducts the windows: the app's own controller, or the Apple mode's while Apple's
+    /// Stage Manager is on and `[windows] with_apple = "augment"`.
+    conductor: Conductor,
     scanned: bool,
     /// The tick's clock: when an event last stirred it, the last full pass ([`tick_pace`]).
     pace: TickPace,
@@ -453,7 +462,7 @@ fn fast_tick() {
     if safety::quit_requested() {
         return;
     }
-    guarded_state("the WM fast tick", "fast tick", "", |s| s.controller.fast_tick(&mut s.observer));
+    guarded_state("the WM fast tick", "fast tick", "", |s| s.conductor.fast_tick(&mut s.observer));
     arm_fast_tick();
     pace_tick(false);
 }
@@ -535,7 +544,7 @@ pub(super) unsafe extern "C-unwind" fn switcher_ax_callback(
     let name = unsafe { notification.as_ref() }.to_string();
     guarded_state("the switcher's AX callback", "switcher AX callback", &name, |s| {
         if !safety::quit_requested() {
-            s.controller.switcher_notice(&s.observer, &name);
+            s.conductor.switcher_notice(&s.observer, &name);
         }
     });
     arm_fast_tick();
@@ -551,9 +560,9 @@ impl WmState {
             if events.is_empty() {
                 break;
             }
-            self.controller.on_events(&mut self.observer, events);
+            self.conductor.on_events(&mut self.observer, events);
         }
-        self.observer.set_fast_retry(self.controller.restore_window_open());
+        self.observer.set_fast_retry(self.conductor.restore_window_open());
     }
 
     fn handle(&mut self, cmd: WmCommand) {
@@ -570,7 +579,7 @@ impl WmState {
             // The tap swallowed the person's minimize: never lost. While nothing is arranged
             // it is macOS's, genie and all.
             WmCommand::Minimize(ask) => match self.arranging() {
-                true => self.controller.minimize_direct(&mut self.observer, ask),
+                true => self.conductor.minimize_direct(&mut self.observer, ask),
                 false => ask.as_macos("Stage Manager is not arranging windows now"),
             },
             WmCommand::Shutdown(reply) if matches!(self.logout.quit(), Quit::Done { .. }) => {
@@ -582,8 +591,8 @@ impl WmState {
                 // knowing what its check knew, as the quit after a stand-down does.
                 let back = if self.stand_down.stranded() {
                     let held_back = safety::retry_held();
-                    let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
-                    let left_back = window_engine::current().bring_back_rest("quit", ours, true).is_none();
+                    let ours = with_kept(self.stand_down_leftovers.take(), self.conductor.safety_ours());
+                    let left_back = rest_engine().bring_back_rest("quit", ours, true).is_none();
                     tracing::info!(held_back, left_back, "quitting after the logout's head start: windows it left were tried again");
                     held_back && left_back
                 } else {
@@ -608,12 +617,27 @@ impl WmState {
                     AppEvent::Launched(app) => Some(app.pid),
                     _ => None,
                 };
+                // An app about to launch: the Apple mode may hide it at once (open here).
+                if let AppEvent::WillLaunch(app) = &event
+                    && self.arranging()
+                    && self.observer.admits(app)
+                {
+                    self.conductor.app_will_launch(&self.observer, app);
+                }
+                // An app activated: the Apple mode may hide a running app with no window at
+                // once, before the window it reopens shows.
+                if let AppEvent::Activated(app, _) = &event
+                    && self.arranging()
+                    && self.observer.admits(app)
+                {
+                    self.conductor.app_activated(&self.observer, app);
+                }
                 self.observer.on_app_event(event, ax_callback);
                 // A just-opened app: the engine may hold its new windows until placed.
                 if let Some(pid) = launched
                     && self.arranging()
                 {
-                    self.controller.app_launched(&self.observer, pid);
+                    self.conductor.app_launched(&self.observer, pid);
                 }
             }
             WmCommand::Probe(note) => self.observer.on_probe(note, ax_callback),
@@ -635,17 +659,14 @@ impl WmState {
             WmCommand::NativeSettings(settings) => {
                 let apple_on = native_settings::apple_stage_manager_enabled(&settings);
                 self.settings = Some(settings.clone());
-                self.controller.set_settings(&settings);
+                self.conductor.set_settings(&settings);
                 self.observer.set_settings(settings);
                 if self.logout.holding() {
                     // Read again when the hold ends (a cancelled logout).
                     tracing::debug!(apple_on, "a logout is coming: Apple's Stage Manager is looked at again if it is cancelled");
                 } else {
-                    match self.stand_down.apple(apple_on) {
-                        Step::Release => self.release(),
-                        Step::Resume => self.resume(),
-                        Step::Nothing => {}
-                    }
+                    let step = self.stand_down.reading(apple_on, self.conductor.with_apple());
+                    self.carry_out(step);
                 }
             }
             WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
@@ -660,49 +681,52 @@ impl WmState {
                     self.display_sweep = Some(Instant::now() + DISPLAY_SWEEP_AFTER);
                 }
                 self.displays = Some(displays.clone());
-                self.controller.set_displays(&mut self.observer, displays, heard);
+                self.conductor.set_displays(&mut self.observer, displays, heard);
             }
             // Without Accessibility no window can move: a stage change now would leave the
             // model out of step with the screen (its parked windows unregistered), so the
             // user's input waits for observation (R1-platform 9).
             WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_)
-                if self.controller.managing() && !self.observer.observing() =>
+                if self.conductor.managing() && !self.observer.observing() =>
             {
                 tracing::debug!("Accessibility is off: input ignored");
             }
-            WmCommand::Input(event, drop) => self.controller.input(&mut self.observer, event, drop),
-            WmCommand::Hotkey(command) => self.controller.hotkey(&mut self.observer, command),
-            WmCommand::Strip(event) => self.controller.strip_event(&mut self.observer, event),
+            WmCommand::Input(event, drop) => self.conductor.input(&mut self.observer, event, drop),
+            WmCommand::Hotkey(command) => self.conductor.hotkey(&mut self.observer, command),
+            WmCommand::Strip(event) => self.conductor.strip_event(&mut self.observer, event),
             WmCommand::SpaceChanged => {
                 // A window a stand-down could not reach may show on this Space now.
                 self.retry_held();
-                self.controller.on_space_changed(&mut self.observer);
+                self.conductor.on_space_changed(&mut self.observer);
             }
-            WmCommand::ToggleStrip => self.controller.toggle_strip(),
-            WmCommand::ReloadConfig => self.controller.reload_config(&mut self.observer),
+            WmCommand::ToggleStrip => self.conductor.toggle_strip(),
+            WmCommand::ReloadConfig => {
+                self.conductor.reload_config(&mut self.observer);
+                self.follow_with_apple();
+            }
             WmCommand::Ctl(cmd, reply) => {
-                let value = self.controller.ctl(&mut self.observer, cmd);
+                let value = self.conductor.ctl(&mut self.observer, cmd);
                 let _ = reply.send(value);
             }
             WmCommand::Shutdown(reply) => {
                 // The unpark saves the stages before the leftovers check reads them (S1).
-                let failed = self.controller.unpark_all(&mut self.observer);
+                let failed = self.conductor.unpark_all(&mut self.observer);
                 // Every window of an allowed app still in a park zone on any Space comes back
                 // now, known to this run or not (6X); one that cannot (another Space's, an app
                 // that does not answer) leaves the exit unclean, so the guardian watches until
                 // it is back.
                 // A quit while stood down still knows whose windows the stand-down left
                 // (its model and state.json are gone by then; the review of 6X3, 2).
-                let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
-                let back = window_engine::current().bring_back_rest("quit", ours, true).is_none();
+                let ours = with_kept(self.stand_down_leftovers.take(), self.conductor.safety_ours());
+                let back = rest_engine().bring_back_rest("quit", ours, true).is_none();
                 // A restore that failed but went through late is seen back now.
-                let unrestored = self.controller.account_shows_owed(&self.observer);
+                let unrestored = self.conductor.account_shows_owed(&self.observer);
                 if failed > 0 {
                     tracing::info!(failed, unrestored, "restores that failed at quit, after the leftovers check");
                 }
                 // Windows taken from an old guardian (round 8N): those shown come back now;
                 // one still away leaves the exit unclean, so this app's guardian waits for it.
-                self.taken.last_look(&self.controller.model_window_ids());
+                self.taken.last_look(&self.conductor.model_window_ids());
                 // What is left, counted: children their apps ordered out while parked aside
                 // (they stay on record and the guardian waits for them, but they do not make
                 // the quit unclean), and the windows the leftovers check left that were
@@ -710,7 +734,7 @@ impl WmState {
                 let end = leftovers::quit_end(leftovers::quit_left(
                     back,
                     safety::left_not_taken(),
-                    &self.controller.shows_owed_ids(),
+                    &self.conductor.shows_owed_ids(),
                     &safety::registry_ids(),
                     &safety::taken_ids(),
                     &safety::ordered_out(),
@@ -815,54 +839,146 @@ impl WmState {
         tracing::warn!("Apple's Stage Manager is on: standing down (every window back, no strip, nothing arranged)");
         for task in release_plan(self.displays.is_some(), self.settings.is_some()) {
             match task {
-                Task::UnparkAll => {
-                    let failed = self.controller.unpark_all(&mut self.observer);
-                    if failed > 0 || safety::registry_len() > 0 {
-                        window_engine::current().bring_all_back("stand-down");
-                    }
-                    // The window server's word, as at quit (the review of 6X): every allowed
-                    // app's window still in a park zone comes back now, known to this run or
-                    // not; one that cannot is looked for again whenever a Desktop shows.
-                    // An earlier stand-down's or logout's leftovers not yet back stay known.
-                    let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
-                    let left = window_engine::current().bring_back_rest("stand-down", ours, true);
-                    let back = left.is_none();
-                    let unrestored = self.controller.account_shows_owed(&self.observer);
-                    if failed > 0 || !back {
-                        tracing::info!(failed, unrestored, back, "restores that failed at the stand-down, after the leftovers check");
-                    }
-                    self.stand_down_leftovers = left;
-                }
+                Task::UnparkAll => self.release_windows(),
                 Task::HoldStranded => self.hold_stranded("standing down"),
                 Task::DropSavedStages => drop_saved_stages(),
                 Task::StopObserving => {
                     self.observer.stop();
                     let _ = self.observer.take_events();
                 }
-                Task::NewController => self.controller = Controller::new(),
+                Task::NewController => self.conductor = Conductor::ours(),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.controller.set_displays(&mut self.observer, d, Instant::now());
+                        self.conductor.set_displays(&mut self.observer, d, Instant::now());
                     }
                 }
                 Task::ReplaySettings => {
                     if let Some(raw) = &self.settings {
-                        self.controller.set_settings(raw);
+                        self.conductor.set_settings(raw);
                     }
                 }
                 Task::HideStrip => {
                     dispatch2::DispatchQueue::main().exec_async(|| crate::ui::strip::stand_down("Apple's Stage Manager is on"));
                 }
-                Task::RetryHeld | Task::StartObserving | Task::SaveStages => {}
+                Task::RetryHeld | Task::StartObserving | Task::SaveStages | Task::InstallAppleEngine | Task::AppleConductor | Task::InstallLaunchEngine => {}
             }
         }
+    }
+
+    /// Carries out the step a reading of Apple's Stage Manager and `[windows] with_apple`
+    /// called for ([`StandDown::reading`]).
+    fn carry_out(&mut self, step: Step) {
+        match step {
+            Step::Release => self.release(),
+            Step::Augment => self.augment(),
+            Step::Resume { from } => self.resume(from),
+            Step::ToAugment => self.swap(true),
+            Step::ToStandDown => self.swap(false),
+            Step::Nothing => {}
+        }
+    }
+
+    /// `[windows] with_apple` as the config in force has it now, against what the app does
+    /// while Apple's is on: a changed value swaps standing down and augmenting (after a
+    /// reload, and at every tick: the conductor polls the file).
+    fn follow_with_apple(&mut self) {
+        if !self.stand_down.apple_on() || self.logout.holding() {
+            return;
+        }
+        let step = self.stand_down.reading(true, self.conductor.with_apple());
+        if step != Step::Nothing {
+            self.carry_out(step);
+        }
+    }
+
+    /// Apple's Stage Manager came on with `with_apple = "augment"`: carries out
+    /// [`augment_plan`]. Every window back as at a release; then the Apple mode follows
+    /// Apple's, observation kept running.
+    fn augment(&mut self) {
+        tracing::warn!("Apple's Stage Manager is on: following it (every window back, no strip of ours; its stages read into the model)");
+        for task in augment_plan(self.displays.is_some(), self.settings.is_some()) {
+            match task {
+                Task::UnparkAll => self.release_windows(),
+                Task::HoldStranded => self.hold_stranded("augmenting Apple's"),
+                Task::DropSavedStages => drop_saved_stages(),
+                Task::InstallAppleEngine => window_engine::install(window_engine::of(window_engine::EngineKind::Apple)),
+                Task::AppleConductor => self.conductor = Conductor::apples(),
+                Task::ReplayDisplays | Task::ReplaySettings | Task::HideStrip => self.replay(task, "Apple's Stage Manager is on"),
+                _ => {}
+            }
+        }
+    }
+
+    /// While Apple's is on, `with_apple` changed: to augmenting (`to_augment`, from standing
+    /// down) or back to standing down. Nothing is hidden by either, so nothing comes back.
+    fn swap(&mut self, to_augment: bool) {
+        let plan = match to_augment {
+            true => to_augment_plan(self.displays.is_some(), self.settings.is_some()),
+            false => to_stand_down_plan(self.displays.is_some(), self.settings.is_some()),
+        };
+        tracing::info!(with_apple = if to_augment { "augment" } else { "stand_down" }, "config: [windows] with_apple changed while Apple's Stage Manager is on");
+        for task in plan {
+            match task {
+                Task::InstallAppleEngine => window_engine::install(window_engine::of(window_engine::EngineKind::Apple)),
+                Task::InstallLaunchEngine => install_launch_engine(),
+                Task::AppleConductor => self.conductor = Conductor::apples(),
+                Task::NewController => self.conductor = Conductor::ours(),
+                Task::StopObserving => {
+                    self.observer.stop();
+                    let _ = self.observer.take_events();
+                }
+                Task::StartObserving if self.trusted => self.observer.set_accessibility(true, ax_callback),
+                Task::ReplayDisplays | Task::ReplaySettings | Task::HideStrip => self.replay(task, "Apple's Stage Manager is on"),
+                _ => {}
+            }
+        }
+    }
+
+    /// [`Task::ReplayDisplays`], [`Task::ReplaySettings`] and [`Task::HideStrip`] (`why`: the
+    /// strip's reason) for whoever conducts now.
+    fn replay(&mut self, task: Task, why: &'static str) {
+        match task {
+            Task::ReplayDisplays => {
+                if let Some(d) = self.displays.clone() {
+                    self.conductor.set_displays(&mut self.observer, d, Instant::now());
+                }
+            }
+            Task::ReplaySettings => {
+                if let Some(raw) = &self.settings {
+                    self.conductor.set_settings(raw);
+                }
+            }
+            Task::HideStrip => {
+                dispatch2::DispatchQueue::main().exec_async(move || crate::ui::strip::stand_down(why));
+            }
+            _ => {}
+        }
+    }
+
+    /// [`Task::UnparkAll`] of a release: the controller's unpark, the registry's last resort,
+    /// then the window server's word (the review of 6X), as at quit.
+    fn release_windows(&mut self) {
+        let failed = self.conductor.unpark_all(&mut self.observer);
+        if failed > 0 || safety::registry_len() > 0 {
+            rest_engine().bring_all_back("stand-down");
+        }
+        let ours = with_kept(self.stand_down_leftovers.take(), self.conductor.safety_ours());
+        let left = rest_engine().bring_back_rest("stand-down", ours, true);
+        let back = left.is_none();
+        let unrestored = self.conductor.account_shows_owed(&self.observer);
+        if failed > 0 || !back {
+            tracing::info!(failed, unrestored, back, "restores that failed at the stand-down, after the leftovers check");
+        }
+        self.stand_down_leftovers = left;
     }
 
     /// A logout signal (round 8H): logged every time with the ms since the logout's first, then
     /// the first starts the head start, a cancel while held resumes at once, and repeats do
     /// nothing more. While standing down nothing is parked: the quit does as before.
     fn logout_signal(&mut self, name: &str, signal: Signal, at: Instant) {
-        let stood_down = self.stand_down.stood_down();
+        // Nothing of ours is parked while Apple's is on (standing down or augmenting): the
+        // quit does as before.
+        let stood_down = self.stand_down.apple_on();
         let (heard, since_first_ms) = self.logout.signal(signal, at, !stood_down);
         let queued_ms = at.elapsed().as_millis() as u64;
         tracing::info!(signal = name, cancel = signal == Signal::Cancelled, since_first_ms, queued_ms, then = heard.name(), "logout signal");
@@ -890,11 +1006,11 @@ impl WmState {
                 Task::UnparkAll => {
                     // As at quit: the controller's unpark, then the window server's word on
                     // every allowed app's window still in a park zone (6X).
-                    let failed = self.controller.unpark_all(&mut self.observer);
-                    let ours = with_kept(self.stand_down_leftovers.take(), self.controller.safety_ours());
-                    let left = window_engine::current().bring_back_rest("logout", ours, true);
+                    let failed = self.conductor.unpark_all(&mut self.observer);
+                    let ours = with_kept(self.stand_down_leftovers.take(), self.conductor.safety_ours());
+                    let left = rest_engine().bring_back_rest("logout", ours, true);
                     let back = left.is_none();
-                    let unrestored = self.controller.account_shows_owed(&self.observer);
+                    let unrestored = self.conductor.account_shows_owed(&self.observer);
                     all_back = back && unrestored == 0 && safety::registry_len() == 0;
                     if !all_back {
                         tracing::warn!(failed, unrestored, back, "not every window came back at the logout's head start; held and tried again at each Space change and at the quit");
@@ -905,20 +1021,20 @@ impl WmState {
                 // The registry's windows still parked (failed restores among them) outlive
                 // the controller that parked them: a cancelled logout's fresh one keeps them.
                 Task::HoldStranded => self.hold_stranded("a logout is coming"),
-                Task::SaveStages => self.controller.save_now(),
+                Task::SaveStages => self.conductor.save_now(),
                 Task::StopObserving => {
                     self.observer.stop();
                     let _ = self.observer.take_events();
                 }
-                Task::NewController => self.controller = Controller::new(),
+                Task::NewController => self.conductor = Conductor::ours(),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.controller.set_displays(&mut self.observer, d, Instant::now());
+                        self.conductor.set_displays(&mut self.observer, d, Instant::now());
                     }
                 }
                 Task::ReplaySettings => {
                     if let Some(raw) = &self.settings {
-                        self.controller.set_settings(raw);
+                        self.conductor.set_settings(raw);
                     }
                 }
                 Task::HideStrip => dispatch2::DispatchQueue::main().exec_async(|| {
@@ -927,7 +1043,7 @@ impl WmState {
                         crate::ui::corner_patch::stand_down(mtm);
                     }
                 }),
-                Task::DropSavedStages | Task::RetryHeld | Task::StartObserving => {}
+                Task::DropSavedStages | Task::RetryHeld | Task::StartObserving | Task::InstallAppleEngine | Task::AppleConductor | Task::InstallLaunchEngine => {}
             }
         }
         self.logout.released(all_back);
@@ -942,14 +1058,13 @@ impl WmState {
         // A later quit waits for the windows parked then, not for this logout's.
         LOGOUT_WINDOWS.store(0, Ordering::SeqCst);
         let apple_on = self.settings.as_ref().is_some_and(native_settings::apple_stage_manager_enabled);
-        match self.stand_down.apple(apple_on) {
-            Step::Release => self.release(),
-            Step::Resume => self.resume(),
+        match self.stand_down.reading(apple_on, self.conductor.with_apple()) {
             Step::Nothing => {
                 if self.trusted {
                     self.observer.set_accessibility(true, ax_callback);
                 }
             }
+            step => self.carry_out(step),
         }
     }
 
@@ -967,15 +1082,24 @@ impl WmState {
 
     /// Apple's Stage Manager went off: carries out [`resume_plan`] (the stages set aside come back
     /// as the fresh controller loads `state.json`).
-    fn resume(&mut self) {
-        tracing::info!("Apple's Stage Manager is off: managing again, the stages set aside taken back (else fresh from the windows on screen)");
-        for task in resume_plan(self.stand_down.stranded()) {
+    fn resume(&mut self, from: WithApple) {
+        tracing::info!(from = from.name(), "Apple's Stage Manager is off: managing again, the stages set aside taken back (else fresh from the windows on screen)");
+        for task in resume_plan(self.stand_down.stranded(), from, self.displays.is_some(), self.settings.is_some()) {
             match task {
+                Task::StopObserving => {
+                    // The Apple mode's stages, saved once more before its conductor goes.
+                    self.conductor.save_now();
+                    self.observer.stop();
+                    let _ = self.observer.take_events();
+                }
+                Task::NewController => self.conductor = Conductor::ours(),
+                Task::ReplayDisplays | Task::ReplaySettings => self.replay(task, "Apple's Stage Manager is off"),
                 Task::RetryHeld => {
                     self.retry_held();
                     // Before observation starts: a window back now is where the fresh start looks.
                     self.look_for_leftovers(true);
                 }
+                Task::InstallLaunchEngine => install_launch_engine(),
                 Task::StartObserving if self.trusted => self.observer.set_accessibility(true, ax_callback),
                 _ => {}
             }
@@ -1012,7 +1136,7 @@ impl WmState {
         self.stand_down_leftovers = retry_leftovers(
             kept,
             || leftovers_now(safety::Ours::now(Default::default()), safety::parked_on_purpose()),
-            |ours| window_engine::current().bring_back_rest("stand-down, a Desktop shows", ours, at_once),
+            |ours| rest_engine().bring_back_rest("stand-down, a Desktop shows", ours, at_once),
         );
         self.stand_down.released(safety::held_len() == 0 && self.stand_down_leftovers.is_none());
     }
@@ -1033,16 +1157,17 @@ impl WmState {
             step("sweep closed windows", || self.observer.sweep_closed());
             // Windows taken from an old guardian (round 8N): its rules, about once a second.
             if self.trusted {
-                step("taken windows", || self.taken.pass(&self.controller.model_window_ids()));
+                step("taken windows", || self.taken.pass(&self.conductor.model_window_ids()));
             }
         }
         step("leftovers look", || self.look_for_leftovers(false));
         step("display change sweep", || self.sweep_after_display_change());
         step("rescan", || self.rescan_pass());
         step("events", || self.pump());
-        step("controller tick", || self.controller.tick(&mut self.observer));
+        step("controller tick", || self.conductor.tick(&mut self.observer));
+        step("with_apple", || self.follow_with_apple());
         // The minimize tap passes everything while nothing is arranged.
-        minimize_tap::admit(self.arranging());
+        minimize_tap::admit(self.arranging() && !self.conductor.is_apples());
         step("minimize tap", minimize_tap::refresh);
         // An app's enhanced UI a restore could not put back, or held off too long: on again.
         step("enhanced UI sweep", enhanced_ui::sweep);
@@ -1070,7 +1195,7 @@ impl WmState {
         } else if enhanced_ui::held_off() {
             Some("an app's enhanced UI held off")
         } else {
-            self.observer.tick_waits().or_else(|| self.controller.tick_waits(now))
+            self.observer.tick_waits().or_else(|| self.conductor.tick_waits(now))
         }
     }
 
@@ -1080,7 +1205,7 @@ impl WmState {
     fn arranging(&self) -> bool {
         self.logout.admits(Work::Input)
             && self.stand_down.admits(Work::Input)
-            && (!self.controller.managing() || self.observer.observing())
+            && (!self.conductor.managing() || self.observer.observing())
     }
 
     /// One slice of the scans waiting ([`Rescan`]): apps a scan could not read, tried again
@@ -1152,8 +1277,24 @@ impl WmState {
         crate::logbook::counters::bump(crate::logbook::counters::Count::Recovery);
         tracing::error!("recovering from a panic on the WM thread: resyncing the parked-window registry");
         let _ = self.observer.take_events();
-        self.controller.resync_registry(&self.observer);
+        self.conductor.resync_registry(&self.observer);
     }
+}
+
+/// The engine that brings back what a release or a logout left (a window still in a park
+/// corner): the one running, or under the Apple mode (which hides nothing) the launch's.
+fn rest_engine() -> std::sync::Arc<dyn window_engine::WindowEngine> {
+    let now = window_engine::current();
+    if now.kind() != window_engine::EngineKind::Apple {
+        return now;
+    }
+    window_engine::of(window_engine::choice().map_or(window_engine::EngineKind::Corner, |c| c.kind))
+}
+
+/// The launch's engine installed again (Apple's is off, or the app stands down).
+fn install_launch_engine() {
+    let kind = window_engine::choice().map_or(window_engine::EngineKind::Corner, |c| c.kind);
+    window_engine::install(window_engine::of(kind));
 }
 
 /// Removes `state.json`: its stages are stale once Apple's Stage Manager arranges windows.
@@ -1228,7 +1369,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
     }));
     let state = WmState {
         observer,
-        controller: Controller::new(),
+        conductor: Conductor::ours(),
         scanned: false,
         pace: TickPace::new(Instant::now()),
         rest: tick_pace::REST,

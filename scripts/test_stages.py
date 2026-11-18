@@ -127,6 +127,9 @@ SM_FIXTURE_ID sets the main fixture's bundle ID (default dev.eugene.stagemanager
 the native phase's apps are <id>.a, <id>.b and <id>.c.
 displays (round displays: a strip and stages on every screen; fixtures moved to the other
 screen by Accessibility, a card click on each screen alone; skipped with one screen).
+Run by name only: edgeflat (round edge-flat: the strip brought back at the left edge only
+once the pointer rests there, its cards flat, sliding in on the slide's spring, and turning
+back as it hides; see `phase_edgeflat`).
 """
 
 import json
@@ -4681,6 +4684,142 @@ def hover_glass_check(window, name, page):
                   f"(off {glass_off(mean, want):.1f})")
     return True
 
+
+# Apple's cards of the three fixture apps (a Alpha, b Bravo, c Charlie), measured 11-16 on the
+# laptop through the window list: each window's frame on the screen, the stacking back to front,
+# and where Apple drew each window on the card, front window first: its left edge and top from
+# the card's leftmost left edge and highest top, and its height (`[strip] card_layout =
+# "apple"` must draw them there). "hidden" is not Apple's: a wide window over a narrower one
+# that the stacked card hides entirely (the 11-16 editor over a terminal), the one layout of
+# these that "spread_covered" spreads.
+CARD_LAYOUTS = [
+    ("inside", {"a": (300, 148, 1000, 732), "b": (550, 298, 500, 432)}, "ab", [(77, 44, 56), (0, 0, 95)]),
+    ("side", {"a": (244, 198, 700, 632), "b": (800, 248, 700, 632)}, "ab", [(25, 12, 90), (0, 0, 90)]),
+    ("behind", {"a": (300, 148, 1000, 732), "b": (400, 198, 1000, 732)}, "ba", [(0, 12, 92), (30, 0, 92)]),
+    ("apart", {"a": (244, 98, 600, 532), "b": (1100, 598, 600, 532)}, "ab", [(27, 13, 89), (0, 0, 90)]),
+    ("three", {"a": (300, 148, 900, 682), "b": (500, 298, 900, 682), "c": (700, 448, 600, 482)}, "abc", [(55, 40, 61), (0, 7, 88), (18, 0, 88)]),
+    ("tiny-front", {"a": (500, 298, 400, 332), "b": (244, 98, 1400, 1032)}, "ba", [(0, 86, 42), (14, 0, 127)]),
+    ("hidden", {"a": (200, 150, 1400, 900), "b": (700, 350, 700, 500)}, "ba", None),
+]
+# The stacked card's left edges (front window first), the 11-09 fixed offsets: the window
+# behind 42 pt to its side, a third 12 pt from the front window toward the second's side.
+CARD_STACKED_X = {"inside": [42, 0], "side": [42, 0], "behind": [0, 42], "apart": [42, 0], "three": [42, 0, 30], "tiny-front": [0, 42], "hidden": [0, 42]}
+
+
+def card_pictures(ids):
+    """The strip's card of exactly the windows `ids` as drawn (`ctl debug-strip`): window id ->
+    (left edge x, top, height) from the card's leftmost left edge and highest top. Each
+    window's left edge is its plane's turn axis, at depth 0: the perspective moves it not."""
+    r = ctl("debug-strip").get("strip") or {}
+    for c in r.get("cards") or []:
+        planes = c.get("planes") or []
+        if sorted(p["window"] for p in planes) != sorted(ids):
+            continue
+        got = {}
+        for p in planes:
+            top, bottom = p["left_edge"]
+            pt = lambda q: (q["x"], q["y"]) if isinstance(q, dict) else (q[0], q[1])
+            (x, y0), (_, y1) = pt(top), pt(bottom)
+            got[p["window"]] = (x, y0, y1 - y0)
+        x0 = min(v[0] for v in got.values())
+        t0 = min(v[1] for v in got.values())
+        return {k: (v[0] - x0, v[1] - t0, v[2]) for k, v in got.items()}
+    return None
+
+
+def phase_cards():
+    say("\n== cards: [strip] card_layout stacked, apple, spread_covered on Apple's measured layouts ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config('[strip]\ncard_layout = "stacked"\n')
+    start_fixture(1)
+    for k in "abc":
+        start_extra(k, 1)
+    try:
+        s = start_app(4, extra_env={"STAGE_MANAGER_TEST": "1"})
+        if not check(s is not None, "app up with the fixture and three fixture apps"):
+            return
+        vis = s["display"]["visible"]
+        # Apple's spread card is the same on every screen (11-16: "side" on the laptop and on a
+        # 2560 x 1440 display, to the point), so its numbers hold here whatever the screen;
+        # within 3 pt (the window list rounds to the point, the raise read 12 to 15).
+        tol = 3.0
+        t = by_title(s)
+        hold = t["Fixture 1"]["id"]
+        wid = {k: t[f"{EXTRA[k][3]} 1"]["id"] for k in "abc"}
+        holder = next(st["number"] for st in s["stages"] if hold in st["windows"])
+        for name, frames, back_to_front, apple in CARD_LAYOUTS:
+            say(f"-- {name}")
+            s = state()
+            ids = [wid[k] for k in back_to_front]
+            target = next(st["number"] for st in s["stages"] if ids[0] in st["windows"])
+            for i in ids[1:]:
+                do("send", target, i)
+            # A fixture app not in this layout waits in the holder's stage, clear of the strip.
+            for k in "abc":
+                if k not in frames:
+                    do("send", holder, wid[k])
+            do("switch", target)
+            wait_state(lambda x: x["active"] == target and x.get("switching") is None, f"{name}: its stage in front")
+            time.sleep(1.0)
+            # The stacking: each window framed back to front, as the landing-order phase does
+            # (`debug-frame` without `only` raises the window it frames). An app activated with
+            # `open` focuses no window (live 11-16: the activations came, the order never moved),
+            # so the first window opened stayed in front. The frames are the laptop's as
+            # measured, whose visible frame starts at y = 39.
+            on_top = None
+            for _ in range(3):
+                for k in back_to_front:
+                    x, y, w, h = frames[k]
+                    ctl("debug-frame", wid[k], vis["x"] + x, vis["y"] + y - 39, w, h)
+                    time.sleep(0.9)
+                wins, _ = fixture_windows([EXTRA[k][0] for k in back_to_front])
+                z = {w["id"]: w["z"] for w in wins}
+                on_top = [z.get(i) for i in ids]
+                if None not in on_top and all(a > b for a, b in zip(on_top, on_top[1:])):
+                    break
+                on_top = None
+            if not check(on_top is not None, f"{name}: on screen {back_to_front[::-1]} front to back ({[z.get(i) for i in ids]})"):
+                continue
+            do("switch", holder)
+            in_order = lambda x: next((st["windows"][:len(ids)] for st in x["stages"] if st["number"] == target), None) == ids[::-1]
+            s = wait_state(in_order, f"{name}: the card's order front to back", timeout=3)
+            if not check(s is not None, f"{name}: its card holds {back_to_front[::-1]} front to back"):
+                continue
+            time.sleep(0.8)
+            # The holder's windows stay clear of the strip so the cards stay shown.
+            for i in [hold] + [wid[k] for k in "abc" if k not in frames]:
+                ctl("debug-frame", i, vis["x"] + 1000, vis["y"] + 300, 600, 400)
+            time.sleep(1.0)
+            front_first = ids[::-1]
+            read = {}
+            for layout in ("stacked", "apple", "spread_covered"):
+                set_config_live(f'[strip]\ncard_layout = "{layout}"\n')
+                time.sleep(0.8)
+                got = card_pictures(ids)
+                if not check(got is not None, f"{name}, {layout}: its card is drawn"):
+                    continue
+                read[layout] = [got[i] for i in front_first]
+            if len(read) < 3:
+                continue
+            xs = [round(v[0], 1) for v in read["stacked"]]
+            check(all(abs(a - b) <= 1.0 for a, b in zip(xs, CARD_STACKED_X[name])),
+                  f"{name}, stacked: left edges {xs} at the fixed offsets {CARD_STACKED_X[name]}")
+            if apple:
+                off = [max(abs(g[j] - a[j]) for j in range(3)) for g, a in zip(read["apple"], apple)]
+                check(max(off) <= tol, f"{name}, apple: {[tuple(round(c, 1) for c in g) for g in read['apple']]} against Apple's {[tuple(round(c, 1) for c in a) for a in apple]} (worst {max(off):.1f} pt)")
+            same = lambda a, b: all(abs(p - q) <= 0.5 for u, v in zip(a, b) for p, q in zip(u, v))
+            want = "apple" if name == "hidden" else "stacked"
+            check(same(read["spread_covered"], read[want]), f"{name}, spread_covered: drawn as {want} ({read['spread_covered']})")
+            if name == "hidden":
+                check(read["apple"][1][0] > read["stacked"][1][0] + 20,
+                      f"hidden, apple: the window behind comes out from under the front one ({read['apple'][1][0]:.0f} pt against {read['stacked'][1][0]:.0f} stacked)")
+            consistent(f"cards {name}")
+    finally:
+        stop_app()
+        all_onscreen("cards quit")
+        stop_all_fixtures()
+        write_config(None)
 
 def phase_glass():
     """Round card-glass (11-03): the strip's cards let the wallpaper through, as Apple's do.
@@ -9399,6 +9538,136 @@ def phase_cmdtab_probe():
     stop_fixture()
 
 
+def phase_edgeflat():
+    """Round edge-flat (11-16): Apple's strip brought back at the left edge shows its cards
+    flat and turns them back as it hides (`ui::edge_flat`; UX-SPEC, "The strip brought back at
+    the edge is flat"). Three fixture windows, each a stage of its own; the current one moved
+    over the strip's column hides the strip. Window captures off (plain cards), Apple's
+    timing (`[animation] speed` 1). Fixture windows only; the pointer is posted only over
+    them and put back at the end.
+
+    1. The pointer posted a point to and fro at the edge about every 50 ms for a second: the
+       strip stays hidden (Apple's comes only once the pointer rests). Skipped when the posts
+       come further apart than the dwell (a busy Mac).
+    2. Then still at the edge: the strip comes, flat (`ctl debug-strip`'s `flat`), every
+       front plane drawn as a rectangle at its size before the turn on every sample (its
+       right edge as tall as its left within 0.5 pt, as wide as `thumb_size` within 1 pt), the
+       front card's left edge sliding from off the screen to its place on the slide's spring
+       (ω 16.8) within 25 pt (the samples' own lag), starting 80 to 400 ms after the rest
+       began (Apple's about 180 ms).
+    3. The pointer off the strip: after the leave delay the cards slide out turning back:
+       some sample of the front card wider than flat (Apple's widens as it starts to turn),
+       and at the end turned (`flat` false, its right edge shorter than its left), hidden."""
+    say("\n== edge-flat: the strip brought back at the edge, flat; turned back as it hides ==")
+    stop_app()
+    stop_all_fixtures()
+    write_config("")
+    start_fixture(3, "--frames", "600,200,900,640;700,300,700,500;800,250,1000,700")
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "app up with three fixture windows"):
+        return
+    t = by_title(s)
+    f1, f2, f3 = (t[f"Fixture {i}"]["id"] for i in (1, 2, 3))
+    do("new", f2)
+    do("new", f3)
+    do("switch", by_title(state())["Fixture 1"]["home"])
+    time.sleep(1.0)
+    s = state()
+    vis = s["display"]["visible"]
+    homes = {by_title(s)[f"Fixture {i}"]["home"] for i in (1, 2, 3)}
+    if not check(len(homes) == 3 and s["active"] == by_title(s)["Fixture 1"]["home"], f"three stages, Fixture 1 current ({stage_titles(s)})"):
+        return
+    # Fixture 1 over the strip's column, its left edge at the screen's: the strip hides.
+    ctl("debug-frame", f1, vis["x"], vis["y"] + 90, 1100, 800)
+    hidden = wait_until(lambda: (lambda p: p if p and not p.get("shown") else None)(strip_probe()), 3, "the strip to hide")
+    if not check(hidden is not None, "a window over the strip's column hides it"):
+        return
+    edge = (vis["x"] + 1, vis["y"] + vis["h"] / 2)
+
+    say("-- 1. the pointer moved a point to and fro at the edge: the strip stays hidden")
+    stamps = []
+    for i in range(20):
+        r = ctl("debug-hover", edge[0] - (i % 2), edge[1] + (i % 3), 0)
+        stamps.append(time.time())
+        if blocked(r, "edge-flat (the pointer at the left edge)"):
+            ctl("debug-pointer-back")
+            return
+        time.sleep(0.05)
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    p = strip_probe() or {}
+    if max(gaps) > 0.11:
+        skip("edge-flat: a moving pointer", f"the posts came up to {max(gaps) * 1000:.0f} ms apart, as long as the dwell")
+    else:
+        check(not p.get("shown"), f"a pointer moving at the edge leaves the strip hidden (posts {max(gaps) * 1000:.0f} ms apart at most)")
+
+    say("-- 2. still at the edge: the strip comes, flat, sliding in on the slide's spring")
+    rest = time.time()
+    proc = subprocess.Popen([BIN, "ctl", "debug-hover", str(edge[0]), str(edge[1]), "1500"], env=ENV, stdout=subprocess.PIPE, text=True)
+    seen = []
+    while proc.poll() is None or time.time() < rest + 1.8:
+        a = time.time()
+        q = strip_probe()
+        if q:
+            seen.append(((a + time.time()) / 2 - rest, q))
+    proc.communicate(timeout=10)
+
+    def front(q):
+        """The first card's front plane: (corners, size before the turn), or None."""
+        c = next((c for c in q.get("cards", []) if c.get("thumb_corners")), None)
+        return (c["thumb_corners"], c["thumb_size"]) if c else None
+
+    def edges(corners):
+        tl, tr, br, bl = corners
+        return bl["y"] - tl["y"], br["y"] - tr["y"], max(tr["x"], br["x"]) - min(tl["x"], bl["x"])
+
+    shown = [(t, q) for t, q in seen if q.get("shown")]
+    if not check(bool(shown), f"the strip comes once the pointer rests ({len(seen)} samples)"):
+        ctl("debug-pointer-back")
+        return
+    check(all(q.get("flat") for _, q in shown), "brought back at the edge, its cards are flat")
+    bad = []
+    for t, q in shown:
+        f = front(q)
+        if f is None:
+            continue
+        left, right, width = edges(f[0])
+        if abs(left - right) > 0.5 or abs(width - f[1]["w"]) > 1.0:
+            bad.append(f"{t * 1000:.0f} ms: left {left:.1f}, right {right:.1f}, {width:.1f} wide of {f[1]['w']:.1f}")
+    check(not bad, f"every front plane drawn flat at its size before the turn ({len(shown)} samples; {bad[:3]})")
+    xs = [(t, front(q)[0][0]["x"] - vis["x"]) for t, q in shown if front(q)]
+    if check(len(xs) >= 4, f"the slide sampled ({len(xs)} samples)"):
+        x0, x1 = min(x for _, x in xs), xs[-1][1]
+        x0 = min(x0, -271.0)
+        w = math.sqrt(282.0 / 1.0)
+
+        def spring(dt):
+            return 0.0 if dt <= 0 else 1 - (1 + w * dt) * math.exp(-w * dt)
+
+        best = min(((max(abs(x0 + (x1 - x0) * spring(t - t0 / 1000) - x) for t, x in xs), t0 / 1000) for t0 in range(0, 800, 5)))
+        check(best[0] < 25.0 and 0.08 <= best[1] <= 0.4,
+              f"the front card slides in on the slide's spring, starting {best[1] * 1000:.0f} ms after the rest (Apple's ~180), within {best[0]:.1f} pt")
+
+    say("-- 3. the pointer off the strip: the cards slide out turning back")
+    if not pointer_off_strip(state(), "edge-flat: the hide"):
+        ctl("debug-pointer-back")
+        return
+    start = time.time()
+    out = []
+    while time.time() < start + 1.6:
+        q = strip_probe()
+        if q:
+            out.append((time.time() - start, q))
+    ctl("debug-pointer-back")
+    widths = [(t, edges(front(q)[0])[2], front(q)[1]["w"]) for t, q in out if front(q)]
+    check(any(w > size + 2.0 for _, w, size in widths),
+          f"a card wider than flat as it starts to turn, as Apple's (widest {max((w - size for _, w, size in widths), default=0):+.1f} pt)")
+    last = out[-1][1] if out else {}
+    f = front(last) if last else None
+    turned = f is not None and edges(f[0])[1] < edges(f[0])[0] - 1.0
+    check(not last.get("shown") and not last.get("flat") and turned,
+          f"hidden again, its cards turned (shown {last.get('shown')}, flat {last.get('flat')}, edges {f and edges(f[0])})")
+
+
 def main():
     phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
@@ -9419,9 +9688,9 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
+             "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
-             "cmdtab-probe": phase_cmdtab_probe}[p]()
+             "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

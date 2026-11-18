@@ -249,7 +249,7 @@ pub fn looked_through(through: Through, pid: i32, element_pid: impl FnOnce() -> 
 }
 
 /// True when `bounds` holds the whole of `screen`, within a point.
-fn covers_screen(bounds: Rect, screen: Rect) -> bool {
+pub(crate) fn covers_screen(bounds: Rect, screen: Rect) -> bool {
     !screen.is_degenerate()
         && bounds.x <= screen.x + 1.0
         && bounds.y <= screen.y + 1.0

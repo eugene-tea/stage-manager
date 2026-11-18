@@ -97,7 +97,7 @@ impl Clock {
 fn rest_on(engine: EngineKind) -> Duration {
     match engine {
         EngineKind::Corner => SLIVER_REST,
-        EngineKind::Spaces => REST,
+        EngineKind::Spaces | EngineKind::Apple => REST,
     }
 }
 

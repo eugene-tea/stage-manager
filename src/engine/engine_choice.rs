@@ -64,7 +64,7 @@ impl Asked {
     /// for the Corner engine (the way out never touches the window server's Space calls).
     pub fn probes(&self) -> bool {
         match self.test {
-            Some(EngineKind::Corner) => false,
+            Some(EngineKind::Corner | EngineKind::Apple) => false,
             Some(EngineKind::Spaces) => true,
             None => self.config == ConfigEngine::Auto,
         }
@@ -88,7 +88,8 @@ pub struct Choice {
 pub fn choose(asked: Asked, probe: Option<ProbeVerdict>) -> Choice {
     let corner = |why: String, probe: Option<ProbeVerdict>| Choice { kind: EngineKind::Corner, why, probe, fallback: None };
     let wants_spaces = match asked.test {
-        Some(EngineKind::Corner) => return corner("the test switch asks for it".into(), probe),
+        // The Apple mode is no launch's choice (it follows Apple's Stage Manager while it is on).
+        Some(EngineKind::Corner | EngineKind::Apple) => return corner("the test switch asks for it".into(), probe),
         Some(EngineKind::Spaces) => "the test switch asks for it",
         None if asked.config == ConfigEngine::Accessibility => return corner("[windows] engine = \"accessibility\"".into(), probe),
         None if !asked.opted_in => {

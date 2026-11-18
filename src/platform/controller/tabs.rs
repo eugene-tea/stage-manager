@@ -147,7 +147,7 @@ impl Controller {
     /// any window the model no longer counts, so it shows on its Desktop once selected again.
     fn release_hidden_tab(&mut self, left: u32) {
         match self.engine.kind() {
-            EngineKind::Corner => {}
+            EngineKind::Corner | EngineKind::Apple => {}
             EngineKind::Spaces => {
                 crate::platform::spaces::engine::shared().release(&[left], "a hidden tab: the tab selected took its place");
             }

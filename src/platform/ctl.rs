@@ -126,6 +126,57 @@ impl CmdTabProbe {
     }
 }
 
+/// One route of the Apple mode run once by hand (`ctl apple try ROUTE TARGET`, needs
+/// `STAGE_MANAGER_TEST=1`): the live check's diagnostics and its tripwires, the routes tried
+/// and rejected that are to do nothing still (docs/STRATEGIES.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AppleTry {
+    /// `focus ID`: the focus route on window ID.
+    Focus(u32),
+    /// `shift-click ID`: the Shift-click route on window ID's thumbnail.
+    ShiftClick(u32),
+    /// `drag ID`: the drag route on window ID (in the stage in front).
+    Drag(u32),
+    /// `ax-press ID`: rejected, `AXPress` on the strip item holding window ID.
+    AxPress(u32),
+    /// `ax-add ID`: rejected, `AXAddToStage` on the strip item holding window ID.
+    AxAddToStage(u32),
+    /// `pid-click ID`: rejected, a Shift-click on window ID's thumbnail posted to
+    /// WindowManager's pid alone.
+    PidClick(u32),
+    /// `shift-focus ID`: rejected, the focus route on window ID with Shift held.
+    ShiftFocus(u32),
+}
+
+impl AppleTry {
+    fn parse(route: &str, target: &str) -> Result<Self, String> {
+        let id = || target.parse::<u32>().map_err(|_| format!("expected a window id, got {target:?}"));
+        match route {
+            "focus" => Ok(Self::Focus(id()?)),
+            "shift-click" => Ok(Self::ShiftClick(id()?)),
+            "drag" => Ok(Self::Drag(id()?)),
+            "ax-press" => Ok(Self::AxPress(id()?)),
+            "ax-add" => Ok(Self::AxAddToStage(id()?)),
+            "pid-click" => Ok(Self::PidClick(id()?)),
+            "shift-focus" => Ok(Self::ShiftFocus(id()?)),
+            _ => Err(format!("apple try takes focus, shift-click, drag, ax-press, ax-add, pid-click or shift-focus, got {route:?}")),
+        }
+    }
+
+    /// Its name, as typed.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Focus(_) => "focus",
+            Self::ShiftClick(_) => "shift-click",
+            Self::Drag(_) => "drag",
+            Self::AxPress(_) => "ax-press",
+            Self::AxAddToStage(_) => "ax-add",
+            Self::PidClick(_) => "pid-click",
+            Self::ShiftFocus(_) => "shift-focus",
+        }
+    }
+}
+
 /// A parsed ctl command.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
@@ -156,6 +207,11 @@ pub enum Command {
     Pin(Option<u32>),
     /// Move stage N's windows into the active stage (a shift-click on its card).
     Merge(usize),
+    /// The Apple mode: one route run once by hand (needs `STAGE_MANAGER_TEST=1`).
+    AppleTry(AppleTry),
+    /// The Apple mode: the stages saved when the mode started (`state-apple.json` as it was
+    /// then) put back on Apple's Stage Manager.
+    AppleRestore,
     /// Reveal the desktop (a wallpaper click).
     Reveal,
     /// Bring every parked window back onscreen (the stages stay).
@@ -356,6 +412,8 @@ impl Command {
             ["new", rest @ ..] if rest.len() <= 1 => Ok(Self::New(window_id(rest.first())?)),
             ["pin", rest @ ..] if rest.len() <= 1 => Ok(Self::Pin(window_id(rest.first())?)),
             ["merge", n] => Ok(Self::Merge(number(n)?)),
+            ["apple", "try", route, target] => AppleTry::parse(route, target).map(Self::AppleTry),
+            ["apple", "restore"] => Ok(Self::AppleRestore),
             ["reveal"] => Ok(Self::Reveal),
             ["unpark-all"] => Ok(Self::UnparkAll),
             ["reload"] => Ok(Self::Reload),
@@ -928,6 +986,13 @@ mod tests {
         assert_eq!(Command::parse("new 12"), Ok(Command::New(Some(12))));
         assert_eq!(Command::parse("pin 12"), Ok(Command::Pin(Some(12))));
         assert_eq!(Command::parse("merge 2"), Ok(Command::Merge(2)));
+        assert_eq!(Command::parse("apple try ax-press 2"), Ok(Command::AppleTry(AppleTry::AxPress(2))));
+        assert_eq!(Command::parse("apple try shift-click 4711"), Ok(Command::AppleTry(AppleTry::ShiftClick(4711))));
+        assert_eq!(Command::parse("apple try shift-focus 12"), Ok(Command::AppleTry(AppleTry::ShiftFocus(12))));
+        assert!(Command::parse("apple try ax-press first").is_err(), "a window id");
+        assert!(Command::parse("apple try teleport 3").is_err());
+        assert_eq!(Command::parse("apple restore"), Ok(Command::AppleRestore));
+        assert!(Command::parse("apple restore now").is_err());
         assert_eq!(Command::parse("reveal"), Ok(Command::Reveal));
         assert_eq!(Command::parse("debug-toggle-strip"), Ok(Command::DebugToggleStrip));
         assert_eq!(Command::parse("unpark-all"), Ok(Command::UnparkAll));

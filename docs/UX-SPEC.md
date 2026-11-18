@@ -19,7 +19,7 @@ file never repeats one.
 
 | System Settings → Desktop & Dock | What Stage Manager does |
 |---|---|
-| Stage Manager on or off | The two cannot run together. While Apple's is on, Stage Manager steps aside: every window comes back, the strip hides and nothing is arranged. It offers to turn Apple's off, and changes the setting only when you click. |
+| Stage Manager on or off | The two cannot run together. While Apple's is on, Stage Manager steps aside: every window comes back, the strip hides and nothing is arranged. It offers to turn Apple's off, and changes the setting only when you click. With `[windows] with_apple = "augment"` (off by default) it follows Apple's stages instead of stepping aside: Apple's draws the strip and arranges the windows, and the stage hotkeys and `ctl switch` bring one of its stages to the front, `ctl merge` and the send hotkeys move windows between its stages (a posted Shift-click on a thumbnail, a drag onto the strip: the pointer jumps for about a frame and comes back, never while the user clicks, drags or holds keys), a newly opened app the rules or Shift want here joins the stage in front, and after a restart or a new login Apple's stages are put back as saved once the windows have reopened (`[stages] restore_with_apple`, on; `ctl apple restore` at any time); each screen's stages are followed apart and a step acts on one screen only, stages of a Desktop not shown are left alone, nothing is done while a full-screen app shows, and Apple's keeps its own strip order (docs/STRATEGIES.md). The menu then says "Following Apple's Stage Manager" in place of the offer to turn it off. |
 | Show recent apps | Off hides the strip until the pointer reaches the left edge. |
 | Show windows from an application | All at Once or One at a Time, as below. |
 | Click wallpaper to reveal desktop | With "Only in Stage Manager", a wallpaper click puts the stage into the strip, as Apple's does. With "Always", macOS itself moves every window aside (Apple's Stage Manager is off while ours runs) and Stage Manager stays out of the way: macOS answers that click before any other app can, and only that setting stops it, which Stage Manager never writes. Settings says so beside its button to System Settings. |
@@ -44,7 +44,10 @@ slid away when it was dragged on to 15 pt, its cards starting at 16 pt; the poin
 was not measured; a laptop's windows nearly fill the screen, so there it goes more often).
 Each screen's strip follows its own front stage. Resting the pointer at the left edge brings
 it back: Apple's starts sliding in about 180 ms after the pointer gets there (measured), ours
-rests 130 ms and checks the pointer every 30 ms (`[reveal] delay_ms`, `poll_ms`). Each card
+rests 130 ms and checks the pointer every 30 ms (`[reveal] delay_ms`, `poll_ms`). It has to
+rest: a move of a point or more starts the rest again (recorded 11-16: a pointer posted a
+point to and fro at the edge left Apple's strip hidden until it stood still), so a pointer
+passing along the edge never brings it. Brought back, its cards are flat (below). Each card
 draws the stage's windows at one scale, turned in perspective toward the middle of the
 screen, with the app icon on its bottom-left corner. The number of cards depends on the
 screen height: 5 on a laptop, 6 on a 5K screen.
@@ -101,6 +104,42 @@ screen) is left off: the card shows the window alone. So is a popup over a windo
 macOS's capture does not place (a calendar's event popup reaching past the window's top):
 never a fill around a window on a card.
 
+**Apple's spread** (measured 11-16 through the window list, which lists each strip picture
+at its bounds: eleven cards of two and three fixture windows of different apps, six on the
+laptop, five on a 2560 × 1440 display; `ui::card_spread`). Apple does not draw the windows'
+real layout: two windows 856 pt apart on the screen came out 27 pt apart, a 500 × 432 window
+centred in a 1000 × 732 one came out beside it. Its rule, fitted to all eleven within 3 pt:
+the front window anchors the card and the second goes to the side of it its middle sits on
+(level: left, as above). Of two windows side by side, the right one's left edge sits 0.25 of
+the left one's width (before the turn) right of the left one's, plus 0.65 of how much
+narrower the right one is (`[cards] spread_step`, `spread_narrow`): equal windows step 25 to
+30 pt and the one behind shows about half of itself (its side and its top); a window half as
+wide as the one beside it comes out beside it, its left edge at the other's far edge; a much
+wider one on the right steps only a quarter of the narrow one (14 pt for a 1400 × 1032
+window behind a 400 × 332 one). A third window goes to the second's side whichever side of
+the front window it sits on, 0.165 of its own width in from the second (`spread_third`:
+17 and 18 pt with the front window narrower, 16 with three equal windows; one card had the
+third right of the front window on the screen and Apple still drew it on the second's left).
+The windows line up 85 % of the way down each (`spread_line`), the second 13 pt up (12 to
+15 read, `spread_raise`), the third 19 (`spread_raise_third`): the front window lowest,
+whatever the real heights. One scale for every window, their sizes relative to each other
+kept: the card's windows span 102 pt top to bottom (100 to 104 read, `spread_height`; two
+400 × 332 windows grew to 87 and 88 pt), never below 0.124 card points per point of the window
+(`spread_min_scale`: 1400 × 1032 and 1400 × 1064 windows drew 127 and 131 pt tall). The
+scale is the window's own, not the screen's: "side" read the same to the point on the laptop
+and on the 2560 × 1440 display (90 pt windows, 25 pt step, 12 pt up), where the cards' plain
+scale is 161 pt over the visible height. Two windows of one app keep their 16 pt step at their
+own size (11-16: 94 × 131 and 95 × 131). Apple's card of an editor over a terminal (11-16, a
+screenshot) put the terminal right of the editor at 0.76 of the editor's turned width; the
+rule gives 0.75 for a window 0.69 as wide. Ours draws the spread with `[strip] card_layout =
+"apple"`. The default stays `"stacked"`, the 11-09 offsets above, where a window behind a
+wider one can hide entirely (the same editor and terminal: the terminal hardly showed), until
+the owner picks; `"spread_covered"` stacks a card unless a window would show less than 30 %
+of itself on it (`spread_covered_share`, sampled on the card as drawn), then spreads it. Left
+open (Known gaps): a fourth window, two windows of one app among others, and the 96 pt that
+11-09's stills read for a card of two on the 5K display where the window list reads 102 on
+both screens.
+
 **Cards let the wallpaper through**, as Apple's do (measured): each window's picture is
 drawn at 78 % over a flat colour of its own,
 the wallpaper's average behind the thumbnail at 95 % of its saturation and 78 % of its
@@ -121,6 +160,37 @@ together. Apple's turns solid on the growth's own curve (measured: the windows' 
 card's edge fit the same spring, ω 16.8 and 16.6). The wallpaper is drawn from its file,
 as the clean corner's is; where it cannot be (a shuffle, an unreadable picture), the cards are
 opaque.
+
+**The strip brought back at the edge is flat** (recorded 11-16 on a 2560 × 1440 pt display:
+Apple's strip hidden behind a window over its column, three fixture windows each a stage of
+its own, the pointer rested at the left edge for about 3 s and then moved away, three
+rounds; every window's bounds read every 8 to 30 ms; `scripts/measure-edge-reveal.py` reads
+the recordings). Hidden, Apple's cards wait off the screen turned as in the strip, their left
+edges at −260 pt (a 900 × 668 pt window's card 94 × 104 pt there: the turn seen from the
+strip's eye, which stays put while the cards slide, as before). Brought back, the cards turn
+**flat at once**, still off the screen, facing the viewer at the size the strip draws them
+before the turn: the window's own proportions, 97 pt tall for these small windows (130.7,
+128.6 and 133.2 pt wide for 900 × 668, 700 × 528 and 1000 × 728 pt windows; read 129 to 132).
+They slide in flat from −260 to 16 pt on a critically damped spring starting within 10 ms
+of the turn (ω 15.7 and 16.6 read, 99 % about 420 ms later; ours is the slide's, ω 16.8),
+their places down the column unchanged. The app icons stay on the cards' corners (the
+owner's screenshot of Apple's revealed strip, 11-16). Hiding (the pointer gone, after the
+leave delay), each card slides out turning back: its window's pose, seen through the
+flight's eye (the display's middle, 1.17 display widths in front, as a switch's snapshot),
+goes from the flat card to the turned one off the screen, its size, turn and height on the
+slide's spring (ω 17.0 and 17.2 read) and its sideways place trailing the spring by
+0.3 · p (1 − p) (0.26 to 0.33 by fit). Seen so, a card first widens as its far side goes back
+toward the eye's middle (the 130.7 pt card 139 to 140 pt wide 30 to 90 ms in) and then narrows to the turned card (`ui::edge_flat`). That draws the
+three cards of both recorded hides within 0.6 pt rms (2.6 at worst) at each frame's best
+progress; a turn about the left edge on the slide, seen through the strip's eye, misses them
+by 7.2 pt rms (18 at worst): it cannot draw a card wider than flat. Ours draws the revealed
+strip with no turn (every hit test too) and, hiding, turns each plane back on keyframes of
+that pose under the usual slide, ending on the turned card it draws at rest; it hides its
+cards 271 pt left on the 5K display (`[motion] slide_distance` 286 from x 15) where Apple's
+went to −260 with these narrow cards. Not recorded: Apple's with "Show recent apps" off (ours
+draws its edge reveal flat too), a revealed strip a window then moves off (ours turns the
+cards back in place on the slide's spring), a revealed card's hover, and the shadows.
+`[reveal] flat = false` keeps the cards turned.
 
 **Strip order is slot-stable.** A clicked card's stage becomes active, and the stage you
 leave takes the slot the clicked card vacated. A stage entering a full strip takes the slot
@@ -406,7 +476,8 @@ screen).
 | Windows shrinking into the strip: the stage you leave, the desktop reveal, ⌘M, a window dropped on the strip | the same spring; sideways motion, width and the turn trailing it |
 | Cards gliding to new slots | spring, 99 % at about 375 ms |
 | The strip sliding out and in | spring, 99 % at about 400 ms, 286 pt |
-| The edge reveal | starts about 180 ms after the pointer reaches the left edge |
+| The edge reveal | starts about 180 ms after the pointer comes to rest at the left edge; the cards turn flat at once and slide in on the slide's spring |
+| The revealed strip hiding | the slide's spring; each card turning back on it, its sideways place trailing it (below) |
 | Hover | grows 11 % on a spring, half way at about 100 ms, 99 % at about 400 ms, its windows turning solid on the same curve |
 | Press | eases to 0.987 of its size in about 100 ms |
 | A card dragged out | its window as it leaves the strip: turned as the card at first, flat on the growing spring; slides under the pointer in about 100 ms (smoothstep) |
@@ -732,6 +803,8 @@ until used; the rest are off.
 | Parked windows' edges ignore clicks; the wallpaper patch covers them | on |
 | Rules for new windows: a named stage, a new stage, pinned to every stage, or ignored; centered or cascaded | off until a rule is written |
 | Keyboard shortcuts to switch, send, pin and show the strip | off |
+| Follow Apple's Stage Manager while it is on: its stages switched by the stage hotkeys and `ctl switch` (`[windows] with_apple = "augment"`) | off |
+| While following Apple's Stage Manager, its stages come back after a restart or a new login (`[stages] restore_with_apple`) | on |
 | Keep windows clear of the strip, by moving or narrowing them | off |
 | Card numbers, stage names, an edge tab, a strip above windows | off |
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
@@ -1055,9 +1128,17 @@ set to move its cursor with the mouse pointer.
 - Apple's auto-hide comes either about 0.1 s or about 1.1 s after the pointer leaves the
   strip (six runs, 11-09, no difference found between them); ours waits 500 ms.
 - Not measured yet on Apple's: a card of four or more apps, which side a third app's window takes when it sits on the
-  other side of the front window from the second app's (ours: the second's side), and what
-  decides how far the other app's window peeks out (ours: always the fixture's 42 and 15 pt, on its
-  side of the screen).
+  other side of the front window from the second app's (stacked and the spread alike: the
+  second's side; the spread measured so 11-16). How far the other app's window peeks out is
+  measured for the spread (11-16, `card_layout = "apple"`); stacked, the default, it is
+  always the fixture's 42 and 15 pt, on its side of the screen.
+- The spread (`card_layout = "apple"`) still to measure: a card of two windows of one app
+  and one of another (ours spreads every window by its place in front-to-back order), the
+  most windows a card shows (ours: `max_windows` 3), what makes the raise 12 on some cards and
+  15 on others, and the window list against the drawn glass: the list reads a card of two at
+  102 pt on both screens (11-16), 11-09's stills read 96 on the 5K, so the screen is ruled out
+  and either the list's boxes run about 6 % larger than the glass or the stills were read
+  short; a still and the window list of one card at once decide it.
 - Where Apple places a window moved to another Desktop is unverified. Ours places it as a
   window of its app opening there: in that app's most recent stage on that Desktop, else a
   stage of its own, shown in front. Several apps moved at once get a stage each; the front

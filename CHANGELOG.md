@@ -2,6 +2,43 @@
 
 ## Unreleased
 
+- New setting `[windows] with_apple` (`"stand_down"` or `"augment"`). With `"augment"`,
+  Stage Manager follows Apple's Stage Manager while it is on instead of stepping aside: the
+  stage hotkeys and `ctl switch N` bring stage N of Apple's strip to the front, and
+  `ctl state` lists Apple's stages. `"stand_down"`, the default, keeps the behaviour as it
+  was.
+- With `[windows] with_apple = "augment"`, `ctl merge N`, `ctl send N`, `ctl new` and the
+  send and new-stage hotkeys move windows between Apple's stages, by a Shift-click well
+  inside a thumbnail as Apple's strip draws it (clear of the thumbnails and app icons drawn
+  over it) or a drag of the title bar onto it; nothing is posted while the
+  user clicks, types or holds a key. A newly opened app that a rule's `current`,
+  `[stages] new_apps_join_current` or Shift wants in the stage in front joins it: the app is
+  hidden as it launches, so Apple's Stage Manager keeps the stage in front, then brought in.
+  The same goes for a running app with no window that opens one as it is activated (a Dock
+  click on Notes or Activity Monitor): it is hidden as it activates, shown again a moment
+  later, and brought in. Finder is left to Apple's Stage Manager. When the app's window shows before the
+  hide takes, the stage that was in front comes back as it was, its windows in their order
+  and in one go, with the app's window on top.
+- New setting `[stages] restore_with_apple`, on by default. With `[windows] with_apple =
+  "augment"`, Apple's stages are put back as saved after a restart or a new login, once the
+  reopened windows have shown; under "All at Once" an app's windows stay in one stage.
+  `ctl apple restore` puts back the stages saved when the following started.
+- With `[windows] with_apple = "augment"`, each screen's stages are followed apart and a
+  stage hotkey or `ctl` command acts on one screen only; stages of a Desktop not shown are
+  kept and left alone; nothing is done while a full-screen app shows. The menu, the welcome
+  and Settings say that Apple's Stage Manager is followed instead of offering to turn it
+  off.
+- New setting `[strip] card_layout` (`"stacked"`, `"apple"` or `"spread_covered"`, applied
+  when the config file is saved). It chooses how a card of several apps places its windows:
+  `"stacked"`, the default, at the fixed offsets as before, where a window behind a wider one
+  can hide; `"apple"` spreads them as Apple's strip does (fitted to cards measured on
+  Apple's), so the window behind stays readable; `"spread_covered"` spreads only a card
+  where a window would show less than 30 % of itself. The `[cards] spread_*` keys hold the
+  spread's measured numbers.
+- The strip brought back at the left edge shows its cards flat, facing the screen, at the
+  size they have before the turn, and turns them back as it slides away, as Apple's does
+  (`[reveal] flat`; false keeps them turned). It comes once the pointer rests at the edge: a
+  pointer still moving there no longer brings it.
 - A window tab selected (Terminal, Finder, any app with window tabs) belongs to the stage
   of its tab group: it takes the place of the tab it hides, and goes with its stage when
   another stage is chosen. A tab selected was let go with no stage, and selected again it

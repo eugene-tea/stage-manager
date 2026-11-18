@@ -3,6 +3,7 @@
 //! The engine compiles and tests on any OS. The platform layer feeds it observations and
 //! executes the [`model::Action`]s it returns.
 
+pub mod apple;
 pub mod ax_blind;
 pub mod busy_apps;
 pub mod corner;
@@ -30,6 +31,7 @@ pub mod not_ours;
 pub mod observe_retry;
 pub mod overview;
 pub mod persist;
+pub mod perspective;
 pub mod phase;
 pub mod placement;
 pub mod raise_order;

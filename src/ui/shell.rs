@@ -371,6 +371,12 @@ impl Shell {
         native_settings::apple_stage_manager_enabled(&self.raw)
     }
 
+    /// Stage Manager follows Apple's while it is on (`[windows] with_apple = "augment"`)
+    /// instead of standing down.
+    fn follows_apple(&self) -> bool {
+        self.config.windows.with_apple == crate::engine::stand_down::WithApple::Augment
+    }
+
     fn save_state(&self) {
         self.state.save(&paths::app_state_file());
     }
@@ -383,7 +389,7 @@ impl Shell {
         later(move || (hooks.set_menu_icon)(icon));
         let first = !self.state.welcomed;
         let prompts = permissions::prompts_allowed() && paths::custom_home().is_none();
-        if welcome::due(first, &self.permissions, self.apple_on(), prompts) {
+        if welcome::due(first, &self.permissions, self.apple_on() && !self.follows_apple(), prompts) {
             tracing::info!(first, accessibility = self.permissions.accessibility, apple = self.apple_on(), "showing the welcome");
             self.show_welcome();
             if first {
@@ -501,7 +507,7 @@ impl Shell {
     }
 
     fn welcome_rows(&self, apple_row: bool) -> Vec<welcome::WelcomeRow> {
-        welcome::rows(&self.permissions, self.capture_on(), apple_row, self.apple_on())
+        welcome::rows(&self.permissions, self.capture_on(), apple_row, self.apple_on(), self.follows_apple())
     }
 
     fn show_welcome(&self) {

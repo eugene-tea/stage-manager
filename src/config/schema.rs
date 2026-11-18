@@ -213,6 +213,8 @@ pub const KEYS: &[KeyDef] = &[
         "With order = \"in_place\" or \"dock\", the active stage's place: \"close\" shows no card and the cards below close up; \"gap\" leaves its slot empty so no other card moves; \"card\" shows it as a highlighted card."),
     k("strip", "level", Kind::Choice(&["below_windows", "above_windows"]), "\"below_windows\"",
         "Where the strip sits: \"below_windows\" is Apple's (a window moved over it covers it); \"above_windows\" keeps it over windows."),
+    k("strip", "card_layout", Kind::Choice(&["stacked", "apple", "spread_covered"]), "\"stacked\"",
+        "How a card of several apps places its windows: \"stacked\" at the fixed offsets below (second_app_dx and the rest), so a window behind a wider one can hide; \"apple\" spreads them as Apple's does (spread_*: a window behind stays readable); \"spread_covered\" stacks them unless a window would show less than spread_covered_share of itself, then spreads. Cards of one app step stack_dx either way."),
     k("strip", "reorder", Kind::Bool, "true",
         "Drag a card up or down within the strip to give it another slot (an extension; Apple's cannot, invisible until used). Off while order = \"dock\"."),
     k("strip", "merge_on_drop", Kind::Bool, "true",
@@ -265,6 +267,17 @@ pub const KEYS: &[KeyDef] = &[
     k("cards", "second_app_dy", f(-300.0, 300.0), "15.0", "...and this far up (the windows centered on one line otherwise)."),
     k("cards", "third_app_dx", f(-300.0, 300.0), "12.0", "On a card of three apps, the third app's window sits this far from the front window, toward the second app's side (Apple's, measured: about 0.29 of the second's)."),
     k("cards", "third_app_dy", f(-300.0, 300.0), "24.0", "...and this far up, behind the others at the top (Apple's, measured: about 1.6 times the second's)."),
+    k("cards", "spread_step", f(0.0, 2.0), "0.25",
+        "With card_layout = \"apple\": each window's left edge sits this share of the width of the window left of it further right (Apple's, measured on the laptop's window list: 0.25)."),
+    k("cards", "spread_narrow", f(0.0, 2.0), "0.65", "...plus this share of how much narrower the right one is, so a small window comes out beside a big one (Apple's: 0.65)."),
+    k("cards", "spread_third", f(0.0, 2.0), "0.165", "A third window goes to the second's side, this share of its own width in from the second, toward the front one (Apple's: 0.165)."),
+    k("cards", "spread_line", f(0.0, 1.0), "0.85", "The windows are lined up this far down each, 0 their tops, 1 their bottoms (Apple's: 0.85)..."),
+    k("cards", "spread_raise", f(-300.0, 300.0), "13.0", "...the window behind the front one raised this far (Apple's: 12 to 15)..."),
+    k("cards", "spread_raise_third", f(-300.0, 300.0), "19.0", "...and the third this far (Apple's: 19)."),
+    k("cards", "spread_height", f(10.0, 1000.0), "102.0", "The spread card's windows, top to bottom, are scaled together to this height (Apple's, on its window list: 100 to 104)..."),
+    k("cards", "spread_min_scale", f(0.01, 1.0), "0.124", "...never smaller than this many card points per point of the window (Apple's, the same on a laptop and a 2560 × 1440 display: 0.124)."),
+    k("cards", "spread_covered_share", f(0.0, 1.0), "0.3",
+        "With card_layout = \"spread_covered\": a window showing less than this share of itself on the stacked card spreads the card."),
     k("cards", "hover_scale", f(1.0, 2.0), "1.11",
         "The card under the pointer grows by this factor, about its center (Apple's, measured on a card of one window: 1.11)."),
     k("cards", "hover_ms", i(0, 3000), "400",
@@ -306,9 +319,11 @@ pub const KEYS: &[KeyDef] = &[
     // [reveal]
     k("reveal", "edge_width", f(0.0, 100.0), "2.0", "The pointer within this many points of the left edge counts as at the edge."),
     k("reveal", "delay_ms", i(0, 10_000), "130",
-        "Resting at the left edge this long brings a hidden strip back (Apple's slide starts about 180 ms after the pointer reaches the edge; the poll and the drawing take the rest)."),
+        "Resting at the left edge this long brings a hidden strip back; a move starts the rest again (Apple's slide starts about 180 ms after the pointer comes to rest there; the poll and the drawing take the rest)."),
     k("reveal", "hide_delay_ms", i(0, 10_000), "500", "A strip brought back hides again this long after the pointer leaves it."),
     k("reveal", "poll_ms", i(10, 1000), "30", "How often the pointer is checked while it rests at the edge or the strip is brought back."),
+    k("reveal", "flat", Kind::Bool, "true",
+        "A strip brought back at the left edge shows its cards flat, facing the viewer, and turns them back as it slides away, as Apple's does; false keeps them turned."),
     k("reveal", "edge_tab", Kind::Bool, "false", "Show a slim tab at the left edge while a window hides the strip (an extension)."),
     k("reveal", "launch_reveal", Kind::Bool, "false", "Show a covered strip for a moment at launch (an extension)."),
     k("reveal", "launch_reveal_ms", i(0, 60_000), "3000", "How long that launch showing lasts."),
@@ -382,6 +397,8 @@ pub const KEYS: &[KeyDef] = &[
         ..k("windows", "engine", Kind::Choice(&["auto", "accessibility"]), "\"auto\"",
             "How a stage's windows are hidden: \"auto\" lets each launch try the window server's own Spaces and keep them only where a trial with a window of the app's own works, with the Accessibility park corner otherwise and for the rest of a run in which a Space call fails; \"accessibility\" always uses the park corner and never tries Spaces (a way out if windows go missing or flicker on a switch). In this version \"auto\" still uses the park corner. Read at launch.")
     },
+    k("windows", "with_apple", Kind::Choice(&["stand_down", "augment"]), "\"stand_down\"",
+        "What Stage Manager does while Apple's Stage Manager is on: \"stand_down\" brings every window back and arranges nothing until Apple's is off; \"augment\" follows Apple's stages instead: the stage hotkeys and `ctl switch` switch between them, and Stage Manager shows no strip of its own. With Apple's off, Stage Manager runs its own stages either way."),
     // [displays]
     KeyDef {
         applies: Applies::Restart,
@@ -407,6 +424,8 @@ pub const KEYS: &[KeyDef] = &[
         "After a restart or a new login, windows go back to the stages and places they had, as their apps reopen them (with macOS's \"Reopen windows when logging back in\"). Off: saved windows not on screen at launch are forgotten and every app starts in a stage of its own, as Apple's does. Read at launch."),
     k("stages", "new_apps_join_current", Kind::Bool, "false",
         "A newly opened app's first windows join the current stage; Shift held while opening it ([sugar] shift_brings_here) gives it a stage of its own. Off is Apple's: a newly opened app gets a stage of its own. Rules and a non-native [defaults] action come first; windows going back to their saved stages, and apps opening while stages come back after a launch, keep Apple's rule."),
+    k("stages", "restore_with_apple", Kind::Bool, "true",
+        "With [windows] with_apple = \"augment\", after a restart or a new login Apple's Stage Manager's stages are put back as they were, once their windows have reopened: a window of each stage brought to the front, the stage's other windows Shift-clicked in from Apple's strip and windows of other stages dragged out of it (the pointer jumps for each and comes back; nothing is posted during a click, typing or a held key). An app's windows stay in one stage under \"Show windows from an application: All at Once\". Off: Apple's Stage Manager arranges the reopened windows its own way. `ctl apple restore` puts back the stages saved when Stage Manager started following Apple's."),
     // [restore]
     k("restore", "saved_size", Kind::Bool, "true",
         "A window its app reopens after a restart at under half its saved size (matched by its title, on the screen it was saved on) gets its saved frame back once, when first shown; moved or resized by you first, it keeps yours. Off: every window keeps the frame its app gives it, as Apple's does."),
@@ -604,6 +623,8 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-42.toml"),
     include_str!("legacy/default-43.toml"),
     include_str!("legacy/default-44.toml"),
+    include_str!("legacy/default-45.toml"),
+    include_str!("legacy/default-46.toml"),
 ];
 
 #[cfg(test)]
