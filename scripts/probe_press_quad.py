@@ -28,9 +28,25 @@ minute and a half. Prints a table and writes it as JSON to a temporary file (nam
 Only the fixtures' windows are clicked, each click only where WindowManager's own window is
 topmost. Window titles are never read.
 
-  SM_TEST_TOGGLE_APPLE_SM=1 scripts/probe_press_quad.py [--dry]
+Two more phases (the run of 11-17 found a back window behind a sibling of its own app takes no
+click, alone or first in a press; the fourth probe of 11-16 had both of a stage of two join):
 
---dry reads the strip and prints the planned points without clicking.
+  two-app  A stage of two apps in the strip (Charlie's window and Bravo's Shift-clicked into it,
+           sent to the strip by activating Alpha): the back window's own part clicked alone;
+           set up again, back then front in one press. Which joined.
+  sibling  Alpha's two windows (one app) in the strip, Charlie in front: the front one clicked
+           alone, then, after the settle and a fresh read, the back one (alone in the strip
+           now). Which joined, and the order of the stage in front after (front to back).
+           Then the raise (Accessibility, the host's trust, as the clicks need): on the window
+           lowest in the stage in front, AXRaise alone; then AXRaise and AXMain; then AXRaise,
+           AXMain and its app frontmost (the focus route). After each: the order, whether the
+           stage stayed whole (no switch: every window still full size where it was).
+
+  SM_TEST_TOGGLE_APPLE_SM=1 scripts/probe_press_quad.py [--dry] [quad] [two-app] [sibling]
+
+With no phase named, all three (quad, the trials above, about a minute and a half; two-app and
+sibling about a minute together). --dry reads the strip and prints quad's planned points without
+clicking, and skips the other two (their set-up clicks).
 """
 
 import atexit
@@ -325,7 +341,7 @@ def read():
         if w["pid"] not in owner or w["layer"] != 0:
             continue
         twin = i > 0 and ws[i - 1]["pid"] == mgr and ws[i - 1]["layer"] == 0 and same(ws[i - 1]["bounds"], w["bounds"])
-        wins.append({"app": owner[w["pid"]], "id": w["id"], "at": i, "bounds": w["bounds"], "thumb": twin})
+        wins.append({"app": owner[w["pid"]], "id": w["id"], "pid": w["pid"], "at": i, "bounds": w["bounds"], "thumb": twin})
     icons = [w["bounds"] for w in ws if w["pid"] == mgr and w["layer"] == 0 and same(w["bounds"][2:], ICON, 2.0)]
     return {"list": ws, "mgr": mgr, "wins": wins, "icons": icons}
 
@@ -416,6 +432,51 @@ def arrange(full=False):
         time.sleep(1.2)
     subprocess.run(["open", t.FIX["Charlie"][1]], check=True)
     return settle()
+
+
+# ----- Accessibility, for the raise ------------------------------------------------------
+
+ax = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+ax.AXIsProcessTrusted.restype = ctypes.c_bool
+ax.AXUIElementCreateApplication.restype = vp
+ax.AXUIElementCreateApplication.argtypes = [ctypes.c_int]
+ax.AXUIElementCopyAttributeValue.restype = ctypes.c_int
+ax.AXUIElementCopyAttributeValue.argtypes = [vp, vp, ctypes.POINTER(vp)]
+ax.AXUIElementSetAttributeValue.restype = ctypes.c_int
+ax.AXUIElementSetAttributeValue.argtypes = [vp, vp, vp]
+ax.AXUIElementPerformAction.restype = ctypes.c_int
+ax.AXUIElementPerformAction.argtypes = [vp, vp]
+ax._AXUIElementGetWindow.restype = ctypes.c_int
+ax._AXUIElementGetWindow.argtypes = [vp, ctypes.POINTER(ctypes.c_uint32)]
+CF_TRUE = vp.in_dll(cf, "kCFBooleanTrue")
+AX = {k: cf.CFStringCreateWithCString(None, k.encode(), UTF8) for k in ("AXWindows", "AXRaise", "AXMain", "AXFrontmost")}
+
+
+def ax_window(pid, wid):
+    """The Accessibility element of window `wid` of app `pid`, or None."""
+    app = ax.AXUIElementCreateApplication(pid)
+    arr = vp()
+    if not app or ax.AXUIElementCopyAttributeValue(app, AX["AXWindows"], ctypes.byref(arr)) != 0 or not arr:
+        return None, app
+    for i in range(cf.CFArrayGetCount(arr)):
+        el = cf.CFArrayGetValueAtIndex(arr, i)
+        n = ctypes.c_uint32()
+        if ax._AXUIElementGetWindow(el, ctypes.byref(n)) == 0 and n.value == wid:
+            return el, app
+    return None, app
+
+
+def raise_window(pid, wid, main=False, frontmost=False):
+    """AXRaise on the window, then (asked) AXMain on it and AXFrontmost on its app: the errors."""
+    el, app = ax_window(pid, wid)
+    if el is None:
+        return {"found": False}
+    out = {"found": True, "raise": ax.AXUIElementPerformAction(el, AX["AXRaise"])}
+    if main:
+        out["main"] = ax.AXUIElementSetAttributeValue(el, AX["AXMain"], CF_TRUE)
+    if frontmost:
+        out["frontmost"] = ax.AXUIElementSetAttributeValue(app, AX["AXFrontmost"], CF_TRUE)
+    return out
 
 
 # ----- the trials -------------------------------------------------------------------------
@@ -511,40 +572,141 @@ def plan(r, v, screen):
     return trials
 
 
-def main():
-    if os.environ.get("SM_TEST_TOGGLE_APPLE_SM") != "1":
-        print("skipped: set SM_TEST_TOGGLE_APPLE_SM=1 to toggle Apple's Stage Manager on this Mac (the owner's call)")
-        return 0
-    dry = "--dry" in sys.argv[1:]
-    if subprocess.run(["pgrep", "-f", "Contents/MacOS/stage-manager"], capture_output=True).returncode == 0:
-        sys.exit("a Stage Manager is running; quit it first (it would follow Apple's or stand down)")
-    t.build_fixtures()
-    t.original = t.read_apple()
+def thumbs_of(r, app):
+    """App `app`'s strip windows, front first (the list's order)."""
+    return [w for w in r["wins"] if w["app"] == app and w["thumb"]]
 
-    def cleanup():
-        t.quit_fixtures()
-        t.restore_apple()
-        try:
-            os.rmdir(t.HOME)
-        except OSError:
-            pass
 
-    atexit.register(cleanup)
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, lambda s, _f: sys.exit(128 + s))
-    t.quit_fixtures()
-    t.set_apple(True)
-    time.sleep(1.5)
-    screen = screen_frame()
-    # The visible frame's left and width: the Dock at the bottom (PROBE_VISIBLE_X/W otherwise).
-    v = view(float(os.environ.get("PROBE_VISIBLE_X", screen[0])), float(os.environ.get("PROBE_VISIBLE_W", screen[2])),
-             screen[1] + screen[3] / 2)
+def point_of(r, v, screen, w):
+    return visible_point(v, screen, w["bounds"], over_of(r, w["at"]))
+
+
+def stage_in_front(r, labels):
+    """The stage in front, front to back, by label: the fixtures' full-size windows."""
+    return [labels.get(w["id"], w["app"]) for w in r["wins"] if not w["thumb"]]
+
+
+def press_and_read(r, clicks, front_id):
+    """One Shift press at `clicks` [(id, point)], the outcome after the settle."""
+    shift_press([p for _, p in clicks])
+    after = settle()
+    return after, outcome(r, after, [i for i, _ in clicks], front_id)
+
+
+def two_app_setup(v, screen):
+    """Charlie's window and Bravo's in one stage in the strip, Alpha's two in front: Charlie and
+    Bravo opened anew (Charlie in front), Bravo's thumbnail Shift-clicked into Charlie's stage,
+    Alpha activated (opened anew when it is not two windows of its own stage)."""
+    reopen("Bravo", 1)
+    time.sleep(1.2)
+    reopen("Charlie", 1)
+    r = settle()
+    b = thumbs_of(r, "Bravo")
+    p = point_of(r, v, screen, b[0]) if b else None
+    if p is None or not top_is_manager(r, p):
+        return None
+    shift_press([p])
+    settle()
+    alpha = [w for w in read()["wins"] if w["app"] == "Alpha"]
+    if len(alpha) == 2 and all(w["thumb"] for w in alpha):
+        subprocess.run(["open", t.FIX["Alpha"][1]], check=True)
+    else:
+        reopen("Alpha", 2)
+    r = settle()
+    pair = thumbs_of(r, "Bravo") + thumbs_of(r, "Charlie")
+    front = [w for w in r["wins"] if w["app"] == "Alpha" and not w["thumb"]]
+    if len(pair) != 2 or len(front) != 2:
+        return None
+    return r
+
+
+def phase_two_app(v, screen):
+    print("\n== two-app: a stage of two apps in the strip, the back window ==")
+    out = []
+    for name, both in (("back alone", False), ("back then front, one press", True)):
+        r = two_app_setup(v, screen)
+        if r is None:
+            print(f"  {name}: could not set up Bravo's and Charlie's windows in one stage in the strip")
+            out.append({"trial": name, "outcome": "no set-up"})
+            continue
+        pair = sorted(thumbs_of(r, "Bravo") + thumbs_of(r, "Charlie"), key=lambda w: w["at"])
+        front, back = pair
+        pb, pf = point_of(r, v, screen, back), point_of(r, v, screen, front)
+        print(f"  front {front['app']} {tuple(round(x) for x in front['bounds'])}, back {back['app']} "
+              f"{tuple(round(x) for x in back['bounds'])}; points back {pb}, front {pf}")
+        if pb is None or (both and pf is None) or not top_is_manager(r, pb):
+            print(f"  {name}: no point of its own for the back window")
+            out.append({"trial": name, "outcome": "no point"})
+            continue
+        clicks = [(back["id"], pb)] + ([(front["id"], pf)] if both else [])
+        alpha_front = next(w["id"] for w in r["wins"] if w["app"] == "Alpha" and not w["thumb"])
+        _, (res, joined) = press_and_read(r, clicks, alpha_front)
+        which = ["back" if i == back["id"] else "front" for i in joined]
+        print(f"  {name}: {res}, joined {len(joined)} of {len(clicks)} {which}", flush=True)
+        out.append({"trial": name, "back_app": back["app"], "points": [p for _, p in clicks], "outcome": res, "joined": which})
+    return out
+
+
+def phase_sibling(v, screen):
+    print("\n== sibling: a stage of one app's two windows, front then back at a fresh read; the raise ==")
+    out = {"clicks": [], "raises": []}
+    r = arrange()
+    if not arranged(r):
+        r = arrange(full=True)
+    if not arranged(r):
+        print("  could not set up Alpha's two in the strip, Charlie in front")
+        return out
+    front, back = thumbs_of(r, "Alpha")
+    labels = {front["id"]: "Alpha front", back["id"]: "Alpha back"}
+    for w in r["wins"]:
+        if w["app"] == "Charlie":
+            labels[w["id"]] = "Charlie"
+    charlie = next(w["id"] for w in r["wins"] if w["app"] == "Charlie")
+    for name, w in (("front alone", front), ("back, at a fresh read", back)):
+        r = read()
+        w = next((x for x in r["wins"] if x["id"] == w["id"]), w)
+        p = point_of(r, v, screen, w) if w["thumb"] else None
+        if p is None or not top_is_manager(r, p):
+            why = "not in the strip" if not w["thumb"] else "no point of its own"
+            print(f"  {name}: {why}")
+            out["clicks"].append({"trial": name, "outcome": why})
+            continue
+        r, (res, joined) = press_and_read(r, [(w["id"], p)], charlie)
+        print(f"  {name} at {p}: {res}; the stage in front {stage_in_front(r, labels)}", flush=True)
+        out["clicks"].append({"trial": name, "point": p, "outcome": res, "joined": len(joined),
+                              "stage_after": stage_in_front(r, labels)})
+    if not ax.AXIsProcessTrusted():
+        print("  the raise: skipped, this process is not trusted for Accessibility")
+        return out
+    for name, main, frontmost in (("AXRaise", False, False), ("AXRaise + AXMain", True, False),
+                                  ("AXRaise + AXMain + app frontmost", True, True)):
+        r = read()
+        full = [w for w in r["wins"] if not w["thumb"]]
+        if len(full) < 2:
+            print(f"  {name}: the stage in front holds {len(full)} fixture window(s); nothing to reorder")
+            break
+        before = stage_in_front(r, labels)
+        low = full[-1]
+        errs = raise_window(low["pid"], low["id"], main, frontmost)
+        after = settle()
+        a = {w["id"]: w for w in after["wins"]}
+        whole = all(w["id"] in a and not a[w["id"]]["thumb"] and same(a[w["id"]]["bounds"], w["bounds"], 2.0) for w in full)
+        order = stage_in_front(after, labels)
+        print(f"  {name} on {labels.get(low['id'], low['app'])}: {before} -> {order}; "
+              f"{'the stage stayed whole' if whole else 'the stage changed (a switch?)'}; AX {errs}", flush=True)
+        out["raises"].append({"trial": name, "window": labels.get(low["id"], low["app"]), "before": before, "after": order,
+                              "whole": whole, "ax": errs})
+    return out
+
+
+def phase_quad(v, screen, dry):
+    print("\n== quad: where a lone thumbnail takes a click ==")
     r = arrange(full=True)
     if not arranged(r):
         r = arrange(full=True)
     if not arranged(r):
-        sys.exit("could not set up Bravo alone and Alpha's two in the strip, Charlie in front")
-    print(f"screen {screen}, tilt {math.degrees(v[0]):.1f}, eye distance {v[1]:.0f}, eye {v[2]}")
+        print("  could not set up Bravo alone and Alpha's two in the strip, Charlie in front")
+        return [], []
     for w in r["wins"]:
         print(f"  {w['app']:8s} {'thumb' if w['thumb'] else 'full '} {tuple(round(x, 1) for x in w['bounds'])}")
     print(f"  icons {[tuple(round(x, 1) for x in b) for b in r['icons']]}")
@@ -580,16 +742,61 @@ def main():
         print(line + res[0] + joined, flush=True)
         results.append({"trial": tr["name"], "app": tr["app"], "points": [p for _, p in tr["clicks"]], "depth": tr["depth"],
                         "outcome": res[0], "joined": len(res[1])})
+    return results, r["icons"]
+
+
+def main():
+    if os.environ.get("SM_TEST_TOGGLE_APPLE_SM") != "1":
+        print("skipped: set SM_TEST_TOGGLE_APPLE_SM=1 to toggle Apple's Stage Manager on this Mac (the owner's call)")
+        return 0
+    dry = "--dry" in sys.argv[1:]
+    phases = [a for a in sys.argv[1:] if not a.startswith("--")] or ["quad", "two-app", "sibling"]
+    unknown = [p for p in phases if p not in ("quad", "two-app", "sibling")]
+    if unknown:
+        sys.exit(f"unknown phase {unknown}; phases: quad, two-app, sibling")
+    if subprocess.run(["pgrep", "-f", "Contents/MacOS/stage-manager"], capture_output=True).returncode == 0:
+        sys.exit("a Stage Manager is running; quit it first (it would follow Apple's or stand down)")
+    t.build_fixtures()
+    t.original = t.read_apple()
+
+    def cleanup():
+        t.quit_fixtures()
+        t.restore_apple()
+        try:
+            os.rmdir(t.HOME)
+        except OSError:
+            pass
+
+    atexit.register(cleanup)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, lambda s, _f: sys.exit(128 + s))
+    t.quit_fixtures()
+    t.set_apple(True)
+    time.sleep(1.5)
+    screen = screen_frame()
+    # The visible frame's left and width: the Dock at the bottom (PROBE_VISIBLE_X/W otherwise).
+    v = view(float(os.environ.get("PROBE_VISIBLE_X", screen[0])), float(os.environ.get("PROBE_VISIBLE_W", screen[2])),
+             screen[1] + screen[3] / 2)
+    report = {"screen": screen, "tilt_deg": math.degrees(v[0]), "distance": v[1], "eye": v[2]}
+    print(f"screen {screen}, tilt {math.degrees(v[0]):.1f}, eye distance {v[1]:.0f}, eye {v[2]}")
+    if "quad" in phases:
+        report["quad"], report["icons"] = phase_quad(v, screen, dry)
+    for name, run in (("two-app", phase_two_app), ("sibling", phase_sibling)):
+        if name in phases:
+            if dry:
+                print(f"\n== {name}: skipped with --dry (its set-up clicks) ==")
+            else:
+                report[name] = run(v, screen)
     fd, path = tempfile.mkstemp(prefix="probe-press-quad.", suffix=".json")
     with os.fdopen(fd, "w") as f:
-        json.dump({"screen": screen, "tilt_deg": math.degrees(v[0]), "distance": v[1], "eye": v[2],
-                   "arrangement": [{"app": w["app"], "bounds": w["bounds"], "thumb": w["thumb"]} for w in read()["wins"]],
-                   "icons": r["icons"], "results": results}, f, indent=1)
+        json.dump(report, f, indent=1)
     print(f"\nwritten to {path}")
     print("Read: 'in' edges and corners 7 in should add, 'out' edges, corners 3 in and the box corners off the plane\n"
           "should not (desktop = the click fell through to the wallpaper); the icon's clear part adding says icons\n"
           "cover only where drawn; the back 5 pt left adding says the front window does not grow under the click;\n"
-          "the one-press pair joining 2 of 2 says the first click of a press is not lost.")
+          "the one-press pair joining 2 of 2 says the first click of a press is not lost. two-app: whether a back\n"
+          "window of another app takes a click; sibling: whether the back one takes it once alone, the order after,\n"
+          "and which raise reorders the stage in front with the stage staying whole.")
     return 0
 
 
