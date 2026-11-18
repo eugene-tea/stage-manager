@@ -115,7 +115,10 @@ impl Controller {
             listed: ob.windows().len(),
             ..Facts::default()
         };
-        if facts.listed > 0 || !facts.trusted {
+        // Nothing observed (standing down for Apple's Stage Manager, a logout's hold, before
+        // observation starts): no window can count as shown nor its app as answering, so the
+        // window list is not read (it was every second while standing down).
+        if facts.listed > 0 || !facts.trusted || !ob.observing() {
             return facts;
         }
         let list = windows::wake_on_screen();
