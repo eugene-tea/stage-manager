@@ -4,6 +4,8 @@
 
 - A link opened in a browser window on another Desktop stays there: macOS no longer jumps to
   that Desktop and back, and the browser's window no longer pops up under a growing picture.
+- When macOS slides to another Desktop during a switch and straight back, the window is
+  there when the Desktop slides in, with no picture still growing over it.
 - With `engine = "spaces"`, a window picked in Mission Control comes to its place in one
   motion.
 - With `engine = "spaces"`, Mission Control shows the hidden stages' windows at once instead

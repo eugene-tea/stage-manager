@@ -1638,6 +1638,33 @@ impl Strip {
         self.motion.capturer.capture_now();
     }
 
+    /// Transition `id`'s incoming windows were landed by a Space change, on the Desktop left
+    /// ([`crate::engine::switch_landing`]): its pictures go now, the incoming and the outgoing
+    /// ones, with no fade, and the cards it held show. Played on, they would grow over windows
+    /// already in place if macOS slides back to that Desktop at once.
+    pub(super) fn cut_transition(&mut self, id: u64) {
+        let Some(r) = self.motion.running.as_ref().filter(|r| r.id == id) else { return };
+        // A stretch planned for a window not taken over yet is wanted no longer.
+        let stale: Vec<u32> = r.stretched.iter().copied().filter(|w| !r.taken.contains(w)).collect();
+        for w in stale {
+            crate::platform::window_engine::current().cancel_stretch(w);
+        }
+        let held = r.held.clone();
+        tracing::debug!(id, "transition: its windows landed at a Space change; its pictures go");
+        self.finish_transition(false);
+        self.motion.overlay.clear_sides();
+        if self.motion.overlay_idle() {
+            self.motion.overlay.hide();
+        }
+        // As at a landing: a card it held let go, the strip back to its level.
+        if self.pressed.is_none() && self.squeezed.is_some_and(|s| held.contains(&s)) {
+            self.squeeze(None);
+        }
+        if self.pane.lifted == Some(true) {
+            self.update_visibility();
+        }
+    }
+
     /// Transition `id` has landed: the snapshots go and the held cards show, in one frame
     /// (the incoming snapshots fade out over their windows, [`LANDING_FADE`]); not before its
     /// incoming windows show under their snapshots (else it looks again then).

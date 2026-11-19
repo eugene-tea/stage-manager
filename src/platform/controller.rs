@@ -121,6 +121,7 @@ use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
 use crate::engine::stale_activation;
 use crate::engine::stranded;
+use crate::engine::switch_landing::{self, Landing, Pictures};
 use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::minimize;
@@ -944,6 +945,9 @@ pub struct Controller {
     /// The transition whose incoming windows are in place, with their frames read back, for
     /// the next snapshot.
     arrived_note: Option<(u64, Vec<(u32, Rect)>)>,
+    /// A transition whose pictures go now, its windows landed by a Space change, for the next
+    /// snapshot ([`switch_landing::pictures_on_landing`]).
+    cut_note: Option<u64>,
     /// How the next animated batch runs when an activation caused it ([`ActivationRun`],
     /// `[animation] activation_grows`).
     activation: ActivationRun,
@@ -1275,6 +1279,7 @@ impl Controller {
             parked_note: None,
             under_note: None,
             arrived_note: None,
+            cut_note: None,
             activation: ActivationRun::default(),
             fallback_said: HashSet::new(),
             patch_items: PatchItems::default(),
@@ -2571,6 +2576,7 @@ impl Controller {
             parked: self.parked_note.take(),
             arrived: self.arrived_note.take(),
             under_now: self.under_note.take(),
+            cut: self.cut_note.take(),
         };
         for d in displays {
             let t = if d == plays_on { transition.clone() } else { None };
@@ -2637,6 +2643,7 @@ impl Controller {
             parked: notes.parked,
             arrived: notes.arrived.clone(),
             under_now: notes.under_now,
+            cut: notes.cut,
             late: None,
             space: space.0,
             display: display.0,
@@ -4365,8 +4372,21 @@ impl Controller {
     /// stages and strip. On a full-screen app's Space: no strip, nothing changes.
     pub fn on_space_changed(&mut self, ob: &mut Observer) {
         // Windows still held behind a switch's snapshots belong to the Space being left:
-        // bring them in before anything is counted for the new one.
+        // bring them in before anything is counted for the new one. macOS posts the notice
+        // once its slide is over: they land out of sight, and their pictures go with them, or
+        // a Desktop sliding back at once would come in with its windows in place and the
+        // pictures still growing over them (`switch_landing`; 11-19 13:13 and 13:25).
+        if let Some(id) = self.pending.as_ref().map(|p| p.id)
+            && switch_landing::pictures_on_landing(Landing::SpaceChange) == Pictures::Go
+        {
+            tracing::debug!(id, "a Space change while a switch's windows were held: they land now, on the Desktop left, and its pictures go");
+            self.cut_note = Some(id);
+        }
         self.flush_pending(ob);
+        if self.cut_note.is_some() {
+            // No window read back in place, so the flush told the strip nothing.
+            self.present();
+        }
         if self.model.is_none() {
             return;
         }
@@ -7342,6 +7362,7 @@ struct PresentNotes {
     parked: Option<u64>,
     arrived: Option<(u64, Vec<(u32, Rect)>)>,
     under_now: Option<(u64, u32)>,
+    cut: Option<u64>,
 }
 
 /// One shown window's frame as [`Controller::observe_with`] read it through Accessibility.

@@ -60,6 +60,7 @@ pub mod stage_area;
 pub mod stage_companions;
 pub mod stand_down;
 pub mod stranded;
+pub mod switch_landing;
 pub mod switcher;
 pub mod tick_pace;
 pub mod wallpaper;

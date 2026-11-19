@@ -2390,6 +2390,9 @@ impl Strip {
         if let Some((id, window)) = self.snapshot.under_now {
             self.shown_in_place(id, window);
         }
+        if let Some(id) = self.snapshot.cut {
+            self.cut_transition(id);
+        }
         self.after_snapshot();
         // Cards moved under a resting pointer: the pane catches clicks where they are now.
         self.update_pass_through(None);
