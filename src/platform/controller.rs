@@ -2269,9 +2269,14 @@ impl Controller {
         // the app and raised its windows in the corner already, and typing right after ⌘Tab
         // must reach the window the switch focuses (8L). One bounded step (8L2); the whole
         // focus runs with the parks as for a card click.
-        let early_focus_ms = match run.focus.filter(|key| actions.contains(&Action::Focus { id: *key })) {
-            Some(key) => self.focus_now(ob, key, id),
-            None => None,
+        let engine = self.engine.clone();
+        let early_focus_ms = match early_focus_key(run.focus, actions, |w| engine.focus_waits_for_show(w)) {
+            Ok(Some(key)) => self.focus_now(ob, key, id),
+            Ok(None) => None,
+            Err(key) => {
+                tracing::debug!(id, key = key.0, "activation: no early focus: the window is on no Desktop and its app has one elsewhere; the keyboard goes with its show");
+                None
+            }
         };
         if let Some(t) = waiting {
             switch_pictures::take(&t);
@@ -7129,6 +7134,19 @@ fn focus_may_switch(hidden: Option<bool>, active: Option<bool>, button_down: boo
     hidden != Some(true) && (active == Some(true) || (active.is_some() && button_down))
 }
 
+/// The window an activation's switch focuses at once, before the motion (`Ok(None)`: none
+/// to focus). `Err`: the key window is on no Desktop and its app has a window on another
+/// one ([`WindowEngine::focus_waits_for_show`]): a focus now would take macOS to that other
+/// Desktop, so the keyboard goes with the window's show instead. 11-19: Mission Control
+/// open on Desktop 2, VS Code activated, and the early focus of its window still in its
+/// stage Space took macOS to Desktop 1.
+fn early_focus_key(focus: Option<WindowId>, actions: &[Action], waits: impl Fn(WindowId) -> bool) -> Result<Option<WindowId>, WindowId> {
+    match focus.filter(|key| actions.contains(&Action::Focus { id: *key })) {
+        Some(key) if waits(key) => Err(key),
+        other => Ok(other),
+    }
+}
+
 /// Whether a window's focus cuts a running switch short: its windows to their frames at once,
 /// its own focus dropped. A focus held until its window's Desktop is recognized (`held`: on
 /// another Desktop, behind a full-screen app, or not placed yet) leaves the switch to land,
@@ -7672,6 +7690,18 @@ mod tests {
         assert!(!focus_may_switch(Some(true), Some(true), true), "a hidden app's window is never the user's");
         assert!(!focus_may_switch(Some(true), Some(false), false));
         assert!(!focus_may_switch(None, None, true), "the app is gone");
+    }
+
+    /// 11-19: the early focus of a window on no Desktop, its app with a window on another,
+    /// took macOS to that Desktop. It waits for the window's show; any other goes at once.
+    #[test]
+    fn an_early_focus_waits_for_a_window_on_no_desktop() {
+        let (a, b) = (WindowId(1), WindowId(2));
+        let actions = [Action::Focus { id: a }];
+        assert_eq!(early_focus_key(Some(a), &actions, |_| false), Ok(Some(a)));
+        assert_eq!(early_focus_key(Some(a), &actions, |w| w == a), Err(a));
+        assert_eq!(early_focus_key(Some(b), &actions, |_| false), Ok(None), "not the batch's focus");
+        assert_eq!(early_focus_key(None, &actions, |_| true), Ok(None));
     }
 
     /// 11-19: an app's own focus of its window on another Desktop, 20 ms into a switch to its
