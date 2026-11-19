@@ -258,6 +258,11 @@ impl Controller {
         self.spaces.mission.lends.is_placed(WindowId(id))
     }
 
+    /// True when window `id` is out for Mission Control (put home, laid out by it).
+    pub(super) fn mission_out(&self, id: WindowId) -> bool {
+        self.spaces.mission.lends.out().iter().any(|o| o.id == id)
+    }
+
     /// True when hidden windows may be put home now: not while a Space change settles, the
     /// screen is locked, a full-screen app's Space shows, a switch plays or the user holds
     /// the button (a drag into Mission Control).

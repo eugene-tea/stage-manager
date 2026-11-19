@@ -2409,6 +2409,12 @@ impl Controller {
         }
     }
 
+    /// The listed windows a slide is judged from: without those out for Mission Control
+    /// ([`slide_hold::besides_out`]).
+    fn slide_bounds(&self, listed: &[(u32, Rect)]) -> Vec<(u32, Rect)> {
+        slide_hold::besides_out(listed, |id| self.mission_out(id))
+    }
+
     /// Whether a raise or focus of ours on window `id` (of app `pid`) is withheld: the app
     /// focused its window of another Desktop mid-switch, no click or key since, and a raise or
     /// focus of its window here would take macOS back ([`WentElsewhere::withholds`]). `what`:
@@ -3063,7 +3069,7 @@ impl Controller {
                 let list = windows::list_windows();
                 if let Some(pid) = pid
                     && self.window_elsewhere(id)
-                    && self.model.as_ref().is_some_and(|m| slide_hold::slide_listed(m, &listed_bounds(&list)))
+                    && self.model.as_ref().is_some_and(|m| slide_hold::slide_listed(m, &self.slide_bounds(&listed_bounds(&list))))
                 {
                     // A Desktop slides before its notice: a stage switch here would raise and
                     // focus a window of the Desktop being left, and macOS would slide back.
@@ -3218,7 +3224,7 @@ impl Controller {
         let asks = watch && self.model.as_ref().is_some_and(|m| slide_hold::asks_focus(m, pid));
         let focused = if needs_focus || asks { arrival::focused_window_of(pid) } else { None };
         let wait = if watch {
-            self.model.as_ref().and_then(|m| slide_hold::activation_waits(m, slide_hold::slide_listed(m, &listed_bounds(&list)), focused))
+            self.model.as_ref().and_then(|m| slide_hold::activation_waits(m, slide_hold::slide_listed(m, &self.slide_bounds(&listed_bounds(&list))), focused))
         } else {
             None
         };
@@ -3327,7 +3333,7 @@ impl Controller {
         let Some(hold) = self.slide_hold else { return };
         let now = Instant::now();
         let step = hold.step(now, self.space_changes, || {
-            self.model.as_ref().is_some_and(|m| slide_hold::slide_listed(m, &listed_bounds(&windows::on_screen())))
+            self.model.as_ref().is_some_and(|m| slide_hold::slide_listed(m, &self.slide_bounds(&listed_bounds(&windows::on_screen()))))
         });
         match step {
             slide_hold::Step::Wait => return,

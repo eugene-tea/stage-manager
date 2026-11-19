@@ -94,6 +94,15 @@ pub fn slide_listed(m: &Model, listed: &[(u32, Rect)]) -> bool {
     super::corner::corner_patch::desktop_slides(0, &parked_here, false, main.frame, main.visible, main.corner)
 }
 
+/// The listed windows `listed` without those out for Mission Control (`out`): Mission
+/// Control lays them out on screen, near an edge too, and they are no Desktop's slide.
+/// Live 11-19 (mission-pick-ours): a hidden stage's window picked in Mission Control, laid out
+/// at the bottom right, read as this Desktop's parked windows slid aside; its app's activation
+/// was held 0.5 s and Mission Control's close carried the window to its park first.
+pub fn besides_out(listed: &[(u32, Rect)], out: impl Fn(WindowId) -> bool) -> Vec<(u32, Rect)> {
+    listed.iter().filter(|(id, _)| !out(WindowId(*id))).copied().collect()
+}
+
 /// Whether an activation of app `pid` asks the app for its focused window: only when the
 /// app has a known standard window on a Desktop not shown, or one saved on a Desktop of the
 /// main display not visited since launch ([`Model::app_saved_on_unvisited_desktop`]);

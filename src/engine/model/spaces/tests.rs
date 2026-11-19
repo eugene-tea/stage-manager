@@ -1038,7 +1038,7 @@ mod slide_activation {
 
     use super::*;
     use crate::engine::focus_replay::{FocusReplay, Wanted};
-    use crate::engine::slide_hold::{SlideHold, Step, Wait, activation_waits, asks_focus, slide_listed};
+    use crate::engine::slide_hold::{SlideHold, Step, Wait, activation_waits, asks_focus, besides_out, slide_listed};
 
     /// The owner's case (10-23, 11:57:50): the editor (pid 10, the owner's browser that day) has a
     /// window on each Desktop. Desktop 1 shows the editor's stage (window 1); on Desktop 2 the
@@ -1295,6 +1295,10 @@ mod slide_activation {
         assert!(!slide_listed(&mac.m, &parked_only(0.0)), "in the zone: no slide");
         assert!(slide_listed(&mac.m, &parked_only(-700.0)), "moved sideways out of the zone");
         assert!(!slide_listed(&mac.m, &[]), "none listed (a hidden app's): no slide");
+        // Out for Mission Control, laid out by it: no slide.
+        let out = |id: WindowId| id == w(3);
+        assert!(!slide_listed(&mac.m, &besides_out(&parked_only(-700.0), out)), "out for Mission Control");
+        assert!(slide_listed(&mac.m, &besides_out(&parked_only(-700.0), |_| false)), "not out: a slide");
     }
     }
 
