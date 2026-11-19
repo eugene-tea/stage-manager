@@ -16,7 +16,8 @@
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
 //! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
-//! prediction sees it, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
+//! prediction sees it (in the Apple mode: found, hit-tested and pressed, no prediction),
+//! `debug-mission-pick ID` clicks a fixture's window where Mission Control lays it out, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
 //! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
 //! as the Dock shows it (its items' titles, the one selected), `debug-mission-control
@@ -369,6 +370,13 @@ pub enum Command {
         /// Which shortcut; `None` is Escape.
         which: Option<Expose>,
     },
+    /// A click on a `STAGE_MANAGER_ONLY` app's window where Mission Control lays it out, only
+    /// while Mission Control shows and no other app's window lies at the point (needs
+    /// `STAGE_MANAGER_TEST=1`; [`super::test_press::mission_pick`]).
+    DebugMissionPick {
+        /// The window id.
+        id: u32,
+    },
     /// A synthetic click at a global point, posted only when our own window or a
     /// `STAGE_MANAGER_ONLY` app's window is the topmost window there (needs
     /// `STAGE_MANAGER_TEST=1`).
@@ -467,6 +475,10 @@ impl Command {
                 Ok(Self::DebugHover { x: coord(x)?, y: coord(y)?, ms })
             }
             ["debug-pointer-back"] => Ok(Self::DebugPointerBack),
+            ["debug-mission-pick", id] => {
+                let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
+                Ok(Self::DebugMissionPick { id })
+            }
             ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
                 Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty() })
@@ -1020,6 +1032,8 @@ mod tests {
         assert_eq!(Command::parse("debug-engine-fail park"), Ok(Command::DebugEngineFail("park".into())));
         assert!(Command::parse("debug-engine-fail sometimes").is_err());
         assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
+        assert_eq!(Command::parse("debug-mission-pick 42"), Ok(Command::DebugMissionPick { id: 42 }));
+        assert!(Command::parse("debug-mission-pick x").is_err());
         assert_eq!(
             Command::parse("debug-click 60 700.5 shift"),
             Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true })

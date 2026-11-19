@@ -61,6 +61,7 @@ use crate::platform::dock::{self, DockItem, DockPress};
 use crate::platform::enhanced_ui;
 use crate::platform::observe::{Observer, WindowKind};
 use crate::platform::safety::{self, ParkedEntry};
+use crate::platform::test_press::{DOCK_PRESS_HOLD, dock_edge};
 use crate::platform::windows::{self, CgWindow};
 use crate::ui::strip_model::{self, StripSnapshot};
 
@@ -69,9 +70,6 @@ use crate::ui::strip_model::{self, StripSnapshot};
 /// app goes back to the global timeout right after ([`AxElement::bounded`]).
 const QUERY_AX_TIMEOUT_SECONDS: f32 = 0.05;
 
-/// How long `ctl debug-dock-click BUNDLE real` holds its press (the owner's clicks: ~100 ms
-/// from the press to the Dock's activation).
-const DOCK_PRESS_HOLD: Duration = Duration::from_millis(100);
 
 /// An arrangement made at a Dock click is undone when no Space change has come this long
 /// after it (the notice comes ~0.35–0.45 s after the click).
@@ -2086,24 +2084,6 @@ impl Controller {
     }
 }
 
-/// Where the pointer shows an auto-hidden Dock whose item sits at `item` (off the display
-/// `display`): the middle of the display's edge the item is beyond, a point inside it.
-fn dock_edge(item: Rect, display: Rect) -> Option<crate::engine::geometry::Point> {
-    use crate::engine::geometry::Point;
-    let (cx, cy) = (item.x + item.w / 2.0, item.y + item.h / 2.0);
-    let x = cx.clamp(display.x + 1.0, display.x + display.w - 1.0);
-    let y = cy.clamp(display.y + 1.0, display.y + display.h - 1.0);
-    if cy >= display.y + display.h - 1.0 {
-        Some(Point::new(x, display.y + display.h - 1.0))
-    } else if cx <= display.x + 1.0 {
-        Some(Point::new(display.x, y))
-    } else if cx >= display.x + display.w - 1.0 {
-        Some(Point::new(display.x + display.w - 1.0, y))
-    } else {
-        None
-    }
-}
-
 /// App `pid`'s focused window, asked with a bounded timeout (the app goes back to the global
 /// one after).
 pub(super) fn focused_window_of(pid: i32) -> Option<WindowId> {
@@ -2441,18 +2421,6 @@ mod tests {
         assert_eq!(echo_verdict(b, x, 10, Some(10), Some(b), Some(x)), EchoVerdict::Echo, "B's own focus");
         assert_eq!(echo_verdict(b, x, 10, Some(20), Some(WindowId(5)), Some(y)), EchoVerdict::Echo, "another app's window");
         assert_eq!(echo_verdict(b, x, 10, Some(10), None, None), EchoVerdict::Echo, "an unknown window of the app");
-    }
-
-    #[test]
-    fn an_auto_hidden_docks_edge_is_where_its_item_is_beyond_the_display() {
-        use crate::engine::geometry::Point;
-        let below = Rect::new(800.0, 1175.0, 60.0, 60.0);
-        assert_eq!(dock_edge(below, MAIN), Some(Point::new(830.0, 1168.0)), "the bottom edge");
-        let left = Rect::new(-70.0, 500.0, 60.0, 60.0);
-        assert_eq!(dock_edge(left, MAIN), Some(Point::new(0.0, 530.0)), "the left edge");
-        let right = Rect::new(1810.0, 500.0, 60.0, 60.0);
-        assert_eq!(dock_edge(right, MAIN), Some(Point::new(1799.0, 530.0)), "the right edge");
-        assert_eq!(dock_edge(Rect::new(800.0, 1100.0, 60.0, 60.0), MAIN), None, "on screen: nothing to reveal");
     }
 
     /// The park zone of the tests: the bottom-right corner of [`MAIN`].

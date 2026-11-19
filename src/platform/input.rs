@@ -583,6 +583,23 @@ pub fn dock_item_click(p: Point, hold: Duration) -> Result<(), String> {
         .map_err(|e| format!("no thread for the click: {e}"))
 }
 
+/// A synthetic click at `p` on Mission Control's cover (test only), where it lays out a
+/// `STAGE_MANAGER_ONLY` app's window: only for a point the caller checked
+/// ([`super::test_press::mission_pick`]; the cover is macOS's own window, so [`path_is_safe`]
+/// would refuse it). The pointer goes back where it was.
+pub fn cover_click(p: Point) -> Result<(), String> {
+    let back = pointer_home();
+    move_first(p, false)?;
+    for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
+        post_mouse(kind, p, false)?;
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    if let Some(back) = back {
+        let _ = CGWarpMouseCursorPosition(back);
+    }
+    Ok(())
+}
+
 /// A synthetic left-button drag along `waypoints` (straight segments), only when every point
 /// it passes is over our own windows or a fixture's (checked before anything is posted). The
 /// button is held `hold` at the end before release; the pointer goes back where it was.

@@ -1239,10 +1239,31 @@ impl AppleController {
         }
     }
 
+    /// `debug-frame ID X Y W H` in this mode (test only): a `STAGE_MANAGER_ONLY` app's window
+    /// set to the frame through Accessibility, as a person's move and resize would leave it,
+    /// on any screen; nothing else (Apple's arranges what follows). The probes of Apple's own
+    /// frames per screen setup.
+    fn debug_frame(&self, ob: &Observer, id: u32, frame: crate::engine::geometry::Rect) -> Value {
+        if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+            return json!({ "ok": false, "error": "debug-frame needs STAGE_MANAGER_TEST=1" });
+        }
+        let Some(w) = ob.window(id).filter(|w| crate::platform::input::test_pids().contains(&w.pid)) else {
+            return json!({ "ok": false, "error": format!("window {id} is not a STAGE_MANAGER_ONLY app's window") });
+        };
+        match w.element.set_frame(frame) {
+            Ok(()) => {
+                tracing::info!(id, ?frame, "apple mode: debug-frame");
+                json!({ "ok": true })
+            }
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        }
+    }
+
     // ── ctl ─────────────────────────────────────────────────────────────────────────────
 
     /// A ctl command in this mode: `state`, `switch`, `merge`, `send`, `new`, `apple try` and
-    /// `reload`; the rest answer that they do nothing here.
+    /// `reload`, and for the probes of Apple's own behaviour (test only) `debug-dock-click`
+    /// and `debug-frame`; the rest answer that they do nothing here.
     pub fn ctl(&mut self, ob: &mut Observer, cmd: Command) -> Value {
         let asked = |r: Result<Value, Refusal>| r.unwrap_or_else(|Refusal(e)| json!({ "ok": false, "error": e }));
         match cmd {
@@ -1253,6 +1274,13 @@ impl AppleController {
             Command::New(id) => asked(self.ask(ob, Ask::New(id))),
             Command::AppleTry(t) => self.try_route(ob, t),
             Command::AppleRestore => asked(self.ask(ob, Ask::Restore)),
+            Command::DebugDockClick { bundle, real } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-dock-click needs STAGE_MANAGER_TEST=1" });
+                }
+                crate::platform::test_press::dock_press(&bundle, real, self.screen().map(|d| d.frame))
+            }
+            Command::DebugFrame { id, frame, .. } => self.debug_frame(ob, id, frame),
             Command::Reload => {
                 self.reload_config();
                 json!({ "ok": true })

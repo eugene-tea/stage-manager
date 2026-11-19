@@ -181,7 +181,7 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 | `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
 | `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
 | `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only: `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
-| `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` (the stand-down) and `scripts/test_apple.py` (the Apple mode: `mirror`, `switch`) toggle Apple's Stage Manager (each restores the setting on exit) |
+| `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` (the stand-down), `scripts/test_apple.py` (the Apple mode: `mirror`, `switch`) and `scripts/probe_apple.py` toggle Apple's Stage Manager (each restores the setting on exit) |
 
 ## The ctl socket
 
@@ -236,6 +236,11 @@ handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` wi
 - `stage-manager probe-windows <bundle-id>…` (or `--all`), `probe-screen` and `probe-patch` print the
   window server's view of apps, of the screen, and what the corner patch would draw.
 - `scripts/probe_park.py` measures where macOS leaves a parked window.
+- `scripts/probe_apple.py [dock-front|mission-pick|mission-pick-ours|frames-setup]` measures
+  Apple's Stage Manager on the fixtures (with `SM_TEST_TOGGLE_APPLE_SM=1`; it restores
+  `GloballyEnabled` and `AppWindowGroupingBehavior`): a Dock click on the app in front, a
+  pick in Mission Control (and the same under the Spaces engine), frames per screen setup.
+  `SM_PROBE_DOCK_CLICK=real` posts a real click on the Dock item instead of `AXPress`.
 - `stage-manager probe-shadow` measures how far an inactive window's shadow reaches past
   each side of its frame, from windows of its own (the corner patch's reach). `--profile`
   prints the falloff of a key and an inactive window's shadow and the colour across each

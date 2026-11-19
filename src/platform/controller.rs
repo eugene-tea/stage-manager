@@ -6708,6 +6708,7 @@ impl Controller {
             Command::AppleTry(t) => json!({ "ok": false, "error": format!("apple try {} works only while Apple's Stage Manager is on with [windows] apple_stage_manager_on = \"integrate\"", t.name()) }),
             Command::AppleRestore => json!({ "ok": false, "error": "apple restore works only while Apple's Stage Manager is on with [windows] apple_stage_manager_on = \"integrate\"" }),
             Command::Ping | Command::TakeWatch(_) | Command::Quit | Command::Settings | Command::Mark(_) | Command::DebugPanic | Command::DebugEngineFail(_) | Command::DebugMenuQuit | Command::DebugUpdate | Command::DebugClick { .. }
+            | Command::DebugMissionPick { .. }
             | Command::DebugHover { .. }
             | Command::DebugPointerBack
             | Command::DebugDrag { .. }

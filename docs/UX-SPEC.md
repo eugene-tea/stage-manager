@@ -236,7 +236,11 @@ does the same for that window. A stage comes in whole: when one of its windows i
 screen at its place as the switch starts, none grows from the card and the rest shows at
 once with it (a recording, 11-18: under `engine = "spaces"` one window of a Dock-clicked
 stage sat there 145 ms before the other flew in; that window now waits out of sight until
-the switch).
+the switch). A Dock click on the app in front changes nothing, even with its other window in
+another stage: Apple's neither cycles nor brings the other window (measured 11-19,
+`scripts/probe_apple.py dock-front`, a press and a real click, under both "Show windows from
+an application" settings). Under All at Once a Shift-click on a card brings in only the
+window clicked; that window dragged back to the strip takes the app's other windows along.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an
@@ -375,8 +379,11 @@ showing most of it (macOS's rule).
 - **`[displays] main_only`** (off) manages the main screen only, a window moved off it left
   alone. It is read at launch: turned on mid-session it would have to bring back every hidden
   window of the other screens, on Desktops not shown too, which a quit does safely.
-- **`[displays] frames_per_setup`** (off until Apple's own behaviour is measured; parity if
-  Apple keeps frames per screen size) keeps each window's frame per screen setup: the
+- **`[displays] frames_per_setup`** (off: Apple's keeps no frame per setup. Measured 11-19,
+  `scripts/probe_apple.py frames-setup`: a window moved and resized on a screen that then
+  goes comes back to its earlier place on the screen left, at the size it had on the gone
+  screen; the screen back, macOS puts it there again at its frame. Sizes never go back)
+  keeps each window's frame per screen setup: the
   connected screens by identity, each with its size in points (a resolution change is another
   setup), the frame kept relative to the window's screen, at most 8 setups a window, saved in
   `state.json` with its entry. Once a display change settles (10 s from macOS's notice) into a
@@ -410,6 +417,12 @@ A Desktop picked inside Mission Control is recognized only once it closes; opene
 before that, the hidden windows of the Desktop the window server shows are put home all the
 same (11-19 07:56: it lent nothing, the model still on the old Desktop), each onto the
 Desktop it was hidden from, and nothing else moves until the change is recognized.
+A window picked in Apple's grows from its Mission Control place to its own frame in one
+motion, done within about 0.5 s, while the stage it leaves shrinks straight into the strip;
+nothing moves after Mission Control closes (`scripts/probe_apple.py mission-pick`, 11-19).
+Under `engine = "spaces"` the picked window is carried to the screen's corner by the close
+and shows at its frame 1.4 s after the pick, the stage left back at its frames until 0.8 s
+(`mission-pick-ours`): a known gap.
 When it closes they go back into their stage Spaces together and their frames are set again; a window picked there is activated by macOS and the activation's
 switch brings its stage in front, so it and, for 1.5 s, the windows of the app in front are
 left to that switch. `[windows] mission_control_stages`: `"shown"` (the default) lends once

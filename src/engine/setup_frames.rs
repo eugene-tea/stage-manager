@@ -37,8 +37,8 @@ use serde::{Deserialize, Serialize};
 use super::geometry::Rect;
 use super::model::{Display, WindowId};
 
-/// `[displays] frames_per_setup`'s default: off until Apple's own behaviour is measured (on
-/// if Apple keeps frames per setup too, as parity).
+/// `[displays] frames_per_setup`'s default: off, as Apple's keeps no frame per setup
+/// (measured 11-19, `scripts/probe_apple.py frames-setup`; UX-SPEC).
 pub const ON_BY_DEFAULT: bool = false;
 
 /// The most setups a window keeps a frame for; the least recent goes first.
