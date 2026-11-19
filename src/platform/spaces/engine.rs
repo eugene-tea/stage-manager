@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::ffi::{ALL_SPACES_MASK, Route, Sky};
+use super::ffi::{ALL_SPACES_MASK, DisplaySpaces, Route, Sky};
 use crate::engine::busy_apps::{Backoff, BusyApps, Reply};
 use crate::engine::engine_choice::Health;
 use crate::engine::geometry::Rect;
@@ -618,7 +618,11 @@ impl SpacesEngine {
 
     /// Every Desktop of every display, and the ones shown.
     fn desktops(sky: &Sky) -> (BTreeSet<u64>, Vec<u64>) {
-        let displays = sky.displays();
+        Self::desktops_of(&sky.displays())
+    }
+
+    /// Every Desktop of `displays` (one read of the window server's), and the ones shown.
+    fn desktops_of(displays: &[DisplaySpaces]) -> (BTreeSet<u64>, Vec<u64>) {
         let all = displays.iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
         let shown = displays.iter().map(|(_, current, _)| *current).filter(|c| *c != 0).collect();
         (all, shown)
@@ -708,22 +712,30 @@ impl SpacesEngine {
         let stage = self.state().plans.get(&id).map_or(NO_STAGE, |(stage, _)| *stage);
         let was = self.state().held.get(&id).copied();
         let now = sky.spaces_of(&[id]);
-        let (desktops, shown) = Self::desktops(sky);
+        let displays = sky.displays();
+        let (desktops, shown) = Self::desktops_of(&displays);
         // Where it is now, else where it was when hidden before (a window flying its last
         // stretch: the Desktop the stretch noted), else the Desktop shown; while a screen
         // gone is watched, the Desktop it was hidden from first ([`spill::hide_home`]).
         let flew_from = flying_guard.as_ref().and_then(|l| self.home_of(id, l.get(&id)));
+        let on = desktop_among(&now, &desktops, &shown);
         let hints = {
             let st = self.state();
+            let listing: Vec<(u64, Vec<u64>)> = displays.iter().map(|(_, current, spaces)| (*current, spaces.iter().map(|(s, _)| *s).collect())).collect();
             spill::HomeHints {
-                on: desktop_among(&now, &desktops, &shown),
+                on,
                 held: was.map(|h| h.home).or(flew_from),
                 last: st.homes.get(&id).copied(),
                 stage: st.stages.keys().find(|(d, s)| *s == stage && stage != NO_STAGE && desktops.contains(d)).map(|(d, _)| *d),
                 shown: shown.first().copied(),
+                showing: on.and_then(|d| spill::showing_on(&listing, d)),
             }
         };
-        let home = spill::hide_home(hints, &desktops, self.watching(Instant::now()));
+        let keep = self.watching(Instant::now());
+        let home = spill::hide_home(hints, &desktops, keep);
+        if keep {
+            tracing::debug!(id, stage, spaces = ?now, ?shown, ?hints, ?home, "display: a hide while a screen gone is watched");
+        }
         let Some(home) = home else {
             tracing::warn!(id, spaces = ?now, "spaces engine: no Desktop known for a window to hide");
             self.state().counts.hide_misses += 1;

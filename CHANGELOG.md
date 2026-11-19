@@ -13,6 +13,8 @@
 - With `engine = "spaces"`, bringing in a stage whose app also has a window on another
   Desktop no longer takes macOS to that Desktop.
 - With `engine = "spaces"`, unplugging a screen keeps every stage whole on its Desktop.
+- With `engine = "spaces"`, unplugging the main screen no longer loses the stage that was in
+  front on the other screen; its window turned up later as a stage of its own.
 - New setting `[displays] frames_per_setup` (off): windows go back to the size and place they
   had the last time the same screens were connected, once a screen is plugged in or out.
 

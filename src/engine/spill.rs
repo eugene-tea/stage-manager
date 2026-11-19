@@ -19,7 +19,9 @@
 //! a screen that is gone, and each stage Space a window came out of, is made again (the old
 //! one is not trusted to hold its windows any more) and its windows moved in, hidden; the old
 //! one ends once empty. A window whose Desktop is gone too is kept hidden in a stage Space of
-//! the Desktop it shows on (else the one shown): its stage still stands, on that Desktop.
+//! the Desktop it shows on (else the one shown): its stage still stands, on that Desktop. A
+//! window shown since its last hide (in front as the screen went) is hidden from the Desktop
+//! its screen shows, not the one the window server lists it on mid-change.
 //!
 //! **A Desktop that ends on a screen still there.** The main screen gone, macOS moves its
 //! Desktops onto the screen left and ends the Desktop it had made there when the other screen
@@ -266,8 +268,11 @@ pub struct HomeHints {
     /// A Desktop its stage has a stage Space for: weighed only for a window on no Desktop (a
     /// stage's Space of a Desktop it left lingers while the stage lives).
     pub stage: Option<u64>,
-    /// The Desktop shown.
+    /// The Desktop shown (the main screen's).
     pub shown: Option<u64>,
+    /// The Desktop shown on the screen that lists `on` ([`showing_on`]): `on` itself when it
+    /// shows.
+    pub showing: Option<u64>,
 }
 
 /// The Desktop a hide takes as the window's home. Outside the [`WATCH`] (`keep` false), the
@@ -275,13 +280,26 @@ pub struct HomeHints {
 /// watching, the Desktop it was hidden from comes first while that Desktop exists (held,
 /// else last), then the one it shows on, then its stage's: the Desktop the window server put
 /// it on as its screen went is not its own. A window shown since it was last hidden has no
-/// last Desktop (a show forgets it), so it is hidden from where it shows, as ever.
+/// last Desktop (a show forgets it): it is hidden from the Desktop its screen shows, not the
+/// one the window server lists it on, which mid-change may be another Desktop of that screen
+/// (a live run, 11-19: the main screen gone, the built-in screen's own Desktop ended, its
+/// window in front was listed on Desktop 1 while the screen showed Desktop 4; hidden into a
+/// Space of Desktop 1, it counted gone from the Desktop shown and lost its stage).
 pub fn hide_home(h: HomeHints, desktops: &BTreeSet<u64>, keep: bool) -> Option<u64> {
     if !keep {
         return h.on.or(h.held).or(h.shown);
     }
     let exists = |d: &u64| desktops.contains(d);
-    h.held.filter(exists).or(h.last.filter(exists)).or(h.on).or(h.stage.filter(exists)).or(h.held).or(h.shown)
+    let kept = h.held.filter(exists).or(h.last.filter(exists));
+    let fresh = h.held.is_none() && h.last.is_none();
+    kept.or(h.showing.filter(|_| fresh)).or(h.on).or(h.stage.filter(exists)).or(h.held).or(h.shown)
+}
+
+/// The Desktop shown on the screen that lists Desktop `desktop`, of `listing` (each screen's
+/// Desktop shown, 0 when none, and its Desktops): None when no screen lists it or that screen
+/// shows none.
+pub fn showing_on(listing: &[(u64, Vec<u64>)], desktop: u64) -> Option<u64> {
+    listing.iter().find(|(_, spaces)| spaces.contains(&desktop)).map(|(current, _)| *current).filter(|c| *c != 0)
 }
 
 #[cfg(test)]
@@ -479,23 +497,61 @@ mod tests {
     #[test]
     fn a_hide_while_watching_takes_the_desktop_it_was_hidden_from() {
         let desktops: BTreeSet<u64> = [471, 1, 4].into();
-        let h = HomeHints { on: Some(1), held: Some(4), last: None, stage: None, shown: Some(4) };
+        // Desktop 1 shows on a screen of its own (the main one shows 4).
+        let h = HomeHints { on: Some(1), held: Some(4), last: None, stage: None, shown: Some(4), showing: Some(1) };
         assert_eq!(hide_home(h, &desktops, true), Some(4), "watching: its own Desktop");
         assert_eq!(hide_home(h, &desktops, false), Some(1), "as ever: where it shows");
         // Let go as it came out (no longer held): the Desktop it was last hidden from.
-        let h = HomeHints { on: Some(1), held: None, last: Some(4), stage: Some(471), shown: Some(4) };
+        let h = HomeHints { on: Some(1), held: None, last: Some(4), stage: Some(471), shown: Some(4), showing: Some(1) };
         assert_eq!(hide_home(h, &desktops, true), Some(4));
         // Shown since (nothing kept): where it shows, never a Desktop its stage left.
-        let h = HomeHints { on: Some(1), held: None, last: None, stage: Some(471), shown: Some(4) };
+        let h = HomeHints { on: Some(1), held: None, last: None, stage: Some(471), shown: Some(4), showing: Some(1) };
         assert_eq!(hide_home(h, &desktops, true), Some(1));
         // On no Desktop and nothing kept: its stage's Desktop.
-        let h = HomeHints { on: None, held: None, last: None, stage: Some(471), shown: Some(4) };
+        let h = HomeHints { on: None, held: None, last: None, stage: Some(471), shown: Some(4), showing: None };
         assert_eq!(hide_home(h, &desktops, true), Some(471));
         // Its Desktop gone: where it shows.
-        let h = HomeHints { on: Some(1), held: Some(9), last: Some(9), stage: None, shown: Some(4) };
+        let h = HomeHints { on: Some(1), held: Some(9), last: Some(9), stage: None, shown: Some(4), showing: Some(1) };
         assert_eq!(hide_home(h, &desktops, true), Some(1));
         // On no Desktop: as ever.
-        let h = HomeHints { on: None, held: Some(9), last: None, stage: None, shown: Some(4) };
+        let h = HomeHints { on: None, held: Some(9), last: None, stage: None, shown: Some(4), showing: None };
         assert_eq!(hide_home(h, &desktops, true), Some(9));
+    }
+
+    /// The 11-19 live shape: a virtual screen (main) had Desktops 1, 4 and 471, 4 shown, its
+    /// stages hidden on 4; the built-in screen had Desktop 1554 (made when the virtual screen
+    /// took the main role), its stage 2 in front, never hidden. The virtual screen goes:
+    /// macOS moves 1, 4 and 471 to the built-in screen, shows 4 and ends 1554; the window
+    /// server lists stage 2's window on Desktop 1 as the model hides it (one stage in front
+    /// per screen).
+    #[test]
+    fn a_window_in_front_hidden_as_its_desktop_ends_goes_to_the_desktop_its_screen_shows() {
+        let listing = [(4, vec![1, 4, 471])];
+        let desktops: BTreeSet<u64> = [1, 4, 471].into();
+        let h = HomeHints { on: Some(1), held: None, last: None, stage: None, shown: Some(4), showing: showing_on(&listing, 1) };
+        assert_eq!(hide_home(h, &desktops, true), Some(4), "the Desktop shown, where present_now counts it");
+        assert_eq!(hide_home(h, &desktops, false), Some(1), "outside the watch: where it is listed, as ever");
+        // Still listed on the ended Desktop (no screen lists it): the Desktop shown.
+        let h = HomeHints { on: None, held: None, last: None, stage: None, shown: Some(4), showing: None };
+        assert_eq!(hide_home(h, &desktops, true), Some(4));
+        // A window kept from an earlier hide keeps its own Desktop (the 11-18 rule).
+        let h = HomeHints { on: Some(1), held: None, last: Some(471), stage: None, shown: Some(4), showing: Some(4) };
+        assert_eq!(hide_home(h, &desktops, true), Some(471));
+        let h = HomeHints { on: Some(1), held: Some(471), last: Some(471), stage: None, shown: Some(4), showing: Some(4) };
+        assert_eq!(hide_home(h, &desktops, true), Some(471));
+        // Two screens: the Desktop shown on the window's own screen, not the main one's.
+        let listing = [(4, vec![1, 4, 471]), (9, vec![8, 9])];
+        let desktops: BTreeSet<u64> = [1, 4, 471, 8, 9].into();
+        let h = HomeHints { on: Some(8), held: None, last: None, stage: None, shown: Some(4), showing: showing_on(&listing, 8) };
+        assert_eq!(hide_home(h, &desktops, true), Some(9));
+    }
+
+    #[test]
+    fn the_desktop_shown_on_a_desktops_screen() {
+        let listing = [(4, vec![1, 4, 471]), (0, vec![8, 9])];
+        assert_eq!(showing_on(&listing, 1), Some(4));
+        assert_eq!(showing_on(&listing, 4), Some(4), "itself when it shows");
+        assert_eq!(showing_on(&listing, 8), None, "a screen that shows none");
+        assert_eq!(showing_on(&listing, 1554), None, "listed by no screen");
     }
 }
