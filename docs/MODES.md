@@ -48,48 +48,35 @@ them.
 | ***Speed*** | | | |
 | A card click until the windows land | about 860 ms | about 850 ms | about 700 ms (Apple's motion) |
 
-1. Apple's Stage Manager takes changes only from the pointer, so the window is moved with a
-   posted drag onto its strip. Under "Show windows from an application: All at Once" an app's
-   windows stay in one stage, so a window whose app has another window in its stage can't be
-   sent.
+1. Apple's Stage Manager takes changes only from the pointer, so the window is dragged onto
+   its strip. Under "Show windows from an application: All at Once", a window can't leave a
+   stage that holds another window of its app.
 2. With the hotkeys or `ctl merge N`. Dropping one card on another works only in Stage
    Manager's own strip.
-3. Apple's Stage Manager gives every new app a stage of its own, so the app is hidden as it
-   opens and its window is then Shift-clicked in from Apple's strip, about 1.7 seconds after
-   the launch. When the window shows before the hide takes, Apple's has already switched: the
-   stage that was in front comes back with the app's window on top, a visible round trip of
-   about two seconds. Finder, and apps that bring themselves forward again once shown, always
-   take that round trip. While Apple's strip is covered the window waits a few seconds, then
-   stays in a stage of its own. A running app with no window that opens one as it is
-   activated is handled the same way.
+3. Apple's Stage Manager gives every new app its own stage, so the app is hidden as it opens
+   and then Shift-clicked into the current stage, about 1.7 seconds after launch. When its
+   window shows first, the switch and the way back are visible (about two seconds); Finder and
+   apps that bring themselves forward always take that round trip.
 4. macOS keeps a thin edge of every window on screen. Those edges sit in a corner, ignore
    clicks, and are covered by a matching piece of the desktop.
-5. A hidden stage's windows are on no Desktop, so Mission Control and App Exposé leave them
-   out. While one of them shows, Stage Manager puts those windows on the Desktop, at the
-   screen's corner, and takes them back when it closes (`[windows] mission_control_stages`,
-   below). Built in this version and not yet measured on a Mac in daily use: whether Mission
-   Control takes in a window that arrives after it has opened decides how well this works,
-   and `scripts/test-stages.sh mission-probe` measures it. Opened with a gesture, a hot
-   corner or the Dock, nothing announces it, and the windows arrive up to two seconds late. A
-   window whose app does not move it within 50 ms stays hidden.
-6. Each move is a posted Shift-click or drag in Apple's strip: the pointer leaves for about a
-   frame per click, about a second per drag, then comes back. Nothing is posted while the user
-   clicks, types or holds a key.
+5. Hidden stages' windows join Mission Control and App Exposé once they open: at once from the
+   keyboard shortcut, up to two seconds later from a gesture, a hot corner or the Dock
+   (`mission_control_stages`, below).
+6. Each move is a posted Shift-click or drag on Apple's strip: the pointer leaves for a frame
+   per click, about a second per drag. Nothing is posted while the user clicks, types or holds
+   a key.
 7. The window server's own Space calls are undocumented. Each launch tests them first, health
    checks keep watching, and Accessibility takes over whenever they fail.
 8. Accessibility and posted events are documented. Where to click depends on how Apple's strip
    is drawn, as measured on macOS 27, and a macOS update can change that. The live tests
    recheck it.
-9. Percent of one CPU core at rest, test windows only, the median of three runs on an Apple
-   silicon Mac with macOS 27 (11-14; method and every figure in [UX-SPEC.md](UX-SPEC.md),
-   "Window engines measured"). Most of what Accessibility costs is in macOS's own processes
-   (the screen-capture service, for the pictures that play the motion, and the window server),
-   so Activity Monitor's line for Stage Manager shows only about a fifth of it.
-10. Activity Monitor's figure for Stage Manager in everyday use on the same Mac (11-18), the
-   system's share on top. Accessibility: a minute of work, readings from 0.9 to 3.6 %, about
-   1.9 % on average; it rises with every click, switch and window moved. Integrated with
-   Apple's: the average over 13 hours (11-17 to 11-18, overnight included, so on the low side),
-   before the work this mode doesn't use was switched off.
+9. Percent of one CPU core at rest, test windows only, the median of three runs (Apple
+   silicon, macOS 27, 11-14; details in [UX-SPEC.md](UX-SPEC.md), "Window engines measured").
+   Most of Accessibility's cost is in macOS's screen-capture service and window server, so
+   Activity Monitor's line for Stage Manager shows only about a fifth of it.
+10. Activity Monitor's figure for Stage Manager in everyday use (11-18), without the system's
+   share. Accessibility: about 1.9 % over a minute of work (0.9 to 3.6 %), rising with every
+   click and switch. Integrated with Apple's: the average over 13 hours, overnight included.
 
 ## Settings
 

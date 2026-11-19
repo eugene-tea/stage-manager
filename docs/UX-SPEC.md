@@ -389,9 +389,9 @@ Mission Control is listed, found within about 30 ms of its keyboard shortcut (th
 own, read from Keyboard Shortcuts, or the keyboard's Mission Control key) and otherwise at
 the next tick (up to 0.25 s while something happens, 2 s at rest: a gesture, a hot corner
 and the Dock's item announce nothing); `"key"` lends at the shortcut itself and takes the
-windows back when nothing shows within 1.5 s; `"off"` lends nothing. Not measured yet:
-whether Mission Control lays out a window that arrives after it opened (`scripts/test-stages.sh
-mission-probe`; the log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
+windows back when nothing shows within 1.5 s; `"off"` lends nothing. Mission Control lays
+out a window that arrives after it opened (`scripts/test-stages.sh mission-probe`, 11-18; the
+log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
 shows, expected from a wallpaper click, and for a second after it closes, as the windows
 slide back) is never taken as the window's frame: a switch then keeps each window's own. The strip never appears in ⌘-Tab or the ⌘\`
 window cycle.

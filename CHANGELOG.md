@@ -2,12 +2,9 @@
 
 ## Unreleased
 
-- With `engine = "spaces"`, a pick with the mouse in the ⌘Tab switcher no longer slides to
-  another Desktop and back.
-- With `engine = "spaces"`, a screen unplugged (or a lid closed) no longer spills its
-  Desktops' hidden stages onto another Desktop: they stay in their stages, hidden, on their own
-  Desktop. With the main screen unplugged, the hidden stages of the Desktop macOS ends on the
-  screen left stay whole too, on the Desktop its windows move to.
+- With `engine = "spaces"`, a mouse pick in the ⌘Tab switcher no longer slides to another
+  Desktop and back.
+- With `engine = "spaces"`, unplugging a screen keeps every stage whole on its Desktop.
 
 ## 1.9.1 — 2026-11-18
 
