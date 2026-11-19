@@ -13,6 +13,7 @@ pub mod displays;
 pub mod early_start;
 pub mod engine_choice;
 pub mod enhanced_ui;
+pub mod focus_elsewhere;
 pub mod focus_replay;
 pub mod fullscreen;
 pub mod geometry;

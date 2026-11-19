@@ -143,6 +143,9 @@ impl Controller {
                 continue;
             }
             let Some(w) = ob.window(id) else { continue };
+            if self.keyboard_withheld(id, w.pid, "an order check's raise again") {
+                continue;
+            }
             let budget = deadline.saturating_duration_since(now).clamp(order::POLL, order::PER_WINDOW);
             self.echoes.touch_window(id, now);
             // A fresh handle found this batch for a dead one wins (stale-handles).
@@ -171,6 +174,7 @@ impl Controller {
         let owed = |k: &u32| self.landing_focus.as_ref().is_some_and(|f| f.owes(*k));
         if let Some(key) = focus.filter(|k| again.contains(k) && !owed(k))
             && let Some(w) = ob.window(key)
+            && !self.keyboard_withheld(key, w.pid, "an order check's focus")
         {
             let now = Instant::now();
             self.echoes.touch_window(key, now);
