@@ -2949,15 +2949,23 @@ impl Controller {
                         return;
                     }
                 }
-                self.flush_superseded(ob, "a focus");
-                self.show_strip_after_desktop("a window was focused");
                 let pid = ob.window(id).map(|w| w.pid);
                 let unknown = self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_none());
                 let elsewhere = self.model.as_ref().is_some_and(|m| m.waits_on_another_space(WindowId(id)));
                 // Its own screen's answer: a full-screen app on the other screen stops nothing here.
                 let frozen = self.frozen_for_window(id);
+                let held = pid.is_some() && (frozen || elsewhere || (unknown && self.unplaced.contains(&id)));
+                // No switch's start known while one is held: any input counts, as before.
+                let input_since_switch =
+                    self.phase.switching().is_none_or(|s| input::since_last_press() < now.saturating_duration_since(s.since));
+                if focus_supersedes(held, input_since_switch) {
+                    self.flush_superseded(ob, "a focus");
+                } else if let Some(s) = self.phase.switching() {
+                    tracing::debug!(id, switch = s.id, "a focus held for its Desktop, no click or key since the switch: the switch lands as planned");
+                }
+                self.show_strip_after_desktop("a window was focused");
                 if let Some(pid) = pid
-                    && (frozen || elsewhere || (unknown && self.unplaced.contains(&id)))
+                    && held
                 {
                     // Its Desktop is not recognized yet (a Dock click or ⌘Tab to a window of
                     // another Desktop, often before the Space change notice): replayed once
@@ -7121,6 +7129,17 @@ fn focus_may_switch(hidden: Option<bool>, active: Option<bool>, button_down: boo
     hidden != Some(true) && (active == Some(true) || (active.is_some() && button_down))
 }
 
+/// Whether a window's focus cuts a running switch short: its windows to their frames at once,
+/// its own focus dropped. A focus held until its window's Desktop is recognized (`held`: on
+/// another Desktop, behind a full-screen app, or not placed yet) leaves the switch to land,
+/// unless a click or key press came after the switch began. 11-19: a link opened Safari, the
+/// switch to its stage began, and 20 ms in Safari focused its window on another Desktop; the
+/// stage's window showed at once and its flying picture landed on it 0.6 s later. A Space
+/// change brings the switch's windows in all the same ([`Controller::on_space_changed`]).
+fn focus_supersedes(held: bool, input_since_switch: bool) -> bool {
+    !held || input_since_switch
+}
+
 /// Recency hints for windows placed on arrival: the window list's z-order and the frontmost
 /// app.
 /// The arrival's windows that stayed out of it or left their stage, each said (round
@@ -7653,6 +7672,17 @@ mod tests {
         assert!(!focus_may_switch(Some(true), Some(true), true), "a hidden app's window is never the user's");
         assert!(!focus_may_switch(Some(true), Some(false), false));
         assert!(!focus_may_switch(None, None, true), "the app is gone");
+    }
+
+    /// 11-19: an app's own focus of its window on another Desktop, 20 ms into a switch to its
+    /// stage here, showed the stage's window at once under its flying picture. A held focus lets
+    /// the switch land; a click or key press since the switch began still cuts it short.
+    #[test]
+    fn a_held_focus_cuts_a_switch_short_only_after_input() {
+        assert!(!focus_supersedes(true, false), "the app's own focus elsewhere: the switch lands");
+        assert!(focus_supersedes(true, true), "⌘Tab or a Dock click to another Desktop's window, mid-switch");
+        assert!(focus_supersedes(false, false), "a window of this Desktop focused: its stage comes now");
+        assert!(focus_supersedes(false, true));
     }
 
     /// The review of 6X, M2: only an unpark tries a busy app again; a switch's arrivals

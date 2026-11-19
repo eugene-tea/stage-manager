@@ -4,6 +4,8 @@
 
 - With `engine = "spaces"`, a mouse pick in the ⌘Tab switcher no longer slides to another
   Desktop and back.
+- A window no longer shows in place before its picture lands when its app also has a window on
+  another Desktop.
 - With `engine = "spaces"`, unplugging a screen keeps every stage whole on its Desktop.
 - New setting `[displays] frames_per_setup` (off): windows go back to the size and place they
   had the last time the same screens were connected, once a screen is plugged in or out.
