@@ -2963,10 +2963,18 @@ impl Controller {
                 // No switch's start known while one is held: any input counts, as before.
                 let input_since_switch =
                     self.phase.switching().is_none_or(|s| input::since_last_press() < now.saturating_duration_since(s.since));
-                if focus_supersedes(held, input_since_switch) {
-                    self.flush_superseded(ob, "a focus");
-                } else if let Some(s) = self.phase.switching() {
-                    tracing::debug!(id, switch = s.id, "a focus held for its Desktop, no click or key since the switch: the switch lands as planned");
+                match focus_on_switch(held, input_since_switch) {
+                    FocusOnSwitch::Supersede => self.flush_superseded(ob, "a focus"),
+                    FocusOnSwitch::LandWithoutFocus => {
+                        if let Some(p) = self.pending.as_mut() {
+                            // The app put its focus on a window of another Desktop (a link
+                            // opened in a browser profile there, 11-19): macOS goes there, and
+                            // the switch's own focus at its landing would pull it back.
+                            let (kept, dropped) = without_focus(std::mem::take(&mut p.actions));
+                            p.actions = kept;
+                            tracing::debug!(id, switch = p.id, ?dropped, "a focus held for its Desktop, no click or key since the switch: the switch lands as planned, without its focus");
+                        }
+                    }
                 }
                 self.show_strip_after_desktop("a window was focused");
                 if let Some(pid) = pid
@@ -7150,12 +7158,24 @@ fn early_focus_key(focus: Option<WindowId>, actions: &[Action], waits: impl Fn(W
 /// Whether a window's focus cuts a running switch short: its windows to their frames at once,
 /// its own focus dropped. A focus held until its window's Desktop is recognized (`held`: on
 /// another Desktop, behind a full-screen app, or not placed yet) leaves the switch to land,
-/// unless a click or key press came after the switch began. 11-19: a link opened Safari, the
+/// without its own focus (the app's wins: a focus at the landing would pull macOS back from
+/// the Desktop the app went to), unless a click or key press came after the switch began. 11-19: a link opened Safari, the
 /// switch to its stage began, and 20 ms in Safari focused its window on another Desktop; the
 /// stage's window showed at once and its flying picture landed on it 0.6 s later. A Space
 /// change brings the switch's windows in all the same ([`Controller::on_space_changed`]).
-fn focus_supersedes(held: bool, input_since_switch: bool) -> bool {
-    !held || input_since_switch
+/// 11-19 again: Safari's link opened in its window of Desktop 1, macOS went there, and the
+/// switch's focus at its landing, on Safari's window of Desktop 2, pulled it back.
+fn focus_on_switch(held: bool, input_since_switch: bool) -> FocusOnSwitch {
+    if !held || input_since_switch { FocusOnSwitch::Supersede } else { FocusOnSwitch::LandWithoutFocus }
+}
+
+/// What a window's focus does to a running switch ([`focus_on_switch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FocusOnSwitch {
+    /// Its windows to their frames at once, its own focus dropped.
+    Supersede,
+    /// Its windows land behind their pictures as planned; its own focus is dropped.
+    LandWithoutFocus,
 }
 
 /// Recency hints for windows placed on arrival: the window list's z-order and the frontmost
@@ -7709,10 +7729,24 @@ mod tests {
     /// the switch land; a click or key press since the switch began still cuts it short.
     #[test]
     fn a_held_focus_cuts_a_switch_short_only_after_input() {
-        assert!(!focus_supersedes(true, false), "the app's own focus elsewhere: the switch lands");
-        assert!(focus_supersedes(true, true), "⌘Tab or a Dock click to another Desktop's window, mid-switch");
-        assert!(focus_supersedes(false, false), "a window of this Desktop focused: its stage comes now");
-        assert!(focus_supersedes(false, true));
+        use FocusOnSwitch::*;
+        assert_eq!(focus_on_switch(true, false), LandWithoutFocus, "the app's own focus elsewhere: the switch lands");
+        assert_eq!(focus_on_switch(true, true), Supersede, "⌘Tab or a Dock click to another Desktop's window, mid-switch");
+        assert_eq!(focus_on_switch(false, false), Supersede, "a window of this Desktop focused: its stage comes now");
+        assert_eq!(focus_on_switch(false, true), Supersede);
+    }
+
+    /// 11-19: Safari opened a link in its window of Desktop 1 while a switch to its stage on
+    /// Desktop 2 played; the switch's landing focus pulled macOS back to Desktop 2. Landing
+    /// without its focus, the batch keeps every move and raise and loses only the focus.
+    #[test]
+    fn a_switch_landing_after_the_apps_focus_elsewhere_keeps_its_moves_not_its_focus() {
+        let frame = Rect { x: 389.0, y: 60.0, w: 1800.0, h: 1282.0 };
+        let batch = vec![Action::SetFrame { id: WindowId(151), frame }, Action::Raise { id: WindowId(151) }, Action::Focus { id: WindowId(151) }];
+        assert_eq!(focus_on_switch(true, false), FocusOnSwitch::LandWithoutFocus);
+        let (kept, dropped) = without_focus(batch);
+        assert_eq!(dropped, vec![151]);
+        assert_eq!(kept, vec![Action::SetFrame { id: WindowId(151), frame }, Action::Raise { id: WindowId(151) }]);
     }
 
     /// The review of 6X, M2: only an unpark tries a busy app again; a switch's arrivals
