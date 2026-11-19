@@ -43,6 +43,11 @@
 #                                          # the Desktop before its key, after it shows, at the key? Prints
 #                                          # what each outcome means (not a default phase; SM_SHOTS=<dir> adds
 #                                          # by-eye screenshots)
+#   SM_ENGINE=spaces scripts/test-stages.sh display-gone [main|secondary] [--rounds N]
+#                                          # a screen going away keeps every stage's windows: a virtual
+#                                          # screen (scripts/virtual-display) added, fixture stages on it
+#                                          # and on the built-in one, then removed (main: it held the menu
+#                                          # bar); 65 s of looks, then every Desktop (default both, 3 rounds)
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
 #                                          # Desktops and toggles full screen; nobody at the Mac
@@ -94,6 +99,11 @@ if [ "${1:-}" = "spaces" ]; then
     *) scripts/dev-app.sh >/dev/null || exit 1 ;;
   esac
   exec python3 scripts/test_spaces.py "${@:2}"
+fi
+# `display-gone` (scripts/test_display_gone.py) adds and removes a virtual screen, run alone.
+if [ "${1:-}" = "display-gone" ]; then
+  scripts/dev-app.sh >/dev/null || exit 1
+  exec python3 scripts/test_display_gone.py "${@:2}"
 fi
 # The app runs from the fixed dev copy (one screen-access approval for every worktree);
 # dev-app.sh refuses to replace a copy running from there, whichever home it uses.

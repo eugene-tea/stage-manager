@@ -9,7 +9,12 @@
 //   --title T    | FIXTURE_TITLE=T     window titles "T 1…N" (default "Fixture")
 //   --frames F   | FIXTURE_FRAMES=F    frames of the first windows, "x,y,w,h;x,y,w,h;..." in
 //                                      points from the visible frame's top-left corner (y
-//                                      down); a width <= 0 is the visible width plus it
+//                                      down); a width <= 0 is the visible width plus it. A
+//                                      frame off the main screen (on another screen) is set
+//                                      again 300 ms after the window shows: macOS opens a new
+//                                      window on the Desktop shown with the focus and moves
+//                                      it onto that screen, but lets the app move it after
+//                                      (scripts/test_display_gone.py, 11-18)
 //   --styles S   | FIXTURE_STYLES=S    window chrome per window, comma-separated, cycled:
 //                                      plain (title bar only, the default), toolbar (unified
 //                                      toolbar), compact (unified compact), expanded (toolbar
@@ -671,9 +676,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.minimizeAfterMs)) { window.miniaturize(nil) }
         } else {
             show(window)
+            replaceOnOtherScreen(window, i, area)
         }
         guard let title = options.retitle[window.title] else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.retitleAfterMs)) { window.title = title }
+    }
+
+    /// A `--frames` frame on another screen than the main one: set again once the window shows
+    /// (macOS opened it on the main screen's Desktop, moved onto that screen).
+    func replaceOnOtherScreen(_ window: NSWindow, _ i: Int, _ area: NSRect) {
+        guard i < options.frames.count, let main = NSScreen.screens.first?.frame else { return }
+        let f = options.frames[i]
+        let fw = f[2] <= 0 ? area.width + f[2] : f[2]
+        let want = window.frameRect(forContentRect: NSRect(x: area.minX + f[0], y: area.maxY - f[1] - f[3], width: fw, height: f[3]))
+        guard !main.intersects(want) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(300)) {
+            if window.frame != want { window.setFrame(want, display: true) }
+        }
     }
 
     /// Window number i + 1: distinct frames, a diagonal cascade with varied sizes.
