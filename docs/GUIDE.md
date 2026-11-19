@@ -172,6 +172,13 @@ screen's stages come back on that screen, by the screen itself, not the cable it
 `[displays] main_only = true` manages only the main screen (the one with the menu bar): a
 window moved to another screen leaves its stage and is left alone there. It is read at launch: quit and open Stage Manager again after changing it.
 
+`[displays] frames_per_setup = true` keeps each window's size and place for each set of
+screens: unplug the external screen and the windows go back to where you had them on the
+laptop alone; plug it in again and they go back to where they were with both. It happens once
+the change settles, about 10 s after it. A window you moved, resized or clicked meanwhile
+stays where you put it, and a set of screens not seen before keeps macOS's placement. A
+resolution changed counts as another set of screens.
+
 ### After a restart
 
 When you restart your Mac or log in again, your stages come back as your apps reopen their

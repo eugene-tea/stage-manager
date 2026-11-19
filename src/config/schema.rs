@@ -407,6 +407,8 @@ pub const KEYS: &[KeyDef] = &[
         ..k("displays", "main_only", Kind::Bool, "false",
             "Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages. Read at launch: quit and open Stage Manager again after changing it.")
     },
+    k("displays", "frames_per_setup", Kind::Bool, if crate::engine::setup_frames::ON_BY_DEFAULT { "true" } else { "false" },
+        "Windows keep their size and place for each set of screens: a screen plugged in or out, or a resolution changed, puts each window back where it was the last time the same screens were connected, once the change settles (10 s). A window moved, resized or clicked since the change stays where it is; a set of screens not seen before keeps macOS's placement. Off leaves the windows where macOS puts them."),
     // [sugar]
     k("sugar", "shift_brings_here", Kind::Bool, "true",
         "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way."),
@@ -631,6 +633,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-48.toml"),
     include_str!("legacy/default-49.toml"),
     include_str!("legacy/default-50.toml"),
+    include_str!("legacy/default-51.toml"),
 ];
 
 #[cfg(test)]

@@ -281,6 +281,7 @@ impl Model {
         self.windows.remove(&id);
         self.restored.remove(&id);
         self.pooled.remove(&id);
+        self.setup_frames.remove(&id);
         self.away.retain(|(w, _)| *w != id);
         // A window gone no longer vouches for a saved Desktop.
         for votes in self.adopt_votes.values_mut() {

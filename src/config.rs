@@ -467,6 +467,9 @@ pub struct DisplaysConfig {
     /// Only the main screen is managed (the first version's behaviour; off by default: every
     /// screen has its own strip and stages, as Apple's).
     pub main_only: bool,
+    /// Windows keep their frame per screen setup and go back to it when the same screens
+    /// are connected again ([`crate::engine::setup_frames`]).
+    pub frames_per_setup: bool,
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -1153,7 +1156,7 @@ impl Config {
                 with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.apple_stage_manager_on")),
                 mission_control: crate::engine::mission_control::Mode::parse(v.text("windows.mission_control_stages")),
             },
-            displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
+            displays: DisplaysConfig { main_only: v.flag("displays.main_only"), frames_per_setup: v.flag("displays.frames_per_setup") },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
             stages: StagesConfig {

@@ -71,6 +71,10 @@ impl Model {
         if touched {
             self.touched.insert(id);
         }
+        // The group's frames per screen setup are the tab left's too.
+        if let Some(frames) = self.setup_frames.remove(&left) {
+            self.setup_frames.insert(id, frames);
+        }
         // `left` leaves as a window gone (its stage keeps `selected`, so it never empties).
         let mut actions = self.remove_window(left);
         self.moved_from.remove(&left);

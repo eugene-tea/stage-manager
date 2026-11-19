@@ -134,6 +134,7 @@ impl Model {
                 fp: (!fp.is_empty()).then_some(fp),
                 pending: None,
                 quit_at: None,
+                setups: self.setup_frames.get(&id).cloned().unwrap_or_default(),
             },
         })
     }

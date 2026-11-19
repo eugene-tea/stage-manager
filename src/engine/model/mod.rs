@@ -40,6 +40,7 @@ mod pending;
 mod pool;
 mod quit;
 mod saved_size;
+mod setup_frames;
 mod spaces;
 mod strip;
 mod tabs;
@@ -483,6 +484,9 @@ pub struct Model {
     pub(crate) restore: super::restore::Restore,
     /// Windows owed their saved frame when first shown (`saved_size.rs`).
     pub(crate) owed: HashMap<WindowId, saved_size::Owed>,
+    /// Each standard window's frame per screen setup, the most recent setup first
+    /// (`[displays] frames_per_setup`, `setup_frames.rs`).
+    pub(crate) setup_frames: HashMap<WindowId, Vec<super::setup_frames::SetupFrame>>,
     /// What the last placement from a pending entry did, for the log.
     pub(crate) last_pending: Option<PendingNote>,
     /// The Dock's application items in order, as the platform last read them ("Follow the
@@ -558,6 +562,7 @@ impl Model {
             quit_frames: Vec::new(),
             restore: super::restore::Restore::default(),
             owed: HashMap::new(),
+            setup_frames: HashMap::new(),
             last_pending: None,
             dock: Vec::new(),
             hidden_apps: HashSet::new(),

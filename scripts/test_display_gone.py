@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Live check: a screen going away keeps every stage's windows.
 
-Run it as `SM_ENGINE=spaces scripts/test-stages.sh display-gone [main|secondary] [--rounds N]`
-(default: both kinds, 3 rounds each), or without `SM_ENGINE` for the Accessibility (Corner)
-engine. Nobody needs to be at the Mac, but nobody may use it
+Run it as `SM_ENGINE=spaces scripts/test-stages.sh display-gone [frames] [main|secondary]
+[--rounds N]` (default: both kinds, 3 rounds each), or without `SM_ENGINE` for the
+Accessibility (Corner) engine. Nobody needs to be at the Mac, but nobody may use it
 either: the run adds a virtual screen (scripts/virtual-display, a CoreGraphics virtual display)
 and takes it away again, as an unplug would.
 
@@ -27,6 +27,18 @@ one):
 The main screen gone, macOS ends the Desktop it made on the built-in screen when the virtual
 one took the main role: that Desktop's hidden stage (Charlie 2) is kept whole too.
 
+**Frames per screen setup** (`display-gone frames [main|secondary] [--rounds N]`, with
+`[displays] frames_per_setup = true` in the test home's config): the fixture stages are opened
+on the built-in screen alone (Fixture 1-2, Alpha 1) and each stage's windows resized there, one
+stage after another. The virtual screen is added (made main, or right of the built-in one):
+the log says a new screen setup once the change settles. Every window shown is resized where
+it is now, and the stage in front changed and its windows resized too. The screen is removed:
+once the change settles the log says the windows were put back, and every window's frame
+(the model's restore frame, and where the window server shows it when shown) is the one it
+had on the built-in screen alone. The screen is added again: every window on the screen its
+frame was kept on is back at its frame of the two-screen setup; one macOS put on another
+screen is counted `elsewhere` by the log, never moved across.
+
 The virtual screen is removed and the screens put back where they were whatever happens (the
 tool does it on SIGTERM too); the app is quit and the fixtures closed after each round. It
 refuses to start while another Stage Manager runs.
@@ -45,12 +57,21 @@ import test_stages as ts  # noqa: E402
 say, check, ctl = ts.say, ts.check, ts.ctl
 
 ARGS = sys.argv[1:]
+FRAMES = "frames" in ARGS
 KINDS = [k for k in ARGS if k in ("main", "secondary")] or ["main", "secondary"]
 ROUNDS = int(ARGS[ARGS.index("--rounds") + 1]) if "--rounds" in ARGS else 3
 WATCH_SECONDS = float(os.environ.get("SM_DISPLAY_GONE_WATCH") or 65)
 TOOL_BUILD = os.path.join(ts.ROOT, "scripts", "virtual-display", "build.sh")
 PID_FILE = os.path.join(ts.HOME, "virtual-display.pid")
 KEPT = "display: a gone screen's hidden windows kept in their stages"
+FRAMES_CONFIG = "[displays]\nframes_per_setup = true\n"
+PUT_BACK = "display: a known screen setup: windows put back at their frames"
+NEW_SETUP = "display: a new screen setup"
+# A display change settles in 10 s (DISPLAY_SETTLE); the tick rests at most 2 s.
+SETTLE_WAIT = 15
+# A snapshot of the frames is kept after its 3 s quiet, on a tick (at most 2 s apart).
+QUIET_WAIT = 8
+FRAME_TOL = 2.0
 FOREIGN = "windows of another Space are on screen"
 
 
@@ -314,15 +335,190 @@ def one_round(kind, n):
     return result
 
 
+def display_by_id(s):
+    return {d["id"]: d for d in s.get("displays", [])}
+
+
+def kept_frames(s):
+    """Title -> (screen key, frame relative to that screen's top-left): every managed window's
+    restore frame as the model has it (a hidden one's included)."""
+    shows = display_by_id(s)
+    out = {}
+    for w in s["windows"]:
+        d = shows.get(w["display"])
+        if d is None or w.get("role") != "standard":
+            continue
+        r, f = w["restore"], d["frame"]
+        out[w["title"]] = (d["key"], {"x": r["x"] - f["x"], "y": r["y"] - f["y"], "w": r["w"], "h": r["h"]})
+    return out
+
+
+def resize_shown(s, step):
+    """Resizes every shown managed fixture window where it is (`debug-frame`: the app's own
+    placement, no click), each to a frame of its own inside its screen's visible frame.
+    Returns the titles resized."""
+    shows = display_by_id(s)
+    done = []
+    for i, w in enumerate(sorted((w for w in s["windows"] if not w["parked"] and w.get("role") == "standard"), key=lambda w: w["title"])):
+        v = shows.get(w["display"], {}).get("visible")
+        if not v:
+            continue
+        k = i + step
+        width, height = min(980 - 40 * k, v["w"] - 200), min(640 - 30 * k, v["h"] - 120)
+        x, y = v["x"] + 140 + 60 * k, v["y"] + 40 + 35 * k
+        r = ctl("debug-frame", w["id"], x, y, width, height)
+        if not r.get("ok"):
+            say(f"    debug-frame {w['title']}: {r.get('error')}")
+            continue
+        done.append(w["title"])
+        time.sleep(0.6)
+    return done
+
+
+def frames_match(s, want, what):
+    """Each window on the screen its frame was kept on: its restore frame, and its frame on
+    screen when shown, at that frame. Returns (matched, problems, elsewhere titles)."""
+    shows = display_by_id(s)
+    live = {w["id"]: w["bounds"] for w in shown_fixture_windows() if w["onscreen"]}
+    matched, problems, elsewhere = [], [], []
+    for w in s["windows"]:
+        if w["title"] not in want:
+            continue
+        key, rel = want[w["title"]]
+        d = shows.get(w["display"])
+        if d is None or d["key"] != key:
+            elsewhere.append(w["title"])
+            continue
+        f = d["frame"]
+        expect = {"x": rel["x"] + f["x"], "y": rel["y"] + f["y"], "w": rel["w"], "h": rel["h"]}
+        if not ts.close(w["restore"], expect, FRAME_TOL):
+            problems.append(f"{what}: {w['title']} kept at {ts.fmt(w['restore'])}, not {ts.fmt(expect)}")
+            continue
+        if not w["parked"] and w["id"] in live and not ts.close(live[w["id"]], expect, FRAME_TOL):
+            problems.append(f"{what}: {w['title']} shows at {ts.fmt(live[w['id']])}, not {ts.fmt(expect)}")
+            continue
+        matched.append(w["title"])
+    return matched, problems, elsewhere
+
+
+def log_counts(line):
+    return {k: int(v) for k, v in re.findall(r"\b(put_back|touched|elsewhere|none_kept)=(\d+)", line)}
+
+
+def settled_line(mark, needle):
+    """The first log line with `needle` after line `mark`, waited for through a settle."""
+    found = ts.wait_until(lambda: next((ln for ln in log_lines(ts.log_text(), mark) if needle in ln), None), SETTLE_WAIT + 10, needle)
+    return found if isinstance(found, str) else None
+
+
+def frames_round(kind, n):
+    say(f"\n== frames per screen setup ({kind}), round {n} ==")
+    ts.write_config(FRAMES_CONFIG)
+    screen = None
+    try:
+        ts.stop_fixture()
+        subprocess.run(["open", "-n", "-g", ts.FIX_APP, "--args", "--windows", "2", "--background", "--frames", fixture_frames(0, 2)], check=True)
+        bundle, path, _, title = ts.EXTRA["a"]
+        ts.stop_extra("a")
+        subprocess.run(["open", "-n", "-g", path, "--args", "--windows", "1", "--title", title, "--background", "--frames", fixture_frames(0, 1, 500)], check=True)
+        if not check(ts.wait_until(lambda: len(shown_fixture_windows()) >= 3, 15, "three fixture windows"), f"frames {kind} {n}: three fixture windows"):
+            return
+        s = ts.start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+        if not check(s is not None, f"frames {kind} {n}: app up with three windows"):
+            return
+        time.sleep(2)
+        # The built-in screen alone: each stage in front in turn, its windows resized.
+        s = ts.state()
+        numbers = sorted(ts.stage_titles(s))
+        first = s["displays"][0].get("active")
+        resized = []
+        for k, number in enumerate(numbers):
+            ctl("switch", number)
+            time.sleep(1.5)
+            resized += resize_shown(ts.state(), 2 * k)
+        if first:
+            ctl("switch", first)
+            time.sleep(1.5)
+        time.sleep(QUIET_WAIT)
+        s = ts.state()
+        alone = kept_frames(s)
+        say(f"    built-in screen alone: {len(alone)} windows kept, resized {resized}; stages {ts.stage_titles(s)}")
+        check(len(resized) >= 3, f"frames {kind} {n}: every fixture window resized on the built-in screen ({resized})")
+
+        # The virtual screen comes: a new setup, macOS's way.
+        mark = len(ts.log_text().splitlines())
+        screen = Screen(kind == "main")
+        say(f"    virtual screen: {screen.info}")
+        new = settled_line(mark, NEW_SETUP)
+        check(bool(new), f"frames {kind} {n}: the log says a new screen setup once the change settles")
+        time.sleep(2)
+        s = ts.state()
+        say(f"    displays: {[(d['id'], d['key'], d['frame']) for d in s['displays']]}")
+        changed = resize_shown(s, 1)
+        others = [num for num in sorted(ts.stage_titles(s)) if num != s["displays"][0].get("active")]
+        if others:
+            ctl("switch", others[0])
+            time.sleep(1.5)
+            changed += resize_shown(ts.state(), 4)
+        time.sleep(QUIET_WAIT)
+        s = ts.state()
+        both = kept_frames(s)
+        say(f"    two screens: resized {changed}; kept {[(t, k, ts.fmt(r)) for t, (k, r) in sorted(both.items())]}")
+        check(bool(changed), f"frames {kind} {n}: windows resized with the virtual screen there ({changed})")
+
+        # The virtual screen goes: the built-in screen alone's frames come back.
+        mark = len(ts.log_text().splitlines())
+        say(f"    screen removed: {screen.stop()}")
+        line = settled_line(mark, PUT_BACK)
+        if check(bool(line), f"frames {kind} {n}: the screen gone, the log says the windows were put back"):
+            say(f"    log: {line[:300]}")
+            counts = log_counts(line)
+            check(counts.get("put_back", 0) >= 3 and counts.get("elsewhere", 1) == 0, f"frames {kind} {n}: every window put back ({counts})")
+        time.sleep(3)
+        matched, problems, elsewhere = frames_match(ts.state(), alone, "alone again")
+        check(not problems and not elsewhere and len(matched) == len(alone),
+              f"frames {kind} {n}: every window at its frame of the built-in screen alone ({matched})"
+              + (f": {problems[:6]}" if problems else "") + (f"; elsewhere {elsewhere}" if elsewhere else ""))
+
+        # The virtual screen again: the two-screen frames come back where macOS puts the windows
+        # on the screen they were kept on.
+        mark = len(ts.log_text().splitlines())
+        screen = Screen(kind == "main")
+        say(f"    virtual screen again: {screen.info}")
+        line = settled_line(mark, PUT_BACK)
+        counts = {}
+        if check(bool(line), f"frames {kind} {n}: the screen back, the log says the windows were put back"):
+            say(f"    log: {line[:300]}")
+            counts = log_counts(line)
+        time.sleep(3)
+        matched, problems, elsewhere = frames_match(ts.state(), both, "both again")
+        say(f"    on the screen their frame was kept on: {matched}; on another (macOS's): {elsewhere}")
+        check(not problems and bool(matched), f"frames {kind} {n}: every window on its screen at its two-screen frame"
+              + (f": {problems[:6]}" if problems else ""))
+        check(not counts or counts.get("elsewhere") == len(elsewhere),
+              f"frames {kind} {n}: the log counts {counts.get('elsewhere')} elsewhere, {len(elsewhere)} seen on another screen")
+    finally:
+        if screen is not None and screen.proc.poll() is None:
+            say(f"    screen removed (cleanup): {screen.stop()}")
+        ts.stop_app()
+        ts.stop_all_fixtures()
+        ts.write_config(None)
+        log = ts.archive_log()
+        say(f"    log kept: {log}")
+
+
 def main():
     if ts.owner_app_running():
         say("STOP: another Stage Manager is running (the owner's?). Quit it first.")
         sys.exit(2)
-    say(f"display-gone: {KINDS} x {ROUNDS}, engine {ts.ENGINE}, test home {ts.HOME}")
+    say(f"display-gone{' frames' if FRAMES else ''}: {KINDS} x {ROUNDS}, engine {ts.ENGINE}, test home {ts.HOME}")
     try:
         for kind in KINDS:
             for n in range(1, ROUNDS + 1):
-                one_round(kind, n)
+                if FRAMES:
+                    frames_round(kind, n)
+                else:
+                    one_round(kind, n)
     finally:
         ts.stop_app()
         ts.stop_all_fixtures()

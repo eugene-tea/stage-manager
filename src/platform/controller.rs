@@ -154,6 +154,7 @@ mod fallback;
 mod landing_focus;
 mod mission_control;
 mod raise_order;
+mod setup_frames;
 mod slide_watch;
 mod spaces;
 mod stale;
@@ -1004,6 +1005,10 @@ pub struct Controller {
     /// it that adds none: within [`DISPLAY_SETTLE`] a window the model has parked elsewhere
     /// that macOS lists on one of them goes back to it ([`Self::reconcile_parked`]).
     displays_added: Vec<DisplayId>,
+    /// Windows' frames per screen setup: when they are taken, when a display change settles,
+    /// which windows the person touched since (`[displays] frames_per_setup`,
+    /// `controller/setup_frames.rs`).
+    setups: crate::engine::setup_frames::Recorder,
     /// When the latest switch we began started (a batch of ours that parks or focuses): an
     /// activation that fired before it never starts one ([`stale_activation::judge`]).
     our_switch: Option<Instant>,
@@ -1286,6 +1291,7 @@ impl Controller {
             last_switch: None,
             displays_changed_at: None,
             displays_added: Vec::new(),
+            setups: crate::engine::setup_frames::Recorder::default(),
             our_switch: None,
             space_checked: Instant::now(),
             foreign: Persisting::default(),
@@ -2845,6 +2851,10 @@ impl Controller {
                     // Moved or resized by the user: a late title re-matches it no more.
                     m.touch_window(WindowId(id));
                 }
+                if !ours && input::left_button_down() {
+                    // The user's, after a display change: its frame stays theirs.
+                    self.frames_touched(id, now);
+                }
                 if !ours && input::left_button_down() && self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| w.parked) {
                     // Dragged while parked (its sliver grabbed without a focus, ⌘ held): the
                     // user's; the tick adopts it where they leave it rather than parking it
@@ -2906,6 +2916,9 @@ impl Controller {
                     // Focused by a click or a key press on it: a late title re-matches it no
                     // more (a focus an app makes by itself at login leaves it).
                     m.touch_window(WindowId(id));
+                }
+                if input::since_last_press() < USER_FOCUS {
+                    self.frames_touched(id, now);
                 }
                 if let Some(pid) = ob.window(id).map(|w| w.pid) {
                     let (hidden, active) = (super::apps::is_hidden(pid), super::apps::is_active(pid));
@@ -5547,6 +5560,7 @@ impl Controller {
             let added: Vec<DisplayId> = displays.iter().filter(|d| !self.displays.iter().any(|o| o.id == d.id)).map(|d| d.id).collect();
             let connected: Vec<DisplayId> = displays.iter().map(|d| d.id).collect();
             self.displays_added = returned_screens(&self.displays_added, settling, added, &connected);
+            self.frames_display_changed(heard);
         }
         // A screen gone (not one seen again under a new id): under the Spaces engine its hidden
         // windows are kept in their stages, on their own Desktops, before the model's batch
@@ -6272,6 +6286,8 @@ impl Controller {
             } else {
                 self.check_spaces(ob);
             }
+            // Windows' frames per screen setup: kept, or put back once a display change settled.
+            self.frames_tick(ob, now);
             // The running engine's checks: a failed one hands over to the Corner engine.
             self.check_engine(ob);
             // What the model counts hidden against the screen, the engine's way.

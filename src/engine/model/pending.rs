@@ -772,6 +772,9 @@ impl Model {
         let live = meta.frame;
         self.windows.insert(id, WindowState { meta, home, restore, parked: false, original, space, sticky: false });
         self.restored.insert(id, Restored { grade, z: entry.z });
+        if sure {
+            self.take_setup_frames(id, &entry.setups);
+        }
         let shown = match home {
             Home::Pinned => true,
             Home::Stage(s) => self.is_active(s),

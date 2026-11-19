@@ -48,6 +48,10 @@
 #                                          # screen (scripts/virtual-display) added, fixture stages on it
 #                                          # and on the built-in one, then removed (main: it held the menu
 #                                          # bar); 65 s of looks, then every Desktop (default both, 3 rounds)
+#   SM_ENGINE=spaces scripts/test-stages.sh display-gone frames [main|secondary] [--rounds N]
+#                                          # [displays] frames_per_setup: windows resized on the built-in
+#                                          # screen, the virtual screen added, resized there, removed: the
+#                                          # built-in screen's frames back; added again: the two-screen ones
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
 #                                          # Desktops and toggles full screen; nobody at the Mac

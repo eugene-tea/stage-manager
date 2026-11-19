@@ -43,6 +43,7 @@ use super::model::{
 use super::restore::{QUIT_KEEP, UNSEEN_KEEP, merge_order};
 use super::rules::Decision;
 use super::settings::AppWindows;
+use super::setup_frames::SetupFrame;
 use super::stage_area::same_frame;
 use super::window_match::{Grade, Live, LowRule, Saved, assign, fingerprint};
 
@@ -108,6 +109,11 @@ pub struct SavedWindow {
     /// for the next session only ([`StateFile::settle_quit`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quit_at: Option<u64>,
+    /// Its frame per screen setup, the most recent first (`[displays] frames_per_setup`,
+    /// [`crate::engine::setup_frames`]). Absent in files written before 11-18, and when none
+    /// is kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub setups: Vec<SetupFrame>,
 }
 
 impl SavedWindow {
@@ -510,6 +516,8 @@ pub struct AssignedWindow {
     pub grade: Grade,
     /// Its saved place in the stage, 0 = front.
     pub z: usize,
+    /// Its saved frames per screen setup (a confident match's only).
+    pub setups: Vec<SetupFrame>,
 }
 
 /// A saved stage with the live windows matched into it, front to back.
@@ -687,6 +695,7 @@ pub fn rematch_on(state: &SavedSpace, live: &[WindowMeta], parked: impl Fn(&Wind
                     original: sw.original.filter(|_| sure),
                     grade: *grade,
                     z: sw.z,
+                    setups: if sure { sw.setups.clone() } else { Vec::new() },
                 });
                 if !sure {
                     // Not sure it is that window: the saved one is still awaited.
@@ -771,6 +780,7 @@ impl Model {
                 fp: (!fp.is_empty()).then_some(fp),
                 pending: None,
                 quit_at: None,
+                setups: self.setup_frames.get(&id).cloned().unwrap_or_default(),
             })
         };
         let here: Vec<&crate::engine::model::Stage> = self.stages_in(space).collect();
@@ -1279,6 +1289,7 @@ impl Model {
         let space = self.current_space(display);
         let mut meta = meta.clone();
         meta.display = display;
+        let meta_id = meta.id;
         self.windows.insert(
             meta.id,
             WindowState {
@@ -1291,6 +1302,7 @@ impl Model {
                 sticky: false,
             },
         );
+        self.take_setup_frames(meta_id, &saved.setups);
     }
 }
 

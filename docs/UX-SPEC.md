@@ -373,6 +373,20 @@ showing most of it (macOS's rule).
 - **`[displays] main_only`** (off) manages the main screen only, a window moved off it left
   alone. It is read at launch: turned on mid-session it would have to bring back every hidden
   window of the other screens, on Desktops not shown too, which a quit does safely.
+- **`[displays] frames_per_setup`** (off until Apple's own behaviour is measured; parity if
+  Apple keeps frames per screen size) keeps each window's frame per screen setup: the
+  connected screens by identity, each with its size in points (a resolution change is another
+  setup), the frame kept relative to the window's screen, at most 8 setups a window, saved in
+  `state.json` with its entry. Once a display change settles (10 s from macOS's notice) into a
+  setup seen before, each window goes back to its frame there, on the same screen: a shown one
+  moved (fitted and brought within reach as any restore), a hidden one given it as its restore
+  frame. A window moved, resized or focused by a click since the change stays, and so does one
+  on another screen than its frame's or on a Desktop not shown: nothing moves a window between
+  screens, Desktops or stages for a frame. Stages are whole first (the screen gone adopted,
+  the Spaces engine's hidden windows kept in their stages), frames after. A setup not seen
+  before keeps macOS's placement and is remembered from the settle. Nothing is taken within a
+  settle, nor from a snapshot younger than 3 s when the change is heard (macOS squeezes the
+  windows as a screen goes).
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
 is back on the same Desktop when they end. Mission Control and App Exposé show every
