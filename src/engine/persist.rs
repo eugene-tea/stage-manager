@@ -111,9 +111,19 @@ pub struct SavedWindow {
     pub quit_at: Option<u64>,
     /// Its frame per screen setup, the most recent first (`[displays] frames_per_setup`,
     /// [`crate::engine::setup_frames`]). Absent in files written before 11-18, and when none
-    /// is kept.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    /// is kept. Read leniently ([`lenient_setups`]): an entry that does not parse is dropped,
+    /// never the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "lenient_setups")]
     pub setups: Vec<SetupFrame>,
+}
+
+/// [`SavedWindow::setups`] as read: each entry that parses, the others dropped (a mangled
+/// entry, or a field that is not a list, costs those frames only, never the whole file and
+/// with it every stage).
+fn lenient_setups<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SetupFrame>, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    let serde_json::Value::Array(items) = value else { return Ok(Vec::new()) };
+    Ok(items.into_iter().filter_map(|v| serde_json::from_value(v).ok()).collect())
 }
 
 impl SavedWindow {

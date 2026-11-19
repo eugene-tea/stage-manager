@@ -47,18 +47,35 @@ impl Model {
     }
 
     /// Keeps `frames` (from [`Model::setup_frames_now`]) for the windows still known; the
-    /// frames of windows gone go. True when anything changed (the file is saved again then).
+    /// frames of windows gone go. A window owed its frame on another screen
+    /// ([`Model::setup_owed`]) keeps that frame for the setup while it stays off that screen;
+    /// on it again, or in another setup, it is owed no more. True when anything changed (the
+    /// file is saved again then).
     pub fn keep_setup_frames(&mut self, frames: Vec<(WindowId, SetupFrame)>) -> bool {
         let before = self.setup_frames.len();
         let windows = &self.windows;
         self.setup_frames.retain(|id, _| windows.contains_key(id));
+        self.setup_owed.retain(|id, _| windows.contains_key(id));
         let mut changed = before != self.setup_frames.len();
         for (id, entry) in frames {
-            if self.windows.contains_key(&id) {
-                changed |= keep(self.setup_frames.entry(id).or_default(), entry);
+            if !self.windows.contains_key(&id) {
+                continue;
             }
+            if let Some(owed) = self.setup_owed.get(&id) {
+                if owed.setup == entry.setup && owed.screen != entry.screen {
+                    continue;
+                }
+                self.setup_owed.remove(&id);
+            }
+            changed |= keep(self.setup_frames.entry(id).or_default(), entry);
         }
         changed
+    }
+
+    /// The person moved, resized or clicked window `id`: where it is now is theirs, its frame
+    /// on another screen owed no more.
+    pub fn setup_frame_placed_by_user(&mut self, id: WindowId) {
+        self.setup_owed.remove(&id);
     }
 
     /// Takes window `id`'s frames from its saved entry (a window matched after a restart).
@@ -112,6 +129,8 @@ impl Model {
             let (shown_space, display) = (self.is_shown_space(w.space), w.meta.display);
             let Some(screen) = screen.filter(|_| parked || shown_space) else {
                 note.elsewhere += 1;
+                // Its frame on the other screen stays kept until it is back there.
+                self.setup_owed.insert(id, entry);
                 continue;
             };
             let frame = absolute(entry.frame, screen.frame);

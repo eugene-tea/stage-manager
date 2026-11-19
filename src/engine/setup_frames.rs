@@ -23,10 +23,11 @@
 //! **Put back.** When a display change settles ([`Recorder::settled`]) into a setup seen
 //! before, each window with a frame for it goes back there, on the same screen: a shown one is
 //! moved, a hidden one gets it as its restore frame (shown there next time). A window the
-//! person moved, resized or focused by a click since the change stays where it is, and so does
-//! one on another screen or on a Desktop not shown: nothing moves a window between screens,
-//! Desktops or stages to fit a frame. A setup not seen before keeps macOS's way, and its frames
-//! are remembered from there.
+//! person moved, resized or focused by a click since the change (until the put-back, which
+//! waits past the settle while a switch, a drag or a full-screen app's Space holds it) stays
+//! where it is, and so does one on another screen or on a Desktop not shown: nothing moves a
+//! window between screens, Desktops or stages to fit a frame. A setup not seen before keeps
+//! macOS's way, and its frames are remembered from there.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -157,12 +158,12 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// The displays changed (heard at `heard`): the waiting snapshot is dropped, the settle
-    /// starts again, and no window counts touched yet.
+    /// The displays changed (heard at `heard`): the waiting snapshot is dropped and the settle
+    /// starts again. The windows touched since an earlier change not settled yet stay touched
+    /// (a screen plugged in often comes as two changes: the screen, then its mode).
     pub fn display_changed(&mut self, heard: Instant) {
         self.waiting = None;
         self.changed_at = Some(heard);
-        self.touched.clear();
     }
 
     /// True within `settle` of the last display change.
@@ -170,10 +171,12 @@ impl Recorder {
         self.changed_at.is_some_and(|t| now.saturating_duration_since(t) < settle)
     }
 
-    /// The person moved, resized or focused by a click window `id`: while a change settles,
-    /// the put-back leaves it alone.
-    pub fn touch(&mut self, id: WindowId, now: Instant, settle: Duration) {
-        if self.settling(now, settle) {
+    /// The person moved, resized or focused by a click window `id`: from a display change
+    /// until its put-back ([`Self::settled`]), the put-back leaves it alone. Past the settle
+    /// too: the put-back waits for a switch, a Desktop change, a drag or a full-screen app's
+    /// Space, and a window grabbed meanwhile is the person's.
+    pub fn touch(&mut self, id: WindowId) {
+        if self.changed_at.is_some() {
             self.touched.insert(id);
         }
     }
@@ -318,20 +321,30 @@ mod tests {
     }
 
     #[test]
-    fn only_windows_touched_within_the_settle_are_left_alone() {
+    fn windows_touched_from_a_change_until_its_put_back_are_left_alone() {
         let t0 = Instant::now();
         let mut r = Recorder::default();
-        r.touch(WindowId(9), t0, SETTLE);
+        r.touch(WindowId(9));
         r.display_changed(t0);
-        r.touch(WindowId(1), t0 + Duration::from_secs(2), SETTLE);
-        r.touch(WindowId(2), t0 + SETTLE, SETTLE);
-        let touched = r.settled(t0 + SETTLE, SETTLE).expect("settled");
-        assert_eq!(touched, HashSet::from([WindowId(1)]), "only the touch within the settle counts");
-        // A second change within the settle starts it again, with nothing touched yet.
-        r.display_changed(t0 + SETTLE);
-        r.touch(WindowId(3), t0 + SETTLE + Duration::from_secs(1), SETTLE);
-        r.display_changed(t0 + SETTLE + Duration::from_secs(2));
-        assert_eq!(r.settled(t0 + SETTLE * 2, SETTLE), None, "the settle runs from the last change");
-        assert_eq!(r.settled(t0 + SETTLE * 2 + Duration::from_secs(2), SETTLE), Some(HashSet::new()));
+        r.touch(WindowId(1));
+        // Past the settle, the put-back held back by a drag: a window grabbed then counts.
+        r.touch(WindowId(2));
+        let touched = r.settled(t0 + SETTLE + Duration::from_secs(2), SETTLE).expect("settled");
+        assert_eq!(touched, HashSet::from([WindowId(1), WindowId(2)]), "the touch before the change does not count");
+        r.touch(WindowId(4));
+        r.display_changed(t0 + SETTLE * 2);
+        assert_eq!(r.settled(t0 + SETTLE * 3, SETTLE), Some(HashSet::new()), "a touch with no change under way does not count");
+    }
+
+    #[test]
+    fn a_second_change_keeps_the_windows_touched_since_the_first() {
+        // A screen plugged in: the screen, then its mode, a few seconds apart.
+        let t0 = Instant::now();
+        let mut r = Recorder::default();
+        r.display_changed(t0);
+        r.touch(WindowId(3));
+        r.display_changed(t0 + Duration::from_secs(2));
+        assert_eq!(r.settled(t0 + SETTLE, SETTLE), None, "the settle runs from the last change");
+        assert_eq!(r.settled(t0 + SETTLE + Duration::from_secs(2), SETTLE), Some(HashSet::from([WindowId(3)])));
     }
 }

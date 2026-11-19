@@ -39,20 +39,20 @@ fn laptop_gone(engine: EngineKind) -> (Env, SpaceId, StageId) {
 }
 
 /// The Studio's arrival listing Code and Chrome (let out of its stage Space onto the
-/// Studio's Desktop as the laptop went), `hold`: the change settling with no click or key
-/// since.
-fn arrive_with_chrome(e: &mut Env, hold: bool) -> Vec<Action> {
+/// Studio's Desktop as the laptop went). `hold`: the change settling with no click or key
+/// since; `watch`: the Spaces engine watching the screen gone (the platform says so before
+/// every arrival and at every tick).
+fn arrive_with_chrome(e: &mut Env, hold: bool, watch: bool) -> Vec<Action> {
     let live = [meta(1, 10, &studio(), (200.0, 100.0)), meta(5, 20, &studio(), (100.0, 100.0))];
     e.m.set_hold_arrivals(hold);
+    e.m.set_display_watch(watch);
     let a = e.m.arrive(STUDIO, &live, &[], &LaunchHints::default());
     e.m.set_hold_arrivals(false);
     e.run(a)
 }
 
-#[test]
-fn a_hidden_window_let_out_as_its_screen_went_stays_in_its_stage_hidden_again() {
-    let (mut e, first, chrome) = laptop_gone(EngineKind::Spaces);
-    let a = arrive_with_chrome(&mut e, true);
+/// Chrome kept in its stage, hidden again, on its own Desktop.
+fn assert_chrome_kept(e: &Env, a: &[Action], first: SpaceId, chrome: StageId) {
     let note = e.m.last_arrival().clone();
     assert_eq!(note.kept_hidden, vec![WindowId(5)], "{note:?}");
     assert!(a.contains(&Action::Hide { id: WindowId(5) }), "hidden again: {a:?}");
@@ -63,22 +63,48 @@ fn a_hidden_window_let_out_as_its_screen_went_stays_in_its_stage_hidden_again() 
 }
 
 #[test]
-fn after_the_settle_or_a_click_a_window_listed_elsewhere_is_taken_as_ever() {
-    // Arrivals not held (the settle over, or the user clicked or typed since): nothing kept.
+fn a_hidden_window_let_out_as_its_screen_went_stays_in_its_stage_hidden_again() {
+    let (mut e, first, chrome) = laptop_gone(EngineKind::Spaces);
+    let a = arrive_with_chrome(&mut e, true, true);
+    assert_chrome_kept(&e, &a, first, chrome);
+}
+
+#[test]
+fn a_key_press_before_the_visit_keeps_the_window_in_its_stage_while_the_engine_watches() {
+    // 20 s after the change, a key pressed since (arrivals no longer held): the engine still
+    // watches the screen gone, and the arrival on the moved Desktop keeps Chrome hidden.
+    let (mut e, first, chrome) = laptop_gone(EngineKind::Spaces);
+    let a = arrive_with_chrome(&mut e, false, true);
+    assert_chrome_kept(&e, &a, first, chrome);
+}
+
+#[test]
+fn after_the_watch_a_window_listed_elsewhere_is_taken_as_ever() {
+    // The engine's watch over: nothing kept, and nothing is kept for later either.
     let (mut e, _, _) = laptop_gone(EngineKind::Spaces);
-    let a = arrive_with_chrome(&mut e, false);
+    let a = arrive_with_chrome(&mut e, true, false);
     assert!(e.m.last_arrival().kept_hidden.is_empty());
     assert!(!a.contains(&Action::Hide { id: WindowId(5) }));
+    assert!(e.m.handed_hidden.is_empty(), "cleared as the watch ended");
     // The same seen twice (the second look a window of another Desktop needs): it moved.
-    arrive_with_chrome(&mut e, false);
+    arrive_with_chrome(&mut e, false, false);
     assert_eq!(e.m.space_of(WindowId(5)), Some(e.space_of(STUDIO)), "moved, as today");
+}
+
+#[test]
+fn a_window_gone_is_no_longer_kept() {
+    let (mut e, _, _) = laptop_gone(EngineKind::Spaces);
+    assert!(e.m.handed_hidden.contains(&WindowId(5)));
+    let a = e.m.remove_window(WindowId(5));
+    e.run(a);
+    assert!(!e.m.handed_hidden.contains(&WindowId(5)));
 }
 
 #[test]
 fn the_corner_engine_keeps_its_own_rules_for_a_gone_screens_cards() {
     // Parked windows sit on their Desktop under the Corner engine; macOS moves them with it.
     let (mut e, _, _) = laptop_gone(EngineKind::Corner);
-    arrive_with_chrome(&mut e, true);
+    arrive_with_chrome(&mut e, true, true);
     assert!(e.m.last_arrival().kept_hidden.is_empty());
 }
 
@@ -124,6 +150,7 @@ fn the_main_screen_gone_the_ended_desktops_stages_join_the_desktop_moved_in_whol
     let main_laptop = e.m.displays()[0];
     let live = [meta(1, 10, &main_laptop, (200.0, 100.0)), meta(6, 60, &main_laptop, (100.0, 100.0))];
     e.m.set_hold_arrivals(true);
+    e.m.set_display_watch(true);
     let a = e.m.arrive(LAPTOP, &live, &[], &LaunchHints::default());
     e.m.set_hold_arrivals(false);
     e.run(a);

@@ -440,8 +440,9 @@ pub struct Model {
     pub(crate) adopted: BTreeSet<WindowId>,
     /// Windows hidden in a stage of a Desktop of a screen that went, at that change (but those
     /// [`Self::adopted`], whose stages [`Model::carry_adopted`] takes whole): one listed on
-    /// another Desktop while the change settles stays in its stage, hidden again
-    /// ([`ArrivalNote::kept_hidden`]). Set again at each change of the screens.
+    /// another Desktop while the Spaces engine watches the screen gone stays in its stage,
+    /// hidden again ([`ArrivalNote::kept_hidden`]). Set again at each change of the screens;
+    /// cleared when the watch ends ([`Model::set_display_watch`]); a window gone leaves it.
     pub(crate) handed_hidden: HashSet<WindowId>,
     /// Desktops not shown whose front stage left them (the lid closed: the laptop's front,
     /// brought in front on the 5K's first Desktop, carried whole to the second one macOS
@@ -451,6 +452,9 @@ pub struct Model {
     /// An arrival leaves out windows first seen on the Desktop still shown
     /// ([`Model::set_hold_arrivals`]).
     pub(crate) hold_arrivals: bool,
+    /// The Spaces engine watches a screen gone: [`Self::handed_hidden`] windows listed on
+    /// another Desktop stay in their stages ([`Model::set_display_watch`]).
+    pub(crate) display_watch: bool,
     /// Windows the platform's own switch just showed while macOS slid to another Desktop,
     /// for the next arrival only ([`Model::set_slide_carried`]).
     pub(crate) slide_carried: HashSet<WindowId>,
@@ -487,6 +491,10 @@ pub struct Model {
     /// Each standard window's frame per screen setup, the most recent setup first
     /// (`[displays] frames_per_setup`, `setup_frames.rs`).
     pub(crate) setup_frames: HashMap<WindowId, Vec<super::setup_frames::SetupFrame>>,
+    /// Windows a settle found on another screen than their frame's for the setup now, with
+    /// that frame: kept as it is until the window is on that screen again or the person
+    /// moves, resizes or clicks it (`setup_frames.rs`).
+    pub(crate) setup_owed: HashMap<WindowId, super::setup_frames::SetupFrame>,
     /// What the last placement from a pending entry did, for the log.
     pub(crate) last_pending: Option<PendingNote>,
     /// The Dock's application items in order, as the platform last read them ("Follow the
@@ -552,6 +560,7 @@ impl Model {
             handed_hidden: HashSet::new(),
             front_owed: BTreeSet::new(),
             hold_arrivals: false,
+            display_watch: false,
             slide_carried: HashSet::new(),
             travellers: Vec::new(),
             desktop_counts: HashMap::new(),
@@ -563,6 +572,7 @@ impl Model {
             restore: super::restore::Restore::default(),
             owed: HashMap::new(),
             setup_frames: HashMap::new(),
+            setup_owed: HashMap::new(),
             last_pending: None,
             dock: Vec::new(),
             hidden_apps: HashSet::new(),

@@ -2853,7 +2853,7 @@ impl Controller {
                 }
                 if !ours && input::left_button_down() {
                     // The user's, after a display change: its frame stays theirs.
-                    self.frames_touched(id, now);
+                    self.frames_touched(id);
                 }
                 if !ours && input::left_button_down() && self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| w.parked) {
                     // Dragged while parked (its sliver grabbed without a focus, ⌘ held): the
@@ -2918,7 +2918,7 @@ impl Controller {
                     m.touch_window(WindowId(id));
                 }
                 if input::since_last_press() < USER_FOCUS {
-                    self.frames_touched(id, now);
+                    self.frames_touched(id);
                 }
                 if let Some(pid) = ob.window(id).map(|w| w.pid) {
                     let (hidden, active) = (super::apps::is_hidden(pid), super::apps::is_active(pid));
@@ -4422,9 +4422,11 @@ impl Controller {
         }
         let hints = launch_hints(list);
         let hold = self.macos_after_display_change();
+        let watch = self.spaces_display_watch();
         let carried = self.slide_carried(Instant::now());
         let Some(m) = self.model.as_mut() else { return };
         m.set_hold_arrivals(hold);
+        m.set_display_watch(watch);
         m.set_slide_carried(carried);
         let mut actions = m.arrive(main.id, &live, &absent, &hints);
         m.set_hold_arrivals(false);
@@ -4637,10 +4639,12 @@ impl Controller {
                 self.unplaced.remove(&meta.id.0);
             }
             let hold = self.macos_after_display_change();
+            let watch = self.spaces_display_watch();
             let carried = self.slide_carried(now);
             let Some(m) = self.model.as_mut() else { return predicted };
             let before = m.current_space(d.id);
             m.set_hold_arrivals(hold);
+            m.set_display_watch(watch);
             m.set_slide_carried(carried);
             let mut actions = m.arrive(d.id, &live, &absent, &hints);
             m.set_hold_arrivals(false);
@@ -5152,6 +5156,13 @@ impl Controller {
         self.displays_changed_at.is_some_and(|t| Instant::now().duration_since(t) < DISPLAY_SETTLE)
     }
 
+    /// True while the Spaces engine watches a screen gone
+    /// ([`crate::platform::spaces::engine::SpacesEngine::watching_now`]): the model keeps the
+    /// gone screen's hidden windows in their stages ([`Model::set_display_watch`]).
+    fn spaces_display_watch(&self) -> bool {
+        self.engine.kind() == crate::platform::window_engine::EngineKind::Spaces && crate::platform::spaces::engine::shared().watching_now()
+    }
+
     /// True when an activation or focus heard now is macOS's after a display change: within
     /// [`DISPLAY_SETTLE`] of it with no click or key press since
     /// ([`crate::engine::displays::macos_after_display_change`]).
@@ -5565,7 +5576,8 @@ impl Controller {
         // A screen gone (not one seen again under a new id): under the Spaces engine its hidden
         // windows are kept in their stages, on their own Desktops, before the model's batch
         // hides anything ([`crate::platform::spaces::engine::SpacesEngine::watch_display_change`]).
-        let screen_gone = self.displays.iter().any(|o| !displays.iter().any(|d| d.id == o.id || d.key == o.key));
+        let keys = |ds: &[Display]| ds.iter().map(|d| d.key).collect::<Vec<_>>();
+        let screen_gone = crate::engine::displays::screen_gone(&keys(&self.displays), &keys(&displays));
         self.displays = displays.clone();
         if screen_gone && self.engine.kind() == crate::platform::window_engine::EngineKind::Spaces {
             crate::platform::spaces::engine::shared().watch_display_change("a screen went");

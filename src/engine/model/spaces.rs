@@ -106,9 +106,10 @@ pub struct ArrivalNote {
     /// Windows the platform's own switch had just shown ([`Model::set_slide_carried`]),
     /// listed here while their own Desktop is another: they stay in their stage there.
     pub kept_home: Vec<WindowId>,
-    /// Windows of a hidden stage of a gone screen's Desktop, listed here while arrivals are
-    /// held (macOS's doing as the screen went, [`Model::set_hold_arrivals`]): they stay in
-    /// their stage on their own Desktop and are hidden again (the Spaces engine).
+    /// Windows of a hidden stage of a gone screen's Desktop, listed here while the Spaces
+    /// engine watches the screen gone (macOS's doing as the screen went,
+    /// [`Model::set_display_watch`]): they stay in their stage on their own Desktop and are
+    /// hidden again.
     pub kept_hidden: Vec<WindowId>,
     /// Windows taken for windows on every Desktop at this arrival ([`STICKY_HOPS`]): pinned,
     /// out of their stage.
@@ -589,6 +590,18 @@ impl Model {
         self.hold_arrivals = on;
     }
 
+    /// Whether the Spaces engine watches a screen gone (its display watch, [`crate::engine::spill::WATCH`]):
+    /// while it does, a window of a hidden stage of the gone screen's Desktops listed on
+    /// another Desktop stays in its stage, hidden again ([`ArrivalNote::kept_hidden`]),
+    /// whatever the user clicked or typed since. The watch over, those windows are taken as
+    /// ever and no longer kept ([`Model::handed_hidden`] cleared).
+    pub fn set_display_watch(&mut self, on: bool) {
+        self.display_watch = on;
+        if !on {
+            self.handed_hidden.clear();
+        }
+    }
+
     /// Names, for the next [`Model::arrive`] only, the windows the platform's own switch
     /// showed just before or during this Space change (round stage-lost). macOS may slide to
     /// another Desktop for the switch's activation and back (an app activated while its
@@ -701,7 +714,7 @@ impl Model {
         // A window of a hidden stage of a gone screen's Desktop, listed here while the display
         // change settles with no click or key since: the window server let it out of its stage
         // Space as the screen went (a log, 11-18), not the user's move. It stays in its stage
-        // on its own Desktop, hidden again (`handed_hidden`).
+        // on its own Desktop, hidden again (`handed_hidden`, while the engine watches).
         let kept_hidden = self.kept_hidden(target, &known);
         known.retain(|id| !kept_hidden.contains(id));
         let unkept: Vec<WindowMeta>;
@@ -887,11 +900,12 @@ impl Model {
     }
 
     /// Of `known` (windows listed at an arrival on `target`), those of a hidden stage of a gone
-    /// screen's Desktop (`handed_hidden`) still counted hidden there, while arrivals are held
-    /// (a display change settling, no click or key since) under the Spaces engine. After the
-    /// settle, or once the user acted, a window listed elsewhere is taken as ever.
+    /// screen's Desktop (`handed_hidden`) still counted hidden there, while the Spaces engine
+    /// watches the screen gone ([`Model::set_display_watch`]: a key press before the first
+    /// visit to a moved Desktop does not end it). After the watch, a window listed elsewhere
+    /// is taken as ever.
     fn kept_hidden(&self, target: SpaceId, known: &[WindowId]) -> Vec<WindowId> {
-        if !self.hold_arrivals || self.options.engine != EngineKind::Spaces {
+        if !self.display_watch || self.options.engine != EngineKind::Spaces {
             return Vec::new();
         }
         known

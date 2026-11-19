@@ -75,6 +75,11 @@ impl Controller {
             let m = self.model.as_ref();
             spaces.keep_tick(&|id| m.map(|m| m.shown_with(WindowId(id)).into_iter().map(|w| w.0).collect()).unwrap_or_default());
         }
+        // The watch over, the model no longer keeps the gone screen's hidden windows.
+        let watching = spaces.watching_now();
+        if let Some(m) = self.model.as_mut() {
+            m.set_display_watch(watching);
+        }
         let Some(m) = self.model.as_ref() else {
             self.spaces.strays.clear();
             return;

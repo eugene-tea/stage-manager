@@ -5,7 +5,11 @@
 //! - **A display change** ([`Controller::set_displays`]) starts the settle
 //!   ([`super::DISPLAY_SETTLE`], from when the change was heard): a snapshot waiting is
 //!   dropped, nothing is taken until it settles, and a window the person moves, resizes or
-//!   focuses by a click meanwhile is left alone by the put-back ([`Controller::frames_touched`]).
+//!   focuses by a click from then until the put-back is left alone by it
+//!   ([`Controller::frames_touched`]).
+//! - **Nothing happens** while a full-screen app's Space shows, a Space change settles or the
+//!   screen is locked, nor while a switch, a Desktop change or a drag goes on: the put-back
+//!   due waits for a later tick ([`step`]).
 //! - **Once it settles** the windows go back to their frames for the setup, when it was seen
 //!   before, and their frames are taken for it at once (macOS's, for a setup not seen
 //!   before). Stages are whole by then: the screen gone was adopted at the change, and under
@@ -14,6 +18,7 @@
 //!   ([`crate::engine::setup_frames::QUIET`]), while the screens CoreGraphics lists are the
 //!   model's.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use super::{Controller, DISPLAY_SETTLE};
@@ -35,9 +40,12 @@ impl Controller {
     }
 
     /// The person moved, resized or focused by a click window `id`: left alone by the
-    /// put-back of a change settling now.
-    pub(super) fn frames_touched(&mut self, id: u32, now: Instant) {
-        self.setups.touch(WindowId(id), now, DISPLAY_SETTLE);
+    /// put-back of a change under way.
+    pub(super) fn frames_touched(&mut self, id: u32) {
+        self.setups.touch(WindowId(id));
+        if let Some(m) = self.model.as_mut() {
+            m.setup_frame_placed_by_user(WindowId(id));
+        }
     }
 
     /// The tick's step: the put-back once a change settled, else a snapshot of the frames.
@@ -47,17 +55,18 @@ impl Controller {
             self.setups = Recorder::default();
             return;
         }
-        if self.locked || self.model.is_none() {
+        if self.model.is_none() {
             return;
         }
-        // A switch, a Desktop change or a drag going on: the put-back and the snapshot wait
-        // for the next tick, so no window moves under them.
-        if self.phase.switching().is_some() || self.pending.is_some() || self.phase.changing() || input::left_button_down() {
-            return;
-        }
-        if let Some(touched) = self.setups.settled(now, DISPLAY_SETTLE) {
-            self.frames_settled(ob, &touched);
-            return;
+        let busy = self.phase.switching().is_some() || self.pending.is_some() || input::left_button_down();
+        let frozen = self.frozen();
+        match step(&mut self.setups, now, frozen, busy) {
+            Step::Wait => return,
+            Step::PutBack(touched) => {
+                self.frames_settled(ob, &touched);
+                return;
+            }
+            Step::Snapshot => {}
         }
         let known: Vec<Rect> = self.displays.iter().map(|d| d.frame).collect();
         let mut live = desktop::cg_display_bounds();
@@ -78,7 +87,7 @@ impl Controller {
 
     /// A display change settled: the windows go back to their frames for the setup when it
     /// was seen before (but those in `touched`), and every window's frame is kept for it.
-    fn frames_settled(&mut self, ob: &Observer, touched: &std::collections::HashSet<WindowId>) {
+    fn frames_settled(&mut self, ob: &Observer, touched: &HashSet<WindowId>) {
         let Some(m) = self.model.as_mut() else { return };
         let (actions, settled) = m.setup_settled(touched);
         match settled {
@@ -102,6 +111,33 @@ impl Controller {
     }
 }
 
+/// What the tick's step does now ([`step`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Step {
+    /// Nothing: a later tick.
+    Wait,
+    /// A display change settled: the put-back, but for the windows touched since the change.
+    PutBack(HashSet<WindowId>),
+    /// A snapshot of the frames is offered.
+    Snapshot,
+}
+
+/// The tick's step at `now`. It waits while `frozen` (a full-screen app's Space shows, a
+/// Space change settles, the screen is locked: the windows of the Desktop behind are not
+/// moved, nor their frames taken) or `busy` (a switch, a Desktop change or a drag goes on: no
+/// window moves under them); a put-back due waits with it, and a window touched meanwhile
+/// still counts ([`Recorder::touch`]). Else the put-back once a change settled, or a
+/// snapshot.
+fn step(r: &mut Recorder, now: Instant, frozen: bool, busy: bool) -> Step {
+    if frozen || busy {
+        return Step::Wait;
+    }
+    match r.settled(now, DISPLAY_SETTLE) {
+        Some(touched) => Step::PutBack(touched),
+        None => Step::Snapshot,
+    }
+}
+
 /// True when the screens CoreGraphics lists now (`live`, main first) are the ones the model
 /// has (`known`, main first), in any order past the main one: a change not heard yet holds the
 /// snapshot.
@@ -112,6 +148,33 @@ fn screens_steady(known: &[Rect], live: &[Rect]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_put_back_held_past_the_settle_leaves_a_window_grabbed_meanwhile_alone() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut r = Recorder::default();
+        r.display_changed(t0);
+        assert_eq!(step(&mut r, at(5000), false, false), Step::Snapshot, "settling: the offer drops it");
+        // At 10 s a Desktop change holds the put-back; at 10.1 s a window is grabbed.
+        assert_eq!(step(&mut r, at(10_000), false, true), Step::Wait);
+        r.touch(WindowId(7));
+        assert_eq!(step(&mut r, at(10_100), false, true), Step::Wait, "the drag holds it too");
+        assert_eq!(step(&mut r, at(10_600), false, false), Step::PutBack(HashSet::from([WindowId(7)])), "released: not moved");
+        assert_eq!(step(&mut r, at(10_700), false, false), Step::Snapshot, "once");
+    }
+
+    #[test]
+    fn nothing_is_put_back_while_a_full_screen_apps_space_shows() {
+        let t0 = Instant::now();
+        let mut r = Recorder::default();
+        r.display_changed(t0);
+        let later = t0 + DISPLAY_SETTLE + Duration::from_secs(5);
+        assert_eq!(step(&mut r, later, true, false), Step::Wait, "the Desktop behind is not touched");
+        assert_eq!(step(&mut r, later + Duration::from_secs(30), true, false), Step::Wait);
+        assert_eq!(step(&mut r, later + Duration::from_secs(31), false, false), Step::PutBack(HashSet::new()), "after it, the put-back");
+    }
 
     #[test]
     fn a_screen_listed_but_not_heard_yet_holds_the_snapshot() {

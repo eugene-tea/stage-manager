@@ -178,7 +178,7 @@ fn a_window_the_user_touched_since_the_change_stays_where_it_is() {
     t.wait(Duration::from_secs(2));
     let theirs = on(&studio(), (900.0, 600.0));
     frame(&mut e, 1, theirs);
-    t.r.touch(WindowId(1), t.now, SETTLE);
+    t.r.touch(WindowId(1));
     let Settled::Known(_, note) = t.settle(&mut e) else { panic!("seen before") };
     assert_eq!((note.touched, note.put_back), (1, 2));
     assert_eq!(restore(&e, 1), theirs, "left where the user put it");
@@ -197,11 +197,23 @@ fn a_window_on_another_screen_than_its_frames_is_never_moved_across() {
     t.keep(&mut e);
     // Plugged in again, macOS leaves the editor on the laptop this time.
     t.screens(&mut e, vec![studio(), laptop()]);
+    let both = e.m.setup_key().expect("known");
+    let on_studio = kept(&e, 1, &both);
+    assert!(on_studio.is_some(), "a frame on the Studio kept from before");
     let before = restore(&e, 1);
     let Settled::Known(_, note) = t.settle(&mut e) else { panic!("seen before") };
     assert_eq!(note.elsewhere, 1, "{note:?}");
     assert_eq!(e.m.window(WindowId(1)).map(|w| w.meta.display), Some(LAPTOP), "still on the laptop");
     assert_eq!(restore(&e, 1), before, "never moved to the Studio for its frame there");
+    // Its frame on the Studio stays kept while macOS leaves it on the laptop, past the settle
+    // and the snapshots after it.
+    assert_eq!(kept(&e, 1, &both), on_studio, "kept at the settle");
+    t.keep(&mut e);
+    assert_eq!(kept(&e, 1, &both), on_studio, "kept by the snapshots after it");
+    // The person moves it on the laptop: where it is now is theirs for the setup.
+    e.m.setup_frame_placed_by_user(WindowId(1));
+    t.keep(&mut e);
+    assert_ne!(kept(&e, 1, &both), on_studio, "the laptop frame kept once the person placed it");
 }
 }
 

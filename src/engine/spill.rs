@@ -27,14 +27,14 @@
 //! onto the Desktop moved in, its stage Spaces stay where they were, on a Desktop no longer
 //! listed, and a hidden window there counted gone left its stage, came out as the stage Space
 //! was swept, and joined another stage of its app. So a stage Space whose Desktop ended
-//! ([`Map::ended`]: unlisted at two looks in a row) is made again too, for the Desktop that
+//! ([`Map::ended`]: unlisted for [`ENDED_AFTER`] while the display list holds still) is made again too, for the Desktop that
 //! Desktop's shown windows are on now ([`Map::landed`]), else the one a window of it was let
 //! out onto, else the one its screen shows, else the main screen's: its stages join there
 //! whole, hidden, as the model takes the Desktop's stages ([`crate::engine::model::Model`]'s
 //! adoption of a gone screen's Desktop).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How long after a screen went (or after the unlock, when it went while the screen was
 /// locked) hidden windows are kept on their own Desktops ([`plan`], [`hide_home`]): the
@@ -82,8 +82,9 @@ pub struct Map {
     pub shown: Vec<u64>,
     /// Each screen there now, with the Desktop it shows.
     pub screen_shown: BTreeMap<String, u64>,
-    /// Desktops that ended (a stage's Desktop not listed at two looks in a row): their stage
-    /// Spaces are made again on another Desktop, on any screen.
+    /// Desktops that ended (a stage's Desktop unlisted for [`ENDED_AFTER`],
+    /// [`ended_desktops`]): their stage Spaces are made again on another Desktop, on any
+    /// screen.
     pub ended: BTreeSet<u64>,
     /// An ended Desktop, with the Desktop its shown windows are on now (by the model's word
     /// of which windows showed there): where its stages join.
@@ -179,18 +180,55 @@ pub fn plan(held: &[HeldNow], map: &Map) -> Plan {
     out
 }
 
+/// The windows the window server lists in a stage Space being made again (`listed`, its
+/// [`Remake::old`]) that go along into the new one: those nothing holds (`held`: every
+/// window held, a candidate or not), a held window's companions (an attached panel). A held
+/// window left out of the remake (lent, waiting as new, flying, a show owed) is where it is
+/// on purpose and stays.
+pub fn followers(listed: &[u32], held: &BTreeSet<u32>) -> Vec<u32> {
+    listed.iter().copied().filter(|id| !held.contains(id)).collect()
+}
+
+/// True when a stage Space made again ([`Remake::old`]) may end: the window server lists no
+/// window in it after the moves (`listed`), and no held window names it (`held`: each held
+/// window's stage Space, a candidate or not), so a lent window's return never names a Space
+/// gone. Else it is kept as retired until it empties.
+pub fn old_ends(old: u64, listed: &[u32], held: impl IntoIterator<Item = u64>) -> bool {
+    listed.is_empty() && !held.into_iter().any(|s| s == old)
+}
+
+/// How long a Desktop a stage is kept for stays unlisted, with the display list unchanged,
+/// before it counts as ended ([`ended_desktops`]): a window server slow to list a gone
+/// screen's Desktops on the screen left would otherwise have their stages joined onto the
+/// Desktop shown, and nothing moves them back.
+pub const ENDED_AFTER: Duration = Duration::from_millis(2500);
+
+/// What the looks while watching have seen of unlisted Desktops ([`ended_desktops`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Unlisted {
+    /// Each Desktop a stage is kept for that is unlisted, with since when (with the display
+    /// list as it is now).
+    since: BTreeMap<u64, Instant>,
+    /// The display list at the last look: each screen with its Desktops.
+    displays: Vec<(String, Vec<u64>)>,
+}
+
 /// The Desktops ended at this look: those of `homes` (Desktops a stage is kept for) not
-/// listed now (`desktops`) that were not listed at the look before either (`unlisted_before`):
-/// one look mid-change may list a screen's Desktops only in part. With the Desktops of
-/// `homes` unlisted now, for the next look.
-pub fn ended_desktops(
-    homes: impl IntoIterator<Item = u64>,
-    desktops: &BTreeSet<u64>,
-    unlisted_before: &BTreeSet<u64>,
-) -> (BTreeSet<u64>, BTreeSet<u64>) {
-    let unlisted: BTreeSet<u64> = homes.into_iter().filter(|d| !desktops.contains(d)).collect();
-    let ended = unlisted.intersection(unlisted_before).copied().collect();
-    (ended, unlisted)
+/// listed now that have been unlisted for [`ENDED_AFTER`] at least while the display list
+/// (`displays`: each screen with its Desktops, as the window server lists them now) stayed
+/// as it is: one look mid-change may list a screen's Desktops only in part, and a window
+/// server slow to list them may do so for a while. A display list changed since the look
+/// before starts every wait again. With what this look saw, for the next.
+pub fn ended_desktops(homes: impl IntoIterator<Item = u64>, displays: &[(String, Vec<u64>)], before: &Unlisted, now: Instant) -> (BTreeSet<u64>, Unlisted) {
+    let listed: BTreeSet<u64> = displays.iter().flat_map(|(_, d)| d.iter().copied()).collect();
+    let same = before.displays == displays;
+    let since: BTreeMap<u64, Instant> = homes
+        .into_iter()
+        .filter(|d| !listed.contains(d))
+        .map(|d| (d, before.since.get(&d).copied().filter(|_| same).unwrap_or(now)))
+        .collect();
+    let ended = since.iter().filter(|(_, t)| now.saturating_duration_since(**t) >= ENDED_AFTER).map(|(d, _)| *d).collect();
+    (ended, Unlisted { since, displays: displays.to_vec() })
 }
 
 /// The Desktop an ended Desktop's shown windows are on now: of `peers` (each one's Spaces
@@ -387,19 +425,46 @@ mod tests {
     }
 
     #[test]
-    fn a_desktop_unlisted_at_one_look_only_is_not_ended() {
+    fn a_desktop_unlisted_but_not_ended_yet_is_left_as_it_is() {
         let mut map = main_gone();
         map.ended.clear();
-        assert!(plan(&[held(16, 1142, 1135, &[1142])], &map).is_empty(), "one look: left as it is");
-        let desktops: BTreeSet<u64> = [1].into();
-        let (ended, unlisted) = ended_desktops([1, 1135], &desktops, &BTreeSet::new());
+        assert!(plan(&[held(16, 1142, 1135, &[1142])], &map).is_empty());
+    }
+
+    #[test]
+    fn a_desktop_ends_only_after_a_while_unlisted_with_the_display_list_still() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let one: Vec<(String, Vec<u64>)> = vec![(LAPTOP.into(), vec![1])];
+        let (ended, u) = ended_desktops([1, 1135], &one, &Unlisted::default(), at(0));
+        assert!(ended.is_empty(), "the look inside the display change");
+        let (ended, u) = ended_desktops([1, 1135], &one, &u, at(500));
+        assert!(ended.is_empty(), "two looks 500 ms apart are not enough");
+        let (ended, u2) = ended_desktops([1, 1135], &one, &u, at(2000));
         assert!(ended.is_empty());
-        assert_eq!(unlisted, [1135].into());
-        let (ended, _) = ended_desktops([1, 1135], &desktops, &unlisted);
-        assert_eq!(ended, [1135].into(), "two looks in a row");
-        // Listed again in between: not ended.
-        let (ended, unlisted) = ended_desktops([1, 1135], &[1, 1135].into(), &unlisted);
-        assert!(ended.is_empty() && unlisted.is_empty());
+        let (ended, _) = ended_desktops([1, 1135], &one, &u2, at(2500));
+        assert_eq!(ended, [1135].into(), "unlisted for the whole wait");
+        // Listed again in between: the wait starts over.
+        let both: Vec<(String, Vec<u64>)> = vec![(LAPTOP.into(), vec![1, 1135])];
+        let (ended, u) = ended_desktops([1, 1135], &both, &u2, at(2200));
+        assert!(ended.is_empty());
+        let (ended, _) = ended_desktops([1, 1135], &one, &u, at(4000));
+        assert!(ended.is_empty(), "unlisted again only since 4 s");
+    }
+
+    #[test]
+    fn a_display_list_still_changing_holds_an_ended_desktop_back() {
+        // A slow window server: the gone screen's Desktops come onto the screen left one at
+        // a time. Desktop 4 is unlisted at first, then listed: never ended.
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let first: Vec<(String, Vec<u64>)> = vec![(LAPTOP.into(), vec![471])];
+        let second: Vec<(String, Vec<u64>)> = vec![(LAPTOP.into(), vec![471, 1])];
+        let (_, u) = ended_desktops([4, 1135], &first, &Unlisted::default(), at(0));
+        let (ended, u) = ended_desktops([4, 1135], &second, &u, at(3000));
+        assert!(ended.is_empty(), "the display list changed: every wait starts over");
+        let (ended, _) = ended_desktops([4, 1135], &second, &u, at(5500));
+        assert_eq!(ended, [4, 1135].into(), "still unlisted, the list unchanged for the wait");
     }
 
     #[test]

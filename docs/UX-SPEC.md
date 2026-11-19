@@ -335,7 +335,9 @@ showing most of it (macOS's rule).
   windows on another of the remaining screen's Desktops, one not shown since the launch, and
   slide to it: the same rule holds there, that Desktop's own front a card, also when macOS
   announces the Desktop still shown before it slides; the Desktop left shows its own most
-  recent stage again when it comes back, never nothing in front.
+  recent stage again when it comes back, never nothing in front. Under `engine = "spaces"`
+  a Desktop counts as ended once macOS has left it unlisted for 2.5 s with the screens and
+  their Desktops unchanged; its hidden stages then join, whole, where its windows went.
 - **macOS's activations at a display change.** The app macOS activates after the change
   (Mail, 0.4 s after the screen goes) switches nothing: with no click or key press since, an
   activation or focus in the 10 s after a display change (counted from macOS's notice) is
@@ -380,13 +382,16 @@ showing most of it (macOS's rule).
   `state.json` with its entry. Once a display change settles (10 s from macOS's notice) into a
   setup seen before, each window goes back to its frame there, on the same screen: a shown one
   moved (fitted and brought within reach as any restore), a hidden one given it as its restore
-  frame. A window moved, resized or focused by a click since the change stays, and so does one
+  frame. The put-back waits while a full-screen app's Space shows or a switch or a drag goes
+  on. A window moved, resized or focused by a click since the change stays, and so does one
   on another screen than its frame's or on a Desktop not shown: nothing moves a window between
-  screens, Desktops or stages for a frame. Stages are whole first (the screen gone adopted,
+  screens, Desktops or stages for a frame. One left on another screen keeps its frame for that
+  setup until it is on that screen again or is moved, resized or clicked there. Stages are whole first (the screen gone adopted,
   the Spaces engine's hidden windows kept in their stages), frames after. A setup not seen
   before keeps macOS's placement and is remembered from the settle. Nothing is taken within a
   settle, nor from a snapshot younger than 3 s when the change is heard (macOS squeezes the
-  windows as a screen goes).
+  windows as a screen goes). A window that leaves its Desktop (full screen, another Desktop)
+  leaves the model, its frames with it: back, it keeps frames afresh.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
 is back on the same Desktop when they end. Mission Control and App Exposé show every
