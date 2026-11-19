@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Live check: a screen going away under the Spaces engine keeps every stage's windows.
+"""Live check: a screen going away keeps every stage's windows.
 
 Run it as `SM_ENGINE=spaces scripts/test-stages.sh display-gone [main|secondary] [--rounds N]`
-(default: both kinds, 3 rounds each). Nobody needs to be at the Mac, but nobody may use it
+(default: both kinds, 3 rounds each), or without `SM_ENGINE` for the Accessibility (Corner)
+engine. Nobody needs to be at the Mac, but nobody may use it
 either: the run adds a virtual screen (scripts/virtual-display, a CoreGraphics virtual display)
 and takes it away again, as an unplug would.
 
@@ -17,13 +18,18 @@ one):
 
 - no stage gains or loses a window (the app's model, by stage id);
 - the window server shows no fixture window of a hidden stage, on any Desktop: only windows
-  of the front stage of the Desktop shown are on screen;
-- the log says `display: a gone screen's hidden windows kept in their stages` with `lost=0`,
-  and never "windows of another Space are on screen" naming a window of a hidden stage.
+  of the front stage of the Desktop shown are on screen (under the Corner engine, a hidden
+  one is on screen only in a park zone);
+- the log says `display: a gone screen's hidden windows kept in their stages` with `lost=0`
+  (the Spaces engine), and never "windows of another Space are on screen" naming a window of a
+  hidden stage.
+
+The main screen gone, macOS ends the Desktop it made on the built-in screen when the virtual
+one took the main role: that Desktop's hidden stage (Charlie 2) is kept whole too.
 
 The virtual screen is removed and the screens put back where they were whatever happens (the
 tool does it on SIGTERM too); the app is quit and the fixtures closed after each round. It
-refuses to start while another Stage Manager runs or under the Corner engine.
+refuses to start while another Stage Manager runs.
 """
 
 import json
@@ -60,16 +66,26 @@ class Screen:
 
     def __init__(self, main):
         # Made main, it takes the main screen's Desktops and their windows (macOS moves them):
-        # at the main screen's size none of them is resized on the way.
+        # at the main screen's size none of them is resized on the way. A placement the
+        # system refused (the tool ends at once, 11-18) is tried again once, a moment later.
         size = ["--size", "main", "--main"] if main else ["--size", "1920x1080"]
-        self.proc = subprocess.Popen([tool(), *size, "--pid-file", PID_FILE],
-                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        line = self.proc.stdout.readline()
-        try:
-            self.info = json.loads(line)
-        except json.JSONDecodeError:
+        for attempt in (1, 2):
+            self.proc = subprocess.Popen([tool(), *size, "--pid-file", PID_FILE],
+                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            line = self.proc.stdout.readline()
+            try:
+                self.info = json.loads(line)
+            except json.JSONDecodeError:
+                self.stop()
+                raise SystemExit(f"virtual-display: {line}{self.proc.stderr.read()}") from None
+            if self.info.get("ready") or attempt == 2:
+                break
+            say(f"    virtual screen not placed ({self.info}); trying again")
             self.stop()
-            raise SystemExit(f"virtual-display: {line}{self.proc.stderr.read()}") from None
+            time.sleep(5)
+        if not self.info.get("ready"):
+            self.stop()
+            raise SystemExit(f"virtual-display: not placed: {self.info}")
 
     def stop(self):
         if self.proc.poll() is None:
@@ -105,6 +121,15 @@ def shown_fixture_windows():
     return [w for w in json.loads(r.stdout)["windows"] if w["layer"] == 0]
 
 
+def parked_anywhere(bounds, s):
+    """True when `bounds` sit in the park zone of a screen there now (the Corner engine)."""
+    for d in s.get("displays", []):
+        f = d.get("frame")
+        if f and ts.is_parked(bounds, dict(f, corner=d.get("corner"), visible=d.get("visible"))):
+            return True
+    return False
+
+
 def look(before, what, out):
     """One look: the model's stages against `before`, the window server's shown windows
     against the front stages. Appends problems to `out` (deduplicated by the caller)."""
@@ -119,7 +144,7 @@ def look(before, what, out):
     fronts = front_stage_ids(s)
     stage_of = {w["id"]: w.get("stage") for w in s["windows"]}
     for w in shown_fixture_windows():
-        if not w["onscreen"]:
+        if not w["onscreen"] or (not ts.SPACES and parked_anywhere(w["bounds"], s)):
             continue
         sid = stage_of.get(w["id"])
         if sid not in fronts:
@@ -232,7 +257,7 @@ def one_round(kind, n):
         s = ts.state()
         say(f"    displays: {[(d['id'], d['frame'], d['space'], d['active_stage']) for d in s['displays']]}")
         say(f"    stages: {stages_by_id(s)}; front: {front_stage_ids(s)}")
-        say(f"    engine spaces: {s['engine'].get('spaces')}")
+        say(f"    engine spaces: {s.get('engine', {}).get('spaces')}")
         before = {"stages": stages_by_id(s)}
         hidden = [sid for sid in before["stages"] if sid not in front_stage_ids(s)]
         check(len(before["stages"]) == 6 and len(hidden) == 4, f"{kind} {n}: six stages, four hidden ({before['stages']})")
@@ -261,8 +286,9 @@ def one_round(kind, n):
         lost = [ln for ln in kept if not re.search(r"\blost=0\b", ln)]
         for ln in kept:
             say(f"    log: {ln[:300]}")
-        check(bool(kept) and not lost, f"{kind} {n}: the log keeps the hidden windows (lost=0)"
-              + ("" if kept else ": no such line") + (f": {lost[:2]}" if lost else ""))
+        if ts.SPACES:
+            check(bool(kept) and not lost, f"{kind} {n}: the log keeps the hidden windows (lost=0)"
+                  + ("" if kept else ": no such line") + (f": {lost[:2]}" if lost else ""))
         s = ts.state()
         title = names(s)
         hidden_ids = {w["id"] for w in s["windows"] if w.get("stage") in set(hidden)}
@@ -289,13 +315,10 @@ def one_round(kind, n):
 
 
 def main():
-    if not ts.SPACES:
-        say("display-gone runs under the Spaces engine only: SM_ENGINE=spaces")
-        sys.exit(2)
     if ts.owner_app_running():
         say("STOP: another Stage Manager is running (the owner's?). Quit it first.")
         sys.exit(2)
-    say(f"display-gone: {KINDS} x {ROUNDS}, test home {ts.HOME}")
+    say(f"display-gone: {KINDS} x {ROUNDS}, engine {ts.ENGINE}, test home {ts.HOME}")
     try:
         for kind in KINDS:
             for n in range(1, ROUNDS + 1):

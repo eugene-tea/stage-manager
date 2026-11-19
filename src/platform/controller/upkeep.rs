@@ -124,6 +124,8 @@ impl Controller {
                     Some("hidden windows out of their Space")
                 } else if !crate::platform::spaces::engine::shared().owed().is_empty() {
                     Some("shows owed")
+                } else if crate::platform::spaces::engine::shared().watching_now() {
+                    Some("a screen gone: hidden windows kept in their stages")
                 } else {
                     None
                 }

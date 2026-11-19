@@ -20,6 +20,18 @@
 //! one is not trusted to hold its windows any more) and its windows moved in, hidden; the old
 //! one ends once empty. A window whose Desktop is gone too is kept hidden in a stage Space of
 //! the Desktop it shows on (else the one shown): its stage still stands, on that Desktop.
+//!
+//! **A Desktop that ends on a screen still there.** The main screen gone, macOS moves its
+//! Desktops onto the screen left and ends the Desktop it had made there when the other screen
+//! took the main role (a live run on a virtual screen, 11-18): that Desktop's shown windows go
+//! onto the Desktop moved in, its stage Spaces stay where they were, on a Desktop no longer
+//! listed, and a hidden window there counted gone left its stage, came out as the stage Space
+//! was swept, and joined another stage of its app. So a stage Space whose Desktop ended
+//! ([`Map::ended`]: unlisted at two looks in a row) is made again too, for the Desktop that
+//! Desktop's shown windows are on now ([`Map::landed`]), else the one a window of it was let
+//! out onto, else the one its screen shows, else the main screen's: its stages join there
+//! whole, hidden, as the model takes the Desktop's stages ([`crate::engine::model::Model`]'s
+//! adoption of a gone screen's Desktop).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -68,6 +80,14 @@ pub struct Map {
     pub desktops: BTreeSet<u64>,
     /// The Desktops shown now, the main screen's first.
     pub shown: Vec<u64>,
+    /// Each screen there now, with the Desktop it shows.
+    pub screen_shown: BTreeMap<String, u64>,
+    /// Desktops that ended (a stage's Desktop not listed at two looks in a row): their stage
+    /// Spaces are made again on another Desktop, on any screen.
+    pub ended: BTreeSet<u64>,
+    /// An ended Desktop, with the Desktop its shown windows are on now (by the model's word
+    /// of which windows showed there): where its stages join.
+    pub landed: BTreeMap<u64, u64>,
 }
 
 impl Map {
@@ -130,21 +150,64 @@ pub fn plan(held: &[HeldNow], map: &Map) -> Plan {
     let mut out = Plan::default();
     for (space, members) in by_space {
         let spilled: Vec<u32> = members.iter().filter(|h| h.spilled()).map(|h| h.id).collect();
-        if spilled.is_empty() && !map.screen_gone(space) {
+        let key = key_of.get(&space).copied();
+        let ended = key.is_some_and(|(from, _)| map.ended.contains(&from));
+        if spilled.is_empty() && !map.screen_gone(space) && !ended {
             continue;
         }
-        let Some(&(from, stage)) = key_of.get(&space) else {
+        let Some((from, stage)) = key else {
             out.unkeyed.extend(spilled);
             continue;
         };
         let surfaced = members.iter().find(|h| h.spilled()).and_then(|h| desktop_of(&h.now, &map.desktops, &map.shown));
-        let Some(to) = Some(from).filter(|d| map.desktops.contains(d)).or(surfaced).or(map.shown.first().copied()) else {
+        let exists = |d: &u64| map.desktops.contains(d);
+        // Its own Desktop while it exists; else where that Desktop's shown windows went, where
+        // a window of it surfaced, what its screen shows, the main screen's.
+        let screen_shows = map.screens.get(&space).and_then(|s| map.screen_shown.get(s)).copied();
+        let to = Some(from)
+            .filter(exists)
+            .or(map.landed.get(&from).copied().filter(exists))
+            .or(surfaced)
+            .or(screen_shows)
+            .or(map.shown.first().copied());
+        let Some(to) = to else {
             out.unkeyed.extend(spilled);
             continue;
         };
         out.remakes.push(Remake { old: space, stage, from, to, windows: members.iter().map(|h| h.id).collect(), spilled });
     }
     out
+}
+
+/// The Desktops ended at this look: those of `homes` (Desktops a stage is kept for) not
+/// listed now (`desktops`) that were not listed at the look before either (`unlisted_before`):
+/// one look mid-change may list a screen's Desktops only in part. With the Desktops of
+/// `homes` unlisted now, for the next look.
+pub fn ended_desktops(
+    homes: impl IntoIterator<Item = u64>,
+    desktops: &BTreeSet<u64>,
+    unlisted_before: &BTreeSet<u64>,
+) -> (BTreeSet<u64>, BTreeSet<u64>) {
+    let unlisted: BTreeSet<u64> = homes.into_iter().filter(|d| !desktops.contains(d)).collect();
+    let ended = unlisted.intersection(unlisted_before).copied().collect();
+    (ended, unlisted)
+}
+
+/// The Desktop an ended Desktop's shown windows are on now: of `peers` (each one's Spaces
+/// now, the windows the model shows there), the Desktop most are on (a tie: one shown, then
+/// the one first met). None when none is on a Desktop.
+pub fn landed_on(peers: &[Vec<u64>], desktops: &BTreeSet<u64>, shown: &[u64]) -> Option<u64> {
+    let mut count: Vec<(u64, usize)> = Vec::new();
+    for now in peers {
+        let Some(d) = desktop_of(now, desktops, shown) else { continue };
+        match count.iter_mut().find(|(c, _)| *c == d) {
+            Some((_, n)) => *n += 1,
+            None => count.push((d, 1)),
+        }
+    }
+    let best = count.iter().map(|(_, n)| *n).max()?;
+    let tied: Vec<u64> = count.iter().filter(|(_, n)| *n == best).map(|(d, _)| *d).collect();
+    tied.iter().copied().find(|d| shown.contains(d)).or(tied.first().copied())
 }
 
 /// The Desktop among `now` (a window's Spaces): one shown first, else any Desktop.
@@ -201,6 +264,7 @@ mod tests {
             screens_now: [LAPTOP.to_string()].into(),
             desktops: [471, 1, 4].into(),
             shown: vec![4],
+            ..Map::default()
         }
     }
 
@@ -267,6 +331,84 @@ mod tests {
     fn a_window_let_out_of_a_space_with_no_key_is_left_to_the_model() {
         let p = plan(&[held(5, 777, 4, &[4])], &unplugged());
         assert_eq!((p.remakes.len(), p.unkeyed.clone()), (0, vec![5]));
+    }
+
+    /// The 11-18 live shape: a virtual screen (main) had Desktop 1, shown, its stages 3-5
+    /// hidden in Spaces 1139-1141; the built-in screen had Desktop 1135 (made when the virtual
+    /// screen took the main role), shown, its stage 6 hidden in 1142. The virtual screen goes:
+    /// macOS moves Desktop 1 to the built-in screen, shows it, and ends Desktop 1135.
+    fn main_gone() -> Map {
+        Map {
+            stages: [((1, 3), 1139), ((1, 4), 1140), ((1, 5), 1141), ((1135, 6), 1142)].into(),
+            screens: [(1139, GONE.into()), (1140, GONE.into()), (1141, GONE.into()), (1142, LAPTOP.into())].into(),
+            screens_now: [LAPTOP.to_string()].into(),
+            desktops: [1].into(),
+            shown: vec![1],
+            screen_shown: [(LAPTOP.to_string(), 1)].into(),
+            ended: [1135].into(),
+            landed: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn an_ended_desktops_stage_space_on_the_screen_left_is_made_again_where_its_windows_went() {
+        // Charlie 2 (16) still hidden in 1142, on no Desktop listed: its Space is made again
+        // for Desktop 1, where the built-in screen's shown windows went.
+        let list = [held(11, 1139, 1, &[1139]), held(16, 1142, 1135, &[1142])];
+        let mut map = main_gone();
+        map.landed = [(1135, 1)].into();
+        let p = plan(&list, &map);
+        let by_old: BTreeMap<u64, &Remake> = p.remakes.iter().map(|r| (r.old, r)).collect();
+        let r = by_old[&1142];
+        assert_eq!((r.stage, r.from, r.to, r.windows.clone()), (6, 1135, 1, vec![16]));
+        assert!(r.rehomed() && r.spilled.is_empty());
+        assert_eq!(by_old[&1139].to, 1, "the gone screen's own, on their own Desktop");
+        // Nothing told of its shown windows: the Desktop its screen shows.
+        let p = plan(&[held(16, 1142, 1135, &[1142])], &main_gone());
+        assert_eq!(p.remakes[0].to, 1);
+    }
+
+    #[test]
+    fn an_ended_desktop_joins_where_its_shown_windows_went_before_its_screens_desktop() {
+        // Two screens left: the ended Desktop's shown windows went onto Desktop 7 of the
+        // other screen; the Desktop its own screen shows (1) is not where its stages go.
+        let mut map = main_gone();
+        map.desktops = [1, 7].into();
+        map.shown = vec![7, 1];
+        map.screens_now.insert("other".into());
+        map.screen_shown.insert("other".into(), 7);
+        map.landed = [(1135, 7)].into();
+        let p = plan(&[held(16, 1142, 1135, &[1142])], &map);
+        assert_eq!(p.remakes[0].to, 7);
+        // Landed on a Desktop gone already: not taken.
+        map.landed = [(1135, 99)].into();
+        let p = plan(&[held(16, 1142, 1135, &[1142])], &map);
+        assert_eq!(p.remakes[0].to, 1, "the Desktop its screen shows");
+    }
+
+    #[test]
+    fn a_desktop_unlisted_at_one_look_only_is_not_ended() {
+        let mut map = main_gone();
+        map.ended.clear();
+        assert!(plan(&[held(16, 1142, 1135, &[1142])], &map).is_empty(), "one look: left as it is");
+        let desktops: BTreeSet<u64> = [1].into();
+        let (ended, unlisted) = ended_desktops([1, 1135], &desktops, &BTreeSet::new());
+        assert!(ended.is_empty());
+        assert_eq!(unlisted, [1135].into());
+        let (ended, _) = ended_desktops([1, 1135], &desktops, &unlisted);
+        assert_eq!(ended, [1135].into(), "two looks in a row");
+        // Listed again in between: not ended.
+        let (ended, unlisted) = ended_desktops([1, 1135], &[1, 1135].into(), &unlisted);
+        assert!(ended.is_empty() && unlisted.is_empty());
+    }
+
+    #[test]
+    fn an_ended_desktops_windows_land_where_most_of_them_are() {
+        let desktops: BTreeSet<u64> = [1, 7].into();
+        assert_eq!(landed_on(&[vec![7], vec![1], vec![1]], &desktops, &[7, 1]), Some(1));
+        assert_eq!(landed_on(&[vec![7], vec![1]], &desktops, &[1]), Some(1), "a tie: the one shown");
+        assert_eq!(landed_on(&[vec![1135], vec![]], &desktops, &[1]), None, "on no Desktop listed");
+        assert_eq!(landed_on(&[], &desktops, &[1]), None);
     }
 
     #[test]

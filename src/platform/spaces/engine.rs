@@ -263,6 +263,10 @@ struct State {
     /// Stage Spaces made again that still hold a window that would not move out, with their
     /// Desktop: still this engine's (swept, let out at a quit), ended once empty.
     retired: BTreeMap<u64, u64>,
+    /// While a screen gone is watched: the Desktops held windows were hidden from that the
+    /// last look found unlisted (a Desktop unlisted at two looks in a row ended,
+    /// [`spill::ended_desktops`]).
+    unlisted: BTreeSet<u64>,
 }
 
 impl State {
@@ -1314,9 +1318,10 @@ impl SpacesEngine {
             let mut st = self.state();
             st.watch = Some(now + spill::WATCH);
             st.kept_at = Some(now);
+            st.unlisted.clear();
         }
         tracing::info!(why, watch_s = spill::WATCH.as_secs(), held = self.state().held.len(), "display: a screen went; hidden windows are kept on their own Desktops for a while");
-        self.keep_through_display_change(why);
+        self.keep_through_display_change(why, &|_| Vec::new());
     }
 
     /// True while a screen gone is watched ([`Self::watch_display_change`]).
@@ -1324,9 +1329,17 @@ impl SpacesEngine {
         self.state().watch.is_some_and(|until| now < until)
     }
 
+    /// True while a screen gone is watched: the tick stays brisk for its looks
+    /// ([`Self::keep_tick`]).
+    pub fn watching_now(&self) -> bool {
+        self.watching(Instant::now())
+    }
+
     /// The tick's look while a screen gone is watched, at most every [`spill::KEEP_EVERY`]
-    /// ([`Self::keep_through_display_change`]); nothing otherwise.
-    pub fn keep_tick(&self) {
+    /// ([`Self::keep_through_display_change`]); nothing otherwise. `peers`: the windows the
+    /// model shows on the Desktop of a hidden window (its Space's, not hidden), asked only for
+    /// a Desktop that ended.
+    pub fn keep_tick(&self, peers: &dyn Fn(u32) -> Vec<u32>) {
         let now = Instant::now();
         {
             let mut st = self.state();
@@ -1335,6 +1348,7 @@ impl SpacesEngine {
                     // Over: a window let go meanwhile is hidden from where it shows again.
                     let held: BTreeSet<u32> = st.held.keys().copied().collect();
                     st.homes.retain(|id, _| held.contains(id));
+                    st.unlisted.clear();
                 }
                 return;
             }
@@ -1343,16 +1357,18 @@ impl SpacesEngine {
             }
             st.kept_at = Some(now);
         }
-        self.keep_through_display_change("the tick");
+        self.keep_through_display_change("the tick", peers);
     }
 
     /// While a screen gone is watched: every window held (not lent, not waiting as new, not
     /// flying its last stretch, no show owed) is read, and each stage Space of a screen gone,
-    /// or that a window came out of, is made again and its windows moved in, hidden, on their
-    /// own Desktop while it exists ([`spill::plan`]); the old Space ends once empty. A window
-    /// that would not go back is no longer held: the tick hides it again by the model's word
-    /// once its Desktop shows, at the Desktop it was hidden from ([`spill::hide_home`]).
-    pub fn keep_through_display_change(&self, why: &str) {
+    /// of a Desktop that ended (on any screen), or that a window came out of, is made again
+    /// and its windows moved in, hidden, on their own Desktop while it exists, else where the
+    /// ended Desktop's shown windows went (`peers`, [`spill::landed_on`]) ([`spill::plan`]);
+    /// the old Space ends once empty. A window that would not go back is no longer held: the
+    /// tick hides it again by the model's word once its Desktop shows, at the Desktop it was
+    /// hidden from ([`spill::hide_home`]).
+    pub fn keep_through_display_change(&self, why: &str, peers: &dyn Fn(u32) -> Vec<u32>) {
         if !self.watching(Instant::now()) || self.blocked() {
             return;
         }
@@ -1379,6 +1395,32 @@ impl SpacesEngine {
         map.screens_now = displays.iter().map(|(uuid, _, _)| uuid.clone()).filter(|u| !u.is_empty()).collect();
         map.desktops = displays.iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
         map.shown = displays.iter().map(|(_, current, _)| *current).filter(|c| *c != 0).collect();
+        map.screen_shown = displays.iter().filter(|(uuid, current, _)| !uuid.is_empty() && *current != 0).map(|(uuid, current, _)| (uuid.clone(), *current)).collect();
+        // A Desktop held windows were hidden from that is unlisted at two looks in a row ended
+        // (its screen still there or not); its stages join where its shown windows went.
+        {
+            let mut st = self.state();
+            let homes: BTreeSet<u64> = candidates.iter().map(|(_, h)| h.home).collect();
+            let (ended, unlisted) = spill::ended_desktops(homes, &map.desktops, &st.unlisted);
+            st.unlisted = unlisted;
+            map.ended = ended;
+        }
+        for d in map.ended.clone() {
+            let shown_there: Vec<Vec<u64>> = candidates
+                .iter()
+                .filter(|(_, h)| h.home == d)
+                .flat_map(|(id, _)| peers(*id))
+                .collect::<BTreeSet<u32>>()
+                .into_iter()
+                .map(|p| sky.spaces_of(&[p]))
+                .collect();
+            if let Some(to) = spill::landed_on(&shown_there, &map.desktops, &map.shown) {
+                map.landed.insert(d, to);
+            }
+        }
+        if !map.ended.is_empty() {
+            tracing::debug!(why, ended = ?map.ended, landed = ?map.landed, "display: Desktops of hidden stages ended");
+        }
         let held: Vec<spill::HeldNow> = candidates.iter().map(|(id, h)| spill::HeldNow { id: *id, space: h.space, home: h.home, now: sky.spaces_of(&[*id]) }).collect();
         let plan = spill::plan(&held, &map);
         if plan.is_empty() {
@@ -1504,8 +1546,11 @@ impl SpacesEngine {
             return HashSet::new();
         }
         let Some(sky) = self.sky() else { return HashSet::new() };
-        let (_, shown) = Self::desktops(sky);
-        held.into_iter().filter(|(id, h)| shown.contains(&h.home) && sky.spaces_of(&[*id]).contains(&h.space)).map(|(id, _)| id).collect()
+        let (desktops, shown) = Self::desktops(sky);
+        // While a screen gone is watched, one whose Desktop ended is not gone: its stage
+        // Space is made again where that Desktop's windows went ([`spill`]).
+        let ended = |home: u64| !desktops.is_empty() && !desktops.contains(&home) && self.watching(Instant::now());
+        held.into_iter().filter(|(id, h)| (shown.contains(&h.home) || ended(h.home)) && sky.spaces_of(&[*id]).contains(&h.space)).map(|(id, _)| id).collect()
     }
 
     /// Lets out every window the window server lists in one of this engine's Spaces that

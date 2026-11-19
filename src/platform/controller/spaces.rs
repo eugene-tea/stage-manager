@@ -69,8 +69,12 @@ impl Controller {
         let now = Instant::now();
         let spaces = engine::shared();
         // A screen gone: windows the window server let out of their stage Spaces go back in,
-        // on their own Desktops, whatever else holds the tick back (a slide there comes later).
-        spaces.keep_tick();
+        // on their own Desktops, whatever else holds the tick back (a slide there comes later);
+        // a Desktop that ended joins its stages where the model's windows of it show.
+        {
+            let m = self.model.as_ref();
+            spaces.keep_tick(&|id| m.map(|m| m.shown_with(WindowId(id)).into_iter().map(|w| w.0).collect()).unwrap_or_default());
+        }
         let Some(m) = self.model.as_ref() else {
             self.spaces.strays.clear();
             return;

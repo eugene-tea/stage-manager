@@ -165,6 +165,21 @@ impl Model {
         self.windows.get(&id).map(|w| w.space)
     }
 
+    /// The windows shown on the Desktop of window `id` (its Space's standard windows not
+    /// hidden, not pinned, not on every Desktop), in id order: where a Desktop's windows went
+    /// once macOS ended it ([`crate::engine::spill::landed_on`]). None for a window unknown.
+    pub fn shown_with(&self, id: WindowId) -> Vec<WindowId> {
+        let Some(space) = self.space_of(id) else { return Vec::new() };
+        let mut out: Vec<WindowId> = self
+            .windows
+            .values()
+            .filter(|w| w.space == space && w.meta.id != id && !w.parked && !w.sticky && w.home != Home::Pinned && w.meta.role == WindowRole::Standard)
+            .map(|w| w.meta.id)
+            .collect();
+        out.sort();
+        out
+    }
+
     /// True for a window seen on every Space.
     pub fn is_sticky(&self, id: WindowId) -> bool {
         self.windows.get(&id).is_some_and(|w| w.sticky)
