@@ -48,19 +48,22 @@ use crate::engine::busy_apps::{Backoff, BusyApps, Reply};
 use crate::engine::engine_choice::Health;
 use crate::engine::geometry::Rect;
 use crate::engine::leftovers;
-use crate::engine::lend_park::{self, LendSteps, Parked};
+use crate::engine::lend_park::{self, LendSteps, Moves, Parked};
 use crate::engine::model::{Display, Model, WindowId};
 use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
 use crate::engine::spill;
 use crate::engine::stage_companions::{Companions, HeldWindow, Stay};
 use crate::platform::ax::{AxElement, AxError, AxResult};
 use crate::platform::safety::{self, Ours, Report, ScanScope};
-use crate::platform::window_engine::{Back, EngineKind, Lend, LendPark, Motion, ShowHow, Stretch, StretchDone, WindowEngine};
+use crate::platform::window_engine::{Back, EngineKind, Homes, Lend, LendPark, Motion, Parks, RoundAsk, ShowHow, Stretch, StretchDone, WindowEngine};
 use crate::platform::windows;
 use crate::ui::strip_model::Transition;
 
 #[path = "landing.rs"]
 mod landing;
+
+#[path = "rounds.rs"]
+mod rounds;
 
 /// How long a hide or a show waits for the window server to list the window where the call
 /// put it (the spike: within a millisecond or two).
@@ -288,14 +291,11 @@ impl State {
     }
 }
 
-/// One window's lend and take back calls ([`LendSteps`]): the window server's add and read
-/// back, and the moves through the window's element.
-struct Steps<'a> {
-    engine: &'a SpacesEngine,
-    sky: &'a Sky,
+/// One window's moves through its element ([`Moves`]): a park's or a restore's. It holds no
+/// window-server connection, so Mission Control's parks run it on a thread per app
+/// ([`SpacesEngine::park_round`]).
+struct Mover<'a> {
     id: u32,
-    held: Held,
-    ours: &'a BTreeSet<u64>,
     element: Option<&'a AxElement>,
     /// How long a move may wait for the app's answer (seconds).
     ax_seconds: f32,
@@ -306,7 +306,17 @@ struct Steps<'a> {
     exact: bool,
 }
 
-impl LendSteps for Steps<'_> {
+impl<'a> Mover<'a> {
+    fn park(id: u32, element: &'a AxElement, ax_seconds: f32) -> Self {
+        Self { id, element: Some(element), ax_seconds, moves: Duration::ZERO, exact: false }
+    }
+
+    fn restore(id: u32, element: &'a AxElement) -> Self {
+        Self { id, element: Some(element), ax_seconds: PARK_AX_SECONDS, moves: Duration::ZERO, exact: true }
+    }
+}
+
+impl Moves for Mover<'_> {
     fn listed(&mut self) -> Option<Rect> {
         windows::describe(&[self.id]).first().map(|w| w.bounds)
     }
@@ -336,9 +346,31 @@ impl LendSteps for Steps<'_> {
         self.moves += t.elapsed();
         out
     }
+}
 
+/// One window's lend and take back calls ([`LendSteps`]): the window server's add and read
+/// back, and the moves through the window's element.
+struct Steps<'a> {
+    engine: &'a SpacesEngine,
+    sky: &'a Sky,
+    held: Held,
+    ours: &'a BTreeSet<u64>,
+    mover: Mover<'a>,
+}
+
+impl Moves for Steps<'_> {
+    fn listed(&mut self) -> Option<Rect> {
+        self.mover.listed()
+    }
+
+    fn move_to(&mut self, to: Rect) -> Option<Rect> {
+        self.mover.move_to(to)
+    }
+}
+
+impl LendSteps for Steps<'_> {
     fn put_home(&mut self) -> bool {
-        let (id, home) = (self.id, self.held.home);
+        let (id, home) = (self.mover.id, self.held.home);
         if let Err(e) = self.sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK) {
             tracing::warn!(id, desktop = home, "spaces engine: a window could not be put home: {e}");
             return false;
@@ -352,7 +384,7 @@ impl LendSteps for Steps<'_> {
     }
 
     fn put_back(&mut self) -> bool {
-        let (id, space) = (self.id, self.held.space);
+        let (id, space) = (self.mover.id, self.held.space);
         if !self.engine.blocked()
             && let Err(e) = self.sky.add_remove(Route::Bridged, space, &[id])
         {
@@ -770,15 +802,12 @@ impl SpacesEngine {
     /// log.
     fn restore_parked(&self, id: u32, why: &str) {
         let Some((parked, element)) = self.state().parked.get(&id).map(|p| (p.park, p.element.clone())) else { return };
-        let Some(sky) = self.sky() else { return };
-        let ours = BTreeSet::new();
-        let held = Held { space: 0, home: 0 };
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: Some(&element), ax_seconds: PARK_AX_SECONDS, moves: Duration::ZERO, exact: true };
-        let restored = lend_park::restore(&mut steps, parked);
+        let mut mover = Mover::restore(id, &element);
+        let restored = lend_park::restore(&mut mover, parked);
         if restored {
             self.state().parked.remove(&id);
         }
-        tracing::info!(id, why, restored, park_ms = steps.moves.as_millis() as u64, "spaces engine: a window parked for a lend takes its frame again");
+        tracing::info!(id, why, restored, park_ms = mover.moves.as_millis() as u64, "spaces engine: a window parked for a lend takes its frame again");
     }
 
     fn show_window_only(&self, id: u32) -> bool {
@@ -911,9 +940,10 @@ impl SpacesEngine {
             Some(p) => (Some(p.ask), Some(p.window), p.ax_seconds.unwrap_or(PARK_AX_SECONDS)),
             None => (None, None, PARK_AX_SECONDS),
         };
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), ax_seconds, moves: Duration::ZERO, exact: false };
+        let mover = Mover { id, element: element.as_ref(), ax_seconds, moves: Duration::ZERO, exact: false };
+        let mut steps = Steps { engine: self, sky, held, ours: &ours, mover };
         let done = lend_park::lend(&mut steps, ask);
-        let park_ms = steps.moves.as_millis() as u64;
+        let park_ms = steps.mover.moves.as_millis() as u64;
         let mut st = self.state();
         if done.home {
             st.lent.insert(id);
@@ -942,7 +972,8 @@ impl SpacesEngine {
         let Some(sky) = self.sky() else { return Back::default() };
         let ours = self.ours();
         let element = parked.as_ref().map(|(_, e)| e.clone());
-        let mut steps = Steps { engine: self, sky, id, held, ours: &ours, element: element.as_ref(), ax_seconds: PARK_AX_SECONDS, moves: Duration::ZERO, exact: true };
+        let mover = Mover { id, element: element.as_ref(), ax_seconds: PARK_AX_SECONDS, moves: Duration::ZERO, exact: true };
+        let mut steps = Steps { engine: self, sky, held, ours: &ours, mover };
         let done = lend_park::take_back(&mut steps, parked.map(|(p, _)| p));
         if done.moved_off {
             tracing::info!(id, "spaces engine: a window parked for a lend was moved off the park by its app");
@@ -1945,6 +1976,30 @@ impl WindowEngine for SpacesEngine {
 
     fn take_back(&self, id: WindowId) -> Back {
         self.take_back_window(id.0)
+    }
+
+    fn shown_desktops(&self) -> Option<Vec<u64>> {
+        self.sky().map(|sky| Self::desktops(sky).1)
+    }
+
+    fn home_of(&self, id: WindowId) -> Option<u64> {
+        self.state().held.get(&id.0).map(|h| h.home)
+    }
+
+    fn park_round(&self, asks: Vec<RoundAsk>, deadline: Instant) -> Parks {
+        self.park_round_now(asks, deadline)
+    }
+
+    fn home_round(&self, ids: &[WindowId]) -> Homes {
+        self.home_round_now(ids)
+    }
+
+    fn back_round(&self, ids: &[(WindowId, i32)]) -> Vec<(WindowId, Back)> {
+        self.back_round_now(ids)
+    }
+
+    fn unpark_round(&self, ids: &[(WindowId, i32)]) -> usize {
+        self.unpark_round_now(ids)
     }
 
     /// Also while a show owes the window its frame ([`State::frames`]): it came out of its

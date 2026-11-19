@@ -77,6 +77,49 @@ pub struct Back {
     pub restored: Option<bool>,
 }
 
+/// A window of a round of Mission Control's lends ([`WindowEngine::park_round`]).
+#[derive(Debug, Clone)]
+pub struct RoundAsk {
+    /// The window.
+    pub id: WindowId,
+    /// Its app: one app's windows are asked in turn, the apps at once.
+    pub pid: i32,
+    /// Its park.
+    pub park: LendPark,
+}
+
+/// What a round's parks did ([`WindowEngine::park_round`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Parks {
+    /// Parked out of sight, still hidden: ready to go home ([`WindowEngine::home_round`]).
+    pub took: Vec<WindowId>,
+    /// Asked, and the park did not take (the app did not move the window in time): still
+    /// hidden; judged again where it is listed when the round goes home.
+    pub missed: Vec<WindowId>,
+    /// Not asked: the round's deadline came before their turn (untouched, hidden).
+    pub late: Vec<WindowId>,
+    /// The apps asked at once.
+    pub apps: usize,
+    /// From the first park to the last answer, in milliseconds.
+    pub ms: u64,
+    /// The windows' moves added up, in milliseconds (what one at a time would have taken).
+    pub sum_ms: u64,
+}
+
+/// What a round's second phase did ([`WindowEngine::home_round`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Homes {
+    /// On their Desktop now, still counted hidden, with where the window server lists each.
+    pub lent: Vec<(WindowId, Option<Rect>)>,
+    /// Not put home (the park did not take, or the window did not go): still hidden.
+    pub left: Vec<WindowId>,
+    /// The calls and their read back, in milliseconds.
+    pub ms: u64,
+    /// When the first call putting windows home was made and the last one returned (`None`:
+    /// no call made): the gap between the first and the last window put home.
+    pub calls: Option<(Instant, Instant)>,
+}
+
 /// How a window is brought to its frame ([`WindowEngine::show`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShowHow {
@@ -233,6 +276,51 @@ pub trait WindowEngine: Send + Sync {
     /// home any more (shown or hidden since).
     fn take_back(&self, _id: WindowId) -> Back {
         Back::default()
+    }
+
+    /// The Desktops the window server shows now, one per screen (SkyLight's own word, read
+    /// now): what Mission Control shows while a Space change made inside it is not
+    /// recognized yet. `None`: this engine does not know (the Corner engine).
+    fn shown_desktops(&self) -> Option<Vec<u64>> {
+        None
+    }
+
+    /// The Desktop window `id`, hidden by this engine off every Desktop, was hidden from (and
+    /// goes back to): the window server's id, as [`Self::shown_desktops`] names them. `None`
+    /// for a window this engine does not hold.
+    fn home_of(&self, _id: WindowId) -> Option<u64> {
+        None
+    }
+
+    /// The first phase of a round of Mission Control's lends (round mc-lends,
+    /// [`crate::engine::lend_round`]): every window of `asks`, hidden by this engine off every
+    /// Desktop, moved to its park while still hidden, the apps at once, each app's windows in
+    /// turn while `deadline` lasts. Nothing shows; each park's restore is owed from now on
+    /// (a hide, a show, a sweep, [`Self::unpark_round`] or the take back sets the frame
+    /// again). The Corner engine: nothing.
+    fn park_round(&self, _asks: Vec<RoundAsk>, _deadline: Instant) -> Parks {
+        Parks::default()
+    }
+
+    /// The second phase: windows `ids`, parked by [`Self::park_round`] and still hidden,
+    /// onto their Desktops in one call per Desktop, those listed in the park zone only; each
+    /// counted put home as [`Self::lend_home`]'s are. The others stay hidden.
+    fn home_round(&self, _ids: &[WindowId]) -> Homes {
+        Homes::default()
+    }
+
+    /// Windows `ids` (with their apps), put home by [`Self::home_round`] or
+    /// [`Self::lend_home`], back into their stage Spaces in one call per Space, then their
+    /// frames set again, the apps at once ([`Self::take_back`] for many).
+    fn back_round(&self, ids: &[(WindowId, i32)]) -> Vec<(WindowId, Back)> {
+        ids.iter().map(|(id, _)| (*id, self.take_back(*id))).collect()
+    }
+
+    /// Windows `ids` (with their apps), parked by [`Self::park_round`] and never put home,
+    /// get their frames again where they are, hidden, the apps at once (Mission Control did
+    /// not show after its key). How many took it.
+    fn unpark_round(&self, _ids: &[(WindowId, i32)]) -> usize {
+        0
     }
 
     /// True while window `id` is parked for a lend ([`Self::lend_home`] with a park) and its

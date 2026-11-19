@@ -37,10 +37,29 @@
 //! park ([`laid_out`]); `scripts/test-stages.sh mission-probe` measures the same on fixture
 //! windows, lent before the key, after it shows, and at the key.
 //!
-//! **Cost.** Each lend is one bounded move through the window's app (its park) and two
-//! window-server calls. They are made in batches of [`BATCH`] a fast tick, most recent stage
-//! first ([`hidden_here`]), so the WM thread answers between them; a window whose park does
-//! not take is not put home (it would show at its frame), and stays hidden.
+//! **All at once** ([`super::lend_round`], round mc-lends). One at a time, the windows came
+//! onto the Desktop one by one during Mission Control's opening, and it laid them out again
+//! at each (a log, 11-19). A round parks every window first, still hidden (one bounded move
+//! through its app, the apps at once, all within [`ROUND_WAIT`]: a window whose turn comes
+//! later waits for the next fast tick's round), then puts all those parked home in one
+//! window-server call per Desktop. A window whose park does not take is not put home (it
+//! would show at its frame), and stays hidden.
+//!
+//! **Parks at the key.** In [`Mode::Shown`] one of the keys starts the parks at once
+//! ([`By::KeyPark`]): the windows stay in their stage Spaces, so nothing shows, and they go
+//! home once Mission Control is seen, with no park to wait for then. When none shows within
+//! [`KEY_WAIT`] (or the mode is turned off) their frames are set again where they are
+//! ([`Lends::early_back`]). A gesture, a hot corner and the Dock's item give no key: the
+//! round is made whole once Mission Control shows.
+//!
+//! **A Desktop picked inside it** ([`scope`]). A Desktop change made in Mission Control (a
+//! click on another Desktop's thumbnail) is recognized only once it has closed, so the model's
+//! shown Space is the old one until then, and the next Mission Control, opened before that,
+//! lent nothing (11-19 07:56:06: `shown out=0`, only the stage in front). While such a
+//! change waits for the overview, the hidden windows are taken by the window server's word
+//! instead: those whose Desktop (the one each was hidden from, and goes back to) is one it
+//! shows now ([`hidden_on`]). Nothing else moves while the change waits; with the screen
+//! locked or a full-screen Space nothing is lent.
 //!
 //! **Never left out.** The engine counts every window put home as lent and parked: a hide,
 //! a show, a sweep (quit, a stand-down, a fallback) and the guardian's scan of the park
@@ -66,9 +85,10 @@ pub const WATCH_EVERY: Duration = Duration::from_millis(30);
 /// A hint counts as what announced Mission Control when it shows within this long.
 pub const HINT_COUNTS: Duration = Duration::from_millis(2000);
 
-/// What one fast tick spends on lends, or on take backs, before the WM thread goes back to
-/// its events.
-pub const BATCH: Duration = Duration::from_millis(40);
+/// How long a round's parks may take turns ([`super::lend_round::park_in_turn`]): each app's
+/// windows are asked in turn while it lasts (parks took 5 to 20 ms a window, 11-15 to 11-19),
+/// the apps at once; a window whose turn comes later waits for the next fast tick's round.
+pub const ROUND_WAIT: Duration = Duration::from_millis(150);
 
 /// Windows put home at a key ([`Mode::Key`]) go back when no Mission Control shows this long
 /// after it (the shortcut was another app's, or macOS did not open it).
@@ -255,6 +275,8 @@ pub enum By {
     Shown,
     /// One of its keys was pressed ([`Mode::Key`]).
     Key,
+    /// One of its keys was pressed ([`Mode::Shown`]): the windows parked, not put home.
+    KeyPark,
     /// A test asked (`ctl debug-mission-control lend`): kept out until it asks them back.
     Asked,
 }
@@ -265,6 +287,7 @@ impl By {
         match self {
             Self::Shown => "Mission Control showed",
             Self::Key => "its key was pressed",
+            Self::KeyPark => "its key was pressed (parked only)",
             Self::Asked => "a test asked",
         }
     }
@@ -282,6 +305,69 @@ pub fn hidden_here(m: &Model, skip: impl Fn(WindowId) -> bool) -> Vec<WindowId> 
         .filter(|id| m.window(*id).is_some_and(|w| w.parked && !w.sticky && w.meta.role == WindowRole::Standard))
         .filter(|id| !skip(*id))
         .collect()
+}
+
+/// The hidden windows of the Desktops the window server shows (`shown`), each found by
+/// `home` (the Desktop it was hidden from, `None` for a window the engine does not hold), in
+/// the order of [`hidden_here`] (the most recently used stage first), whatever Space the
+/// model counts shown.
+pub fn hidden_on(m: &Model, home: impl Fn(WindowId) -> Option<u64>, shown: &[u64], skip: impl Fn(WindowId) -> bool) -> Vec<WindowId> {
+    let mut stages: Vec<_> = m.stages().iter().collect();
+    stages.sort_by_key(|s| std::cmp::Reverse(s.last_active));
+    stages
+        .into_iter()
+        .flat_map(|s| s.windows.iter().copied())
+        .filter(|id| m.window(*id).is_some_and(|w| w.parked && !w.sticky && w.meta.role == WindowRole::Standard))
+        .filter(|id| home(*id).is_some_and(|d| shown.contains(&d)))
+        .filter(|id| !skip(*id))
+        .collect()
+}
+
+/// What holds the stages when a lend is asked ([`scope`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Moment {
+    /// The screen is locked.
+    pub locked: bool,
+    /// A full-screen app's Space shows, or a change from one has not settled.
+    pub fullscreen: bool,
+    /// A Space change waits to be recognized.
+    pub changing: bool,
+    /// What it waits for is the overview to close ([`super::phase::Hold::Overview`]).
+    pub for_overview: bool,
+    /// Mission Control or App Exposé is listed.
+    pub showing: bool,
+}
+
+/// Where the hidden windows to lend are taken from ([`scope`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    /// The model's shown Spaces ([`hidden_here`]).
+    Model,
+    /// The Desktops the window server shows ([`hidden_on`]): the model's shown Space is stale.
+    Desktops(Vec<u64>),
+    /// None: nothing is lent now.
+    Nothing,
+}
+
+/// Where the windows to lend come from at `at`: `model` the Desktops of the hidden windows
+/// the model counts on its shown Spaces (by the engine's word), `server` the Desktops the
+/// window server shows. Locked or full screen: nothing. A Space change waiting for Mission
+/// Control to close, while it shows: the window server's Desktops, unless the model's agree
+/// with them. Any other change settling: nothing, as everything waits for it.
+pub fn scope(at: Moment, model: &[u64], server: &[u64]) -> Scope {
+    if at.locked || at.fullscreen {
+        return Scope::Nothing;
+    }
+    if !at.changing {
+        return Scope::Model;
+    }
+    if !(at.for_overview && at.showing) || server.is_empty() {
+        return Scope::Nothing;
+    }
+    if !model.is_empty() && model.iter().all(|d| server.contains(d)) {
+        return Scope::Model;
+    }
+    Scope::Desktops(server.to_vec())
 }
 
 /// True when Mission Control moved a window put home: listed away from where it was listed
@@ -359,10 +445,21 @@ pub struct RoundDone {
     pub asked: usize,
     /// Those put home.
     pub lent: usize,
+    /// Those parked and left hidden for Mission Control to show ([`By::KeyPark`]).
+    pub parked: usize,
     /// From its first lend to its last.
     pub took: Duration,
-    /// Of that, in the parks' moves.
+    /// The parks' moves added up (what one at a time would have taken).
     pub park_ms: u64,
+    /// The parks, from the first asked to the last answer, the apps at once.
+    pub parks_ms: u64,
+    /// The window-server calls putting the windows home, with their read back.
+    pub move_ms: u64,
+    /// The most apps asked at once.
+    pub apps: usize,
+    /// From the first call putting windows home to the end of the last (`None`: none made):
+    /// the gap between the first and the last window put home.
+    pub first_to_last: Option<Duration>,
 }
 
 /// The take backs after a close, as the log says them once no window is out.
@@ -384,7 +481,13 @@ struct Round {
     started: Instant,
     asked: usize,
     lent: usize,
+    parked: usize,
     park_ms: u64,
+    parks_ms: u64,
+    move_ms: u64,
+    apps: usize,
+    /// The first call putting windows home made, and the last one's end.
+    calls: Option<(Instant, Instant)>,
     /// When its last window was out (the round said in the log).
     done: Option<Instant>,
 }
@@ -411,6 +514,10 @@ pub struct Lends {
     round: Option<Round>,
     /// The windows put home.
     out: Vec<Out>,
+    /// The windows parked at a key ([`By::KeyPark`]), still hidden, with their apps.
+    early: Vec<(WindowId, Pid)>,
+    /// When that key was pressed, until Mission Control shows.
+    early_at: Option<Instant>,
     /// The layout was read for this Mission Control.
     measured: bool,
     back: usize,
@@ -448,9 +555,18 @@ impl Lends {
             return false;
         }
         self.hint = Some((hint, now));
-        if self.mode == Mode::Key && matches!(hint, Hint::Key(_)) && self.round.is_none() && self.out.is_empty() {
-            self.wanted = Some(By::Key);
-            self.guess = Some(now);
+        if matches!(hint, Hint::Key(_)) && self.round.is_none() && self.out.is_empty() && self.early.is_empty() {
+            match self.mode {
+                Mode::Key => {
+                    self.wanted = Some(By::Key);
+                    self.guess = Some(now);
+                }
+                Mode::Shown => {
+                    self.wanted = Some(By::KeyPark);
+                    self.early_at = Some(now);
+                }
+                Mode::Off => {}
+            }
         }
         true
     }
@@ -475,11 +591,15 @@ impl Lends {
                 self.measured = false;
                 self.guess = None;
                 let hint = self.hint.take().map(|(h, t)| (h, now.saturating_duration_since(t))).filter(|(_, d)| *d < HINT_COUNTS);
+                self.early_at = None;
                 if self.mode != Mode::Off {
                     // Windows still out from the last one stay out for this one.
                     self.closed = None;
-                    if self.round.is_none() {
+                    // A round of parks at the key goes home now, with what it did not reach.
+                    if self.round.is_none_or(|r| r.by == By::KeyPark) {
                         self.wanted = Some(By::Shown);
+                        self.round = None;
+                        self.queue.clear();
                     }
                 }
                 Some(Edge::Shown(hint))
@@ -520,6 +640,48 @@ impl Lends {
         self.wanted
     }
 
+    /// True while the round under way only parks ([`By::KeyPark`], Mission Control not seen
+    /// yet): nothing goes home.
+    pub fn parks_only(&self) -> bool {
+        self.up.is_none() && self.round.is_some_and(|r| r.by == By::KeyPark)
+    }
+
+    /// Windows parked at the key, still hidden, for Mission Control to show.
+    pub fn parked_early(&mut self, windows: impl IntoIterator<Item = (WindowId, Pid)>) {
+        for (id, pid) in windows {
+            if !self.early.iter().any(|(e, _)| *e == id) {
+                self.early.push((id, pid));
+                if let Some(r) = self.round.as_mut() {
+                    r.parked += 1;
+                }
+            }
+        }
+    }
+
+    /// The windows parked at the key, handed to the round that puts them home now.
+    pub fn take_early(&mut self) -> Vec<(WindowId, Pid)> {
+        std::mem::take(&mut self.early)
+    }
+
+    /// The windows parked at the key whose frames are set again now, once: no Mission Control
+    /// within [`KEY_WAIT`] of the key, it closed before they went home, or the mode is off.
+    pub fn early_back(&mut self, now: Instant) -> Option<Vec<(WindowId, Pid)>> {
+        if self.early.is_empty() || (self.up.is_some() && self.mode != Mode::Off) {
+            return None;
+        }
+        let waited = self.early_at.is_none_or(|t| now.saturating_duration_since(t) >= KEY_WAIT);
+        if self.mode != Mode::Off && !waited {
+            return None;
+        }
+        self.early_at = None;
+        if self.round.is_some_and(|r| r.by == By::KeyPark) {
+            self.round = None;
+            self.queue.clear();
+            self.wanted = None;
+        }
+        Some(self.take_early())
+    }
+
     /// A test's round, whatever the mode (`ctl debug-mission-control lend`).
     pub fn ask(&mut self) {
         self.wanted = Some(By::Asked);
@@ -542,7 +704,7 @@ impl Lends {
     pub fn plan(&mut self, windows: Vec<WindowId>, now: Instant) {
         let Some(by) = self.wanted.take() else { return };
         self.queue = windows.into_iter().filter(|id| !self.out.iter().any(|o| o.id == *id)).collect();
-        self.round = Some(Round { by, started: now, asked: self.queue.len(), lent: 0, park_ms: 0, done: None });
+        self.round = Some(Round { by, started: now, asked: self.queue.len(), lent: 0, parked: 0, park_ms: 0, parks_ms: 0, move_ms: 0, apps: 0, calls: None, done: None });
     }
 
     /// The next window to put home.
@@ -550,11 +712,44 @@ impl Lends {
         self.queue.pop_front()
     }
 
-    /// A window was put home; its park's moves took `park_ms`.
-    pub fn lent(&mut self, out: Out, park_ms: u64) {
+    /// Every window still to put home, for one round ([`super::lend_round`]).
+    pub fn take_queue(&mut self) -> Vec<WindowId> {
+        self.queue.drain(..).collect()
+    }
+
+    /// Windows whose turn came after the round's deadline ([`ROUND_WAIT`]): the next round's
+    /// first, in their order.
+    pub fn requeue(&mut self, windows: Vec<WindowId>) {
+        for id in windows.into_iter().rev() {
+            self.queue.push_front(id);
+        }
+    }
+
+    /// A round's parks were made: `parks_ms` from the first to the last answer, `sum_ms` the
+    /// moves added up, `apps` asked at once.
+    pub fn parks_made(&mut self, parks_ms: u64, sum_ms: u64, apps: usize) {
+        if let Some(r) = self.round.as_mut() {
+            r.parks_ms += parks_ms;
+            r.park_ms += sum_ms;
+            r.apps = r.apps.max(apps);
+        }
+    }
+
+    /// A round's windows were put home: `move_ms` in the calls and their read back, `calls`
+    /// the first call's start and the last one's end.
+    pub fn homes_made(&mut self, move_ms: u64, calls: Option<(Instant, Instant)>) {
+        if let Some(r) = self.round.as_mut() {
+            r.move_ms += move_ms;
+            if let Some((start, end)) = calls {
+                r.calls = Some(r.calls.map_or((start, end), |(s, _)| (s, end)));
+            }
+        }
+    }
+
+    /// A window was put home.
+    pub fn lent(&mut self, out: Out) {
         if let Some(r) = self.round.as_mut() {
             r.lent += 1;
-            r.park_ms += park_ms;
         }
         self.out.retain(|o| o.id != out.id);
         self.out.push(out);
@@ -567,7 +762,18 @@ impl Lends {
         }
         let r = self.round.as_mut().filter(|r| r.done.is_none())?;
         r.done = Some(now);
-        Some(RoundDone { by: r.by, asked: r.asked, lent: r.lent, took: now.saturating_duration_since(r.started), park_ms: r.park_ms })
+        Some(RoundDone {
+            by: r.by,
+            asked: r.asked,
+            lent: r.lent,
+            parked: r.parked,
+            took: now.saturating_duration_since(r.started),
+            park_ms: r.park_ms,
+            parks_ms: r.parks_ms,
+            move_ms: r.move_ms,
+            apps: r.apps,
+            first_to_last: r.calls.map(|(s, e)| e.saturating_duration_since(s)),
+        })
     }
 
     /// True when the window list is to be read at `now` for what Mission Control did with
@@ -631,7 +837,8 @@ impl Lends {
     pub fn wants_fast(&self, now: Instant) -> bool {
         let watching = self.up.is_none() && self.hint.is_some_and(|(h, t)| now.saturating_duration_since(t) < h.watch());
         let measuring = self.up.is_some() && !self.measured && !self.out.is_empty() && self.round.is_some_and(|r| r.done.is_some());
-        watching || self.guess.is_some() || !self.queue.is_empty() || measuring || self.closing(now).is_some()
+        let early = !self.early.is_empty() && self.up.is_none();
+        watching || self.guess.is_some() || !self.queue.is_empty() || measuring || early || self.closing(now).is_some()
     }
 }
 
@@ -724,6 +931,46 @@ mod tests {
         assert_eq!(order, vec![w(4), w(3)], "A in front now, C used last: {order:?}");
     }
 
+    /// 11-19 07:56: Mission Control opened again before a Desktop picked in it was
+    /// recognized. The model's shown Space is the old Desktop's; the window server's Desktop
+    /// is the new one, and its hidden windows are lent; with the two agreeing, as ever; with
+    /// the screen locked or a full-screen Space, nothing.
+    #[test]
+    fn a_desktop_picked_inside_mission_control_lends_the_shown_desktops_windows() {
+        let stale = Moment { changing: true, for_overview: true, showing: true, ..Moment::default() };
+        assert_eq!(scope(stale, &[2], &[1]), Scope::Desktops(vec![1]), "the model still on Desktop 2, the window server on 1");
+        assert_eq!(scope(stale, &[], &[1]), Scope::Desktops(vec![1]), "nothing hidden on the model's Space");
+        assert_eq!(scope(stale, &[1], &[1, 9]), Scope::Model, "the two agree");
+        assert_eq!(scope(Moment::default(), &[2], &[1]), Scope::Model, "no change waits: the model's");
+        assert_eq!(scope(Moment { showing: true, ..Moment::default() }, &[1], &[1]), Scope::Model);
+        for held in [Moment { locked: true, ..stale }, Moment { fullscreen: true, ..stale }] {
+            assert_eq!(scope(held, &[2], &[1]), Scope::Nothing, "{held:?}");
+        }
+        assert_eq!(scope(Moment { for_overview: false, ..stale }, &[2], &[1]), Scope::Nothing, "another change settling");
+        assert_eq!(scope(Moment { showing: false, ..stale }, &[2], &[1]), Scope::Nothing, "Mission Control not listed");
+        assert_eq!(scope(stale, &[2], &[]), Scope::Nothing, "the window server said nothing");
+
+        // The windows: every hidden one whose Desktop is shown, the stage used last first,
+        // whatever the model counts in front.
+        let mut m = model_with(ModelOptions { engine: EngineKind::Spaces, ..ModelOptions::default() });
+        let obs = Observation::default();
+        let new = Decision { action: RuleAction::New, ..Decision::default() };
+        m.add_window(meta(1, 10, "com.example.a"), &Decision::default(), &obs);
+        m.add_window(meta(3, 20, "com.example.b"), &new, &obs);
+        m.add_window(meta(4, 30, "com.example.c"), &new, &obs);
+        // 1 and 3 hidden (stage C in front); 1 hidden from Desktop 1, 3 from Desktop 2.
+        let home = |id: WindowId| match id.0 {
+            1 => Some(1),
+            3 => Some(2),
+            _ => None,
+        };
+        assert_eq!(hidden_on(&m, home, &[1], |_| false), vec![w(1)], "Desktop 1's only");
+        assert_eq!(hidden_on(&m, home, &[2], |_| false), vec![w(3)]);
+        assert_eq!(hidden_on(&m, home, &[1, 2], |_| false), vec![w(3), w(1)], "the stage used last first");
+        assert_eq!(hidden_on(&m, home, &[1, 2], |id| id == w(3)), vec![w(1)], "one put home already is left alone");
+        assert!(!hidden_on(&m, home, &[1, 2], |_| false).contains(&w(4)), "a shown window is never lent");
+    }
+
     #[test]
     fn a_window_left_at_its_park_was_not_laid_out() {
         let parked = Rect::new(1439.0, 868.0, 600.0, 400.0);
@@ -737,27 +984,36 @@ mod tests {
     fn shown_mode_lends_only_once_mission_control_shows() {
         let t = Instant::now();
         let mut l = Lends::default();
-        assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
+        // The Dock's notice gives no key: nothing is parked before Mission Control shows.
+        assert!(l.hint(Hint::Dock, t));
         assert_eq!(l.wanted(), None, "nothing on a guess");
         assert!(l.wants_fast(t) && l.look_due(t), "the looks come at the fast tick");
         assert!(!l.look_due(t + ms(10)), "not more often than the watch's pause");
         assert!(l.look_due(t + ms(40)));
         assert_eq!(l.saw(false, t + ms(40)), None);
-        assert_eq!(l.saw(true, t + ms(70)), Some(Edge::Shown(Some((Hint::Key(Trigger::MissionControl), ms(70))))));
+        assert_eq!(l.saw(true, t + ms(70)), Some(Edge::Shown(Some((Hint::Dock, ms(70))))));
         assert_eq!(l.wanted(), Some(By::Shown));
         assert!(!l.look_due(t + ms(120)), "no watch while it shows: the tick looks for its close");
         l.plan(vec![w(1), w(2), w(3)], t + ms(70));
         assert_eq!(l.wanted(), None);
-        assert_eq!(l.next_window(), Some(w(1)));
-        l.lent(out(1), 6);
-        assert_eq!(l.round_done(t + ms(80)), None, "two to go");
-        assert_eq!(l.next_window(), Some(w(2)));
+        assert!(!l.parks_only());
+        // One round: all three asked, the third's turn after the deadline.
+        assert_eq!(l.take_queue(), vec![w(1), w(2), w(3)]);
+        l.parks_made(20, 30, 2);
+        l.requeue(vec![w(3)]);
+        let home = t + ms(90);
+        l.homes_made(2, Some((home, home + ms(1))));
+        l.lent(out(1));
         // Its park did not take: not put home.
-        assert_eq!(l.next_window(), Some(w(3)));
-        l.lent(out(3), 9);
-        assert_eq!(l.next_window(), None);
+        assert_eq!(l.round_done(t + ms(92)), None, "one to go");
+        assert_eq!(l.take_queue(), vec![w(3)], "the next round");
+        l.parks_made(10, 10, 1);
+        l.homes_made(1, Some((home + ms(15), home + ms(16))));
+        l.lent(out(3));
         let done = l.round_done(t + ms(110)).expect("the round's summary");
-        assert_eq!((done.by, done.asked, done.lent, done.took, done.park_ms), (By::Shown, 3, 2, ms(40), 15));
+        assert_eq!((done.by, done.asked, done.lent, done.took), (By::Shown, 3, 2, ms(40)));
+        assert_eq!((done.park_ms, done.parks_ms, done.move_ms, done.apps), (40, 30, 3, 2));
+        assert_eq!(done.first_to_last, Some(ms(16)), "from the first call to the end of the last");
         assert_eq!(l.round_done(t + ms(120)), None, "said once");
         assert!(!l.measure_due(t + ms(500)));
         assert!(l.measure_due(t + ms(110) + MEASURE_AFTER));
@@ -791,7 +1047,7 @@ mod tests {
         assert!(!l.hint(Hint::Key(Trigger::AppWindows), t + ms(300)), "nor do its repeats while held replace it");
         l.plan(vec![w(1)], t + ms(5));
         assert_eq!(l.next_window(), Some(w(1)));
-        l.lent(out(1), 7);
+        l.lent(out(1));
         assert_eq!(l.round_done(t + ms(15)).map(|d| d.by), Some(By::Key));
         assert!(!l.guess_over(t + ms(900)));
         assert!(l.look_due(t + ms(900)), "still looked for past the hint's watch, while the guess lasts");
@@ -805,13 +1061,64 @@ mod tests {
         assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
         l.plan(vec![w(1)], t);
         assert_eq!(l.next_window(), Some(w(1)));
-        l.lent(out(1), 7);
+        l.lent(out(1));
         l.round_done(t + ms(10));
         assert_eq!(l.saw(true, t + ms(60)), Some(Edge::Shown(Some((Hint::Key(Trigger::MissionControl), ms(60))))));
         assert_eq!(l.wanted(), None, "no second round for the same Mission Control");
         assert!(!l.guess_over(t + KEY_WAIT + ms(100)), "it showed");
         assert!(l.saw(false, t + ms(4000)).is_some());
         assert!(l.closing(t + ms(4000)).is_some());
+    }
+
+    /// "shown": the key parks the windows (nothing shows); Mission Control seen, they go home
+    /// with no park to wait for; none seen within the key's wait, their frames are set again.
+    #[test]
+    fn shown_mode_parks_at_the_key_and_puts_home_once_mission_control_shows() {
+        let t = Instant::now();
+        let mut l = Lends::default();
+        assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
+        assert_eq!(l.wanted(), Some(By::KeyPark), "the parks start at the key");
+        l.plan(vec![w(1), w(2)], t);
+        assert!(l.parks_only(), "nothing goes home before Mission Control shows");
+        assert_eq!(l.take_queue(), vec![w(1), w(2)]);
+        l.parked_early([(w(1), 10), (w(2), 20)]);
+        let done = l.round_done(t + ms(20)).expect("the parks' summary");
+        assert_eq!((done.by, done.parked, done.lent), (By::KeyPark, 2, 0));
+        assert!(l.out().is_empty() && l.wants_fast(t + ms(900)), "nothing out; the wait is watched");
+        assert_eq!(l.early_back(t + ms(900)), None, "the key's wait lasts");
+        // Mission Control shows: a round of its own, the windows parked handed to it.
+        assert!(l.saw(true, t + ms(80)).is_some());
+        assert_eq!(l.wanted(), Some(By::Shown));
+        assert_eq!(l.early_back(t + KEY_WAIT + ms(10)), None, "it showed: they go home");
+        l.plan(vec![w(1), w(2), w(3)], t + ms(80));
+        assert!(!l.parks_only());
+        assert_eq!(l.take_early(), vec![(w(1), 10), (w(2), 20)]);
+        assert_eq!(l.take_queue(), vec![w(1), w(2), w(3)], "w(3) hid since: parked now");
+        // No Mission Control after the next key: the parks undone.
+        let mut l = Lends::default();
+        assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
+        l.plan(vec![w(1)], t);
+        l.take_queue();
+        l.parked_early([(w(1), 10)]);
+        assert_eq!(l.early_back(t + KEY_WAIT - ms(1)), None);
+        assert_eq!(l.early_back(t + KEY_WAIT), Some(vec![(w(1), 10)]));
+        assert_eq!(l.early_back(t + KEY_WAIT + ms(10)), None, "once");
+        assert!(!l.wants_fast(t + KEY_WAIT + ms(10)));
+        // Turned off meanwhile: undone at once.
+        let mut l = Lends::default();
+        assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
+        l.plan(vec![w(1)], t);
+        l.take_queue();
+        l.parked_early([(w(1), 10)]);
+        l.set_mode(Mode::Off);
+        assert_eq!(l.early_back(t + ms(5)), Some(vec![(w(1), 10)]));
+        // "key" lends at the key as before: nothing parked only.
+        let mut l = Lends::default();
+        l.set_mode(Mode::Key);
+        assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
+        assert_eq!(l.wanted(), Some(By::Key));
+        l.plan(vec![w(1)], t);
+        assert!(!l.parks_only());
     }
 
     #[test]
@@ -829,7 +1136,7 @@ mod tests {
         assert_eq!(l.wanted(), Some(By::Asked));
         l.plan(vec![w(1)], t + ms(600));
         assert_eq!(l.next_window(), Some(w(1)));
-        l.lent(out(1), 5);
+        l.lent(out(1));
         assert_eq!(l.round_done(t + ms(610)).map(|d| d.by), Some(By::Asked));
         assert!(l.saw(true, t + ms(700)).is_some());
         assert!(l.measure_due(t + ms(700) + MEASURE_AFTER), "its layout is read all the same");
@@ -848,7 +1155,7 @@ mod tests {
         assert!(l.saw(true, t).is_some());
         l.plan(vec![w(1), w(2)], t);
         assert_eq!(l.next_window(), Some(w(1)));
-        l.lent(out(1), 5);
+        l.lent(out(1));
         l.set_mode(Mode::Off);
         assert_eq!(l.next_window(), None, "no more lends");
         assert!(l.saw(false, t + ms(900)).is_some());
@@ -862,7 +1169,7 @@ mod tests {
         l.saw(true, t);
         l.plan(vec![w(1)], t);
         l.next_window();
-        l.lent(out(1), 5);
+        l.lent(out(1));
         l.round_done(t + ms(10));
         l.saw(false, t + ms(1000));
         assert!(l.closing(t + ms(1000)).is_some());

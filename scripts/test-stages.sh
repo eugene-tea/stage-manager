@@ -39,6 +39,10 @@
 #   SM_ENGINE=spaces scripts/test-stages.sh mission         # Mission Control and App Exposé show the hidden stages'
 #                                          # windows and put them back; a pick; kill -9 with them out
 #                                          # (round spaces-mission-control; skips under the park corner)
+#   SM_ENGINE=spaces scripts/test-stages.sh mission-desktop # a Desktop picked inside Mission Control (⌃→ there),
+#                                          # Mission Control opened again at once: the shown Desktop's
+#                                          # hidden windows still put home (needs a Desktop to the right;
+#                                          # not a default phase)
 #   SM_ENGINE=spaces scripts/test-stages.sh mission-probe   # does Mission Control lay out a hidden window put on
 #                                          # the Desktop before its key, after it shows, at the key? Prints
 #                                          # what each outcome means (not a default phase; SM_SHOTS=<dir> adds

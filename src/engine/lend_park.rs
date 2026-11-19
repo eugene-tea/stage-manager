@@ -57,13 +57,19 @@ pub fn away(listed: Rect, p: Parked) -> bool {
     !at_origin(listed, p.frame)
 }
 
-/// The calls a lend and a take back make on one window, in the order this module decides.
-pub trait LendSteps {
+/// The moves a park and a restore make on one window (Accessibility through its app, and the
+/// window server's list): all a park needs, so Mission Control's parks run on a thread per
+/// app ([`super::lend_round`]).
+pub trait Moves {
     /// Where the window server lists the window now.
     fn listed(&mut self) -> Option<Rect>;
     /// Moves the window's origin to `to`'s (Accessibility, bounded); where the window server
     /// lists it afterwards (`None`: the call failed or the window is not listed).
     fn move_to(&mut self, to: Rect) -> Option<Rect>;
+}
+
+/// The calls a lend and a take back make on one window, in the order this module decides.
+pub trait LendSteps: Moves {
     /// Out of its stage Space onto its Desktop; true when listed out of every stage Space.
     fn put_home(&mut self) -> bool;
     /// Back into its stage Space; true when listed there and nowhere else.
@@ -133,35 +139,79 @@ fn same_size(a: Rect, b: Rect) -> bool {
     (a.w - b.w).abs() <= NEAR && (a.h - b.h).abs() <= NEAR
 }
 
+/// A park made while the window is still hidden in its stage Space, before it goes home
+/// ([`park`]); [`settle`] ends the lend once it is known whether it went.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Parking {
+    /// Where it parked, and the frame it goes back to.
+    pub parked: Parked,
+    /// Listed in the park zone after the move: out of sight once home.
+    pub took: bool,
+    /// Listed away from its frame after the move (in the zone or not).
+    pub moved: bool,
+    /// Lent whether the park took or not ([`ParkAsk::must`]).
+    pub must: bool,
+}
+
+impl Parking {
+    /// True when the window goes home after this park: it took, or the lend is needed now.
+    pub fn goes_home(&self) -> bool {
+        self.took || self.must
+    }
+
+    /// The park as the window server lists the window now (`listed`), for a window parked
+    /// a while ago and still hidden ([`super::lend_round`]: parked at Mission Control's key,
+    /// put home once it shows): an app may have moved it since.
+    pub fn now(parked: Parked, listed: Option<Rect>) -> Self {
+        Self { parked, took: listed.is_some_and(|r| parked.display.parks(r)), moved: listed.is_some_and(|r| !at_origin(r, parked.frame)), must: false }
+    }
+}
+
+/// The park of a lend, the window still hidden in its stage Space: moved to `ask.at`, read
+/// back. Its frame is the one listed before (at the window's size, and not in the park zone:
+/// a window parked already keeps the frame of the model), else the model's.
+pub fn park(mac: &mut impl Moves, ask: ParkAsk) -> Parking {
+    let before = mac.listed().filter(|r| same_size(*r, ask.frame) && !ask.display.parks(*r));
+    let parked = Parked { at: ask.at, frame: before.unwrap_or(ask.frame), display: ask.display };
+    let landed = mac.move_to(ask.at);
+    Parking { parked, took: landed.is_some_and(|r| ask.display.parks(r)), moved: landed.is_some_and(|r| !at_origin(r, parked.frame)), must: ask.must }
+}
+
+/// The lend after its park, `home` saying whether the window went home. Not lent (the park
+/// did not take, or the window did not go home): still hidden in its stage Space, a move seen
+/// is undone there, unseen; one not seen yet (refused, answered late, timed out) may still
+/// come: owed.
+pub fn settle(mac: &mut impl Moves, p: Parking, home: bool) -> LendDone {
+    if home {
+        return LendDone { home, parked: Some(p.took), owed: Some(p.parked) };
+    }
+    let undone = p.moved && mac.move_to(p.parked.frame).is_some_and(|r| at_origin(r, p.parked.frame));
+    LendDone { home, parked: Some(p.took), owed: (!undone).then_some(p.parked) }
+}
+
 /// Lends the window: parked first while still hidden when `park` asks it, then put home.
 /// Without a park only home.
-pub fn lend(mac: &mut impl LendSteps, park: Option<ParkAsk>) -> LendDone {
-    let Some(ask) = park else {
+pub fn lend(mac: &mut impl LendSteps, park_ask: Option<ParkAsk>) -> LendDone {
+    let Some(ask) = park_ask else {
         return LendDone { home: mac.put_home(), parked: None, owed: None };
     };
-    let before = mac.listed().filter(|r| same_size(*r, ask.frame));
-    let parked_at = Parked { at: ask.at, frame: before.unwrap_or(ask.frame), display: ask.display };
-    let landed = mac.move_to(ask.at);
-    let took = landed.is_some_and(|r| ask.display.parks(r));
-    let moved = landed.is_some_and(|r| !at_origin(r, parked_at.frame));
-    let home = (took || ask.must) && mac.put_home();
-    if home {
-        return LendDone { home, parked: Some(took), owed: Some(parked_at) };
-    }
-    // Not lent (the park did not take, or the window did not go home): still hidden in its
-    // stage Space. A move seen is undone there, unseen; one not seen yet (refused, answered
-    // late, timed out) may still come: owed.
-    let undone = moved && mac.move_to(parked_at.frame).is_some_and(|r| at_origin(r, parked_at.frame));
-    LendDone { home, parked: Some(took), owed: (!undone).then_some(parked_at) }
+    let p = park(mac, ask);
+    let home = p.goes_home() && mac.put_home();
+    settle(mac, p, home)
+}
+
+/// True when a window parked for a lend (`parked`) is listed off the park and not at its
+/// frame: its app moved it (one listed at its frame never took the park, its restore owed
+/// only in case the move came late).
+pub fn moved_off(mac: &mut impl Moves, parked: Option<Parked>) -> bool {
+    parked.is_some_and(|p| mac.listed().is_some_and(|r| !p.display.parks(r) && !at_origin(r, p.frame)))
 }
 
 /// Takes the lent window back: into its stage Space first, then (when it was parked) its
 /// frame restored there, unseen. A window that did not go back keeps its park (restoring it
 /// on the Desktop would show it): its frame stays owed until it hides or shows.
 pub fn take_back(mac: &mut impl LendSteps, parked: Option<Parked>) -> BackDone {
-    // Off the park and not at its frame: its app moved it (one listed at its frame never
-    // took the park, its restore owed only in case the move came late).
-    let moved_off = parked.is_some_and(|p| mac.listed().is_some_and(|r| !p.display.parks(r) && !at_origin(r, p.frame)));
+    let moved_off = moved_off(mac, parked);
     let back = mac.put_back();
     let restored = match parked {
         Some(p) if back => Some(restore(mac, p)),
@@ -173,7 +223,7 @@ pub fn take_back(mac: &mut impl LendSteps, parked: Option<Parked>) -> BackDone {
 
 /// The frame of a window parked for a lend set again (it is hidden, or about to show): true
 /// when the window server lists it there.
-pub fn restore(mac: &mut impl LendSteps, p: Parked) -> bool {
+pub fn restore(mac: &mut impl Moves, p: Parked) -> bool {
     if mac.listed().is_some_and(|r| at_origin(r, p.frame)) {
         return true;
     }
@@ -221,7 +271,7 @@ mod tests {
         }
     }
 
-    impl LendSteps for Fake {
+    impl Moves for Fake {
         fn listed(&mut self) -> Option<Rect> {
             self.at
         }
@@ -239,6 +289,9 @@ mod tests {
             self.look();
             self.at
         }
+    }
+
+    impl LendSteps for Fake {
         fn put_home(&mut self) -> bool {
             self.calls.push("home".into());
             if self.homes {
@@ -421,6 +474,17 @@ mod tests {
         let mut mac = Fake { at: None, ..Fake::new(frame()) };
         let done = lend(&mut mac, Some(ask(true)));
         assert_eq!(done.parked, Some(false));
+    }
+
+    /// A window listed at its park already (parked at Mission Control's key, then lent for ⌘Tab
+    /// before it showed): the park is never taken as its frame, the model's is.
+    #[test]
+    fn a_window_parked_already_keeps_the_models_frame() {
+        let a = ask(false);
+        let mut mac = Fake::new(a.at);
+        let done = lend(&mut mac, Some(a));
+        assert_eq!(done.owed.map(|p| p.frame), Some(frame()), "never the park as its frame");
+        assert!(done.home);
     }
 
     /// Listed at another size before the park (Mission Control's layout shrinks the windows

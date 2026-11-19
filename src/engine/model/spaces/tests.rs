@@ -1960,7 +1960,7 @@ mod arranged_ahead {
     fn cmd_tab_parks_the_lent_window_and_the_model_keeps_its_frame() {
         use crate::engine::corner::park::ParkRequest;
         use crate::engine::corner::park_frame_of;
-        use crate::engine::lend_park::{self, LendSteps, ParkAsk};
+        use crate::engine::lend_park::{self, LendSteps, Moves, ParkAsk};
         use switcher::{Act, Key};
 
         /// Window 5 of the fake Mac as the lend's calls see it; every call in order.
@@ -1977,7 +1977,7 @@ mod arranged_ahead {
                 }
             }
         }
-        impl LendSteps for Steps<'_> {
+        impl Moves for Steps<'_> {
             fn listed(&mut self) -> Option<Rect> {
                 Some(self.mac.wins[&5].1)
             }
@@ -1989,6 +1989,8 @@ mod arranged_ahead {
                 self.look();
                 self.listed()
             }
+        }
+        impl LendSteps for Steps<'_> {
             fn put_home(&mut self) -> bool {
                 self.calls.push("home");
                 self.mac.stage_space.remove(&5);

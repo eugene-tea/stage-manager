@@ -45,7 +45,9 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   dragged window's card shows).
 - **Threads:** every AX call runs on the WM thread with a 0.25 s timeout; the main thread
   never calls AX. Apps that do not answer yet (a login, the launch's recovery scan) are
-  asked on threads of their own, so one busy app holds up no other. The minimize tap
+  asked on threads of their own, so one busy app holds up no other; so are the parks of
+  Mission Control's lends under the Spaces engine (a thread per app, the WM thread waiting
+  for all within one deadline, then making the window-server calls itself). The minimize tap
   (`platform::minimize_tap`) asks on its own thread too, at 0.1 s a call and only for a press
   near a managed window's title-bar buttons or ⌘M: a minimize caught there goes to the WM
   thread as a command. Frame writes run with

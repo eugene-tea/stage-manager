@@ -399,9 +399,18 @@ stage's windows, as Apple's Stage Manager does (a report, 11-18: under `engine =
 stage in front showed, a hidden stage's windows being on no Desktop).
 Under `engine = "spaces"` the hidden stages' windows of the Desktops shown are put on their
 Desktop while one of them shows, parked at the screen's corner first so that none shows at
-its frame, most recent stage first, in batches of 40 ms; a window whose app does not move it
-within 50 ms stays hidden. When it closes they go back into their stage Spaces and their
-frames are set again; a window picked there is activated by macOS and the activation's
+its frame; a window whose app does not move it within 50 ms stays hidden. They arrive all at
+once, as Apple's do: every window is parked first, still hidden (the apps asked at once, one
+app's windows in turn, for up to 150 ms a round), then all of them go onto the Desktop in one
+window-server call per Desktop (one at a time they came one by one during the opening, 7
+windows over 237 ms, and Mission Control laid them out again at each: a log, 11-19). In
+`"shown"` mode its keyboard shortcut already starts the parks; the windows go onto the
+Desktop once it is listed, and get their frames back unseen when nothing shows within 1.5 s.
+A Desktop picked inside Mission Control is recognized only once it closes; opened again
+before that, the hidden windows of the Desktop the window server shows are put home all the
+same (11-19 07:56: it lent nothing, the model still on the old Desktop), each onto the
+Desktop it was hidden from, and nothing else moves until the change is recognized.
+When it closes they go back into their stage Spaces together and their frames are set again; a window picked there is activated by macOS and the activation's
 switch brings its stage in front, so it and, for 1.5 s, the windows of the app in front are
 left to that switch. `[windows] mission_control_stages`: `"shown"` (the default) lends once
 Mission Control is listed, found within about 30 ms of its keyboard shortcut (the user's

@@ -11,13 +11,15 @@
 //!   for a moment. With `[windows] mission_control_stages = "key"` the key also starts the
 //!   lends.
 //! - **Shown** ([`Controller::mission_step`], the fast tick while there is work and every
-//!   tick): the hidden windows are put home in batches, each parked first
-//!   ([`Controller::lend_park`], never lent when its park does not take). A moment later the
-//!   window list is read for what Mission Control did with them, and the log says how many
-//!   it laid out.
-//! - **Closed**: each goes back into its stage Space, its frame set again, but one whose
-//!   stage came in front (picked in Mission Control: macOS activates its app and the
-//!   activation's switch shows it), and for a moment those of the app in front.
+//!   tick): the hidden windows are put home a round at a time
+//!   ([`crate::engine::lend_round`]): every window parked first ([`Controller::lend_park`],
+//!   the apps at once), then all those whose park took put home together. A moment later
+//!   the window list is read for what Mission Control did with them, and the log says how
+//!   many it laid out. In `"shown"` mode its key already starts the parks; the windows go
+//!   home once it shows, and get their frames back when it does not.
+//! - **Closed**: they go back into their stage Spaces together, their frames set again, but
+//!   one whose stage came in front (picked in Mission Control: macOS activates its app and
+//!   the activation's switch shows it), and for a moment those of the app in front.
 //!
 //! Every line in the log starts with `mission-control:`. The engine counts each window put
 //! home as lent and parked, so a hide, a show, a quit's sweep and the guardian bring it
@@ -29,10 +31,13 @@ use serde_json::{Value, json};
 
 use super::Controller;
 use crate::engine::mission_control::{self as mc, Edge, Fate, Hint, Keys, Lends, Mode, Mods, Out, Settled, Shortcut};
+use crate::engine::model::WindowId;
+use crate::engine::phase::Hold;
 use crate::engine::overview::Overview;
 use crate::platform::input::{self, InputEvent};
 use crate::platform::observe::Observer;
 use crate::platform::space_keys::{Expose, SpaceKey};
+use crate::platform::window_engine::RoundAsk;
 use crate::platform::{apps, windows};
 
 /// How long Mission Control's shortcuts, read from the user's settings, are trusted.
@@ -97,7 +102,7 @@ impl Controller {
         self.spaces.mission.lends.set_mode(mode);
         if self.spaces.mission.lends.hint(Hint::Key(trigger), now) {
             tracing::info!(key = code, mode = mode.name(), "mission-control: trigger seen: {}", trigger.name());
-            // "key": the lends start now, before anything shows.
+            // "key": the lends start now, before anything shows; "shown": the parks.
             self.mission_step(ob, false, now);
         }
     }
@@ -143,7 +148,50 @@ impl Controller {
     /// screen is locked, a full-screen app's Space shows, a switch plays or the user holds
     /// the button (a drag into Mission Control).
     fn mission_may_lend(&self) -> bool {
-        !self.frozen() && self.phase.switching().is_none() && self.pending.is_none() && self.drag.is_none() && !input::left_button_down()
+        !self.frozen() && self.mission_unbusy()
+    }
+
+    /// No switch plays, none waits, no drag, the button up.
+    fn mission_unbusy(&self) -> bool {
+        self.phase.switching().is_none() && self.pending.is_none() && self.drag.is_none() && !input::left_button_down()
+    }
+
+    /// The hidden windows to put home now ([`mc::scope`]), `showing` Mission Control: the
+    /// model's shown Spaces' as a rule; while a Desktop picked inside Mission Control waits
+    /// for it to close, the window server's shown Desktops'; `None` while nothing may be lent.
+    fn mission_hidden(&self, showing: bool) -> Option<Vec<WindowId>> {
+        if !self.mission_unbusy() {
+            return None;
+        }
+        let m = self.model.as_ref()?;
+        let skip = self.lent.map(|l| l.window);
+        let here = mc::hidden_here(m, |id| Some(id) == skip);
+        let at = mc::Moment {
+            locked: self.locked,
+            fullscreen: self.phase.fullscreen(),
+            changing: self.phase.changing(),
+            for_overview: self.phase.hold() == Some(Hold::Overview),
+            showing,
+        };
+        let (model, server) = if at.changing {
+            let model: Vec<u64> = here.iter().filter_map(|id| self.engine.home_of(*id)).collect();
+            (model, self.engine.shown_desktops().unwrap_or_default())
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        match mc::scope(at, &model, &server) {
+            mc::Scope::Model => Some(here),
+            mc::Scope::Nothing => None,
+            mc::Scope::Desktops(shown) => {
+                let hidden = mc::hidden_on(m, |id| self.engine.home_of(id), &shown, |id| Some(id) == skip);
+                tracing::info!(
+                    desktops = ?shown,
+                    hidden = hidden.len(),
+                    "mission-control: a Desktop picked inside Mission Control is not recognized yet: the hidden windows of the Desktop the window server shows are put home"
+                );
+                Some(hidden)
+            }
+        }
     }
 
     /// One step: the window list looked at (`look`), Mission Control's opening and closing
@@ -180,49 +228,121 @@ impl Controller {
                 "mission-control: no Mission Control showed after its key: the windows put home go back"
             );
         }
-        if self.spaces.mission.lends.wanted().is_some() && self.mission_may_lend() {
-            let skip = self.lent.map(|l| l.window);
-            let hidden = self.model.as_ref().map(|m| mc::hidden_here(m, |id| Some(id) == skip)).unwrap_or_default();
+        if let Some(early) = self.spaces.mission.lends.early_back(now) {
+            let restored = self.engine.unpark_round(&early);
+            tracing::info!(
+                parked = early.len(),
+                restored,
+                wait_ms = ms(mc::KEY_WAIT),
+                "mission-control: no Mission Control to put the windows parked at its key home: their frames are set again, hidden"
+            );
+        }
+        if self.spaces.mission.lends.wanted().is_some()
+            && let Some(hidden) = self.mission_hidden(showing)
+        {
             self.spaces.mission.lends.plan(hidden, now);
         }
-        self.mission_lend_batch(ob, Some(mc::BATCH));
-        if let Some(done) = self.spaces.mission.lends.round_done(Instant::now()) {
+        self.mission_round(ob, Some(mc::ROUND_WAIT));
+        self.mission_round_said();
+        if self.spaces.mission.lends.measure_due(now) {
+            self.mission_measure();
+        }
+        self.mission_back_round(now);
+    }
+
+    /// The round's summary in the log, once its last window is out.
+    fn mission_round_said(&mut self) -> Option<mc::RoundDone> {
+        let done = self.spaces.mission.lends.round_done(Instant::now())?;
+        let first_to_last_ms = done.first_to_last.map(|d| d.as_secs_f64() * 1000.0);
+        if done.by == mc::By::KeyPark {
+            tracing::info!(
+                hidden = done.asked,
+                parked = done.parked,
+                ms = ms(done.took),
+                parks_ms = done.parks_ms,
+                park_sum_ms = done.park_ms,
+                apps = done.apps,
+                "mission-control: parked {} windows at its key in {} ms, hidden until it shows",
+                done.parked,
+                ms(done.took)
+            );
+        } else {
             tracing::info!(
                 why = done.by.name(),
                 hidden = done.asked,
                 lent = done.lent,
                 ms = ms(done.took),
-                park_ms = done.park_ms,
+                parks_ms = done.parks_ms,
+                park_sum_ms = done.park_ms,
+                move_ms = done.move_ms,
+                apps = done.apps,
+                first_to_last_ms,
                 "mission-control: lent {} windows in {} ms",
                 done.lent,
                 ms(done.took)
             );
         }
-        if self.spaces.mission.lends.measure_due(now) {
-            self.mission_measure();
-        }
-        self.mission_back_batch(Some(mc::BATCH), now);
+        Some(done)
     }
 
-    /// Puts the round's next windows home, each parked first, for at most `budget`.
-    fn mission_lend_batch(&mut self, ob: &Observer, budget: Option<Duration>) {
-        let started = Instant::now();
-        while budget.is_none_or(|b| started.elapsed() < b) {
-            let Some(id) = self.spaces.mission.lends.next_window() else { break };
+    /// One round ([`crate::engine::lend_round`]): every window still to put home parked
+    /// first, the apps at once, each app's windows in turn while `wait` lasts (those after it
+    /// wait for the next round), then all of them put home together, or (parks only, at the
+    /// key) left parked and hidden for Mission Control to show. Windows parked at the key
+    /// go home with the round without a park.
+    fn mission_round(&mut self, ob: &Observer, wait: Option<Duration>) {
+        let ids = self.spaces.mission.lends.take_queue();
+        if ids.is_empty() {
+            return;
+        }
+        let parks_only = self.spaces.mission.lends.parks_only();
+        let early = if parks_only { Vec::new() } else { self.spaces.mission.lends.take_early() };
+        let mut asks = Vec::new();
+        let mut parked = Vec::new();
+        let mut pids = Vec::new();
+        for id in ids {
             let Some(pid) = self.model.as_ref().and_then(|m| m.window(id)).map(|w| w.meta.pid) else { continue };
+            pids.push((id, pid));
+            if early.iter().any(|(e, _)| *e == id) {
+                parked.push(id);
+                continue;
+            }
             // Never at its frame: a window whose park cannot be asked or does not take
             // stays hidden.
-            let Some(park) = self.lend_park(ob, id, false, Some(mc::PARK_SECONDS)) else {
-                tracing::debug!(window = id.0, "mission-control: a hidden window has no element to park it through: left hidden");
-                continue;
-            };
-            let lend = self.engine.lend_home(id, Some(park));
-            if lend.home {
-                let parked = windows::describe(&[id.0]).first().map(|w| w.bounds);
-                self.spaces.mission.lends.lent(Out { id, pid, parked }, lend.park_ms);
-            } else {
-                tracing::debug!(window = id.0, parked = ?lend.parked, park_ms = lend.park_ms, "mission-control: a hidden window was not put home (its park did not take, or the engine does not hold it): left hidden");
+            match self.lend_park(ob, id, false, Some(mc::PARK_SECONDS)) {
+                Some(park) => asks.push(RoundAsk { id, pid, park }),
+                None => tracing::debug!(window = id.0, "mission-control: a hidden window has no element to park it through: left hidden"),
             }
+        }
+        // A test's round waits as long as it takes.
+        let deadline = Instant::now() + wait.unwrap_or(Duration::from_secs(5));
+        let parks = self.engine.park_round(asks, deadline);
+        self.spaces.mission.lends.parks_made(parks.ms, parks.sum_ms, parks.apps);
+        if !parks.late.is_empty() {
+            tracing::debug!(late = ?parks.late.iter().map(|w| w.0).collect::<Vec<_>>(), "mission-control: windows whose park's turn came after the round's wait: the next round's");
+            self.spaces.mission.lends.requeue(parks.late.clone());
+        }
+        let pid_of = |id: crate::engine::model::WindowId| pids.iter().find(|(w, _)| *w == id).map(|(_, p)| *p);
+        if parks_only {
+            let early: Vec<_> = parks.took.iter().chain(&parks.missed).filter_map(|id| Some((*id, pid_of(*id)?))).collect();
+            self.spaces.mission.lends.parked_early(early);
+            return;
+        }
+        parked.extend(parks.took.iter().chain(&parks.missed).copied());
+        let homes = self.engine.home_round(&parked);
+        self.spaces.mission.lends.homes_made(homes.ms, homes.calls);
+        for (id, at) in homes.lent {
+            if let Some(pid) = pid_of(id) {
+                self.spaces.mission.lends.lent(Out { id, pid, parked: at });
+            }
+        }
+        if !homes.left.is_empty() {
+            tracing::debug!(windows = ?homes.left.iter().map(|w| w.0).collect::<Vec<_>>(), "mission-control: hidden windows not put home (their park did not take, or the engine does not hold them): left hidden");
+        }
+        // Parked at the key and out of this round (shown since, gone): their frames again.
+        let stray: Vec<_> = early.into_iter().filter(|(id, _)| !parked.contains(id)).collect();
+        if !stray.is_empty() {
+            self.engine.unpark_round(&stray);
         }
     }
 
@@ -250,15 +370,13 @@ impl Controller {
     }
 
     /// After a close: each window out is left to its switch, waits for one, or goes back
-    /// ([`mc::fate`]), for at most `budget`; the summary once none is out.
-    fn mission_back_batch(&mut self, budget: Option<Duration>, now: Instant) {
+    /// ([`mc::fate`]), those going back together ([`crate::engine::lend_round::back_all`]);
+    /// the summary once none is out.
+    fn mission_back_round(&mut self, now: Instant) {
         let Some(since) = self.spaces.mission.lends.closing(now) else { return };
-        let started = Instant::now();
         let front = apps::frontmost_pid();
+        let mut going = Vec::new();
         for out in self.spaces.mission.lends.out().to_vec() {
-            if budget.is_some_and(|b| started.elapsed() >= b) {
-                break;
-            }
             // Shown by the model, its stage in front (the switch shows it), or gone.
             let shown = self.model.as_ref().is_none_or(|m| {
                 m.window(out.id).is_none_or(|w| !w.parked) || m.stage_of(out.id).is_some_and(|s| m.stage_in_front(s))
@@ -272,10 +390,17 @@ impl Controller {
                         self.spaces.mission.lends.settle(out.id, Settled::Missed);
                         continue;
                     }
-                    let back = self.engine.take_back(out.id);
-                    tracing::debug!(window = out.id.0, back = back.back, restored = ?back.restored, "mission-control: a window put home goes back");
-                    self.spaces.mission.lends.settle(out.id, if back.back { Settled::Back } else { Settled::Missed });
+                    going.push((out.id, out.pid));
                 }
+            }
+        }
+        if !going.is_empty() {
+            let started = Instant::now();
+            let backs = self.engine.back_round(&going);
+            tracing::debug!(windows = going.len(), ms = ms(started.elapsed()), "mission-control: windows put home go back together");
+            for (id, back) in backs {
+                tracing::debug!(window = id.0, back = back.back, restored = ?back.restored, "mission-control: a window put home goes back");
+                self.spaces.mission.lends.settle(id, if back.back { Settled::Back } else { Settled::Missed });
             }
         }
         if let Some(done) = self.spaces.mission.lends.back_done(Instant::now()) {
@@ -336,8 +461,8 @@ impl Controller {
                 let hidden = self.model.as_ref().map(|m| mc::hidden_here(m, |id| Some(id) == skip)).unwrap_or_default();
                 self.spaces.mission.lends.ask();
                 self.spaces.mission.lends.plan(hidden.clone(), now);
-                self.mission_lend_batch(ob, None);
-                let done = self.spaces.mission.lends.round_done(Instant::now());
+                self.mission_round(ob, None);
+                let done = self.mission_round_said();
                 let took = done.map_or(0, |d| ms(d.took));
                 tracing::info!(hidden = hidden.len(), lent = done.map_or(0, |d| d.lent), ms = took, park_ms = done.map_or(0, |d| d.park_ms), "mission-control: lent for a test");
                 json!({
@@ -351,7 +476,7 @@ impl Controller {
             ["back"] => {
                 let out: Vec<u32> = self.spaces.mission.lends.out().iter().map(|o| o.id.0).collect();
                 self.spaces.mission.lends.ask_back(now);
-                self.mission_back_batch(None, now);
+                self.mission_back_round(now);
                 let left: Vec<u32> = self.spaces.mission.lends.out().iter().map(|o| o.id.0).collect();
                 json!({ "ok": true, "were_out": out, "still_out": left })
             }

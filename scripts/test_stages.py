@@ -9941,6 +9941,28 @@ def mission_back(ids, titles, frames, label):
     return bool(ok)
 
 
+MISSION_FIRST_TO_LAST_MS = 20.0
+
+
+def mission_timings(text, n, label):
+    """Round mc-lends: the round line's timings read back from the log `text`; passes when
+    the first and the last window put home are under MISSION_FIRST_TO_LAST_MS apart."""
+    lines = [ln for ln in text.splitlines() if f"mission-control: lent {n} windows" in ln]
+    line = lines[-1] if lines else ""
+    def num(key):
+        m = re.search(rf"\b{key}=([0-9.]+)", line)
+        return float(m.group(1)) if m else None
+    gap, parks, moves, apps = num("first_to_last_ms"), num("parks_ms"), num("move_ms"), num("apps")
+    say(f"    timings: first_to_last_ms={gap} parks_ms={parks} park_sum_ms={num('park_sum_ms')} move_ms={moves} apps={apps} ms={num('ms')}")
+    check(gap is not None and gap < MISSION_FIRST_TO_LAST_MS,
+          f"mission {label}: every hidden window put home at once (first to last {gap} ms, under {MISSION_FIRST_TO_LAST_MS:g})")
+    keyed = [ln.split("mission-control:", 1)[1].strip() for ln in text.splitlines() if "mission-control: parked" in ln and "at its key" in ln]
+    if keyed:
+        say(f"    parked at the key first: {keyed[-1][:160]}")
+    elif "trigger seen" not in text:
+        say("    the app's input monitor did not hear the posted key (no \"trigger seen\" line): the parks at the key are not measured here; press the real key and read the log")
+
+
 def mission_shot(name):
     """A by-eye screenshot while Mission Control shows, only with $SM_SHOTS (never the repo)."""
     d = os.environ.get("SM_SHOTS")
@@ -10102,7 +10124,11 @@ def phase_mission():
        out of their stage Spaces, on the Desktop, still counted hidden by the model; the log
        says shown, the lend and its time, and how many Mission Control laid out. After
        Escape: both back in their stage Spaces at their frames, the same stage in front, no
-       Space change, nothing lent or parked.
+       Space change, nothing lent or parked. All at once (round mc-lends): the log's round
+       line has `first_to_last_ms` (the first window put home to the last) under
+       MISSION_FIRST_TO_LAST_MS, with its parks' and moves' times; in "shown" mode the key
+       parks first (a "parked ... at its key" line when the input monitor hears the posted
+       key, said either way).
     2. The same with App Exposé.
     3. A pick: while Mission Control shows, Alpha (another app, its one window hidden in a
        stage) is activated, as a click on its window there or on its Dock item activates it;
@@ -10151,6 +10177,7 @@ def phase_mission():
         text = log_text()[mark:]
         for what in ("mission-control: shown", f"mission-control: lent {n} windows", "mission-control: Mission Control lays out", "mission-control: closed", f"mission-control: put back {n} windows"):
             check(what in text, f"mission {label}: the log says \"{what}\"")
+        mission_timings(text, n, label)
         x = state()
         check(x.get("space") == space and x.get("active") == active and ctl("space").get("changes") == changes,
               f"mission {label}: the same stage in front, no Space change")
@@ -10201,6 +10228,77 @@ def phase_mission():
     all_onscreen("mission quit")
 
 
+def mission_desktop_key(direction):
+    """Types the Desktop switch shortcut (`ctl debug-space`, which answers only once the
+    change is handled: after Mission Control closes) on a thread of its own."""
+    import threading
+    t = threading.Thread(target=lambda: ctl("debug-space", direction), daemon=True)
+    t.start()
+    return t
+
+
+def phase_mission_desktop():
+    """A Desktop picked inside Mission Control, then Mission Control opened again before the
+    change is recognized (Spaces engine, `SM_ENGINE=spaces`; needs a second Desktop to the
+    right of the one shown, else skipped; not a default phase). Live 11-19 07:56: the next
+    Mission Control lent nothing, the model's shown Space still the old Desktop's.
+
+    Fixture 1 in front, Fixture 2 and 3 hidden on Desktop A. Mission Control; ⌃→ inside it
+    (Desktop B); Escape. Mission Control on B; ⌃← inside it (back to A); Escape and Mission
+    Control again at once (within 0.3 s of the close): Fixture 2 and 3 are put home, the log
+    says the window server's Desktop was taken; then everything goes back."""
+    say("\n== mission-desktop: a Desktop picked inside Mission Control, opened again at once (Spaces engine) ==")
+    if not SPACES:
+        skip("mission-desktop", "the Spaces engine's own; run with SM_ENGINE=spaces")
+        return
+    s, ids, titles = mission_setup("mission-desktop")
+    if not s:
+        stop_app()
+        return
+    hidden = [ids[k] for k in titles]
+    frames = {i: w["bounds"] for i, w in mission_listed().items()}
+    space = s.get("space")
+    opened = mission_open("mission-control", "mission-desktop on A")
+    if not opened:
+        stop_app()
+        return
+    mission_desktop_key("right")
+    time.sleep(0.8)
+    mission_close(opened[1], "mission-desktop on A")
+    moved = wait_until(lambda: (lambda v: v if v.get("space") != space and not v.get("settling") else None)(ctl("space")), 6, "Desktop B recognized")
+    if not moved:
+        skip("mission-desktop", "no Desktop to the right of the one shown (or ⌃→ inside Mission Control did not change it): add a Desktop and run again")
+        stop_app()
+        return
+    mark = len(log_text())
+    opened = mission_open("mission-control", "mission-desktop on B")
+    if not opened:
+        mission_desktop_key("left").join(8)
+        stop_app()
+        return
+    back = mission_desktop_key("left")
+    time.sleep(0.8)
+    ctl("debug-expose", "escape")
+    t_close = time.time()
+    wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in opened[1]], 3, "Mission Control to end")
+    closed_at = time.time()
+    again = mission_open("mission-control", "mission-desktop again on A")
+    say(f"    opened again {closed_at - t_close:.2f} s after Escape, {time.time() - closed_at:.2f} s after its cover went")
+    if again:
+        out = wait_until(lambda: (lambda st: st if len(st.get("out") or []) == len(hidden) else None)(mission_status()), 3, "Desktop A's hidden windows put home")
+        check(bool(out), f"mission-desktop: the hidden windows of the Desktop shown are put home before the change is recognized (out {mission_status().get('out')}, want {hidden})")
+        text = log_text()[mark:]
+        said = "the hidden windows of the Desktop the window server shows are put home" in text
+        say(f"    the window server's Desktop taken: {said} (False with the change recognized already: then the model's, as ever)")
+        mission_close(again[1], "mission-desktop again on A")
+    back.join(8)
+    mission_back(ids, titles, frames, "mission-desktop")
+    check(ctl("space").get("space") == space, "mission-desktop: back on Desktop A")
+    consistent("after mission-desktop")
+    stop_app()
+    all_onscreen("mission-desktop quit")
+
+
 def main():
     phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
@@ -10224,7 +10322,7 @@ def main():
              "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel,
-             "mission": phase_mission, "mission-probe": phase_mission_probe}[p]()
+             "mission": phase_mission, "mission-probe": phase_mission_probe, "mission-desktop": phase_mission_desktop}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
