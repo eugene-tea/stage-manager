@@ -124,6 +124,7 @@ use crate::engine::hidden_tab::Candidate;
 use crate::engine::leftovers;
 use crate::engine::minimize;
 use crate::engine::minimize_press::Minimizable;
+use crate::engine::mission_control::PickBy;
 use crate::engine::corner::park::{Corner, ParkRequest, choose_corner};
 use crate::engine::recovery::{self, Known};
 use crate::engine::corner::sliver;
@@ -2160,10 +2161,16 @@ impl Controller {
             let display = m.window(id).and_then(|s| m.displays().iter().find(|d| d.id == s.meta.display));
             // A window on no screen the model knows: counted hidden, its picture grows.
             let engine_hides = listed.is_some_and(|r| display.is_none_or(|d| engine.keeps_out_of_view(id, d, r)));
-            transition_plan::already_shown(g.window.frame, transition_plan::Sighting { listed, engine_hides })
+            let placed = self.upkeep_placed(id.0);
+            transition_plan::already_shown(g.window.frame, transition_plan::Sighting { listed, engine_hides, placed })
         });
         for (window, off) in &skipped.shown {
-            tracing::info!(id = t.id, window, off, reason = "on screen at its frame and not hidden by the engine", "transition: incoming window already shown: no grow-in");
+            let reason = if self.upkeep_placed(*window) {
+                "picked in Mission Control: set at its frame as it closed"
+            } else {
+                "on screen at its frame and not hidden by the engine"
+            };
+            tracing::info!(id = t.id, window, off, reason, "transition: incoming window already shown: no grow-in");
         }
         if !skipped.rest.is_empty() {
             let shown: Vec<u32> = skipped.shown.iter().map(|s| s.0).collect();
@@ -3046,6 +3053,11 @@ impl Controller {
                 {
                     return;
                 }
+                if let Some(pid) = pid
+                    && self.upkeep_pick(PickBy::Window(WindowId(id), pid), |m| m.window_focused(WindowId(id), &obs), Instant::now())
+                {
+                    return;
+                }
                 if let Some(m) = self.model.as_mut() {
                     let actions = m.window_focused(WindowId(id), &obs);
                     if !actions.is_empty() {
@@ -3194,6 +3206,11 @@ impl Controller {
         ob.note_frames(obs.frames.iter().map(|(id, f)| (id.0, *f)));
         if self.bring_here_if_shift(ob, pid, &obs, now) {
             self.forget_held(ob);
+            return;
+        }
+        // A window picked in Mission Control: its stage's windows take their frames as it
+        // closes, and the switch may wait for the close (round mc-pick).
+        if self.upkeep_pick(PickBy::App(pid), |m| m.app_activated(pid, &obs), Instant::now()) {
             return;
         }
         let since = ob.activated_at(pid);

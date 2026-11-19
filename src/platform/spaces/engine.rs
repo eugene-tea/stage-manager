@@ -2014,6 +2014,10 @@ impl WindowEngine for SpacesEngine {
         self.unpark_round_now(ids)
     }
 
+    fn frames_back(&self, ids: &[(WindowId, i32)]) -> Vec<WindowId> {
+        self.frames_back_now(ids)
+    }
+
     /// Also while a show owes the window its frame ([`State::frames`]): it came out of its
     /// Space away from it (a minimize's dive), so where it is listed is not its frame either.
     fn parked_lend(&self, id: WindowId) -> bool {

@@ -323,6 +323,15 @@ pub trait WindowEngine: Send + Sync {
         0
     }
 
+    /// Windows `ids` (with their apps), put home and parked by [`Self::home_round`], get
+    /// their own frames again on their Desktop, still lent, the apps at once: picked in
+    /// Mission Control, whose close carries them there (round mc-pick). Each move is read
+    /// back through its element, as the window list gives Mission Control's layout while it
+    /// shows. Those that took it.
+    fn frames_back(&self, _ids: &[(WindowId, i32)]) -> Vec<WindowId> {
+        Vec::new()
+    }
+
     /// True while window `id` is parked for a lend ([`Self::lend_home`] with a park) and its
     /// frame not set again: where it is listed is not its frame, so its move notices are not
     /// the model's (the platform drops them). The Corner engine: never.

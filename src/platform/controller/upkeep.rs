@@ -25,6 +25,8 @@ use super::{Controller, spaces};
 use super::corner::unrestored::LetGo;
 use crate::engine::corner::corner_patch::{Refused, SwitchCover};
 use crate::engine::geometry::{Point, Rect};
+use crate::engine::mission_control::PickBy;
+use crate::engine::model::{Action, Model};
 use crate::platform::corner::sliver_tap;
 use crate::platform::observe::Observer;
 use crate::platform::safety::ParkedEntry;
@@ -151,7 +153,7 @@ impl Controller {
     /// ([`Self::corner_fast_tick`]). The Spaces engine: Mission Control looked for after one
     /// of its keys, the hidden stages' windows put home for it and taken back
     /// ([`Self::mission_fast_tick`]).
-    pub(super) fn upkeep_fast_tick(&mut self, ob: &Observer, now: Instant) {
+    pub(super) fn upkeep_fast_tick(&mut self, ob: &mut Observer, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_fast_tick(now),
             EngineKind::Spaces => self.mission_fast_tick(ob, now),
@@ -166,6 +168,26 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Spaces => self.mission_key(ob, event, now),
             EngineKind::Corner | EngineKind::Apple => {}
+        }
+    }
+
+    /// A switch for app `by` is about to be made (an activation's or a focus's), `predict`
+    /// its model change on a copy of the model. The Spaces engine: a window picked in Mission
+    /// Control, its stage's windows put home set at their frames as it closes, the switch
+    /// waiting for the close ([`Self::mission_pick`]). True when the switch waits.
+    pub(super) fn upkeep_pick(&mut self, by: PickBy, predict: impl FnOnce(&mut Model) -> Vec<Action>, now: Instant) -> bool {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_pick(by, predict, now),
+            EngineKind::Corner | EngineKind::Apple => false,
+        }
+    }
+
+    /// True when window `id` was set at its frame ahead of its switch. The Spaces engine:
+    /// picked in Mission Control ([`Self::mission_placed`]).
+    pub(super) fn upkeep_placed(&self, id: u32) -> bool {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_placed(id),
+            EngineKind::Corner | EngineKind::Apple => false,
         }
     }
 

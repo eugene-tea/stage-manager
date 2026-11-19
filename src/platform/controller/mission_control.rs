@@ -21,6 +21,14 @@
 //!   one whose stage came in front (picked in Mission Control: macOS activates its app and
 //!   the activation's switch shows it), and for a moment those of the app in front.
 //!
+//! - **Picked** ([`Controller::mission_pick`], round mc-pick): macOS's activation of a
+//!   picked window's app (or its focus of the window, the app in front already) comes with
+//!   the release that closes Mission Control. The windows put home of the stage its switch
+//!   brings in get their own frames back at once (the close carries them there), and the
+//!   switch waits until Mission Control's own window is gone
+//!   ([`crate::engine::mission_control::Lends::pick_switch`]); then it plays the stage
+//!   left's shrink alone, the windows placed counting as shown at their frames.
+//!
 //! Every line in the log starts with `mission-control:`. The engine counts each window put
 //! home as lent and parked, so a hide, a show, a quit's sweep and the guardian bring it
 //! back whatever happens here.
@@ -30,10 +38,10 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Controller;
-use crate::engine::mission_control::{self as mc, Edge, Fate, Hint, Keys, Lends, Mode, Mods, Out, Settled, Shortcut};
-use crate::engine::model::WindowId;
+use crate::engine::mission_control::{self as mc, Edge, Fate, Hint, Keys, Lends, Mode, Mods, Out, PickBy, PickSwitch, Settled, Shortcut};
+use crate::engine::model::{Action, Model, WindowId};
 use crate::engine::phase::Hold;
-use crate::engine::overview::Overview;
+use crate::engine::overview::{self, Overview, Sighting};
 use crate::platform::input::{self, InputEvent};
 use crate::platform::observe::Observer;
 use crate::platform::space_keys::{Expose, SpaceKey};
@@ -122,19 +130,20 @@ impl Controller {
         self.spaces.mission.lends.wants_fast(now)
     }
 
-    /// The fast tick: a look for Mission Control while a hint's watch lasts, then whatever
-    /// is due.
-    pub(super) fn mission_fast_tick(&mut self, ob: &Observer, now: Instant) {
+    /// The fast tick: a look for Mission Control while a hint's watch lasts (or a pick's
+    /// switch waits for its close), then whatever is due.
+    pub(super) fn mission_fast_tick(&mut self, ob: &mut Observer, now: Instant) {
         if !self.spaces.mission.lends.wants_fast(now) {
             return;
         }
         let look = self.spaces.mission.lends.look_due(now);
         self.mission_step(ob, look, now);
+        self.mission_pick_due(ob, now);
     }
 
     /// The tick: a look for Mission Control (the window list the tick's other duties read),
     /// then whatever is due. With the mode off and nothing out, nothing is read.
-    pub(super) fn mission_tick(&mut self, ob: &Observer, now: Instant) {
+    pub(super) fn mission_tick(&mut self, ob: &mut Observer, now: Instant) {
         let mode = self.mission_mode();
         let idle = self.spaces.mission.lends.out().is_empty() && !self.spaces.mission.lends.up();
         if mode == Mode::Off && idle {
@@ -142,6 +151,111 @@ impl Controller {
             return;
         }
         self.mission_step(ob, true, now);
+        self.mission_pick_due(ob, now);
+    }
+
+    /// True when Mission Control's own window (WindowManager's, not the Dock's cover that
+    /// stays for its exit) is in `list`, over the main display `main`.
+    fn mission_own_listed(list: &[windows::CgWindow], main: crate::engine::geometry::Rect) -> bool {
+        let sightings = list.iter().map(|w| Sighting { owner: &w.owner, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen });
+        overview::overview_in(sightings, main).overview == Some(Overview::MissionControl)
+    }
+
+    /// A switch for `by` is about to be made (an activation's, or a focus's), `predict` its
+    /// model change: on a copy of the model, so that nothing changes when it waits. While
+    /// windows are out for Mission Control (it shows, or closed within
+    /// [`mc::PICK_WAIT`]), the stage it brings in may be one picked there: its windows out get
+    /// their own frames back now, still lent ([`mc::to_frames`]; Mission Control's close
+    /// carries them there), and the switch waits for Mission Control's own window to go
+    /// ([`Lends::pick_switch`]). True when it waits: the caller makes no switch now.
+    pub(super) fn mission_pick(&mut self, by: PickBy, predict: impl FnOnce(&mut Model) -> Vec<Action>, now: Instant) -> bool {
+        if let Some(held) = self.spaces.mission.lends.pick_held()
+            && held.pid() != by.pid()
+        {
+            // Another app activated meanwhile: the pick's switch never plays; its windows go
+            // back with the others once Mission Control has closed.
+            self.spaces.mission.lends.drop_pick();
+            tracing::info!(held = held.pid(), now = by.pid(), "mission-control: another app comes in front before the picked stage's switch: it is dropped");
+        }
+        if !self.spaces.mission.lends.pick_open(now) {
+            return false;
+        }
+        let Some(mut copy) = self.model.clone() else { return false };
+        let arriving: Vec<WindowId> = predict(&mut copy)
+            .into_iter()
+            .filter_map(|a| match a {
+                Action::SetFrame { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        let lends = &self.spaces.mission.lends;
+        let new = mc::to_frames(lends.out(), lends.placed_ids(), &arriving);
+        let placed_before = arriving.iter().any(|id| lends.is_placed(*id));
+        if new.is_empty() && !placed_before {
+            return false;
+        }
+        let up = lends.up();
+        let since_close_ms = lends.closing(now).map(ms);
+        if !new.is_empty() {
+            let started = Instant::now();
+            let asked: Vec<(WindowId, i32)> = new.iter().map(|o| (o.id, o.pid)).collect();
+            let set = self.engine.frames_back(&asked);
+            tracing::info!(
+                pid = by.pid(),
+                ?by,
+                asked = ?asked.iter().map(|(w, _)| w.0).collect::<Vec<_>>(),
+                set = ?set.iter().map(|w| w.0).collect::<Vec<_>>(),
+                up,
+                since_close_ms,
+                ms = ms(started.elapsed()),
+                "mission-control: picked: the stage's windows out take their own frames now, Mission Control's close carries them there"
+            );
+            self.spaces.mission.lends.placed(set);
+        }
+        if !arriving.iter().any(|id| self.spaces.mission.lends.is_placed(*id)) {
+            // None took its frame: the switch brings them as ever.
+            return false;
+        }
+        let own = up && self.model.as_ref().is_some_and(|m| Self::mission_own_listed(&windows::on_screen(), m.main_display().frame));
+        self.spaces.mission.lends.saw_own(own);
+        match self.spaces.mission.lends.pick_switch(by, now) {
+            PickSwitch::AfterClose => {
+                tracing::info!(pid = by.pid(), hold_ms = ms(mc::PICK_HOLD), "mission-control: the picked stage's switch waits for Mission Control's close: the stage left reaches its frames first");
+                true
+            }
+            PickSwitch::Now => false,
+        }
+    }
+
+    /// The picked stage's switch, once Mission Control's own window is gone (or its wait is
+    /// over), when its app is still in front ([`Lends::pick_due`]); otherwise none, and its
+    /// windows go back as any other.
+    fn mission_pick_due(&mut self, ob: &mut Observer, now: Instant) {
+        let Some(by) = self.spaces.mission.lends.pick_due(now) else { return };
+        let front = apps::frontmost_pid();
+        if front != Some(by.pid()) {
+            tracing::info!(pid = by.pid(), ?front, "mission-control: the picked app is no longer in front: no switch for the pick");
+            return;
+        }
+        tracing::info!(?by, up = self.spaces.mission.lends.up(), "mission-control: Mission Control's own window is gone: the picked stage's switch");
+        match by {
+            PickBy::App(pid) => self.decide_activation(ob, pid, now, false),
+            PickBy::Window(id, pid) => {
+                let list = windows::list_windows();
+                let obs = self.observe_with(ob, &list);
+                if let Some(m) = self.model.as_mut() {
+                    let actions = m.window_focused(id, &obs);
+                    self.activation = self.activation_for(pid, &actions, ob);
+                    self.execute_animated(ob, actions);
+                }
+            }
+        }
+    }
+
+    /// True when window `id` is out at its own frame for a pick: its switch plays no motion
+    /// for it ([`crate::ui::transition_plan::Shown::Placed`]).
+    pub(super) fn mission_placed(&self, id: u32) -> bool {
+        self.spaces.mission.lends.is_placed(WindowId(id))
     }
 
     /// True when hidden windows may be put home now: not while a Space change settles, the
@@ -204,6 +318,7 @@ impl Controller {
         if look && !self.locked {
             let list = windows::wake_on_screen();
             self.look_for_overview(&list, main.frame, now);
+            self.spaces.mission.lends.saw_own(Self::mission_own_listed(&list, main.frame));
         }
         let showing = self.overview.showing() == Some(Overview::MissionControl);
         match self.spaces.mission.lends.saw(showing, now) {

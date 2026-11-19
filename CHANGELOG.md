@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, a window picked in Mission Control comes to its place in one
+  motion.
 - With `engine = "spaces"`, Mission Control shows the hidden stages' windows at once instead
   of one by one.
 - With `engine = "spaces"`, Mission Control opened again right after picking another Desktop

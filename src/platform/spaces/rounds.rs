@@ -75,6 +75,38 @@ fn restore_apps(apps: &[(i32, Vec<Unpark>)]) -> Vec<(u32, bool)> {
         .collect()
 }
 
+/// How long a pick's move waits for the window's element to report its frame
+/// ([`AxMover`]).
+const PICK_READ_BACK: Duration = Duration::from_millis(60);
+
+/// The pause between two reads of a pick's move.
+const PICK_READ_STEP: Duration = Duration::from_millis(5);
+
+/// A window's moves through its element, read back there too (Accessibility): while Mission
+/// Control shows or closes, the window list gives where its layout draws the window, never
+/// its frame (round mc-pick).
+struct AxMover<'a> {
+    element: &'a AxElement,
+}
+
+impl lend_park::Moves for AxMover<'_> {
+    fn listed(&mut self) -> Option<Rect> {
+        self.element.bounded(PARK_AX_SECONDS, |e| e.frame()).ok()
+    }
+
+    fn move_to(&mut self, to: Rect) -> Option<Rect> {
+        self.element.bounded(PARK_AX_SECONDS, |e| e.set_position(to.origin())).ok()?;
+        let by = Instant::now() + PICK_READ_BACK;
+        loop {
+            let now = self.listed();
+            if now.is_some_and(|r| lend_park::at_origin(r, to)) || Instant::now() >= by {
+                return now;
+            }
+            std::thread::sleep(PICK_READ_STEP);
+        }
+    }
+}
+
 /// The second phase's calls ([`HomeSteps`]).
 struct HomeMac<'a> {
     engine: &'a SpacesEngine,
@@ -312,6 +344,34 @@ impl SpacesEngine {
             }
         }
         out
+    }
+
+    /// [`crate::platform::window_engine::WindowEngine::frames_back`]: the parks of windows
+    /// lent (put home) undone through their elements, the apps at once; a window that took it
+    /// is parked no more (its move notices are the model's again), and stays lent.
+    pub(super) fn frames_back_now(&self, ids: &[(WindowId, i32)]) -> Vec<WindowId> {
+        let parked: Vec<(i32, Unpark)> = {
+            let st = self.state();
+            ids.iter()
+                .filter(|(id, _)| st.lent.contains(&id.0))
+                .filter_map(|(id, pid)| st.parked.get(&id.0).map(|p| (*pid, (id.0, p.park, p.element.clone()))))
+                .collect()
+        };
+        let apps = lend_round::by_app(parked);
+        let answers = per_app(&apps, |ws| ws.iter().map(|(id, p, e)| (*id, lend_park::restore(&mut AxMover { element: e }, *p))).collect::<Vec<_>>());
+        let mut st = self.state();
+        let mut set = Vec::new();
+        for ((_, ws), answer) in apps.iter().zip(answers) {
+            for (id, ok) in answer.unwrap_or_else(|| ws.iter().map(|(id, _, _)| (*id, false)).collect()) {
+                if !ok {
+                    tracing::info!(id, "spaces engine: a picked window did not take its frame back: it comes with its switch");
+                } else if st.lent.contains(&id) {
+                    st.parked.remove(&id);
+                    set.push(WindowId(id));
+                }
+            }
+        }
+        set
     }
 
     /// [`crate::platform::window_engine::WindowEngine::unpark_round`].

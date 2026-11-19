@@ -74,6 +74,8 @@ COVERS = ["com.apple.WindowManager", "com.apple.dock"]
 MOVE_TOL = 1.0          # points: a change in the list smaller than this is no move
 FRAME_TOL = 2.0         # points: the same frame
 MOTION_GAP_MS = 150     # changes further apart than this are two motions
+PICK_AT_MS = 650        # mission-pick-ours: the window picked at its own frame by then (Apple's: 502 ms)
+LEFT_GONE_MS = 1100     # mission-pick-ours: the stage left gone into the strip by then (Apple's: 602 ms)
 EXPOSE_SETTLE = 1.2     # Mission Control's opening animation, with room
 SCREEN_SETTLE = 6.0     # a screen added or removed: macOS's and Apple's moves, with room
 SAMPLE_MS = 1800        # a pick's sampling: from 0.1 s before the pick to past 1.5 s after
@@ -235,6 +237,26 @@ def report_path(name, changes, own=None, closed_ms=None, waypoints=6):
     if closed_ms is not None:
         after = [m for m in ms if m[1] > closed_ms + 20]
         say(f"      after Mission Control closed ({closed_ms} ms): " + (", ".join(f"{max(s, closed_ms)}-{e} ms to {fmt(to)}" for s, e, _, to, _ in after) if after else "still"))
+
+
+def pick_verdict(label, samples, t0, pick, others, own, closed_ms, names):
+    """mission-pick-ours' pass/fail line (round mc-pick): the window picked reaches its own
+    frame by PICK_AT_MS in one motion, with no motion after Mission Control closed; the stage
+    left is gone from the screen (into its stage Space, the strip's card) by LEFT_GONE_MS."""
+    path = path_of(samples, pick, t0)
+    ms = motions(path)
+    at = reached(path, own.get(pick)) if own.get(pick) else None
+    after = [m for m in ms if closed_ms is not None and m[1] > closed_ms + 20]
+    gone = {}
+    for i in others:
+        p = path_of(samples, i, t0)
+        gone[i] = p[-1][0] if p and p[-1][1] is None else None
+    left_ok = all(g is not None and g <= LEFT_GONE_MS for g in gone.values())
+    check(at is not None and at <= PICK_AT_MS and len(ms) == 1 and not after,
+          f"{label}: {names[pick]} at its own frame at {at} ms (by {PICK_AT_MS}), in {len(ms)} motion(s), "
+          f"{len(after)} after Mission Control closed ({closed_ms} ms)")
+    check(left_ok, f"{label}: the stage left gone into the strip: "
+          + ", ".join(f"{names.get(i, i)} at {g} ms" for i, g in gone.items()) + f" (by {LEFT_GONE_MS})")
 
 
 def cover_times(samples, display, t0):
@@ -572,6 +594,8 @@ def mission_round(label, s, pick, others, own, snap, names):
     say(f"  paths (ms after the pick; 'own frame' = where the window was when its stage was in front):")
     for i in ids:
         report_path(names[i], path_of(samples, i, t0), own.get(i), closed)
+    if label == "mission-pick-ours":
+        pick_verdict(label, samples, t0, pick, others, own, closed, names)
     say("  the mirror (front; strip) at each change, ms after the pick:")
     for t, v in seen:
         say(f"    {round((t - t0) * 1000)} ms: {v}")

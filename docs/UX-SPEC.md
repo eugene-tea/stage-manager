@@ -420,9 +420,10 @@ Desktop it was hidden from, and nothing else moves until the change is recognize
 A window picked in Apple's grows from its Mission Control place to its own frame in one
 motion, done within about 0.5 s, while the stage it leaves shrinks straight into the strip;
 nothing moves after Mission Control closes (`scripts/probe_apple.py mission-pick`, 11-19).
-Under `engine = "spaces"` the picked window is carried to the screen's corner by the close
-and shows at its frame 1.4 s after the pick, the stage left back at its frames until 0.8 s
-(`mission-pick-ours`): a known gap.
+Under `engine = "spaces"` the picked stage's windows take their frames back when macOS
+activates the app (with the release, about 150 ms after the press), so the close carries
+them there in one motion; its switch waits until Mission Control's own window is gone (1 s at
+most) and plays only the stage left's shrink into its card (`mission-pick-ours`).
 When it closes they go back into their stage Spaces together and their frames are set again; a window picked there is activated by macOS and the activation's
 switch brings its stage in front, so it and, for 1.5 s, the windows of the app in front are
 left to that switch. `[windows] mission_control_stages`: `"shown"` (the default) lends once

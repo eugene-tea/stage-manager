@@ -61,6 +61,22 @@
 //! shows now ([`hidden_on`]). Nothing else moves while the change waits; with the screen
 //! locked or a full-screen Space nothing is lent.
 //!
+//! **A window picked** ([`to_frames`], [`Lends::pick_switch`], round mc-pick). Apple's grows
+//! the window picked from its place in Mission Control to its own frame as Mission Control
+//! closes, in one motion, while the stage it leaves shrinks into the strip (11-19). Ours was
+//! carried to the park corner by the close, and came to its frame a second later, behind its
+//! switch's pictures. macOS's activation of the picked window's app is the signal: it comes
+//! about 150 ms after the press, with the release that starts the close (the input monitor
+//! does not always see a press inside Mission Control: four picks of 11-19 came with none).
+//! At that activation the stage it brings in front is known (a copy of the model is asked),
+//! and the windows of it that are out get their own frames back at once: Mission Control's
+//! close carries them there. They stay lent until the switch shows them. The switch itself
+//! waits until Mission Control's own window is gone ([`PICK_HOLD`] at most), so the stage
+//! left reaches its frames first; then it plays the stage left's shrink into its card, and
+//! nothing for the windows already at their frames
+//! ([`crate::ui::transition_plan::Shown::Placed`]). Should no switch come (another app in front by then), the windows
+//! placed go back into their stage Spaces like any other, at their frames, unseen.
+//!
 //! **Never left out.** The engine counts every window put home as lent and parked: a hide,
 //! a show, a sweep (quit, a stand-down, a fallback) and the guardian's scan of the park
 //! corner bring each back as they do ⌘Tab's ([`super::lend_park`]). [`Lends`] only decides
@@ -99,6 +115,11 @@ pub const KEY_WAIT: Duration = Duration::from_millis(1500);
 /// taken back first, the app's focus on a window off every Desktop could take macOS to
 /// another Desktop ([`super::spaces::macos_counts_hidden`]).
 pub const PICK_WAIT: Duration = Duration::from_millis(1500);
+
+/// How long a picked stage's switch waits at most for Mission Control's own window to go
+/// ([`Lends::pick_due`]): Apple's was gone 0.53 s after a pick, its Dock's cover 0.81 s
+/// (`scripts/probe_apple.py mission-pick`, 11-19).
+pub const PICK_HOLD: Duration = Duration::from_millis(1000);
 
 /// How long after the lend (and after Mission Control showed) the window list is read for
 /// what Mission Control did with the windows put home ([`laid_out`]): its layout animates
@@ -415,6 +436,42 @@ pub fn fate(shown: bool, front_app: bool, since_close: Duration) -> Fate {
     }
 }
 
+/// What asked for a picked stage's switch: macOS's activation of its app, or its focus of
+/// one of its windows (the app in front already).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickBy {
+    /// The app's activation.
+    App(Pid),
+    /// A window's focus, with its app.
+    Window(WindowId, Pid),
+}
+
+impl PickBy {
+    /// The app picked.
+    pub fn pid(self) -> Pid {
+        match self {
+            Self::App(pid) | Self::Window(_, pid) => pid,
+        }
+    }
+}
+
+/// The windows put home (`out`) that a switch bringing in `arriving` (the windows its batch
+/// shows) puts at their own frames now, while Mission Control closes: those out and not
+/// `placed` already. A switch that brings in no window put home (the stage in front's app
+/// activated, a stage never lent) gets none.
+pub fn to_frames(out: &[Out], placed: &[WindowId], arriving: &[WindowId]) -> Vec<Out> {
+    out.iter().filter(|o| arriving.contains(&o.id) && !placed.contains(&o.id)).copied().collect()
+}
+
+/// When a picked stage's switch plays ([`Lends::pick_switch`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickSwitch {
+    /// At once: Mission Control is gone, or the switch waited for it already.
+    Now,
+    /// Once Mission Control's own window is gone ([`Lends::pick_due`]).
+    AfterClose,
+}
+
 /// How a window put home left the list ([`Lends::settle`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
@@ -523,6 +580,16 @@ pub struct Lends {
     back: usize,
     picked: Vec<WindowId>,
     missed: Vec<WindowId>,
+    /// Windows out whose own frames were set again for a pick ([`to_frames`]): still lent,
+    /// until their switch shows them.
+    placed: Vec<WindowId>,
+    /// A picked stage's switch waiting for Mission Control's close, and since when.
+    pick: Option<(PickBy, Instant)>,
+    /// The pick whose wait is over: its switch plays now, it waits no more.
+    released: Option<PickBy>,
+    /// Mission Control's own window (WindowManager's) was listed at the last look; the
+    /// Dock's cover may stay listed a while after it for the exit.
+    own_listed: bool,
 }
 
 impl Lends {
@@ -575,7 +642,9 @@ impl Lends {
     /// tick; the look is then counted made).
     pub fn look_due(&mut self, now: Instant) -> bool {
         let watching = self.hint.is_some_and(|(h, t)| now.saturating_duration_since(t) < h.watch()) || self.guess.is_some();
-        if !watching || self.up.is_some() || self.looked.is_some_and(|t| now.saturating_duration_since(t) < WATCH_EVERY) {
+        // A pick's switch waits for the close: looked for at the fast tick while it shows.
+        let opening = watching && self.up.is_none();
+        if !(opening || self.pick.is_some()) || self.looked.is_some_and(|t| now.saturating_duration_since(t) < WATCH_EVERY) {
             return false;
         }
         self.looked = Some(now);
@@ -592,6 +661,9 @@ impl Lends {
                 self.guess = None;
                 let hint = self.hint.take().map(|(h, t)| (h, now.saturating_duration_since(t))).filter(|(_, d)| *d < HINT_COUNTS);
                 self.early_at = None;
+                // Opened again before a pick's switch played: it waits no more.
+                self.pick = None;
+                self.released = None;
                 if self.mode != Mode::Off {
                     // Windows still out from the last one stay out for this one.
                     self.closed = None;
@@ -803,6 +875,7 @@ impl Lends {
     pub fn settle(&mut self, id: WindowId, how: Settled) {
         let before = self.out.len();
         self.out.retain(|o| o.id != id);
+        self.placed.retain(|p| *p != id);
         if self.out.len() == before {
             return;
         }
@@ -831,6 +904,78 @@ impl Lends {
         self.up.is_some()
     }
 
+    /// True when a switch at `now` may be a pick in Mission Control: windows are out, and
+    /// it shows or closed less than [`PICK_WAIT`] ago.
+    pub fn pick_open(&self, now: Instant) -> bool {
+        !self.out.is_empty() && (self.up.is_some() || self.closed.is_some_and(|t| now.saturating_duration_since(t) < PICK_WAIT))
+    }
+
+    /// Windows out whose own frames were set again for a pick ([`to_frames`]).
+    pub fn placed(&mut self, ids: impl IntoIterator<Item = WindowId>) {
+        for id in ids {
+            if self.out.iter().any(|o| o.id == id) && !self.placed.contains(&id) {
+                self.placed.push(id);
+            }
+        }
+    }
+
+    /// The windows out at their own frames for a pick.
+    pub fn placed_ids(&self) -> &[WindowId] {
+        &self.placed
+    }
+
+    /// True when window `id` is out at its own frame for a pick: its switch plays no motion
+    /// for it.
+    pub fn is_placed(&self, id: WindowId) -> bool {
+        self.placed.contains(&id)
+    }
+
+    /// What Mission Control's own window (WindowManager's) did at a look: `listed` or not.
+    pub fn saw_own(&mut self, listed: bool) {
+        self.own_listed = listed;
+    }
+
+    /// When the switch of a pick (`by`) at `now` plays: after Mission Control's close while
+    /// its own window is listed (the pick is then held, [`Self::pick_due`]), else now. A pick
+    /// of the app whose wait is over plays now; one of the app held already stays as held.
+    pub fn pick_switch(&mut self, by: PickBy, now: Instant) -> PickSwitch {
+        if self.released.is_some_and(|r| r.pid() == by.pid()) || self.up.is_none() || !self.own_listed {
+            self.released = None;
+            self.pick = None;
+            return PickSwitch::Now;
+        }
+        // The same app's focus after its activation (or again) keeps the pick held as it was.
+        if self.pick.is_none_or(|(held, _)| held.pid() != by.pid()) {
+            self.pick = Some((by, now));
+        }
+        PickSwitch::AfterClose
+    }
+
+    /// The pick held for Mission Control's close.
+    pub fn pick_held(&self) -> Option<PickBy> {
+        self.pick.map(|(by, _)| by)
+    }
+
+    /// A held pick waits no more (another app was activated): its switch never plays; its
+    /// windows go back as any other once Mission Control has closed.
+    pub fn drop_pick(&mut self) -> Option<PickBy> {
+        self.released = None;
+        self.pick.take().map(|(by, _)| by)
+    }
+
+    /// The held pick whose switch plays now, once: Mission Control closed, its own window
+    /// gone (the Dock's cover may still be listed for its exit), or [`PICK_HOLD`] over.
+    pub fn pick_due(&mut self, now: Instant) -> Option<PickBy> {
+        let (by, at) = self.pick?;
+        let due = self.up.is_none() || !self.own_listed || now.saturating_duration_since(at) >= PICK_HOLD;
+        if !due {
+            return None;
+        }
+        self.pick = None;
+        self.released = Some(by);
+        Some(by)
+    }
+
     /// True while there is work for the fast tick at `now`: a watch, a round under way, the
     /// layout to read, windows going back. A round wanted that cannot be planned yet (a
     /// switch plays, the button is down) is tried again at the tick.
@@ -838,7 +983,7 @@ impl Lends {
         let watching = self.up.is_none() && self.hint.is_some_and(|(h, t)| now.saturating_duration_since(t) < h.watch());
         let measuring = self.up.is_some() && !self.measured && !self.out.is_empty() && self.round.is_some_and(|r| r.done.is_some());
         let early = !self.early.is_empty() && self.up.is_none();
-        watching || self.guess.is_some() || !self.queue.is_empty() || measuring || early || self.closing(now).is_some()
+        watching || self.guess.is_some() || !self.queue.is_empty() || measuring || early || self.pick.is_some() || self.closing(now).is_some()
     }
 }
 
@@ -1178,6 +1323,109 @@ mod tests {
         assert_eq!(l.wanted(), Some(By::Shown), "and what hid meanwhile is put home too");
         l.plan(vec![w(1), w(2)], t + ms(1030));
         assert_eq!(l.next_window(), Some(w(2)), "the one out already is not lent twice");
+    }
+
+    /// Out: 1 and 2 of the stage picked (app 10), 3 of another (app 30).
+    fn three_out(t: Instant) -> Lends {
+        let mut l = Lends::default();
+        l.saw(true, t);
+        l.plan(vec![w(1), w(2), w(3)], t);
+        l.take_queue();
+        for (id, pid) in [(1, 10), (2, 10), (3, 30)] {
+            l.lent(Out { id: w(id), pid, parked: Some(Rect::new(2558.0, 1407.0, 520.0, 424.0)) });
+        }
+        l.round_done(t + ms(30));
+        l
+    }
+
+    /// Round mc-pick: the windows put home that the activation's switch brings in go to their
+    /// frames; none for a switch that brings in no window put home.
+    #[test]
+    fn the_switchs_arrivals_that_are_out_go_to_their_frames() {
+        let l = three_out(Instant::now());
+        let ids = |v: Vec<Out>| v.iter().map(|o| o.id).collect::<Vec<_>>();
+        assert_eq!(ids(to_frames(l.out(), &[], &[w(1), w(2), w(7)])), vec![w(1), w(2)], "the stage picked: its windows out, not one never lent");
+        assert_eq!(ids(to_frames(l.out(), &[w(1)], &[w(1), w(2)])), vec![w(2)], "one placed already is not set again");
+        assert!(to_frames(l.out(), &[], &[w(7)]).is_empty(), "a stage never lent (the app in front's)");
+        assert!(to_frames(l.out(), &[], &[]).is_empty(), "no switch");
+    }
+
+    /// The pick: its windows placed while Mission Control closes; its switch held until
+    /// Mission Control's own window is gone, then played once, and not held again; the
+    /// windows placed wait for it at the close (the app picked is in front) and are left to
+    /// it once their stage is in front.
+    #[test]
+    fn a_picks_switch_waits_for_mission_controls_own_window_to_go() {
+        let t = Instant::now();
+        let mut l = three_out(t);
+        let pick = t + ms(1000);
+        assert!(l.pick_open(pick), "it shows: a switch now may be its pick");
+        l.placed([w(1), w(2), w(9)]);
+        assert_eq!(l.placed_ids(), &[w(1), w(2)], "only windows out");
+        assert!(l.is_placed(w(1)) && !l.is_placed(w(3)));
+        l.saw_own(true);
+        let by = PickBy::App(10);
+        assert_eq!(l.pick_switch(by, pick), PickSwitch::AfterClose, "the stage left reaches its frames first");
+        assert_eq!(l.pick_held(), Some(by));
+        assert!(l.wants_fast(pick + ms(10)) && l.look_due(pick + ms(10)), "its close looked for at the fast tick");
+        assert!(!l.look_due(pick + ms(20)), "not more often than the watch's pause");
+        assert_eq!(l.pick_switch(by, pick + ms(50)), PickSwitch::AfterClose, "a second activation of the same app: still held");
+        assert_eq!(l.pick_switch(PickBy::Window(w(1), 10), pick + ms(60)), PickSwitch::AfterClose, "its window's focus");
+        assert_eq!(l.pick_held(), Some(by), "held as it was, its wait not started again");
+        assert_eq!(l.pick_due(pick + ms(300)), None, "its own window still listed");
+        // Its own window gone, the Dock's cover still listed: the switch plays.
+        l.saw_own(false);
+        assert_eq!(l.pick_due(pick + ms(530)), Some(by));
+        assert_eq!(l.pick_due(pick + ms(540)), None, "once");
+        assert_eq!(l.pick_switch(by, pick + ms(540)), PickSwitch::Now, "its wait over: not held again");
+        assert_eq!(l.pick_held(), None);
+        // Closed: the windows placed wait for their switch (their app in front), the rest go back.
+        assert!(l.saw(false, pick + ms(800)).is_some());
+        assert_eq!(fate(false, true, ms(5)), Fate::Wait, "placed, the switch not shown yet");
+        l.settle(w(3), Settled::Back);
+        l.settle(w(1), Settled::Picked);
+        l.settle(w(2), Settled::Picked);
+        assert!(l.placed_ids().is_empty(), "left to the switch: placed no more");
+        let back = l.back_done(pick + ms(900)).expect("the summary");
+        assert_eq!((back.back, back.picked), (1, vec![w(1), w(2)]));
+        assert!(!l.pick_open(pick + ms(900)), "nothing out");
+    }
+
+    #[test]
+    fn a_pick_plays_at_once_once_mission_control_is_gone_or_its_wait_is_over() {
+        let t = Instant::now();
+        // Mission Control's own window gone already at the activation: no wait.
+        let mut l = three_out(t);
+        l.saw_own(false);
+        assert_eq!(l.pick_switch(PickBy::App(10), t + ms(100)), PickSwitch::Now);
+        // Closed (the activation after the close, within the pick's wait): no wait.
+        let mut l = three_out(t);
+        l.saw_own(true);
+        assert!(l.saw(false, t + ms(200)).is_some());
+        assert!(l.pick_open(t + ms(300)));
+        assert_eq!(l.pick_switch(PickBy::Window(w(1), 10), t + ms(300)), PickSwitch::Now);
+        assert!(!l.pick_open(t + ms(200) + PICK_WAIT), "long closed: no pick any more");
+        // Its own window never seen gone: the switch plays after the hold all the same.
+        let mut l = three_out(t);
+        l.saw_own(true);
+        assert_eq!(l.pick_switch(PickBy::App(10), t), PickSwitch::AfterClose);
+        assert_eq!(l.pick_due(t + PICK_HOLD - ms(1)), None);
+        assert_eq!(l.pick_due(t + PICK_HOLD), Some(PickBy::App(10)));
+        // Another app activated meanwhile: the pick dropped, nothing plays for it.
+        let mut l = three_out(t);
+        l.saw_own(true);
+        assert_eq!(l.pick_switch(PickBy::App(10), t), PickSwitch::AfterClose);
+        assert_eq!(l.drop_pick(), Some(PickBy::App(10)));
+        assert!(l.saw(false, t + ms(500)).is_some());
+        assert_eq!(l.pick_due(t + ms(500)), None);
+        // Opened again before it played: dropped.
+        let mut l = three_out(t);
+        l.saw_own(true);
+        l.pick_switch(PickBy::App(10), t);
+        l.saw(false, t + ms(100));
+        l.saw(true, t + ms(120));
+        assert_eq!(l.pick_held(), None);
+        assert_eq!(PickBy::Window(w(4), 30).pid(), 30);
     }
 
     #[test]
