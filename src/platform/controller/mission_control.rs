@@ -323,12 +323,13 @@ impl Controller {
     /// True when the activation (or focus) `by` at `now` is no pick: Mission Control closed by
     /// its key, no click since ([`mission_close::verdict`]). Then nothing switches, the
     /// windows put home go back with the others (its app's do not wait for a switch), and
-    /// the stage in front's key window is focused again once Mission Control is gone. The
-    /// app of that key window itself is never refused: its focus is the one given back.
+    /// the stage in front's key window is focused again once Mission Control is gone. That
+    /// key window's focus, and its app's activation, are never refused: they are the focus
+    /// given back ([`gives_focus_back`]); another window of its app focused is judged.
     fn mission_no_pick(&mut self, by: PickBy, now: Instant) -> bool {
         let pid = by.pid();
         let front_key = self.mission_front_key();
-        if front_key.is_some_and(|(_, p)| p == pid) {
+        if gives_focus_back(by, front_key) {
             return false;
         }
         let own_front = self.model.as_ref().is_some_and(|m| {
@@ -362,7 +363,8 @@ impl Controller {
     }
 
     /// The stage in front's key window focused again after a close by key, once Mission
-    /// Control is gone (or [`mc::PICK_HOLD`] has passed), when another app is in front.
+    /// Control is gone (or [`mc::PICK_HOLD`] has passed), when another app or another window
+    /// has the focus (one of its app's put home, focused under the pointer).
     fn mission_refocus_due(&mut self, ob: &Observer, now: Instant) {
         let Some(since) = self.spaces.mission.refocus else { return };
         if self.spaces.mission.lends.up() && now.saturating_duration_since(since) < mc::PICK_HOLD {
@@ -371,8 +373,8 @@ impl Controller {
         self.spaces.mission.refocus = None;
         let Some((key, pid)) = self.mission_front_key() else { return };
         let front = apps::frontmost_pid();
-        if front == Some(pid) {
-            tracing::debug!(window = key.0, "mission-control: after a close by key the stage in front's app is in front already");
+        if front == Some(pid) && super::focused_window() == Some(key.0) {
+            tracing::debug!(window = key.0, "mission-control: after a close by key the stage in front's key window has the focus already");
             return;
         }
         tracing::info!(window = key.0, pid, ?front, waited_ms = ms(now.saturating_duration_since(since)), "mission-control: after a close by key the stage in front's key window is focused again");
@@ -848,10 +850,31 @@ impl Controller {
     }
 }
 
+/// True when `by` is the focus a close by key gives back: the activation of the app of the
+/// stage in front's key window (`front_key`, with its app), or that window's own focus. Another
+/// window of that app focused (one put home under the pointer) is not.
+fn gives_focus_back(by: PickBy, front_key: Option<(WindowId, i32)>) -> bool {
+    match (by, front_key) {
+        (PickBy::App(pid), Some((_, front))) => pid == front,
+        (PickBy::Window(id, _), Some((key, _))) => id == key,
+        (_, None) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::platform::space_keys::DEFAULT_MODIFIERS;
+
+    #[test]
+    fn only_the_front_stages_own_focus_is_never_judged() {
+        let front = Some((WindowId(5), 70));
+        assert!(gives_focus_back(PickBy::App(70), front), "the front app's activation: the focus given back");
+        assert!(gives_focus_back(PickBy::Window(WindowId(5), 70), front), "its key window's focus");
+        assert!(!gives_focus_back(PickBy::Window(WindowId(6), 70), front), "another window of its app, put home under the pointer");
+        assert!(!gives_focus_back(PickBy::App(71), front), "another app");
+        assert!(!gives_focus_back(PickBy::App(70), None), "no stage in front");
+    }
 
     #[test]
     fn a_shortcut_of_the_settings_keeps_its_key_and_modifiers() {
