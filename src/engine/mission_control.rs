@@ -43,7 +43,9 @@
 //! through its app, the apps at once, all within [`ROUND_WAIT`]: a window whose turn comes
 //! later waits for the next fast tick's round), then puts all those parked home in one
 //! window-server call per Desktop. A window whose park does not take is not put home (it
-//! would show at its frame), and stays hidden.
+//! would show at its frame), and stays hidden; while Mission Control shows it is tried again
+//! [`RETRY_AFTER`] later, up to [`PARK_TRIES`] parks in all ([`retry`]: 10 of 50 opens,
+//! 11-18 to 11-20, left one to five windows out, never with a word of why).
 //!
 //! **Parks at the key.** In [`Mode::Shown`] one of the keys starts the parks at once
 //! ([`By::KeyPark`]): the windows stay in their stage Spaces, so nothing shows, and they go
@@ -86,6 +88,7 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use super::geometry::Rect;
+use super::lend_round::Left;
 use super::model::{Model, Pid, WindowId, WindowRole};
 
 /// How long the looks for Mission Control come at the fast tick after one of its keys.
@@ -105,6 +108,15 @@ pub const HINT_COUNTS: Duration = Duration::from_millis(2000);
 /// windows are asked in turn while it lasts (parks took 5 to 20 ms a window, 11-15 to 11-19),
 /// the apps at once; a window whose turn comes later waits for the next fast tick's round.
 pub const ROUND_WAIT: Duration = Duration::from_millis(150);
+
+/// How many parks a hidden window gets in all while one Mission Control shows: one that did
+/// not take (or a window the window server did not take home) is tried again ([`retry`]).
+pub const PARK_TRIES: u8 = 3;
+
+/// The pause before a window left hidden by a round is tried again: a window in a stage Space
+/// can be listed at its new place later than a frame (a take back's restore, 11-15), and a
+/// park's read back waits 20 ms.
+pub const RETRY_AFTER: Duration = Duration::from_millis(60);
 
 /// Windows put home at a key ([`Mode::Key`]) go back when no Mission Control shows this long
 /// after it (the shortcut was another app's, or macOS did not open it).
@@ -412,6 +424,16 @@ pub struct Out {
     pub parked: Option<Rect>,
 }
 
+/// True when a hidden window a round left hidden (`why`), `misses` times now while this
+/// Mission Control shows (`showing`), is tried again: a park that did not take, or a window
+/// the window server did not take home, up to [`PARK_TRIES`] parks in all. A window the
+/// engine does not hold, one lent or in a switch, and one with no park made are not: nothing
+/// a later round does changes that. Never at its frame: a retry is a park again, and only a
+/// park that takes goes home.
+pub fn retry(why: Left, misses: u8, showing: bool) -> bool {
+    showing && misses < PARK_TRIES && matches!(why, Left::ParkMissed { .. } | Left::NotHome)
+}
+
 /// What becomes of a window put home once Mission Control has closed ([`fate`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fate {
@@ -590,6 +612,12 @@ pub struct Lends {
     /// Mission Control's own window (WindowManager's) was listed at the last look; the
     /// Dock's cover may stay listed a while after it for the exit.
     own_listed: bool,
+    /// The windows left hidden by a round while this Mission Control shows, and how many
+    /// times ([`retry`]).
+    misses: Vec<(WindowId, u8)>,
+    /// Those tried again once [`RETRY_AFTER`] has passed, and when.
+    retry: Vec<WindowId>,
+    retry_at: Option<Instant>,
 }
 
 impl Lends {
@@ -600,6 +628,7 @@ impl Lends {
             self.wanted = None;
             self.queue.clear();
             self.hint = None;
+            self.forget_misses();
         }
         self.mode = mode;
     }
@@ -664,6 +693,7 @@ impl Lends {
                 // Opened again before a pick's switch played: it waits no more.
                 self.pick = None;
                 self.released = None;
+                self.forget_misses();
                 if self.mode != Mode::Off {
                     // Windows still out from the last one stay out for this one.
                     self.closed = None;
@@ -680,6 +710,7 @@ impl Lends {
                 self.up = None;
                 self.wanted = None;
                 self.queue.clear();
+                self.forget_misses();
                 // A test's round waits for its own back; everything else out goes back.
                 if !self.round.is_some_and(|r| r.by == By::Asked) {
                     self.round = None;
@@ -702,6 +733,7 @@ impl Lends {
         self.guess = None;
         self.wanted = None;
         self.queue.clear();
+        self.forget_misses();
         self.round = None;
         self.closed = Some(now);
         true
@@ -766,6 +798,7 @@ impl Lends {
         self.wanted = None;
         self.guess = None;
         self.queue.clear();
+        self.forget_misses();
         self.round = None;
         // Long closed: nothing waits for a pick.
         self.closed = Some(now.checked_sub(PICK_WAIT).unwrap_or(now));
@@ -795,6 +828,50 @@ impl Lends {
         for id in windows.into_iter().rev() {
             self.queue.push_front(id);
         }
+    }
+
+    /// Window `id` was left hidden by a round at `now`, `why`: tried again [`RETRY_AFTER`]
+    /// later while Mission Control shows ([`retry`]). How many times it was left so far, and
+    /// whether it is tried again.
+    pub fn left(&mut self, id: WindowId, why: Left, now: Instant) -> (u8, bool) {
+        let misses = match self.misses.iter_mut().find(|(w, _)| *w == id) {
+            Some((_, n)) => {
+                *n = n.saturating_add(1);
+                *n
+            }
+            None => {
+                self.misses.push((id, 1));
+                1
+            }
+        };
+        let again = retry(why, misses, self.up.is_some() && self.mode != Mode::Off);
+        if again && !self.retry.contains(&id) {
+            self.retry.push(id);
+            self.retry_at = Some(now + RETRY_AFTER);
+        }
+        (misses, again)
+    }
+
+    /// The windows to try again, into the queue once their pause is over at `now` (while
+    /// Mission Control shows): true when some went in.
+    pub fn retries_due(&mut self, now: Instant) -> bool {
+        if self.retry.is_empty() || self.up.is_none() || self.retry_at.is_some_and(|t| now < t) {
+            return false;
+        }
+        self.retry_at = None;
+        let out = &self.out;
+        let again: Vec<WindowId> = std::mem::take(&mut self.retry).into_iter().filter(|id| !out.iter().any(|o| o.id == *id)).collect();
+        let any = !again.is_empty();
+        self.queue.extend(again);
+        any
+    }
+
+    /// No window waits to be tried again (Mission Control closed or opened anew, the mode
+    /// off, the lends ended).
+    fn forget_misses(&mut self) {
+        self.misses.clear();
+        self.retry.clear();
+        self.retry_at = None;
     }
 
     /// A round's parks were made: `parks_ms` from the first to the last answer, `sum_ms` the
@@ -829,7 +906,7 @@ impl Lends {
 
     /// The round's summary, once: its last window is out (or was not put home).
     pub fn round_done(&mut self, now: Instant) -> Option<RoundDone> {
-        if !self.queue.is_empty() {
+        if !self.queue.is_empty() || !self.retry.is_empty() {
             return None;
         }
         let r = self.round.as_mut().filter(|r| r.done.is_none())?;
@@ -983,7 +1060,8 @@ impl Lends {
         let watching = self.up.is_none() && self.hint.is_some_and(|(h, t)| now.saturating_duration_since(t) < h.watch());
         let measuring = self.up.is_some() && !self.measured && !self.out.is_empty() && self.round.is_some_and(|r| r.done.is_some());
         let early = !self.early.is_empty() && self.up.is_none();
-        watching || self.guess.is_some() || !self.queue.is_empty() || measuring || early || self.pick.is_some() || self.closing(now).is_some()
+        let retrying = !self.retry.is_empty() && self.up.is_some();
+        watching || self.guess.is_some() || !self.queue.is_empty() || retrying || measuring || early || self.pick.is_some() || self.closing(now).is_some()
     }
 }
 
@@ -1177,6 +1255,76 @@ mod tests {
         assert_eq!((back.back, back.picked.clone(), back.missed.len(), back.took), (1, vec![w(3)], 0, ms(30)));
         assert_eq!(l.back_done(t + ms(3040)), None);
         assert!(!l.wants_fast(t + ms(3040)) && l.out().is_empty());
+    }
+
+    /// Which windows left hidden are tried again: a park that did not take and a window the
+    /// window server kept in its stage Space, while Mission Control shows, up to
+    /// [`PARK_TRIES`] parks; nothing a later round changes is not.
+    #[test]
+    fn a_missed_park_is_tried_again_while_mission_control_shows() {
+        let missed = Left::ParkMissed { listed: Some(Rect::new(300.0, 120.0, 900.0, 600.0)), moved: false };
+        for why in [missed, Left::ParkMissed { listed: None, moved: false }, Left::ParkMissed { listed: None, moved: true }, Left::NotHome] {
+            assert!(retry(why, 1, true) && retry(why, PARK_TRIES - 1, true), "{why:?}");
+            assert!(!retry(why, PARK_TRIES, true), "{why:?}: {PARK_TRIES} parks in all");
+            assert!(!retry(why, 1, false), "{why:?}: not once Mission Control is gone");
+        }
+        for why in [Left::NotHeld, Left::Busy, Left::NotParked] {
+            assert!(!retry(why, 1, true), "{why:?}");
+        }
+    }
+
+    /// A round leaves two windows hidden: they wait [`RETRY_AFTER`], go into the next round's
+    /// queue, and the round's summary waits for them; a third miss is the last; a close or a
+    /// new opening forgets them.
+    #[test]
+    fn windows_left_hidden_go_into_a_later_round_and_the_summary_waits() {
+        let t = Instant::now();
+        let mut l = Lends::default();
+        assert_eq!(l.saw(true, t), Some(Edge::Shown(None)));
+        l.plan(vec![w(1), w(2), w(3)], t);
+        assert_eq!(l.take_queue(), vec![w(1), w(2), w(3)]);
+        l.lent(out(1));
+        let missed = Left::ParkMissed { listed: None, moved: false };
+        assert_eq!(l.left(w(2), missed, t + ms(30)), (1, true));
+        assert_eq!(l.left(w(3), Left::NotHeld, t + ms(30)), (1, false), "the engine does not hold it: nothing to try");
+        assert_eq!(l.round_done(t + ms(31)), None, "one to try again");
+        assert!(l.wants_fast(t + ms(40)));
+        assert!(!l.retries_due(t + ms(40)), "not before its pause");
+        assert!(l.take_queue().is_empty());
+        assert!(l.retries_due(t + ms(30) + RETRY_AFTER));
+        assert_eq!(l.take_queue(), vec![w(2)], "the next round's");
+        assert_eq!(l.left(w(2), missed, t + ms(100)), (2, true));
+        assert!(l.retries_due(t + ms(100) + RETRY_AFTER));
+        assert_eq!(l.take_queue(), vec![w(2)]);
+        assert_eq!(l.left(w(2), missed, t + ms(200)), (3, false), "its last park");
+        let done = l.round_done(t + ms(201)).expect("the summary once nothing is left to try");
+        assert_eq!((done.asked, done.lent), (3, 1));
+        // Taken on a later try: put home with the round.
+        let mut l = Lends::default();
+        l.saw(true, t);
+        l.plan(vec![w(4)], t);
+        l.take_queue();
+        l.left(w(4), Left::NotHome, t);
+        assert!(l.retries_due(t + RETRY_AFTER));
+        assert_eq!(l.take_queue(), vec![w(4)]);
+        l.lent(out(4));
+        assert_eq!(l.round_done(t + RETRY_AFTER + ms(5)).map(|d| d.lent), Some(1));
+        // Closed while one waits: forgotten, nothing goes into a queue after.
+        let mut l = Lends::default();
+        l.saw(true, t);
+        l.plan(vec![w(5)], t);
+        l.take_queue();
+        l.left(w(5), missed, t);
+        l.saw(false, t + ms(10));
+        assert!(!l.retries_due(t + ms(500)) && l.take_queue().is_empty());
+        assert!(!l.wants_fast(t + ms(500)));
+        // Opened again: a window counts its misses afresh.
+        l.saw(true, t + ms(600));
+        assert_eq!(l.left(w(5), missed, t + ms(610)), (1, true));
+        // The mode turned off: nothing is tried again.
+        l.set_mode(Mode::Off);
+        assert!(!l.retries_due(t + ms(2000)));
+        assert_eq!(l.left(w(5), missed, t + ms(2000)), (1, false));
     }
 
     #[test]

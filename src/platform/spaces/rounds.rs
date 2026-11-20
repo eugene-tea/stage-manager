@@ -20,7 +20,7 @@ use super::super::ffi::{ALL_SPACES_MASK, Route, Sky};
 use super::{Call, Mover, PARK_AX_SECONDS, ParkedLend, SpacesEngine, hidden_in, out_of};
 use crate::engine::geometry::Rect;
 use crate::engine::lend_park::{self, LendDone, Parked, Parking};
-use crate::engine::lend_round::{self, BackAsk, BackSteps, HomeAsk, HomeSteps};
+use crate::engine::lend_round::{self, BackAsk, BackSteps, HomeAsk, HomeSteps, Left};
 use crate::engine::model::WindowId;
 use crate::platform::ax::AxElement;
 use crate::platform::enhanced_ui;
@@ -192,7 +192,19 @@ impl SpacesEngine {
         let asks: Vec<RoundAsk> = {
             let st = self.state();
             asks.into_iter()
-                .filter(|a| !stretching.contains(&a.id.0) && !st.lent.contains(&a.id.0) && st.held.get(&a.id.0).is_some_and(|h| desktops.contains(&h.home)))
+                .filter(|a| {
+                    let why = if stretching.contains(&a.id.0) || st.lent.contains(&a.id.0) {
+                        Some(Left::Busy)
+                    } else if !st.held.get(&a.id.0).is_some_and(|h| desktops.contains(&h.home)) {
+                        Some(Left::NotHeld)
+                    } else {
+                        None
+                    };
+                    if let Some(why) = why {
+                        parks.skipped.push((a.id, why));
+                    }
+                    why.is_none()
+                })
                 .map(|mut a| {
                     // Parked already (a take back whose restore is owed): its frame is the
                     // one kept then.
@@ -240,6 +252,7 @@ impl SpacesEngine {
                 if let Some(a) = ws.iter().find(|a| a.id == id) {
                     st.parked.insert(id.0, ParkedLend { park: p.parked, element: a.park.window.clone() });
                 }
+                parks.landed.push((id, p.landed));
                 if p.took { parks.took.push(id) } else { parks.missed.push(id) }
             }
         }
@@ -253,7 +266,7 @@ impl SpacesEngine {
         let mut homes = Homes::default();
         let Some(sky) = self.sky() else { return homes };
         if self.blocked() {
-            homes.left = ids.to_vec();
+            homes.left = ids.iter().map(|w| (*w, Left::NotHome)).collect();
             return homes;
         }
         let stretching: Vec<u32> = self.stretches_within("a round of lends").map(|l| l.keys().copied().collect()).unwrap_or_default();
@@ -261,16 +274,24 @@ impl SpacesEngine {
         let wanted: Vec<u32> = ids.iter().map(|w| w.0).collect();
         let listed: BTreeMap<u32, Rect> = windows::describe(&wanted).into_iter().map(|w| (w.id, w.bounds)).collect();
         let mut elements = BTreeMap::new();
+        let mut why: BTreeMap<u32, Left> = BTreeMap::new();
         let asks: Vec<HomeAsk> = {
             let st = self.state();
             wanted
                 .iter()
                 .filter_map(|id| {
-                    let held = st.held.get(id).filter(|h| desktops.contains(&h.home))?;
-                    let p = st.parked.get(id)?;
+                    let Some(held) = st.held.get(id).filter(|h| desktops.contains(&h.home)) else {
+                        why.insert(*id, Left::NotHeld);
+                        return None;
+                    };
                     if st.lent.contains(id) || stretching.contains(id) {
+                        why.insert(*id, Left::Busy);
                         return None;
                     }
+                    let Some(p) = st.parked.get(id) else {
+                        why.insert(*id, Left::NotParked);
+                        return None;
+                    };
                     elements.insert(*id, p.element.clone());
                     Some(HomeAsk { id: *id, desktop: held.home, parking: Parking::now(p.park, listed.get(id).copied()) })
                 })
@@ -278,6 +299,11 @@ impl SpacesEngine {
         };
         let ours = self.ours();
         let done = lend_round::home_all(&mut HomeMac { engine: self, sky, ours: &ours, elements: &elements }, &asks);
+        for (a, (_, l)) in asks.iter().zip(&done.lends) {
+            if let Some(w) = lend_round::left_why(a, l) {
+                why.insert(a.id, w);
+            }
+        }
         let lent: Vec<u32> = done.lends.iter().filter(|(_, l)| l.home).map(|(id, _)| *id).collect();
         let at: BTreeMap<u32, Rect> = windows::describe(&lent).into_iter().map(|w| (w.id, w.bounds)).collect();
         {
@@ -296,7 +322,7 @@ impl SpacesEngine {
             if lent.contains(&w.0) {
                 homes.lent.push((*w, at.get(&w.0).copied()));
             } else if !self.lent(w.0) {
-                homes.left.push(*w);
+                homes.left.push((*w, why.get(&w.0).copied().unwrap_or(Left::NotHome)));
             }
         }
         homes.calls = done.calls;

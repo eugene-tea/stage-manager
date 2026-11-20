@@ -38,6 +38,7 @@ use super::safety::{Ours, Report, ScanScope};
 use crate::engine::engine_choice::{self, Asked, Choice, ConfigEngine};
 use crate::engine::geometry::Rect;
 use crate::engine::landing_order;
+use crate::engine::lend_round::Left;
 use crate::engine::model::{Display, Model, WindowId};
 use crate::ui::landing_math::Affine;
 use crate::ui::strip_model::Transition;
@@ -89,7 +90,7 @@ pub struct RoundAsk {
 }
 
 /// What a round's parks did ([`WindowEngine::park_round`]).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Parks {
     /// Parked out of sight, still hidden: ready to go home ([`WindowEngine::home_round`]).
     pub took: Vec<WindowId>,
@@ -98,6 +99,11 @@ pub struct Parks {
     pub missed: Vec<WindowId>,
     /// Not asked: the round's deadline came before their turn (untouched, hidden).
     pub late: Vec<WindowId>,
+    /// Not asked, and why ([`Left::NotHeld`], [`Left::Busy`]): left hidden.
+    pub skipped: Vec<(WindowId, Left)>,
+    /// Where each window asked was listed after its park's move (`None`: not listed, or the
+    /// move not taken).
+    pub landed: Vec<(WindowId, Option<Rect>)>,
     /// The apps asked at once.
     pub apps: usize,
     /// From the first park to the last answer, in milliseconds.
@@ -111,8 +117,9 @@ pub struct Parks {
 pub struct Homes {
     /// On their Desktop now, still counted hidden, with where the window server lists each.
     pub lent: Vec<(WindowId, Option<Rect>)>,
-    /// Not put home (the park did not take, or the window did not go): still hidden.
-    pub left: Vec<WindowId>,
+    /// Not put home, and why (the park did not take, the window did not go, or the engine
+    /// does not hold it): still hidden.
+    pub left: Vec<(WindowId, Left)>,
     /// The calls and their read back, in milliseconds.
     pub ms: u64,
     /// When the first call putting windows home was made and the last one returned (`None`:

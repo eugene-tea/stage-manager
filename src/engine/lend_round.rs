@@ -104,6 +104,57 @@ pub fn home_all(steps: &mut impl HomeSteps, asks: &[HomeAsk]) -> HomeDone {
     HomeDone { lends, calls }
 }
 
+/// Why a hidden window of a round was not put home (it stays hidden, in its stage Space): what
+/// the log says of each, and what decides whether it is tried again
+/// ([`super::mission_control::retry`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Left {
+    /// The engine does not hold it in a stage Space of a Desktop shown (shown since, gone, or
+    /// its Desktop not shown).
+    NotHeld,
+    /// Lent already (a Dock press or ⌘Tab's switcher has it), or flying a switch's last stretch.
+    Busy,
+    /// No park was made for it (its element missing, or the round's parks refused).
+    NotParked,
+    /// Its park did not take: `listed` where the window server listed it when the round went
+    /// home (`None`: not listed), `moved` when that is away from its frame (out of the park
+    /// zone all the same: in view, were it put home).
+    ParkMissed {
+        /// Where it was listed.
+        listed: Option<Rect>,
+        /// Away from its frame.
+        moved: bool,
+    },
+    /// Parked and put home, and still listed in a stage Space (the window server's call did
+    /// not take it out): its move undone there.
+    NotHome,
+}
+
+impl Left {
+    /// Its name for the log.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NotHeld => "not held in a stage Space of a Desktop shown",
+            Self::Busy => "lent already, or in a switch",
+            Self::NotParked => "no park made",
+            Self::ParkMissed { moved: false, .. } => "its park did not take: listed at its frame",
+            Self::ParkMissed { moved: true, .. } => "its park did not take: listed away from its frame, out of the park zone",
+            Self::NotHome => "parked, and the window server did not take it out of its stage Space",
+        }
+    }
+}
+
+/// Why the window of `ask` was left hidden by its lend `done` (`None`: it went home).
+pub fn left_why(ask: &HomeAsk, done: &LendDone) -> Option<Left> {
+    if done.home {
+        None
+    } else if ask.parking.goes_home() {
+        Some(Left::NotHome)
+    } else {
+        Some(Left::ParkMissed { listed: ask.parking.landed, moved: ask.parking.moved })
+    }
+}
+
 /// A window put home that goes back.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BackAsk {
@@ -314,6 +365,29 @@ mod tests {
         assert!(mac.seen.iter().all(|(_, r)| d.parks(*r)), "only ever seen parked: {:?}", mac.seen);
     }
 
+    /// Each window left hidden says why: its park missed (where it was listed, at its frame or
+    /// away from it), or the window server did not take it home.
+    #[test]
+    fn a_window_left_hidden_says_why() {
+        let mut mac = mac();
+        mac.stuck = vec![2];
+        mac.refused = vec![3];
+        let d = display();
+        let asks: Vec<HomeAsk> = [1, 2, 3]
+            .into_iter()
+            .map(|id| HomeAsk { id, desktop: 5, parking: park(&mut Win(&mut mac, id), ask(d, id)) })
+            .collect();
+        let done = home_all(&mut mac, &asks);
+        let why: Vec<Option<Left>> = asks.iter().zip(&done.lends).map(|(a, (_, l))| left_why(a, l)).collect();
+        assert_eq!(why, [None, Some(Left::ParkMissed { listed: Some(frame(2)), moved: false }), Some(Left::NotHome)]);
+        let off = Rect::new(500.0, 300.0, 900.0, 600.0);
+        let away = HomeAsk { id: 4, desktop: 5, parking: Parking::now(asks[1].parking.parked, Some(off)) };
+        let not = LendDone { home: false, parked: Some(false), owed: None };
+        assert_eq!(left_why(&away, &not), Some(Left::ParkMissed { listed: Some(off), moved: true }));
+        assert_eq!(left_why(&HomeAsk { parking: Parking::now(asks[1].parking.parked, None), ..away }, &not), Some(Left::ParkMissed { listed: None, moved: false }), "not listed");
+        assert_ne!(Left::ParkMissed { listed: None, moved: true }.name(), Left::ParkMissed { listed: None, moved: false }.name());
+    }
+
     /// Windows of two Desktops: one call each, back to back after every park.
     #[test]
     fn one_call_per_desktop() {
@@ -349,7 +423,7 @@ mod tests {
         let parks = park_in_turn(&[1u32, 2, 3], t + Duration::from_millis(50), || clock.get(), |id| {
             clock.set(clock.get() + Duration::from_millis(30));
             let d = display();
-            Parking { parked: Parked { at: ask(d, id).at, frame: frame(id), display: d }, took: true, moved: true, must: false }
+            Parking { parked: Parked { at: ask(d, id).at, frame: frame(id), display: d }, took: true, moved: true, must: false, landed: Some(ask(d, id).at) }
         });
         assert_eq!(parks.iter().map(|(id, p)| (*id, p.is_some())).collect::<Vec<_>>(), [(1, true), (2, true), (3, false)]);
     }

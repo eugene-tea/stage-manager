@@ -151,6 +151,9 @@ pub struct Parking {
     pub moved: bool,
     /// Lent whether the park took or not ([`ParkAsk::must`]).
     pub must: bool,
+    /// Where the window server listed the window after the move (`None`: not listed, or the
+    /// move was not taken): what the log says of a park that did not take.
+    pub landed: Option<Rect>,
 }
 
 impl Parking {
@@ -163,7 +166,7 @@ impl Parking {
     /// a while ago and still hidden ([`super::lend_round`]: parked at Mission Control's key,
     /// put home once it shows): an app may have moved it since.
     pub fn now(parked: Parked, listed: Option<Rect>) -> Self {
-        Self { parked, took: listed.is_some_and(|r| parked.display.parks(r)), moved: listed.is_some_and(|r| !at_origin(r, parked.frame)), must: false }
+        Self { parked, took: listed.is_some_and(|r| parked.display.parks(r)), moved: listed.is_some_and(|r| !at_origin(r, parked.frame)), must: false, landed: listed }
     }
 }
 
@@ -174,7 +177,7 @@ pub fn park(mac: &mut impl Moves, ask: ParkAsk) -> Parking {
     let before = mac.listed().filter(|r| same_size(*r, ask.frame) && !ask.display.parks(*r));
     let parked = Parked { at: ask.at, frame: before.unwrap_or(ask.frame), display: ask.display };
     let landed = mac.move_to(ask.at);
-    Parking { parked, took: landed.is_some_and(|r| ask.display.parks(r)), moved: landed.is_some_and(|r| !at_origin(r, parked.frame)), must: ask.must }
+    Parking { parked, took: landed.is_some_and(|r| ask.display.parks(r)), moved: landed.is_some_and(|r| !at_origin(r, parked.frame)), must: ask.must, landed }
 }
 
 /// The lend after its park, `home` saying whether the window went home. Not lent (the park

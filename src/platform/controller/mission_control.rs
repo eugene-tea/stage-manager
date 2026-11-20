@@ -39,6 +39,7 @@ use serde_json::{Value, json};
 
 use super::Controller;
 use crate::engine::mission_control::{self as mc, Edge, Fate, Hint, Keys, Lends, Mode, Mods, Out, PickBy, PickSwitch, Settled, Shortcut};
+use crate::engine::lend_round::Left;
 use crate::engine::model::{Action, Model, WindowId};
 use crate::engine::phase::Hold;
 use crate::engine::overview::{self, Overview, Sighting};
@@ -70,6 +71,11 @@ fn shortcut(key: SpaceKey) -> Shortcut {
 /// Milliseconds of `d`.
 fn ms(d: Duration) -> u64 {
     d.as_millis() as u64
+}
+
+/// A frame as the log writes it: `x,y wxh`.
+fn fmt_rect(r: crate::engine::geometry::Rect) -> String {
+    format!("{:.0},{:.0} {:.0}x{:.0}", r.x, r.y, r.w, r.h)
 }
 
 impl Controller {
@@ -362,6 +368,7 @@ impl Controller {
         {
             self.spaces.mission.lends.plan(hidden, now);
         }
+        self.spaces.mission.lends.retries_due(now);
         self.mission_round(ob, Some(mc::ROUND_WAIT));
         self.mission_round_said();
         if self.spaces.mission.lends.measure_due(now) {
@@ -409,7 +416,9 @@ impl Controller {
     /// first, the apps at once, each app's windows in turn while `wait` lasts (those after it
     /// wait for the next round), then all of them put home together, or (parks only, at the
     /// key) left parked and hidden for Mission Control to show. Windows parked at the key
-    /// go home with the round without a park.
+    /// go home with the round without a park. Each window left hidden is said in the log
+    /// with why and where it was listed, and a missed park is tried again in a later round
+    /// while Mission Control shows ([`mc::retry`]).
     fn mission_round(&mut self, ob: &Observer, wait: Option<Duration>) {
         let ids = self.spaces.mission.lends.take_queue();
         if ids.is_empty() {
@@ -420,6 +429,7 @@ impl Controller {
         let mut asks = Vec::new();
         let mut parked = Vec::new();
         let mut pids = Vec::new();
+        let mut unasked = Vec::new();
         for id in ids {
             let Some(pid) = self.model.as_ref().and_then(|m| m.window(id)).map(|w| w.meta.pid) else { continue };
             pids.push((id, pid));
@@ -431,7 +441,8 @@ impl Controller {
             // stays hidden.
             match self.lend_park(ob, id, false, Some(mc::PARK_SECONDS)) {
                 Some(park) => asks.push(RoundAsk { id, pid, park }),
-                None => tracing::debug!(window = id.0, "mission-control: a hidden window has no element to park it through: left hidden"),
+                // No element to park it through: said with the others left hidden.
+                None => unasked.push((id, Left::NotParked)),
             }
         }
         // A test's round waits as long as it takes.
@@ -456,8 +467,28 @@ impl Controller {
                 self.spaces.mission.lends.lent(Out { id, pid, parked: at });
             }
         }
-        if !homes.left.is_empty() {
-            tracing::debug!(windows = ?homes.left.iter().map(|w| w.0).collect::<Vec<_>>(), "mission-control: hidden windows not put home (their park did not take, or the engine does not hold them): left hidden");
+        let now = Instant::now();
+        let landed = |id: WindowId| parks.landed.iter().find(|(w, _)| *w == id).and_then(|(_, r)| *r);
+        for (id, why) in homes.left.iter().chain(&parks.skipped).chain(&unasked) {
+            let (misses, again) = self.spaces.mission.lends.left(*id, *why, now);
+            let listed = match why {
+                Left::ParkMissed { listed, .. } => *listed,
+                _ => None,
+            };
+            let model = self.model.as_ref().and_then(|m| m.window(*id)).map(|w| w.restore);
+            tracing::info!(
+                window = id.0,
+                why = why.name(),
+                after_park = ?landed(*id).map(fmt_rect),
+                listed = ?listed.map(fmt_rect),
+                frame = ?model.map(fmt_rect),
+                misses,
+                again,
+                retry_ms = again.then(|| ms(mc::RETRY_AFTER)),
+                "mission-control: a hidden window left hidden: {}{}",
+                why.name(),
+                if again { "; tried again" } else { "" }
+            );
         }
         // Parked at the key and out of this round (shown since, gone): their frames again.
         let stray: Vec<_> = early.into_iter().filter(|(id, _)| !parked.contains(id)).collect();
