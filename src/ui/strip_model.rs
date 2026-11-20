@@ -89,10 +89,11 @@ pub struct StripSnapshot {
     /// left behind hid): the snapshots pass under it from here on, as under
     /// [`Transition::under`], which could not name it while it waited off screen.
     pub under_now: Option<(u64, u32)>,
-    /// A transition whose incoming windows a Space change landed on the Desktop left: its
-    /// pictures go now, the outgoing ones and the cards it held with them
-    /// ([`crate::engine::switch_landing`]).
-    pub cut: Option<u64>,
+    /// A transition whose incoming windows landed before its unveil, and what its pictures do
+    /// now ([`crate::engine::switch_landing::pictures_on_landing`]): they finish where they
+    /// were headed and hand over (a click, an activation, any other landing on the Desktop
+    /// shown), or go now with the cards it held shown (a Space change: the Desktop left).
+    pub landed: Option<(u64, crate::engine::switch_landing::Pictures)>,
     /// These are the cards of a Desktop not shown, arranged ahead of its arrival (a Dock
     /// click): only its own pane, if it has one, is redrawn with them, at once, so it slides
     /// in arranged; the strip shown is untouched.

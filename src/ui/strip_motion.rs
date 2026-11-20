@@ -191,6 +191,8 @@ struct Running {
     lands_after: Option<Instant>,
     /// When the strip unveils the incoming windows.
     unveil_at: Option<Instant>,
+    /// The unveil ran: on its timer, or at a landing before it ([`Strip::finish_now`]).
+    unveiled: bool,
     /// Incoming windows the window server does not show at their frames yet: their snapshots
     /// keep their shadows, and the landing waits ([`Strip::poll_shown`]).
     unshown: Vec<u32>,
@@ -1031,6 +1033,7 @@ impl Strip {
                 arrived,
                 lands_after: None,
                 unveil_at: None,
+                unveiled: false,
                 unshown,
                 late_key: t.key_in.filter(|k| late.contains(k)),
                 late: late.clone(),
@@ -1426,6 +1429,13 @@ impl Strip {
     /// the controller places the windows now. Where each snapshot is drawn is kept for
     /// `ctl state` ([`GhostReport::at_unveil`]).
     fn unveil(&mut self, id: u64) {
+        // Once: a landing before the unveil ran it already ([`Self::finish_now`]).
+        if self.motion.running.as_ref().is_some_and(|r| r.id == id && r.unveiled) {
+            return;
+        }
+        if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+            r.unveiled = true;
+        }
         if let Some(r) = self.motion.running.as_ref().filter(|r| r.id == id) {
             let drawn: Vec<(u32, Rect)> =
                 r.ghosts.iter().filter(|g| r.arrived.iter().any(|(w, _)| *w == g.window)).map(|g| (g.window, self.plane_rect(&g.drawn()))).collect();
@@ -1663,6 +1673,86 @@ impl Strip {
         if self.pane.lifted == Some(true) {
             self.update_visibility();
         }
+    }
+
+    /// Transition `id`'s incoming windows landed at their frames before its unveil (a click, an
+    /// activation, a focus, any other landing on the Desktop shown:
+    /// [`crate::engine::switch_landing`]): its motion ends now, where it was headed. Each
+    /// incoming picture is set on its window's frame, each outgoing one on its card, and from
+    /// there it lands as after an unveil: each picture hands its shadow over once the window
+    /// server shows its window ([`Self::poll_shown`]; cut away at once, a window not drawn yet
+    /// would leave a hole), and they fade together; the held cards show then. Flown on, the
+    /// pictures would grow over windows already in place, or the outgoing ones shrink over them.
+    pub(super) fn finish_now(&mut self, id: u64) {
+        let now = Instant::now();
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        // A stretch planned for a window not taken over yet is wanted no longer: the window is
+        // at its frame.
+        let stale: Vec<u32> = r.stretched.iter().copied().filter(|w| !r.taken.contains(w)).collect();
+        for w in stale {
+            crate::platform::window_engine::current().cancel_stretch(w);
+        }
+        objc2_quartz_core::CATransaction::begin();
+        objc2_quartz_core::CATransaction::setDisableActions(true);
+        // The motion not started yet (the outgoing windows' note still to come): every picture
+        // goes straight to its end.
+        let before_motion = r.rise.take();
+        if let Some(rise) = &before_motion {
+            for (i, end, glass) in &rise.ghosts {
+                if let Some(g) = r.ghosts.get_mut(*i) {
+                    g.set(*end);
+                    g.set_shadow_amount(1.0);
+                    g.set_glass(glass.as_ref(), 0.0);
+                }
+            }
+        }
+        for (i, end, glass, _) in std::mem::take(&mut r.waiting) {
+            if let Some(g) = r.ghosts.get_mut(i) {
+                g.set(end);
+                g.set_shadow_amount(0.0);
+                g.set_glass(glass.as_ref(), 1.0);
+            }
+        }
+        // Flying: each ends where its spring was taking it (an incoming one's target is its
+        // window's frame as read back, [`Self::incoming_arrived`]).
+        for g in r.ghosts.iter_mut().filter(|g| g.flown().is_some()) {
+            g.settle();
+        }
+        // Reduce Motion: the incoming pictures stand where the windows are, the outgoing ones
+        // are gone.
+        if r.crossfade.is_some() {
+            if let Some(g) = &r.incoming {
+                g.set_opacity(1.0);
+            }
+            if let Some(g) = &r.outgoing {
+                g.set_opacity(0.0);
+            }
+        }
+        objc2_quartz_core::CATransaction::commit();
+        let unveiled = r.unveiled;
+        if r.started.is_none() {
+            r.started = Some(now);
+        }
+        if !unveiled {
+            // The landing's clock from now: [`AFTER_UNVEIL`] at the least, and no later than
+            // the wait for the windows to show allows.
+            let wait = if r.late.is_empty() { SHOWN_MAX } else { LATE_MAX.max(SHOWN_MAX) };
+            r.unveil_at = Some(now);
+            r.lands_after = Some(now + Duration::from_secs_f64(wait + AFTER_UNVEIL));
+            if !r.late.is_empty() {
+                let display = self.display;
+                r.timers.push(after(LATE_MAX, move || {
+                    with_strip_of(display, |s| s.late_shown(id, None, None));
+                }));
+            }
+        }
+        // Nothing left to settle: it lands once its windows show.
+        r.settled = true;
+        tracing::debug!(id, unveiled, before_motion = before_motion.is_some(), "transition: its windows landed before its unveil; its pictures finish where they were headed and hand over");
+        if !unveiled {
+            self.unveil(id);
+        }
+        self.end_transition(id);
     }
 
     /// Transition `id` has landed: the snapshots go and the held cards show, in one frame

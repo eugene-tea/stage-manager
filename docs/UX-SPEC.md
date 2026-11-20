@@ -746,7 +746,12 @@ switch's pictures move (a round of captures is the window server's work, and dro
 click, a click of yours anywhere, an activation, a focus) still brings its windows, but
 never focuses one or activates its app afterwards: its held focus is dropped, so the keyboard is the newer switch's or
 where you clicked (else two card clicks half a second apart hand the activation back and
-forth between the two apps). A window's focus brings its stage only in the active app (or with the button down
+forth between the two apps). Its motion ends at once where it was going: each arriving window's picture
+set on its window's place until the window server shows the window there, then gone as at a
+landing, and the stage left on its card. Apple's moves the windows themselves, so a window is
+never in two places; flown on, a picture grew over its window already in place (a log, 11-19:
+up to 0.4 s after an activation, 60 ms after a click). A new switch of ours takes the pictures
+over with its own instead; a Space change takes them away (the Desktop has slid out of sight). A window's focus brings its stage only in the active app (or with the button down
 on a sliver), never in a hidden app or an app behind: those are the app's own or a late echo
 of ours (with apps slow to answer, notices come up to a second late, past the echo window). A window on screen when Stage Manager started but found late (its
 app not answering then) goes to its stage as during the restore window, parked when that

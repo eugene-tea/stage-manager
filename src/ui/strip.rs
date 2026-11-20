@@ -490,6 +490,7 @@ pub fn stand_down(why: &str) {
         snapshot.transition = None;
         snapshot.parked = None;
         snapshot.arrived = None;
+        snapshot.landed = None;
         snapshot.window_drag = None;
         snapshot.active_windows = Default::default();
         snapshot.pinned_windows = Default::default();
@@ -2395,8 +2396,10 @@ impl Strip {
         if let Some((id, window)) = self.snapshot.under_now {
             self.shown_in_place(id, window);
         }
-        if let Some(id) = self.snapshot.cut {
-            self.cut_transition(id);
+        match self.snapshot.landed {
+            Some((id, crate::engine::switch_landing::Pictures::Go)) => self.cut_transition(id),
+            Some((id, crate::engine::switch_landing::Pictures::Finish)) => self.finish_now(id),
+            Some((_, crate::engine::switch_landing::Pictures::FlyOn)) | None => {}
         }
         self.after_snapshot();
         // Cards moved under a resting pointer: the pane catches clicks where they are now.

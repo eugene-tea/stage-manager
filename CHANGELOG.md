@@ -6,6 +6,8 @@
   that Desktop and back, and the browser's window no longer pops up under a growing picture.
 - When macOS slides to another Desktop during a switch and straight back, the window is
   there when the Desktop slides in, with no picture still growing over it.
+- A click or another app coming in front during a switch ends its animation at once, with no
+  picture still growing over a window already in its place.
 - With `engine = "spaces"`, a window picked in Mission Control comes to its place in one
   motion.
 - With `engine = "spaces"`, Mission Control shows the hidden stages' windows at once instead

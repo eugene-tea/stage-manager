@@ -442,6 +442,25 @@ impl Ghost {
         self.target = p;
     }
 
+    /// Ends its flight at once where it was headed: the plane at its target, the picture's
+    /// glass and the shadows at the values their springs were going to (each spring sets its
+    /// end first: [`Self::spring_to`], [`Self::spring_glass`], [`Self::spring_shadow`]).
+    pub fn settle(&mut self) {
+        let target = self.target;
+        self.set(target);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        let opacity = NSString::from_str("opacity");
+        for layer in [&self.image, &self.glass] {
+            layer.removeAnimationForKey(&opacity);
+        }
+        self.body.removeAnimationForKey(&NSString::from_str("shadowOpacity"));
+        if let Some(s) = &self.shadow {
+            s.settle_amount();
+        }
+        CATransaction::commit();
+    }
+
     /// Shows `amount` of the window's shadow (0: the card's shadow alone, 1: the window's
     /// alone), at once.
     pub fn set_shadow_amount(&self, amount: f64) {

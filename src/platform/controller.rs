@@ -945,9 +945,10 @@ pub struct Controller {
     /// The transition whose incoming windows are in place, with their frames read back, for
     /// the next snapshot.
     arrived_note: Option<(u64, Vec<(u32, Rect)>)>,
-    /// A transition whose pictures go now, its windows landed by a Space change, for the next
-    /// snapshot ([`switch_landing::pictures_on_landing`]).
-    cut_note: Option<u64>,
+    /// A transition whose windows landed before its unveil, and what its pictures do now (they
+    /// finish where they were headed, or go with a Space change), for the next snapshot
+    /// ([`switch_landing::pictures_on_landing`]).
+    landed_note: Option<(u64, Pictures)>,
     /// How the next animated batch runs when an activation caused it ([`ActivationRun`],
     /// `[animation] activation_grows`).
     activation: ActivationRun,
@@ -1279,7 +1280,7 @@ impl Controller {
             parked_note: None,
             under_note: None,
             arrived_note: None,
-            cut_note: None,
+            landed_note: None,
             activation: ActivationRun::default(),
             fallback_said: HashSet::new(),
             patch_items: PatchItems::default(),
@@ -1976,7 +1977,7 @@ impl Controller {
         // lands: an app in both keeps its enhanced UI off across them.
         let quiet = enhanced_ui::Batch::open();
         if supersedes(&actions) {
-            self.flush_superseded(ob, "a new switch");
+            self.flush_superseded(ob, "a new switch", Landing::NewSwitch);
         } else {
             self.flush_pending(ob);
         }
@@ -2333,7 +2334,14 @@ impl Controller {
     /// Brings held incoming windows to their frames now (their snapshots cover them, or other
     /// input arrived). Never interrupted: these windows are not parked in the model's eyes.
     fn flush_pending(&mut self, ob: &Observer) {
-        self.flush_pending_as(ob, None);
+        self.flush_pending_as(ob, None, Landing::Other);
+    }
+
+    /// Brings held incoming windows to their frames now for `landing` (the unveil, its
+    /// backstop, a click on an arriving window, a Space change): what their pictures still in
+    /// flight do then is [`switch_landing::pictures_on_landing`]'s.
+    fn land_pending(&mut self, ob: &Observer, landing: Landing) {
+        self.flush_pending_as(ob, None, landing);
     }
 
     /// The user acted, or a new switch begins (`why`), while a switch's windows may still be
@@ -2341,11 +2349,11 @@ impl Controller {
     /// app for the switch left behind any more (11-02: two card clicks 0.56 s apart, the
     /// first one's held focus ran after the second one's). The held batch runs
     /// without its focus ([`without_focus`]).
-    fn flush_superseded(&mut self, ob: &Observer, why: &'static str) {
-        self.flush_pending_as(ob, Some(why));
+    fn flush_superseded(&mut self, ob: &Observer, why: &'static str, landing: Landing) {
+        self.flush_pending_as(ob, Some(why), landing);
     }
 
-    fn flush_pending_as(&mut self, ob: &Observer, superseded: Option<&'static str>) {
+    fn flush_pending_as(&mut self, ob: &Observer, superseded: Option<&'static str>, landing: Landing) {
         if let Some(mut p) = self.pending.take() {
             self.landing_focus = None;
             if let Some(why) = superseded {
@@ -2359,6 +2367,12 @@ impl Controller {
             let since = self.phase.switching().map_or(now, |s| s.since);
             self.phase.feed(phase::Event::SwitchDone, now);
             tracing::trace!(id = p.id, held_ms = now.duration_since(since).as_millis() as u64, "incoming windows unveiled");
+            // Landed before the unveil: no picture of the switch goes on growing or shrinking
+            // over the windows now at their frames (`switch_landing`).
+            let pictures = switch_landing::pictures_on_landing(landing);
+            if pictures != Pictures::FlyOn {
+                tracing::debug!(id = p.id, ?landing, ?pictures, held_ms = now.duration_since(since).as_millis() as u64, "a switch's windows land before its unveil: its pictures stop flying");
+            }
             let asked: Vec<(u32, Rect)> = p
                 .actions
                 .iter()
@@ -2396,8 +2410,16 @@ impl Controller {
                 tracing::debug!(id = p.id, window = id, asked = %frame, real = %real, off, "transition: incoming window in place");
                 arrived.push((id, real));
             }
+            // Told with the windows placed (any snapshot the batch sent went before), and with
+            // no window read back in place, the pictures' note alone tells the strip.
+            if pictures != Pictures::FlyOn {
+                self.landed_note = Some((p.id, pictures));
+            }
+            let tell = !arrived.is_empty() || self.landed_note.is_some();
             if !arrived.is_empty() {
                 self.arrived_note = Some((p.id, arrived));
+            }
+            if tell {
                 self.present();
             }
             // The strip has its note: now the order its card shows (`raise_order`), unless the
@@ -2576,7 +2598,7 @@ impl Controller {
             parked: self.parked_note.take(),
             arrived: self.arrived_note.take(),
             under_now: self.under_note.take(),
-            cut: self.cut_note.take(),
+            landed: self.landed_note.take(),
         };
         for d in displays {
             let t = if d == plays_on { transition.clone() } else { None };
@@ -2643,7 +2665,7 @@ impl Controller {
             parked: notes.parked,
             arrived: notes.arrived.clone(),
             under_now: notes.under_now,
-            cut: notes.cut,
+            landed: notes.landed,
             late: None,
             space: space.0,
             display: display.0,
@@ -3024,7 +3046,7 @@ impl Controller {
                         tracing::debug!(id, ?switch, "a focus on a window the switch brings in: the switch lands as planned, behind its picture");
                         return;
                     }
-                    FocusOnSwitch::Supersede => self.flush_superseded(ob, "a focus"),
+                    FocusOnSwitch::Supersede => self.flush_superseded(ob, "a focus", Landing::Superseded),
                     FocusOnSwitch::LandWithoutFocus => {
                         // The app put its focus on a window of another Desktop (a link opened
                         // in its window there, 11-19): macOS goes there, and the switch's focus
@@ -3204,7 +3226,7 @@ impl Controller {
                 // The user switched apps: a late echo of an earlier focus of ours is no
                 // longer one.
                 self.user_switched();
-                self.flush_superseded(ob, "an activation");
+                self.flush_superseded(ob, "an activation", Landing::Superseded);
                 self.show_strip_after_desktop("an app was activated");
                 if self.activation_frozen(pid) {
                     tracing::debug!(pid, "activation held until the Desktop is recognized");
@@ -3718,9 +3740,9 @@ impl Controller {
                 // The owner's click decides where the keyboard goes: no focus of ours follows it, but
                 // for a click on an arriving window, which lands now as the switch meant.
                 if for_arriving {
-                    self.flush_pending(ob);
+                    self.land_pending(ob, Landing::Click);
                 } else {
-                    self.flush_superseded(ob, "a click");
+                    self.flush_superseded(ob, "a click", Landing::Click);
                 }
                 self.end_drag();
                 self.user_switched();
@@ -4376,17 +4398,7 @@ impl Controller {
         // once its slide is over: they land out of sight, and their pictures go with them, or
         // a Desktop sliding back at once would come in with its windows in place and the
         // pictures still growing over them (`switch_landing`; 11-19 13:13 and 13:25).
-        if let Some(id) = self.pending.as_ref().map(|p| p.id)
-            && switch_landing::pictures_on_landing(Landing::SpaceChange) == Pictures::Go
-        {
-            tracing::debug!(id, "a Space change while a switch's windows were held: they land now, on the Desktop left, and its pictures go");
-            self.cut_note = Some(id);
-        }
-        self.flush_pending(ob);
-        if self.cut_note.is_some() {
-            // No window read back in place, so the flush told the strip nothing.
-            self.present();
-        }
+        self.land_pending(ob, Landing::SpaceChange);
         if self.model.is_none() {
             return;
         }
@@ -5978,7 +5990,7 @@ impl Controller {
         }
         if let StripEvent::Unveil { id } = event {
             if self.phase.switching().is_some_and(|s| s.id == id) {
-                self.flush_pending(ob);
+                self.land_pending(ob, Landing::Unveil);
             }
             return;
         }
@@ -5989,7 +6001,7 @@ impl Controller {
         // The restore window's end (at this event or at the card's press) may have moved a
         // voter out of the stage the card showed: the card follows its window.
         let event = self.follow_event(event);
-        self.flush_superseded(ob, "a strip click");
+        self.flush_superseded(ob, "a strip click", Landing::Superseded);
         // The strip shows a reorder or a merge before the engine has decided: when the engine
         // refuses it (or does nothing), a snapshot puts the strip back (review R2 V4).
         // A window dragged off a combined card leaves the card drawn without it, the same.
@@ -6290,7 +6302,7 @@ impl Controller {
         self.publish_minimizable(ob);
         if let Some(s) = self.phase.switching().filter(|s| s.overdue(now)) {
             tracing::warn!(id = s.id, max_ms = s.max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
-            self.flush_pending(ob);
+            self.land_pending(ob, Landing::Backstop);
         }
         self.echoes.prune(now);
         if !safety::quit_requested() {
@@ -7362,7 +7374,7 @@ struct PresentNotes {
     parked: Option<u64>,
     arrived: Option<(u64, Vec<(u32, Rect)>)>,
     under_now: Option<(u64, u32)>,
-    cut: Option<u64>,
+    landed: Option<(u64, Pictures)>,
 }
 
 /// One shown window's frame as [`Controller::observe_with`] read it through Accessibility.
