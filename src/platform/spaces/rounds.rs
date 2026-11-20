@@ -19,11 +19,12 @@ use std::time::{Duration, Instant};
 use super::super::ffi::{ALL_SPACES_MASK, Route, Sky};
 use super::{Call, Mover, PARK_AX_SECONDS, ParkedLend, SpacesEngine, hidden_in, out_of};
 use crate::engine::geometry::Rect;
-use crate::engine::lend_park::{self, LendDone, Parked, Parking};
+use crate::engine::lend_park::{self, LendDone, Parked, Parking, Zone};
 use crate::engine::lend_round::{self, BackAsk, BackSteps, HomeAsk, HomeSteps, Left};
 use crate::engine::model::WindowId;
 use crate::platform::ax::AxElement;
 use crate::platform::enhanced_ui;
+use crate::platform::safety;
 use crate::platform::window_engine::{Back, Homes, Parks, RoundAsk};
 use crate::platform::windows;
 
@@ -210,6 +211,7 @@ impl SpacesEngine {
                     // one kept then.
                     if let Some(p) = st.parked.get(&a.id.0) {
                         a.park.ask.frame = p.park.frame;
+                        a.park.ask.kept = true;
                     }
                     a
                 })
@@ -237,7 +239,7 @@ impl SpacesEngine {
                 // Its thread panicked mid-park: a move may have been sent, so each restore is
                 // owed; judged as listed when the round goes home.
                 for a in ws {
-                    let park = Parked { at: a.park.ask.at, frame: a.park.ask.frame, display: a.park.ask.display };
+                    let park = Parked { at: a.park.ask.at, zone: a.park.ask.zone, frame: a.park.ask.frame, display: a.park.ask.display };
                     st.parked.insert(a.id.0, ParkedLend { park, element: a.park.window.clone() });
                     parks.missed.push(a.id);
                 }
@@ -256,6 +258,8 @@ impl SpacesEngine {
                 if p.took { parks.took.push(id) } else { parks.missed.push(id) }
             }
         }
+        drop(st);
+        self.lends_to_file();
         parks.ms = ms(began.elapsed());
         parks
     }
@@ -306,6 +310,7 @@ impl SpacesEngine {
         }
         let lent: Vec<u32> = done.lends.iter().filter(|(_, l)| l.home).map(|(id, _)| *id).collect();
         let at: BTreeMap<u32, Rect> = windows::describe(&lent).into_iter().map(|w| (w.id, w.bounds)).collect();
+        let at_card: Vec<u32> = asks.iter().filter(|a| a.parking.parked.zone == Zone::Card).map(|a| a.id).collect();
         {
             let mut st = self.state();
             for (id, l) in &done.lends {
@@ -320,11 +325,12 @@ impl SpacesEngine {
         }
         for w in ids {
             if lent.contains(&w.0) {
-                homes.lent.push((*w, at.get(&w.0).copied()));
+                homes.lent.push((*w, at.get(&w.0).copied(), at_card.contains(&w.0)));
             } else if !self.lent(w.0) {
                 homes.left.push((*w, why.get(&w.0).copied().unwrap_or(Left::NotHome)));
             }
         }
+        self.lends_to_file();
         homes.calls = done.calls;
         homes.ms = ms(began.elapsed());
         homes
@@ -369,6 +375,8 @@ impl SpacesEngine {
                 o.1 = Back { back: b.back, restored: b.restored };
             }
         }
+        drop(st);
+        self.lends_to_file();
         out
     }
 
@@ -397,6 +405,8 @@ impl SpacesEngine {
                 }
             }
         }
+        drop(st);
+        self.lends_to_file();
         set
     }
 
@@ -418,6 +428,24 @@ impl SpacesEngine {
                 n += 1;
             }
         }
+        drop(st);
+        self.lends_to_file();
         n
+    }
+
+    /// The card parks of the windows parked for a lend now ([`lend_park::Zone::Card`]): what
+    /// the parked file names for the guardian ([`crate::engine::recovery::ParkedFile::lends`]).
+    pub(super) fn card_parks(&self) -> Vec<Rect> {
+        self.state().parked.values().filter(|p| p.park.zone == Zone::Card).map(|p| p.park.at).collect()
+    }
+
+    /// The parked file written again when the card parks changed ([`Self::card_parks`]): after
+    /// a kill -9 with windows out at their cards, the guardian finds them there. The file is
+    /// rewritten only when it would differ.
+    fn lends_to_file(&self) {
+        let lends = self.card_parks();
+        if safety::set_lends(lends) {
+            safety::rewrite_parked_file();
+        }
     }
 }

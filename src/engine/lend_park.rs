@@ -35,6 +35,14 @@
 //! is made whether the park took or not ([`ParkAsk::must`]): a window seen early is the
 //! lesser harm, a lend after the release lets macOS slide to another Desktop.
 //!
+//! **Mission Control's lends** (round mc-card-park) park a window at its stage's card
+//! instead ([`Zone::Card`], [`super::card_park`]): Mission Control flies a window put home
+//! from where it is, so from the corner it flew in from the bottom right and was laid out at
+//! the right, where Apple's grows out of the strip and settles on the left. A card park is in
+//! view on the Desktop, so it is made only for windows that go home while Mission Control
+//! shows ([`super::mission_control::Lends::park_at_cards`]); ⌘Tab's and the Dock's lends,
+//! which are on the Desktop with nothing over them, keep the corner.
+//!
 //! The calls go through [`LendSteps`] so the order is tested without a window server.
 
 use super::geometry::Rect;
@@ -76,11 +84,38 @@ pub trait LendSteps: Moves {
     fn put_back(&mut self) -> bool;
 }
 
+/// Where a lend parks a window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Zone {
+    /// The display's park corner ([`super::corner::park_frame_of`]): out of sight but a
+    /// sliver, wherever the window is put home.
+    #[default]
+    Corner,
+    /// Its stage's card ([`super::card_park::at_card`]): in view on the Desktop, for windows
+    /// put home while Mission Control shows, which flies them from there.
+    Card,
+}
+
+impl Zone {
+    /// True when `listed` is at a park of this zone asked at `at` on `display`: in the
+    /// display's park zone for the corner (macOS clamps a park above the visible bottom), at
+    /// the asked origin for a card (on screen: nothing else tells it).
+    pub fn holds(self, listed: Rect, at: Rect, display: &Display) -> bool {
+        match self {
+            Self::Corner => display.parks(listed),
+            Self::Card => at_origin(listed, at),
+        }
+    }
+}
+
 /// A park asked for a lend.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParkAsk {
-    /// The park frame ([`super::corner::park_frame_of`] of the window's frame).
+    /// The park frame ([`super::corner::park_frame_of`] of the window's frame, or
+    /// [`super::card_park::at_card`]).
     pub at: Rect,
+    /// Which park it is.
+    pub zone: Zone,
     /// The window's display: its park zone tells a park that took.
     pub display: Display,
     /// The window's frame as the model knows it: where it goes back when the window server
@@ -90,6 +125,10 @@ pub struct ParkAsk {
     /// Lend even when the park does not take (the first Tab: a quick ⌘Tab has no other
     /// chance, and a slide is worse than a window seen for a moment).
     pub must: bool,
+    /// `frame` is the one an earlier park kept, its restore still owed: the window is listed
+    /// at that park (a card's, parked at Mission Control's key, then lent for ⌘Tab), so the
+    /// listing is never taken for its frame.
+    pub kept: bool,
 }
 
 /// A window parked for a lend, until its frame is set again.
@@ -97,10 +136,19 @@ pub struct ParkAsk {
 pub struct Parked {
     /// Where it was asked to park.
     pub at: Rect,
+    /// Which park it is.
+    pub zone: Zone,
     /// Its frame before the park: where a take back restores it.
     pub frame: Rect,
     /// Its display (the park zone).
     pub display: Display,
+}
+
+impl Parked {
+    /// True when `listed` is at this park ([`Zone::holds`]).
+    pub fn holds(&self, listed: Rect) -> bool {
+        self.zone.holds(listed, self.at, &self.display)
+    }
 }
 
 /// What a lend did. A park's move, once sent, may still be carried out after it was read
@@ -145,7 +193,8 @@ fn same_size(a: Rect, b: Rect) -> bool {
 pub struct Parking {
     /// Where it parked, and the frame it goes back to.
     pub parked: Parked,
-    /// Listed in the park zone after the move: out of sight once home.
+    /// Listed at its park after the move ([`Parked::holds`]): out of sight once home at the
+    /// corner; where Mission Control flies it from at a card.
     pub took: bool,
     /// Listed away from its frame after the move (in the zone or not).
     pub moved: bool,
@@ -166,18 +215,19 @@ impl Parking {
     /// a while ago and still hidden ([`super::lend_round`]: parked at Mission Control's key,
     /// put home once it shows): an app may have moved it since.
     pub fn now(parked: Parked, listed: Option<Rect>) -> Self {
-        Self { parked, took: listed.is_some_and(|r| parked.display.parks(r)), moved: listed.is_some_and(|r| !at_origin(r, parked.frame)), must: false, landed: listed }
+        Self { parked, took: listed.is_some_and(|r| parked.holds(r)), moved: listed.is_some_and(|r| !at_origin(r, parked.frame)), must: false, landed: listed }
     }
 }
 
 /// The park of a lend, the window still hidden in its stage Space: moved to `ask.at`, read
-/// back. Its frame is the one listed before (at the window's size, and not in the park zone:
-/// a window parked already keeps the frame of the model), else the model's.
+/// back. Its frame is the one listed before (at the window's size, and neither in the park
+/// zone nor at the park asked: a window parked already keeps the frame of the model), else
+/// the model's.
 pub fn park(mac: &mut impl Moves, ask: ParkAsk) -> Parking {
-    let before = mac.listed().filter(|r| same_size(*r, ask.frame) && !ask.display.parks(*r));
-    let parked = Parked { at: ask.at, frame: before.unwrap_or(ask.frame), display: ask.display };
+    let before = mac.listed().filter(|r| !ask.kept && same_size(*r, ask.frame) && !ask.display.parks(*r) && !at_origin(*r, ask.at));
+    let parked = Parked { at: ask.at, zone: ask.zone, frame: before.unwrap_or(ask.frame), display: ask.display };
     let landed = mac.move_to(ask.at);
-    Parking { parked, took: landed.is_some_and(|r| ask.display.parks(r)), moved: landed.is_some_and(|r| !at_origin(r, parked.frame)), must: ask.must, landed }
+    Parking { parked, took: landed.is_some_and(|r| parked.holds(r)), moved: landed.is_some_and(|r| !at_origin(r, parked.frame)), must: ask.must, landed }
 }
 
 /// The lend after its park, `home` saying whether the window went home. Not lent (the park
@@ -207,7 +257,7 @@ pub fn lend(mac: &mut impl LendSteps, park_ask: Option<ParkAsk>) -> LendDone {
 /// frame: its app moved it (one listed at its frame never took the park, its restore owed
 /// only in case the move came late).
 pub fn moved_off(mac: &mut impl Moves, parked: Option<Parked>) -> bool {
-    parked.is_some_and(|p| mac.listed().is_some_and(|r| !p.display.parks(r) && !at_origin(r, p.frame)))
+    parked.is_some_and(|p| mac.listed().is_some_and(|r| !p.holds(r) && !at_origin(r, p.frame)))
 }
 
 /// Takes the lent window back: into its stage Space first, then (when it was parked) its
@@ -319,7 +369,7 @@ mod tests {
 
     fn ask(must: bool) -> ParkAsk {
         let d = display();
-        ParkAsk { at: park_frame_of(frame(), &d, ParkRequest::default()), display: d, frame: frame(), must }
+        ParkAsk { at: park_frame_of(frame(), &d, ParkRequest::default()), zone: Zone::Corner, display: d, frame: frame(), must, kept: false }
     }
 
     /// Parked while still in its stage Space, then home; back into its stage Space, then its
@@ -331,7 +381,7 @@ mod tests {
         let done = lend(&mut mac, Some(a));
         assert!(done.home);
         assert_eq!(done.parked, Some(true));
-        assert_eq!(done.owed, Some(Parked { at: a.at, frame: frame(), display: a.display }));
+        assert_eq!(done.owed, Some(Parked { at: a.at, zone: Zone::Corner, frame: frame(), display: a.display }));
         assert_eq!(mac.calls, vec![format!("move {},{} staged=true", a.at.x, a.at.y), "home".to_string()], "the park first, unseen");
         let back = take_back(&mut mac, done.owed);
         assert_eq!(back, BackDone { back: true, restored: Some(true), moved_off: false });
@@ -355,7 +405,7 @@ mod tests {
     #[test]
     fn a_park_refused_lends_only_when_the_lend_is_needed_now() {
         let a = ask(false);
-        let owed = Some(Parked { at: a.at, frame: frame(), display: a.display });
+        let owed = Some(Parked { at: a.at, zone: Zone::Corner, frame: frame(), display: a.display });
         let mut mac = Fake::new(frame());
         mac.moves = false;
         let done = lend(&mut mac, Some(a));
@@ -454,7 +504,7 @@ mod tests {
         mac.times_out = true;
         let a = ask(true);
         let done = lend(&mut mac, Some(a));
-        assert_eq!(done, LendDone { home: true, parked: Some(false), owed: Some(Parked { at: a.at, frame: frame(), display: a.display }) });
+        assert_eq!(done, LendDone { home: true, parked: Some(false), owed: Some(Parked { at: a.at, zone: Zone::Corner, frame: frame(), display: a.display }) });
         // The app answers now: the window goes to the park.
         mac.at = Some(a.at);
         mac.times_out = false;
@@ -520,5 +570,72 @@ mod tests {
         assert!(!spaces.stranded(frame(), &displays, Known::Registered));
         assert!(!spaces.stranded(a.at, &displays, Known::Managed), "a window it did not register: never by its frame");
         assert!(!spaces.stranded(a.at, &displays, Known::Unknown));
+    }
+
+    /// A card park (round mc-card-park): Mission Control's lend parks a window at its stage's
+    /// card while it is still hidden, then puts it home; a park that took is one listed at the
+    /// asked origin (on screen: no zone tells it), and one listed elsewhere did not take.
+    fn card_ask() -> ParkAsk {
+        let d = display();
+        let card = Rect::new(16.0, 280.0, 76.0, 109.0);
+        let at = crate::engine::card_park::at_card(frame(), card, d.visible).expect("fits");
+        ParkAsk { at, zone: Zone::Card, display: d, frame: frame(), must: false, kept: false }
+    }
+
+    #[test]
+    fn a_card_park_takes_at_its_origin_and_restores_after_its_take_back() {
+        let a = card_ask();
+        assert!(!a.display.parks(a.at), "a card park is out of the corner's zone");
+        let mut mac = Fake::new(frame());
+        let done = lend(&mut mac, Some(a));
+        assert_eq!((done.home, done.parked), (true, Some(true)));
+        assert_eq!(mac.calls[0], format!("move {},{} staged=true", a.at.x, a.at.y), "parked while still hidden");
+        assert!(mac.seen.iter().all(|r| at_origin(*r, a.at)), "only ever seen at its card: {:?}", mac.seen);
+        let parked = done.owed.expect("its frame owed");
+        assert_eq!((parked.zone, parked.frame), (Zone::Card, frame()));
+        assert!(parked.holds(a.at) && !parked.holds(frame()));
+        assert!(!moved_off(&mut mac, done.owed), "at its card: not moved off");
+        assert_eq!(take_back(&mut mac, done.owed), BackDone { back: true, restored: Some(true), moved_off: false });
+        assert_eq!(mac.at, Some(frame()));
+        // Clamped by macOS elsewhere (or refused): not taken, and never put home.
+        let mut mac = Fake::new(frame());
+        mac.clamp_y = Some(200.0);
+        let low = ParkAsk { at: Rect { y: 1100.0, ..a.at }, ..a };
+        let done = lend(&mut mac, Some(low));
+        assert_eq!((done.home, done.parked), (false, Some(false)));
+        assert!(mac.seen.is_empty());
+    }
+
+    /// A window parked at its card at Mission Control's key and judged when it goes home: at
+    /// the card it took; its app moved it since, it did not. A ⌘Tab lend of it later never
+    /// takes the card for its frame.
+    #[test]
+    fn a_card_park_made_earlier_is_judged_at_its_origin() {
+        let a = card_ask();
+        let p = Parked { at: a.at, zone: Zone::Card, frame: frame(), display: a.display };
+        assert!(Parking::now(p, Some(a.at)).took);
+        let moved = Parking::now(p, Some(Rect::new(800.0, 300.0, 1100.0, 800.0)));
+        assert!(!moved.took && moved.moved);
+        assert!(!Parking::now(p, Some(frame())).took);
+        let mut mac = Fake::new(a.at);
+        let done = lend(&mut mac, Some(ParkAsk { kept: true, ..ask(false) }));
+        assert_eq!(done.owed.map(|p| p.frame), Some(frame()), "the frame kept, never the card");
+    }
+
+    /// After a kill -9 with windows out at their cards, the guardian's scan finds a window it
+    /// registered at one of the parked file's card parks stranded, wherever it is on screen;
+    /// never another app's window there, nor one at another frame.
+    #[test]
+    fn a_card_park_is_stranded_for_the_recovery_scan_when_registered() {
+        let d = display();
+        let a = card_ask();
+        let displays = ScanDisplays::new(d.frame, d.visible, Vec::new(), [d.corner]).with_lends(vec![a.at]);
+        let spaces = EngineKind::Spaces;
+        assert!(spaces.stranded(a.at, &displays, Known::Registered), "at its card park");
+        assert!(spaces.stranded(a.at.translate(0.5, -0.5), &displays, Known::Registered), "within a point");
+        assert!(!spaces.stranded(a.at.translate(30.0, 0.0), &displays, Known::Registered), "moved since");
+        assert!(!spaces.stranded(Rect { w: a.at.w - 50.0, ..a.at }, &displays, Known::Registered), "another size");
+        assert!(!is_stranded(a.at, &displays, Known::Managed) && !is_stranded(a.at, &displays, Known::Unknown), "only a window we registered");
+        assert!(!is_stranded(a.at, &ScanDisplays::new(d.frame, d.visible, Vec::new(), [d.corner]), Known::Registered), "no card park in the file");
     }
 }

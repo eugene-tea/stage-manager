@@ -276,6 +276,40 @@ pub(crate) fn zones_used() -> Vec<ParkZone> {
     ZONES.lock().map(|z| z.clone()).unwrap_or_default()
 }
 
+/// The frames the Spaces engine parks windows at for Mission Control's lends, at their
+/// stages' cards (round mc-card-park; the guardian's: those the app's parked file names), so
+/// a window the app registered is stranded there in every scan
+/// ([`crate::engine::recovery::ScanDisplays::lends`]).
+static LENDS: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
+
+/// The card parks of Mission Control's lends now (or named by the parked files read).
+pub(crate) fn lends_used() -> Vec<Rect> {
+    LENDS.lock().map(|l| l.clone()).unwrap_or_default()
+}
+
+/// The Spaces engine's card parks now (every window parked at its card for Mission
+/// Control's lend): true when they changed, and the parked file is then written again
+/// ([`rewrite_parked_file`]).
+pub fn set_lends(lends: Vec<Rect>) -> bool {
+    LENDS.lock().is_ok_and(|mut l| {
+        let changed = *l != lends;
+        *l = lends;
+        changed
+    })
+}
+
+/// Takes the card parks a parked file names (the guardian's, and the launch's for an earlier
+/// copy's file) without writing one.
+pub fn assume_lends(lends: &[Rect]) {
+    if let Ok(mut l) = LENDS.lock() {
+        for r in lends {
+            if !l.contains(r) {
+                l.push(*r);
+            }
+        }
+    }
+}
+
 /// Every park corner used this run (the guardian's: those the app's parked file names), so a
 /// window parked at a corner the arrangement no longer picks still counts as parked.
 static CORNERS: Mutex<BTreeSet<Corner>> = Mutex::new(BTreeSet::new());
@@ -426,7 +460,16 @@ fn write_parked_file(listed: &[Registered]) {
     let file =
         {
             let engine = window_engine::current();
-            ParkedFile { engine: engine.kind(), visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout, spaces: engine.parked_spaces() }
+            ParkedFile {
+                engine: engine.kind(),
+                visible: visible_frame(),
+                windows: listed.to_vec(),
+                corners: corners_used(),
+                zones: zones_used(),
+                logout,
+                spaces: engine.parked_spaces(),
+                lends: lends_used(),
+            }
         };
     let mut written = lock_written();
     if written.as_ref() == Some(&file) {
@@ -1115,7 +1158,7 @@ pub(crate) fn scan_displays() -> ScanDisplays {
     let visible = visible_frame()
         .filter(|v| main.contains_rect(v))
         .unwrap_or_else(|| Rect::new(main.x, main.y + MENU_BAR_GUESS, main.w, main.h - MENU_BAR_GUESS));
-    ScanDisplays::new(main, visible, bounds, corners_used()).with_zones(zones_used())
+    ScanDisplays::new(main, visible, bounds, corners_used()).with_zones(zones_used()).with_lends(lends_used())
 }
 
 /// Which windows a recovery scan looks at.
@@ -1277,7 +1320,10 @@ pub fn crashed_registered() -> BTreeMap<u32, Registered> {
     for entry in dir.flatten() {
         let name = entry.file_name();
         let Some(pid) = name.to_str().and_then(parked_file_pid).filter(|&p| p != own) else { continue };
-        for r in read_parked_file(pid).windows {
+        let file = read_parked_file(pid);
+        // Its windows out at their cards for Mission Control are stranded there too.
+        assume_lends(&file.lends);
+        for r in file.windows {
             found.insert(r.id, r);
         }
     }

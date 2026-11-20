@@ -2014,7 +2014,7 @@ mod arranged_ahead {
         let restore = mac.m.window(w(5)).expect("managed").restore;
         let d = *mac.m.display(MAIN);
         let at = park_frame_of(own, &d, ParkRequest::default());
-        let ask = ParkAsk { at, display: d, frame: own, must: true };
+        let ask = ParkAsk { at, zone: crate::engine::lend_park::Zone::Corner, display: d, frame: own, must: true, kept: false };
         let mut keys = switcher::Switcher::default();
         let acts = cmd_tab(&mac, &mut keys, tab(false), None);
         assert_eq!(acts.is_empty(), !spaces, "only the Spaces engine puts a window home: {acts:?}");

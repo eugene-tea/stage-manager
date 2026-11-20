@@ -9,7 +9,9 @@
 //!   corners that count ([`ScanDisplays::corners`]; [`super::corner::park::is_parked_in_at`]: the full frame's or
 //!   the visible frame's, since macOS keeps a parked window above a bottom Dock) and does not
 //!   show on another display either (so a window on a second display to the bottom-right of
-//!   the main one is left alone);
+//!   the main one is left alone); a window the crashed copy registered is also stranded at a
+//!   frame it parked a window at for Mission Control's lend, at its stage's card
+//!   ([`ScanDisplays::lends`], round mc-card-park: on screen, so no zone tells it);
 //! - a stranded window goes back to the frame a crashed copy registered for it (its parked
 //!   file, by window id: exact, and fresher than any save; S4 of the review of 10-29),
 //!   else its frame from `state.json` (any Space; the same window id first, then exact
@@ -78,6 +80,10 @@ pub struct ScanDisplays {
     /// The other managed displays' park zones (round displays): a window in one of them is
     /// parked there, as one in the main display's zone is.
     pub zones: Vec<ParkZone>,
+    /// The frames the app parked windows at for Mission Control's lends, at their stages'
+    /// cards (round mc-card-park; [`super::card_park`]): a registered window listed at one
+    /// is stranded there. On screen, so only a registered window counts.
+    pub lends: Vec<Rect>,
 }
 
 impl ScanDisplays {
@@ -88,13 +94,26 @@ impl ScanDisplays {
         corners.extend(used);
         corners.sort();
         corners.dedup();
-        Self { main, visible, others, corners, zones: Vec::new() }
+        Self { main, visible, others, corners, zones: Vec::new(), lends: Vec::new() }
     }
 
     /// The same, with the other managed displays' park zones (round displays).
     pub fn with_zones(mut self, zones: Vec<ParkZone>) -> Self {
         self.zones = zones;
         self
+    }
+
+    /// The same, with the frames of Mission Control's card parks ([`Self::lends`]).
+    pub fn with_lends(mut self, lends: Vec<Rect>) -> Self {
+        self.lends = lends;
+        self
+    }
+
+    /// True when `frame` is one of [`Self::lends`] (its origin within
+    /// [`super::lend_park::NEAR`], its size the same: a lend never resizes).
+    pub fn at_lend(&self, frame: Rect) -> bool {
+        let near = super::lend_park::NEAR;
+        self.lends.iter().any(|r| super::lend_park::at_origin(frame, *r) && (frame.w - r.w).abs() <= near && (frame.h - r.h).abs() <= near)
     }
 
     /// True when `frame` is in a park zone at any corner that counts (the main display's,
@@ -171,8 +190,12 @@ pub const MIN_STRANDED_SIDE: f64 = 48.0;
 /// True when `frame` is in the main display's park zone and not meaningfully on any other
 /// display (it shows at most [`PARK_MARGIN`] points on both axes there), as far as what is
 /// `known` of its window allows ([`Known`]: slivers, and helpers' tiny windows,
-/// [`MIN_STRANDED_SIDE`]).
+/// [`MIN_STRANDED_SIDE`]); or, for a window we registered, at a card park of Mission
+/// Control's lends ([`ScanDisplays::at_lend`]), on whichever display.
 pub fn is_stranded(frame: Rect, displays: &ScanDisplays, known: Known) -> bool {
+    if known == Known::Registered && displays.at_lend(frame) {
+        return true;
+    }
     let tiny = frame.w < MIN_STRANDED_SIDE || frame.h < MIN_STRANDED_SIDE;
     if (tiny && known != Known::Registered) || !displays.parks_with(frame, known.slivers()) {
         return false;
@@ -365,6 +388,12 @@ pub struct ParkedFile {
     /// empty, so the Corner engine's file reads as before.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub spaces: Vec<StageSpace>,
+    /// The frames the Spaces engine parked windows at for Mission Control's lends, at their
+    /// stages' cards ([`ScanDisplays::lends`]): after a crash with them out, such a window is
+    /// on its Desktop in view there, and the guardian brings it to its registered frame. Left
+    /// out when empty, so the file reads as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lends: Vec<Rect>,
 }
 
 /// A stage Space of the Spaces engine, as the parked file names it.
@@ -489,6 +518,7 @@ mod tests {
             visible: VISIBLE,
             others: vec![],
             zones: vec![],
+            lends: vec![],
         }
     }
 
@@ -766,12 +796,17 @@ mod tests {
             zones: vec![ParkZone { frame: Rect::new(-1800.0, 271.0, 1800.0, 1169.0), visible: Rect::new(-1800.0, 310.0, 1800.0, 1130.0), corners: vec![Corner::BottomLeft] }],
             logout: false,
             spaces: vec![],
+            lends: vec![],
         };
         let json = serde_json::to_vec(&f).unwrap_or_default();
         assert_eq!(ParkedFile::from_json(&json).ok(), Some(f.clone()));
         assert!(!String::from_utf8_lossy(&json).contains("logout"), "written only at an unclean quit for a logout");
         assert!(!String::from_utf8_lossy(&json).contains("engine"), "the Corner engine's file reads as before the engines");
         assert!(!String::from_utf8_lossy(&json).contains("spaces"), "no stage Space: no key");
+        assert!(!String::from_utf8_lossy(&json).contains("lends"), "no card park: no key");
+        let lends = ParkedFile { engine: EngineKind::Spaces, lends: vec![Rect::new(0.0, 122.0, 520.0, 424.0)], ..f.clone() };
+        let json = serde_json::to_vec(&lends).unwrap_or_default();
+        assert_eq!(ParkedFile::from_json(&json).ok(), Some(lends));
         let spaces = ParkedFile { engine: EngineKind::Spaces, spaces: vec![StageSpace { space: 836, desktop: 3 }], ..f.clone() };
         let json = serde_json::to_vec(&spaces).unwrap_or_default();
         assert!(String::from_utf8_lossy(&json).contains(r#""spaces":[{"space":836,"desktop":3}]"#));

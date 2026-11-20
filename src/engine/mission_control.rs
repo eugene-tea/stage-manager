@@ -9,8 +9,8 @@
 //!
 //! So while Mission Control or App Exposé shows, the hidden windows of the Desktops shown are
 //! put on their Desktop the way ⌘Tab's switcher and a Dock press put one there
-//! ([`super::lend_park`]): moved to the park corner while still in their stage Space, then
-//! put home, still counted hidden. When it closes they go back into their stage Spaces,
+//! ([`super::lend_park`]): moved to a park while still in their stage Space (their stages'
+//! cards, below), then put home, still counted hidden. When it closes they go back into their stage Spaces,
 //! their frames set again; a window picked there is activated by macOS, and the activation's
 //! switch brings its stage in front as after a Dock press.
 //!
@@ -79,9 +79,22 @@
 //! ([`crate::ui::transition_plan::Shown::Placed`]). Should no switch come (another app in front by then), the windows
 //! placed go back into their stage Spaces like any other, at their frames, unseen.
 //!
+//! **At its card** ([`Lends::park_at_cards`], [`super::card_park`], round mc-card-park).
+//! Mission Control flies a window put home from where it is listed and lays it out near
+//! there: parked at the corner, a hidden stage's window flew in from the bottom right and
+//! settled at the right, where Apple's grows out of its strip thumbnail and settles in a
+//! column on the left (`scripts/probe_apple.py mission-open`, 11-20). So a window that goes
+//! home while Mission Control shows (its round made once it showed, or parked at its key and
+//! put home once it shows) parks at its stage's card, at its own size. Put home in view, it
+//! is only put home with Mission Control over it: a round at the key in [`Mode::Key`] (home
+//! before anything shows, and for [`KEY_WAIT`] when nothing does) and a test's round keep the
+//! corner. Once Mission Control closes, a window out at its card is on the Desktop in view
+//! until it goes back, so while one is out the close is looked for at the fast tick
+//! ([`WATCH_EVERY`]) instead of the tick.
+//!
 //! **Never left out.** The engine counts every window put home as lent and parked: a hide,
 //! a show, a sweep (quit, a stand-down, a fallback) and the guardian's scan of the park
-//! corner bring each back as they do ⌘Tab's ([`super::lend_park`]). [`Lends`] only decides
+//! corner and of the card parks its file names bring each back as they do ⌘Tab's ([`super::lend_park`]). [`Lends`] only decides
 //! when; what is out is the engine's to know.
 
 use std::collections::VecDeque;
@@ -422,6 +435,9 @@ pub struct Out {
     pub pid: Pid,
     /// Where the window server listed it once parked and home (`None`: not listed then).
     pub parked: Option<Rect>,
+    /// Parked at its stage's card ([`super::lend_park::Zone::Card`]): in view on the Desktop
+    /// once Mission Control has closed, until it goes back.
+    pub at_card: bool,
 }
 
 /// True when a hidden window a round left hidden (`why`), `misses` times now while this
@@ -618,6 +634,8 @@ pub struct Lends {
     /// Those tried again once [`RETRY_AFTER`] has passed, and when.
     retry: Vec<WindowId>,
     retry_at: Option<Instant>,
+    /// A test's round parks at the cards (`ctl debug-mission-control lend card`).
+    asked_at_cards: bool,
 }
 
 impl Lends {
@@ -671,9 +689,10 @@ impl Lends {
     /// tick; the look is then counted made).
     pub fn look_due(&mut self, now: Instant) -> bool {
         let watching = self.hint.is_some_and(|(h, t)| now.saturating_duration_since(t) < h.watch()) || self.guess.is_some();
-        // A pick's switch waits for the close: looked for at the fast tick while it shows.
+        // A pick's switch waits for the close, and a window out at its card is in view once
+        // it is over: looked for at the fast tick while it shows.
         let opening = watching && self.up.is_none();
-        if !(opening || self.pick.is_some()) || self.looked.is_some_and(|t| now.saturating_duration_since(t) < WATCH_EVERY) {
+        if !(opening || self.pick.is_some() || self.watching_close()) || self.looked.is_some_and(|t| now.saturating_duration_since(t) < WATCH_EVERY) {
             return false;
         }
         self.looked = Some(now);
@@ -786,10 +805,32 @@ impl Lends {
         Some(self.take_early())
     }
 
-    /// A test's round, whatever the mode (`ctl debug-mission-control lend`).
-    pub fn ask(&mut self) {
+    /// A test's round, whatever the mode (`ctl debug-mission-control lend`); `at_cards`: its
+    /// windows park at their cards, as for a Mission Control that shows (`lend card`).
+    pub fn ask(&mut self, at_cards: bool) {
         self.wanted = Some(By::Asked);
         self.closed = None;
+        self.asked_at_cards = at_cards;
+    }
+
+    /// True when the round under way parks its windows at their stages' cards
+    /// ([`super::card_park`]): it puts them home only with Mission Control over them, seen
+    /// showing ([`By::Shown`], its retries and late windows) or parked at its key and put home
+    /// once it shows ([`By::KeyPark`]). A round at the key in [`Mode::Key`] puts them home
+    /// before anything shows, in view at a card for [`KEY_WAIT`] when nothing does: the
+    /// corner. A test's round only when it asked.
+    pub fn park_at_cards(&self) -> bool {
+        self.round.is_some_and(|r| match r.by {
+            By::Shown | By::KeyPark => true,
+            By::Key => false,
+            By::Asked => self.asked_at_cards,
+        })
+    }
+
+    /// True while Mission Control shows with a window out at its card: its close is looked
+    /// for at the fast tick, so that the window goes back as soon as it is in view.
+    fn watching_close(&self) -> bool {
+        self.up.is_some() && self.out.iter().any(|o| o.at_card)
     }
 
     /// A test asks its windows back (`ctl debug-mission-control back`), or everything out
@@ -1061,7 +1102,15 @@ impl Lends {
         let measuring = self.up.is_some() && !self.measured && !self.out.is_empty() && self.round.is_some_and(|r| r.done.is_some());
         let early = !self.early.is_empty() && self.up.is_none();
         let retrying = !self.retry.is_empty() && self.up.is_some();
-        watching || self.guess.is_some() || !self.queue.is_empty() || retrying || measuring || early || self.pick.is_some() || self.closing(now).is_some()
+        watching
+            || self.guess.is_some()
+            || !self.queue.is_empty()
+            || retrying
+            || measuring
+            || early
+            || self.pick.is_some()
+            || self.closing(now).is_some()
+            || self.watching_close()
     }
 }
 
@@ -1085,7 +1134,7 @@ mod tests {
     }
 
     fn out(id: u32) -> Out {
-        Out { id: w(id), pid: 10, parked: Some(Rect::new(1439.0, 899.0, 600.0, 400.0)) }
+        Out { id: w(id), pid: 10, parked: Some(Rect::new(1439.0, 899.0, 600.0, 400.0)), at_card: false }
     }
 
     #[test]
@@ -1414,6 +1463,61 @@ mod tests {
         assert!(!l.parks_only());
     }
 
+    /// Round mc-card-park: the windows park at their cards only when they go home with
+    /// Mission Control over them (its round once it shows, or parked at its key in "shown");
+    /// a "key" round puts them home before anything shows: the corner. A test's only when it
+    /// asks.
+    #[test]
+    fn windows_park_at_their_cards_only_when_they_go_home_with_mission_control_over_them() {
+        let t = Instant::now();
+        let mut l = Lends::default();
+        assert!(!l.park_at_cards(), "no round");
+        assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
+        l.plan(vec![w(1)], t);
+        assert!(l.parks_only() && l.park_at_cards(), "parked at the key, still hidden: home once it shows");
+        l.take_queue();
+        l.parked_early([(w(1), 10)]);
+        assert!(l.saw(true, t + ms(80)).is_some());
+        l.plan(vec![w(1), w(2)], t + ms(80));
+        assert!(l.park_at_cards(), "Mission Control's own round");
+        let mut l = Lends::default();
+        l.set_mode(Mode::Key);
+        assert!(l.hint(Hint::Key(Trigger::MissionControl), t));
+        l.plan(vec![w(1)], t);
+        assert!(!l.park_at_cards(), "home at the key, before anything shows: the corner");
+        let mut l = Lends::default();
+        l.ask(false);
+        l.plan(vec![w(1)], t);
+        assert!(!l.park_at_cards(), "a test's round, nothing over it");
+        l.ask(true);
+        l.plan(vec![w(1)], t);
+        assert!(l.park_at_cards(), "a test that asks for the cards");
+    }
+
+    /// A window out at its card is in view once Mission Control has closed: while one is out,
+    /// the close is looked for at the fast tick, and it goes back at the look that sees it.
+    #[test]
+    fn with_a_window_out_at_its_card_the_close_is_looked_for_at_the_fast_tick() {
+        let t = Instant::now();
+        let mut l = Lends::default();
+        assert!(l.saw(true, t).is_some());
+        l.plan(vec![w(1), w(2)], t);
+        l.take_queue();
+        l.lent(out(1));
+        l.round_done(t + ms(20));
+        l.measured();
+        assert!(!l.wants_fast(t + ms(2000)) && !l.look_due(t + ms(2000)), "at the corner: the tick looks for its close");
+        l.lent(Out { at_card: true, ..out(2) });
+        assert!(l.wants_fast(t + ms(2000)) && l.look_due(t + ms(2000)), "at its card: the fast tick");
+        assert!(!l.look_due(t + ms(2010)), "not more often than the watch's pause");
+        assert!(l.look_due(t + ms(2000) + WATCH_EVERY));
+        assert!(l.saw(false, t + ms(2040)).is_some());
+        assert_eq!(l.closing(t + ms(2040)), Some(Duration::ZERO), "they go back at once");
+        l.settle(w(1), Settled::Back);
+        l.settle(w(2), Settled::Back);
+        assert!(!l.wants_fast(t + ms(2100)), "none out");
+    }
+
     #[test]
     fn off_follows_nothing_and_a_tests_round_waits_for_its_own_back() {
         let t = Instant::now();
@@ -1425,7 +1529,7 @@ mod tests {
         assert!(!l.wants_fast(t));
         assert!(l.saw(false, t + ms(500)).is_some());
         // A test's round before the key: Mission Control opening and closing leaves it out.
-        l.ask();
+        l.ask(false);
         assert_eq!(l.wanted(), Some(By::Asked));
         l.plan(vec![w(1)], t + ms(600));
         assert_eq!(l.next_window(), Some(w(1)));
@@ -1480,7 +1584,7 @@ mod tests {
         l.plan(vec![w(1), w(2), w(3)], t);
         l.take_queue();
         for (id, pid) in [(1, 10), (2, 10), (3, 30)] {
-            l.lent(Out { id: w(id), pid, parked: Some(Rect::new(2558.0, 1407.0, 520.0, 424.0)) });
+            l.lent(Out { id: w(id), pid, parked: Some(Rect::new(2558.0, 1407.0, 520.0, 424.0)), at_card: false });
         }
         l.round_done(t + ms(30));
         l

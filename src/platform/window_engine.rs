@@ -115,8 +115,9 @@ pub struct Parks {
 /// What a round's second phase did ([`WindowEngine::home_round`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Homes {
-    /// On their Desktop now, still counted hidden, with where the window server lists each.
-    pub lent: Vec<(WindowId, Option<Rect>)>,
+    /// On their Desktop now, still counted hidden, with where the window server lists each
+    /// and whether it was parked at its stage's card ([`crate::engine::lend_park::Zone::Card`]).
+    pub lent: Vec<(WindowId, Option<Rect>, bool)>,
     /// Not put home, and why (the park did not take, the window did not go, or the engine
     /// does not hold it): still hidden.
     pub left: Vec<(WindowId, Left)>,

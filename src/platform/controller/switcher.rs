@@ -69,7 +69,7 @@ use super::Controller;
 use super::arrival::Lent;
 use super::slide_watch::LendNote;
 use crate::engine::corner;
-use crate::engine::lend_park::ParkAsk;
+use crate::engine::lend_park::{ParkAsk, Zone};
 use crate::engine::model::{AppFacts, WindowId};
 use crate::engine::switcher::{self, Act, Choice, Heard, Key, LetGo, List, Switcher};
 use crate::platform::ctl::CmdTabProbe;
@@ -337,7 +337,7 @@ impl Controller {
         let display = *m.display(w.meta.display);
         let element = ob.element(window.0).or_else(|| ob.window(window.0).map(|o| o.element.clone()))?;
         let at = corner::park_frame_of(w.meta.frame, &display, m.options().park);
-        Some(LendPark { ask: ParkAsk { at, display, frame: w.meta.frame, must }, window: element, ax_seconds })
+        Some(LendPark { ask: ParkAsk { at, zone: Zone::Corner, display, frame: w.meta.frame, must, kept: false }, window: element, ax_seconds })
     }
 
     /// Carries out one act of the switcher's plan (`first`: the switcher's first selection).

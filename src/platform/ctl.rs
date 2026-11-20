@@ -21,9 +21,9 @@
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
 //! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
 //! as the Dock shows it (its items' titles, the one selected), `debug-mission-control
-//! status|lend|back|mode off|shown|key|config` drives Mission Control's lends under the Spaces
+//! status|lend [card]|back|mode off|shown|key|config` drives Mission Control's lends under the Spaces
 //! engine by hand (the probe: every hidden window put home now and kept out, taken back, the
-//! mode for this run), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
+//! mode for this run; `lend card` parks them at their cards), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
 //! nothing else, on any Desktop), `debug-space
 //! left|right [numpad]` types the Desktop switch shortcut and reports the Space change, and
 //! `debug-fullscreen ID on|off` puts a `STAGE_MANAGER_ONLY` app's window in or out of full
@@ -533,10 +533,10 @@ impl Command {
             }
             ["debug-switcher"] => Ok(Self::DebugSwitcher),
             ["debug-mission-control", rest @ ..] => match rest {
-                ["status" | "lend" | "back"] | ["mode", "off" | "shown" | "key" | "config"] => {
+                ["status" | "lend" | "back"] | ["lend", "card"] | ["mode", "off" | "shown" | "key" | "config"] => {
                     Ok(Self::DebugMissionControl(rest.iter().map(|w| (*w).to_string()).collect()))
                 }
-                _ => Err("debug-mission-control takes status, lend, back, or mode off|shown|key|config".into()),
+                _ => Err("debug-mission-control takes status, lend [card], back, or mode off|shown|key|config".into()),
             },
             ["debug-cmd-tab", "result"] => Ok(Self::DebugCmdTab(CmdTabProbe::Result)),
             ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
@@ -1108,6 +1108,7 @@ mod tests {
         assert_eq!(Command::parse("debug-cmd-tab result"), Ok(Command::DebugCmdTab(CmdTabProbe::Result)));
         assert_eq!(Command::parse("debug-switcher"), Ok(Command::DebugSwitcher));
         assert_eq!(Command::parse("debug-mission-control lend"), Ok(Command::DebugMissionControl(vec!["lend".into()])));
+        assert_eq!(Command::parse("debug-mission-control lend card"), Ok(Command::DebugMissionControl(vec!["lend".into(), "card".into()])));
         assert_eq!(
             Command::parse("debug-mission-control mode key"),
             Ok(Command::DebugMissionControl(vec!["mode".into(), "key".into()]))

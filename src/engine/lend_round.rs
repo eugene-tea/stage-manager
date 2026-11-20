@@ -225,7 +225,7 @@ mod tests {
     use super::*;
     use crate::engine::corner::park::ParkRequest;
     use crate::engine::corner::park_frame_of;
-    use crate::engine::lend_park::{Moves, ParkAsk, park, settle};
+    use crate::engine::lend_park::{Moves, ParkAsk, Zone, park, settle};
     use crate::engine::model::Display;
     use crate::engine::testkit::display;
     use std::collections::BTreeMap;
@@ -318,7 +318,7 @@ mod tests {
     }
 
     fn ask(d: Display, id: u32) -> ParkAsk {
-        ParkAsk { at: park_frame_of(frame(id), &d, ParkRequest::default()), display: d, frame: frame(id), must: false }
+        ParkAsk { at: park_frame_of(frame(id), &d, ParkRequest::default()), zone: Zone::Corner, display: d, frame: frame(id), must: false, kept: false }
     }
 
     /// Windows 1 to 4 hidden at their frames; 1 and 2 of one app, 3 and 4 of two others.
@@ -423,7 +423,7 @@ mod tests {
         let parks = park_in_turn(&[1u32, 2, 3], t + Duration::from_millis(50), || clock.get(), |id| {
             clock.set(clock.get() + Duration::from_millis(30));
             let d = display();
-            Parking { parked: Parked { at: ask(d, id).at, frame: frame(id), display: d }, took: true, moved: true, must: false, landed: Some(ask(d, id).at) }
+            Parking { parked: Parked { at: ask(d, id).at, zone: Zone::Corner, frame: frame(id), display: d }, took: true, moved: true, must: false, landed: Some(ask(d, id).at) }
         });
         assert_eq!(parks.iter().map(|(id, p)| (*id, p.is_some())).collect::<Vec<_>>(), [(1, true), (2, true), (3, false)]);
     }
@@ -438,7 +438,7 @@ mod tests {
         mac.seen.clear();
         mac.refused = vec![4];
         let d = display();
-        let parked = |id: u32| Some(Parked { at: ask(d, id).at, frame: frame(id), display: d });
+        let parked = |id: u32| Some(Parked { at: ask(d, id).at, zone: Zone::Corner, frame: frame(id), display: d });
         let asks: Vec<BackAsk> = [(1, 70), (2, 70), (3, 71), (4, 72)].map(|(id, space)| BackAsk { id, pid: pid_of(id), space, parked: parked(id) }).to_vec();
         let done = back_all(&mut mac, &asks);
         assert_eq!(mac.calls[..3], ["back 70 [1, 2]".to_string(), "back 71 [3]".to_string(), "back 72 [4]".to_string()]);
@@ -458,7 +458,7 @@ mod tests {
     #[test]
     fn a_park_made_earlier_is_judged_as_listed_at_home_time() {
         let d = display();
-        let p = Parked { at: ask(d, 1).at, frame: frame(1), display: d };
+        let p = Parked { at: ask(d, 1).at, zone: Zone::Corner, frame: frame(1), display: d };
         assert!(Parking::now(p, Some(p.at)).took);
         let moved = Parking::now(p, Some(Rect::new(400.0, 300.0, 900.0, 600.0)));
         assert!(!moved.took && moved.moved && !moved.goes_home());

@@ -947,7 +947,15 @@ impl SpacesEngine {
             return Lend::default();
         }
         let ours = self.ours();
-        let park = park.filter(|_| !self.failing(Call::Park));
+        let mut park = park.filter(|_| !self.failing(Call::Park));
+        // Parked already (at its card at Mission Control's key, its restore owed): it is
+        // listed there, and its frame is the one kept then.
+        if let Some(p) = park.as_mut()
+            && let Some(kept) = self.state().parked.get(&id).map(|x| x.park.frame)
+        {
+            p.ask.frame = kept;
+            p.ask.kept = true;
+        }
         let (ask, element, ax_seconds) = match park {
             Some(p) => (Some(p.ask), Some(p.window), p.ax_seconds.unwrap_or(PARK_AX_SECONDS)),
             None => (None, None, PARK_AX_SECONDS),
@@ -1915,7 +1923,7 @@ impl WindowEngine for SpacesEngine {
         let was_held = self.holds(id.0);
         let parked = self.state().parked.get(&id.0).map(|p| p.park);
         if let Some(p) = parked
-            && windows::describe(&[id.0]).first().is_some_and(|w| !p.display.parks(w.bounds) && !lend_park::at_origin(w.bounds, p.frame))
+            && windows::describe(&[id.0]).first().is_some_and(|w| !p.holds(w.bounds) && !lend_park::at_origin(w.bounds, p.frame))
         {
             tracing::info!(id = id.0, "spaces engine: a window parked for a lend was moved off the park by its app; shown at its frame");
         }
@@ -2043,6 +2051,9 @@ impl WindowEngine for SpacesEngine {
         }
         safety::assume_corners(&file.corners);
         safety::assume_zones(&file.zones);
+        // Windows out at their cards for Mission Control (round mc-card-park): on their
+        // Desktop in view, found by the frame the file names.
+        safety::assume_lends(&file.lends);
         if !file.spaces.is_empty() {
             tracing::info!(spaces = file.spaces.len(), "guardian: the app's stage Spaces ended with it; their windows are back on their Desktops");
         }
@@ -2332,7 +2343,7 @@ mod tests {
     fn parked_lend(frame: Rect) -> ParkedLend {
         let display = crate::engine::testkit::display();
         let at = Rect::new(display.frame.max_x() - 20.0, display.frame.max_y() - 20.0, frame.w, frame.h);
-        ParkedLend { park: Parked { at, frame, display }, element: dead_element() }
+        ParkedLend { park: Parked { at, zone: lend_park::Zone::Corner, frame, display }, element: dead_element() }
     }
 
     /// Review A-1/B-1: a window parked for ⌘Tab's lend comes out of its stage Space at the

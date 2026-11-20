@@ -6,6 +6,7 @@
 pub mod apple;
 pub mod ax_blind;
 pub mod busy_apps;
+pub mod card_park;
 pub mod corner;
 pub mod desktop_click;
 pub mod desktop_echo;

@@ -1,6 +1,7 @@
 //! Mission Control and App Exposé under the Spaces engine, on the WM thread (round
 //! spaces-mission-control): while one shows, the hidden stages' windows of the Desktops
-//! shown are on their Desktop, parked at the screen's corner, so that it lays them out with
+//! shown are on their Desktop, parked at their stages' cards (round mc-card-park; the
+//! screen's corner when they go home before it shows), so that it lays them out with
 //! the stage in front, as Apple's Stage Manager and the Corner engine have it. The decisions
 //! are [`crate::engine::mission_control`]'s; here they are carried out.
 //!
@@ -12,7 +13,8 @@
 //!   lends.
 //! - **Shown** ([`Controller::mission_step`], the fast tick while there is work and every
 //!   tick): the hidden windows are put home a round at a time
-//!   ([`crate::engine::lend_round`]): every window parked first ([`Controller::lend_park`],
+//!   ([`crate::engine::lend_round`]): every window parked first ([`Controller::mission_park`]:
+//!   at its stage's card when it goes home with Mission Control over it, else at the corner;
 //!   the apps at once), then all those whose park took put home together. A moment later
 //!   the window list is read for what Mission Control did with them, and the log says how
 //!   many it laid out. In `"shown"` mode its key already starts the parks; the windows go
@@ -39,6 +41,9 @@ use serde_json::{Value, json};
 
 use super::Controller;
 use crate::engine::mission_control::{self as mc, Edge, Fate, Hint, Keys, Lends, Mode, Mods, Out, PickBy, PickSwitch, Settled, Shortcut};
+use crate::engine::card_park;
+use crate::engine::geometry::Rect;
+use crate::engine::lend_park::Zone;
 use crate::engine::lend_round::Left;
 use crate::engine::model::{Action, Model, WindowId};
 use crate::engine::phase::Hold;
@@ -46,7 +51,8 @@ use crate::engine::overview::{self, Overview, Sighting};
 use crate::platform::input::{self, InputEvent};
 use crate::platform::observe::Observer;
 use crate::platform::space_keys::{Expose, SpaceKey};
-use crate::platform::window_engine::RoundAsk;
+use crate::platform::window_engine::{LendPark, RoundAsk};
+use crate::ui::strip_model;
 use crate::platform::{apps, windows};
 
 /// How long Mission Control's shortcuts, read from the user's settings, are trusted.
@@ -74,7 +80,7 @@ fn ms(d: Duration) -> u64 {
 }
 
 /// A frame as the log writes it: `x,y wxh`.
-fn fmt_rect(r: crate::engine::geometry::Rect) -> String {
+fn fmt_rect(r: Rect) -> String {
     format!("{:.0},{:.0} {:.0}x{:.0}", r.x, r.y, r.w, r.h)
 }
 
@@ -162,7 +168,7 @@ impl Controller {
 
     /// True when Mission Control's own window (WindowManager's, not the Dock's cover that
     /// stays for its exit) is in `list`, over the main display `main`.
-    fn mission_own_listed(list: &[windows::CgWindow], main: crate::engine::geometry::Rect) -> bool {
+    fn mission_own_listed(list: &[windows::CgWindow], main: Rect) -> bool {
         let sightings = list.iter().map(|w| Sighting { owner: &w.owner, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen });
         overview::overview_in(sightings, main).overview == Some(Overview::MissionControl)
     }
@@ -426,6 +432,7 @@ impl Controller {
             return;
         }
         let parks_only = self.spaces.mission.lends.parks_only();
+        let at_cards = self.spaces.mission.lends.park_at_cards();
         let early = if parks_only { Vec::new() } else { self.spaces.mission.lends.take_early() };
         let mut asks = Vec::new();
         let mut parked = Vec::new();
@@ -440,7 +447,7 @@ impl Controller {
             }
             // Never at its frame: a window whose park cannot be asked or does not take
             // stays hidden.
-            match self.lend_park(ob, id, false, Some(mc::PARK_SECONDS)) {
+            match self.mission_park(ob, id, at_cards) {
                 Some(park) => asks.push(RoundAsk { id, pid, park }),
                 // No element to park it through: said with the others left hidden.
                 None => unasked.push((id, Left::NotParked)),
@@ -463,9 +470,9 @@ impl Controller {
         parked.extend(parks.took.iter().chain(&parks.missed).copied());
         let homes = self.engine.home_round(&parked);
         self.spaces.mission.lends.homes_made(homes.ms, homes.calls);
-        for (id, at) in homes.lent {
+        for (id, at, at_card) in homes.lent {
             if let Some(pid) = pid_of(id) {
-                self.spaces.mission.lends.lent(Out { id, pid, parked: at });
+                self.spaces.mission.lends.lent(Out { id, pid, parked: at, at_card });
             }
         }
         let now = Instant::now();
@@ -496,6 +503,36 @@ impl Controller {
         if !stray.is_empty() {
             self.engine.unpark_round(&stray);
         }
+    }
+
+    /// The park of window `id` lent to Mission Control: at its stage's card when `at_cards`
+    /// ([`mc::Lends::park_at_cards`]) and its card is known and holds it
+    /// ([`card_park::at_card`]), else at the corner ([`Controller::lend_park`]).
+    fn mission_park(&self, ob: &Observer, id: WindowId, at_cards: bool) -> Option<LendPark> {
+        let mut park = self.lend_park(ob, id, false, Some(mc::PARK_SECONDS))?;
+        if at_cards {
+            match self.card_park_of(id, park.ask.frame) {
+                Some(at) => {
+                    park.ask.at = at;
+                    park.ask.zone = Zone::Card;
+                }
+                None => tracing::debug!(window = id.0, "mission-control: no card to park the window at (its strip out of sight, or the window too big): the corner"),
+            }
+        }
+        Some(park)
+    }
+
+    /// Where window `id` at `frame` parks at its stage's card: the card its display's strip
+    /// last laid out ([`strip_model::published_cards_of`]: none while the strip is out of
+    /// sight), the window centered on it inside the display's visible frame.
+    fn card_park_of(&self, id: WindowId, frame: Rect) -> Option<Rect> {
+        let m = self.model.as_ref()?;
+        let w = m.window(id)?;
+        let stage = m.stage_of(id)?;
+        let d = m.display(w.meta.display);
+        let key = if d.id == m.main_display().id { strip_model::MAIN_STRIP } else { d.id.0 };
+        let card = strip_model::published_cards_of(key).into_iter().find(|(s, _)| *s == stage.0).map(|(_, r)| r)?;
+        card_park::at_card(frame, card, d.visible)
     }
 
     /// Reads where the window server lists the windows put home, Mission Control showing:
@@ -575,7 +612,7 @@ impl Controller {
             "mode": self.mission_mode().name(),
             "test_mode": self.spaces.mission.mode.map(Mode::name),
             "up": l.up(),
-            "out": l.out().iter().map(|o| json!({ "id": o.id.0, "pid": o.pid, "parked": o.parked.map(|r| [r.x, r.y, r.w, r.h]) })).collect::<Vec<_>>(),
+            "out": l.out().iter().map(|o| json!({ "id": o.id.0, "pid": o.pid, "parked": o.parked.map(|r| [r.x, r.y, r.w, r.h]), "at_card": o.at_card })).collect::<Vec<_>>(),
             "keys": self.spaces.mission.keys.map(|(k, _)| json!({
                 "mission_control": [u64::from(k.mission_control.keycode), u64::from(k.mission_control.enabled)],
                 "app_windows": [u64::from(k.app_windows.keycode), u64::from(k.app_windows.enabled)],
@@ -586,7 +623,9 @@ impl Controller {
     /// `ctl debug-mission-control …` (a test's, `STAGE_MANAGER_TEST=1`): `status`; `mode
     /// off|shown|key|config` sets the mode for this run; `lend` puts every hidden window of
     /// the Desktops shown home now, as Mission Control's lend does, and keeps them out until
-    /// `back` takes them back (the probe's rounds: lent before the key, and after it shows).
+    /// `back` takes them back (the probe's rounds: lent before the key, and after it shows);
+    /// parked at the corner, or with `lend card` at their cards, as once Mission Control
+    /// shows (in view with none over them: the `mission` phase's kill -9).
     pub(super) fn debug_mission_control(&mut self, ob: &Observer, words: &[String]) -> Value {
         let now = Instant::now();
         match words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
@@ -602,7 +641,8 @@ impl Controller {
                 }
                 None => json!({ "ok": false, "error": "debug-mission-control mode takes off, shown, key or config" }),
             },
-            ["lend"] => {
+            ["lend"] | ["lend", "card"] => {
+                let at_cards = words.len() == 2;
                 if self.model.as_ref().is_none_or(|m| m.macos_counts_hidden()) {
                     return json!({ "ok": false, "error": "only under the Spaces engine: the Corner engine's hidden windows are on their Desktop already" });
                 }
@@ -611,7 +651,7 @@ impl Controller {
                 }
                 let skip = self.lent.map(|l| l.window);
                 let hidden = self.model.as_ref().map(|m| mc::hidden_here(m, |id| Some(id) == skip)).unwrap_or_default();
-                self.spaces.mission.lends.ask();
+                self.spaces.mission.lends.ask(at_cards);
                 self.spaces.mission.lends.plan(hidden.clone(), now);
                 self.mission_round(ob, None);
                 let done = self.mission_round_said();
@@ -621,6 +661,7 @@ impl Controller {
                     "ok": true,
                     "hidden": hidden.iter().map(|w| w.0).collect::<Vec<_>>(),
                     "lent": self.spaces.mission.lends.out().iter().map(|o| o.id.0).collect::<Vec<_>>(),
+                    "at_card": self.spaces.mission.lends.out().iter().filter(|o| o.at_card).map(|o| o.id.0).collect::<Vec<_>>(),
                     "ms": took,
                     "park_ms": done.map_or(0, |d| d.park_ms),
                 })
@@ -632,7 +673,7 @@ impl Controller {
                 let left: Vec<u32> = self.spaces.mission.lends.out().iter().map(|o| o.id.0).collect();
                 json!({ "ok": true, "were_out": out, "still_out": left })
             }
-            _ => json!({ "ok": false, "error": "debug-mission-control takes status, lend, back, or mode off|shown|key|config" }),
+            _ => json!({ "ok": false, "error": "debug-mission-control takes status, lend [card], back, or mode off|shown|key|config" }),
         }
     }
 }
