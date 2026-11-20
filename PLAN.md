@@ -99,8 +99,8 @@ UX-SPEC, "Known gaps".
   layout slot; then the same with ours, which flies them from the park corner when found
   during the opening); why parks miss (the `a hidden window left hidden` lines: listed at
   its frame after the park is a late listing or a refusal, away from it out of the zone a
-  clamp, perhaps above the Dock Mission Control shows; whether the retry takes); a hidden window dragged to another
-  Desktop inside Mission Control (it goes back to its stage); hidden dialogs and panels
+  clamp, perhaps above the Dock Mission Control shows; whether the retry takes); a hidden
+  window dragged to another Desktop inside Mission Control (it goes back to its stage); hidden dialogs and panels
   (standard windows only are lent); App Exposé lends every hidden window, not only the app
   in front's.
 - **Video calls in a hidden stage (Spaces engine).** A stage's windows off every Desktop
