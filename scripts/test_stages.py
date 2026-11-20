@@ -10130,7 +10130,14 @@ def phase_mission():
        parks first (a "parked ... at its key" line when the input monitor hears the posted
        key, said either way).
     2. The same with App Exposé.
-    3. A pick: while Mission Control shows, Alpha (another app, its one window hidden in a
+    3. A close by its key (round mc-key): Mission Control open, the pointer over Fixture 2's
+       laid-out window (`debug-mission-pick ID hover`, no click), its shortcut posted again:
+       the same stage in front after (Fixture 1's), Fixture 2 and 3 and Alpha 1 back in their
+       stage Spaces at their frames, no Space change, the keyboard the stage in front's. The
+       app's key tap heard both posted shortcuts (`mission_control.tap.keys_heard`; the log's
+       "trigger seen" line); what macOS brought in front is said (the log's "closed by its
+       key" line when it was found no pick).
+    4. A pick: while Mission Control shows, Alpha (another app, its one window hidden in a
        stage) is activated, as a click on its window there or on its Dock item activates it;
        its stage comes in front with Alpha 1 at its frame, with no Space change, and Fixture
        2 and 3 are back in their stage Spaces.
@@ -10138,7 +10145,7 @@ def phase_mission():
        cards (`at_card`, centered on the card, on the display's left half), so Mission Control
        flies them from the strip; after Escape none is listed on the Desktop at its card for
        longer than MISSION_CARD_SEEN_S once Mission Control's own windows are gone.
-    4. kill -9 while the windows are out at their cards (lent for the test, `lend card`, no
+    5. kill -9 while the windows are out at their cards (lent for the test, `lend card`, no
        Mission Control): the guardian brings both back to their frames."""
     say("\n== mission: Mission Control shows every stage's windows (Spaces engine) ==")
     if not SPACES:
@@ -10188,6 +10195,8 @@ def phase_mission():
         check(x.get("space") == space and x.get("active") == active and ctl("space").get("changes") == changes,
               f"mission {label}: the same stage in front, no Space change")
         consistent(f"after {label}")
+
+    mission_close_key(ids, titles, frames, space, active, n)
 
     say("  -- a pick --")
     mark = len(log_text())
@@ -10285,6 +10294,51 @@ def mission_close_seen(before, hidden, parked, label):
           f"{MISSION_CARD_SEEN_S * 1000:.0f} ms ({span * 1000:.0f} ms, {len(seen)} looks)")
     time.sleep(EXPOSE_SETTLE)
     return gone_at is not None
+
+
+def mission_close_key(ids, titles, frames, space, active, n):
+    """Round mc-key: Mission Control closed by its own shortcut with the pointer over a hidden
+    fixture window (Fixture 2's, where it is laid out): no pick. The same stage in front after,
+    the hidden windows back, the keyboard the stage in front's; the key tap heard the keys."""
+    say("  -- a close by its key, the pointer over Fixture 2's window --")
+    mark = len(log_text())
+    changes = ctl("space").get("changes")
+    heard_before = (mission_status().get("tap") or {}).get("keys_heard") or 0
+    opened = mission_open("mission-control", "mission close key")
+    if not opened:
+        return
+    wait_until(lambda: len(mission_status().get("out") or []) == n, 3, "every hidden window put home")
+    time.sleep(1.2)
+    r = ctl("debug-mission-pick", ids["Fixture 2"], "hover")
+    if not check(r.get("ok"), f"mission close key: the pointer over Fixture 2 where Mission Control lays it out ({r.get('at')}; {r.get('error') or 'ok'})"):
+        mission_close(opened[1], "mission close key")
+        return
+    time.sleep(0.4)
+    r = ctl("debug-expose", "mission-control")
+    check(r.get("ok"), f"mission close key: Mission Control's shortcut posted again ({r.get('key', r.get('error'))})")
+    gone = wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in opened[1]], 5, "mission close key: Mission Control to end")
+    ctl("debug-pointer-back")
+    if not check(bool(gone), "mission close key: Mission Control closed by its shortcut"):
+        mission_close(opened[1], "mission close key")
+    time.sleep(EXPOSE_SETTLE)
+    x = wait_state(lambda v: active_titles(v) == {"Fixture 1"}, "Fixture 1's stage still in front", 3)
+    check(x is not None and state().get("active") == active,
+          f"mission close key: the same stage in front after, nothing picked ({stage_titles(state()).get(state()['active'])})")
+    mission_back(ids, titles, frames, "mission close key")
+    check(ctl("space").get("changes") == changes and state().get("space") == space, "mission close key: no Space change")
+    front = wait_until(lambda: frontmost_bundle() == FIX_ID, 2, "the stage in front's app frontmost")
+    check(bool(front), f"mission close key: the keyboard is the stage in front's (frontmost {frontmost_bundle()})")
+    text = log_text()[mark:]
+    tap = mission_status().get("tap") or {}
+    heard = (tap.get("keys_heard") or 0) - heard_before
+    if not check(heard >= 2 and "trigger seen" in text,
+                 f"mission close key: the app's key tap heard the posted shortcut both times ({heard} keys heard; tap {tap})"):
+        say("    the posted key did not reach the HID tap: press the real ⌃↑ or F3 and look for \"mission-control: trigger seen\" with by=\"the key tap\" in the log")
+    closer = [ln.split("mission-control:", 1)[1].strip()[:160] for ln in text.splitlines() if "a key that closes it" in ln]
+    refused = [ln.split("mission-control:", 1)[1].strip()[:200] for ln in text.splitlines() if "closed by its key, no click" in ln]
+    check(bool(closer), "mission close key: the log says the key that closed it was heard")
+    say(f"    what macOS brought in front: {refused[-1] if refused else 'nothing taken for a pick (no activation of a hidden stage came)'}")
+    consistent("after the close by key")
 
 
 def mission_desktop_key(direction):

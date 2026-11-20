@@ -48,6 +48,22 @@ from an application" (`AppWindowGroupingBehavior`) are put back as they were on 
               hidden stage's window is put home at its card (its own size, centered on the
               card, inside the display): its flight starts "around its strip thumbnail" and it
               is laid out on the left, as Apple's. About 30 s.
+  mission-close-key Which app macOS brings in front when Mission Control is closed by its key
+              (round mc-key). As mission-pick sets it up (Alpha's stage in front, Bravo's and
+              Charlie's in the strip, Alpha frontmost), Mission Control opened by its key, the
+              pointer moved over Bravo's laid-out window (`ctl debug-mission-pick ID hover`: no
+              click), then its shortcut posted again. The frontmost app sampled every ~30 ms
+              from that key to 2 s after, and the stage in front after. Says whether macOS
+              brought the app under the pointer in front (Bravo), another hidden stage's
+              (Charlie), or none (Alpha stays), and whether Apple's brought that app's stage
+              in front: engine::mission_close::APPLE_SWITCHES_AT_CLOSE_KEY follows that, and
+              the time of the activation after the key bounds mission_close::KEY_COUNTS. About
+              30 s.
+  mission-close-key-ours The same under our Spaces engine (as mission-pick-ours sets it up):
+              the order the windows were put home in (the most recent stage first), which app macOS
+              brings in front, the stage in front after (Alpha's should stay), whether the
+              app's key tap heard the posted shortcut (`mission_control.tap`) and the log's
+              `closed by its key` line. About 30 s.
   frames-setup Window frames per screen setup. Alpha opened with one window. Built-in screen
               only: Bravo 1 set to frame A_b (in front), Alpha 1 to A_a (in front; Bravo to the
               strip). A virtual screen added right of the screens (scripts/virtual-display,
@@ -67,6 +83,7 @@ import atexit
 import ctypes
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -78,9 +95,10 @@ import test_apple as ta  # noqa: E402
 
 say, check, ctl, wait_until = ta.say, ta.check, ta.ctl, ta.wait_until
 
-PHASES = ("dock-front", "mission-pick", "mission-open", "mission-pick-ours", "mission-open-ours", "frames-setup")
-APPLE_PHASES = ("dock-front", "mission-pick", "mission-open", "frames-setup")
-OURS_PHASES = ("mission-pick-ours", "mission-open-ours")
+PHASES = ("dock-front", "mission-pick", "mission-open", "mission-close-key", "mission-pick-ours", "mission-open-ours",
+          "mission-close-key-ours", "frames-setup")
+APPLE_PHASES = ("dock-front", "mission-pick", "mission-open", "mission-close-key", "frames-setup")
+OURS_PHASES = ("mission-pick-ours", "mission-open-ours", "mission-close-key-ours")
 GROUPING = "AppWindowGroupingBehavior"
 DOCK_CLICK = (os.environ.get("SM_PROBE_DOCK_CLICK") or "press").strip().lower()
 BUNDLES = [b for b, _, _ in ta.FIX.values()]
@@ -94,6 +112,7 @@ EXPOSE_SETTLE = 1.2     # Mission Control's opening animation, with room
 SCREEN_SETTLE = 6.0     # a screen added or removed: macOS's and Apple's moves, with room
 SAMPLE_MS = 1800        # a pick's sampling: from 0.1 s before the pick to past 1.5 s after
 OPEN_SAMPLE_MS = 1200   # mission-open: the list sampled this long from Mission Control's key
+CLOSE_SAMPLE_S = 2.0    # mission-close-key: the frontmost app sampled this long from the closing key
 grouping_original = None  # (had, type, value) of AppWindowGroupingBehavior
 screen = None             # the virtual screen while it is up
 
@@ -898,6 +917,178 @@ def phase_mission_open_ours():
     say(f"  after: {ours_snapshot(ctl('state'))}")
 
 
+# ----- mission-close-key ----------------------------------------------------------------------
+
+
+def frontmost_bundle():
+    """The frontmost app's bundle ID (as test_stages.py reads it: the front ASN first)."""
+    asn = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True).stdout.strip()
+    if not asn:
+        return None
+    out = subprocess.run(["lsappinfo", "info", "-only", "bundleid", asn], capture_output=True, text=True).stdout
+    m = re.search(r'(?:bundleID|"CFBundleIdentifier")\s*=\s*"([^"]+)"', out)
+    return m.group(1) if m else None
+
+
+class FrontSampler(threading.Thread):
+    """The frontmost app every ~30 ms until stopped: [(epoch seconds, bundle)] at each change."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.stop_flag, self.seen = threading.Event(), []
+
+    def run(self):
+        last = object()
+        while not self.stop_flag.is_set():
+            b = frontmost_bundle()
+            if b != last:
+                self.seen.append((time.time(), b))
+                last = b
+            time.sleep(0.03)
+
+    def stop(self):
+        self.stop_flag.set()
+        self.join(timeout=5)
+        return self.seen
+
+
+def fixture_name(bundle):
+    """The fixture a bundle ID is (Alpha, Bravo, Charlie), else the bundle itself."""
+    return next((n for n, (b, _, _) in ta.FIX.items() if b == bundle), bundle or "none")
+
+
+def close_key_round(label, under, snap, while_open=None):
+    """Mission Control opened by its key, the pointer over window `under` where it is laid
+    out, its shortcut posted again; the frontmost app sampled from that key. `snap`: state ->
+    the stage in front's titles; `while_open`: called just before the closing key. (the
+    activations [(ms after the key, fixture)], the stage in front after) or None."""
+    front_before = fixture_name(frontmost_bundle())
+    opened = open_mission_control()
+    if opened is None:
+        return None
+    time.sleep(EXPOSE_SETTLE)
+    settled_layout([under])
+    r = ctl("debug-mission-pick", under, "hover")
+    if not check(r.get("ok"), f"{label}: the pointer over the hidden window where Mission Control lays it out ({r.get('at')}; {r.get('error') or 'ok'})"):
+        close_mission_control(opened)
+        return None
+    time.sleep(0.4)
+    if while_open:
+        while_open()
+    fronts = FrontSampler()
+    fronts.start()
+    time.sleep(0.1)
+    t0 = time.time()
+    r = ctl("debug-expose", "mission-control")
+    check(r.get("ok"), f"{label}: Mission Control's shortcut posted again ({r.get('key', r.get('error'))})")
+    gone = wait_until(lambda: not [o for o in overlays() if o["id"] not in opened], 5, "Mission Control to end")
+    closed_ms = round((time.time() - t0) * 1000) if gone else None
+    time.sleep(max(0.0, t0 + CLOSE_SAMPLE_S - time.time()))
+    seen = fronts.stop()
+    ctl("debug-pointer-back")
+    if not gone:
+        close_mission_control(opened)
+    time.sleep(0.8)
+    after = snap(ctl("state"))
+    changes = [(round((t - t0) * 1000), fixture_name(b)) for t, b in seen if t >= t0]
+    say(f"  {label}: frontmost before the key {front_before}; Mission Control's covers gone {closed_ms} ms after the key")
+    say(f"  frontmost at each change (ms after the closing key): {changes or 'no change'}")
+    say(f"  the stage in front after: {after}")
+    return changes, after
+
+
+def close_key_answer(label, changes, stays, under, other):
+    """What macOS brought in front: the app under the pointer, another hidden stage's, or none."""
+    apps = [n for _, n in changes if n != stays]
+    if not apps:
+        say(f"  {label}: macOS brings no app in front at a close by key ({stays} stays frontmost)")
+        return None
+    first = apps[0]
+    ms_ = next(t for t, n in changes if n == first)
+    kind = "the one under the pointer" if first == under else "another hidden stage's (the top one put home?)" if first == other else "another app"
+    say(f"  {label}: macOS brings {first} in front {ms_} ms after the key: {kind}"
+        f" (mission_close::KEY_COUNTS is 1000 ms: {'within' if ms_ < 1000 else 'PAST it, raise it'})")
+    return first
+
+
+def phase_mission_close_key():
+    say("\n== mission-close-key: Mission Control closed by its key, the pointer over Bravo's window, Apple's ==")
+    value_was = ta.all_at_once()
+    if not value_was:
+        set_grouping(1)
+        time.sleep(1.5)
+        reopen_all()
+    try:
+        ta.separate()
+        s = ta.bring_front("Alpha")
+        if not check(s is not None, "Alpha's stage in front, Bravo's and Charlie's in the strip"):
+            return
+        s = ta.quiet_state()
+        bravo = ta.windows_of(s, "Bravo")
+        say(f"  stages: {ta.title_groups(s)}")
+        subprocess.run(["open", ta.FIX["Alpha"][1]], check=True)
+        time.sleep(0.8)
+        got = close_key_round("mission-close-key", bravo[0], lambda x: ta.front_titles(x) if x.get("ok") else None)
+        if got is None:
+            return
+        changes, after = got
+        app = close_key_answer("mission-close-key", changes, "Alpha", "Bravo", "Charlie")
+        if app is None:
+            say("  so: nothing to decide at a close by key; APPLE_SWITCHES_AT_CLOSE_KEY stays false")
+        else:
+            switched = any(t.startswith(app) for t in (after or []))
+            say(f"  so: Apple's {'brings' if switched else 'does not bring'} {app}'s stage in front"
+                f" -> engine::mission_close::APPLE_SWITCHES_AT_CLOSE_KEY = {'true' if switched else 'false'}")
+    finally:
+        if not value_was:
+            restore_grouping()
+            time.sleep(1.5)
+
+
+def phase_mission_close_key_ours():
+    say("\n== mission-close-key-ours: the same close by key under our Spaces engine (Apple's off) ==")
+    if ours_separated() is None:
+        return
+    s = switch_to("Alpha 1")
+    if not check(s is not None, "Alpha's stage in front, Bravo's and Charlie's hidden"):
+        return
+    time.sleep(1.0)
+    names = title_of(ctl("state"))
+    bravo = id_of(ctl("state"), "Bravo 1")
+    subprocess.run(["open", ta.FIX["Alpha"][1]], check=True)
+    time.sleep(0.8)
+    tap_before = (ctl("debug-mission-control", "status").get("mission_control") or {}).get("tap") or {}
+    log = os.path.join(ta.HOME, time.strftime("%Y-%m-%d") + ".log")
+    mark = os.path.getsize(log) if os.path.exists(log) else 0
+    say(f"  stages: {ours_snapshot(ctl('state'))}; the key tap before: {tap_before}")
+    out_order = []
+
+    def read_out():
+        mc = (ctl("debug-mission-control", "status").get("mission_control") or {})
+        out_order.extend(names.get(o["id"], str(o["id"])) for o in mc.get("out") or [])
+    got = close_key_round("mission-close-key-ours", bravo, lambda x: ours_snapshot(x)[0] if x.get("ok") else None, read_out)
+    if got is None:
+        return
+    changes, after = got
+    say(f"  the windows put home, in the order put home (the most recent stage first): {out_order or 'not read'}")
+    close_key_answer("mission-close-key-ours", changes, "Alpha", "Bravo", "Charlie")
+    check(after is not None and all(t.startswith("Alpha") for t in after),
+          f"mission-close-key-ours: Alpha's stage still in front after the close by key ({after})")
+    tap = (ctl("debug-mission-control", "status").get("mission_control") or {}).get("tap") or {}
+    heard = (tap.get("keys_heard") or 0) - (tap_before.get("keys_heard") or 0)
+    say(f"  the key tap after: {tap}")
+    check(heard >= 2, f"mission-close-key-ours: the app's key tap heard the posted shortcut both times ({heard} keys heard)")
+    try:
+        with open(log, encoding="utf-8", errors="replace") as f:
+            f.seek(mark)
+            text = f.read()
+    except FileNotFoundError:
+        text = ""
+    lines = [ln.split("mission-control:", 1)[1].strip()[:200] for ln in text.splitlines()
+             if "mission-control: trigger seen" in ln or "a key that closes it" in ln or "closed by its key" in ln or "focused again" in ln]
+    say("  the log: " + ("; ".join(lines) if lines else "no trigger or close line"))
+
+
 # ----- frames-setup ---------------------------------------------------------------------------
 
 
@@ -1141,11 +1332,12 @@ def main():
         if ta.start() is None:
             return 1
         runs = {"dock-front": phase_dock_front, "mission-pick": phase_mission_pick, "mission-open": phase_mission_open,
-                "frames-setup": phase_frames_setup}
+                "mission-close-key": phase_mission_close_key, "frames-setup": phase_frames_setup}
         for name in APPLE_PHASES:
             if name in phases:
                 runs[name]()
-    ours = {"mission-pick-ours": phase_mission_pick_ours, "mission-open-ours": phase_mission_open_ours}
+    ours = {"mission-pick-ours": phase_mission_pick_ours, "mission-open-ours": phase_mission_open_ours,
+            "mission-close-key-ours": phase_mission_close_key_ours}
     for name in OURS_PHASES:
         if name in phases:
             ours[name]()
