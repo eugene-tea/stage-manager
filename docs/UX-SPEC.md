@@ -468,15 +468,16 @@ late (11-20 11:16:34, `found_within_ms=2140`: its stages' windows came in late);
 HID level hears them now (the Accessibility permission, no other), and only them: Mission
 Control's shortcuts as Keyboard Shortcuts has them, its key, and while it shows Escape and
 presses.
-Closed by its key (its shortcut again, its key, Escape), Mission Control picks nothing: macOS
-may still bring an app in front (11-20 11:16:36, pressed again from the stage in front:
-Terminal, whose window was out for it, came in front while it closed, and its stage was
-switched to). Under `engine = "spaces"` an activation or a focus within 1 s of that key, with
-no click since, switches nothing: the windows put home go back, and the stage in front's key
-window is focused again once Mission Control is gone. A click while it shows is a pick as
-before. Which app macOS brings in front then, and what Apple's does with its stage, are not
-measured yet (`scripts/probe_apple.py mission-close-key`); until they are, the stage in front
-stays, as Apple's keeps it when nothing is picked. Mission Control lays
+Closed by its key (its shortcut again, its key, Escape), Mission Control picks nothing, but
+macOS brings in front the app whose window is under the pointer, and Apple's Stage Manager
+brings its stage in front (`scripts/probe_apple.py mission-close-key`, 11-20: 108 ms after the
+key, the window under the pointer a hidden stage's; under ours 60 to 104 ms). Ours does the
+same by default (11-20 11:16:36, pressed again from the stage in front: Terminal, whose window
+was under the pointer, came in front with its stage). With `[windows]
+mission_control_key_keeps_stage` an activation or a focus within 1 s of that key, with no
+click since, switches nothing: the windows put home go back, and the stage in front's key
+window is focused again once Mission Control is gone (about 0.6 s after the key). A click
+while it shows is a pick either way. Mission Control lays
 out a window that arrives after it opened (`scripts/test-stages.sh mission-probe`, 11-18; the
 log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
 shows, expected from a wallpaper click, and for a second after it closes, as the windows

@@ -10298,9 +10298,30 @@ def mission_close_seen(before, hidden, parked, label):
 
 def mission_close_key(ids, titles, frames, space, active, n):
     """Round mc-key: Mission Control closed by its own shortcut with the pointer over a hidden
-    fixture window (Fixture 2's, where it is laid out): no pick. The same stage in front after,
+    fixture window (Fixture 2's, where it is laid out), with `[windows]
+    mission_control_key_keeps_stage` on (off, Apple's, is a pick: `probe_apple.py
+    mission-close-key-ours` checks both): no pick. The same stage in front after,
     the hidden windows back, the keyboard the stage in front's; the key tap heard the keys."""
-    say("  -- a close by its key, the pointer over Fixture 2's window --")
+    say("  -- a close by its key, the pointer over Fixture 2's window ([windows] mission_control_key_keeps_stage = true) --")
+    path = os.path.join(HOME, "config.toml")
+    try:
+        with open(path) as f:
+            config_was = f.read()
+    except FileNotFoundError:
+        config_was = ""
+    if not check(set_config_live(config_was + "\n[windows]\nmission_control_key_keeps_stage = true\n"
+                                 if "[windows]" not in config_was else
+                                 config_was.replace("[windows]\n", "[windows]\nmission_control_key_keeps_stage = true\n", 1)),
+                 "mission close key: the setting turned on"):
+        return
+    try:
+        mission_close_key_kept(ids, titles, frames, space, active, n)
+    finally:
+        set_config_live(config_was)
+
+
+def mission_close_key_kept(ids, titles, frames, space, active, n):
+    """`mission_close_key`'s round with the setting on."""
     mark = len(log_text())
     changes = ctl("space").get("changes")
     heard_before = (mission_status().get("tap") or {}).get("keys_heard") or 0

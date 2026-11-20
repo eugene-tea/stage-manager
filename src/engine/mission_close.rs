@@ -16,13 +16,11 @@
 //! pick, its later notices of the same close are not one either ([`CloseWatch::refused`]):
 //! its window's focus follows its activation by tens of ms.
 //!
-//! Which app macOS brings in front at such a close (the one under the pointer, the top one
-//! put home, or none) is not measured: `scripts/probe_apple.py mission-close-key` measures it
-//! with Apple's Stage Manager and with ours. Any answer is covered: with none, nothing comes
-//! to decide; with one, it is no pick. What the measurement may change is
-//! [`APPLE_SWITCHES_AT_CLOSE_KEY`]: should Apple's bring that app's stage in front, the
-//! activation is a pick after all (Apple's way stays the default), and [`KEY_COUNTS`], should
-//! the activation come later than it allows.
+//! Which app macOS brings in front at such a close is measured (`scripts/probe_apple.py
+//! mission-close-key`, 11-20): the one whose window is under the pointer, 108 ms after the
+//! key, and Apple's Stage Manager brings its stage in front. So Apple's way, the default, is a
+//! pick (`apple_switches`); `[windows] mission_control_key_keeps_stage` makes it no pick.
+//! Under ours the activation came 63 ms after the key, well within [`KEY_COUNTS`].
 
 use std::time::{Duration, Instant};
 
@@ -38,11 +36,10 @@ pub const ESCAPE_KEY: u16 = 53;
 /// owner's unwanted activation came while it still showed (11-20 11:16:36).
 pub const KEY_COUNTS: Duration = Duration::from_millis(1000);
 
-/// Whether Apple's Stage Manager brings in front the stage of the app macOS activates at a
-/// close by key. Not measured: false, the stage in front stays (as Apple's keeps the stage in
-/// front when nothing is picked). `mission-close-key` settles it: true makes such an
-/// activation a pick again, as Apple's would have it.
-pub const APPLE_SWITCHES_AT_CLOSE_KEY: bool = false;
+/// Apple's Stage Manager brings in front the stage of the app macOS activates at a close by
+/// key (the one under the pointer, `mission-close-key`, 11-20): such an activation is a pick
+/// unless `[windows] mission_control_key_keeps_stage` is on.
+pub const APPLE_SWITCHES_AT_CLOSE_KEY: bool = true;
 
 /// The key that closes Mission Control or App Exposé while one shows: its own shortcuts
 /// ([`trigger`]: the user's, the keyboard's Mission Control key) or Escape (with no ⌘, ⌥ or
@@ -114,8 +111,8 @@ pub enum Verdict {
 /// What the activation (or focus) of app `pid` at `now` is, `watch` what this close came
 /// with: no pick when Mission Control was closed by its key and no click came
 /// ([`CloseWatch::closed_by_key`]), or when `pid` was found no pick already at this close.
-/// `own_front`: `pid` has a window in the stage in front; `apple_switches`:
-/// [`APPLE_SWITCHES_AT_CLOSE_KEY`] (a parameter for the tests).
+/// `own_front`: `pid` has a window in the stage in front; `apple_switches`: Apple's way
+/// ([`APPLE_SWITCHES_AT_CLOSE_KEY`]), false with `[windows] mission_control_key_keeps_stage`.
 pub fn verdict(watch: &CloseWatch, pid: Pid, now: Instant, own_front: bool, apple_switches: bool) -> Verdict {
     let by_key = watch.closed_by_key(now) || watch.refused() == Some(pid);
     if !by_key || (apple_switches && !own_front) {
@@ -199,15 +196,16 @@ mod tests {
         assert!(!w.closed_by_key(t0 + ms(10)), "opened again: the last close's key counts no more");
     }
 
-    /// `mission-close-key` may find that Apple's brings the activated app's stage in front:
-    /// then the activation is a pick, unless its stage is in front already.
+    /// Apple's brings the activated app's stage in front (`mission-close-key`, 11-20): the
+    /// activation is a pick, unless its stage is in front already.
     #[test]
-    fn apples_switch_at_a_close_by_key_would_make_it_a_pick() {
+    fn apples_switch_at_a_close_by_key_makes_it_a_pick() {
         let t0 = Instant::now();
         let mut w = CloseWatch::default();
         w.key(t0);
         assert_eq!(verdict(&w, 9, t0 + ms(100), false, true), Verdict::Pick);
         assert_eq!(verdict(&w, 9, t0 + ms(100), true, true), Verdict::NoPick { own_front: true });
-        assert_eq!(verdict(&w, 9, t0 + ms(100), false, APPLE_SWITCHES_AT_CLOSE_KEY), Verdict::NoPick { own_front: false }, "unmeasured: the stage in front stays");
+        assert_eq!(verdict(&w, 9, t0 + ms(100), false, APPLE_SWITCHES_AT_CLOSE_KEY), Verdict::Pick, "Apple's, measured: the stage under the pointer comes");
+        assert_eq!(verdict(&w, 9, t0 + ms(100), false, false), Verdict::NoPick { own_front: false }, "the setting on: the stage in front stays");
     }
 }

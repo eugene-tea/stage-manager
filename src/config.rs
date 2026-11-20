@@ -443,6 +443,10 @@ pub struct WindowsConfig {
     /// put on their Desktop for Mission Control under the Spaces engine
     /// ([`crate::engine::mission_control::Mode`]). Read on every reload.
     pub mission_control: crate::engine::mission_control::Mode,
+    /// `[windows] mission_control_key_keeps_stage`: a close of Mission Control by its key keeps
+    /// the stage in front ([`crate::engine::mission_close::verdict`]); off is Apple's, the
+    /// stage of the app macOS brings in front comes with it. Read on every reload.
+    pub mission_key_keeps_stage: bool,
     /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
     /// shadow side by side ([`crate::engine::corner::corner_patch::DEFAULT_REACH`]), or one number for
     /// every side ([`WindowsConfig::patch_reach`]).
@@ -1155,6 +1159,7 @@ impl Config {
                 engine: crate::engine::engine_choice::ConfigEngine::parse(v.text("windows.engine")),
                 with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.apple_stage_manager_on")),
                 mission_control: crate::engine::mission_control::Mode::parse(v.text("windows.mission_control_stages")),
+                mission_key_keeps_stage: v.flag("windows.mission_control_key_keeps_stage"),
             },
             displays: DisplaysConfig { main_only: v.flag("displays.main_only"), frames_per_setup: v.flag("displays.frames_per_setup") },
             rules: RuleSet::new(rules, defaults),

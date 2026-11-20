@@ -104,15 +104,10 @@ UX-SPEC, "Known gaps".
   window dragged to another Desktop inside Mission Control (it goes back to its stage); hidden dialogs and panels
   (standard windows only are lent); App Exposé lends every hidden window, not only the app
   in front's.
-- **Mission Control closed by its key: measure Apple's.** Built (round mc-key): an activation
-  within 1 s of the key that closed it, with no click, is no pick. Run
-  `SM_TEST_TOGGLE_APPLE_SM=1 scripts/probe_apple.py mission-close-key mission-close-key-ours`:
-  which app macOS brings in front (the one under the pointer, another hidden stage's, none),
-  how long after the key, and whether Apple's brings its stage in front. Apple's does: set
-  `engine::mission_close::APPLE_SWITCHES_AT_CLOSE_KEY` to true. Later than 1 s: raise
-  `KEY_COUNTS`. Then `SM_ENGINE=spaces scripts/test-stages.sh mission`, and the real F3 and ⌃↑
-  (the log's `mission-control: trigger seen ... by="the key tap"`; with F3 not heard, `ctl
-  state`'s `mission_control.tap.system_defined_seen` says whether it comes as a media key).
+- **Mission Control's keys: the real F3.** The posted ⌃↑ reaches the key tap (11-20); press
+  the real F3 and ⌃↑ and look for the log's `mission-control: trigger seen ... by="the key
+  tap"`; with F3 not heard, `ctl state`'s `mission_control.tap.system_defined_seen` says
+  whether it comes as a media key.
 - **Video calls in a hidden stage (Spaces engine).** A stage's windows off every Desktop
   count as hidden to their apps: Google Meet in Safari stops drawing other people's video and
   its card shows grey tiles (11-16); Apple's keeps them playing. Option, the owner's call: a

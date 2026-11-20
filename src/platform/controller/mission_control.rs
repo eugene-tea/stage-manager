@@ -168,7 +168,9 @@ impl Controller {
         if self.spaces.mission.lends.up() {
             if mission_close::closes(&keys, code, mods) {
                 self.spaces.mission.close.key(now);
-                tracing::info!(key = code, by, "mission-control: a key that closes it: an app macOS brings in front now is no pick");
+                let keeps = self.store.config().windows.mission_key_keeps_stage;
+                let then = if keeps { "an app macOS brings in front now is no pick" } else { "an app macOS brings in front now brings its stage, as Apple's" };
+                tracing::info!(key = code, by, keeps_stage = keeps, "mission-control: a key that closes it: {then}");
             }
             return;
         }
@@ -336,7 +338,7 @@ impl Controller {
             m.windows().any(|w| w.meta.pid == pid && !w.parked && m.stage_of(w.meta.id).is_some_and(|s| m.stage_in_front(s)))
         });
         let watch = self.spaces.mission.close;
-        match mission_close::verdict(&watch, pid, now, own_front, mission_close::APPLE_SWITCHES_AT_CLOSE_KEY) {
+        match mission_close::verdict(&watch, pid, now, own_front, !self.store.config().windows.mission_key_keeps_stage) {
             Verdict::Pick => false,
             Verdict::NoPick { own_front } => {
                 let first = watch.refused() != Some(pid);

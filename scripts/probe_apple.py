@@ -56,14 +56,15 @@ from an application" (`AppWindowGroupingBehavior`) are put back as they were on 
               from that key to 2 s after, and the stage in front after. Says whether macOS
               brought the app under the pointer in front (Bravo), another hidden stage's
               (Charlie), or none (Alpha stays), and whether Apple's brought that app's stage
-              in front: engine::mission_close::APPLE_SWITCHES_AT_CLOSE_KEY follows that, and
+              in front (it does, 11-20: engine::mission_close::APPLE_SWITCHES_AT_CLOSE_KEY), and
               the time of the activation after the key bounds mission_close::KEY_COUNTS. About
               30 s.
   mission-close-key-ours The same under our Spaces engine (as mission-pick-ours sets it up):
               the order the windows were put home in (the most recent stage first), which app macOS
-              brings in front, the stage in front after (Alpha's should stay), whether the
-              app's key tap heard the posted shortcut (`mission_control.tap`) and the log's
-              `closed by its key` line. About 30 s.
+              brings in front, the stage in front after (by default Bravo's, as Apple's; with
+              [windows] mission_control_key_keeps_stage, run second, Alpha's stays), whether
+              the app's key tap heard the posted shortcut (`mission_control.tap`) and the log's
+              `closed by its key` line. About 60 s.
   frames-setup Window frames per screen setup. Alpha opened with one window. Built-in screen
               only: Bravo 1 set to frame A_b (in front), Alpha 1 to A_a (in front; Bravo to the
               strip). A virtual screen added right of the screens (scripts/virtual-display,
@@ -1049,6 +1050,18 @@ def phase_mission_close_key_ours():
     say("\n== mission-close-key-ours: the same close by key under our Spaces engine (Apple's off) ==")
     if ours_separated() is None:
         return
+    close_key_ours(False)
+    say("\n  -- [windows] mission_control_key_keeps_stage = true --")
+    ta.write_config("mission_control_key_keeps_stage = true\n")
+    ctl("reload")
+    time.sleep(1.0)
+    close_key_ours(True)
+
+
+def close_key_ours(keeps):
+    """One close by key under ours: with `keeps` ([windows] mission_control_key_keeps_stage)
+    Alpha's stage stays in front, else Bravo's, under the pointer, comes, as Apple's."""
+    label = "the setting on" if keeps else "the default"
     s = switch_to("Alpha 1")
     if not check(s is not None, "Alpha's stage in front, Bravo's and Charlie's hidden"):
         return
@@ -1072,8 +1085,12 @@ def phase_mission_close_key_ours():
     changes, after = got
     say(f"  the windows put home, in the order put home (the most recent stage first): {out_order or 'not read'}")
     close_key_answer("mission-close-key-ours", changes, "Alpha", "Bravo", "Charlie")
-    check(after is not None and all(t.startswith("Alpha") for t in after),
-          f"mission-close-key-ours: Alpha's stage still in front after the close by key ({after})")
+    if keeps:
+        check(after is not None and all(t.startswith("Alpha") for t in after),
+              f"mission-close-key-ours ({label}): Alpha's stage still in front after the close by key ({after})")
+    else:
+        check(after is not None and all(t.startswith("Bravo") for t in after),
+              f"mission-close-key-ours ({label}): Bravo's stage, under the pointer, in front after the close by key, as Apple's ({after})")
     tap = (ctl("debug-mission-control", "status").get("mission_control") or {}).get("tap") or {}
     heard = (tap.get("keys_heard") or 0) - (tap_before.get("keys_heard") or 0)
     say(f"  the key tap after: {tap}")

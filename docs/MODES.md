@@ -91,6 +91,9 @@ All three are in the `[windows]` section of the config file; `engine` and
   show the hidden stages' windows. `"shown"` (the default) puts them on the Desktop once
   Mission Control shows; `"key"` already when its keyboard shortcut is pressed; `"off"` leaves
   them hidden. Read when the config file changes.
+- `mission_control_key_keeps_stage`: with `engine = "spaces"`, closing Mission Control with its
+  key or Escape keeps the stage in front. Off (the default) is Apple's: the app whose window is
+  under the pointer comes in front with its stage.
 - `apple_stage_manager_on`: what happens while Apple's Stage Manager is on. `"pause"` (the
   default) brings every window back and arranges nothing until Apple's is off; `"integrate"`
   follows Apple's stages.
