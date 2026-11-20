@@ -46,6 +46,9 @@ dragged too, until the strip takes it in: Drag and drop) (recorded on a
 Studio Display: Apple's stayed up under a window dragged left over the cards to 52 pt, and
 slid away when it was dragged on to 15 pt, its cards starting at 16 pt; the point between
 was not measured; a laptop's windows nearly fill the screen, so there it goes more often).
+The pointer on a window over the cards is on the window: no card grows under it. A strip off
+the screen, on a full-screen Space or with its cards wholly under windows takes no picture
+of them; each card coming into view is taken again at once, as it shows.
 Each screen's strip follows its own front stage. Resting the pointer at the left edge brings
 it back: Apple's starts sliding in about 180 ms after the pointer gets there (measured), ours
 rests 130 ms and checks the pointer every 30 ms (`[reveal] delay_ms`, `poll_ms`). It has to
@@ -934,7 +937,7 @@ in the place of its first stage, whichever of its windows is shown.
 top-to-bottom order is the Dock's left-to-right order (top to bottom for a Dock on the side).
 The Dock's application items are read through Accessibility (its lists' `AXDockItem`
 children and their `AXURL`), so running apps that are not kept in the Dock count where their
-icons show; its preferences are never read or written. A stage sits at the leftmost Dock
+icons show; its preferences are never read for values or written. A stage sits at the leftmost Dock
 position among its windows' apps (by bundle id, else by pid), the apps of `[strip]
 dock_ignore` (default `["com.apple.finder"]`) counting only when no other app of the stage
 has a Dock icon: the Finder's windows join stages of every kind and the Finder always sits
@@ -944,8 +947,10 @@ a stage of listed apps alone at the leftmost of them; a changed list re-sorts at
 changed Dock does; `[]` lets every app count). Stages at the same position
 keep creation order, and stages whose apps have no Dock icon come after all others, in
 creation order. Hotkey numbers follow the strip. The Dock is read at launch, half a second
-after an app launches or quits, and every two seconds while this order is on (no
-Accessibility notification is known for a rearranged Dock); a changed order re-sorts the
+after an app launches or quits, at once when the Dock's preferences file changes (its date;
+the Dock writes it when an icon is moved, kept or removed, and no Accessibility notification
+is known for a rearranged Dock), and a minute after the last read with none of these; a
+changed order re-sorts the
 strip at the first moment no switch, drag or Desktop change is under way, and the cards glide
 to their new places on the strip's spring. `[strip] active`, the overflow rule and the
 animations are Keep stages in place's. A card dragged within the strip springs back and
