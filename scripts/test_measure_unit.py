@@ -174,6 +174,12 @@ class Plan(unittest.TestCase):
         o = M.parse_args(["run", "--engine", "spaces", "--out", "/x", "hidden"])
         self.assertEqual(o["scenarios"], ["hidden"])
 
+    def test_measure_stages_accepts_the_covered_scenario_by_name_only(self):
+        self.assertNotIn("covered", M.SCENARIOS)
+        self.assertIn("covered", M.BY_NAME)
+        o = M.parse_args(["run", "--engine", "spaces", "--out", "/x", "covered"])
+        self.assertEqual(o["scenarios"], ["covered"])
+
 
 if __name__ == "__main__":
     unittest.main()

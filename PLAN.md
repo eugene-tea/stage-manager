@@ -109,24 +109,25 @@ UX-SPEC, "Known gaps".
   real layout, so a window mostly behind another hardly shows (VS Code over Terminal, 11-16);
   Apple's spreads them. Variants for the owner to compare from the menu: the real layout,
   Apple's spread, spread only when a window is mostly covered.
-- **Less work while nobody looks: CPU and battery.** At rest the app takes 4 to 5 % CPU (11-13:
-  1 min 51 s of CPU in 37 min, 4.5 % over 30 s), about half of it macOS's screen capture on
-  short-lived threads (card thumbnails every 1.5 s, full-size switch pictures every 2 s),
-  a third the WM thread (notices, the once-a-second checks, the Dock's order read again).
-  On a laptop screen windows cover the strip most of the time. Aim: 1 to 2 %, with no card
-  shown stale and no switch slower.
-  - No thumbnail captures for a screen whose strip is hidden or covered; one round as it
-    starts to show (the edge reveal, a window moved off it, a switch), so its cards are
-    fresh by the time they are seen.
-  - The Dock's order read when an app opens or quits, or the Dock's file changes, not on a
-    timer.
-  - Full-size switch pictures: keep them (a Dock click or ⌘Tab switch has no pointer near
-    the strip to warn), but skip a window that has not changed since its last picture if
+- **Less work while nobody looks: CPU and battery.** 4 to 5 % CPU at rest on 11-13; since
+  1.9 the thumbnails come at events only (none at rest: a day's log of 11-19 counts no capture
+  in hours with no switch), the Spaces engine takes no full-size picture on a timer, and the
+  Dock's order is read at events. Aim: 1 to 2 %, with no card shown stale and no switch slower.
+  - Run `RUNS=1 ENGINES=spaces SM_REST_S=300 scripts/measure.sh covered` (and `rest`) and write
+    the numbers in UX-SPEC.
+  - Full-size switch pictures, the park corner only (every 2 s of the front stage's windows,
+    whether the strip shows or not): keep them (a Dock click or ⌘Tab switch has no pointer
+    near the strip to warn), but skip a window that has not changed since its last picture if
     that can be told cheaply; measure before deciding.
   - Video calls: check whether our captures make a call's video stutter (it lags at times
-    with ours where Apple's is smooth). Record a call with and without captures, count
-    dropped frames at each capture round; if they show, capture a window that plays video
-    or a call less often, or never at full size.
+    with ours where Apple's is smooth). The call stand-in missed no refresh at rest or
+    switching (11-14, 11-18), and at rest only the park corner's 2 s pictures touch a call
+    window in front; so a real call, recorded with and without captures, dropped frames
+    counted at each capture round; if they show, capture a window that plays video or a call
+    less often, or never at full size.
+  - The Dock's bar is still read every 2 s for the inert slivers (its lists' frames, a few
+    Accessibility calls): read it at a display change, the Dock's preferences file changing
+    and an app launch instead, if its auto-hide does not move it.
   - Measure on battery (Activity Monitor's Energy Impact, before and after) and write the
     numbers in UX-SPEC.
 
