@@ -408,7 +408,7 @@ is back on the same Desktop when they end. Mission Control and App Exposé show 
 stage's windows, as Apple's Stage Manager does (a report, 11-18: under `engine = "spaces"` only the
 stage in front showed, a hidden stage's windows being on no Desktop).
 Under `engine = "spaces"` the hidden stages' windows of the Desktops shown are put on their
-Desktop while one of them shows, parked at the screen's corner first so that none shows at
+Desktop while one of them shows, parked at their stages' cards first so that none shows at
 its frame; a window whose app does not move it within 50 ms stays hidden, and while Mission
 Control shows its park is asked again 60 ms later, up to three parks in all (10 of 51 opens,
 11-18 to 11-20, left one to five windows out; the log's `mission-control: a hidden window left
@@ -419,6 +419,22 @@ window-server call per Desktop (one at a time they came one by one during the op
 windows over 237 ms, and Mission Control laid them out again at each: a log, 11-19). In
 `"shown"` mode its keyboard shortcut already starts the parks; the windows go onto the
 Desktop once it is listed, and get their frames back unseen when nothing shows within 1.5 s.
+Apple's starts a hidden stage's window's flight at its strip thumbnail (Bravo at 16,280
+76x109), grows it over about 330 ms and settles it in a column on the left (28,90 188x153);
+the stage in front flies from its own frames (`scripts/probe_apple.py mission-open`, fixtures,
+11-20). Ours put a hidden window home at the screen's park corner: it first showed there at
+206 ms (2559,1408 520x424) and was laid out 25 ms later in a slot at the right (2357,945), since
+Mission Control flies a window from where it is put home and lays it out near there
+(`mission-open-ours`, 11-20). So a window that goes home while Mission Control shows (or
+parked at its key and put home once it shows) is parked at its stage's card at its own size,
+centered on the card and kept inside its screen's visible frame: its flight starts at the
+strip and it is laid out on the left, in the strip's order. A window larger than the screen,
+or with no card in sight (the strip out of sight), parks at the corner. A card park is in
+view on the Desktop, so `"key"` mode's lend at the shortcut (on the Desktop before anything
+shows), ⌘Tab's and the Dock's lends keep the corner; once Mission Control closes the windows
+at their cards are taken back at the next look, which comes every 30 ms while one is out. After
+a crash with windows out at their cards the guardian brings each back to its frame (its
+parked file names the card parks).
 A Desktop picked inside Mission Control is recognized only once it closes; opened again
 before that, the hidden windows of the Desktop the window server shows are put home all the
 same (11-19 07:56: it lent nothing, the model still on the old Desktop), each onto the
@@ -1257,8 +1273,10 @@ screen-capture service reads 0 and the window server, measured with other apps o
   stages' windows up to two seconds late (found at the tick, 2 s at rest: they appear in its
   layout with no motion, 11-20 07:49:14; the log's `found_within_ms` says how late it may have
   been found), and an app's hidden dialogs and panels are not shown there. Found during its
-  opening, it flies them in from the park corner, where they were put home (11-20 07:49:27);
-  where Apple's flies a hidden stage's windows from is not measured.
+  opening, it flies them in from their cards at their own size, where Apple's grows each out
+  of its strip thumbnail (a lend moves a window, it never resizes it). In `"key"` mode the
+  windows put home at the shortcut fly in from the park corner. Once it closes, a window
+  out at its card may show there at its own size for a frame or two before it goes back.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.

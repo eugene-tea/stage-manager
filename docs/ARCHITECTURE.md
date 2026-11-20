@@ -209,7 +209,9 @@ the log: the guardian starts once the app has ended, and they ended with it. Its
 the app's screens from the file as the Corner engine's does (`assume`: the visible frame, the
 corners, the other screens' zones), since a window parked at the corner for ⌘Tab's lend stays
 there when the app ends; a registered window there is stranded by the park-zone rule under
-either engine. A Spaces run's recovery scan also runs the Corner scan when an earlier copy
+either engine. Mission Control's lends park at the stages' cards instead (round
+mc-card-park), on screen: the file names those frames (`ParkedFile::lends`), and a
+registered window listed at one is stranded there (`ScanDisplays::at_lend`). A Spaces run's recovery scan also runs the Corner scan when an earlier copy
 left registered windows, and in the guardian, so a Corner run that crashed with windows in
 the park corner, or a lend's park, is brought back the Corner way under Spaces (the launch
 scan is the Corner one under either engine). So are the windows the model first meets in the park corner later (a Desktop shown for
