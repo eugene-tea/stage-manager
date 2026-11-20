@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, a link that opens in a browser window hidden in a stage on another
+  Desktop now goes to that Desktop with the window in front; before, nothing seemed to happen.
+  The Desktop left keeps the stage it had in front.
 - A link opened in a browser window on another Desktop stays there: macOS no longer jumps to
   that Desktop and back, and the browser's window no longer pops up under a growing picture.
 - When macOS slides to another Desktop during a switch and straight back, the window is

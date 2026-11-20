@@ -116,7 +116,7 @@ use crate::engine::desktop_click;
 use crate::engine::desktop_echo::{Cause, DesktopEcho};
 use crate::engine::displays::{display_kept, display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display, returned_screens};
 use crate::engine::early_start;
-use crate::engine::focus_elsewhere::{self, FocusOnSwitch, WentElsewhere, focus_on_switch};
+use crate::engine::focus_elsewhere::{self, FocusFacts, FocusOnSwitch, SwitchBack, WentElsewhere, focus_on_switch};
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
 use crate::engine::stale_activation;
@@ -936,6 +936,11 @@ pub struct Controller {
     /// An app's own focus on its window of another Desktop mid-switch: our raises and focuses
     /// of its other windows off that Desktop are withheld for a while ([`focus_elsewhere`]).
     went_elsewhere: Option<WentElsewhere>,
+    /// The last activation's switch on the Desktop shown, to undo unseen should the app's
+    /// focus go to its window hidden on another Desktop ([`focus_elsewhere::hidden_focus`]).
+    activation_switch: Option<SwitchBack>,
+    /// That switch, undone once macOS has left its Desktop ([`Self::switch_back_after_arrival`]).
+    switch_back: Option<SwitchBack>,
     next_transition: u64,
     /// The transition whose outgoing windows just parked, for the next snapshot.
     parked_note: Option<u64>,
@@ -1276,6 +1281,8 @@ impl Controller {
             pending: None,
             landing_focus: None,
             went_elsewhere: None,
+            activation_switch: None,
+            switch_back: None,
             next_transition: 0,
             parked_note: None,
             under_note: None,
@@ -3038,6 +3045,16 @@ impl Controller {
                 // A window the switch still brings in (or a child of one).
                 let standard = self.model.as_ref().and_then(|m| m.resolve_standard(WindowId(id))).map_or(id, |w| w.0);
                 let arriving = self.pending.as_ref().is_some_and(|p| p.entries.contains_key(&id) || p.entries.contains_key(&standard));
+                // Held off every Desktop (a stage Space): macOS goes nowhere for it by itself.
+                let hidden = pid.map(|pid| {
+                    let since_press = input::since_last_press();
+                    focus_elsewhere::hidden_focus(FocusFacts {
+                        elsewhere,
+                        off_every_desktop: elsewhere && self.engine.off_every_desktop(WindowId(standard)),
+                        frozen,
+                        activation_switched: self.activation_switch.as_ref().is_some_and(|a| a.pid == pid && a.holds(since_press, now)),
+                    })
+                });
                 match focus_on_switch(arriving, held, input_since_switch) {
                     FocusOnSwitch::LandAsPlanned => {
                         // The switch already brings it in front: shown now, the window would
@@ -3074,6 +3091,9 @@ impl Controller {
                     tracing::debug!(id, pid, settling = self.phase.changing(), elsewhere, unknown, predicted, "focus held until its Desktop is recognized");
                     self.focus_replay.hold(Wanted::Window { id: WindowId(id), pid }, now);
                     self.after_hold(ob, now);
+                    if let Some(h) = hidden.filter(|h| h.arrive) {
+                        self.arrive_for_hidden_focus(ob, WindowId(standard), pid, h.switch_back, now);
+                    }
                     return;
                 }
                 if frozen {
@@ -3246,6 +3266,7 @@ impl Controller {
     /// a Desktop not shown, the app's focused window) and is held for the Space change
     /// instead ([`Self::hold_for_slide`]); one held so is decided again without it.
     fn decide_activation(&mut self, ob: &mut Observer, pid: i32, now: Instant, watch_slide: bool) {
+        self.activation_switch = None;
         let list = windows::list_windows();
         let present = self.app_present(pid);
         let needs_focus = self.model.as_ref().is_none_or(|m| m.activation_needs_focus(pid));
@@ -3295,7 +3316,12 @@ impl Controller {
         }
         let since = ob.activated_at(pid);
         if let Some(m) = self.model.as_mut() {
+            // The Desktop as it stands, so the switch can be taken back unseen should the
+            // app's focus go to its window hidden on another Desktop (a clone of one
+            // Desktop's slots: nothing waits on it).
+            let before = m.before_activation(&obs);
             let actions = m.app_activated(pid, &obs);
+            self.activation_switch = before.and_then(|b| m.switch_undo(b)).map(|undo| SwitchBack { pid, undo, at: now });
             if actions.is_empty() && !present {
                 // Nothing to show here: macOS may be on its way to the app's window
                 // on another Desktop (its focus may have come first and be held).
@@ -4581,6 +4607,7 @@ impl Controller {
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
         let (more, predicted) = self.settle_ahead(ob, list, main.id, after, Instant::now());
         actions.extend(more);
+        actions.extend(self.switch_back_after_arrival(ob));
         // A focus or activation still held for a Desktop not shown: maybe another screen's,
         // recognized below.
         let awaited = self.awaited_elsewhere(Instant::now());
@@ -4791,6 +4818,7 @@ impl Controller {
             // A Desktop of this screen arranged ahead: confirmed or undone, in its batch.
             let (more, window) = self.settle_ahead(ob, list, d.id, after, now);
             actions.extend(more);
+            actions.extend(self.switch_back_after_arrival(ob));
             predicted = predicted.or(window);
             self.execute(ob, actions);
         }

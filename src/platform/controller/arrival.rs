@@ -1093,6 +1093,59 @@ impl Controller {
         true
     }
 
+    /// App `pid`'s own focus on its window `id`, held off every Desktop elsewhere
+    /// ([`crate::engine::focus_elsewhere::hidden_focus`]): its Desktop arranged and the window
+    /// focused, as at an activation ([`Self::arrange_for_hidden_focus`]), so macOS goes. With
+    /// `switch_back`, the activation's switch on the Desktop shown is undone once macOS has
+    /// left it ([`Self::switch_back_after_arrival`]). 11-20 07:53:39: the focus came 200 ms
+    /// after the activation, mid-switch, and waited for a Space change that never came.
+    pub(super) fn arrive_for_hidden_focus(&mut self, ob: &Observer, id: WindowId, pid: i32, switch_back: bool, now: Instant) {
+        if !self.arrange_for_hidden_focus(ob, id, pid, now) {
+            tracing::debug!(window = id.0, pid, ahead = self.ahead.is_some(), "a focus on a window hidden on another Desktop: nothing arranged; held for its Desktop");
+            return;
+        }
+        let back = if switch_back { self.activation_switch.take() } else { None };
+        tracing::info!(
+            window = id.0,
+            pid,
+            switch_back = ?back.as_ref().map(|b| (b.undo.space.0, b.undo.stage.0, b.undo.previous.0)),
+            "a focus of the app's own on its window hidden on another Desktop: arranged there and focused, macOS goes; the activation's switch here is undone once it has"
+        );
+        self.switch_back = back;
+    }
+
+    /// The activation's switch kept by [`Self::arrive_for_hidden_focus`], undone now that its
+    /// Desktop is no longer shown (moves only, the windows brought back registered until
+    /// seen): that Desktop shows as it was before the activation, as Apple's leaves it. Kept
+    /// while its Desktop is still shown; dropped after a click or key press since the
+    /// activation, or [`crate::engine::focus_elsewhere::WENT_ELSEWHERE_MAX`]. The actions
+    /// are for the arrival's batch.
+    pub(super) fn switch_back_after_arrival(&mut self, ob: &Observer) -> Vec<Action> {
+        let Some(back) = self.switch_back.take() else { return Vec::new() };
+        let now = Instant::now();
+        if !back.holds(crate::platform::input::since_last_press(), now) {
+            tracing::debug!(space = back.undo.space.0, "the activation's switch is no longer undone: a click or key since, or too late");
+            return Vec::new();
+        }
+        let Some(m) = self.model.as_mut() else { return Vec::new() };
+        if m.is_shown_space(back.undo.space) {
+            self.switch_back = Some(back);
+            return Vec::new();
+        }
+        let actions = m.undo_ahead(&back.undo);
+        tracing::info!(
+            space = back.undo.space.0,
+            stage = back.undo.previous.0,
+            left = back.undo.stage.0,
+            moves = actions.iter().filter(|a| !matches!(a, Action::StateChanged)).count(),
+            since_activation_ms = ms(back.at, now),
+            "arrival: macOS left the Desktop the activation switched; its switch undone unseen, the stage that was in front back"
+        );
+        self.keep_registered(ob, &actions);
+        self.present_away(back.undo.space);
+        actions
+    }
+
     /// Arranges window `id`'s Desktop for it ([`crate::engine::model::Model::arrange_ahead`]);
     /// on a Desktop not shown the windows it brings back stay registered until seen out of
     /// the park zone. True when arranged.
