@@ -236,10 +236,11 @@ handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` wi
 - `stage-manager probe-windows <bundle-id>…` (or `--all`), `probe-screen` and `probe-patch` print the
   window server's view of apps, of the screen, and what the corner patch would draw.
 - `scripts/probe_park.py` measures where macOS leaves a parked window.
-- `scripts/probe_apple.py [dock-front|mission-pick|mission-pick-ours|frames-setup]` measures
-  Apple's Stage Manager on the fixtures (with `SM_TEST_TOGGLE_APPLE_SM=1`; it restores
+- `scripts/probe_apple.py [dock-front|mission-pick|mission-open|mission-close-key|…-ours|frames-setup]`
+  measures Apple's Stage Manager on the fixtures (with `SM_TEST_TOGGLE_APPLE_SM=1`; it restores
   `GloballyEnabled` and `AppWindowGroupingBehavior`): a Dock click on the app in front, a
-  pick in Mission Control (and the same under the Spaces engine), frames per screen setup.
+  pick in Mission Control, its opening, its close by key with the pointer over a hidden
+  window (each also under the Spaces engine), frames per screen setup.
   `SM_PROBE_DOCK_CLICK=real` posts a real click on the Dock item instead of `AXPress`.
 - `stage-manager probe-shadow` measures how far an inactive window's shadow reaches past
   each side of its frame, from windows of its own (the corner patch's reach). `--profile`

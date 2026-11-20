@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, Mission Control shows the hidden stages' windows as soon as it
+  opens from its key or its keyboard shortcut; before, they could come up to two seconds late.
+- With `engine = "spaces"`, closing Mission Control with its key or Escape keeps the stage in
+  front; before, an app whose window was under the pointer could come in front with its stage.
+
 - With `engine = "spaces"`, a link that opens in a browser window hidden in a stage on another
   Desktop now goes to that Desktop with the window in front; before, nothing seemed to happen.
   The Desktop left keeps the stage it had in front.

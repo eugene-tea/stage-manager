@@ -460,7 +460,23 @@ Mission Control is listed, found within about 30 ms of its keyboard shortcut (th
 own, read from Keyboard Shortcuts, or the keyboard's Mission Control key) and otherwise at
 the next tick (up to 0.25 s while something happens, 2 s at rest: a gesture, a hot corner
 and the Dock's item announce nothing); `"key"` lends at the shortcut itself and takes the
-windows back when nothing shows within 1.5 s; `"off"` lends nothing. Mission Control lays
+windows back when nothing shows within 1.5 s; `"off"` lends nothing. Until round mc-key no key
+of Mission Control's was ever heard: macOS takes its shortcuts and its key in the window
+server, before any app gets them, so the input monitor never saw one (no `trigger seen` line
+in any log to 11-20), and Mission Control opened by its key was found by the tick, up to 2 s
+late (11-20 11:16:34, `found_within_ms=2140`: its stages' windows came in late); `"key"` mode and the parks at the key never ran. A listen-only event tap at the
+HID level hears them now (the Accessibility permission, no other), and only them: Mission
+Control's shortcuts as Keyboard Shortcuts has them, its key, and while it shows Escape and
+presses.
+Closed by its key (its shortcut again, its key, Escape), Mission Control picks nothing: macOS
+may still bring an app in front (11-20 11:16:36, pressed again from the stage in front:
+Terminal, whose window was out for it, came in front while it closed, and its stage was
+switched to). Under `engine = "spaces"` an activation or a focus within 1 s of that key, with
+no click since, switches nothing: the windows put home go back, and the stage in front's key
+window is focused again once Mission Control is gone. A click while it shows is a pick as
+before. Which app macOS brings in front then, and what Apple's does with its stage, are not
+measured yet (`scripts/probe_apple.py mission-close-key`); until they are, the stage in front
+stays, as Apple's keeps it when nothing is picked. Mission Control lays
 out a window that arrives after it opened (`scripts/test-stages.sh mission-probe`, 11-18; the
 log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
 shows, expected from a wallpaper click, and for a second after it closes, as the windows
