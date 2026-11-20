@@ -210,6 +210,15 @@ fn application_item(element: &AxElement) -> AxResult<Option<DockItem>> {
     Ok(Some(DockItem { path: element.url_path()?, frame: element.frame()? }))
 }
 
+/// When the Dock's preferences file last changed, and its length: a new stamp says the
+/// Dock wrote its settings (an icon moved, kept or removed; the Dock's size or side), the
+/// sign "Follow the Dock" reads the order again on. One `stat`, no Accessibility call; the
+/// file is never opened. `None` while it cannot be looked at.
+pub fn preferences_stamp() -> Option<(std::time::SystemTime, u64)> {
+    let m = std::fs::metadata(super::paths::dock_preferences()).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
 /// The Dock's application items in its order (`dock`: its pid), left to right (top to bottom
 /// on the side), each with its bundle id and, when it runs, its pid: the order "Follow the
 /// Dock" sorts the strip by. Read through Accessibility only (the Dock's lists, `AXChildren`,
