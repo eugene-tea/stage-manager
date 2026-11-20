@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Measurement probes of Apple's Stage Manager (fixture apps only), beside scripts/test_apple.py.
 
-Run with `SM_TEST_TOGGLE_APPLE_SM=1 scripts/probe_apple.py [PHASE...]` (all four by default,
-in this order). These are measurements: each phase prints what Apple's did, with times; a FAIL
+Run with `SM_TEST_TOGGLE_APPLE_SM=1 scripts/probe_apple.py [PHASE...]` (all by default, in
+this order). These are measurements: each phase prints what Apple's did, with times; a FAIL
 is only a probe that could not run (its setup, a refused step). Built on test_apple.py: the
 fixture copies Alpha (two windows), Bravo and Charlie, the dev app in the Apple mode
 (`apple_stage_manager_on = "integrate"`, STAGE_MANAGER_ONLY = the fixtures) mirroring Apple's
@@ -35,6 +35,16 @@ from an application" (`AppWindowGroupingBehavior`) are put back as they were on 
               the dev app started anew, each fixture in a stage of its own (`ctl new`),
               Alpha's in front (`ctl switch`). Same sampling and summary, for comparison.
               About 30 s.
+  mission-open Where each window's flight starts as Mission Control opens. Each fixture
+              alone in a stage, each one's own frame read in front, Alpha's stage in front
+              (Bravo's and Charlie's in the strip), Mission Control opened by its key; the
+              window list sampled every 10 ms for 1.2 s from the key. Per window: its frame at
+              the first sample, its first frame on screen (when), the flight's start judged
+              (its strip thumbnail, its own frame, a corner, off screen, elsewhere), a few
+              waypoints (ms: x,y wxh) and Mission Control's settled layout frame (reached
+              when). Escape after. About 30 s.
+  mission-open-ours The same under our Spaces engine (as mission-pick-ours sets it up; the
+              strip thumbnail is our card's, `ctl debug-strip`). About 30 s.
   frames-setup Window frames per screen setup. Alpha opened with one window. Built-in screen
               only: Bravo 1 set to frame A_b (in front), Alpha 1 to A_a (in front; Bravo to the
               strip). A virtual screen added right of the screens (scripts/virtual-display,
@@ -65,8 +75,9 @@ import test_apple as ta  # noqa: E402
 
 say, check, ctl, wait_until = ta.say, ta.check, ta.ctl, ta.wait_until
 
-PHASES = ("dock-front", "mission-pick", "mission-pick-ours", "frames-setup")
-APPLE_PHASES = ("dock-front", "mission-pick", "frames-setup")
+PHASES = ("dock-front", "mission-pick", "mission-open", "mission-pick-ours", "mission-open-ours", "frames-setup")
+APPLE_PHASES = ("dock-front", "mission-pick", "mission-open", "frames-setup")
+OURS_PHASES = ("mission-pick-ours", "mission-open-ours")
 GROUPING = "AppWindowGroupingBehavior"
 DOCK_CLICK = (os.environ.get("SM_PROBE_DOCK_CLICK") or "press").strip().lower()
 BUNDLES = [b for b, _, _ in ta.FIX.values()]
@@ -79,6 +90,7 @@ LEFT_GONE_MS = 1100     # mission-pick-ours: the stage left gone into the strip 
 EXPOSE_SETTLE = 1.2     # Mission Control's opening animation, with room
 SCREEN_SETTLE = 6.0     # a screen added or removed: macOS's and Apple's moves, with room
 SAMPLE_MS = 1800        # a pick's sampling: from 0.1 s before the pick to past 1.5 s after
+OPEN_SAMPLE_MS = 1200   # mission-open: the list sampled this long from Mission Control's key
 grouping_original = None  # (had, type, value) of AppWindowGroupingBehavior
 screen = None             # the virtual screen while it is up
 
@@ -504,10 +516,11 @@ def overlays():
         return []
 
 
-def open_mission_control():
+def open_mission_control(before=None):
     """Mission Control by its own shortcut (`ctl debug-expose`), or its launcher when the
-    shortcut is off; the overlays listed before, or None when none came."""
-    before = {o["id"] for o in overlays()}
+    shortcut is off; the overlays listed before (`before`, read now when not given), or None
+    when none came."""
+    before = {o["id"] for o in overlays()} if before is None else before
     r = ctl("debug-expose", "mission-control")
     if not r.get("ok") and "turned off" in str(r.get("error")):
         say(f"  {r.get('error')}; opening Mission Control (com.apple.exposelauncher) instead")
@@ -675,8 +688,9 @@ def switch_to(title):
     return wait_until(lambda: (lambda x: x if (stage_of(x, id_of(x, title)) or {}).get("number") == x.get("active") else None)(ctl("state")), 5, f"{title}'s stage in front")
 
 
-def phase_mission_pick_ours():
-    say("\n== mission-pick-ours: the same pick under our Spaces engine (Apple's off) ==")
+def ours_separated():
+    """Our app started anew under the Spaces engine (Apple's off), each fixture in a stage of
+    its own; the state, or None."""
     ctl("quit")
     wait_until(lambda: not ctl("ping").get("ok"), 10, "Stage Manager quit", step=0.2)
     ta.set_apple(False)
@@ -698,7 +712,13 @@ def phase_mission_pick_ours():
             time.sleep(1.0)
     s = wait_until(lambda: (lambda x: x if all(len((stage_of(x, id_of(x, t)) or {}).get("windows", [])) == 1 for t in ("Bravo 1", "Charlie 1")) else None)(ctl("state")), 6,
                    "Bravo and Charlie each alone in a stage")
-    if not check(s is not None, f"each fixture in a stage of its own ({ours_snapshot(ctl('state'))})"):
+    check(s is not None, f"each fixture in a stage of its own ({ours_snapshot(ctl('state'))})")
+    return s
+
+
+def phase_mission_pick_ours():
+    say("\n== mission-pick-ours: the same pick under our Spaces engine (Apple's off) ==")
+    if ours_separated() is None:
         return
     s = switch_to("Bravo 1")
     time.sleep(1.0)
@@ -717,6 +737,155 @@ def phase_mission_pick_ours():
     time.sleep(0.8)
     say(f"  stages: {ours_snapshot(ctl('state'))}")
     mission_round("mission-pick-ours", s, bravo[0], alpha, own, ours_snapshot, names)
+    time.sleep(1.0)
+    say(f"  after: {ours_snapshot(ctl('state'))}")
+
+
+# ----- mission-open ---------------------------------------------------------------------------
+
+
+def raw_path(samples, wid, t0):
+    """Window `wid`'s listing over `samples`: [(ms after t0, bounds or None, on screen)] at
+    each change (on or off screen counts)."""
+    out, prev = [], None
+    for t, ws in samples:
+        w = ws.get(wid)
+        b = w["bounds"] if w and w.get("layer") == 0 else None
+        on = bool(w and w.get("onscreen") and b)
+        if prev is None or on != prev[1] or (b is None) != (prev[0] is None) or (b is not None and moved(b, prev[0])):
+            out.append((round((t - t0) * 1000), b, on))
+            prev = (b, on)
+    return out
+
+
+def meets(b, d):
+    return b["x"] < d["x"] + d["w"] and b["x"] + b["w"] > d["x"] and b["y"] < d["y"] + d["h"] and b["y"] + b["h"] > d["y"]
+
+
+def start_kind(b, own, thumb, point, d):
+    """Where a flight starts: off screen, its own frame, its strip thumbnail, a corner of
+    the display, or elsewhere (and whether it sticks out of the display)."""
+    if b is None:
+        return "not listed"
+    if d and not meets(b, d):
+        return "off screen"
+    out = "" if not d or (b["x"] >= d["x"] - 1 and b["y"] >= d["y"] - 1 and b["x"] + b["w"] <= d["x"] + d["w"] + 1
+                         and b["y"] + b["h"] <= d["y"] + d["h"] + 1) else " (partly off screen)"
+    if close(b, own, 8.0):
+        return "its own frame" + out
+    small = not d or b["w"] < d["w"] / 3
+    if (thumb and close(b, thumb, 12.0)) or (point and small and b["x"] <= point["x"] <= b["x"] + b["w"] and b["y"] <= point["y"] <= b["y"] + b["h"]):
+        return "its strip thumbnail" + out
+    if d and small:
+        cx, cy = b["x"] + b["w"] / 2, b["y"] + b["h"] / 2
+        h = "left" if cx - d["x"] < d["w"] * 0.2 else "right" if d["x"] + d["w"] - cx < d["w"] * 0.2 else None
+        v = "top" if cy - d["y"] < d["h"] * 0.2 else "bottom" if d["y"] + d["h"] - cy < d["h"] * 0.2 else None
+        if h and v:
+            return f"the {v}-{h} corner" + out
+        if h == "left" and thumb is None:
+            return "the left edge (the strip's side)" + out
+    return "elsewhere" + (f" (thumbnail {fmt(thumb)})" if thumb else "") + out
+
+
+def open_round(label, ids, own, thumbs, names, points=None):
+    """Mission Control opened by its key with the list sampled from it; per window of `ids`:
+    where its flight starts and ends. `own`: {id: frame in front}; `thumbs`: {id: its strip
+    thumbnail's frame}; `points`: {id: a point on its thumbnail}."""
+    points = points or {}
+    before = listed()
+    say("  before: " + "; ".join(f"{names.get(i, i)} {fmt((before.get(i) or {}).get('bounds'))}"
+                                 f"{'' if (before.get(i) or {}).get('onscreen') else ' (off screen)'}" for i in ids))
+    say("  own frames: " + ", ".join(f"{names.get(i, i)} {fmt(own.get(i))}" for i in ids)
+        + "; thumbnails: " + (", ".join(f"{names.get(i, i)} {fmt(t)}" for i, t in thumbs.items()) or "none read"))
+    pre = {o["id"] for o in overlays()}
+    sampler = Sampler(BUNDLES, 10, OPEN_SAMPLE_MS + 100)
+    time.sleep(0.1)
+    t0 = time.time()
+    opened = open_mission_control(pre)
+    shown_ms = round((time.time() - t0) * 1000)
+    samples, display = sampler.result()
+    if opened is None:
+        return
+    laid = settled_layout(ids)
+    say(f"  {label}: Mission Control listed by {shown_ms} ms after its key; {len(samples)} samples"
+        f" (the last at {round((samples[-1][0] - t0) * 1000) if samples else '-'} ms); display {fmt(display)}")
+    for i in ids:
+        path = raw_path(samples, i, t0)
+        name = names.get(i, str(i))
+        if not path:
+            say(f"    {name}: never listed")
+            continue
+        first = path[0]
+        on = next((p for p in path if p[2]), None)
+        final = (laid.get(i) or {}).get("bounds")
+        kind = start_kind(on[1] if on else None, own.get(i), thumbs.get(i), points.get(i), display)
+        say(f"    {name}: first sample {fmt(first[1])}{'' if first[2] else ' (off screen)'}; first on screen "
+            + (f"{fmt(on[1])} at {on[0]} ms" if on else "never") + f"; flight starts at {kind}")
+        moves = [(t, b) for t, b, o in path if o]
+        step = max(1, len(moves) // 7)
+        say("      path: " + " -> ".join(f"{t}:{fmt(b)}" for t, b in (moves[::step][:7] + moves[-1:] if moves else [])))
+        r = reached(moves, final) if final else None
+        say(f"      laid out at {fmt(final)}" + (f", reached at {r} ms" if r is not None else ", not reached in the sampling")
+            + (" (= its own frame)" if close(final, own.get(i), 8.0) else ""))
+    close_mission_control(opened)
+
+
+def phase_mission_open():
+    say("\n== mission-open: where each window's flight starts as Mission Control opens, Apple's ==")
+    value_was = ta.all_at_once()
+    if not value_was:
+        set_grouping(1)
+        time.sleep(1.5)
+        reopen_all()
+    try:
+        ta.separate()
+        own = {}
+        for name in ("Bravo", "Charlie", "Alpha"):
+            if not check(ta.bring_front(name) is not None, f"{name} in front, to read its own frame"):
+                return
+            s = ta.quiet_state()
+            ws = listed()
+            own.update({i: ws[i]["bounds"] for i in ta.windows_of(s, name) if i in ws})
+        s = ta.quiet_state()
+        names = title_of(s)
+        ids = sorted(own, key=lambda i: names.get(i, str(i)))
+        ws = listed()
+        thumbs = {i: ws[i]["bounds"] for i in ids if i in ws and where(s, i).startswith("strip")}
+        points = {int(k): v for k, v in ((s.get("apple") or {}).get("click_at") or {}).items()}
+        say(f"  stages: {ta.title_groups(s)}")
+        open_round("mission-open", ids, own, thumbs, names, points)
+        s = ta.quiet_state()
+        say(f"  after: front {ta.front_titles(s) if s else '?'}; {windows_line(s or ctl('state'), listed())}")
+    finally:
+        if not value_was:
+            restore_grouping()
+            time.sleep(1.5)
+
+
+def phase_mission_open_ours():
+    say("\n== mission-open-ours: the same opening under our Spaces engine (Apple's off) ==")
+    if ours_separated() is None:
+        return
+    own = {}
+    for title in ("Bravo 1", "Charlie 1", "Alpha 1"):
+        s = switch_to(title)
+        if not check(s is not None, f"{title}'s stage in front, to read its own frame"):
+            return
+        time.sleep(1.0)
+        ws = listed()
+        st = stage_of(s, id_of(s, title)) or {}
+        own.update({i: ws[i]["bounds"] for i in st.get("windows", []) if i in ws})
+    s = ctl("state")
+    names = title_of(s)
+    ids = sorted(own, key=lambda i: names.get(i, str(i)))
+    r = ctl("debug-strip")
+    cards = {c.get("stage"): c.get("thumb") for c in ((r.get("strip") or r).get("cards") or [])}
+    thumbs = {i: cards[st["number"]] for i in ids if (st := stage_of(s, i)) and st["number"] != s.get("active") and cards.get(st["number"])}
+    # Escape must reach a fixture: Alpha frontmost.
+    subprocess.run(["open", ta.FIX["Alpha"][1]], check=True)
+    time.sleep(0.8)
+    say(f"  stages: {ours_snapshot(ctl('state'))}")
+    open_round("mission-open-ours", ids, own, thumbs, names)
     time.sleep(1.0)
     say(f"  after: {ours_snapshot(ctl('state'))}")
 
@@ -963,12 +1132,15 @@ def main():
     if any(p in APPLE_PHASES for p in phases):
         if ta.start() is None:
             return 1
-        runs = {"dock-front": phase_dock_front, "mission-pick": phase_mission_pick, "frames-setup": phase_frames_setup}
+        runs = {"dock-front": phase_dock_front, "mission-pick": phase_mission_pick, "mission-open": phase_mission_open,
+                "frames-setup": phase_frames_setup}
         for name in APPLE_PHASES:
             if name in phases:
                 runs[name]()
-    if "mission-pick-ours" in phases:
-        phase_mission_pick_ours()
+    ours = {"mission-pick-ours": phase_mission_pick_ours, "mission-open-ours": phase_mission_open_ours}
+    for name in OURS_PHASES:
+        if name in phases:
+            ours[name]()
     say(f"\n{len(ta.passed)} steps ran, {len(ta.failed)} could not")
     return 1 if ta.failed else 0
 
