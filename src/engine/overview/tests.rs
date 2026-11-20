@@ -248,6 +248,22 @@ fn the_watch_freezes_while_it_shows_and_a_settle_after() {
     assert!(w.freezes(ms(t0, 3100)));
 }
 
+/// The look before the one that found an overview bounds how late it was found.
+#[test]
+fn an_overview_is_found_within_the_gap_since_the_last_look() {
+    let t0 = Instant::now();
+    let mut w = OverviewWatch::default();
+    assert_eq!(w.see(None, t0), Change::None);
+    assert_eq!(w.found_within(), None);
+    w.see(None, ms(t0, 250));
+    assert_eq!(w.see(Some(Overview::MissionControl), ms(t0, 2250)), Change::Began(Overview::MissionControl));
+    assert_eq!(w.found_within(), Some(Duration::from_millis(2000)), "a look at rest: up to 2 s late");
+    w.see(Some(Overview::MissionControl), ms(t0, 2270));
+    assert_eq!(w.found_within(), Some(Duration::from_millis(2000)), "the gap of the look that found it, kept while it shows");
+    w.see(None, ms(t0, 3000));
+    assert_eq!(w.found_within(), None, "closed");
+}
+
 #[test]
 fn an_overview_listed_for_ever_stops_freezing() {
     let t0 = Instant::now();

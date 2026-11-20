@@ -167,6 +167,11 @@ pub struct OverviewWatch {
     stuck: bool,
     /// When Show Desktop was last expected from a wallpaper click ([`Self::expect_show_desktop`]).
     expected: Option<Instant>,
+    /// When the window list was last looked at.
+    looked: Option<Instant>,
+    /// The look before the one the shown overview began at was this long before it: it began
+    /// within that much ([`Self::found_within`]).
+    found_within: Option<Duration>,
 }
 
 impl OverviewWatch {
@@ -175,6 +180,8 @@ impl OverviewWatch {
     /// never begins one (an auto-hiding Dock brought up lists the same window).
     pub fn see(&mut self, sight: impl Into<Sight>, now: Instant) -> Change {
         let sight = sight.into();
+        let gap = self.looked.map(|t| now.saturating_duration_since(t));
+        self.looked = Some(now);
         if sight.overview.is_some() {
             self.told_at = Some(now);
         }
@@ -193,6 +200,7 @@ impl OverviewWatch {
             }
             (Some(kind), _) => {
                 self.showing = Some((kind, now));
+                self.found_within = gap;
                 self.stuck = false;
                 self.ended = None;
                 if kind == Overview::ShowDesktop {
@@ -210,6 +218,13 @@ impl OverviewWatch {
             }
             (None, None) => Change::None,
         }
+    }
+
+    /// How long before the look that found the overview shown the previous look was: it
+    /// began on screen at most this much before it was found (`None`: the first look). A
+    /// gesture, a hot corner and the Dock's item are found at the tick (2 s at rest).
+    pub fn found_within(&self) -> Option<Duration> {
+        self.found_within.filter(|_| self.showing.is_some())
     }
 
     /// The overview shown at the last look (not one listed too long to be trusted).

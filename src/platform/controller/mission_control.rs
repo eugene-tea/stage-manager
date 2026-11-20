@@ -338,6 +338,7 @@ impl Controller {
                     mode = mode.name(),
                     hint = hint.map(|(h, _)| h.name()),
                     after_hint_ms = hint.map(|(_, d)| ms(d)),
+                    found_within_ms = self.overview.found_within().map(ms),
                     out = self.spaces.mission.lends.out().len(),
                     "mission-control: shown"
                 );
