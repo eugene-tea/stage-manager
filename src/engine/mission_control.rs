@@ -474,6 +474,15 @@ pub fn fate(shown: bool, front_app: bool, since_close: Duration) -> Fate {
     }
 }
 
+/// True when a window put home that waits for its switch ([`Fate::Wait`]) goes to the park
+/// corner while it waits: parked at its stage's card (`at_card`), in view on the Desktop since
+/// the close, and not `placed` at its frame by a pick. At the card it would show up to
+/// [`PICK_WAIT`] on the left (1.2 s in the live check, 11-20); at the corner a sliver at most,
+/// as before the cards. It goes back or comes with its switch from there.
+pub fn corner_while_waiting(fate: Fate, at_card: bool, placed: bool) -> bool {
+    fate == Fate::Wait && at_card && !placed
+}
+
 /// What asked for a picked stage's switch: macOS's activation of its app, or its focus of
 /// one of its windows (the app in front already).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1026,6 +1035,15 @@ impl Lends {
     /// it shows or closed less than [`PICK_WAIT`] ago.
     pub fn pick_open(&self, now: Instant) -> bool {
         !self.out.is_empty() && (self.up.is_some() || self.closed.is_some_and(|t| now.saturating_duration_since(t) < PICK_WAIT))
+    }
+
+    /// Window `id` out, moved from its card to the park corner at `at` while it waits for its
+    /// switch ([`corner_while_waiting`]): at its card no more.
+    pub fn cornered(&mut self, id: WindowId, at: Rect) {
+        if let Some(o) = self.out.iter_mut().find(|o| o.id == id) {
+            o.at_card = false;
+            o.parked = Some(at);
+        }
     }
 
     /// Windows out whose own frames were set again for a pick ([`to_frames`]).
@@ -1687,5 +1705,21 @@ mod tests {
         assert_eq!(fate(false, false, ms(0)), Fate::TakeBack, "another app's: back at once");
         assert_eq!(fate(false, true, ms(200)), Fate::Wait, "the app in front: its switch may still come");
         assert_eq!(fate(false, true, PICK_WAIT), Fate::TakeBack, "none came");
+    }
+
+    #[test]
+    fn a_window_waiting_at_its_card_waits_at_the_corner() {
+        assert!(corner_while_waiting(Fate::Wait, true, false), "at its card, in view: to the corner");
+        assert!(!corner_while_waiting(Fate::Wait, false, false), "at the corner already");
+        assert!(!corner_while_waiting(Fate::Wait, true, true), "placed at its frame by a pick: left there");
+        assert!(!corner_while_waiting(Fate::TakeBack, true, false), "going back now");
+        assert!(!corner_while_waiting(Fate::Forget, true, false), "its switch has it");
+        let mut l = Lends::default();
+        l.lent(Out { id: w(1), pid: 10, parked: Some(Rect::new(16.0, 280.0, 640.0, 452.0)), at_card: true });
+        let corner = Rect::new(2559.0, 1408.0, 640.0, 452.0);
+        l.cornered(w(1), corner);
+        assert_eq!(l.out().first().map(|o| (o.at_card, o.parked)), Some((false, Some(corner))));
+        l.cornered(w(9), corner);
+        assert_eq!(l.out().len(), 1, "a window not out is not added");
     }
 }

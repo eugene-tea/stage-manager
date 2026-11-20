@@ -2026,6 +2026,10 @@ impl WindowEngine for SpacesEngine {
         self.frames_back_now(ids)
     }
 
+    fn to_corner(&self, ids: &[(WindowId, i32, Rect)]) -> Vec<WindowId> {
+        self.to_corner_now(ids)
+    }
+
     /// Also while a show owes the window its frame ([`State::frames`]): it came out of its
     /// Space away from it (a minimize's dive), so where it is listed is not its frame either.
     fn parked_lend(&self, id: WindowId) -> bool {

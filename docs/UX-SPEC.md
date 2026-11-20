@@ -432,7 +432,13 @@ strip and it is laid out on the left, in the strip's order. A window larger than
 or with no card in sight (the strip out of sight), parks at the corner. A card park is in
 view on the Desktop, so `"key"` mode's lend at the shortcut (on the Desktop before anything
 shows), ⌘Tab's and the Dock's lends keep the corner; once Mission Control closes the windows
-at their cards are taken back at the next look, which comes every 30 ms while one is out. After
+at their cards are taken back at the next look, which comes every 30 ms while one is out, and
+one whose app is in front, which waits up to 1.5 s for a pick's switch, waits at the corner
+(at its card it showed 1.2 s on the left after the close: `mission`, 11-20). Measured with
+the card parks (`mission-open-ours`, 11-20): found as Mission Control was listed (204 ms), a
+hidden window showed at its card (0,464 520x424) and was laid out on the left 10 ms later
+(19,874 209x170), with no flight; whether one parked at the key and put home once it shows
+flies from its card is not measured (the probe's posted key is not heard). After
 a crash with windows out at their cards the guardian brings each back to its frame (its
 parked file names the card parks).
 A Desktop picked inside Mission Control is recognized only once it closes; opened again

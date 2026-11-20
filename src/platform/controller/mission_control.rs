@@ -41,7 +41,7 @@ use serde_json::{Value, json};
 
 use super::Controller;
 use crate::engine::mission_control::{self as mc, Edge, Fate, Hint, Keys, Lends, Mode, Mods, Out, PickBy, PickSwitch, Settled, Shortcut};
-use crate::engine::card_park;
+use crate::engine::{card_park, corner};
 use crate::engine::geometry::Rect;
 use crate::engine::lend_park::Zone;
 use crate::engine::lend_round::Left;
@@ -565,12 +565,22 @@ impl Controller {
         let Some(since) = self.spaces.mission.lends.closing(now) else { return };
         let front = apps::frontmost_pid();
         let mut going = Vec::new();
+        let mut cornering = Vec::new();
         for out in self.spaces.mission.lends.out().to_vec() {
             // Shown by the model, its stage in front (the switch shows it), or gone.
             let shown = self.model.as_ref().is_none_or(|m| {
                 m.window(out.id).is_none_or(|w| !w.parked) || m.stage_of(out.id).is_some_and(|s| m.stage_in_front(s))
             });
-            match mc::fate(shown, front == Some(out.pid), since) {
+            let fate = mc::fate(shown, front == Some(out.pid), since);
+            if mc::corner_while_waiting(fate, out.at_card, self.spaces.mission.lends.is_placed(out.id)) {
+                match self.model.as_ref().and_then(|m| corner::park_frame(m, out.id)) {
+                    Some(at) => cornering.push((out.id, out.pid, at)),
+                    // No corner known: back now rather than in view at its card.
+                    None => going.push((out.id, out.pid)),
+                }
+                continue;
+            }
+            match fate {
                 Fate::Wait => {}
                 Fate::Forget => self.spaces.mission.lends.settle(out.id, Settled::Picked),
                 Fate::TakeBack => {
@@ -582,6 +592,19 @@ impl Controller {
                     going.push((out.id, out.pid));
                 }
             }
+        }
+        if !cornering.is_empty() {
+            let started = Instant::now();
+            let took = self.engine.to_corner(&cornering);
+            for (id, pid, at) in cornering {
+                if took.contains(&id) {
+                    self.spaces.mission.lends.cornered(id, at);
+                } else {
+                    // Still at its card, in view: back now.
+                    going.push((id, pid));
+                }
+            }
+            tracing::debug!(windows = took.len(), ms = ms(started.elapsed()), "mission-control: windows put home at their cards wait at the corner for their app's switch");
         }
         if !going.is_empty() {
             let started = Instant::now();

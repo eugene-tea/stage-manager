@@ -92,10 +92,10 @@ UX-SPEC, "Known gaps".
   at rest now, the shown line's `found_within_ms`; 11-20 07:49:14 no notice of the Dock's
   came, observed since 07:48:20. To measure: whether the input monitor's global monitor gets
   `NSEventType::Gesture`/`Swipe` events for a four-finger swipe up, and what one look at the
-  on-screen list costs at 4 Hz at rest, `measure_stages.py`); the card parks (round
-  mc-card-park) live: `mission` (out at their cards, none seen there after the close past
-  150 ms, the kill -9) and `probe_apple.py mission-open-ours` (flights from around the cards,
-  laid out on the left); should the close show them at their cards, move them to the corner
+  on-screen list costs at 4 Hz at rest, `measure_stages.py`); whether a window parked at
+  its card at the key (the real key, `"shown"`) and put home once Mission Control shows flies
+  from its card (the probe's posted key is not heard; found at the listing it is laid out with
+  no flight, 11-20); should the close show them at their cards, move them to the corner
   at the close's key (Escape, the shortcut again), as a pick's frames are set at its
   activation, and measure whether a move while Mission Control shows lays it out again; why
   parks miss (the `a hidden window left hidden` lines: listed at

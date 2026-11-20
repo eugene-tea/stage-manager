@@ -11,9 +11,9 @@
   there when the Desktop slides in, with no picture still growing over it.
 - A click or another app coming in front during a switch ends its animation at once, with no
   picture still growing over a window already in its place.
-- With `engine = "spaces"`, Mission Control brings the hidden stages' windows in from the
-  strip and lays them out on the left, as Apple's does; before, they flew in from the
-  bottom-right corner and were laid out at the right.
+- With `engine = "spaces"`, Mission Control lays out the hidden stages' windows on the left,
+  as Apple's does; before, they came in from the bottom-right corner and were laid out at the
+  right.
 - With `engine = "spaces"`, a window picked in Mission Control comes to its place in one
   motion.
 - With `engine = "spaces"`, Mission Control shows the hidden stages' windows at once instead

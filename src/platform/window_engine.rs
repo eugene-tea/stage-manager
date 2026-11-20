@@ -340,6 +340,14 @@ pub trait WindowEngine: Send + Sync {
         Vec::new()
     }
 
+    /// Windows `ids` (with their apps and corner parks), lent and parked at their stages'
+    /// cards, moved to the park corner on their Desktop, still lent, the apps at once: their
+    /// app in front waits for a pick's switch after Mission Control's close
+    /// ([`crate::engine::mission_control::corner_while_waiting`]). Those that took it.
+    fn to_corner(&self, _ids: &[(WindowId, i32, Rect)]) -> Vec<WindowId> {
+        Vec::new()
+    }
+
     /// True while window `id` is parked for a lend ([`Self::lend_home`] with a park) and its
     /// frame not set again: where it is listed is not its frame, so its move notices are not
     /// the model's (the platform drops them). The Corner engine: never.

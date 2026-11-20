@@ -410,6 +410,44 @@ impl SpacesEngine {
         set
     }
 
+    /// [`crate::platform::window_engine::WindowEngine::to_corner`]: each lent window parked
+    /// at its card moved to its corner park through its element, the apps at once; one listed
+    /// there is parked at the corner now (its frame kept), and the parked file names its card
+    /// no more.
+    pub(super) fn to_corner_now(&self, ids: &[(WindowId, i32, Rect)]) -> Vec<WindowId> {
+        let asks: Vec<(i32, (u32, Rect, Parked, AxElement))> = {
+            let st = self.state();
+            ids.iter()
+                .filter(|(id, _, _)| st.lent.contains(&id.0))
+                .filter_map(|(id, pid, at)| st.parked.get(&id.0).filter(|p| p.park.zone == Zone::Card).map(|p| (*pid, (id.0, *at, p.park, p.element.clone()))))
+                .collect()
+        };
+        let apps = lend_round::by_app(asks);
+        let answers = per_app(&apps, |ws| {
+            ws.iter()
+                .map(|(id, at, p, e)| {
+                    let landed = lend_park::Moves::move_to(&mut AxMover { element: e }, *at);
+                    (*id, landed.is_some_and(|r| Zone::Corner.holds(r, *at, &p.display)))
+                })
+                .collect::<Vec<_>>()
+        });
+        let mut st = self.state();
+        let mut took = Vec::new();
+        for ((_, ws), answer) in apps.iter().zip(answers) {
+            for (id, ok) in answer.unwrap_or_default() {
+                let Some(at) = ws.iter().find(|w| w.0 == id).map(|w| w.1) else { continue };
+                if ok && let Some(p) = st.parked.get_mut(&id) {
+                    p.park.at = at;
+                    p.park.zone = Zone::Corner;
+                    took.push(WindowId(id));
+                }
+            }
+        }
+        drop(st);
+        self.lends_to_file();
+        took
+    }
+
     /// [`crate::platform::window_engine::WindowEngine::unpark_round`].
     pub(super) fn unpark_round_now(&self, ids: &[(WindowId, i32)]) -> usize {
         let parked: Vec<(i32, Unpark)> = {
