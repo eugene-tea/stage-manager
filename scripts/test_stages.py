@@ -10134,8 +10134,12 @@ def phase_mission():
        stage) is activated, as a click on its window there or on its Dock item activates it;
        its stage comes in front with Alpha 1 at its frame, with no Space change, and Fixture
        2 and 3 are back in their stage Spaces.
-    4. kill -9 while the windows are out (lent for the test, no Mission Control): the guardian
-       brings both back out of the park corner."""
+       At their cards (round mc-card-park): the hidden windows go home parked at their stages'
+       cards (`at_card`, centered on the card, on the display's left half), so Mission Control
+       flies them from the strip; after Escape none is listed on the Desktop at its card for
+       longer than MISSION_CARD_SEEN_S once Mission Control's own windows are gone.
+    4. kill -9 while the windows are out at their cards (lent for the test, `lend card`, no
+       Mission Control): the guardian brings both back to their frames."""
     say("\n== mission: Mission Control shows every stage's windows (Spaces engine) ==")
     if not SPACES:
         skip("mission", "the Spaces engine's own: with the park corner Mission Control shows every window already; run with SM_ENGINE=spaces")
@@ -10171,8 +10175,10 @@ def phase_mission():
             check(sorted(laid) == sorted(hidden), f"mission {label}: it lays out every hidden window (moved from their park: {laid} of {hidden})")
         else:
             say(f"    App Exposé shows the front app's windows; laid out here: {laid} of {hidden} (the fixture's two are expected, Alpha's is another app's)")
+        if which == "mission-control":
+            mission_at_cards(out, hidden, label)
         mission_shot(which)
-        mission_close(opened[1], f"mission {label}")
+        mission_close_seen(opened[1], hidden, parked, f"mission {label}")
         mission_back(ids, titles, frames, f"mission {label}")
         text = log_text()[mark:]
         for what in ("mission-control: shown", f"mission-control: lent {n} windows", "mission-control: Mission Control lays out", "mission-control: closed", f"mission-control: put back {n} windows"):
@@ -10209,23 +10215,76 @@ def phase_mission():
         check(ctl("space").get("changes") == changes, "mission pick: no Space change")
         consistent("after the pick")
 
-    say("  -- kill -9 with the windows out --")
+    say("  -- kill -9 with the windows out at their cards --")
     ctl("debug-mission-control", "mode", "off")
-    r = ctl("debug-mission-control", "lend")
+    r = ctl("debug-mission-control", "lend", "card")
     lent = r.get("lent") or []
+    out = {o["id"]: dict(zip("xywh", o["parked"])) for o in (mission_status().get("out") or []) if o.get("parked")}
     wins, d = fixture_windows([FIX_ID, EXTRA["a"][0]])
-    at_park = [w["id"] for w in wins if w["id"] in lent and is_parked(w["bounds"], d)]
-    if check(bool(lent) and sorted(at_park) == sorted(lent), f"mission kill: the hidden windows are out, parked in the corner ({lent}, in the corner {at_park}; {r.get('error') or 'ok'})"):
+    at_card = [w["id"] for w in wins if w["id"] in lent and w["id"] in (r.get("at_card") or []) and not w.get("staged")
+               and w["id"] in out and close(w["bounds"], out[w["id"]], 2.0) and not is_parked(w["bounds"], d)]
+    if check(bool(lent) and sorted(at_card) == sorted(lent),
+             f"mission kill: the hidden windows are out at their cards, on the Desktop ({lent}, at their cards {at_card}; {r.get('error') or 'ok'})"):
         pid = app_pid()
         os.kill(pid, signal.SIGKILL)
         wait_gone(pid)
-        back = wait_until(lambda: (lambda ws: ws if ws[0] and not any(is_parked(w["bounds"], ws[1]) or w.get("staged") for w in ws[0]) else None)(fixture_windows([FIX_ID, EXTRA["a"][0]])), 20,
-                          "every fixture window out of the park corner")
-        check(bool(back), "mission kill: the guardian brought every window out of the park corner")
+
+        def home():
+            ws = {w["id"]: w for w in fixture_windows([FIX_ID, EXTRA["a"][0]])[0]}
+            ok = all(i in ws and not ws[i].get("staged") and i in frames and close(ws[i]["bounds"], frames[i], 2.0) for i in lent)
+            return ws if ok else None
+        back = wait_until(home, 20, "every fixture window back at its frame")
+        ws = {w["id"]: w for w in fixture_windows([FIX_ID, EXTRA["a"][0]])[0]}
+        check(bool(back), "mission kill: the guardian brought every window from its card back to its frame ("
+              + ", ".join(f"{i}: {fmt(ws[i]['bounds']) if i in ws else 'gone'}, was {fmt(frames[i]) if i in frames else '?'}" for i in lent) + ")")
         for g in guardian_pids(pid):
             wait_gone(g, 20)
     stop_app()
     all_onscreen("mission quit")
+
+
+# A window out at its card is on the Desktop in view once Mission Control has closed, until it
+# goes back: its close is looked for at the fast tick (engine::mission_control::WATCH_EVERY,
+# 30 ms), and the take back is one call per stage Space.
+MISSION_CARD_SEEN_S = 0.15
+
+
+def mission_at_cards(out, hidden, label):
+    """Round mc-card-park: every hidden window went home parked at its stage's card (`at_card`),
+    listed then on the display's left half (centered on its card, inside the visible frame)."""
+    outs = {o["id"]: o for o in (out or {}).get("out", [])}
+    d = fixture_windows([FIX_ID])[1] or {}
+    half = d.get("x", 0) + d.get("w", 0) / 2
+    left = [i for i in hidden if outs.get(i, {}).get("at_card") and outs[i].get("parked") and outs[i]["parked"][0] + outs[i]["parked"][2] / 2 < half]
+    check(sorted(left) == sorted(hidden),
+          f"mission {label}: the hidden windows went home at their cards, on the left ({left} of {hidden}; "
+          + ", ".join(f"{i}: {outs[i].get('parked')} card={outs[i].get('at_card')}" for i in hidden if i in outs) + ")")
+
+
+def mission_close_seen(before, hidden, parked, label):
+    """Escape, the list sampled until Mission Control's windows are gone and the hidden
+    windows back in their stage Spaces: how long any was listed on the Desktop at its card
+    park after Mission Control's own windows went (round mc-card-park; under
+    MISSION_CARD_SEEN_S)."""
+    ctl("debug-expose", "escape")
+    end, gone_at, seen = time.time() + 5, None, []
+    while time.time() < end:
+        now = time.time()
+        up = [o for o in screen_overlays() if o["id"] not in before]
+        ws = mission_listed()
+        if not up and gone_at is None:
+            gone_at = now
+        at = [i for i in hidden if i in parked and i in ws and not ws[i].get("staged") and close(ws[i]["bounds"], parked[i], 2.0)]
+        if gone_at is not None and at:
+            seen.append(now)
+        if gone_at is not None and all(ws.get(i, {}).get("staged") for i in hidden):
+            break
+    span = (seen[-1] - gone_at) if seen and gone_at else 0.0
+    check(gone_at is not None, f"{label}: Mission Control ended")
+    check(span <= MISSION_CARD_SEEN_S, f"{label}: after the close no hidden window stayed on the Desktop at its card longer than "
+          f"{MISSION_CARD_SEEN_S * 1000:.0f} ms ({span * 1000:.0f} ms, {len(seen)} looks)")
+    time.sleep(EXPOSE_SETTLE)
+    return gone_at is not None
 
 
 def mission_desktop_key(direction):

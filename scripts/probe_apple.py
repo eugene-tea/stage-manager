@@ -44,7 +44,10 @@ from an application" (`AppWindowGroupingBehavior`) are put back as they were on 
               waypoints (ms: x,y wxh) and Mission Control's settled layout frame (reached
               when). Escape after. About 30 s.
   mission-open-ours The same under our Spaces engine (as mission-pick-ours sets it up; the
-              strip thumbnail is our card's, `ctl debug-strip`). About 30 s.
+              strip thumbnail is our card's, `ctl debug-strip`). Since round mc-card-park a
+              hidden stage's window is put home at its card (its own size, centered on the
+              card, inside the display): its flight starts "around its strip thumbnail" and it
+              is laid out on the left, as Apple's. About 30 s.
   frames-setup Window frames per screen setup. Alpha opened with one window. Built-in screen
               only: Bravo 1 set to frame A_b (in front), Alpha 1 to A_a (in front; Bravo to the
               strip). A virtual screen added right of the screens (scripts/virtual-display,
@@ -774,6 +777,11 @@ def start_kind(b, own, thumb, point, d):
     if close(b, own, 8.0):
         return "its own frame" + out
     small = not d or b["w"] < d["w"] / 3
+    if thumb and not close(b, thumb, 12.0) and b["x"] <= thumb["x"] + thumb["w"] / 2 <= b["x"] + b["w"] \
+            and b["y"] <= thumb["y"] + thumb["h"] / 2 <= b["y"] + b["h"] and abs((b["y"] + b["h"] / 2) - (thumb["y"] + thumb["h"] / 2)) <= 2.0:
+        # Ours since round mc-card-park: the window's own size centered on its card, held
+        # inside the display (level with the card).
+        return "around its strip thumbnail (its own size, level with it)" + out
     if (thumb and close(b, thumb, 12.0)) or (point and small and b["x"] <= point["x"] <= b["x"] + b["w"] and b["y"] <= point["y"] <= b["y"] + b["h"]):
         return "its strip thumbnail" + out
     if d and small:
