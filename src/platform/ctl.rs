@@ -17,7 +17,8 @@
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
 //! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it (in the Apple mode: found, hit-tested and pressed, no prediction),
-//! `debug-mission-pick ID` clicks a fixture's window where Mission Control lays it out, `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
+//! `debug-mission-pick ID [hover]` clicks a fixture's window where Mission Control lays it out
+//! (with `hover` only moves the pointer there, back with `debug-pointer-back`), `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
 //! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
 //! as the Dock shows it (its items' titles, the one selected), `debug-mission-control
@@ -372,10 +373,13 @@ pub enum Command {
     },
     /// A click on a `STAGE_MANAGER_ONLY` app's window where Mission Control lays it out, only
     /// while Mission Control shows and no other app's window lies at the point (needs
-    /// `STAGE_MANAGER_TEST=1`; [`super::test_press::mission_pick`]).
+    /// `STAGE_MANAGER_TEST=1`; [`super::test_press::mission_pick`]). With `hover` the pointer
+    /// is only moved there (no click; `debug-pointer-back` puts it back).
     DebugMissionPick {
         /// The window id.
         id: u32,
+        /// Only the pointer moved there.
+        hover: bool,
     },
     /// A synthetic click at a global point, posted only when our own window or a
     /// `STAGE_MANAGER_ONLY` app's window is the topmost window there (needs
@@ -475,9 +479,9 @@ impl Command {
                 Ok(Self::DebugHover { x: coord(x)?, y: coord(y)?, ms })
             }
             ["debug-pointer-back"] => Ok(Self::DebugPointerBack),
-            ["debug-mission-pick", id] => {
+            ["debug-mission-pick", id, rest @ ..] if rest.is_empty() || rest == ["hover"] => {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
-                Ok(Self::DebugMissionPick { id })
+                Ok(Self::DebugMissionPick { id, hover: !rest.is_empty() })
             }
             ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
@@ -1032,7 +1036,9 @@ mod tests {
         assert_eq!(Command::parse("debug-engine-fail park"), Ok(Command::DebugEngineFail("park".into())));
         assert!(Command::parse("debug-engine-fail sometimes").is_err());
         assert_eq!(Command::parse("debug-menu-quit"), Ok(Command::DebugMenuQuit));
-        assert_eq!(Command::parse("debug-mission-pick 42"), Ok(Command::DebugMissionPick { id: 42 }));
+        assert_eq!(Command::parse("debug-mission-pick 42"), Ok(Command::DebugMissionPick { id: 42, hover: false }));
+        assert_eq!(Command::parse("debug-mission-pick 42 hover"), Ok(Command::DebugMissionPick { id: 42, hover: true }));
+        assert!(Command::parse("debug-mission-pick 42 click").is_err());
         assert!(Command::parse("debug-mission-pick x").is_err());
         assert_eq!(
             Command::parse("debug-click 60 700.5 shift"),

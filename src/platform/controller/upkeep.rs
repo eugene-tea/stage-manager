@@ -171,6 +171,26 @@ impl Controller {
         }
     }
 
+    /// One of Mission Control's keys, or a press while it may show, heard by its key tap
+    /// ([`crate::platform::mission_key_tap`]). The Spaces engine: a hint, or the key that
+    /// closed it ([`Self::mission_heard`]); the Corner engine's hidden windows are on their
+    /// Desktop, where Mission Control shows them.
+    pub fn mission_input(&mut self, ob: &mut Observer, heard: crate::platform::mission_key_tap::HeardAt) {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_heard(ob, heard),
+            EngineKind::Corner | EngineKind::Apple => {}
+        }
+    }
+
+    /// A left mouse-down in another app at `now`. The Spaces engine: while Mission Control
+    /// shows, its close is a pick ([`Self::mission_click`]).
+    pub(super) fn upkeep_press(&mut self, now: Instant) {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_click(now),
+            EngineKind::Corner | EngineKind::Apple => {}
+        }
+    }
+
     /// A switch for app `by` is about to be made (an activation's or a focus's), `predict`
     /// its model change on a copy of the model. The Spaces engine: a window picked in Mission
     /// Control, its stage's windows put home set at their frames as it closes, the switch
@@ -216,7 +236,11 @@ impl Controller {
     /// window list, and the park reconcile ([`Self::corner_tick`]).
     pub(super) fn upkeep_tick(&mut self, ob: &mut Observer) {
         match self.engine.kind() {
-            EngineKind::Corner => self.corner_tick(ob),
+            EngineKind::Corner => {
+                // Mission Control shows the Corner engine's hidden windows already.
+                crate::platform::mission_key_tap::publish(false, None, false);
+                self.corner_tick(ob)
+            }
             EngineKind::Spaces => {
                 // Mission Control first: what it has put home is the engine's to count.
                 self.mission_tick(ob, Instant::now());

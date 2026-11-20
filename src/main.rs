@@ -603,11 +603,11 @@ mod app {
                 spaces_engine::shared().fail_calls(mode);
                 json!({ "ok": true, "engine": window_engine::current().kind().name(), "mode": word })
             }
-            Command::DebugMissionPick { id } => {
+            Command::DebugMissionPick { id, hover } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-mission-pick needs STAGE_MANAGER_TEST=1");
                 }
-                stage_manager::platform::test_press::mission_pick(id)
+                stage_manager::platform::test_press::mission_pick(id, hover)
             }
             Command::DebugClick { x, y, shift } => {
                 if std::env::var_os(TEST_ENV).is_none() {

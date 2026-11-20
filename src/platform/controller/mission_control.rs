@@ -31,6 +31,13 @@
 //!   ([`crate::engine::mission_control::Lends::pick_switch`]); then it plays the stage
 //!   left's shrink alone, the windows placed counting as shown at their frames.
 //!
+//! - **Closed by its key** ([`Controller::mission_pick`], round mc-key): an activation that
+//!   comes just after the key that closed Mission Control, with no click, is macOS's, not a
+//!   pick ([`crate::engine::mission_close`]): no switch, the windows put home go back, and
+//!   the stage in front's key window is focused again once Mission Control is gone
+//!   ([`Controller::mission_refocus_due`]). Its keys are heard by a listen-only tap at the HID
+//!   level ([`crate::platform::mission_key_tap`]); the input monitor never hears them.
+//!
 //! Every line in the log starts with `mission-control:`. The engine counts each window put
 //! home as lent and parked, so a hide, a show, a quit's sweep and the guardian bring it
 //! back whatever happens here.
@@ -40,6 +47,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use super::Controller;
+use crate::engine::mission_close::{self, CloseWatch, Verdict};
 use crate::engine::mission_control::{self as mc, Edge, Fate, Hint, Keys, Lends, Mode, Mods, Out, PickBy, PickSwitch, Settled, Shortcut};
 use crate::engine::{card_park, corner};
 use crate::engine::geometry::Rect;
@@ -49,6 +57,7 @@ use crate::engine::model::{Action, Model, WindowId};
 use crate::engine::phase::Hold;
 use crate::engine::overview::{self, Overview, Sighting};
 use crate::platform::input::{self, InputEvent};
+use crate::platform::mission_key_tap::{self, Heard, HeardAt};
 use crate::platform::observe::Observer;
 use crate::platform::space_keys::{Expose, SpaceKey};
 use crate::platform::window_engine::{LendPark, RoundAsk};
@@ -67,6 +76,11 @@ pub(super) struct MissionWatch {
     keys: Option<(Keys, Instant)>,
     /// `ctl debug-mission-control mode …` (a test's): in place of the config's.
     mode: Option<Mode>,
+    /// What its close came with: the key that closed it, a click ([`CloseWatch`]).
+    close: CloseWatch,
+    /// An activation found no pick: the stage in front's key window is focused again once
+    /// Mission Control is gone (since when it waits).
+    refocus: Option<Instant>,
 }
 
 /// A shortcut of the settings as the engine compares it.
@@ -108,23 +122,74 @@ impl Controller {
         keys
     }
 
-    /// A key-down in another app: one of Mission Control's shortcuts is a hint
-    /// ([`Lends::hint`]). Typing reads nothing.
+    /// A key-down in another app, heard by the input monitor: one of Mission Control's
+    /// shortcuts is a hint ([`Self::mission_key_heard`]). Typing reads nothing. macOS keeps
+    /// its own shortcuts from the monitor: its key tap hears them ([`Self::mission_input`]).
     pub(super) fn mission_key(&mut self, ob: &Observer, event: &InputEvent, now: Instant) {
         let Some(code) = event.key else { return };
         let mods = Mods { control: event.control, option: event.option, command: event.cmd };
-        if self.mission_mode() == Mode::Off || !mc::may_trigger(code, mods) {
+        if !mc::may_trigger(code, mods) {
+            return;
+        }
+        self.mission_key_heard(ob, code, mods, "the input monitor", now);
+    }
+
+    /// What Mission Control's key tap heard ([`mission_key_tap`]): one of its keys, or a
+    /// press while it may show.
+    pub(super) fn mission_heard(&mut self, ob: &Observer, heard: HeardAt) {
+        match heard.what {
+            Heard::Key { code, mods } => self.mission_key_heard(ob, code, mods, "the key tap", heard.at),
+            Heard::Click => self.mission_click(heard.at),
+        }
+    }
+
+    /// A mouse-down at `now` (the input monitor's or the key tap's): while Mission Control
+    /// shows, what follows its close is a pick ([`CloseWatch::click`]).
+    pub(super) fn mission_click(&mut self, now: Instant) {
+        if self.spaces.mission.lends.up() {
+            self.spaces.mission.close.click(now);
+        }
+    }
+
+    /// One of Mission Control's keys heard (`by`: the key tap or the input monitor): while it
+    /// shows, a key that closes it ([`mission_close::closes`]) makes what macOS brings in
+    /// front next no pick; else one of its shortcuts is a hint ([`Lends::hint`]). Mission
+    /// Control opened without a key and not yet seen is looked for first, so that its own
+    /// shortcut pressed to close it is not taken for an opening.
+    fn mission_key_heard(&mut self, ob: &Observer, code: u16, mods: Mods, by: &'static str, now: Instant) {
+        if self.mission_mode() == Mode::Off {
             return;
         }
         let keys = self.mission_keys(now);
-        let Some(trigger) = mc::trigger(&keys, code, mods) else { return };
+        let trigger = mc::trigger(&keys, code, mods);
+        if trigger.is_some() && !self.spaces.mission.lends.up() {
+            self.mission_step(ob, true, now);
+        }
+        if self.spaces.mission.lends.up() {
+            if mission_close::closes(&keys, code, mods) {
+                self.spaces.mission.close.key(now);
+                tracing::info!(key = code, by, "mission-control: a key that closes it: an app macOS brings in front now is no pick");
+            }
+            return;
+        }
+        let Some(trigger) = trigger else { return };
         let mode = self.mission_mode();
         self.spaces.mission.lends.set_mode(mode);
         if self.spaces.mission.lends.hint(Hint::Key(trigger), now) {
-            tracing::info!(key = code, mode = mode.name(), "mission-control: trigger seen: {}", trigger.name());
+            tracing::info!(key = code, mode = mode.name(), by, "mission-control: trigger seen: {}", trigger.name());
             // "key": the lends start now, before anything shows; "shown": the parks.
             self.mission_step(ob, false, now);
         }
+    }
+
+    /// Mission Control's key tap told what to listen for: wanted while the mode is not off,
+    /// the shortcuts as read, armed (Escape and presses heard) while it shows or windows are
+    /// out for it.
+    fn mission_publish(&mut self, now: Instant) {
+        let wanted = self.mission_mode() != Mode::Off;
+        let keys = wanted.then(|| self.mission_keys(now));
+        let l = &self.spaces.mission.lends;
+        mission_key_tap::publish(wanted, keys, l.up() || !l.out().is_empty());
     }
 
     /// A notice of the Dock's (it draws Mission Control): a hint, nothing more.
@@ -137,20 +202,22 @@ impl Controller {
         self.spaces.mission.lends.hint(Hint::Dock, now);
     }
 
-    /// True while Mission Control's lends have work for the fast tick.
+    /// True while Mission Control's lends have work for the fast tick, or a focus waits for
+    /// its close.
     pub(super) fn mission_wants_fast(&self, now: Instant) -> bool {
-        self.spaces.mission.lends.wants_fast(now)
+        self.spaces.mission.lends.wants_fast(now) || self.spaces.mission.refocus.is_some()
     }
 
     /// The fast tick: a look for Mission Control while a hint's watch lasts (or a pick's
     /// switch waits for its close), then whatever is due.
     pub(super) fn mission_fast_tick(&mut self, ob: &mut Observer, now: Instant) {
-        if !self.spaces.mission.lends.wants_fast(now) {
+        if !self.mission_wants_fast(now) {
             return;
         }
-        let look = self.spaces.mission.lends.look_due(now);
+        let look = self.spaces.mission.lends.look_due(now) || (self.spaces.mission.refocus.is_some() && self.spaces.mission.lends.up());
         self.mission_step(ob, look, now);
         self.mission_pick_due(ob, now);
+        self.mission_refocus_due(ob, now);
     }
 
     /// The tick: a look for Mission Control (the window list the tick's other duties read),
@@ -160,10 +227,12 @@ impl Controller {
         let idle = self.spaces.mission.lends.out().is_empty() && !self.spaces.mission.lends.up();
         if mode == Mode::Off && idle {
             self.spaces.mission.lends.set_mode(mode);
+            self.mission_publish(now);
             return;
         }
         self.mission_step(ob, true, now);
         self.mission_pick_due(ob, now);
+        self.mission_refocus_due(ob, now);
     }
 
     /// True when Mission Control's own window (WindowManager's, not the Dock's cover that
@@ -191,6 +260,9 @@ impl Controller {
         }
         if !self.spaces.mission.lends.pick_open(now) {
             return false;
+        }
+        if self.mission_no_pick(by, now) {
+            return true;
         }
         let Some(mut copy) = self.model.clone() else { return false };
         let arriving: Vec<WindowId> = predict(&mut copy)
@@ -237,6 +309,74 @@ impl Controller {
             }
             PickSwitch::Now => false,
         }
+    }
+
+    /// The key window of the main display's stage in front, with its app: the focus a close
+    /// by key gives back ([`Self::mission_no_pick`]).
+    fn mission_front_key(&self) -> Option<(WindowId, i32)> {
+        let m = self.model.as_ref()?;
+        let stage = m.stage(m.main_active_stage()?)?;
+        let key = m.focus_key(stage.key, &stage.windows)?;
+        Some((key, m.window(key)?.meta.pid))
+    }
+
+    /// True when the activation (or focus) `by` at `now` is no pick: Mission Control closed by
+    /// its key, no click since ([`mission_close::verdict`]). Then nothing switches, the
+    /// windows put home go back with the others (its app's do not wait for a switch), and
+    /// the stage in front's key window is focused again once Mission Control is gone. The
+    /// app of that key window itself is never refused: its focus is the one given back.
+    fn mission_no_pick(&mut self, by: PickBy, now: Instant) -> bool {
+        let pid = by.pid();
+        let front_key = self.mission_front_key();
+        if front_key.is_some_and(|(_, p)| p == pid) {
+            return false;
+        }
+        let own_front = self.model.as_ref().is_some_and(|m| {
+            m.windows().any(|w| w.meta.pid == pid && !w.parked && m.stage_of(w.meta.id).is_some_and(|s| m.stage_in_front(s)))
+        });
+        let watch = self.spaces.mission.close;
+        match mission_close::verdict(&watch, pid, now, own_front, mission_close::APPLE_SWITCHES_AT_CLOSE_KEY) {
+            Verdict::Pick => false,
+            Verdict::NoPick { own_front } => {
+                let first = watch.refused() != Some(pid);
+                self.spaces.mission.close.refuse(pid);
+                if self.spaces.mission.lends.pick_held().is_some_and(|h| h.pid() == pid) {
+                    self.spaces.mission.lends.drop_pick();
+                }
+                self.spaces.mission.refocus.get_or_insert(now);
+                if first {
+                    tracing::info!(
+                        pid,
+                        ?by,
+                        own_front,
+                        front_key = ?front_key.map(|(w, _)| w.0),
+                        up = self.spaces.mission.lends.up(),
+                        "mission-control: closed by its key, no click: the app macOS brings in front is no pick; no switch, the stage in front keeps its focus"
+                    );
+                } else {
+                    tracing::debug!(pid, ?by, "mission-control: the app found no pick at this close: still none");
+                }
+                true
+            }
+        }
+    }
+
+    /// The stage in front's key window focused again after a close by key, once Mission
+    /// Control is gone (or [`mc::PICK_HOLD`] has passed), when another app is in front.
+    fn mission_refocus_due(&mut self, ob: &Observer, now: Instant) {
+        let Some(since) = self.spaces.mission.refocus else { return };
+        if self.spaces.mission.lends.up() && now.saturating_duration_since(since) < mc::PICK_HOLD {
+            return;
+        }
+        self.spaces.mission.refocus = None;
+        let Some((key, pid)) = self.mission_front_key() else { return };
+        let front = apps::frontmost_pid();
+        if front == Some(pid) {
+            tracing::debug!(window = key.0, "mission-control: after a close by key the stage in front's app is in front already");
+            return;
+        }
+        tracing::info!(window = key.0, pid, ?front, waited_ms = ms(now.saturating_duration_since(since)), "mission-control: after a close by key the stage in front's key window is focused again");
+        self.execute(ob, vec![Action::Raise { id: key }, Action::Focus { id: key }]);
     }
 
     /// The picked stage's switch, once Mission Control's own window is gone (or its wait is
@@ -340,6 +480,7 @@ impl Controller {
         let showing = self.overview.showing() == Some(Overview::MissionControl);
         match self.spaces.mission.lends.saw(showing, now) {
             Some(Edge::Shown(hint)) if mode != Mode::Off => {
+                self.spaces.mission.close.opened();
                 tracing::info!(
                     mode = mode.name(),
                     hint = hint.map(|(h, _)| h.name()),
@@ -382,6 +523,7 @@ impl Controller {
             self.mission_measure();
         }
         self.mission_back_round(now);
+        self.mission_publish(now);
     }
 
     /// The round's summary in the log, once its last window is out.
@@ -564,6 +706,8 @@ impl Controller {
     fn mission_back_round(&mut self, now: Instant) {
         let Some(since) = self.spaces.mission.lends.closing(now) else { return };
         let front = apps::frontmost_pid();
+        // An app found no pick at a close by key: its windows wait for no switch.
+        let refused = self.spaces.mission.close.refused();
         let mut going = Vec::new();
         let mut cornering = Vec::new();
         for out in self.spaces.mission.lends.out().to_vec() {
@@ -571,7 +715,7 @@ impl Controller {
             let shown = self.model.as_ref().is_none_or(|m| {
                 m.window(out.id).is_none_or(|w| !w.parked) || m.stage_of(out.id).is_some_and(|s| m.stage_in_front(s))
             });
-            let fate = mc::fate(shown, front == Some(out.pid), since);
+            let fate = mc::fate(shown, front == Some(out.pid) && refused != Some(out.pid), since);
             if mc::corner_while_waiting(fate, out.at_card, self.spaces.mission.lends.is_placed(out.id)) {
                 match self.model.as_ref().and_then(|m| corner::park_frame(m, out.id)) {
                     Some(at) => cornering.push((out.id, out.pid, at)),
@@ -616,6 +760,7 @@ impl Controller {
             }
         }
         if let Some(done) = self.spaces.mission.lends.back_done(Instant::now()) {
+            self.spaces.mission.close.over();
             tracing::info!(
                 back = done.back,
                 picked = ?done.picked.iter().map(|w| w.0).collect::<Vec<_>>(),
@@ -636,6 +781,8 @@ impl Controller {
             "test_mode": self.spaces.mission.mode.map(Mode::name),
             "up": l.up(),
             "out": l.out().iter().map(|o| json!({ "id": o.id.0, "pid": o.pid, "parked": o.parked.map(|r| [r.x, r.y, r.w, r.h]), "at_card": o.at_card })).collect::<Vec<_>>(),
+            "tap": mission_key_tap::status(),
+            "refused": self.spaces.mission.close.refused(),
             "keys": self.spaces.mission.keys.map(|(k, _)| json!({
                 "mission_control": [u64::from(k.mission_control.keycode), u64::from(k.mission_control.enabled)],
                 "app_windows": [u64::from(k.app_windows.keycode), u64::from(k.app_windows.enabled)],

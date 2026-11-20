@@ -29,6 +29,7 @@ pub mod lend_round;
 pub mod logout_watch;
 pub mod minimize;
 pub mod minimize_press;
+pub mod mission_close;
 pub mod mission_control;
 pub mod model;
 pub mod not_ours;

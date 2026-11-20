@@ -600,6 +600,18 @@ pub fn cover_click(p: Point) -> Result<(), String> {
     Ok(())
 }
 
+/// A synthetic pointer move to `p` on Mission Control's cover (test only), no button: only
+/// for a point the caller checked as for [`cover_click`]. The pointer stays; [`pointer_back`]
+/// puts it where it was.
+pub fn cover_hover(p: Point) -> Result<(), String> {
+    if let Ok(mut home) = HOVER_HOME.lock()
+        && home.is_none()
+    {
+        *home = pointer_now().map(|c| (c.x, c.y));
+    }
+    post_mouse(CGEventType::MouseMoved, p, false)
+}
+
 /// A synthetic left-button drag along `waypoints` (straight segments), only when every point
 /// it passes is over our own windows or a fixture's (checked before anything is posted). The
 /// button is held `hold` at the end before release; the pointer goes back where it was.

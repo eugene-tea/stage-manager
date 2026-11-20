@@ -73,9 +73,10 @@ NSWorkspace notifications     persists state.json               ctl socket (test
 - **Idle subsystems** (1.9): what a mode has no use for does not run. The Apple mode and the
   stand-down run no controller of ours (no Dock order, corner upkeep, lock poll or park
   checks); the Apple mode's closed-window sweep runs only on the list its mirror read in
-  that tick. Both event taps (`platform::tap_switch`) are on only while they have something
+  that tick. The event taps (`platform::tap_switch`) are on only while they have something
   to catch: the inert slivers' while windows are parked with the shield on, the minimize
-  tap's while the WM thread arranges and `minimize_to_strip` holds. With no strip showing
+  tap's while the WM thread arranges and `minimize_to_strip` holds, Mission Control's key tap
+  while the Spaces engine arranges with `mission_control_stages` not `"off"`. With no strip showing
   cards (hidden, or standing down) the strip lets go of the mouse moves' monitor and the
   card glass reads no wallpaper; capture workers with no targets sleep until given work.
   The Dock order's running-app paths are asked of LaunchServices after a launch or a quit
@@ -389,11 +390,16 @@ Mission Control and App Exposé lay out only the windows of the Desktop, so unde
 engine the same lend is made for every hidden window of the Desktops shown while one of them
 shows (`engine::mission_control` decides when, `platform/controller/mission_control.rs`
 carries it out on the fast tick, 40 ms of lends at a time, each window parked first). It is
-found from macOS's own window over the display (`engine::overview`); one of its shortcuts
-heard by the input monitor, or a notice of the Dock's, only brings that look to the fast
-tick (`[windows] mission_control_stages = "key"` lends at the shortcut itself). At the close
-the windows go back into their stage Spaces, but a picked window's stage, which the
-activation's switch shows. The engine counts each as lent and parked, so a hide, a show, a
+found from macOS's own window over the display (`engine::overview`); one of its shortcuts,
+or a notice of the Dock's, only brings that look to the fast tick (`[windows]
+mission_control_stages = "key"` lends at the shortcut itself). The window server takes its
+shortcuts before any app gets the key, so the global input monitor never hears them: a
+listen-only event tap at the HID level does (`platform::mission_key_tap`, the Accessibility
+permission; it forwards Mission Control's shortcuts and key, and while it shows Escape and
+presses, nothing else). At the close the windows go back into their stage Spaces, but a
+picked window's stage, which the activation's switch shows. An activation just after the
+key that closed it, with no click, is no pick (`engine::mission_close`): nothing switches
+and the stage in front's key window is focused again. The engine counts each as lent and parked, so a hide, a show, a
 quit's sweep and the guardian's scan of the park corner bring it back like ⌘Tab's.
 
 ```mermaid

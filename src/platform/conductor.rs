@@ -74,6 +74,14 @@ impl Conductor {
         }
     }
 
+    /// One of Mission Control's keys, or a press while it may show, from its key tap: ours
+    /// only (the Apple mode's Mission Control shows every stage already).
+    pub fn mission_input(&mut self, ob: &mut Observer, heard: super::mission_key_tap::HeardAt) {
+        if let Self::Ours(c) = self {
+            c.mission_input(ob, heard);
+        }
+    }
+
     /// A minimize the tap caught: ours to the strip; Apple's, macOS's own.
     pub fn minimize_direct(&mut self, ob: &mut Observer, ask: MinimizeAsk) {
         match self {

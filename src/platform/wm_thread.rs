@@ -60,6 +60,7 @@ use super::handoff::TakenWatch;
 use super::ctl::Command;
 use super::input::InputEvent;
 use super::minimize_tap::{self, MinimizeAsk};
+use super::mission_key_tap;
 use super::launch_scan;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
@@ -209,6 +210,9 @@ pub enum WmCommand {
     /// the window goes to the strip, or is minimized as macOS would when Stage Manager cannot
     /// take it now ([`super::minimize_tap`]).
     Minimize(MinimizeAsk),
+    /// One of Mission Control's keys, or a press while it may show, heard by its key tap
+    /// ([`super::mission_key_tap`]).
+    MissionInput(mission_key_tap::HeardAt),
     /// A hotkey was pressed.
     Hotkey(HotkeyCommand),
     /// Input from the strip.
@@ -246,6 +250,7 @@ impl WmCommand {
             WmCommand::Displays(..) => "command Displays",
             WmCommand::Input(..) => "command Input",
             WmCommand::Minimize(_) => "command Minimize",
+            WmCommand::MissionInput(_) => "command MissionInput",
             WmCommand::Hotkey(_) => "command Hotkey",
             WmCommand::Strip(_) => "command Strip",
             WmCommand::SpaceChanged => "command SpaceChanged",
@@ -567,7 +572,7 @@ impl WmState {
 
     fn handle(&mut self, cmd: WmCommand) {
         match cmd {
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
+            WmCommand::Input(..) | WmCommand::MissionInput(_) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
                 if !self.logout.admits(Work::Input) =>
             {
                 tracing::debug!("a logout is coming: input ignored");
@@ -669,7 +674,7 @@ impl WmState {
                     self.carry_out(step);
                 }
             }
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
+            WmCommand::Input(..) | WmCommand::MissionInput(_) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
                 if !self.stand_down.admits(Work::Input) =>
             {
                 tracing::debug!("Apple's Stage Manager is on: input ignored");
@@ -686,12 +691,13 @@ impl WmState {
             // Without Accessibility no window can move: a stage change now would leave the
             // model out of step with the screen (its parked windows unregistered), so the
             // user's input waits for observation (R1-platform 9).
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_)
+            WmCommand::Input(..) | WmCommand::MissionInput(_) | WmCommand::Hotkey(_) | WmCommand::Strip(_)
                 if self.conductor.managing() && !self.observer.observing() =>
             {
                 tracing::debug!("Accessibility is off: input ignored");
             }
             WmCommand::Input(event, drop) => self.conductor.input(&mut self.observer, event, drop),
+            WmCommand::MissionInput(heard) => self.conductor.mission_input(&mut self.observer, heard),
             WmCommand::Hotkey(command) => self.conductor.hotkey(&mut self.observer, command),
             WmCommand::Strip(event) => self.conductor.strip_event(&mut self.observer, event),
             WmCommand::SpaceChanged => {
@@ -1189,6 +1195,8 @@ impl WmState {
         // The minimize tap passes everything while nothing is arranged.
         minimize_tap::admit(self.arranging() && !self.conductor.is_apples());
         step("minimize tap", minimize_tap::refresh);
+        mission_key_tap::admit(self.arranging() && !self.conductor.is_apples());
+        step("mission key tap", mission_key_tap::refresh);
         // An app's enhanced UI a restore could not put back, or held off too long: on again.
         step("enhanced UI sweep", enhanced_ui::sweep);
     }
@@ -1210,7 +1218,7 @@ impl WmState {
             Some("a logout's hold")
         } else if safety::taken_len() > 0 {
             Some("windows taken from an old guardian")
-        } else if minimize_tap::off_for_secure_input() || super::corner::sliver_tap::off_for_secure_input() {
+        } else if minimize_tap::off_for_secure_input() || super::corner::sliver_tap::off_for_secure_input() || mission_key_tap::off_for_secure_input() {
             Some("an event tap off for secure input")
         } else if enhanced_ui::held_off() {
             Some("an app's enhanced UI held off")
@@ -1409,6 +1417,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
     }
     let mut observer = Observer::new(std::process::id() as i32, only);
     minimize_tap::set_handle(own.clone());
+    mission_key_tap::set_handle(own.clone());
     let probes = own.clone();
     observer.set_probe_notify(Arc::new(move |note| {
         probes.send(WmCommand::Probe(note));

@@ -37,6 +37,7 @@ pub mod logging;
 pub mod logout_watch;
 pub mod login_item;
 pub mod minimize_tap;
+pub mod mission_key_tap;
 pub mod native_settings;
 pub mod observe;
 pub mod observe_probe;

@@ -3750,6 +3750,8 @@ impl Controller {
         match event.kind {
             InputKind::MouseDown => {
                 tracing::debug!(x = event.at.x, y = event.at.y, "mouse down in another app");
+                // While Mission Control shows, its close is then a pick (round mc-key).
+                self.upkeep_press(now);
                 // A press whose release never came (missed by the monitor) waits no more.
                 self.wallpaper_press = None;
                 self.end_restore(ob, "a click (or a Dock click)", End::User);

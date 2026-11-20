@@ -103,17 +103,19 @@ pub fn dock_press(bundle: &str, real: bool, main: Option<Rect>) -> Value {
 
 /// `debug-mission-pick ID`: a click on window `ID`'s place in Mission Control's layout (the
 /// middle of its bounds as the window list gives them while Mission Control shows), only when
-/// [`pick_point`] finds it safe. The pointer goes back where it was.
-pub fn mission_pick(id: u32) -> Value {
+/// [`pick_point`] finds it safe. The pointer goes back where it was. With `hover` the
+/// pointer is only moved there, no button (`mission-close-key`: a close by key with the
+/// pointer over a hidden stage's window); `debug-pointer-back` puts it back.
+pub fn mission_pick(id: u32, hover: bool) -> Value {
     let list = windows::list_windows();
     let pids = super::input::test_pids();
     let own = std::process::id() as i32;
     let display = super::desktop::cg_display_bounds().first().copied();
     let through = |w: &CgWindow, p: Point| super::desktop::seen_through(w, p);
     match pick_point(&list, id, &pids, own, display, &through) {
-        Ok((p, bounds)) => match super::input::cover_click(p) {
+        Ok((p, bounds)) => match if hover { super::input::cover_hover(p) } else { super::input::cover_click(p) } {
             Ok(()) => {
-                tracing::info!(id, x = p.x, y = p.y, "debug-mission-pick: clicked");
+                tracing::info!(id, x = p.x, y = p.y, hover, "debug-mission-pick: {}", if hover { "the pointer over it" } else { "clicked" });
                 json!({ "ok": true, "at": [p.x, p.y], "bounds": bounds })
             }
             Err(e) => json!({ "ok": false, "error": e }),
