@@ -463,7 +463,11 @@ def scenario_covered():
     under = (T.ctl("debug-strip").get("strip") or {}).get("under_windows")
     c0 = costs_now().get("captures") or 0
     card = cards[0]
-    T.ctl("debug-hover", card["x"] + card["w"] * 0.75, card["y"] + card["h"] / 2, 2000)
+    # On the window, over the card: between the window's left edge and the card's right one.
+    over_x = (vis["x"] + 100 + card["x"] + card["w"]) / 2
+    if over_x <= vis["x"] + 100 or over_x >= card["x"] + card["w"]:
+        raise RuntimeError("the window covers no part of the card to hover")
+    T.ctl("debug-hover", over_x, card["y"] + card["h"] / 2, 2000)
     time.sleep(2.5)
     hover_captures = (costs_now().get("captures") or 0) - c0
     T.ctl("debug-pointer-back")
