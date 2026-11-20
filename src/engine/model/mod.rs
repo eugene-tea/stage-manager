@@ -60,7 +60,7 @@ use super::recovery::EngineKind;
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
-pub use ahead::{Ahead, AheadMark, AppFacts};
+pub use ahead::{Ahead, AheadMark, AppFacts, BeforeSwitch};
 pub use pending::{PendingNote, Restored};
 pub use pool::NumberRef;
 pub(crate) use pool::Kin;

@@ -2238,6 +2238,113 @@ mod arranged_ahead {
         mac.elsewhere.clear();
         (mac, editor)
     }
+
+    both_engines! {
+    /// 11-20 07:53:39, in the order the events came. Desktop 1 shows Mail (window 1), Safari's
+    /// work window 2 waits in a stage there; Safari's home window 3 waits in a stage of
+    /// Desktop 2. A link clicked in Mail: Safari activates and its stage comes in front here
+    /// (the switch recorded before it), then Safari focuses window 3. Its Desktop is
+    /// arranged and macOS goes; once Desktop 1 is left, its switch is undone unseen: Mail in
+    /// front again, the strip as it was, nothing raised or focused there. Back on Desktop 1,
+    /// nothing moves.
+    #[test]
+    fn a_link_opened_in_a_window_hidden_on_another_desktop_leaves_this_one_as_it_was() {
+        use crate::engine::focus_elsewhere::{FocusFacts, HiddenFocus, SwitchBack, WENT_ELSEWHERE_MAX, hidden_focus};
+        const MAIL: Pid = 40;
+        const SAFARI: Pid = 20;
+        let mut mac = Mac::new();
+        mac.put(0, 1, MAIL, "com.example.mail", "Inbox");
+        mac.put(0, 2, SAFARI, "com.example.browser", "Work wiki");
+        mac.put(1, 3, SAFARI, "com.example.browser", "Home page");
+        mac.put(1, 4, 30, "com.example.chat", "Family");
+        mac.focused = Some(w(4));
+        mac.go(1);
+        let chat = mac.m.stage_of(w(4)).expect("chat stage");
+        mac.click(chat);
+        assert!(mac.parked(3), "the home window waits in its stage on Desktop 2");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let mail = mac.m.stage_of(w(1)).expect("Mail's stage");
+        let work = mac.m.stage_of(w(2)).expect("the work window's stage");
+        mac.click(mail);
+        assert!(mac.parked(2));
+        let desktop_1 = mac.space();
+        let slots = mac.m.slots[&desktop_1].clone();
+        let keys = (mac.m.stage(mail).and_then(|s| s.key), mac.m.stage(work).and_then(|s| s.key));
+        mac.elsewhere.clear();
+
+        // 39.065: Safari activates; its work window's stage comes in front here.
+        let obs = Observation { focused: None, ..mac.obs() };
+        let before = mac.m.before_activation(&obs).expect("Desktop 1 as it stands");
+        let switch = mac.m.app_activated(SAFARI, &obs);
+        assert!(!switch.is_empty(), "the activation switches stages here");
+        mac.run(switch);
+        let undo = mac.m.switch_undo(before).expect("the switch, to undo");
+        assert_eq!((undo.space, undo.stage, undo.previous), (desktop_1, work, mail));
+        assert!(mac.m.undo_ahead(&undo).is_empty(), "Desktop 1 still shown: what shows stays");
+        // Kept from the activation (the click in Mail came before it) until a press or 3 s.
+        let t0 = std::time::Instant::now();
+        let record = SwitchBack { pid: SAFARI, undo: undo.clone(), at: t0 };
+        let ms = std::time::Duration::from_millis;
+        assert!(record.holds(ms(400), t0 + ms(196)), "the focus, 196 ms after the activation");
+        assert!(record.holds(ms(1000), t0 + ms(700)), "the arrival on Desktop 2");
+        assert!(!record.holds(ms(100), t0 + ms(700)), "a click or key since the activation");
+        assert!(!record.holds(ms(60_000), t0 + WENT_ELSEWHERE_MAX));
+
+        // 39.261: Safari's own focus of window 3, hidden in a stage of Desktop 2.
+        assert!(mac.m.waits_on_another_space(w(3)));
+        let facts = FocusFacts { elsewhere: true, off_every_desktop: true, frozen: false, activation_switched: true };
+        assert_eq!(hidden_focus(facts), HiddenFocus { arrive: true, switch_back: true });
+        let (ahead, actions) = mac.m.arrange_ahead(w(3), None).expect("Desktop 2 arranged for window 3");
+        mac.run(actions);
+
+        // macOS goes to Desktop 2 for the focused window 3.
+        mac.shown = 1;
+        mac.focused = Some(w(3));
+        let at = arrival(&mut mac, Some(&ahead), Some(Wanted::Window { id: w(3), pid: SAFARI }));
+        assert!(at.contains(&Action::Focus { id: w(3) }), "the link's window comes in front: {at:?}");
+        assert!(!mac.parked(3));
+
+        // Desktop 1 left: its switch undone, unseen.
+        mac.elsewhere.clear();
+        let back = mac.m.undo_ahead(&undo);
+        assert!(!raises_or_focus(&back), "nothing raised or focused on a Desktop not shown: {back:?}");
+        assert!(!moves(&back).is_empty());
+        mac.run(back);
+        assert!(mac.elsewhere.iter().all(|a| [1, 2].contains(&id_of(a))), "only Desktop 1's windows: {:?}", mac.elsewhere);
+        assert_eq!(mac.m.active_stage_in(desktop_1), Some(mail), "Mail in front on Desktop 1, as Apple's leaves it");
+        assert_eq!(mac.m.slots[&desktop_1], slots, "the strip as it was");
+        assert_eq!((mac.m.stage(mail).and_then(|s| s.key), mac.m.stage(work).and_then(|s| s.key)), keys);
+        assert!(mac.parked(2) && !mac.parked(1));
+        consistent(&mac);
+        assert!(mac.m.undo_ahead(&undo).is_empty(), "undone once");
+
+        // Back on Desktop 1 by hand: as it was, nothing to fix.
+        mac.focused = Some(w(1));
+        let at = mac.go(0);
+        assert!(moves(&at).is_empty(), "{at:?}");
+        assert_eq!(mac.m.main_active_stage(), Some(mail));
+        consistent(&mac);
+    }
+
+    /// No switch since the record (the app's stage was already in front), or a desktop
+    /// reveal there: nothing to undo.
+    #[test]
+    fn no_switch_and_a_reveal_leave_nothing_to_undo() {
+        let (mut mac, editor) = revealed_on_desktop_1();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let obs = Observation { focused: None, ..mac.obs() };
+        assert!(mac.m.before_activation(&obs).is_none(), "a reveal: never set up again unseen");
+        let a = mac.m.switch_to(editor, &obs);
+        mac.run(a);
+        let obs = Observation { focused: None, ..mac.obs() };
+        let before = mac.m.before_activation(&obs).expect("Desktop 1");
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        assert!(mac.m.switch_undo(before).is_none(), "the editor's stage was in front: no switch");
+    }
+    }
 }
 
 /// Desktop identity across restarts and Desktops sliding (round 6Y, 10-13): made-up apps and

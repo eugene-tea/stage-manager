@@ -22,10 +22,19 @@
 //! to (a landing's focus after the window's stretch, an order check's raise again) is checked
 //! as it is given ([`WentElsewhere::withholds`]), until a click or key press, or
 //! [`WENT_ELSEWHERE_MAX`].
+//!
+//! A window held off every Desktop (the Spaces engine's stage Space) takes macOS nowhere: its
+//! Desktop is arranged with its stage in front and the window focused, as at an activation
+//! whose focused window waits hidden so ([`hidden_focus`]). 11-20 07:53:39: a link clicked in
+//! Mail on Desktop 1 opened in Safari's window hidden in a stage of Desktop 2; Safari's
+//! activation switched to its work window's stage here, its focus on the other window came
+//! 200 ms later and waited for a Space change that never came. Twice. The activation's
+//! switch here is undone unseen once macOS has left ([`SwitchBack`]): Apple's leaves
+//! Desktop 1 as it was, Mail in front.
 
 use std::time::{Duration, Instant};
 
-use super::model::{Action, Pid, SpaceId, WindowId};
+use super::model::{Action, Ahead, Pid, SpaceId, WindowId};
 
 /// How long an app's own focus elsewhere keeps our raises and focuses of its other windows
 /// back: a switch's landing comes within its unveil backstop, a landing focus after the
@@ -127,6 +136,68 @@ impl WentElsewhere {
     }
 }
 
+/// What the platform knows of a window an app focused by itself, held for its Desktop
+/// ([`hidden_focus`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FocusFacts {
+    /// The window waits on a Desktop not shown (for the model): not on the one shown, in a
+    /// stage there or in front.
+    pub elsewhere: bool,
+    /// The engine holds it off every Desktop (the Spaces engine's stage Space): macOS counts
+    /// it on none and goes nowhere for it.
+    pub off_every_desktop: bool,
+    /// A full-screen app is in front on its screen: nothing is arranged for it.
+    pub frozen: bool,
+    /// The app's own activation switched stages on the Desktop shown, with no click or key
+    /// since ([`SwitchBack::holds`]).
+    pub activation_switched: bool,
+}
+
+/// What an app's own focus on its window of another Desktop asks of ours ([`hidden_focus`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HiddenFocus {
+    /// The window's Desktop arranged with its stage in front and the window raised and
+    /// focused there, so macOS goes (the activation's hidden-focus arrival).
+    pub arrive: bool,
+    /// The activation's switch on the Desktop shown is undone unseen once macOS has left it.
+    pub switch_back: bool,
+}
+
+/// An app's focus on a window of another Desktop, not an echo of ours (those never get
+/// here), held for that Desktop. A window macOS counts on its Desktop (shown there, or in
+/// the Corner engine's park corner: 11-19 13:13) takes macOS there by itself: nothing more.
+/// One held off every Desktop takes macOS nowhere, and the focus would wait for a Space
+/// change that never comes (11-20 07:53:39): its Desktop is arranged and the window focused
+/// (`arrive`). The app's activation, a moment before, switched stages here for it
+/// (`activation_switched`): Apple's leaves this Desktop as it was, so that switch is undone
+/// once macOS has left (`switch_back`). A window in a stage of the Desktop shown is not
+/// `elsewhere`: its stage comes in front here, as before.
+pub fn hidden_focus(f: FocusFacts) -> HiddenFocus {
+    let arrive = f.elsewhere && f.off_every_desktop && !f.frozen;
+    HiddenFocus { arrive, switch_back: arrive && f.activation_switched }
+}
+
+/// An app's activation's switch on the Desktop shown, and how to take it back unseen
+/// ([`crate::engine::model::Model::undo_ahead`]; [`hidden_focus`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchBack {
+    /// The app activated.
+    pub pid: Pid,
+    /// The switch, as an arrangement to undo.
+    pub undo: Ahead,
+    /// When the activation came.
+    pub at: Instant,
+}
+
+impl SwitchBack {
+    /// True while it may still be taken back: no mouse button or key pressed since the
+    /// activation (`since_press`: since the last press), within [`WENT_ELSEWHERE_MAX`].
+    pub fn holds(&self, since_press: Duration, now: Instant) -> bool {
+        let age = now.saturating_duration_since(self.at);
+        age < WENT_ELSEWHERE_MAX && since_press >= age
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,6 +277,40 @@ mod tests {
         assert!(!went.withholds(w150, SAFARI, Some(SpaceId(2)), Duration::from_millis(100), later), "a click or key since");
         assert!(went.withholds(w150, SAFARI, Some(SpaceId(2)), Duration::from_millis(1000), later), "the last press before it");
         assert!(!went.withholds(w150, SAFARI, Some(SpaceId(2)), quiet, at + WENT_ELSEWHERE_MAX));
+    }
+
+    /// 11-20 07:53:39, in the order the events came: Mail in front on Desktop 1, a link
+    /// clicked; Safari activated, the switch to its work window's stage 19 (window 150) here
+    /// began 65 ms later, its keyboard planned for the window's show; 130 ms on, Safari
+    /// focused its home window 151, hidden in stage 3 of Desktop 2 (a stage Space: on no
+    /// Desktop for macOS). Held for its Desktop, the focus waited for a Space change that
+    /// never came. Now the switch lands without the keyboard as for 13:13, and 151's Desktop
+    /// is arranged and the window focused, so macOS goes; the switch here is undone once
+    /// it has.
+    #[test]
+    fn a_focus_on_a_window_hidden_in_a_stage_of_another_desktop_takes_macos_there() {
+        // .261: no click or key since the switch began.
+        assert_eq!(focus_on_switch(false, true, false), FocusOnSwitch::LandWithoutFocus);
+        let facts = FocusFacts { elsewhere: true, off_every_desktop: true, frozen: false, activation_switched: true };
+        assert_eq!(hidden_focus(facts), HiddenFocus { arrive: true, switch_back: true });
+        // The app already in front, no activation switch here (a link opened from Safari
+        // itself): arranged there all the same, nothing to undo here.
+        let alone = FocusFacts { activation_switched: false, ..facts };
+        assert_eq!(hidden_focus(alone), HiddenFocus { arrive: true, switch_back: false });
+    }
+
+    /// 11-19 13:13: the window the app focused is shown on its Desktop (macOS counts it
+    /// there and goes by itself): nothing arranged, nothing undone, as before. A window in a
+    /// stage of the Desktop shown (not elsewhere: its stage comes in front here), and one
+    /// behind a full-screen app, ask nothing either.
+    #[test]
+    fn a_window_macos_counts_on_its_desktop_or_one_here_asks_nothing() {
+        let shown_there = FocusFacts { elsewhere: true, off_every_desktop: false, frozen: false, activation_switched: true };
+        assert_eq!(hidden_focus(shown_there), HiddenFocus::default(), "13:13: macOS goes by itself");
+        let here = FocusFacts { elsewhere: false, off_every_desktop: true, ..shown_there };
+        assert_eq!(hidden_focus(here), HiddenFocus::default(), "a stage of this Desktop");
+        let full_screen = FocusFacts { off_every_desktop: true, frozen: true, ..shown_there };
+        assert_eq!(hidden_focus(full_screen), HiddenFocus::default());
     }
 
     /// The window the app focused not known yet (no Space): every other window of the app is
