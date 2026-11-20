@@ -409,7 +409,10 @@ stage's windows, as Apple's Stage Manager does (a report, 11-18: under `engine =
 stage in front showed, a hidden stage's windows being on no Desktop).
 Under `engine = "spaces"` the hidden stages' windows of the Desktops shown are put on their
 Desktop while one of them shows, parked at the screen's corner first so that none shows at
-its frame; a window whose app does not move it within 50 ms stays hidden. They arrive all at
+its frame; a window whose app does not move it within 50 ms stays hidden, and while Mission
+Control shows its park is asked again 60 ms later, up to three parks in all (10 of 51 opens,
+11-18 to 11-20, left one to five windows out; the log's `mission-control: a hidden window left
+hidden` lines say why and where each was listed after its park). They arrive all at
 once, as Apple's do: every window is parked first, still hidden (the apps asked at once, one
 app's windows in turn, for up to 150 ms a round), then all of them go onto the Desktop in one
 window-server call per Desktop (one at a time they came one by one during the opening, 7
@@ -1251,8 +1254,11 @@ screen-capture service reads 0 and the window server, measured with other apps o
 - In the Spaces mode, a hidden stage's window dragged to another Desktop inside Mission
   Control goes back into its stage when Mission Control closes; in the default mode it
   moves. Opened by a gesture, a hot corner or the Dock, Mission Control gets the hidden
-  stages' windows up to two seconds late, and an app's hidden dialogs and panels are not
-  shown there.
+  stages' windows up to two seconds late (found at the tick, 2 s at rest: they appear in its
+  layout with no motion, 11-20 07:49:14; the log's `found_within_ms` says how late it may have
+  been found), and an app's hidden dialogs and panels are not shown there. Found during its
+  opening, it flies them in from the park corner, where they were put home (11-20 07:49:27);
+  where Apple's flies a hidden stage's windows from is not measured.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.

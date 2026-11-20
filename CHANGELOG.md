@@ -15,6 +15,8 @@
   motion.
 - With `engine = "spaces"`, Mission Control shows the hidden stages' windows at once instead
   of one by one.
+- With `engine = "spaces"`, Mission Control leaves out fewer of the hidden stages' windows: one
+  that did not come in time is brought in a moment later.
 - With `engine = "spaces"`, Mission Control opened again right after picking another Desktop
   in it shows that Desktop's hidden stages too.
 - With `engine = "spaces"`, a mouse pick in the ⌘Tab switcher no longer slides to another
