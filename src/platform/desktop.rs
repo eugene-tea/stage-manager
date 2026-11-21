@@ -149,8 +149,16 @@ fn bounds_of(id: u32) -> Rect {
 /// spans its whole display, clear and click-through there ([`DockBar`]; the review's
 /// switching 3: no click on the Dock's screen was a wallpaper click).
 pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
-    !list.iter().any(|w| {
+    window_clicked(list, p, dock, None).is_none()
+}
+
+/// The window a click at `p` lands on: the frontmost in `list` that takes it, counted as
+/// [`is_wallpaper_click`] counts them (`None`: the wallpaper). `not`: a process whose
+/// windows never take the click (our own: another app's click never lands on them).
+pub fn window_clicked<'a>(list: &'a [CgWindow], p: Point, dock: &DockBar, not: Option<i32>) -> Option<&'a CgWindow> {
+    list.iter().find(|w| {
         w.onscreen
+            && Some(w.pid) != not
             && w.layer >= 0
             && w.alpha > 0.0
             && w.bounds.contains(p)

@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- A click on a hidden window's edge in the corner, or a drag of a window, right after a
+  stage switch now works at once; before, either could be ignored for most of a second.
+- On a busy Mac, an app that reports its own focus late no longer brings back the stage just
+  left, and a click on the wallpaper no longer brings Finder's windows in front.
 - With `engine = "spaces"`, ⌘Tab or a Dock click to an app that is slow to come in front
   no longer slides to another Desktop; ⌘Tab cancelled with Escape takes its window back at once.
 - A switch that comes while the app is busy no longer plays its pictures over windows already

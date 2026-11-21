@@ -229,6 +229,14 @@ impl Causes {
 
     fn expect(&mut self, id: u32, pid: i32, notices: u8, now: Instant) {
         let asked = self.focus.entry(pid).or_default();
+        // What an earlier request for this window left closed (answered, or ended by a
+        // press of the user's on it) says nothing of this one.
+        let last = asked.len().saturating_sub(1);
+        let mut i = 0;
+        asked.retain(|e| {
+            i += 1;
+            i - 1 == last || e.window != id || e.left > 0
+        });
         match asked.last_mut().filter(|e| e.window == id && now.saturating_duration_since(e.asked) < EXPECT_MAX) {
             Some(e) => *e = FocusExpected { window: id, asked: now, left: e.left.max(notices), pressed: false },
             None => asked.push(FocusExpected { window: id, asked: now, left: notices, pressed: false }),
@@ -646,6 +654,22 @@ mod tests {
         assert_eq!(c.pressed_on(7, Some(t0 + MS(900))), None, "a key since, or a click on our own strip");
         c.pressed(Pressed::Elsewhere, t0 + MS(2000));
         assert_eq!(c.pressed_on(7, Some(t0 + MS(2000))), None, "the Dock, the menu bar: not known");
+    }
+
+    /// A press on a window ends what was asked of it; a focus of ours asked after the press
+    /// is expected afresh, also with other requests in between.
+    #[test]
+    fn a_request_after_a_press_on_the_window_is_expected_afresh() {
+        let t0 = Instant::now();
+        let mut c = Causes { front: Some(42), ..Causes::default() };
+        c.believed.insert(42, 1);
+        c.expect_focus(7, 42, t0);
+        c.pressed(Pressed::Window(7), t0 + MS(100));
+        assert!(!c.focus_heard(7, Some(42), t0 + MS(120)), "the click's own");
+        c.expect_focus(8, 42, t0 + MS(1000));
+        c.expect_focus(7, 42, t0 + MS(2000));
+        assert!(c.focus_heard(8, Some(42), t0 + MS(3500)));
+        assert!(c.focus_heard(7, Some(42), t0 + MS(3600)), "ours again: asked after the press");
     }
 
     /// A raise makes a window its app's key window only when that app is in front: behind,

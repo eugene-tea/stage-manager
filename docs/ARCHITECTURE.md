@@ -66,12 +66,29 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   ends: the bench, docs/DEVELOPMENT.md, runs the real controller so). Every event carries when it was received from macOS: the AX callback's
   entry, the NSWorkspace or input monitor's handler on the main thread, an event tap's
   callback (`observe::Stamped`, `InputEvent::heard`, `WmCommand::SpaceChanged`'s instant;
-  the controller keeps the one being handled, `received`). An attribution ("is this focus
-  within 700 ms of our own action, or of a press") is measured to that stamp, never to when
+  the controller keeps the one being handled, `received`). An attribution that still goes
+  by time ("is this within X of a press") is measured to that stamp, never to when
   the WM thread got to it, so a wait on that thread does not eat the window; a stamp older
   than the action counts as at it (age zero) and is counted. A deadline keeps the clock's
   now. Every such decision, and every wait's end, notes its margin by name
   (`engine::margin`; DEVELOPMENT, "Time values that came close").
+- **Who caused a notice** (review 11-21, R1): macOS never says. Order decides where it can,
+  time only expires what never came. Each action of ours registers what it expects in the
+  cause ledger (`engine::causes`): a focus or raise a focus of that window, kept per app in
+  the order asked (an app tells its focus changes in order); a frame set a move to that
+  frame (the window where our set put it, or the first answer to a set, clamped); an
+  `AXFrontmost` the app's activation. The user's presses are kept there too, with the
+  window pressed (a hit-test in the window list read for the press): a press on a window
+  makes its next focus theirs at once. A press on the desktop expects Finder's first
+  activation and first focus (`engine::desktop_echo`). A focus or activation notice is then
+  judged by one pure function over the facts gathered for it (`engine::attribution`: the
+  gates in one written order, a table of where the two notices differ;
+  `controller/notices.rs` gathers and does what the verdict says). What still goes by
+  time, each named in `engine::causes`' module doc: a focus after a key press
+  (`USER_FOCUS`), macOS's own activation after a display change (`DISPLAY_SETTLE`), a
+  window just shown counted as carried by our switch at a Space change (`SLIDE_CARRY`),
+  the echo window (`[windows] focus_echo_ms`) for a notice beyond those expected and for
+  "the window list may not show our write yet", and the caps.
 - **The WM tick** (`engine::tick_pace`): the duties no event announces (a window closed or
   an app gone with no notice, the Space check, the engine's upkeep, the debounced save, the
   config poll, the controller's own deadlines) run on one timer, every 0.25 s for 3 s after

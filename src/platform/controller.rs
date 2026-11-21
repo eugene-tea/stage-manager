@@ -673,13 +673,13 @@ fn press_reads_list(managing: bool, frozen: bool, pressed_frozen: Option<bool>) 
     managing && (!frozen || pressed_frozen == Some(false))
 }
 
-/// Where a press at `p` landed ([`Pressed`]), from the window list read for it (front to
-/// back): on the frontmost window of another app there when that is an app's own window
-/// (layer 0); elsewhere when something else is in front there (the Dock, the menu bar, an
-/// overlay) or nothing is. Our own windows never take another app's click.
-fn pressed_on(list: &[windows::CgWindow], p: Point) -> Pressed {
-    let own = std::process::id() as i32;
-    match list.iter().find(|w| w.onscreen && w.pid != own && w.bounds.contains(p)) {
+/// Where a press at `p` landed ([`Pressed`]), from the window list read for it: on the
+/// window that takes the click there ([`desktop::window_clicked`]: the Dock's window away
+/// from its bar and macOS's click-through overlays are looked through) when that is an
+/// app's own window (layer 0); elsewhere when it is the Dock's bar, the menu bar or an
+/// overlay, or the wallpaper. Our own windows never take another app's click.
+fn pressed_on(list: &[windows::CgWindow], p: Point, dock: &sliver::DockBar) -> Pressed {
+    match desktop::window_clicked(list, p, dock, Some(std::process::id() as i32)) {
         Some(w) if w.layer == 0 => Pressed::Window(w.id),
         _ => Pressed::Elsewhere,
     }
@@ -3492,7 +3492,8 @@ impl Controller {
                 // Where the press landed, before anything it lands registers what it expects:
                 // a focus of the window pressed is the user's, and no late focus is ours by
                 // order after a press that may have caused it ([`Causes::pressed`]).
-                self.causes.pressed(list.as_deref().map_or(Pressed::Elsewhere, |list| pressed_on(list, event.at)), heard);
+                let on = list.as_deref().map_or(Pressed::Elsewhere, |list| pressed_on(list, event.at, &self.dock_bar_now()));
+                self.causes.pressed(on, heard);
                 self.dock_pressed(ob, list.as_deref().unwrap_or_default(), event.at, now);
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.

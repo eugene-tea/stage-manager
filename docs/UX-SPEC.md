@@ -810,7 +810,12 @@ never in two places; flown on, a picture grew over its window already in place (
 up to 0.4 s after an activation, 60 ms after a click). A new switch of ours takes the pictures
 over with its own instead; a Space change takes them away (the Desktop has slid out of sight). A window's focus brings its stage only in the active app (or with the button down
 on a sliver), never in a hidden app or an app behind: those are the app's own or a late echo
-of ours (with apps slow to answer, notices come up to a second late, past the echo window). A window on screen when Stage Manager started but found late (its
+of ours (with apps slow to answer, notices come up to a second late). A focus that answers
+a focus of ours is ours however late it is told: the first one of that window since we
+asked, in the order asked of its app (the bench at load 10: 12 s late). A window we only
+moved or hid expects none: a click on a parked window's sliver right after its stage left,
+or on a window just shown, is the user's. A move while a button is down that leaves a window
+elsewhere than we put it is a drag, also right after a switch showed it. A window on screen when Stage Manager started but found late (its
 app not answering then) goes to its stage as during the restore window, parked when that
 stage is inactive, never bringing it forward.
 Arriving windows

@@ -88,6 +88,14 @@ person and macOS did, as its log tells it, and its test asserts what came of it 
 3 and 10. An assertion marked `// TIME DECIDES:` names the constant that changed the
 outcome under load.
 
+`src/platform/controller/bench/causes.rs` pins the focus and activation chains ("who caused
+this notice", `engine/attribution.rs`): one scenario for each gate, from the incident its doc
+comment tells. Their outcomes also read what each focus and activation notice came to, in
+the order handled (the trail: `attribution::judged` notes the verdict of every notice;
+`Bench::trail`), so a change that moves a notice from one gate to another shows even when a
+person would see the same. After such a change, print what to assert:
+`BENCH_PRINT=1 cargo test --lib causes::print_them -- --nocapture`.
+
 - One scenario with its story (the notices handled and the calls made, in order) and the
   app's own log lines:
   `BENCH_ONE="Dock click" BENCH_LOAD=3 BENCH_LOG=debug cargo test --lib bench_one -- --nocapture`.
@@ -98,7 +106,7 @@ To add a scenario: write a function of the load that builds a `Bench` (the engin
 config text, the desk's apps and windows), scripts the incident with the bench's verbs
 (`click`, `card_click`, `dock_click`, `cmd_tab`, `mission_open`, `go_to_desktop`,
 `activate`, `advance(ms)`, or the desk's own through `desk(|d| ..)`) and returns the outcome
-in a few words; cite the doc comment or commit that tells the incident; add it to `ALL` and
+in a few words (with `Bench::trail` when the scenario is about who caused a notice); cite the doc comment or commit that tells the incident; add it to `ALL` and
 assert its three outcomes in a test. Something macOS does that the desk does not play yet
 goes in the desk, with where it was measured, never in the scenario.
 
