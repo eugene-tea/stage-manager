@@ -467,11 +467,11 @@ fn wallpaper_click(load: f64) -> Run {
 #[test]
 fn a_wallpaper_click_and_finders_echo() {
     let ignored = "front [12] shows [12] desktop 1 app 91 switches 0 slides 0";
-    let taken = "front [16] shows [16] desktop 1 app 91 switches 1 slides 0";
-    // TIME DECIDES: WALLPAPER_ECHO (1 s after the release). Finder's activation, about 1 s
-    // after the press on the Mac as measured, comes 3 s after it three times slower: taken
-    // for a deliberate one, and Finder's stage comes in front.
-    expect(wallpaper_click, [ignored, taken, taken]);
+    // By order since round r4-causes: Finder's first activation and first focus after the
+    // press are its echo however late (`WALLPAPER_ECHO` is a 15 s cap). Before, TIME
+    // DECIDED: 1 s after the release; three times slower the activation came 3 s after the
+    // press, was taken for a deliberate one, and Finder's stage came in front.
+    expect(wallpaper_click, [ignored, ignored, ignored]);
 }
 
 // ----- 9. Space changes ----------------------------------------------------------------------

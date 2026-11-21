@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use super::{Controller, DISPLAY_SETTLE, USER_FOCUS, arrival, listed_bounds};
 use crate::engine::attribution::{self, ActivationFacts, ActivationStage, ActivationVerdict, AppNow, FocusFacts, FocusStage, FocusVerdict, Heard, Notice, Place, Scene};
-use crate::engine::desktop_echo::DESKTOP_OWNER;
+use crate::engine::desktop_echo::{Cause, Told};
 use crate::engine::focus_elsewhere::{self, FocusOnSwitch, WentElsewhere};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::mission_control::PickBy;
@@ -24,9 +24,10 @@ use crate::platform::observe::Observer;
 use crate::platform::{apps, clock, enhanced_ui, input, windows};
 
 impl Controller {
-    /// What is known of any notice of app `bundle`, received at `at`, read now: no read
-    /// here costs, and none changes anything.
-    fn heard(&self, bundle: Option<&str>, at: Instant) -> Heard {
+    /// What is known of any notice of app `bundle` (`told`: its activation, or a focus of
+    /// one of its windows), received at `at`, read now: no read here costs. The desktop
+    /// press's echo counts the notice, as the echo ledger does.
+    fn heard(&mut self, bundle: Option<&str>, told: Told, at: Instant) -> Heard {
         Heard {
             at,
             now: clock::now(),
@@ -34,8 +35,7 @@ impl Controller {
             button_down: input::left_button_down(),
             display_changed: self.displays_changed_at,
             display_settle: DISPLAY_SETTLE,
-            desktop_echo: self.desktop_echo,
-            desktop_owner: bundle == Some(DESKTOP_OWNER),
+            wallpaper_echo: self.desktop_echo.heard(bundle, told, at) == Cause::WallpaperEcho,
             settling: self.model.as_ref().is_some_and(Model::settling),
         }
     }
@@ -82,7 +82,7 @@ impl Controller {
         let echo = self.causes.focus_heard(id, pid, at) || (self.ahead.is_some() && self.causes.wrote_before(id, at));
         let beats_echo = echo && self.focus_beats_echo(ob, id, now);
         let mut facts = FocusFacts {
-            heard: self.heard(bundle.as_deref(), at),
+            heard: self.heard(bundle.as_deref(), Told::Focus, at),
             echo,
             beats_echo,
             app: pid.map(|pid| AppNow { hidden: apps::is_hidden(pid), active: apps::is_active(pid) }),
@@ -284,7 +284,7 @@ impl Controller {
         let said = |verdict: &'static str| attribution::judged(Notice::Activation, i64::from(pid), verdict);
         let bundle = ob.bundle_id(pid).map(str::to_owned);
         let mut facts = ActivationFacts {
-            heard: self.heard(bundle.as_deref(), at),
+            heard: self.heard(bundle.as_deref(), Told::Activation, at),
             pid,
             // 1: the echo ledger (`at` is the notice's `fired`: when the main thread got it).
             echo: self.causes.is_app_echo(pid, at),

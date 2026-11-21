@@ -565,15 +565,15 @@ fn held_for_a_desktop() {
 #[test]
 fn finders_echo_of_a_wallpaper_press() {
     let ignored = "front [12] shows [12] desktop 1 app 91 switches 0 slides 0";
-    let taken = "front [16] shows [16] desktop 1 app 91 switches 1 slides 0";
     let echo = "activation 91: the wallpaper press's echo, focus 16: the wallpaper press's echo";
-    let users = "activation 91: the user's: its stage comes, focus 16: ours";
-    // TIME DECIDES: WALLPAPER_ECHO (1 s after the release): Finder's activation 3 s after
-    // the press is taken for a deliberate one.
-    pin(wallpaper_click_and_its_notices, [ignored, taken, taken], [echo, users, users]);
-    // A Dock click on Finder 2.5 s after the wallpaper click is deliberate at every load.
-    // TIME DECIDES: at load 3 and 10 what brings Finder's stage is the wallpaper's own late
-    // echo, come after the Dock press.
+    // By order: Finder's first activation and first focus after the press, at every load.
+    // (Before, TIME DECIDED: WALLPAPER_ECHO, 1 s after the release; at load 3 and 10
+    // Finder's activation was taken for a deliberate one and its stage came.)
+    pin(wallpaper_click_and_its_notices, [ignored, ignored, ignored], [echo, echo, echo]);
+    // A Dock click on Finder 2.5 s after the wallpaper click is deliberate at every load:
+    // the press ends the echo. At load 3 and 10 the wallpaper's own echo has not come yet
+    // at the Dock press, and comes after it: it is what brings Finder's stage, the Dock
+    // click's activation our echo then (10: the user's with nothing to switch).
     let at1 = "after the click: front [12] shows [12] desktop 1 app 91 switches 0 slides 0; activation 91: the wallpaper press's echo, focus 16: the wallpaper press's echo; after the Dock click: front [16] shows [16] desktop 1 app 91 switches 1 slides 0; activation 91: the wallpaper press's echo, focus 16: the wallpaper press's echo, activation 91: the user's: its stage comes, focus 16: ours";
     let at3 = "after the click: front [12] shows [12] desktop 1 app 102 switches 0 slides 0; ; after the Dock click: front [16] shows [16] desktop 1 app 91 switches 1 slides 0; activation 91: the user's: its stage comes, focus 16: ours, activation 91: ours, focus 16: ours";
     let at10 = "after the click: front [12] shows [12] desktop 1 app 102 switches 0 slides 0; ; after the Dock click: front [16] shows [16] desktop 1 app 91 switches 1 slides 0; activation 91: the user's: its stage comes, focus 16: ours, activation 91: the user's: nothing to switch, focus 16: the user's: nothing to switch";

@@ -54,7 +54,6 @@
 
 use std::time::{Duration, Instant};
 
-use super::desktop_echo::{Cause, DESKTOP_OWNER, DesktopEcho};
 use super::displays::macos_after_display_change;
 use super::focus_elsewhere::{FocusOnSwitch, HiddenFocus, focus_on_switch};
 use super::margin;
@@ -76,10 +75,9 @@ pub struct Heard {
     /// How long after a display change an activation or focus with no press since is
     /// macOS's (`DISPLAY_SETTLE`).
     pub display_settle: Duration,
-    /// The pending echo of the last desktop press.
-    pub desktop_echo: DesktopEcho,
-    /// The notice's app owns the desktop (Finder).
-    pub desktop_owner: bool,
+    /// The desktop owner's (Finder's) first such notice since a press on the desktop: the
+    /// press's echo ([`super::desktop_echo::DesktopEcho::heard`]).
+    pub wallpaper_echo: bool,
     /// The login's settling (the restore window) is open.
     pub settling: bool,
 }
@@ -102,10 +100,6 @@ impl Heard {
         macos
     }
 
-    /// Finder's echo of a wallpaper press.
-    fn wallpaper_echo(&self) -> bool {
-        self.desktop_echo.classify(self.desktop_owner.then_some(DESKTOP_OWNER), self.at) == Cause::WallpaperEcho
-    }
 }
 
 /// The focused window's app, as NSWorkspace has it now.
@@ -294,7 +288,7 @@ pub fn focus(f: &FocusFacts) -> FocusVerdict {
         return AfterDisplayChange;
     }
     // 4. Finder's echo of a wallpaper press.
-    if h.wallpaper_echo() {
+    if h.wallpaper_echo {
         return WallpaperEcho;
     }
     // 5. The login settles: a click whose press is not heard yet ends it.
@@ -426,7 +420,7 @@ pub fn activation(f: &ActivationFacts) -> ActivationVerdict {
         return Ours;
     }
     // 2. Finder's echo of a wallpaper press.
-    if h.wallpaper_echo() {
+    if h.wallpaper_echo {
         return WallpaperEcho;
     }
     // 3. Stale.
@@ -540,8 +534,7 @@ mod tests {
             button_down: false,
             display_changed: None,
             display_settle: Duration::from_secs(10),
-            desktop_echo: DesktopEcho::default(),
-            desktop_owner: false,
+            wallpaper_echo: false,
             settling: false,
         }
     }
@@ -643,15 +636,12 @@ mod tests {
     #[test]
     fn finders_echo_sits_on_either_side_of_the_display_change() {
         let t0 = Instant::now();
-        let mut echo = DesktopEcho::default();
-        echo.desktop_pressed(t0 - MS(300));
-        echo.released(t0 - MS(200));
-        let h = Heard { desktop_echo: echo, desktop_owner: true, display_changed: Some(t0 - MS(4000)), ..heard(t0) };
+        let h = Heard { wallpaper_echo: true, display_changed: Some(t0 - MS(4000)), ..heard(t0) };
         assert_eq!(focus(&FocusFacts { heard: h, ..a_focus(t0) }), FocusVerdict::AfterDisplayChange);
         let a = ActivationFacts { heard: h, ..an_activation(t0) };
         assert_eq!(activation(&a), ActivationVerdict::WallpaperEcho);
         // Another app's notice is never the echo.
-        let other = Heard { desktop_owner: false, display_changed: None, ..h };
+        let other = Heard { wallpaper_echo: false, display_changed: None, ..h };
         assert_eq!(activation(&ActivationFacts { heard: other, ..an_activation(t0) }), ActivationVerdict::Gather(ActivationStage::Frozen));
     }
 
