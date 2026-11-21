@@ -62,6 +62,14 @@ Each fixture window opens at a frame of its own (FRAMES).
           it; the job's route and times as info. When the hide wins the race (route
           hide_activation) the order and Charlie on top are checked all the same. Charlie
           opened again as it was at the end.
+  answers Read after the phases before it (`ctl state`'s `margins`): every step of ours had
+          Apple's answer seen in the window list (`apple::ANSWER_WAIT`: none ended by its
+          2 s cap, which would mean the mirror missed what Apple's did and a step waited
+          blind), and every motion after it came to rest (`apple::MOTION_WAIT`: none by its
+          3 s cap); the longest of each, the events' waits (`apple::SETTLE`, a cap there is an
+          event that changed nothing) and the unhides (`apple::UNHIDE_WAIT`: met when the
+          app's reopened window was listed, capped when it was not seen) as info. Runs before
+          restore, which starts Stage Manager again (the table with it).
   restore `ctl apple restore`: stages set up (Alpha's two windows with Bravo's, Charlie's
           alone and in front), saved to state-apple.json, Stage Manager quit and opened again
           (the mode reads the file as it starts; the same session, so nothing is put back by
@@ -118,7 +126,7 @@ OPEN_RUNNING_MAX_S = 3.5   # the hide (~1.1 s), the unhide into the strip (~0.7 
 RESTORE_MAX_S = 8.0        # a drag (~0.9 s) and a press (~0.8 s), a focus, Apple's motions and settles
 ROUNDTRIP_MAX_S = 5.0      # first run live 11-18: the job done at 3.1 s, the list showing it at 3.9-4.4 s (three Apple motions, the settles, one press)
 PHASES = ("mirror", "switch", "rejected", "merge", "split", "pointer", "open-here", "open-running",
-          "roundtrip-order", "restore")
+          "roundtrip-order", "answers", "restore")
 
 HOME = tempfile.mkdtemp(prefix="sm-apple-mode.", dir="/tmp")
 ENV = dict(os.environ, STAGE_MANAGER_HOME=HOME)
@@ -903,6 +911,27 @@ def phase_roundtrip_order():
         relaunch("Charlie")
 
 
+def phase_answers():
+    say("\n== answers: Apple's answer to every step seen in the list, never waited out ==")
+    margins = (ctl("state") or {}).get("margins") or {}
+
+    def row(name):
+        return margins.get(name) or {}
+
+    answer, motion = row("apple::ANSWER_WAIT"), row("apple::MOTION_WAIT")
+    if not answer.get("waits"):
+        say("  info no step of ours ran before this phase: nothing to read")
+        return
+    check(answer.get("capped", 0) == 0,
+          f"every step's answer seen, none by the {answer.get('limit_ms')} ms cap ({answer.get('capped', 0)} of {answer.get('waits')} capped, longest {answer.get('longest_wait_ms')} ms)")
+    check(motion.get("capped", 0) == 0,
+          f"every motion after a step at rest by the list, none by the {motion.get('limit_ms')} ms cap ({motion.get('capped', 0)} of {motion.get('waits')} capped, longest {motion.get('longest_wait_ms')} ms)")
+    for name in ("apple::SETTLE", "apple::UNHIDE_WAIT", "apple::OWN_ACTIVATION", "apple::HANDED_OVER"):
+        r = row(name)
+        if r.get("waits"):
+            say(f"  info {name}: {r.get('waits')} waits, {r.get('capped', 0)} ended by the {r.get('limit_ms')} ms cap, longest {r.get('longest_wait_ms')} ms")
+
+
 def title_groups(s):
     """The mirror's stages by title: the one in front, then the others sorted."""
     groups = [titles(s, g) for g in groups_of(s)]
@@ -1030,7 +1059,8 @@ def main():
         return 1
     runs = {"mirror": phase_mirror, "switch": phase_switch, "rejected": phase_rejected, "merge": phase_merge,
             "split": phase_split, "pointer": phase_pointer, "open-here": phase_open_here,
-            "open-running": phase_open_running, "roundtrip-order": phase_roundtrip_order, "restore": phase_restore}
+            "open-running": phase_open_running, "roundtrip-order": phase_roundtrip_order, "answers": phase_answers,
+            "restore": phase_restore}
     for name in PHASES:
         if name in phases:
             runs[name]()
