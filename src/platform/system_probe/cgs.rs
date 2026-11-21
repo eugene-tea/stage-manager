@@ -275,9 +275,9 @@ impl Log {
     }
 
     fn note_spaces(&mut self, sky: &Sky) {
-        for (_, current, spaces) in sky.displays() {
-            self.spaces.insert(current);
-            self.spaces.extend(spaces.iter().map(|s| s.0));
+        for screen in sky.displays() {
+            self.spaces.insert(screen.current);
+            self.spaces.extend(screen.every());
         }
     }
 }
@@ -293,7 +293,7 @@ fn ax_window(pid: i32, id: u32) -> Result<AxElement, String> {
 
 impl Scene {
     fn main_space(&self, sky: &Sky) -> u64 {
-        sky.displays().iter().find(|d| d.0 == self.main_id).map_or(0, |d| d.1)
+        sky.displays().iter().find(|d| d.screen == self.main_id).map_or(0, |d| d.current)
     }
 
     fn overview_shows(&self) -> bool {
@@ -367,8 +367,8 @@ pub(super) fn run(ctx: &Ctx, args: &Args) -> Result<(), String> {
     let display = main_frame().ok_or("no main display")?;
     let displays = sky.displays();
     let main = main_entry(&displays).ok_or("no entry of SLSCopyManagedDisplaySpaces is the main screen's")?;
-    let (main_id, start, spaces) = displays[main].clone();
-    let desktops: Vec<u64> = spaces.iter().filter(|s| s.1 == 0).map(|s| s.0).collect();
+    let (main_id, start) = (displays[main].screen.clone(), displays[main].current);
+    let desktops: Vec<u64> = displays[main].desks.iter().map(|d| d.id).collect();
     let at = desktops.iter().position(|d| *d == start).ok_or("the main screen shows no Desktop (a full-screen app's Space?): show a Desktop first")?;
     let next = if at + 1 < desktops.len() {
         Some((desktops[at + 1], Direction::Right))
