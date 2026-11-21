@@ -103,9 +103,6 @@ pub mod delays {
     /// The strip: a transition presented to its pictures drawn (its answer to the cover
     /// wait; the main thread's next frame or two).
     pub const STRIP_COVERS: f64 = 20.0;
-    /// The strip: its answer to its pictures on screen (the layers committed, then a frame of
-    /// the display shown: 8-17 ms at 120 Hz). Assumed, not measured.
-    pub const STRIP_SHOWS: f64 = 12.0;
     /// A new window: `AXWindowCreated` to the window server listing it on screen.
     pub const WINDOW_SHOWS: f64 = 60.0;
     /// A launched app answering Accessibility after its launch notice.
@@ -331,9 +328,6 @@ pub struct Strip {
     pub draws: bool,
     /// How long its pictures take to cover the windows, in ms before the load factor.
     pub covers_ms: f64,
-    /// How long after its answer its pictures are on screen (the layers committed and a frame
-    /// shown), in ms before the load factor.
-    pub shows_ms: f64,
     /// Transitions whose pictures covered the windows in time (the switch played with them),
     /// and those the switch moved windows for without them.
     pub covered: usize,
@@ -583,7 +577,7 @@ impl Desk {
             last_click: None,
             dock: Dock { pid: DOCK_PID, bar: Rect::new(420.0, 830.0, 600.0, 66.0), items: Vec::new() },
             locked: false,
-            strip: Strip { draws: true, covers_ms: delays::STRIP_COVERS, shows_ms: delays::STRIP_SHOWS, ..Strip::default() },
+            strip: Strip { draws: true, covers_ms: delays::STRIP_COVERS, ..Strip::default() },
             switcher: Switcher::default(),
             tap_hears: true,
             tap_switcher: false,
