@@ -78,8 +78,9 @@ pub struct FakeWindowManager {
     /// The strip hidden (a window over it): its thumbnails off the left edge.
     covered: bool,
     /// The last change, the bounds every window was listed at before it (the motion's
-    /// start), and the list as it was then (what shows until Apple's answer starts).
-    changed: Option<(Instant, BTreeMap<u32, Rect>, Listed)>,
+    /// start), the list as it was then (what shows until Apple's answer starts), and its lag
+    /// (none for a change while an answer is under way: the motion goes on to the new places).
+    changed: Option<(Instant, BTreeMap<u32, Rect>, Listed, Duration)>,
     /// How long after a change Apple's answer starts ([`LAG`] by default): until then the
     /// list shows the arrangement as it was.
     pub lag: Duration,
@@ -90,6 +91,9 @@ pub struct FakeWindowManager {
     pub busy_posts: u32,
     /// Focuses asked while Apple's answer to a change was under way.
     pub busy_focuses: u32,
+    /// Changes Apple's made (each one answered after the lag): a test's driver tells the
+    /// mirror of those it did not cause, as the platform hears their notices.
+    pub changes: u64,
     /// Every focus asked, in order.
     pub focused: Vec<u32>,
     /// Every gesture posted, in order.
@@ -162,11 +166,11 @@ impl FakeWindowManager {
             room: 4,
             covered: false,
             changed: None,
-            // Until the mirror waits for what it sees: no lag, the motion the mirror's settle.
-            lag: Duration::ZERO,
-            motion: Duration::from_millis(700),
+            lag: LAG,
+            motion: MOTION,
             busy_posts: 0,
             busy_focuses: 0,
+            changes: 0,
             focused: Vec::new(),
             posted: Vec::new(),
             input: InputNow::idle(),
@@ -257,12 +261,18 @@ impl FakeWindowManager {
         self.windows.get(&id).map(|(_, f)| *f)
     }
 
-    /// Notes a change now: the motion starts from where every window is listed now, and the
-    /// list shows what it shows now until Apple's answer starts.
+    /// Notes a change now: the motion starts from where every window is listed now (mid-way
+    /// through an answer to a change before, from where that left it), and the list shows what
+    /// it shows now until Apple's answer starts.
     fn change(&mut self) {
+        let lag = if self.busy() { Duration::ZERO } else { self.lag };
         let before = self.listed();
-        let from = self.targets();
-        self.changed = Some((self.clock, from, before));
+        let mut from = self.targets();
+        for w in before.windows.iter().filter(|w| w.pid != MANAGER) {
+            from.insert(w.id, w.bounds);
+        }
+        self.changed = Some((self.clock, from, before, lag));
+        self.changes += 1;
     }
 
     /// Apple's answer to a change is under way: in its lag or its motion.
@@ -607,20 +617,20 @@ impl FakeWindowManager {
     /// While Apple's answer to the last change is under way, how far its motion is (0 in the
     /// lag, then up to 1).
     fn moving(&self) -> Option<f64> {
-        let (at, _, _) = self.changed.as_ref()?;
+        let (at, _, _, lag) = self.changed.as_ref()?;
         let since = self.clock.saturating_duration_since(*at);
-        if since < self.lag {
+        if since < *lag {
             return Some(0.0);
         }
-        let t = (since - self.lag).as_secs_f64() / self.motion.as_secs_f64().max(f64::EPSILON);
+        let t = (since - *lag).as_secs_f64() / self.motion.as_secs_f64().max(f64::EPSILON);
         (t < 1.0).then_some(t)
     }
 
     /// Still in the lag after the last change: the list as it was, less the windows closed
     /// since (the window server lists a closed window no more).
     fn before_answer(&self) -> Option<Listed> {
-        let (at, _, before) = self.changed.as_ref()?;
-        if self.clock.saturating_duration_since(*at) >= self.lag {
+        let (at, _, before, lag) = self.changed.as_ref()?;
+        if self.clock.saturating_duration_since(*at) >= *lag {
             return None;
         }
         let mut l = before.clone();
@@ -639,7 +649,7 @@ impl FakeWindowManager {
         let moving = self.moving();
         let at = |id: u32| {
             let to = targets[&id];
-            match (moving, self.changed.as_ref().and_then(|(_, from, _)| from.get(&id))) {
+            match (moving, self.changed.as_ref().and_then(|(_, from, _, _)| from.get(&id))) {
                 (Some(t), Some(from)) => Rect::new(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t, from.w + (to.w - from.w) * t, from.h + (to.h - from.h) * t),
                 _ => to,
             }
@@ -659,7 +669,7 @@ impl FakeWindowManager {
                 }
                 // A thumbnail's twin is listed once it is at rest (one the motion does not move:
                 // a change elsewhere, a window opened in the stage in front).
-                let still = self.changed.as_ref().and_then(|(_, from, _)| from.get(id)).is_some_and(|f| *f == targets[id]);
+                let still = self.changed.as_ref().and_then(|(_, from, _, _)| from.get(id)).is_some_and(|f| *f == targets[id]);
                 if moving.is_none() || still {
                     windows.push(ListedWindow { id: 9000 + id, pid: MANAGER, layer: 0, bounds: b, onscreen: true });
                 }
@@ -694,7 +704,7 @@ impl FakeWindowManager {
     /// WindowManager's Accessibility now: blank for [`BLANK`] after a change, else one item
     /// per listed slot.
     pub fn reading(&self) -> Reading {
-        if self.changed.as_ref().is_some_and(|(at, _, _)| self.clock.saturating_duration_since(*at) < BLANK) {
+        if self.changed.as_ref().is_some_and(|(at, _, _, _)| self.clock.saturating_duration_since(*at) < BLANK) {
             return Reading::default();
         }
         let items = self

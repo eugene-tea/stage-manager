@@ -54,7 +54,7 @@ mod tests {
         for _ in 0..60 {
             f.advance(50);
             a = fold(&a, Some(&f.reading()), &f.listed(), &f.window_ids(), &display(), f.now());
-            if a.settled {
+            if a.settled && !f.busy() {
                 return a;
             }
         }
@@ -103,7 +103,7 @@ mod tests {
             let [Step::Focus(window)] = steps.as_slice() else { panic!("one focus at rest: {steps:?}") };
             Focus.can(&steps[0], a, &InputNow::default()).expect("the route can");
             Focus.run(&steps[0], f).expect("focused");
-            a.step_began(f.now());
+            a.expect(crate::engine::apple::job::answer(&steps[0], a).expect("a focus is answered"), f.now());
             *a = settled(f, a);
             follow::follow(m, a, &metas(f), Some(*window));
             *window

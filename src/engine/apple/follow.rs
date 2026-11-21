@@ -168,7 +168,7 @@ mod tests {
         for _ in 0..60 {
             f.advance(50);
             a = fold(&a, Some(&f.reading()), &f.listed(), &f.window_ids(), &display(), f.now());
-            if a.settled {
+            if a.settled && !f.busy() {
                 return a;
             }
         }

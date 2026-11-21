@@ -8,7 +8,7 @@ use std::collections::BTreeSet;
 use super::desk::{AppleDesk, InputNow};
 use super::gate::{GATE_WAIT, STRIP_WAIT};
 use super::job::{Ctx, Job, Next, Report};
-use super::mirror::{Arrangement, SETTLE, fold};
+use super::mirror::{Arrangement, fold};
 use super::plan::{self, Step};
 use crate::engine::apple::desk::{Posted, Press};
 use crate::engine::geometry::{Point, Rect};
@@ -25,7 +25,7 @@ fn settle(f: &mut FakeWindowManager, a: &Arrangement) -> Arrangement {
     for _ in 0..60 {
         f.advance(50);
         a = read(f, &a);
-        if a.settled {
+        if a.settled && !f.busy() {
             return a;
         }
     }
@@ -61,7 +61,13 @@ fn drive_every(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, ma
     for _ in 0..max_ms / every {
         f.advance(every);
         let t = f.now().duration_since(start).as_millis() as u64;
+        // A change the test makes is one the platform hears of (an activation, a window
+        // opened): the mirror expects it, as the controller's watch has it.
+        let changes = f.changes;
         each(f, t);
+        if f.changes != changes {
+            a.stirred(f.now());
+        }
         *a = read(f, a);
         for w in &front {
             if let (Some(now), Some(then)) = (a.frames.get(w), frames0.get(w))
@@ -83,11 +89,8 @@ fn drive_every(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, ma
                     Step::Unhide(pid) => f.unhide(*pid).is_ok(),
                     Step::AwaitSettle => true,
                 };
-                job.ran(&step, ok);
-                if let Some(l) = f.landed() {
-                    job.landed(&l);
-                }
-                a.step_began(f.now());
+                job.ran(&step, ok, f.now());
+                expect_answer(a, job, &step, f);
                 d.steps.push((t, step));
             }
             Next::Wait(_) => {}
@@ -102,6 +105,23 @@ fn drive_every(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, ma
         }
     }
     d
+}
+
+/// After `step` ran on the fake, as the platform does: the gesture's end told to the job, and
+/// Apple's answer expected of the mirror (a refused gesture's not: nothing was posted).
+fn expect_answer(a: &mut Arrangement, job: &mut Job, step: &Step, f: &mut FakeWindowManager) {
+    let effect = super::job::answer(step, a);
+    match f.landed() {
+        Some(l @ (super::desk::Landed::Refused(_) | super::desk::Landed::Interrupted(_))) => {
+            job.landed(&l);
+            return;
+        }
+        Some(l) => job.landed(&l),
+        None => {}
+    }
+    if let Some(e) = effect {
+        a.expect(e, f.now());
+    }
 }
 
 fn drive(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, max_ms: u64) -> Drive {
@@ -218,11 +238,13 @@ fn a_click_is_held_back_while_apple_moves_windows() {
     let mut job = plan::merge(&a, 2, f.now()).expect("planned at rest");
     // Apple's motion begins (an activation of Bravo's) just as the job starts.
     f.focus_window(3);
+    let mut a = a;
+    a.stirred(f.now());
     let mut a = read(&f, &a);
     let d = drive(&mut f, &mut a, &mut job, 8000);
     d.end.expect("ended").expect("done");
     assert_eq!(f.ignored_mid_motion, 0, "nothing was posted mid-motion");
-    assert!(d.steps[0].0 >= SETTLE.as_millis() as u64, "the first click after the motion's settle ({} ms)", d.steps[0].0);
+    assert!(d.steps[0].0 >= (f.lag + f.motion).as_millis() as u64, "the first click after Apple's motion ({} ms)", d.steps[0].0);
     assert!([1, 2, 4].iter().all(|w| f.current().contains(w)), "Apple wins: the job goes on from what is there: {:?}", f.current());
 }
 
@@ -400,11 +422,8 @@ fn a_drag_its_guard_refuses_is_given_up_with_the_guards_words() {
                     Step::Unhide(pid) => f.unhide(*pid).is_ok(),
                     Step::AwaitSettle => true,
                 };
-                job.ran(&step, ok);
-                if let Some(l) = f.landed() {
-                    job.landed(&l);
-                }
-                a.step_began(f.now());
+                job.ran(&step, ok, f.now());
+                expect_answer(&mut a, &mut job, &step, &mut f);
                 d.steps.push((0, step));
             }
             Next::GiveUp(r) => {
@@ -467,7 +486,7 @@ fn a_new_app_hidden_at_its_launch_comes_in_with_one_click_and_the_stage_in_front
     // later (a settle, the focus, another settle). The focus goes at the first read that shows
     // it joined, and the job ends with it.
     let (click, focus) = (times(&d.steps, "shift_click")[0], times(&d.steps, "focus")[0]);
-    assert!(focus - click <= SETTLE.as_millis() as u64 + 100, "focused {} ms after the click", focus - click);
+    assert!(focus - click <= (f.lag + f.motion).as_millis() as u64 + 100, "focused {} ms after the click", focus - click);
     assert!(r.ms <= focus + 100, "done {} ms after the focus", r.ms - focus);
 }
 
@@ -561,7 +580,8 @@ fn a_running_apps_reopened_window_comes_in_hidden_at_its_activation_and_the_stag
     assert_eq!(sorted(f.current()), vec![4, 5]);
     assert!(d.moved_in_front.is_empty(), "the stage in front never moved: {:?}", d.moved_in_front);
     assert!(!f.hidden.contains(&40));
-    assert!(r.unhide_ms.is_some_and(|ms| ms >= 100), "{r:?}");
+    // Shown again as soon as the list has the window it ordered in, not at the cap.
+    assert!(r.unhide_ms.is_some_and(|ms| (100..=150).contains(&ms)), "{r:?}");
     assert!(r.first_window_ms.is_some());
 }
 
@@ -605,7 +625,7 @@ fn a_reopened_window_with_a_reused_id_read_as_a_dialog_while_hidden_still_comes_
     assert_eq!(presses(&d.steps), vec![vec![5]], "its thumbnail, by its pid, in one press");
     assert_eq!(d.steps.last().map(|(_, s)| s.clone()), Some(Step::Focus(5)), "focused last");
     let focus = times(&d.steps, "focus")[0];
-    assert!(focus - click <= super::job::PRESS_AGAIN.as_millis() as u64 + 100, "focused {} ms after the press", focus - click);
+    assert!(focus - click <= (f.lag + f.motion).as_millis() as u64 + 150, "focused {} ms after the press", focus - click);
     assert_eq!(sorted(f.current()), vec![4, 5]);
     assert!(d.moved_in_front.is_empty(), "the stage in front never moved: {:?}", d.moved_in_front);
     assert!(r.given_up.is_none() && f.unhidden == vec![40]);
@@ -631,7 +651,7 @@ fn a_launch_that_makes_no_window_while_hidden_is_shown_again_and_its_thumbnail_t
     assert_eq!(r.route, Some("hide"));
     let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
     assert_eq!(kinds, vec!["unhide", "shift_click", "focus"], "{:?}", d.steps);
-    assert!(times(&d.steps, "unhide")[0] <= 300);
+    assert!(times(&d.steps, "unhide")[0] <= super::job::UNHIDE_WAIT.as_millis() as u64 + 50, "{:?}", d.steps);
     let (twin, click) = (twin.expect("its twin listed"), times(&d.steps, "shift_click")[0]);
     assert!(click - twin <= 100, "pressed {} ms after its twin came", click - twin);
     assert_eq!(sorted(f.current()), vec![4, 5]);
@@ -652,7 +672,7 @@ fn a_running_apps_window_shown_before_the_hide_took_comes_back_by_the_round_trip
     let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front");
     // The activation stirs the mirror (in motion from it, as the platform's watch has it);
     // the window shows at once, the hide not taken.
-    a.step_began(f.now());
+    a.stirred(f.now());
     f.reopen(40, 5, false);
     let d = drive(&mut f, &mut a, &mut job, 6000);
     let r = d.end.expect("ended").expect("done");
@@ -674,7 +694,7 @@ fn a_running_app_apple_switched_to_before_the_hide_took_is_shown_again_for_the_r
     let (mut f, mut a) = three();
     let before = f.current().to_vec();
     let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
-    a.step_began(f.now());
+    a.stirred(f.now());
     f.switch_to_empty();
     job.hide_took(f.now());
     f.reopen_hidden(40, 5);
@@ -708,7 +728,7 @@ fn finders_reused_window_shown_before_any_hide_comes_back_by_the_round_trip_by_i
     assert!(!plan::may_hide("com.apple.finder"));
     let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
     // Never hidden: the window shows at once, Apple's switches to a stage of its own.
-    a.step_began(f.now());
+    a.stirred(f.now());
     f.loose.insert(5);
     f.reopen(40, 5, false);
     let d = drive_every(&mut f, &mut a, &mut job, 6000, FAST, |_, _| {});
@@ -750,7 +770,7 @@ fn a_stage_of_four_left_for_a_new_app_comes_back_whole_in_its_order_with_the_app
     f.open_app(10, &[1, 2, 3, 4]);
     let mut a = settle(&mut f, &Arrangement::default());
     let mut job = plan::open_here(&a, 40, f.now()).expect("a stage in front");
-    a.step_began(f.now());
+    a.stirred(f.now());
     f.launch(40, &[9], false);
     let d = drive_every(&mut f, &mut a, &mut job, 6000, FAST, |_, _| {});
     let r = d.end.expect("ended").expect("done");
@@ -822,7 +842,7 @@ fn the_round_trip_brings_the_stage_back_by_one_focus_then_presses_the_apps_windo
     f.open_app(10, &[1, 2]);
     let mut a = settle(&mut f, &Arrangement::default());
     let mut job = plan::open_here(&a, 40, f.now()).expect("a stage in front");
-    a.step_began(f.now());
+    a.stirred(f.now());
     f.launch(40, &[8, 9], false);
     let d = drive_every(&mut f, &mut a, &mut job, 8000, FAST, |_, _| {});
     let r = d.end.expect("ended").expect("done");
@@ -862,7 +882,7 @@ fn an_app_in_front_by_itself_once_shown_again_goes_by_one_switch_back() {
     let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
     assert_eq!(kinds, vec!["unhide", "focus", "shift_click", "focus"], "{:?}", d.steps);
     assert_eq!(d.steps[1].1, Step::Focus(1), "the stage that left, by a switch");
-    assert!(d.steps[1].0 - came <= SETTLE.as_millis() as u64 + 150, "switched back {} ms after Apple's switch", d.steps[1].0 - came);
+    assert!(d.steps[1].0 - came <= (f.lag + f.motion).as_millis() as u64 + 150, "switched back {} ms after Apple's switch", d.steps[1].0 - came);
     assert_eq!(presses(&d.steps), vec![vec![5]]);
     assert_eq!(f.current(), &[5, 1, 2], "the stage in its order, the app on top");
     assert!(r.round_trip_why.is_some_and(|w| w.contains("by itself")), "{r:?}");
@@ -876,11 +896,14 @@ fn an_app_in_front_by_itself_once_shown_again_goes_by_one_switch_back() {
 #[test]
 fn a_hide_called_off_that_took_late_is_the_hide_route_taken_in_ahead_of_the_settle() {
     let mut f = FakeWindowManager::new();
+    // A stage past the strip's room, its window listed off screen.
+    f.open_app(30, &[9]);
     f.open_app(20, &[3]);
     f.open_app(10, &[1, 2]);
+    f.set_room(1);
     let mut a = settle(&mut f, &Arrangement::default());
     let mut job = plan::reopen_here(&a, 40, &f.pids(), f.now()).expect("a stage in front, no window of the app");
-    a.step_began(f.now());
+    a.stirred(f.now());
     // It hid all the same; the platform shows it again at once.
     f.reopen(40, 5, true);
     job.hid_late(f.now());
@@ -890,8 +913,9 @@ fn a_hide_called_off_that_took_late_is_the_hide_route_taken_in_ahead_of_the_sett
         if twin.is_none() && f.listed().windows.iter().any(|w| w.id == 9005) {
             twin = Some(t);
         }
-        // A window of the stage in front moves all along: the arrangement never settles.
-        f.set_frame(2, Rect::new(330.0 + (t / 25) as f64, 150.0, 700.0, 500.0));
+        // A window past the strip's room moves all along (its app resizing it): the arrangement
+        // never settles.
+        f.set_frame(9, Rect::new(330.0 + 2.0 * (t / 25) as f64, 150.0, 700.0, 500.0));
     });
     let r = d.end.expect("ended").expect("done");
     assert_eq!(r.route, Some("hide_activation"));
@@ -969,7 +993,7 @@ fn a_running_app_hidden_at_its_activation_that_reopens_no_window_is_activated_ag
     let d = drive(&mut f, &mut a, &mut job, 6000);
     let r = d.end.expect("ended").expect_err("given up");
     assert_eq!((r.unhide, r.activate), (Some(40), Some(40)), "{r:?}");
-    let wait = (super::job::UNHIDE_AFTER + super::job::REOPEN_THUMB).as_millis() as u64;
+    let wait = (super::job::UNHIDE_WAIT + super::job::REOPEN_THUMB).as_millis() as u64;
     assert!(r.ms >= wait && r.ms <= wait + 200, "given up {} ms in", r.ms);
     assert_eq!(f.unhidden, vec![40], "shown again, not activated, before the give-up");
     assert!(f.posted.is_empty());
@@ -1216,8 +1240,10 @@ fn two_screens_each_have_a_mirror_of_their_own_and_a_step_acts_on_one() {
         let next = job.advance(&Ctx { mirror: &m2, input: two.input, screen: &right, pids: &pids, in_flight: false }, two.now());
         match next {
             Next::Run(Step::Focus(w)) => {
-                job.ran(&Step::Focus(w), two.focus(w).is_ok());
-                m2.step_began(two.now());
+                let step = Step::Focus(w);
+                let answer = super::job::answer(&step, &m2).expect("answered");
+                job.ran(&step, two.focus(w).is_ok(), two.now());
+                m2.expect(answer, two.now());
             }
             Next::Done(_) => break,
             Next::Run(other) => panic!("only a focus: {other:?}"),
@@ -1314,7 +1340,6 @@ fn never_mid_answer(f: &FakeWindowManager, what: &str) {
 }
 
 #[test]
-#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
 fn a_slow_apple_gets_one_focus_for_a_switch() {
     for k in LAGS {
         let (mut f, mut a) = three_slowed(k, 1);
@@ -1327,7 +1352,6 @@ fn a_slow_apple_gets_one_focus_for_a_switch() {
 }
 
 #[test]
-#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
 fn a_slow_apple_gets_one_press_per_window_of_a_merge() {
     for k in LAGS {
         let (mut f, mut a) = three_slowed(k, 1);
@@ -1342,7 +1366,6 @@ fn a_slow_apple_gets_one_press_per_window_of_a_merge() {
 }
 
 #[test]
-#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
 fn a_slow_apple_gets_one_switch_one_press_and_one_switch_back_for_a_send() {
     for k in LAGS {
         let mut f = FakeWindowManager::new();
@@ -1361,7 +1384,6 @@ fn a_slow_apple_gets_one_switch_one_press_and_one_switch_back_for_a_send() {
 }
 
 #[test]
-#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
 fn a_slow_apple_gets_one_drag_to_take_a_window_out() {
     for k in LAGS {
         let mut f = FakeWindowManager::new();
@@ -1380,14 +1402,13 @@ fn a_slow_apple_gets_one_drag_to_take_a_window_out() {
 /// A newly opened app hidden at its launch on a slow Mac: its thumbnail pressed once, its
 /// window focused once in front.
 #[test]
-#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
 fn a_slow_apple_gets_one_press_for_a_new_app_opened_here() {
     for k in LAGS {
         let (mut f, mut a) = three_slowed(k, 1);
         let mut job = plan::open_here(&a, 40, f.now()).expect("a stage in front");
         f.launch(40, &[5], true);
         // The platform's watch at the launch notice.
-        a.step_began(f.now());
+        a.stirred(f.now());
         let d = drive_every(&mut f, &mut a, &mut job, 10_000, FAST, |_, _| {});
         let r = d.end.expect("ended").unwrap_or_else(|r| panic!("lag x{k}: {r:?}"));
         assert_eq!(presses(&d.steps), vec![vec![5]], "lag x{k}");

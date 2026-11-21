@@ -63,7 +63,7 @@ use crate::engine::apple::desk::{AppleDesk, Landed, Posted};
 use crate::engine::apple::follow;
 use crate::engine::apple::gate;
 use crate::engine::apple::job::{self, Ctx, Job, Next, Report};
-use crate::engine::apple::mirror::{self, Arrangement};
+use crate::engine::apple::mirror::{self, Arrangement, Effect};
 use crate::engine::apple::plan::{self, Intent, Refusal, Step};
 use crate::engine::apple::points;
 use crate::engine::apple::restore::{self, AutoRestore, Wanted};
@@ -536,15 +536,15 @@ impl AppleController {
     }
 
     /// Reads at the motion's pace for [`WATCH`] from now: Apple's motion follows its cause.
-    /// The arrangement counts in motion from now ([`Arrangement::step_began`]): a read in
-    /// the moment before Apple's motion starts shows the stage coming in beside the one
-    /// leaving (live 11-16: an activation followed that way put both in one stage).
+    /// The arrangement counts in motion until the list shows a change ([`Arrangement::stirred`]):
+    /// a read in the moment before Apple's motion starts shows the stage coming in beside the
+    /// one leaving (live 11-16: an activation followed that way put both in one stage).
     fn watch(&mut self) {
         let now = clock::now();
         self.watch_until = Some(now + WATCH);
-        self.mirror.step_began(now);
+        self.mirror.stirred(now);
         for m in self.others.values_mut() {
-            m.step_began(now);
+            m.stirred(now);
         }
     }
 
@@ -919,7 +919,7 @@ impl AppleController {
             Next::Run(step) => {
                 let ran = self.run_step(ob, screen, &step, now);
                 if let Some(job) = self.jobs.front_mut() {
-                    job.ran(&step, ran.is_ok());
+                    job.ran(&step, ran.is_ok(), now);
                 }
                 if let Err(e) = ran {
                     tracing::info!(step = job::step_name(&step), error = e, "apple mode: a step did not run; tried again at the next settle");
@@ -1019,7 +1019,8 @@ impl AppleController {
         self.read_due = Some(now + mirror::MOTION_READ);
     }
 
-    /// Runs `step` through its route now; the mirror counts in motion from here.
+    /// Runs `step` through its route now; the mirror expects Apple's answer from here (a
+    /// drag's once it landed, [`Self::gesture_landed`]).
     fn run_step(&mut self, ob: &Observer, screen: &Display, step: &Step, now: Instant) -> Result<(), String> {
         let mut desk = Desk { ob, manager: self.manager, screen: self.screen().map(|d| d.frame), displays: &self.displays };
         let route: &dyn Route = match step {
@@ -1031,7 +1032,7 @@ impl AppleController {
                 // strip from here.
                 let ran = desk.unhide(*pid);
                 tracing::debug!(pid, "apple mode: the app hidden at its activation shown again, not activated");
-                self.mirror_on_mut(Some(screen.id)).step_began(now);
+                self.mirror_on_mut(Some(screen.id)).expect(Effect::App(*pid), now);
                 self.watch();
                 self.read_due = Some(now + mirror::MOTION_READ);
                 return ran;
@@ -1050,7 +1051,12 @@ impl AppleController {
             if let Step::Post(p) = step {
                 self.posting = Some(p.clone());
             }
-            self.mirror_on_mut(Some(screen.id)).step_began(now);
+            // A drag moves its window as it goes: its answer is expected once it landed.
+            if !matches!(step, Step::Post(Posted::Drag { .. }))
+                && let Some(effect) = job::answer(step, self.mirror_on(Some(screen.id)))
+            {
+                self.mirror_on_mut(Some(screen.id)).expect(effect, now);
+            }
             self.watch();
             self.read_due = Some(now + mirror::MOTION_READ);
         }
@@ -1085,7 +1091,14 @@ impl AppleController {
             }
         }
         let screen = self.jobs.front().and_then(|j| j.screen);
-        self.mirror_on_mut(screen).step_began(now);
+        match (landed, posted) {
+            // A drag's answer: its window taken out (or only moved).
+            (Landed::Posted, Some(Posted::Drag { window, .. })) => self.mirror_on_mut(screen).expect(Effect::Moved(window), now),
+            // A press's answer was expected as it began.
+            (Landed::Posted, _) => {}
+            // Nothing (more) posted: no answer to wait for.
+            (Landed::Refused(_) | Landed::Interrupted(_), _) => self.mirror_on_mut(screen).refuted(now),
+        }
         self.watch();
     }
 
@@ -1234,7 +1247,6 @@ impl AppleController {
         };
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         tracing::info!(route = t.name(), ok = ran.is_ok(), ms, "apple mode: a route tried by hand");
-        self.mirror.step_began(now);
         self.watch();
         self.read_due = Some(now + mirror::MOTION_READ);
         match ran {
@@ -1318,6 +1330,7 @@ impl AppleController {
             "age_ms": self.mirror.read_at.map(|t| now.duration_since(t).as_millis() as u64),
             "read_ms": (self.read_ms * 10.0).round() / 10.0,
             "in_motion": self.mirror.in_motion,
+            "expects": self.mirror.expecting().map(|e| json!({ "effect": format!("{:?}", e.effect), "step": e.step, "ms": now.saturating_duration_since(e.since).as_millis() as u64 })),
             "ax_corrections": self.mirror.corrections,
             "ax_age_ms": self.mirror.ax_at.map(|t| now.duration_since(t).as_millis() as u64),
             "strip_shown": self.mirror.strip_shown,

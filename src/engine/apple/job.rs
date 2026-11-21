@@ -40,11 +40,13 @@
 //!   of the settle ([`Job::pickup`]): by its pid, never by a window's id (a running app
 //!   reopens the window it ordered out, an id seen before, read as `AXDialog` while hidden,
 //!   live 11-16), from every window of it the list shows ([`super::mirror::Arrangement::seen`]).
-//!   Nothing of it shows: [`UNHIDE_AFTER`] after the hide took (a launch: as soon as a window
-//!   of it is known, if sooner) it is shown again without activating it ([`Step::Unhide`]), and
-//!   Apple's puts its window into the strip (some apps make none while hidden: Reminders, live
-//!   11-16). Its thumbnails, each with a twin and at rest for [`STILL_FOR`] reads, are
-//!   Shift-clicked in, in one press; its windows in front at rest are focused; the rest of the
+//!   Nothing of it shows: once the list has a window of it it did not have at the ask (the
+//!   window it ordered in while hidden, listed off screen; a launch: a window of it known),
+//!   or [`UNHIDE_WAIT`] after the hide took at most, it is shown again without activating it
+//!   ([`Step::Unhide`]), and Apple's puts its window into the strip (some apps make none while
+//!   hidden: Reminders, live 11-16). Its thumbnails, each with a twin and at rest for
+//!   [`STILL_FOR`] reads, are Shift-clicked in, in one press, a press only once the list shows
+//!   Apple's answer to the one before (a thumbnail pressed going); its windows in front at rest are focused; the rest of the
 //!   arrangement may still move (the stage in front does not). No thumbnail [`REOPEN_THUMB`]
 //!   after the unhide (a running app) or [`FIRST_WINDOW`] after the ask (a launch): given up,
 //!   the app activated, as the person asked. The stage in front left meanwhile (a window shown
@@ -72,11 +74,17 @@
 //! A *lenient* job (the restore) skips a goal it cannot meet, says why in its report, and
 //! goes on with the next; the deadline and the person's own input still end it.
 //!
-//! Whether a goal is met is asked of every read out of motion (the groups are read afresh);
-//! a posted step, and a focus that switches stages, wait for the settle; every posted step
-//! goes through the gate ([`super::gate`]). A step that ran and whose goal is still not met at
-//! the next settle runs once more ([`TRIES`]), then the job is given up and reported. The
-//! person's own input ending a drag gives it up at once.
+//! **After a step runs** the job waits in two states ([`After`]): Apple's answer not seen yet
+//! (the mirror's change expected, [`super::mirror::Arrangement::expect`]: the first change
+//! the step makes, capped by [`super::mirror::ANSWER_WAIT`]), then Apple's motion, until the
+//! list is still for two reads (capped by [`MOTION_WAIT`]); each end is logged with how it
+//! came (`engine::margin`). Only then are the goals judged again, so a slow Apple's answer is
+//! never taken for none and the step posted again mid-answer. Whether a goal is met is asked
+//! of every read out of motion (the groups are read afresh); a posted step, and a focus that
+//! switches stages, wait for the settle; every posted step goes through the gate
+//! ([`super::gate`]). A step that ran and whose goal is still not met then runs once more
+//! ([`TRIES`]), then the job is given up and reported. The person's own input ending a drag
+//! gives it up at once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
@@ -85,7 +93,7 @@ use serde::Serialize;
 
 use super::desk::{InputNow, Landed, Posted, Press};
 use super::gate::{self, Hold, Waiting};
-use super::mirror::{Arrangement, Seen, Where};
+use super::mirror::{Arrangement, Effect, Seen, Where};
 use super::plan::{Intent, Step};
 use super::points;
 use crate::engine::geometry::Rect;
@@ -101,10 +109,13 @@ pub const FIRST_WINDOW: Duration = Duration::from_secs(10);
 /// about 50 ms after the activation): a ⌘Tab to an app that opens none is not held up longer.
 pub const REOPEN_WINDOW: Duration = Duration::from_secs(3);
 
-/// How long after the hide took an app hidden by us is shown again (without activating it):
-/// time for it to order its window in (live 11-16: Activity Monitor's came 24 ms after the
-/// hide took).
-pub const UNHIDE_AFTER: Duration = Duration::from_millis(275);
+/// How long after the hide took an app hidden by us that has ordered no window in is shown
+/// again (without activating it) all the same: some apps make none while hidden (Reminders,
+/// live 11-16). One that orders one in (listed off screen while hidden) is shown again as
+/// soon as the list has it (live 11-16: Activity Monitor's came 24 ms after the hide took).
+/// The cap is the time once waited out blind: a window reopened under an id the list had at
+/// the ask (one ordered out may stay listed) is not told apart, and waits it as before.
+pub const UNHIDE_WAIT: Duration = Duration::from_millis(275);
 
 /// How long after that unhide a running app's thumbnail may take to show in the strip (the
 /// probe: about 0.5 s): none by then, the app is activated.
@@ -114,9 +125,19 @@ pub const REOPEN_THUMB: Duration = Duration::from_millis(1500);
 /// motion): two fast reads.
 pub const STILL_FOR: u32 = 2;
 
-/// After a Shift press on an app's thumbnails, how long before they are pressed again (Apple's
-/// add motion starts about 100 ms after the click and runs about 600 ms).
-pub const PRESS_AGAIN: Duration = Duration::from_millis(700);
+/// How long Apple's motion may run, once its answer to a step showed, before the job judges
+/// its goals at the next read out of motion all the same (the motion measured: about 600 ms;
+/// a window that never stops, a video's, would hold the job to its deadline).
+pub const MOTION_WAIT: Duration = Duration::from_secs(3);
+
+/// Where a job is after a step of its own ran (module docs).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum After {
+    /// Apple's answer to the step not seen yet (the mirror expects it), since the step ran.
+    Answer(Instant),
+    /// Apple's answer seen, its motion not at rest yet, since the answer showed.
+    Motion(Instant),
+}
 
 /// What a job is to bring about.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -277,9 +298,11 @@ pub struct Job {
     /// The stage that was in front was brought back by a focus (the round trip): the app's
     /// windows it left in the strip are taken in ahead of the settle ([`Job::pickup`]).
     back: bool,
-    /// The step asked is the round trip's switch back: at rest is enough for it
-    /// ([`Arrangement::at_rest`]), the settle not waited.
-    switch_back: bool,
+    /// After the step last run: Apple's answer, then its motion, waited for.
+    after: Option<After>,
+    /// The app's windows the list had at the ask ([`Arrangement::listed_of`]): a window of it
+    /// not among them is one it ordered in since.
+    pub listed_before: BTreeSet<u32>,
     /// When the unhide was asked.
     unhide_at: Option<Instant>,
     /// When the app's thumbnails were last pressed ([`Job::pickup`]).
@@ -342,7 +365,8 @@ impl Job {
             unhidden: false,
             late: false,
             back: false,
-            switch_back: false,
+            after: None,
+            listed_before: BTreeSet::new(),
             unhide_at: None,
             pressed_at: None,
             app_seen: BTreeSet::new(),
@@ -388,10 +412,40 @@ impl Job {
         self.report.unhide_ms.get_or_insert(ms(now, self.since));
     }
 
-    /// When the job next wants an advance whatever the reads: the unhide's moment
-    /// ([`UNHIDE_AFTER`] after the hide took), while it is to come.
+    /// When the job next wants an advance whatever the reads: the unhide's cap
+    /// ([`UNHIDE_WAIT`] after the hide took), while it is to come.
     pub fn due(&self) -> Option<Instant> {
-        if self.hidden && !self.unhidden && matches!(self.intent, Intent::OpenHere(_)) { self.hidden_at.map(|t| t + UNHIDE_AFTER) } else { None }
+        if self.hidden && !self.unhidden && matches!(self.intent, Intent::OpenHere(_)) { self.hidden_at.map(|t| t + UNHIDE_WAIT) } else { None }
+    }
+
+    /// The app hidden by us has ordered a window in since the ask: the list has one of it it
+    /// did not have then (on screen or off).
+    fn ordered_in(&self, a: &Arrangement, pid: i32) -> bool {
+        a.listed_of.get(&pid).is_some_and(|ids| ids.iter().any(|id| !self.listed_before.contains(id)))
+    }
+
+    /// Where the job is after its last step, as the mirror now shows it: `Some` to wait
+    /// (Apple's answer not seen, or its motion not at rest), `None` to judge the goals
+    /// (module docs).
+    fn after_step(&mut self, cx: &Ctx, now: Instant) -> Option<Next> {
+        if let Some(After::Answer(_)) = self.after {
+            if cx.mirror.expecting().is_some_and(|e| e.step) {
+                return Some(self.wait("Apple's answer to the step"));
+            }
+            self.after = Some(After::Motion(now));
+        }
+        let Some(After::Motion(since)) = self.after else { return None };
+        let waited = now.saturating_duration_since(since);
+        let how = if cx.mirror.settled {
+            crate::engine::margin::End::Met
+        } else if waited >= MOTION_WAIT {
+            crate::engine::margin::End::Cap
+        } else {
+            return Some(self.wait("Apple's motion"));
+        };
+        crate::engine::margin::wait("apple::MOTION_WAIT", waited, MOTION_WAIT, how);
+        self.after = None;
+        None
     }
 
     /// `why` said in the report's `could_not`, once.
@@ -434,6 +488,10 @@ impl Job {
         // toward the person's (the job's deadline bounds them).
         if cx.in_flight {
             return self.wait(Hold::InFlight.why());
+        }
+        // The step last run: Apple's answer, then its motion at rest.
+        if let Some(next) = self.after_step(cx, now) {
+            return next;
         }
         // In motion the groups read before stand: nothing to tell from them. Out of motion
         // they are read afresh, settled or not: a goal is met at the first such read.
@@ -479,11 +537,14 @@ impl Job {
         Next::Done(self.report.clone())
     }
 
-    /// Step `step` ran (`ok`: its calls went; a posted one's end comes with
-    /// [`Job::landed`]).
-    pub fn ran(&mut self, step: &Step, ok: bool) {
+    /// Step `step` ran at `now` (`ok`: its calls went; a posted one's end comes with
+    /// [`Job::landed`]): Apple's answer is waited for from here (module docs).
+    pub fn ran(&mut self, step: &Step, ok: bool, now: Instant) {
         if !ok {
             return;
+        }
+        if !matches!(step, Step::AwaitSettle) {
+            self.after = Some(After::Answer(now));
         }
         match step {
             Step::Focus(w) => {
@@ -519,7 +580,11 @@ impl Job {
     pub fn landed(&mut self, landed: &Landed) {
         match landed {
             Landed::Interrupted(why) => self.interrupted = Some(format!("the person's own input ended the gesture: {why}")),
-            Landed::Refused(why) => self.refused = Some(why.clone()),
+            Landed::Refused(why) => {
+                // Nothing posted: no answer to wait for.
+                self.refused = Some(why.clone());
+                self.after = None;
+            }
             Landed::Posted => {}
         }
     }
@@ -812,7 +877,6 @@ impl Job {
         if let Some(front) = base.first().copied()
             && !base.iter().any(|w| a.current.contains(w))
         {
-            self.switch_back = app.is_some();
             return Need::Step(Step::Focus(front));
         }
         // The app's windows in the strip, front first: on top of the order wanted.
@@ -878,8 +942,10 @@ impl Job {
                 if cx.in_flight {
                     return Some(self.wait(Hold::InFlight.why()));
                 }
-                if let Some(t) = self.hidden_at.filter(|t| now >= *t + UNHIDE_AFTER) {
-                    crate::engine::margin::wait("apple::UNHIDE_AFTER", now.saturating_duration_since(t), UNHIDE_AFTER, crate::engine::margin::End::Cap);
+                let ordered_in = self.ordered_in(a, pid);
+                if let Some(t) = self.hidden_at.filter(|t| ordered_in || now >= *t + UNHIDE_WAIT) {
+                    let how = if ordered_in { crate::engine::margin::End::Met } else { crate::engine::margin::End::Cap };
+                    crate::engine::margin::wait("apple::UNHIDE_WAIT", now.saturating_duration_since(t), UNHIDE_WAIT, how);
                     self.unhide_at = Some(now);
                     self.report.unhide_ms.get_or_insert(ms(now, self.since));
                     self.report.round_trip_why.get_or_insert("Apple switched at the activation, before the hide took: shown again, the round trip");
@@ -905,13 +971,14 @@ impl Job {
             if !front.is_empty() {
                 return None;
             }
-            // Nothing of it shows: shown again once it has had time to order its window in (a
-            // launch: as soon as a window of it is known).
-            let due = self.hidden_at.is_some_and(|t| now >= t + UNHIDE_AFTER);
-            if due || (!self.reopen && cx.pids.values().any(|p| *p == pid)) {
+            // Nothing of it shows: shown again once the list has a window it ordered in (a
+            // launch: or a window of it known), or at the cap.
+            let seen = self.ordered_in(a, pid) || (!self.reopen && cx.pids.values().any(|p| *p == pid));
+            let due = self.hidden_at.is_some_and(|t| now >= t + UNHIDE_WAIT);
+            if due || seen {
                 if let Some(t) = self.hidden_at {
-                    let how = if due { crate::engine::margin::End::Cap } else { crate::engine::margin::End::Met };
-                    crate::engine::margin::wait("apple::UNHIDE_AFTER", now.saturating_duration_since(t), UNHIDE_AFTER, how);
+                    let how = if seen { crate::engine::margin::End::Met } else { crate::engine::margin::End::Cap };
+                    crate::engine::margin::wait("apple::UNHIDE_WAIT", now.saturating_duration_since(t), UNHIDE_WAIT, how);
                 }
                 if !windows.iter().all(|w| a.seen.iter().any(|(id, s)| id == w && s.full)) {
                     self.report.round_trip_why.get_or_insert("Apple switched at the activation, before the hide took: shown again, the round trip");
@@ -923,8 +990,10 @@ impl Job {
             return Some(self.wait("the app to order its window in"));
         }
         if !thumbs.is_empty() {
-            if self.pressed_at.is_some_and(|t| now.saturating_duration_since(t) < PRESS_AGAIN) {
-                return Some(self.wait("Apple's add motion"));
+            // Apple's answer to a cause not seen yet (the press before: its thumbnail still
+            // where it was, its twin over it; an activation heard): it may still move them.
+            if cx.mirror.expecting().is_some() {
+                return Some(self.wait(if self.pressed_at.is_some() { "Apple's add motion" } else { "Apple's answer" }));
             }
             if thumbs.iter().any(|(_, s)| s.still < STILL_FOR) {
                 return Some(self.wait("the app's thumbnail to rest"));
@@ -960,8 +1029,10 @@ impl Job {
                 self.report.round_trip_why.get_or_insert("the app came in front by itself after its unhide: the round trip");
                 return None;
             }
-            // In the stage in front: focused once at rest (a window there switches nothing).
-            if front.iter().any(|(_, s)| s.still < STILL_FOR) {
+            // In the stage in front: focused once at rest, it and the stage it was asked into
+            // (a window there switches nothing; one of the stage still moving may be leaving).
+            let stage_moving = windows.iter().any(|w| a.seen.iter().any(|(id, s)| id == w && s.still < STILL_FOR));
+            if stage_moving || front.iter().any(|(_, s)| s.still < STILL_FOR) {
                 return Some(self.wait("the app's window into the stage in front"));
             }
             // The order put back, the app's front window focused last (module docs).
@@ -1005,13 +1076,10 @@ impl Job {
 
     /// `step` through the gate and the retry count.
     fn try_step(&mut self, mut step: Step, cx: &Ctx, now: Instant) -> Next {
-        // The round trip's switch back goes once at rest: a focus aims at nothing on screen, so
-        // the settle's wait after the last frame of Apple's motion is not its own.
-        let rest_enough = std::mem::take(&mut self.switch_back) && cx.mirror.at_rest();
         let gated = match &mut step {
             // A focus that switches stages waits for the settle; one in the stage in front (a
             // raise, the newly opened app's focus) goes at once.
-            Step::Focus(w) if !cx.mirror.settled && !rest_enough && !cx.mirror.current.contains(w) => Err(Hold::InMotion),
+            Step::Focus(w) if !cx.mirror.settled && !cx.mirror.current.contains(w) => Err(Hold::InMotion),
             Step::Focus(_) => gate::focus_gate(&cx.input, cx.in_flight),
             Step::Post(posted) => gate::gate(&cx.input, cx.mirror.settled, cx.in_flight).map(|go| {
                 if let Posted::Clicks { own_shift, .. } = posted {
@@ -1119,6 +1187,21 @@ fn step_key(step: &Step) -> (u8, u32) {
         Step::Post(p @ Posted::Drag { .. }) => (2, p.window()),
         Step::AwaitSettle => (3, 0),
         Step::Unhide(pid) => (5, *pid as u32),
+    }
+}
+
+/// The first change Apple's answer to `step` makes, as the mirror `a` at the step tells it
+/// ([`super::mirror::Arrangement::expect`]): a focus of a window in front raises it, any
+/// other focus switches stages; a Shift press takes its thumbnails; a drag (expected once it
+/// landed) moves its window; an unhide shows a window of the app.
+pub fn answer(step: &Step, a: &Arrangement) -> Option<Effect> {
+    match step {
+        Step::Focus(w) if a.current.contains(w) => Some(Effect::Raise(*w)),
+        Step::Focus(_) => Some(Effect::Change),
+        Step::Post(Posted::Clicks { presses, .. }) => Some(Effect::Thumbs(presses.iter().map(|p| p.window).collect())),
+        Step::Post(Posted::Drag { window, .. }) => Some(Effect::Moved(*window)),
+        Step::Unhide(pid) => Some(Effect::App(*pid)),
+        Step::AwaitSettle => None,
     }
 }
 
