@@ -17,6 +17,8 @@
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
 //! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it (in the Apple mode: found, hit-tested and pressed, no prediction),
+//! `debug-dock-lend BUNDLE` feeds that click without pressing the item (what the press put
+//! home waits for an activation that does not come),
 //! `debug-mission-pick ID [hover]` clicks a fixture's window where Mission Control lays it out
 //! (with `hover` only moves the pointer there, back with `debug-pointer-back`), `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
@@ -333,6 +335,13 @@ pub enum Command {
     /// A posted ⌘Tab and what answered it, or the last one's report (needs
     /// `STAGE_MANAGER_TEST=1`; round cmd-tab, [`crate::platform::switcher_probe`]).
     DebugCmdTab(CmdTabProbe),
+    /// [`Command::DebugDockClick`]'s fed click with no press of the item (needs
+    /// `STAGE_MANAGER_TEST=1`; the Spaces engine, round r2-lends): what the press puts home
+    /// waits for an activation that never comes, for the live checks of what ends it.
+    DebugDockLend {
+        /// The app's bundle id.
+        bundle: String,
+    },
     /// Mission Control's lends under the Spaces engine, for the probe (needs
     /// `STAGE_MANAGER_TEST=1`; round spaces-mission-control): `status`, `lend`, `back`,
     /// `mode off|shown|key|config`.
@@ -546,6 +555,7 @@ impl Command {
             ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
             ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: false }),
             ["debug-dock-click", bundle, "real"] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: true }),
+            ["debug-dock-lend", bundle] => Ok(Self::DebugDockLend { bundle: (*bundle).to_string() }),
             ["adopted", ids @ ..] => ids
                 .iter()
                 .map(|id| id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}")))
@@ -1099,6 +1109,8 @@ mod tests {
             Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: true })
         );
         assert!(Command::parse("debug-dock-click dev.example.app fake").is_err());
+        assert_eq!(Command::parse("debug-dock-lend dev.example.app"), Ok(Command::DebugDockLend { bundle: "dev.example.app".into() }));
+        assert!(Command::parse("debug-dock-lend").is_err());
         assert_eq!(
             Command::parse("debug-cmd-tab cancel"),
             Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 1, hold_ms: 300, gap_ms: 40, lend: true }))

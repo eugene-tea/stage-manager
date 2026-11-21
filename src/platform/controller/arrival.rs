@@ -2187,6 +2187,24 @@ impl Controller {
     /// on the release as for a person's click (the fed path above arranges before `AXPress`,
     /// which hid the race of the owner's log of 11-15 06:32:34).
     pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str, real: bool) -> serde_json::Value {
+        self.debug_dock(ob, bundle, real, true)
+    }
+
+    /// `debug-dock-lend BUNDLE` (test only, round r2-lends): [`Self::debug_dock_click`]'s fed
+    /// click (the hit-test, the press, the release) with no press of the item: what the press
+    /// put home waits for an activation that does not come, as for a busy app, so a live check
+    /// can tell what ends it (another app's activation, the next press, the cap). The reply's
+    /// `lent` names the window put home, if any.
+    pub(super) fn debug_dock_lend(&mut self, ob: &Observer, bundle: &str) -> serde_json::Value {
+        let mut r = self.debug_dock(ob, bundle, false, false);
+        if let Some(obj) = r.as_object_mut() {
+            obj.insert("lent".into(), serde_json::json!(self.lent.filter(|l| !l.switcher).map(|l| l.window.0)));
+        }
+        r
+    }
+
+    /// [`Self::debug_dock_click`] (`activate`: the fed click presses the item after it).
+    fn debug_dock(&mut self, ob: &Observer, bundle: &str, real: bool, activate: bool) -> serde_json::Value {
         use serde_json::json;
         let only = std::env::var("STAGE_MANAGER_ONLY").unwrap_or_default();
         if !only.split(',').any(|b| b.trim() == bundle) {
@@ -2227,7 +2245,7 @@ impl Controller {
                 Err(miss) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
             }
         } else {
-            self.debug_dock_press(ob, &list, bundle, &listed, at, hit)
+            self.debug_dock_press(ob, &list, bundle, &listed, at, hit, activate)
         };
         if revealed {
             crate::platform::input::pointer_back();
@@ -2239,7 +2257,8 @@ impl Controller {
     }
 
     /// The rest of [`Self::debug_dock_click`]: the hit-test's answer `hit` at `at` goes
-    /// through the press and release path, then the item is pressed.
+    /// through the press and release path, then the item is pressed (unless not `activate`).
+    #[allow(clippy::too_many_arguments)]
     fn debug_dock_press(
         &mut self,
         ob: &Observer,
@@ -2248,6 +2267,7 @@ impl Controller {
         listed: &DockItem,
         at: crate::engine::geometry::Point,
         hit: Result<(AxElement, DockItem), dock::Miss>,
+        activate: bool,
     ) -> serde_json::Value {
         use serde_json::json;
         let (element, item) = match hit {
@@ -2258,6 +2278,10 @@ impl Controller {
         let pressed_at = clock::now();
         self.press_item(ob, list, item, at, pressed_at);
         let predicted = self.dock_released(ob, at, false, clock::now());
+        if !activate {
+            tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), "debug-dock-lend: the click fed, the item not pressed");
+            return json!({ "ok": true, "predicted": predicted.map(|w| w.0) });
+        }
         let pressed = element.bounded(QUERY_AX_TIMEOUT_SECONDS * 4.0, |e| e.perform_action(names::PRESS));
         tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), pressed = pressed.is_ok(), "debug-dock-click");
         json!({ "ok": pressed.is_ok(), "predicted": predicted.map(|w| w.0), "error": pressed.err().map(|e| e.to_string()) })

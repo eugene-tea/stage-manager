@@ -9529,7 +9529,14 @@ def phase_cmdtab_probe():
     Tab, Escape, ⌘'s release) and decided, and what an event tap made for the probe sees.
     Run it with SM_ENGINE=spaces (under the Corner engine the app follows no switcher: only
     the Dock's samples and the tap mean anything). Not in the default phases (it posts ⌘Tab:
-    run it while nobody types)."""
+    run it while nobody types).
+
+    Round r2-lends (Spaces): the app's HID key tap is on while the switcher is up and hears
+    its Escape (`ctl state` `mission_control.tap.switcher_escapes_heard` one more per probe;
+    the report's `key tap` lines say what it fed the switcher), and is no longer armed for
+    the switcher after it (`switcher_armed` false). No release here: one Tab from the fixture
+    selects an app that is no fixture's (`ctl debug-cmd-tab` refuses it); test_spaces.py's
+    cmd-tab cases release onto the fixture."""
     say("\n== cmd-tab probe: what the Dock and the input monitor show of ⌘Tab's switcher (Escape before ⌘'s release) ==")
     stop_app()
     stop_fixture()
@@ -9542,10 +9549,19 @@ def phase_cmdtab_probe():
     subprocess.run(["open", FIX_APP], capture_output=True)
     time.sleep(1.0)
     before = state()
+    tap = lambda: ((state().get("mission_control") or {}).get("tap") or {})  # noqa: E731
     for words in (("cancel", "1", "400"), ("cancel", "3", "400")):
+        escapes = tap().get("switcher_escapes_heard", 0)
         r = cmd_tab_probe(*words)
         check(r.get("ok") and r.get("done"), f"cmd-tab probe {' '.join(words)}: the probe ran ({r.get('error') or r.get('outcome')})")
         say_cmd_tab_report(r, f"debug-cmd-tab {' '.join(words)}")
+        if SPACES:
+            t = tap()
+            fed = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "key tap"]
+            say(f"     key tap: {t}; fed the switcher: {fed}")
+            check(t.get("switcher_escapes_heard", 0) == escapes + 1 and any("Cancelled" in f for f in fed),
+                  f"cmd-tab probe {' '.join(words)}: the key tap heard the switcher's Escape and cancelled it ({fed})")
+            check(t.get("switcher_armed") is False, f"cmd-tab probe {' '.join(words)}: the key tap no longer armed for the switcher after it")
         heard = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "heard"]
         if not any("Selected" in h for h in heard):
             skip(f"cmd-tab probe {' '.join(words)}: the input monitor heard the switcher's Tab",

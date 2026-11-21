@@ -1463,6 +1463,19 @@ def cmd_tab_cases(d1, d2):
        screen at its frame, and no Space change.
     5. **A quick tap** (⌘ let go ~60 ms after the Tab went down: no switcher list ever): 0
        Space changes, the Fixture stage in front; the prediction alone decided.
+    6. **A slow app** (round r2-lends): the fixture's main thread blocked (SIGPROF, its
+       --hang-ms, 3 s by default) from ~0.45 s after the probe starts, one Tab held 1.5 s, ⌘
+       let go onto it: its activation may come only once it answers, past the 200 ms the
+       window put home used to wait. 0 Space changes, the Fixture stage in front; the delay
+       from ⌘'s release to the activation is printed (a skip says so when the blocked thread
+       did not delay it: the slow case not reproduced).
+    7. **A Dock click, then another app's activation** (round r2-lends): the fixture's Dock
+       click fed with no press of its item (`ctl debug-dock-lend`: its activation never
+       comes); 300 ms later Bravo (on Desktop 2 only) is activated: the window put home at the
+       press goes back at Bravo's activation ("another app was activated"), within 0.5 s, not
+       at the cap (5 s); macOS goes to Desktop 2 for Bravo. Last: it leaves Desktop 2 shown.
+    In 1 the key tap hears Escape (the probe's `key tap` lines) and the window put home goes
+    back within 100 ms of Escape's key-down (the probe's `taken back`).
     In 3 the window put home is listed parked (the park zone) while the switcher shows, and at
     its frame once its stage is in front.
     Each prints the probe's report: the Dock's switcher as Accessibility showed it, what the
@@ -1587,6 +1600,19 @@ def _cmd_tab_cases(d1, d2):
     if any("put home while the switcher shows" in line for line in lines):
         check(any("the window put home for the switcher goes back" in line for line in lines),
               "cmd-tab escape: the window put home went back at Escape")
+        # Round r2-lends: Escape heard at the key tap, the window back at once (before, the
+        # cancel was told by no activation 200 ms after the list went).
+        events = r.get("events", [])
+        tapped = [e["what"] for e in events if e["kind"] == "key tap"]
+        check(any("Cancelled" in t for t in tapped), f"cmd-tab escape: the key tap heard Escape while the switcher showed ({tapped})")
+        esc = next((e["ms"] for e in events if e["kind"] == "posted" and e["what"] == "Escape"), None)
+        back = [e for e in events if e["kind"] == "taken back"]
+        if check(esc is not None and bool(back), f"cmd-tab escape: the probe noted Escape ({esc} ms) and the take-back ({back[-1:]})"):
+            # The probe notes "Escape" after its key-up, posted 10 ms after its key-down.
+            after = back[-1]["ms"] - (esc - 10)
+            say(f"    escape: taken back {after} ms after Escape's key-down ({back[-1]['what']})")
+            check(after <= 100 and "why=the switcher was cancelled" in back[-1]["what"],
+                  f"cmd-tab escape: the window put home went back within 100 ms of Escape's key-down, as cancelled ({after} ms)")
 
     # 2. macOS's own way, nothing put home: measured, not checked.
     if not _cmd_tab_setup(d1, d2, "cmd-tab measured"):
@@ -1686,6 +1712,72 @@ def _cmd_tab_cases(d1, d2):
           f"cmd-tab tap: the Fixture stage in front on Desktop 1 ({ts.stage_titles(x)})")
     check(any("put home while the switcher shows" in line for line in lines),
           "cmd-tab tap: the app's log says Fixture 1 was put home before ⌘'s release")
+
+    # 6. A slow app: the fixture's main thread blocked from ~0.45 s, ⌘ let go at ~1.6 s.
+    _cmd_tab_slow_app(d1, d2)
+
+    # 7. A Dock click whose activation never comes, then another app's activation. Last: it
+    # ends on Desktop 2 (Bravo's).
+    _dock_lend_then_another_app(d1, d2)
+
+
+def _cmd_tab_slow_app(d1, d2):
+    """Case 6 of `cmd_tab_cases`."""
+    if not _cmd_tab_setup(d1, d2, "cmd-tab slow app"):
+        return
+    x = state()
+    pid = next((w["pid"] for w in x["windows"] if w["title"] == "Fixture 1"), None)
+    if not check(pid is not None, "cmd-tab slow app: the fixture app's pid"):
+        return
+    hang = threading.Timer(0.45, lambda: os.kill(pid, signal.SIGPROF))
+    t0 = time.time()
+    hang.start()
+    r = ts.cmd_tab_probe("release", "1", "1500", wait=10.0)
+    hang.join()
+    time.sleep(2.0)  # the hang's end (3 s from ~0.45 s) and the switch
+    ts.say_cmd_tab_report(r, "cmd-tab slow app (the fixture blocked, held 1.5 s)")
+    check(r.get("ok") and r.get("outcome") == "released", f"cmd-tab slow app: ⌘ let go on the fixture app ({r.get('error') or r.get('outcome')})")
+    released = r.get("released_ms")
+    activated = next((e["ms"] for e in r.get("events", []) if e["kind"] == "activated" and f"pid={pid} " in e["what"] + " "
+                      and released is not None and e["ms"] >= released - 20), None)
+    delay = activated - released if activated is not None and released is not None else None
+    say(f"    slow app: the fixture activated {delay} ms after ⌘'s release")
+    if delay is None or delay < 300:
+        ts.skip("cmd-tab slow app: a late activation kept the window put home",
+                f"the blocked main thread did not delay the activation ({delay} ms after ⌘'s release): the slow case is not reproduced")
+    lines = [line for _, line in log_events(t0)]
+    back = [line for line in lines if "the window put home for the switcher goes back" in line]
+    check(not back, f"cmd-tab slow app: the window put home was not taken back before the activation ({back[:1]})")
+    changes = space_changes_since(t0)
+    x = ts.wait_state(lambda y: y.get("space") == d1 and y["active"] == stage_holding(y, "Fixture 1"), "the Fixture stage in front", timeout=4) or state()
+    check(not changes, f"cmd-tab slow app: no Space change ({changes})")
+    check(x.get("space") == d1 and x["active"] == stage_holding(x, "Fixture 1"),
+          f"cmd-tab slow app: the Fixture stage in front on Desktop 1 ({ts.stage_titles(x)})")
+
+
+def _dock_lend_then_another_app(d1, d2):
+    """Case 7 of `cmd_tab_cases`."""
+    if not _cmd_tab_setup(d1, d2, "dock lend"):
+        return
+    t0 = time.time()
+    r = ctl("debug-dock-lend", ts.FIX_ID)
+    if not check(r.get("ok") and r.get("lent"), f"dock lend: the press put the fixture's window home ({r})"):
+        return
+    time.sleep(0.3)
+    t_act = time.time()
+    ts.activate("b")
+    time.sleep(1.5)
+    events = log_events(t0)
+    back = [(t, line) for t, line in events if "dock: the window put home at the press goes back" in line]
+    say(f"    dock lend: {[line[line.find('dock: the window'):][:140] for _, line in back[:2]] or 'not taken back'}")
+    if check(bool(back), "dock lend: the window put home at the press went back"):
+        t, line = back[0]
+        check("another app was activated" in line,
+              f"dock lend: taken back at another app's activation ({line[line.find('goes back'):][:80]})")
+        check(t - t_act < 0.5, f"dock lend: within 0.5 s of Bravo's activation ({t - t_act:.2f} s; the cap is 5 s)")
+    x = state()
+    check(any(w["id"] == r["lent"] and w["parked"] for w in x["windows"]),
+          f"dock lend: the fixture's window hidden in its stage again ({ts.stage_titles(x)})")
 
 
 def stage_holding(s, title):
