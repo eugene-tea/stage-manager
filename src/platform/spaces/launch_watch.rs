@@ -25,12 +25,17 @@
 //! created and ordered in within one read (Stickies' second note, once) shows unheld: counted
 //! (`new_missed`), placed as before.
 //!
+//! The window server's notice of a window's creation (type 811, 3-11 ms after the cause,
+//! measured 11-21 with the AppKit event loop turning: [`super::notices`]) wakes the watch for a
+//! look at once ([`nudge`]); the read every [`EVERY`] stays as the cap. Each window held is
+//! noted by which look found it (`margin` `launch_watch::EVERY`: `noticed`, else the poll's).
+//!
 //! [`WindowEngine::about_to_show`]: crate::platform::window_engine::WindowEngine::about_to_show
 //! [`WindowEngine::let_new_out`]: crate::platform::window_engine::WindowEngine::let_new_out
 
 use crate::platform::clock;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::engine::SpacesEngine;
@@ -88,6 +93,35 @@ pub fn let_out_unplaced(ordered: Option<Instant>, watching: bool, now: Instant) 
 /// The apps being watched now (a second launch notice for one starts no second watch).
 static WATCHED: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
 
+/// How many window-creation notices came ([`nudge`]), and the watches' wake-up.
+static NUDGES: Mutex<u64> = Mutex::new(0);
+static NUDGED: Condvar = Condvar::new();
+
+/// True while an app's launch is watched.
+pub fn watching() -> bool {
+    WATCHED.lock().is_ok_and(|w| !w.is_empty())
+}
+
+/// A window was created (the window server's notice): every watch looks now.
+pub fn nudge() {
+    if let Ok(mut n) = NUDGES.lock() {
+        *n += 1;
+        NUDGED.notify_all();
+    }
+}
+
+/// Waits [`EVERY`] or until a [`nudge`] after the one `seen` counts; true when a nudge ended it.
+fn pause(seen: &mut u64) -> bool {
+    let Ok(n) = NUDGES.lock() else {
+        std::thread::sleep(EVERY);
+        return false;
+    };
+    let (n, _) = NUDGED.wait_timeout_while(n, EVERY, |n| *n == *seen).unwrap_or_else(std::sync::PoisonError::into_inner);
+    let woke = *n != *seen;
+    *seen = *n;
+    woke
+}
+
 /// Starts watching app `pid`'s new windows on a thread of its own.
 pub fn start(engine: Arc<SpacesEngine>, pid: i32) {
     // On a fake desk no thread watches: a new app's windows show as their app orders them in.
@@ -127,6 +161,9 @@ fn watch(engine: &SpacesEngine, pid: i32) {
     let mut waiting: BTreeMap<u32, Option<Instant>> = BTreeMap::new();
     let (mut held, mut missed, mut left_alone, mut placed, mut unplaced) = (0u32, 0u32, 0u32, 0u32, 0u32);
     let mut first_held_ms: Option<u64> = None;
+    let mut nudges = NUDGES.lock().map(|n| *n).unwrap_or(0);
+    // Whether the look now was brought by a creation notice, and when the last look was.
+    let (mut by_notice, mut held_by_notice, mut last_look) = (false, 0u32, began);
     loop {
         let now = clock::now();
         let watching = now.duration_since(began) < WATCH_FOR && alive(pid);
@@ -146,6 +183,13 @@ fn watch(engine: &SpacesEngine, pid: i32) {
                     FirstLook::Hold => {
                         if engine.hold_new(w.id) {
                             held += 1;
+                            let since = now.saturating_duration_since(last_look);
+                            if by_notice {
+                                held_by_notice += 1;
+                                crate::engine::margin::wait_noticed("launch_watch::EVERY", since, EVERY);
+                            } else {
+                                crate::engine::margin::wait("launch_watch::EVERY", since, EVERY, crate::engine::margin::End::Met);
+                            }
                             first_held_ms.get_or_insert(began.elapsed().as_millis() as u64);
                             waiting.insert(w.id, None);
                         }
@@ -186,11 +230,13 @@ fn watch(engine: &SpacesEngine, pid: i32) {
                 }
             }
         }
-        std::thread::sleep(EVERY);
+        last_look = now;
+        by_notice = pause(&mut nudges);
     }
     tracing::info!(
         pid,
         held,
+        held_by_notice,
         placed,
         unplaced,
         missed,
