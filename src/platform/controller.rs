@@ -5479,6 +5479,9 @@ impl Controller {
         if self.model.as_ref().is_none_or(|m| m.window(WindowId(id)).is_some()) {
             return;
         }
+        if let Some(pid) = ob.window(id).map(|w| w.pid).filter(|_| self.engine.kind() == crate::platform::window_engine::EngineKind::Spaces) {
+            self.spaces_found(pid, id);
+        }
         let about_to_show = self.engine.about_to_show(WindowId(id));
         self.ax_window_found(ob, Instant::now());
         let displays = desktop::cg_display_bounds();

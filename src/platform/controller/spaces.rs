@@ -95,8 +95,9 @@ impl Controller {
     /// out is tried again; a window the model counts hidden on a Desktop shown that is not
     /// in its stage Space (by the window server's word) is hidden again (a few times, said
     /// once, then ever more slowly: [`Stray`]); a window the model
-    /// shows that a stage Space still holds is let out; every few seconds the engine's map is
-    /// tidied ([`TIDY_EVERY`]). Not while the two may differ for a
+    /// shows that a stage Space still holds is let out; every 10 s the engine's map is tidied
+    /// ([`TIDY_EVERY`]), and windows nothing answers for are let out (at once too for a window
+    /// found in a stage Space: [`Self::spaces_found`]). Not while the two may differ for a
     /// reason: a switch's windows waiting behind their pictures, a Space change settling, an
     /// overview, an arrangement made ahead, a drag.
     pub(super) fn spaces_tick(&mut self) {
@@ -170,6 +171,23 @@ impl Controller {
             spaces.tidy(&alive, |stage| m.stages().iter().any(|s| s.id.0 == stage));
             spaces.let_strangers_out(&windows::wake_list(), |id| m.window(WindowId(id)).is_some());
         }
+    }
+
+    /// A window of an observed app found (`WinEvent::Found`) that the model does not know:
+    /// when the window server lists it in a stage Space the engine does not hold it in (its
+    /// app ordered it out while hidden and in again: it comes back in the Space it was in),
+    /// that app's windows nothing answers for are let out now
+    /// ([`engine::SpacesEngine::let_strangers_out`]), not at the next tidy ([`TIDY_EVERY`],
+    /// still the backstop): before, the window stayed invisible up to 10 s.
+    pub(super) fn spaces_found(&self, pid: i32, id: u32) {
+        let spaces = engine::shared();
+        if !spaces.stranger_in_stage(id) {
+            return;
+        }
+        let list: Vec<windows::CgWindow> = windows::wake_list().iter().filter(|w| w.pid == pid).cloned().collect();
+        let m = self.model.as_ref();
+        let out = spaces.let_strangers_out(&list, |w| m.is_some_and(|m| m.window(WindowId(w)).is_some()));
+        tracing::info!(id, pid, out, "spaces engine: a window found in a stage's Space that nothing holds: its app's strangers let out now");
     }
 
     /// `ctl state`'s `strays` under the Spaces engine: the windows being hidden again.

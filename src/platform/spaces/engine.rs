@@ -1724,6 +1724,21 @@ impl SpacesEngine {
         out
     }
 
+    /// True when window `id` is in one of the stage Spaces and not held: a window its app
+    /// ordered out while hidden and in again (it comes back in the Space it was in), for
+    /// [`Self::let_strangers_out`] at once rather than at the next tidy.
+    pub fn stranger_in_stage(&self, id: u32) -> bool {
+        let (stage_spaces, held): (BTreeSet<u64>, bool) = {
+            let st = self.state();
+            (st.stages.values().copied().collect(), st.held.contains_key(&id))
+        };
+        if held || stage_spaces.is_empty() {
+            return false;
+        }
+        let Some(sky) = self.sky() else { return false };
+        in_stage_space(&sky.spaces_of(&[id]), &stage_spaces)
+    }
+
     /// The windows held, each with its process from `list` (one `list` does not name is left
     /// out: gone).
     fn held_windows(&self, list: &[windows::CgWindow]) -> Vec<HeldWindow> {
@@ -2195,9 +2210,25 @@ impl WindowEngine for SpacesEngine {
     }
 }
 
+/// True when a window listed in `now` (its Spaces) is in one of `stage_spaces`.
+fn in_stage_space(now: &[u64], stage_spaces: &BTreeSet<u64>) -> bool {
+    now.iter().any(|s| stage_spaces.contains(s))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window its app ordered out while hidden and in again is listed in its stage Space
+    /// again; one on a Desktop, or in a landing Space, is not a stranger there.
+    #[test]
+    fn a_window_back_in_a_stage_space_is_told_from_one_on_a_desktop() {
+        let stages: BTreeSet<u64> = [995, 996].into();
+        assert!(in_stage_space(&[996], &stages));
+        assert!(!in_stage_space(&[4], &stages), "on Desktop 4");
+        assert!(!in_stage_space(&[1201], &stages), "a landing Space");
+        assert!(!in_stage_space(&[], &stages), "listed nowhere yet");
+    }
 
     #[test]
     fn the_switch_is_honoured_only_in_a_fixture_run() {
