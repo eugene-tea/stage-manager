@@ -283,6 +283,11 @@ pub struct StateFile {
     pub display: Option<SavedDisplay>,
     /// Every Space with stages, the shown one flagged `current`.
     pub spaces: Vec<SavedSpace>,
+    /// The window server's Desktop bound to each saved Space, by its uuid (the Spaces engine;
+    /// [`crate::engine::model::desks`]). Absent in files written before it was kept, and
+    /// under an engine with no listing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desks: Vec<crate::engine::model::desks::SavedDesk>,
 }
 
 /// The main display when saved.
@@ -316,6 +321,7 @@ impl StateFile {
             saved_at: None,
             display: None,
             spaces: vec![space],
+            desks: Vec::new(),
         }
     }
 
@@ -759,12 +765,14 @@ impl Model {
             l
         }));
         let main = self.main_display();
+        let ids: Vec<u64> = spaces.iter().map(|s| s.id).collect();
         StateFile {
             version: STATE_VERSION,
             session: None,
             saved_at: None,
             display: Some(SavedDisplay { w: main.frame.w, h: main.frame.h, key: main.key.known().then(|| main.key.text()) }),
             spaces,
+            desks: self.saved_desks(&ids),
         }
     }
 

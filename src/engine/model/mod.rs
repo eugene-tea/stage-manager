@@ -33,6 +33,7 @@
 
 mod ahead;
 mod away;
+pub mod desks;
 mod hidden;
 mod hiding;
 mod ops;
@@ -510,6 +511,12 @@ pub struct Model {
     pub(crate) clock: u64,
     /// Next stage ID.
     pub(crate) next_stage: u64,
+    /// The window server's Desktops bound to the model's Spaces, by the window server's id
+    /// (`desks.rs`): one id, one Space. Empty under an engine with no listing.
+    pub(crate) desks: BTreeMap<u64, desks::Bound>,
+    /// The bindings `state.json` saved, kept to be written again for the saved Spaces not
+    /// visited yet (`desks.rs`).
+    pub(crate) saved_desks: Vec<desks::SavedDesk>,
     /// Options.
     pub(crate) options: ModelOptions,
 }
@@ -579,6 +586,8 @@ impl Model {
             hidden_slots: HashMap::new(),
             clock: 0,
             next_stage: 1,
+            desks: BTreeMap::new(),
+            saved_desks: Vec::new(),
             options,
         };
         let ids: Vec<DisplayId> = model.displays.iter().map(|d| d.id).collect();
@@ -749,6 +758,10 @@ impl Model {
     /// the controller's fallback mid-run to the Corner engine. Windows hidden stay counted
     /// hidden; the controller hides them again the new engine's way.
     pub fn set_engine(&mut self, engine: crate::engine::recovery::EngineKind) {
+        if engine != self.options.engine {
+            // The window server's Desktops are the Spaces engine's to read (`desks.rs`).
+            self.unbind_all();
+        }
         self.options.engine = engine;
     }
 

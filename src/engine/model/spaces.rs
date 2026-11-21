@@ -114,6 +114,9 @@ pub struct ArrivalNote {
     /// Windows taken for windows on every Desktop at this arrival ([`STICKY_HOPS`]): pinned,
     /// out of their stage.
     pub sticky: Vec<WindowId>,
+    /// The Desktop the window server listed on the screen at this arrival, and whether the
+    /// model's guess was the Space bound to it ([`Model::arrive_on`]); `None` with no listing.
+    pub desk: Option<(u64, super::desks::Agree)>,
 }
 
 /// A Space's synthetic id: given by the model, stable while the app runs and kept in
@@ -339,10 +342,12 @@ impl Model {
         self.spaces.retain(|s| s.id != space);
         self.front_owed.remove(&space);
         self.moved_from.retain(|_, from| *from != space);
+        self.unbind_space(space);
     }
 
     /// Renames a Space everywhere it is referenced.
     pub(crate) fn relabel_space(&mut self, old: SpaceId, new: SpaceId) {
+        self.relabel_desks(old, new);
         for s in &mut self.spaces {
             if s.id == old {
                 s.id = new;
@@ -894,6 +899,7 @@ impl Model {
             kept_home,
             kept_hidden,
             sticky,
+            desk: None,
         };
         actions.push(Action::StateChanged);
         actions

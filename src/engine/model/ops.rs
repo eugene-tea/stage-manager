@@ -2030,6 +2030,7 @@ impl Model {
         self.adopt_votes.remove(&shown);
         self.beside.remove(&shown);
         self.spaces.retain(|s| s.id != shown);
+        self.unbind_space(shown);
         self.front_owed.remove(&shown);
         self.moved_from.retain(|_, from| *from != shown);
         for q in &mut self.quit {
