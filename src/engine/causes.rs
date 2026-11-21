@@ -52,6 +52,17 @@
 //!
 //! Each time decision and each expectation's end is noted ([`super::margin`]): a log tells
 //! how often the echo window was what decided.
+//!
+//! **When the count is off.** How many focus notices an app tells for a focus of ours is
+//! counted here from what was measured, not known for every app. One expectation too many
+//! stays open until a later request to that app is answered, a press that could cause a
+//! focus, or [`EXPECT_MAX`]; one too few leaves a notice to the echo window. Both show: an
+//! expectation that ends unanswered (by its cap, or passed over by a later answer) is a
+//! wait ended by its cap (`EXPECTED_FOCUS`, `EXPECTED_MOVE`), a focus notice judged by the
+//! echo window while something was still expected of its app is a decision of
+//! `FOCUS_ECHO_FALLBACK`, and each is kept for one log line with its app
+//! ([`Causes::take_notes`], [`Note`]). [`Causes::open`] counts what is expected now (`ctl
+//! state`, `causes`).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -95,6 +106,54 @@ pub enum Pressed {
     /// have caused a focus of any window.
     Elsewhere,
 }
+
+/// Something the ledger's count got wrong, or may have ([`Causes::take_notes`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Note {
+    /// What happened.
+    pub what: Off,
+    /// The app, when the ledger knows it (a focus's; a move's is its window's).
+    pub pid: Option<i32>,
+    /// The window.
+    pub window: u32,
+    /// How long after we asked.
+    pub age: Duration,
+}
+
+/// What a [`Note`] tells.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Off {
+    /// A focus we expected was never told: its cap ended it.
+    FocusNeverTold,
+    /// A focus we expected was never told: a later request to its app was answered first.
+    FocusPassedOver,
+    /// A frame we set was never answered by a move notice: its cap ended it.
+    MoveNeverTold,
+    /// A focus notice of a window we had focused was judged by the echo window (`ours`:
+    /// within it), with `open` other expectations of its app still open.
+    FocusByEchoWindow {
+        /// Judged ours.
+        ours: bool,
+        /// The app's expectations still open.
+        open: usize,
+    },
+}
+
+/// What is expected now ([`Causes::open`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Open {
+    /// Focus notices expected (requests with an answer still to come).
+    pub focus: usize,
+    /// Frames set and not answered yet.
+    pub moves: usize,
+    /// Activations awaited.
+    pub activations: usize,
+    /// How long the oldest of them has been open.
+    pub oldest: Option<Duration>,
+}
+
+/// The most notes kept for the log between two reads.
+const NOTES_KEPT: usize = 64;
 
 /// A focus we asked of an app (a focus or a raise of ours).
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +203,8 @@ pub struct Causes {
     users_focus: HashMap<u32, Instant>,
     /// The windows a batch of ours showed (set a frame for), and when.
     shown: HashMap<u32, Instant>,
+    /// What the count got wrong since the last [`Self::take_notes`].
+    notes: Vec<Note>,
     /// Each app's focused window as we believe it is, or will be once the app has done what
     /// we asked: the window we last asked it to focus, or the one a focus notice not ours
     /// named since.
@@ -167,6 +228,7 @@ impl Default for Causes {
             desktop: DesktopEcho::default(),
             users_focus: HashMap::new(),
             shown: HashMap::new(),
+            notes: Vec::new(),
             believed: HashMap::new(),
             window,
         }
@@ -177,6 +239,27 @@ impl Causes {
     /// Sets the echo window.
     pub fn set_window(&mut self, window: Duration) {
         self.window = window;
+    }
+
+    fn note(notes: &mut Vec<Note>, note: Note) {
+        if notes.len() < NOTES_KEPT {
+            notes.push(note);
+        }
+    }
+
+    /// What the count got wrong since the last call, oldest first, for the log (the caller
+    /// knows each app's bundle id).
+    pub fn take_notes(&mut self) -> Vec<Note> {
+        std::mem::take(&mut self.notes)
+    }
+
+    /// What is expected at `now`: the answers still to come and the oldest one's age.
+    pub fn open(&self, now: Instant) -> Open {
+        let focus: Vec<Instant> = self.focus.values().flatten().filter(|e| e.left > 0).map(|e| e.asked).collect();
+        let moves: Vec<Instant> = self.moves.values().filter(|e| e.unmet).map(|e| e.asked).collect();
+        let activations: Vec<Instant> = self.awaiting.values().copied().collect();
+        let oldest = focus.iter().chain(&moves).chain(&activations).min().map(|t| now.saturating_duration_since(*t));
+        Open { focus: focus.len(), moves: moves.len(), activations: activations.len(), oldest }
     }
 
     // ----- what we did --------------------------------------------------------------------
@@ -390,12 +473,24 @@ impl Causes {
             asked[i].left -= 1;
             margin::wait("EXPECTED_FOCUS", age, EXPECT_MAX, End::Met);
             for e in asked.drain(..i).filter(|e| e.left > 0) {
-                margin::wait("EXPECTED_FOCUS", at.saturating_duration_since(e.asked), EXPECT_MAX, End::Cap);
+                // Never told, and now never to be: one expectation too many.
+                let age = at.saturating_duration_since(e.asked);
+                margin::wait("EXPECTED_FOCUS", age, EXPECT_MAX, End::Cap);
+                Self::note(&mut self.notes, Note { what: Off::FocusPassedOver, pid: Some(pid), window: e.window, age });
             }
             return true;
         }
         // By time, as before: one more than expected, within the echo window of our focus.
         let Some(last) = asked.iter().rev().find(|e| e.window == id) else { return false };
+        let open = asked.iter().filter(|e| e.left > 0).count();
+        if open > 0 {
+            // While something is still expected of its app: the count may be off (this
+            // notice the answer to one of those, or one more than counted).
+            let age = margin::age("FOCUS_ECHO_FALLBACK", at, last.asked);
+            let ours = margin::within("FOCUS_ECHO_FALLBACK", age, window);
+            Self::note(&mut self.notes, Note { what: Off::FocusByEchoWindow { ours, open }, pid: Some(pid), window: id, age });
+            return ours;
+        }
         let age = margin::age("ECHO_WINDOW", at, last.asked);
         age < window.saturating_mul(2) && margin::within("ECHO_WINDOW", age, window)
     }
@@ -488,11 +583,13 @@ impl Causes {
         self.wrote.retain(|_, t| now.duration_since(*t) < keep);
         self.apps.retain(|_, t| now.duration_since(*t) < keep);
         self.awaiting.retain(|_, t| now.saturating_duration_since(*t) < LATE_ACTIVATION_MAX);
-        for asked in self.focus.values_mut() {
+        let notes = &mut self.notes;
+        for (pid, asked) in self.focus.iter_mut() {
             asked.retain(|e| {
                 let age = now.saturating_duration_since(e.asked);
                 if age >= EXPECT_MAX && e.left > 0 {
                     margin::wait("EXPECTED_FOCUS", age, EXPECT_MAX, End::Cap);
+                    Self::note(notes, Note { what: Off::FocusNeverTold, pid: Some(*pid), window: e.window, age });
                 }
                 // One answered stays while the echo window may still ask about it.
                 age < if e.left > 0 { EXPECT_MAX } else { keep }
@@ -502,9 +599,12 @@ impl Causes {
         self.shown.retain(|_, t| now.saturating_duration_since(*t) < keep);
         // A frame we set stays the frame we set until the window moves elsewhere: only an
         // unanswered set ends by time.
-        for e in self.moves.values_mut() {
-            if e.unmet && now.saturating_duration_since(e.asked) >= EXPECT_MAX {
+        for (id, e) in self.moves.iter_mut() {
+            let age = now.saturating_duration_since(e.asked);
+            if e.unmet && age >= EXPECT_MAX {
                 e.unmet = false;
+                margin::wait("EXPECTED_MOVE", age, EXPECT_MAX, End::Cap);
+                Self::note(notes, Note { what: Off::MoveNeverTold, pid: None, window: *id, age });
             }
         }
     }
@@ -670,6 +770,36 @@ mod tests {
         c.expect_focus(7, 42, t0 + MS(2000));
         assert!(c.focus_heard(8, Some(42), t0 + MS(3500)));
         assert!(c.focus_heard(7, Some(42), t0 + MS(3600)), "ours again: asked after the press");
+    }
+
+    /// When the count is off it shows: an expectation never answered (by its cap, or passed
+    /// over by a later answer), and a focus judged by the echo window while something was
+    /// still expected of its app, each noted once for the log; `open` counts what is
+    /// expected now.
+    #[test]
+    fn what_the_count_got_wrong_is_noted_once() {
+        let t0 = Instant::now();
+        let mut c = Causes { front: Some(42), ..Causes::default() };
+        c.believed.insert(42, 1);
+        c.expect_focus(7, 42, t0);
+        c.expect_move(9, AT, Some(PARK), t0);
+        c.touch_app(50, t0 + MS(500));
+        assert_eq!(c.open(t0 + MS(2000)), Open { focus: 1, moves: 1, activations: 1, oldest: Some(MS(2000)) });
+        // Passed over: a later request to the app answered first.
+        c.expect_focus(8, 42, t0 + MS(1000));
+        assert!(c.focus_heard(8, Some(42), t0 + MS(1100)));
+        assert_eq!(c.take_notes(), vec![Note { what: Off::FocusPassedOver, pid: Some(42), window: 7, age: MS(1100) }]);
+        // The echo window's answer while something is still expected of the app.
+        c.expect_focus(7, 42, t0 + MS(1200));
+        assert!(c.focus_heard(8, Some(42), t0 + MS(1400)), "one more of 8, within the echo window of our focus of it");
+        assert_eq!(c.take_notes(), vec![Note { what: Off::FocusByEchoWindow { ours: true, open: 1 }, pid: Some(42), window: 8, age: MS(400) }]);
+        // The caps.
+        c.prune(t0 + MS(1200) + EXPECT_MAX);
+        let notes = c.take_notes();
+        assert!(notes.contains(&Note { what: Off::FocusNeverTold, pid: Some(42), window: 7, age: EXPECT_MAX }), "{notes:?}");
+        assert!(notes.iter().any(|n| n.what == Off::MoveNeverTold && n.window == 9), "{notes:?}");
+        assert!(c.take_notes().is_empty(), "each once");
+        assert_eq!(c.open(t0 + MS(1200) + EXPECT_MAX), Open::default());
     }
 
     /// A raise makes a window its app's key window only when that app is in front: behind,

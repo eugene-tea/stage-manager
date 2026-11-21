@@ -347,6 +347,14 @@ wait that often ends by its cap, is the one a slower or busier Mac may get wrong
   as it happens (once as it comes close and once as it crosses, not at every check), and
   every wait ended by its cap (`ended=cap`).
 - `ctl state`'s `margins` has the whole run's table.
+- The cause ledger (`engine/causes.rs`: what our own focus, raise and frame expect of macOS)
+  says when its count is off. `EXPECTED_FOCUS` and `EXPECTED_MOVE` are its waits: `capped`
+  counts the expectations that ended unanswered (by their 30 s cap, or passed over when a
+  later request to the same app was answered first); `FOCUS_ECHO_FALLBACK` counts the focus
+  notices judged by the echo window while something was still expected of their app. At
+  `debug` each is one line, `cause ledger: …`, with the app's bundle id, the window id and
+  the age. `ctl state`'s `causes` has what is expected now: `open` (`open_focus`,
+  `open_moves`, `open_activations`) and `oldest_ms`.
 
 Shares are measured to when macOS's notice reached the app, not to when the window thread
 got to it (docs/ARCHITECTURE.md, "Time"): a busy thread no longer shrinks a window.

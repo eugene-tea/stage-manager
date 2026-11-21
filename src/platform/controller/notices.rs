@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use super::{Controller, DISPLAY_SETTLE, USER_FOCUS, arrival, listed_bounds};
 use crate::engine::attribution::{self, ActivationFacts, ActivationStage, ActivationVerdict, AppNow, FocusFacts, FocusStage, FocusVerdict, Heard, Notice, Place, Scene};
+use crate::engine::causes::Off;
 use crate::engine::desktop_echo::Told;
 use crate::engine::focus_elsewhere::{self, FocusOnSwitch, WentElsewhere};
 use crate::engine::focus_replay::Wanted;
@@ -67,6 +68,26 @@ impl Controller {
         (place, standard)
     }
 
+    /// One debug line for each thing the cause ledger's count got wrong since the last call
+    /// ([`crate::engine::causes::Note`]), with the app's bundle id (never a title): how
+    /// often an expectation ends unanswered, or the echo window answers while something is
+    /// still expected of the app, shows in a log.
+    pub(super) fn tell_ledger_notes(&mut self, ob: &Observer) {
+        for note in self.causes.take_notes() {
+            let pid = note.pid.or_else(|| ob.window(note.window).map(|w| w.pid));
+            let bundle = pid.and_then(|pid| ob.bundle_id(pid)).unwrap_or("?");
+            let age_ms = note.age.as_millis() as u64;
+            match note.what {
+                Off::FocusNeverTold => tracing::debug!(bundle, pid, window = note.window, age_ms, "cause ledger: a focus we expected was never told (its cap)"),
+                Off::FocusPassedOver => tracing::debug!(bundle, pid, window = note.window, age_ms, "cause ledger: a focus we expected was never told (a later request to its app was answered first)"),
+                Off::MoveNeverTold => tracing::debug!(bundle, pid, window = note.window, age_ms, "cause ledger: a frame we set was never answered by a move notice (its cap)"),
+                Off::FocusByEchoWindow { ours, open } => {
+                    tracing::debug!(bundle, pid, window = note.window, age_ms, ours, open, "cause ledger: a focus judged by the echo window while its app still owes an answer")
+                }
+            }
+        }
+    }
+
     /// A window's focus notice, received at `at` (module docs).
     pub(super) fn on_focused(&mut self, ob: &mut Observer, id: u32, at: Instant, now: Instant) {
         if self.unplaced.contains(&id) {
@@ -80,6 +101,7 @@ impl Controller {
         // for: its rules are the arrival's, by the echo window of its moves as before); and
         // the arrangement that may overrule either.
         let echo = self.causes.focus_heard(id, pid, at) || (self.ahead.is_some() && self.causes.wrote_before(id, at));
+        self.tell_ledger_notes(ob);
         let beats_echo = echo && self.focus_beats_echo(ob, id, now);
         let heard = self.heard(bundle.as_deref(), Told::Focus, at);
         let mut facts = FocusFacts {

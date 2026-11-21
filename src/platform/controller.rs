@@ -6145,6 +6145,7 @@ impl Controller {
             self.landing_focus_after(ob, id, after);
         }
         self.causes.prune(now);
+        self.tell_ledger_notes(ob);
         if !safety::quit_requested() {
             self.retry_shows(ob, false);
         }
@@ -6855,6 +6856,16 @@ impl Controller {
         state["mission_control"] = self.status_mission_control();
         // The window server's Desktops, their bindings and where they disagree (design r3).
         state["desks"] = self.desks_json();
+        // What our own actions still expect of macOS (the cause ledger): the answers to
+        // come and how long the oldest has been open.
+        let open = self.causes.open(clock::now());
+        state["causes"] = json!({
+            "open_focus": open.focus,
+            "open_moves": open.moves,
+            "open_activations": open.activations,
+            "open": open.focus + open.moves + open.activations,
+            "oldest_ms": open.oldest.map(|d| d.as_millis() as u64),
+        });
         // Windows whose handle died judged closed once, waiting for a second look.
         state["stale_closing"] = json!(self.stale.waiting());
         // Keep stages in place (9B): the order, the active stage's mode and its empty slot.
