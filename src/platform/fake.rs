@@ -378,6 +378,12 @@ pub struct Desk {
     /// The app armed the tap for ⌘Tab's switcher (`mission_key_tap::switcher_up`): while it
     /// is, the tap forwards Escape, ⌘ let go and mouse-downs.
     pub tap_switcher: bool,
+    /// An activation that slides tells its notice at the slide's start, not its end: as a
+    /// Dock item's `AXPress` did in the live two-Desktop check (11-21, `spaces --auto`, the
+    /// Dock arrivals: the activation handled ~30 ms before the arriving Desktop's windows were
+    /// listed, the Space change's notice ~300 ms after it). False: as measured 10-13 for an
+    /// `open` ([`delays::SLIDE_ACTIVATES`]).
+    pub activation_leads_slide: bool,
     /// macOS's own windows listed above the apps' (Mission Control's covers, Show Desktop's).
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
@@ -526,6 +532,7 @@ impl Desk {
             switcher: Switcher::default(),
             tap_hears: true,
             tap_switcher: false,
+            activation_leads_slide: false,
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
             mission: false,
@@ -1070,7 +1077,7 @@ impl Desk {
                 let after = match slide {
                     Some((screen, to)) => {
                         self.slide(screen, to);
-                        delays::SLIDE_ACTIVATES
+                        if self.activation_leads_slide { 0.0 } else { delays::SLIDE_ACTIVATES }
                     }
                     None => 0.0,
                 };
