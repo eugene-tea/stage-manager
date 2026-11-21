@@ -76,8 +76,9 @@
 //!   round sm-tick: which could stir the WM tick); reads only.
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
-//! - `dock-notices`, `space-flip`, `names`, `indicator` (round r0-probes): the four live probes
-//!   of [`system`], plain tables and verdicts, through `scripts/probe_system.py`.
+//! - `dock-notices`, `space-flip`, `names`, `indicator` (round r0-probes), `cgs` (round
+//!   r2-probes2): the five live probes of [`system`], plain tables and verdicts, through
+//!   `scripts/probe_system.py`.
 
 
 use std::io::Write as _;
@@ -205,7 +206,7 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle|pixels|notices|dock-notices|space-flip|names|indicator …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle|pixels|notices|dock-notices|space-flip|names|indicator|cgs …");
     };
     // Read only (no window moves): any app, their own arguments.
     if cmd == "sources" {

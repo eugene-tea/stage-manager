@@ -1,4 +1,4 @@
-//! `stage-manager probe-spaces dock-notices|space-flip|names|indicator …`: four live
+//! `stage-manager probe-spaces dock-notices|space-flip|names|indicator|cgs …`: five live
 //! probes the rework waits on (rounds r0-probes and r2-probes2, 11-21; the review's R3 and R4).
 //! Each answers one question the window server or the Dock can answer and nothing in the repo
 //! has measured:
@@ -11,6 +11,9 @@
 //!   one `SLSCopyManagedDisplaySpaces` costs (read only).
 //! - [`indicator`]: which capture lights the purple screen-recording indicator (may raise
 //!   macOS's screen-capture alert: run only with the owner at the Mac).
+//! - [`cgs`]: does the window server tell this process of Mission Control, a Desktop change
+//!   or a window's move between Spaces (`SLSRegisterConnectionNotifyProc`,
+//!   `SLSRegisterNotifyProc`, every type 0..2000)?
 //!
 //! They are reached through `scripts/probe_system.py` (`scripts/test-stages.sh probe-system`),
 //! which opens the fixture windows, launches this binary from the dev app through
@@ -41,6 +44,7 @@ use crate::platform::space_keys::{self, SpaceKey};
 use crate::platform::spaces::ffi::{DisplaySpaces, Sky};
 use crate::platform::{desktop, desktop_counts, windows};
 
+mod cgs;
 mod dock_notices;
 mod indicator;
 mod names;
@@ -52,7 +56,7 @@ pub(super) struct Ctx {
     pub(super) sky: Sky,
 }
 
-/// The arguments the four take (each reads the ones it needs).
+/// The arguments the five take (each reads the ones it needs).
 #[derive(Debug, Default)]
 pub(super) struct Args {
     /// Fixture bundle ids, in order.
@@ -101,7 +105,7 @@ impl Args {
     }
 }
 
-/// Runs `cmd` when it is one of the four (module docs); `None` for any other subcommand.
+/// Runs `cmd` when it is one of the five (module docs); `None` for any other subcommand.
 pub(super) fn run(cmd: &str, rest: &[String]) -> Option<ExitCode> {
     type Probe = fn(&Ctx, &Args) -> Result<(), String>;
     let probe: Probe = match cmd {
@@ -109,6 +113,7 @@ pub(super) fn run(cmd: &str, rest: &[String]) -> Option<ExitCode> {
         "space-flip" => space_flip::run,
         "names" => names::run,
         "indicator" => indicator::run,
+        "cgs" => cgs::run,
         _ => return None,
     };
     let args = match Args::parse(rest) {

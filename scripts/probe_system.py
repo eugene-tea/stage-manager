@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Four live probes the rework waits on (round r0-probes, 11-21; the review's R3 and R4).
+"""Five live probes the rework waits on (rounds r0-probes and r2-probes2, 11-21; the review's
+R3 and R4).
 
-Run them as `scripts/test-stages.sh probe-system [dock] [flip] [names] [indicator] [--rounds N]
-[--window ID]` (which builds the app and the fixtures and refreshes the dev copy), or with
-`python3 scripts/probe_system.py …` once built. With no name: dock, flip and names.
+Run them as `scripts/test-stages.sh probe-system [dock] [flip] [names] [indicator] [cgs]
+[--rounds N] [--window ID]` (which builds the app and the fixtures and refreshes the dev copy),
+or with `python3 scripts/probe_system.py …` once built. With no name: dock, flip and names.
 `indicator` runs only by name: it may raise macOS's screen-capture alert, so the owner is at
 the Mac for it.
 
@@ -25,6 +26,7 @@ Ctrl-C. Nothing is written to the repo: the probe's output file is in the test h
              The Desktop keys, Bravo then Alpha opened, a Desktop picked in Mission Control,
              Alpha's window into full screen and out, each N times there and back. Needs two
              Desktops on the main screen for all but full screen (skipped and said with one).
+             The probe turns as an app does (`[NSApp run]`'s event fetch), so the notice comes.
              Nobody may use the Mac. About 2-3 min.
   names      Read only: SLSCopyManagedDisplaySpaces's screens and Spaces (identifiers by
              shape, never values), separate Spaces per display, SLSCopySpacesForWindows for a
@@ -37,6 +39,17 @@ Ctrl-C. Nothing is written to the repo: the probe's output file is in the test h
              menu bar's windows are read every 100 ms; kinds the list cannot tell run again
              with a 3 s countdown each, for the owner to watch. About 1-2 min. Says how many
              screen-access alerts macOS showed meanwhile.
+  cgs        Does the window server tell its clients? Every notice type 0..2000 registered
+             both ways (SLSRegisterConnectionNotifyProc, SLSRegisterNotifyProc) and the
+             fixture windows' own notices asked for (SLSRequestNotificationsForWindows), while
+             N rounds of: Mission Control, App Exposé and Show Desktop opened and closed by
+             their shortcuts, the Desktop key there and back, Bravo then Alpha opened (slides),
+             Alpha into full screen and out, minimized and back, a Charlie window closed, and
+             Alpha into a Space the probe made and back; 3 s rests between. Per action the
+             types that came within 1.5 s and in no rest; the rests' types as noise; verdicts
+             for Mission Control's open and close, a Desktop change, a Space membership
+             change. Alpha, Bravo (on the next Desktop) and Charlie (N+1 windows). Nobody may
+             use the Mac. About 2 min a round.
 
 It refuses to run while any Stage Manager runs (the owner's or a test's). Only fixture windows
 are moved, and each probe puts them back.
@@ -54,7 +67,7 @@ import test_stages as ts  # noqa: E402
 
 say = ts.say
 
-PROBES = {"dock": "dock-notices", "flip": "space-flip", "names": "names", "indicator": "indicator"}
+PROBES = {"dock": "dock-notices", "flip": "space-flip", "names": "names", "indicator": "indicator", "cgs": "cgs"}
 DEFAULT = ["dock", "flip", "names"]
 ALPHA, BRAVO, CHARLIE = ts.EXTRA["a"], ts.EXTRA["b"], ts.EXTRA["c"]
 
@@ -150,6 +163,15 @@ def run_indicator(_rounds, _window):
     return r
 
 
+def run_cgs(rounds, _window):
+    ts.start_extra("a", 1)
+    ts.start_extra("b", 1)
+    ts.start_extra("c", rounds + 1)
+    ts.activate("a")
+    time.sleep(1.0)
+    return launch("cgs", ALPHA[0], BRAVO[0], CHARLIE[0], "--rounds", rounds, timeout=120 + 180 * rounds)
+
+
 def cleanup():
     for pid in probe_pids():
         os.kill(pid, signal.SIGTERM)
@@ -168,7 +190,7 @@ def main():
     atexit.register(cleanup)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, lambda *_: sys.exit(130))
-    runs = {"dock": run_dock, "flip": run_flip, "names": run_names, "indicator": run_indicator}
+    runs = {"dock": run_dock, "flip": run_flip, "names": run_names, "indicator": run_indicator, "cgs": run_cgs}
     results = []
     try:
         for name in names:
