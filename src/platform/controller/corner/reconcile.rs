@@ -26,7 +26,7 @@ impl Controller {
     /// ([`crate::engine::corner::park_reconcile`]; the review's L1, K2, S5: until now only a
     /// Space arrival's `match_screen` reconciled the two, and such a window sat mid-screen,
     /// counted parked, with no card, until the next Desktop change). A window the user
-    /// focused since its park ([`Self::user_focus`]), or moved while parked, joins the active
+    /// focused since its park ([`crate::engine::causes::Causes::focused_since_hidden`]), or moved while parked, joins the active
     /// stage where it is ([`Model::adopt_shown`]); any other is parked again once it rests
     /// (nothing is judged while our own park, raise or un-minimize may still be landing, nor
     /// while its listed frame changes: live 10-29, ⌘M's un-minimize focused the window and
@@ -147,7 +147,7 @@ impl Controller {
             // The user's choice only: focused now, and by a focus of theirs since our park
             // (macOS's focus at an un-minimize, or our own, counts for nothing).
             let is_focused = *focused.get_or_insert_with(focused_window) == Some(id);
-            let user_focused = is_focused && self.user_focus.contains_key(&id);
+            let user_focused = is_focused && self.causes.focused_since_hidden(id);
             let facts = Facts {
                 seen,
                 bounds,

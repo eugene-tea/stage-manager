@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use super::{Controller, DISPLAY_SETTLE, USER_FOCUS, arrival, listed_bounds};
 use crate::engine::attribution::{self, ActivationFacts, ActivationStage, ActivationVerdict, AppNow, FocusFacts, FocusStage, FocusVerdict, Heard, Notice, Place, Scene};
-use crate::engine::desktop_echo::{Cause, Told};
+use crate::engine::desktop_echo::Told;
 use crate::engine::focus_elsewhere::{self, FocusOnSwitch, WentElsewhere};
 use crate::engine::focus_replay::Wanted;
 use crate::engine::mission_control::PickBy;
@@ -35,7 +35,7 @@ impl Controller {
             button_down: input::left_button_down(),
             display_changed: self.displays_changed_at,
             display_settle: DISPLAY_SETTLE,
-            wallpaper_echo: self.desktop_echo.heard(bundle, told, at) == Cause::WallpaperEcho,
+            wallpaper_echo: self.causes.desktop_heard(bundle, told, at),
             settling: self.model.as_ref().is_some_and(Model::settling),
         }
     }
@@ -109,7 +109,7 @@ impl Controller {
         }
         if !matches!(verdict, FocusVerdict::Ours | FocusVerdict::AppBehind | FocusVerdict::AfterDisplayChange) {
             // Past 3: not our echo, the user's (or an app's own), remembered for the reconciler.
-            self.user_focus.insert(id, now);
+            self.causes.focus_not_ours(id, now);
         }
         if !verdict.passed_causes() {
             match verdict {

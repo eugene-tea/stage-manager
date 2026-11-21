@@ -26,6 +26,20 @@
 //!   echo window of our `AXFrontmost`, or when it is the first reported for an app we made
 //!   frontmost with nothing of the user's between: the rule the other two were modelled on.
 //!
+//! The ledger also keeps what the same question needs later, in one place (until round
+//! r4-causes four records of the controller's own):
+//!
+//! - **Finder's echo of a press on the desktop** ([`Causes::desktop_pressed`],
+//!   [`Causes::desktop_heard`]; [`super::desktop_echo`]): the user's press, and the first
+//!   activation and focus of Finder it expects.
+//! - **The windows the user (or their app) focused since we last hid them**
+//!   ([`Causes::focus_not_ours`], [`Causes::focused_since_hidden`]): a focus judged not ours
+//!   stays on record until our next hide of its window, for the check that adopts a parked
+//!   window the user went to.
+//! - **The windows our batches showed, and when** ([`Causes::showed`],
+//!   [`Causes::shown_within`]): a Space change's arrival counts those just shown as carried
+//!   by our switch (a time still, the arrival's own).
+//!
 //! What stays a time, and why:
 //!
 //! - The echo window (`[windows] focus_echo_ms`) still answers for a focus notice **beyond**
@@ -42,6 +56,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use super::desktop_echo::{Cause, DesktopEcho, Told};
 use super::geometry::Rect;
 use super::margin::{self, End};
 
@@ -123,6 +138,12 @@ pub struct Causes {
     front: Option<i32>,
     /// The last press of the user's the input monitor heard, and when.
     last_press: Option<(Pressed, Instant)>,
+    /// The last press on the desktop, and what Finder still owes it.
+    desktop: DesktopEcho,
+    /// The windows a focus not ours named since we last hid them, and when.
+    users_focus: HashMap<u32, Instant>,
+    /// The windows a batch of ours showed (set a frame for), and when.
+    shown: HashMap<u32, Instant>,
     /// Each app's focused window as we believe it is, or will be once the app has done what
     /// we asked: the window we last asked it to focus, or the one a focus notice not ours
     /// named since.
@@ -135,7 +156,20 @@ impl Default for Causes {
         // The echo window: `[windows] focus_echo_ms` as the config has it by default (set from
         // the config in force at the controller's start, [`Self::set_window`]).
         let window = Duration::from_millis(crate::config::Config::default().windows.focus_echo_ms);
-        Self { wrote: HashMap::new(), focus: HashMap::new(), moves: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), front: None, last_press: None, believed: HashMap::new(), window }
+        Self {
+            wrote: HashMap::new(),
+            focus: HashMap::new(),
+            moves: HashMap::new(),
+            apps: HashMap::new(),
+            awaiting: HashMap::new(),
+            front: None,
+            last_press: None,
+            desktop: DesktopEcho::default(),
+            users_focus: HashMap::new(),
+            shown: HashMap::new(),
+            believed: HashMap::new(),
+            window,
+        }
     }
 }
 
@@ -163,6 +197,36 @@ impl Causes {
     /// `notices` focus notices are expected of window `id` of app `pid`, asked now: one
     /// request with the one before it when that was for the same window (a switch focuses
     /// its key window at once and again at the landing).
+    /// A batch of ours just showed this window (set its frame): on record for the arrival of
+    /// a Space change ([`Self::shown_within`]).
+    pub fn showed(&mut self, id: u32, now: Instant) {
+        self.shown.insert(id, now);
+    }
+
+    /// The windows our batches showed less than `limit` before `at` (time window `name`,
+    /// each noted); the others are forgotten.
+    pub fn shown_within(&mut self, at: Instant, limit: Duration, name: &'static str) -> Vec<u32> {
+        self.shown.retain(|_, shown| margin::within(name, at.saturating_duration_since(*shown), limit));
+        self.shown.keys().copied().collect()
+    }
+
+    /// We just hid this window: a focus of it before this is not the user's choice about
+    /// where it is now.
+    pub fn hid(&mut self, id: u32) {
+        self.users_focus.remove(&id);
+    }
+
+    /// A focus of window `id` was judged not ours (the user's, or its app's own): on record
+    /// until our next hide of it.
+    pub fn focus_not_ours(&mut self, id: u32, now: Instant) {
+        self.users_focus.insert(id, now);
+    }
+
+    /// True when the user (or its app) focused window `id` since we last hid it.
+    pub fn focused_since_hidden(&self, id: u32) -> bool {
+        self.users_focus.contains_key(&id)
+    }
+
     fn expect(&mut self, id: u32, pid: i32, notices: u8, now: Instant) {
         let asked = self.focus.entry(pid).or_default();
         match asked.last_mut().filter(|e| e.window == id && now.saturating_duration_since(e.asked) < EXPECT_MAX) {
@@ -255,6 +319,30 @@ impl Causes {
             Pressed::Window(w) => Some(w == id),
             Pressed::Elsewhere => None,
         }
+    }
+
+    /// The user pressed the desktop (the wallpaper or a desktop icon): Finder's first
+    /// activation and first window focus that follow are the press's echo
+    /// ([`DesktopEcho`]).
+    pub fn desktop_pressed(&mut self, now: Instant) {
+        self.desktop.desktop_pressed(now);
+    }
+
+    /// A left mouse-up: a desktop press still down is released now.
+    pub fn released(&mut self, now: Instant) {
+        self.desktop.released(now);
+    }
+
+    /// The user did something else than press the desktop (a mouse-down off it, a key
+    /// press): what Finder does next is no echo. True when an echo was pending.
+    pub fn off_the_desktop(&mut self) -> bool {
+        self.desktop.user_acted()
+    }
+
+    /// App `bundle_id` told `told`, received at `at`: true when it is Finder's echo of the
+    /// last desktop press ([`DesktopEcho::heard`]). Call it once per notice.
+    pub fn desktop_heard(&mut self, bundle_id: Option<&str>, told: Told, at: Instant) -> bool {
+        self.desktop.heard(bundle_id, told, at) == Cause::WallpaperEcho
     }
 
     /// The user may have switched apps (a click, a ⌘ key press, another app activated on
@@ -403,6 +491,7 @@ impl Causes {
             });
         }
         self.focus.retain(|_, asked| !asked.is_empty());
+        self.shown.retain(|_, t| now.saturating_duration_since(*t) < keep);
         // A frame we set stays the frame we set until the window moves elsewhere: only an
         // unanswered set ends by time.
         for e in self.moves.values_mut() {
@@ -417,6 +506,8 @@ impl Causes {
         self.wrote.remove(&id);
         self.focus.values_mut().for_each(|asked| asked.retain(|e| e.window != id));
         self.moves.remove(&id);
+        self.users_focus.remove(&id);
+        self.shown.remove(&id);
         self.believed.retain(|_, w| *w != id);
     }
 }
@@ -616,6 +707,34 @@ mod tests {
         c.expect_move(9, AT, Some(PARK), t0);
         assert!(c.move_heard(9, Some(clamped), false, t0 + MS(20)));
         assert!(c.move_heard(9, Some(Rect { w: 740.0, ..AT }), false, t0 + MS(60)));
+    }
+
+    /// The review of 1.9, B-8: the windows our batches showed are kept only for a while,
+    /// also with no Space change ever (one Desktop), and an arrival names those just shown.
+    #[test]
+    fn the_windows_we_showed_are_named_to_an_arrival_only_for_a_while() {
+        let t0 = Instant::now();
+        let mut c = Causes::default();
+        for i in 0..100 {
+            c.showed(i, t0 + MS(u64::from(i) * 100));
+            c.prune(t0 + MS(u64::from(i) * 100));
+        }
+        assert!(c.shown.len() <= 51, "pruned with no arrival ever: {}", c.shown.len());
+        let mut carried = c.shown_within(t0 + MS(9_900), MS(1500), "SLIDE_CARRY");
+        carried.sort_unstable();
+        assert_eq!(carried, (85..100).collect::<Vec<u32>>(), "only those within the carry of the arrival");
+    }
+
+    /// A focus judged not ours stays on record until our next hide of its window.
+    #[test]
+    fn a_focus_not_ours_is_remembered_until_we_hide_its_window() {
+        let t0 = Instant::now();
+        let mut c = Causes::default();
+        c.focus_not_ours(7, t0);
+        c.prune(t0 + Duration::from_secs(3600));
+        assert!(c.focused_since_hidden(7));
+        c.hid(7);
+        assert!(!c.focused_since_hidden(7));
     }
 
     // ----- an activation --------------------------------------------------------------------

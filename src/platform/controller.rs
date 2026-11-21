@@ -119,7 +119,6 @@ use self::corner::unrestored::LetGo;
 use crate::engine::corner::park_reconcile::{self, Stray};
 use crate::engine::corner::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_click;
-use crate::engine::desktop_echo::DesktopEcho;
 use crate::engine::displays::{display_kept, display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display, returned_screens};
 use crate::engine::early_start;
 use crate::engine::focus_elsewhere::{SwitchBack, WentElsewhere};
@@ -891,10 +890,6 @@ pub struct Controller {
     /// Window tabs selected that Accessibility did not list when their app was asked again
     /// ([`tabs`]), and when it was: asked again only after [`tabs::ASK_AGAIN`].
     tab_asked: HashMap<u32, Instant>,
-    /// Windows our own batches moved onto the screen or set a frame for, and when (round
-    /// stage-lost): named to the arrivals of a Space change within [`SLIDE_CARRY`]
-    /// ([`Model::set_slide_carried`]).
-    shown_by_us: HashMap<u32, Instant>,
     /// While a notice or an input is handled (an observer event, a Space change and its
     /// arrival, a press), when it was received from macOS ([`Self::received_at`]): what is
     /// asked deep in its handling of "within X of Y" ([`SLIDE_CARRY`], [`USER_SWITCH`], a
@@ -1037,8 +1032,6 @@ pub struct Controller {
     seen_active: HashMap<u64, Option<u64>>,
     /// The stages at the last strip snapshot (`None` before the first).
     seen_stages: Option<BTreeSet<u64>>,
-    /// Finder's activation and focus that follow a wallpaper click.
-    desktop_echo: DesktopEcho,
     /// `[strip] hide_while_desktop_shown`: a wallpaper click hid the strip, until the
     /// reveal ends or any window activation.
     strip_hidden_for_desktop: bool,
@@ -1055,11 +1048,6 @@ pub struct Controller {
     /// Windows whose Accessibility handle died: when each was looked up afresh, and those
     /// judged closed once ([`stale`], [`crate::engine::stale_handle`]).
     stale: stale::StaleHandles,
-    /// When the user last focused each window (a focus event that was not our echo), kept
-    /// until our next park of it: the reconciler adopts a parked window the user focused
-    /// since it was parked, never one macOS focused at an un-minimize or our own focus
-    /// ([`Self::reconcile_parked`]).
-    user_focus: HashMap<u32, Instant>,
     /// When a wallpaper click was left to macOS's own reveal (Show Desktop: every window slides
     /// aside): until its windows are back, a check never counts them gone, so the reveal is
     /// never read as a Space change (review R2 V8). Ends with a click off the wallpaper or a
@@ -1135,15 +1123,6 @@ fn kept_ready(strip_visible: bool, windows: Vec<CardWindow>) -> Vec<CardWindow> 
 /// list every 20 ms for 1.5 s (the review of 1.9, B-7); the once-a-second check offers them.
 fn looks_soon(listed: Option<Rect>, launched_ago: Option<Duration>) -> bool {
     listed.is_none_or(|b| b.is_degenerate()) || launched_ago.is_some_and(|d| d < FRESH_APP)
-}
-
-/// Notes in `shown` that our own batch set window `id`'s frame at `now`, forgetting the
-/// windows noted [`SLIDE_CARRY`] or longer ago ([`Controller::slide_carried`] reads what is
-/// left). Pruned only at a Space change before (the review of 1.9, B-8), the map kept every
-/// window ever shown on a Mac with one Desktop.
-fn note_shown_by_us(shown: &mut HashMap<u32, Instant>, id: u32, now: Instant) {
-    shown.retain(|_, at| now.saturating_duration_since(*at) < SLIDE_CARRY);
-    shown.insert(id, now);
 }
 
 /// The strip's card count on a display with `visible` frame.
@@ -1226,7 +1205,6 @@ impl Controller {
             unplaced: BTreeSet::new(),
             fresh_unplaced: BTreeMap::new(),
             tab_asked: HashMap::new(),
-            shown_by_us: HashMap::new(),
             received: None,
             users_word: false,
             build_wait: None,
@@ -1275,13 +1253,11 @@ impl Controller {
             off_screen: HashMap::new(),
             seen_active: HashMap::new(),
             seen_stages: None,
-            desktop_echo: DesktopEcho::default(),
             strip_hidden_for_desktop: false,
             focus_after_press: None,
             unparked: BTreeMap::new(),
             unparked_apps: BTreeMap::new(),
             stale: stale::StaleHandles::default(),
-            user_focus: HashMap::new(),
             active_off_screen: HashMap::new(),
             macos_reveal_at: None,
             wallpaper_press: None,
@@ -1718,7 +1694,8 @@ impl Controller {
                 }
             };
             if matches!(action, Action::SetFrame { .. }) {
-                note_shown_by_us(&mut self.shown_by_us, id, now);
+                // Named to the arrival of a Space change that follows closely ([`SLIDE_CARRY`]).
+                self.causes.showed(id, now);
             }
             // Where a hide puts the window (asked once: a write tried again asks the same).
             let park = match action {
@@ -1777,7 +1754,7 @@ impl Controller {
             }
             if matches!(action, Action::Hide { .. }) {
                 // A focus before this park is not the user's choice about where it is now.
-                self.user_focus.remove(&id);
+                self.causes.hid(id);
             }
             let pid = w.pid;
             // A dead handle is looked up afresh and the move tried once more (stale-handles).
@@ -2871,7 +2848,6 @@ impl Controller {
             WinEvent::Destroyed(id) => {
                 self.unplaced.remove(&id);
                 self.absent.remove(&id);
-                self.user_focus.remove(&id);
                 self.causes.forget_window(id);
                 // A tab no longer selected may be reported destroyed while its app keeps it
                 // (8J): when the tab selected shows in its place already, it takes that place in
@@ -3541,7 +3517,7 @@ impl Controller {
                 } else {
                     list.as_deref().is_some_and(|list| self.mouse_down(list, event.at, event.clicks, event.stamp))
                 };
-                if !wallpaper && self.desktop_echo.user_acted() {
+                if !wallpaper && self.causes.off_the_desktop() {
                     tracing::debug!("a click off the wallpaper: Finder's next activation is deliberate");
                 }
                 if !wallpaper {
@@ -3553,7 +3529,7 @@ impl Controller {
                 let _ = self.dock_released(ob, event.at, modifiers, now);
                 self.press = None;
                 // A desktop press (a click, a long press, a drag): Finder's echo runs on from here.
-                self.desktop_echo.released(heard);
+                self.causes.released(heard);
                 if let Some(press) = self.wallpaper_press.take() {
                     self.wallpaper_released(ob, press, event.at, event.stamp);
                 }
@@ -3615,7 +3591,7 @@ impl Controller {
                     // ⌘Tab, ⌘`: the focus that follows may be of any window.
                     self.causes.pressed(Pressed::Elsewhere, heard);
                 }
-                if self.desktop_echo.user_acted() {
+                if self.causes.off_the_desktop() {
                     tracing::debug!("a key press after a wallpaper click: Finder's next activation is deliberate");
                 }
             }
@@ -4507,8 +4483,7 @@ impl Controller {
     /// after it counts as shown at it.
     fn slide_carried(&mut self, now: Instant) -> HashSet<WindowId> {
         let at = self.received_at(now);
-        self.shown_by_us.retain(|_, shown| margin::within("SLIDE_CARRY", at.saturating_duration_since(*shown), SLIDE_CARRY));
-        self.shown_by_us.keys().map(|id| WindowId(*id)).collect()
+        self.causes.shown_within(at, SLIDE_CARRY, "SLIDE_CARRY").into_iter().map(WindowId).collect()
     }
 
     /// What is held now (a window's focus, an app's activation) for a Desktop no screen
@@ -5607,7 +5582,7 @@ impl Controller {
         }
         // The desktop is Finder's either way: its activation and focus while the press is down
         // and just after its release are echoes, whether it ends as a click or not.
-        self.desktop_echo.desktop_pressed(self.received_at(clock::now()));
+        self.causes.desktop_pressed(self.received_at(clock::now()));
         // A press on a desktop file or folder (to select it, drag it onto a window, open it) is
         // Finder's, as on Apple's: nothing reveals, ours or macOS's.
         let icons = self.icons_for_press(p, clock::now());
@@ -7446,22 +7421,6 @@ mod tests {
         assert!(looks_soon(Some(at), Some(Duration::from_secs(2))), "a just-opened app's window");
         assert!(!looks_soon(Some(at), None), "another Desktop's, a minimized one, a hidden app's: at its frame");
         assert!(!looks_soon(Some(at), Some(FRESH_APP)), "an app launched long ago");
-    }
-
-    /// The review of 1.9, B-8: the windows our batches showed are kept only for the slide
-    /// carry's time, also with no Space change ever (one Desktop).
-    #[test]
-    fn the_windows_shown_by_us_are_kept_only_for_the_slide_carry() {
-        let t0 = Instant::now();
-        let mut shown = HashMap::new();
-        for i in 0..100 {
-            note_shown_by_us(&mut shown, i, t0 + Duration::from_millis(u64::from(i) * 100));
-        }
-        let last = t0 + Duration::from_millis(9_900);
-        let kept: BTreeSet<u32> = shown.keys().copied().collect();
-        let carried = SLIDE_CARRY.as_millis() as u32 / 100;
-        assert_eq!(kept, (100 - carried..100).collect(), "only those within the carry of the last");
-        assert!(shown.values().all(|at| last.saturating_duration_since(*at) < SLIDE_CARRY));
     }
 
     /// 11-09 10:00:03: an activation as Show Desktop closed read a window at its pushed-aside
