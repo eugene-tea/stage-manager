@@ -26,7 +26,7 @@ use crate::platform::{apps, clock, enhanced_ui, input, windows};
 impl Controller {
     /// What is known of any notice of app `bundle` (`told`: its activation, or a focus of
     /// one of its windows), received at `at`, read now: no read here costs. The desktop
-    /// press's echo counts the notice, as the echo ledger does.
+    /// press's echo counts the notice, as the cause ledger does.
     fn heard(&mut self, bundle: Option<&str>, told: Told, at: Instant) -> Heard {
         Heard {
             at,
@@ -293,7 +293,7 @@ impl Controller {
         let mut facts = ActivationFacts {
             heard: self.heard(bundle.as_deref(), Told::Activation, at),
             pid,
-            // 1: the echo ledger (`at` is the notice's `fired`: when the main thread got it).
+            // 1: the cause ledger (`at` is the notice's `fired`: when the main thread got it).
             echo: self.causes.is_app_echo(pid, at),
             fired,
             our_switch: self.our_switch,

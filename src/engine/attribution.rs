@@ -14,7 +14,7 @@
 //!
 //! | # | A window's focus ([`focus`]) | An app's activation ([`activation`]) |
 //! |---|---|---|
-//! | 1 | ours: the echo ledger's answer, unless an arrangement made ahead says the focus is the user's word ([`FocusVerdict::Ours`]) | ours: the echo ledger's answer ([`ActivationVerdict::Ours`]) |
+//! | 1 | ours: the cause ledger's answer, unless an arrangement made ahead says the focus is the user's word ([`FocusVerdict::Ours`]) | ours: the cause ledger's answer ([`ActivationVerdict::Ours`]) |
 //! | 2 | its app is hidden, or not the app in front, with no button down ([`FocusVerdict::AppBehind`]) | Finder's echo of a wallpaper press ([`ActivationVerdict::WallpaperEcho`]) |
 //! | 3 | macOS's after a display change ([`FocusVerdict::AfterDisplayChange`]) | stale: older than a switch we began since, or another app is in front now ([`ActivationVerdict::Stale`]) |
 //! | 4 | Finder's echo of a wallpaper press ([`FocusVerdict::WallpaperEcho`]) | macOS's after a display change ([`ActivationVerdict::AfterDisplayChange`]) |
@@ -146,7 +146,7 @@ pub struct Scene {
 pub struct FocusFacts {
     /// The notice itself.
     pub heard: Heard,
-    /// The echo ledger: we touched this window within the echo window.
+    /// The cause ledger: we touched this window within the echo window.
     pub echo: bool,
     /// An arrangement made ahead says the focus is the user's word all the same.
     pub beats_echo: bool,
@@ -357,7 +357,7 @@ pub struct ActivationFacts {
     pub heard: Heard,
     /// The app.
     pub pid: i32,
-    /// The echo ledger: ours.
+    /// The cause ledger: ours.
     pub echo: bool,
     /// When the main thread got the notice.
     pub fired: Instant,
@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(activation(&passed_over), ActivationVerdict::Stale(Stale::NotFrontmost { front: 9 }));
     }
 
-    /// 11-14 (the echo ledger's awaited path) and the order: ours wins over everything, a
+    /// 11-14 (the cause ledger's awaited path) and the order: ours wins over everything, a
     /// stale notice over the display change (the lend's refutation runs for neither).
     #[test]
     fn ours_first_then_stale_then_the_display_change() {
