@@ -96,6 +96,16 @@ the order handled (the trail: `attribution::judged` notes the verdict of every n
 person would see the same. After such a change, print what to assert:
 `BENCH_PRINT=1 cargo test --lib causes::print_them -- --nocapture`.
 
+`src/platform/controller/bench/switch.rs` pins a switch's handshake with the strip and the
+raise-order check after it: the strip answering in time, late or never (`Strip::covers_ms`,
+`Strip::draws`), a second click, a click or an app's activation inside the cover wait or the
+check, an app reordering its windows late (`App::reorders_ms`). Each outcome reads what a
+person sees, how many switches played with their pictures (`Strip::covered`, `uncovered`)
+and the calls in order. What macOS does on its own clock, whatever the app's thread is
+doing, the desk plays with `Desk::at` (at a time) and `Desk::on_raise` (a while after the
+app's raise of a window). Print what to assert:
+`BENCH_PRINT=1 cargo test --lib switch::print_them -- --nocapture`.
+
 - One scenario with its story (the notices handled and the calls made, in order) and the
   app's own log lines:
   `BENCH_ONE="Dock click" BENCH_LOAD=3 BENCH_LOG=debug cargo test --lib bench_one -- --nocapture`.

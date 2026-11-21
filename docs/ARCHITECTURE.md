@@ -59,6 +59,22 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   afresh by id; one unlisted and off screen on two looks a second apart is let go as closed
   (`engine::stale_handle`). Commands go main → WM by channel plus `CFRunLoopPerformBlock`;
   snapshots WM → main via GCD.
+- **A switch's states** (round r6-waits): planned; under the Spaces engine the outgoing
+  windows' pictures taken (`switch_pictures`, 160 ms at most); the transition sent to the
+  strip and the activation's keyboard routed at once; the strip's answer waited for on the
+  WM thread (`strip_model::wait_cover`, a condvar, `COVER_TIMEOUT` 150 ms; no answer: the
+  windows move at once and the strip, told so, draws nothing), then `[animation] cover_ms`
+  (20 ms) for the pictures to reach the screen; the hides run and the arrivals are held
+  (`pending`, the phase's `Switching`) until the strip's `Unveil`, the backstop at the tick,
+  or an event that lands or supersedes them (`flush_pending_as`); the landing's batch; then
+  the raise-order check (`controller::raise_order`): a state, read on the fast tick 4 ms
+  apart until the order holds for 60 ms (150 ms after a fix) or 400 ms pass, the WM thread
+  handling its notices between reads; the user's click, another window in front, or a
+  later batch that stacks or moves its windows ends it. The cover wait still blocks: the
+  handlers that start a switch go on after it as if its batch had run (an un-minimize's
+  dive frame, a new window's release from the engine, an activation's lend decided, the
+  tick's and the fast tick's later duties, the next events of the same run), so making it a
+  state means making each of those a continuation run at the cover's end.
 - **Time** (review 11-21): the platform layer reads one clock, `platform::clock::now()`
   (under `cfg(test)` a per-thread clock a test freezes and moves, `clock::test::freeze`,
   `advance`; a wait on the WM thread goes through `clock::sleep` and an age that decides
