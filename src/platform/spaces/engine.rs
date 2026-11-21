@@ -260,8 +260,10 @@ struct State {
     /// window the window server let out as its screen went goes back there ([`spill`]).
     homes: BTreeMap<u32, u64>,
     /// Until when hidden windows are kept on their own Desktops after a screen went
-    /// ([`spill::WATCH`]), and when the tick last looked ([`spill::KEEP_EVERY`]).
+    /// ([`spill::WATCH`]), when that watch began (the change, or the unlock after it:
+    /// [`spill::mid_change`]), and when the tick last looked ([`spill::KEEP_EVERY`]).
     watch: Option<Instant>,
+    watch_from: Option<Instant>,
     kept_at: Option<Instant>,
     /// Stage Spaces made again that still hold a window that would not move out, or that a
     /// held window names (a lent one comes back there), with their Desktop: still this
@@ -719,6 +721,13 @@ impl SpacesEngine {
         // gone is watched, the Desktop it was hidden from first ([`spill::hide_home`]).
         let flew_from = flying_guard.as_ref().and_then(|l| self.home_of(id, l.get(&id)));
         let on = desktop_among(&now, &desktops, &shown);
+        let keep = self.watching(Instant::now());
+        // Only within the change itself may a window in front be listed on another Desktop
+        // than its screen shows; past it, or once the user pressed, where it is listed holds.
+        let mid_change = keep && {
+            let from = self.state().watch_from;
+            spill::mid_change(from.map(|t| Instant::now().saturating_duration_since(t)), crate::platform::input::since_last_press())
+        };
         let hints = {
             let st = self.state();
             let listing: Vec<(u64, Vec<u64>)> = displays.iter().map(|(_, current, spaces)| (*current, spaces.iter().map(|(s, _)| *s).collect())).collect();
@@ -729,9 +738,9 @@ impl SpacesEngine {
                 stage: st.stages.keys().find(|(d, s)| *s == stage && stage != NO_STAGE && desktops.contains(d)).map(|(d, _)| *d),
                 shown: shown.first().copied(),
                 showing: on.and_then(|d| spill::showing_on(&listing, d)),
+                mid_change,
             }
         };
-        let keep = self.watching(Instant::now());
         let home = spill::hide_home(hints, &desktops, keep);
         if keep {
             tracing::debug!(id, stage, spaces = ?now, ?shown, ?hints, ?home, "display: a hide while a screen gone is watched");
@@ -1369,6 +1378,7 @@ impl SpacesEngine {
         {
             let mut st = self.state();
             st.watch = Some(now + spill::WATCH);
+            st.watch_from = Some(now);
             st.kept_at = Some(now);
             st.unlisted = spill::Unlisted::default();
         }
@@ -1397,6 +1407,7 @@ impl SpacesEngine {
             let mut st = self.state();
             if !st.watch.is_some_and(|until| now < until) {
                 if st.watch.take().is_some() {
+                    st.watch_from = None;
                     // Over: a window let go meanwhile is hidden from where it shows again.
                     let held: BTreeSet<u32> = st.held.keys().copied().collect();
                     st.homes.retain(|id, _| held.contains(id));

@@ -21,7 +21,13 @@
 //! one ends once empty. A window whose Desktop is gone too is kept hidden in a stage Space of
 //! the Desktop it shows on (else the one shown): its stage still stands, on that Desktop. A
 //! window shown since its last hide (in front as the screen went) is hidden from the Desktop
-//! its screen shows, not the one the window server lists it on mid-change.
+//! its screen shows, not the one the window server lists it on mid-change ([`MID_CHANGE`]: in
+//! the change's settle, no click or key since). Later in the watch such a window is hidden
+//! from the Desktop it is listed on: a Desktop not shown whose stage in front goes to a card
+//! (a Dock click or ⌘-Tab arranges that Desktop before macOS slides to it) keeps it (a log,
+//! 11-21: the external screen back after a day on the laptop alone, a Dock click 36 s after
+//! the change hid the arriving Desktop's front window into a stage of the Desktop still
+//! shown; it was counted gone 3 s later and showed up on the other Desktop).
 //!
 //! **A Desktop that ends on a screen still there.** The main screen gone, macOS moves its
 //! Desktops onto the screen left and ends the Desktop it had made there when the other screen
@@ -43,6 +49,20 @@ use std::time::{Duration, Instant};
 /// window server let windows out of stage Spaces as late as the first look at a moved
 /// Desktop (a log, 11-18: 20 s after the change).
 pub const WATCH: Duration = Duration::from_secs(60);
+
+/// How long after a screen went (or after the unlock) a hide counts as the display change's
+/// own, with no click or key since ([`mid_change`]): the settle of a display change, as the
+/// controller's (an activation macOS makes then switches nothing).
+pub const MID_CHANGE: Duration = Duration::from_secs(10);
+
+/// True when a hide now is part of the display change itself, not the user's doing: the
+/// watch began `since_watch` ago ([`WATCH`], restarted at the unlock), within [`MID_CHANGE`],
+/// and the user's last click or key press (`since_press` ago) came before it. Only then may
+/// the window server list a window in front on another Desktop than the one its screen
+/// shows ([`hide_home`]). `None`: no watch.
+pub fn mid_change(since_watch: Option<Duration>, since_press: Duration) -> bool {
+    crate::engine::displays::macos_after_display_change(since_watch, since_press, MID_CHANGE)
+}
 
 /// How often the tick looks for hidden windows let out of their stage Space while
 /// [`WATCH`]ing: faster than the model's look for windows of another Desktop on screen
@@ -273,6 +293,8 @@ pub struct HomeHints {
     /// The Desktop shown on the screen that lists `on` ([`showing_on`]): `on` itself when it
     /// shows.
     pub showing: Option<u64>,
+    /// The hide is the display change's own ([`mid_change`]): `showing` is weighed only then.
+    pub mid_change: bool,
 }
 
 /// The Desktop a hide takes as the window's home. Outside the [`WATCH`] (`keep` false), the
@@ -280,11 +302,14 @@ pub struct HomeHints {
 /// watching, the Desktop it was hidden from comes first while that Desktop exists (held,
 /// else last), then the one it shows on, then its stage's: the Desktop the window server put
 /// it on as its screen went is not its own. A window shown since it was last hidden has no
-/// last Desktop (a show forgets it): it is hidden from the Desktop its screen shows, not the
-/// one the window server lists it on, which mid-change may be another Desktop of that screen
-/// (a live run, 11-19: the main screen gone, the built-in screen's own Desktop ended, its
-/// window in front was listed on Desktop 1 while the screen showed Desktop 4; hidden into a
-/// Space of Desktop 1, it counted gone from the Desktop shown and lost its stage).
+/// last Desktop (a show forgets it): within the change itself ([`HomeHints::mid_change`]) it
+/// is hidden from the Desktop its screen shows, not the one the window server lists it on,
+/// which mid-change may be another Desktop of that screen (a live run, 11-19: the main screen
+/// gone, the built-in screen's own Desktop ended, its window in front was listed on Desktop 1
+/// while the screen showed Desktop 4; hidden into a Space of Desktop 1, it counted gone from
+/// the Desktop shown and lost its stage). After that, from the Desktop it is listed on: the
+/// front window of a Desktop not shown, hidden as a Dock click or ⌘-Tab arranges that Desktop
+/// ahead of the slide, is on its own Desktop (a log, 11-21; module docs).
 pub fn hide_home(h: HomeHints, desktops: &BTreeSet<u64>, keep: bool) -> Option<u64> {
     if !keep {
         return h.on.or(h.held).or(h.shown);
@@ -292,7 +317,7 @@ pub fn hide_home(h: HomeHints, desktops: &BTreeSet<u64>, keep: bool) -> Option<u
     let exists = |d: &u64| desktops.contains(d);
     let kept = h.held.filter(exists).or(h.last.filter(exists));
     let fresh = h.held.is_none() && h.last.is_none();
-    kept.or(h.showing.filter(|_| fresh)).or(h.on).or(h.stage.filter(exists)).or(h.held).or(h.shown)
+    kept.or(h.showing.filter(|_| fresh && h.mid_change)).or(h.on).or(h.stage.filter(exists)).or(h.held).or(h.shown)
 }
 
 /// The Desktop shown on the screen that lists Desktop `desktop`, of `listing` (each screen's
@@ -498,23 +523,23 @@ mod tests {
     fn a_hide_while_watching_takes_the_desktop_it_was_hidden_from() {
         let desktops: BTreeSet<u64> = [471, 1, 4].into();
         // Desktop 1 shows on a screen of its own (the main one shows 4).
-        let h = HomeHints { on: Some(1), held: Some(4), last: None, stage: None, shown: Some(4), showing: Some(1) };
+        let h = HomeHints { on: Some(1), held: Some(4), last: None, stage: None, shown: Some(4), showing: Some(1), mid_change: false };
         assert_eq!(hide_home(h, &desktops, true), Some(4), "watching: its own Desktop");
         assert_eq!(hide_home(h, &desktops, false), Some(1), "as ever: where it shows");
         // Let go as it came out (no longer held): the Desktop it was last hidden from.
-        let h = HomeHints { on: Some(1), held: None, last: Some(4), stage: Some(471), shown: Some(4), showing: Some(1) };
+        let h = HomeHints { on: Some(1), held: None, last: Some(4), stage: Some(471), shown: Some(4), showing: Some(1), mid_change: false };
         assert_eq!(hide_home(h, &desktops, true), Some(4));
         // Shown since (nothing kept): where it shows, never a Desktop its stage left.
-        let h = HomeHints { on: Some(1), held: None, last: None, stage: Some(471), shown: Some(4), showing: Some(1) };
+        let h = HomeHints { on: Some(1), held: None, last: None, stage: Some(471), shown: Some(4), showing: Some(1), mid_change: false };
         assert_eq!(hide_home(h, &desktops, true), Some(1));
         // On no Desktop and nothing kept: its stage's Desktop.
-        let h = HomeHints { on: None, held: None, last: None, stage: Some(471), shown: Some(4), showing: None };
+        let h = HomeHints { on: None, held: None, last: None, stage: Some(471), shown: Some(4), showing: None, mid_change: false };
         assert_eq!(hide_home(h, &desktops, true), Some(471));
         // Its Desktop gone: where it shows.
-        let h = HomeHints { on: Some(1), held: Some(9), last: Some(9), stage: None, shown: Some(4), showing: Some(1) };
+        let h = HomeHints { on: Some(1), held: Some(9), last: Some(9), stage: None, shown: Some(4), showing: Some(1), mid_change: false };
         assert_eq!(hide_home(h, &desktops, true), Some(1));
         // On no Desktop: as ever.
-        let h = HomeHints { on: None, held: Some(9), last: None, stage: None, shown: Some(4), showing: None };
+        let h = HomeHints { on: None, held: Some(9), last: None, stage: None, shown: Some(4), showing: None, mid_change: false };
         assert_eq!(hide_home(h, &desktops, true), Some(9));
     }
 
@@ -528,22 +553,77 @@ mod tests {
     fn a_window_in_front_hidden_as_its_desktop_ends_goes_to_the_desktop_its_screen_shows() {
         let listing = [(4, vec![1, 4, 471])];
         let desktops: BTreeSet<u64> = [1, 4, 471].into();
-        let h = HomeHints { on: Some(1), held: None, last: None, stage: None, shown: Some(4), showing: showing_on(&listing, 1) };
+        let h = HomeHints { on: Some(1), held: None, last: None, stage: None, shown: Some(4), showing: showing_on(&listing, 1), mid_change: true };
         assert_eq!(hide_home(h, &desktops, true), Some(4), "the Desktop shown, where present_now counts it");
         assert_eq!(hide_home(h, &desktops, false), Some(1), "outside the watch: where it is listed, as ever");
         // Still listed on the ended Desktop (no screen lists it): the Desktop shown.
-        let h = HomeHints { on: None, held: None, last: None, stage: None, shown: Some(4), showing: None };
+        let h = HomeHints { on: None, held: None, last: None, stage: None, shown: Some(4), showing: None, mid_change: true };
         assert_eq!(hide_home(h, &desktops, true), Some(4));
         // A window kept from an earlier hide keeps its own Desktop (the 11-18 rule).
-        let h = HomeHints { on: Some(1), held: None, last: Some(471), stage: None, shown: Some(4), showing: Some(4) };
+        let h = HomeHints { on: Some(1), held: None, last: Some(471), stage: None, shown: Some(4), showing: Some(4), mid_change: true };
         assert_eq!(hide_home(h, &desktops, true), Some(471));
-        let h = HomeHints { on: Some(1), held: Some(471), last: Some(471), stage: None, shown: Some(4), showing: Some(4) };
+        let h = HomeHints { on: Some(1), held: Some(471), last: Some(471), stage: None, shown: Some(4), showing: Some(4), mid_change: true };
         assert_eq!(hide_home(h, &desktops, true), Some(471));
         // Two screens: the Desktop shown on the window's own screen, not the main one's.
         let listing = [(4, vec![1, 4, 471]), (9, vec![8, 9])];
         let desktops: BTreeSet<u64> = [1, 4, 471, 8, 9].into();
-        let h = HomeHints { on: Some(8), held: None, last: None, stage: None, shown: Some(4), showing: showing_on(&listing, 8) };
+        let h = HomeHints { on: Some(8), held: None, last: None, stage: None, shown: Some(4), showing: showing_on(&listing, 8), mid_change: true };
         assert_eq!(hide_home(h, &desktops, true), Some(9));
+    }
+
+    /// The 11-21 shape: one screen at a time (a laptop closed on an external screen), Desktops
+    /// 1 and 4 moved from the laptop to the external screen under the same ids, 1 shown. The
+    /// watch begins as the laptop goes (t 0) and again at the unlock (6.5 s); every hidden
+    /// window stays in its stage on its own Desktop. Then the user's Dock clicks, each
+    /// arranging a Desktop not shown before macOS slides to it.
+    #[test]
+    fn a_dock_click_past_the_change_hides_the_arriving_desktops_front_on_its_own_desktop() {
+        let s = Duration::from_secs_f64;
+        let desktops: BTreeSet<u64> = [1, 4, 9].into();
+        let listing = [(1, vec![1, 4, 9])];
+        // 36 s: a Dock click (40 ms ago) to Terminal, whose window waits on Desktop 4: the
+        // front window of 4 (an editor's, shown there since the laptop) goes to a card while 1
+        // still shows. It is hidden on 4, its own, not on the Desktop shown.
+        let watch = Some(s(36.0 - 6.5));
+        let h = HomeHints {
+            on: Some(4),
+            held: None,
+            last: None,
+            stage: Some(4),
+            shown: Some(1),
+            showing: showing_on(&listing, 4),
+            mid_change: mid_change(watch, s(0.04)),
+        };
+        assert!(!h.mid_change, "the user's click, 29 s into the watch");
+        assert_eq!(hide_home(h, &desktops, true), Some(4));
+        // 61 s: back to Desktop 1 by another Dock click, 4 showing now: Terminal's other
+        // window, in front on 1, is hidden on 1.
+        let listing = [(4, vec![1, 4, 9])];
+        let h = HomeHints {
+            on: Some(1),
+            held: None,
+            last: None,
+            stage: Some(1),
+            shown: Some(4),
+            showing: showing_on(&listing, 1),
+            mid_change: mid_change(Some(s(61.0 - 6.5)), s(0.02)),
+        };
+        assert_eq!(hide_home(h, &desktops, true), Some(1));
+        // The same hide within the change, nothing pressed since: the 11-19 rule, the
+        // Desktop shown.
+        let h = HomeHints { mid_change: mid_change(Some(s(0.1)), s(5.0)), ..h };
+        assert!(h.mid_change);
+        assert_eq!(hide_home(h, &desktops, true), Some(4));
+    }
+
+    #[test]
+    fn a_hide_is_the_changes_own_only_in_its_settle_with_nothing_pressed_since() {
+        let s = Duration::from_secs_f64;
+        assert!(mid_change(Some(s(0.1)), s(5.0)), "the model's own hide as the screen goes");
+        assert!(mid_change(Some(s(9.0)), s(30.0)));
+        assert!(!mid_change(Some(s(10.0)), s(30.0)), "past the settle");
+        assert!(!mid_change(Some(s(3.0)), s(1.0)), "a click or key since: the user's");
+        assert!(!mid_change(None, s(30.0)), "no watch");
     }
 
     #[test]

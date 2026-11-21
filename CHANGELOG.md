@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, a window no longer ends up on another Desktop when the Dock or ⌘Tab
+  switches Desktops in the minute after a screen is plugged in or out.
 - With `engine = "spaces"`, Mission Control shows the hidden stages' windows as soon as it
   opens from its key or its keyboard shortcut; before, they could come up to two seconds late.
 - With `engine = "spaces"`, `[windows] mission_control_key_keeps_stage = true` keeps the stage

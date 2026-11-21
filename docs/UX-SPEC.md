@@ -361,6 +361,18 @@ showing most of it (macOS's rule).
   screen, from any of its Desktops; it is never hidden again at the remaining screen's
   corner. A card put back brings nothing forward; the remaining screen, its front gone back,
   brings its own most recent stage forward. None of it counts as the user's drag.
+- **One screen at a time** (a laptop closed on an external screen, used alone a day, the
+  external screen back; a log, 11-20 to 11-21). macOS moves the Desktops whole to the screen
+  that comes, under the same ids, each with its windows, shown or hidden; nothing is lost and
+  every stage stays on its Desktop. For the minute after the change (`spill::WATCH`) a hidden
+  window goes back to the Desktop it was hidden from. A window in front of a Desktop not shown,
+  sent to a card as the Dock or ⌘-Tab arranges that Desktop before macOS slides to it, stays on
+  its own Desktop: the Desktop its screen shows counts only within the change's 10 s settle
+  with nothing pressed since (`spill::mid_change`; before, two windows of the log ended up on
+  the other Desktop). Apple's Stage Manager here is not measured: with it on, two Desktops each
+  with a stage in front and one hidden, the lid closed on the external screen, the external
+  unplugged and the lid opened, then back, and on each Desktop a Dock click to the other
+  Desktop's hidden app within a minute; which Desktop each window is on after.
 - **The hidden corner.** Each screen's hidden stages wait in a corner of that screen with no
   screen beyond it (the laptop's bottom-left, its right edge touching the 5K). A window
   showing only a piece at its screen's hidden corner (what shows reaches past the corner's
