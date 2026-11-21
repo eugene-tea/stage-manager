@@ -219,7 +219,9 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make
 Exit status is 0 on success, 1 on an error reply and 2 when the app is not running. With
 `STAGE_MANAGER_TEST=1` the `debug-*` commands post clicks, drags, Desktop and Mission
 Control shortcuts, ⌘M (`debug-cmd-m`), full-screen toggles and the strip shown or hidden for the scripted checks,
-`debug-minimize-button ID` gives a window's minimize button's frame (for `debug-click`), and `debug-stale-handle
+`debug-minimize-button ID` gives a window's minimize button's frame (for `debug-click`), `debug-dock-lend
+BUNDLE` feeds a Dock click without pressing the item (what the press put home waits for an
+activation that never comes), and `debug-stale-handle
 ID` takes our handle on a window for dead until it is looked up afresh (`test-stages.sh
 handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` windows. See
 `src/platform/ctl.rs`.
@@ -342,6 +344,15 @@ polled, and the Corner engine writes nothing. Read a day with
   `dock_clicks`, `dock_parked`, `dock_fell_back`, `dock_slid`, `dock_slid_back`,
   `dock_slowest_park_ms`, the same for `cmdtab_`, and `new` (outcomes since the last
   summary). `ctl state` has the same counts under `slide_watch`.
+- What ended each lend: `dock: the window put home at the press goes back: WHY` and
+  `cmd-tab: the window put home for the switcher goes back: WHY` (another app was activated,
+  the press was no click, the next press, the switcher was cancelled, or its cap), with
+  `since_ms`, `cap` and `activated`; a lend its switch took is a debug line. The margins
+  table's `LEND_WAIT`, `ACTIVATION_WAIT`, `UNREAD_WAIT`, `SILENT_ACTIVATION_WAIT`,
+  `SILENT_UNREAD_WAIT`, `DOCK_SWITCH_CAP` and `GONE_WAIT` rows count how each wait ended
+  (`capped`: by time). `cmd-tab: the key tap heard the switcher's end` says what the HID tap
+  fed the switcher; `ctl state` `mission_control.tap` has `switcher_armed`,
+  `switcher_escapes_heard` and `command_ups_heard`.
 
 ## Configuration keys
 

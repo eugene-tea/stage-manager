@@ -385,8 +385,14 @@ press on a Dock item (the Dock activates the app on the release, ~100 ms later) 
 macOS should go to is put on its Desktop first: an arrangement ahead for another Desktop is
 made at the press, and for an app whose stage on the Desktop shown is hidden while it shows
 a window elsewhere, that stage's window is put home for a while, still counted hidden
-(`WindowEngine::lend_home`, `Model::dock_home`), and taken back when no switch to its stage
-follows. It is moved to its park frame at the screen's corner first, while still in its
+(`WindowEngine::lend_home`, `Model::dock_home`). Events end that lend, time only caps it
+(`engine::lend_wait`): the app's activation and its switch confirm it; another app's
+activation, a press that was no click and the next press take it back at once; with
+neither it goes back after 5 s (`LEND_WAIT`; it was 1 s, and a busy app's activation after
+it let macOS slide away). The arrangement made at the press for another Desktop is undone by
+the click's activation when no Space change came before it and none of that Desktop's
+windows is on screen (macOS tells the activation only once its slide is over), else by the
+Space change's arrival, or after 3 s (`DOCK_SWITCH_CAP`; the Corner engine keeps 1 s). It is moved to its park frame at the screen's corner first, while still in its
 stage Space (`engine::lend_park`, as for ⌘Tab): macOS counts a window on a Desktop wherever
 it is, and at its own frame it showed before its stage's switch (under the front windows
 from the press, in front of them from the release). The park's move waits 30 ms for the app
@@ -400,7 +406,15 @@ once (macOS picks the Desktop 3-12 ms after ⌘'s release; the Dock lists the sw
 ~180 ms after the Tab); the Dock's own selection (`AXProcessSwitcherList`, observed through
 its `AXCreated` and `AXSelectedChildrenChanged` notices) corrects it while the switcher
 shows (`platform/controller/switcher.rs`, `platform/switcher_ax.rs`). It is taken back when
-the selection moves on, at Escape, or when ⌘ is let go on another app.
+the selection moves on, at Escape, or when ⌘ is let go on another app. The input monitor
+never hears Escape while the switcher shows, nor always ⌘'s release, so the HID key tap
+(`platform::mission_key_tap`, below) is on from the Tab heard to the switcher's end, whatever
+Mission Control's mode, and feeds the switcher Escape, ⌘'s release and a mouse-down (a pick).
+Escape takes the window back at once. After ⌘'s release the window waits for its app's
+activation, which with the switch confirms it, while another app's activation refutes it;
+the 3 s cap (`ACTIVATION_WAIT`, `UNREAD_WAIT` after a pick) ends only an activation that
+never comes. A tap that does not hear (macOS refused it, secure input) leaves the guess of
+before: no activation within 200 ms of the release is a cancel (`SILENT_ACTIVATION_WAIT`).
 
 Mission Control and App Exposé lay out only the windows of the Desktop, so under the Spaces
 engine the same lend is made for every hidden window of the Desktops shown while one of them
@@ -411,8 +425,8 @@ or a notice of the Dock's, only brings that look to the fast tick (`[windows]
 mission_control_stages = "key"` lends at the shortcut itself). The window server takes its
 shortcuts before any app gets the key, so the global input monitor never hears them: a
 listen-only event tap at the HID level does (`platform::mission_key_tap`, the Accessibility
-permission; it forwards Mission Control's shortcuts and key, and while it shows Escape and
-presses, nothing else). At the close the windows go back into their stage Spaces, but a
+permission; it forwards Mission Control's shortcuts and key, while it shows Escape and
+presses, and while ⌘Tab's switcher is up its Escape, ⌘'s release and presses, nothing else). At the close the windows go back into their stage Spaces, but a
 picked window's stage, which the activation's switch shows. An activation just after the
 key that closed it, with no click, is no pick (`engine::mission_close`): nothing switches
 and the stage in front's key window is focused again. The engine counts each as lent and parked, so a hide, a show, a

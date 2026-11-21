@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, ⌘Tab or a Dock click to an app that is slow to come in front
+  no longer slides to another Desktop; ⌘Tab cancelled with Escape takes its window back at once.
 - A switch that comes while the app is busy no longer plays its pictures over windows already
   in their places.
 - With `engine = "spaces"`, a window its app closes and opens again while its stage is hidden

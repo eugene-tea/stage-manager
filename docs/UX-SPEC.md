@@ -242,7 +242,10 @@ stage sat there 145 ms before the other flew in; that window now waits out of si
 the switch). A Dock click on the app in front changes nothing, even with its other window in
 another stage: Apple's neither cycles nor brings the other window (measured 11-19,
 `scripts/probe_apple.py dock-front`, a press and a real click, under both "Show windows from
-an application" settings). Under All at Once a Shift-click on a card brings in only the
+an application" settings). Under `engine = "spaces"` a ⌘-Tab or Dock click to an app slow to
+come in front still switches here: the window put home for it waits out of sight for the
+app's activation (up to 3 s after ⌘'s release, 5 s after a Dock press) and goes back at once
+at Escape, at a press that was no click, or when another app comes in front. Under All at Once a Shift-click on a card brings in only the
 window clicked; that window dragged back to the strip takes the app's other windows along.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
@@ -479,7 +482,7 @@ in any log to 11-20), and Mission Control opened by its key was found by the tic
 late (11-20 11:16:34, `found_within_ms=2140`: its stages' windows came in late); `"key"` mode and the parks at the key never ran. A listen-only event tap at the
 HID level hears them now (the Accessibility permission, no other), and only them: Mission
 Control's shortcuts as Keyboard Shortcuts has them, its key, and while it shows Escape and
-presses.
+presses; and while ⌘-Tab's switcher shows, its Escape, ⌘'s release and presses.
 Closed by its key (its shortcut again, its key, Escape), Mission Control picks nothing, but
 macOS brings in front the app whose window is under the pointer, and Apple's Stage Manager
 brings its stage in front (`scripts/probe_apple.py mission-close-key`, 11-20: 108 ms after the

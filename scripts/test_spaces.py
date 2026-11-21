@@ -616,7 +616,10 @@ planned steps (hands-free):
               (ctl debug-cmd-tab; a release only onto a fixture): Escape before ⌘'s release (nothing activated),
               macOS's own way measured (nolend), held 400 ms and a quick tap (~60 ms) each with 0 Space
               changes and the Fixture stage in front; each prints what the Dock, the input monitor and a
-              probe tap showed
+              probe tap showed; Escape heard by the key tap, the window back within 100 ms; a slow app (the
+              fixture blocked by SIGPROF, held 1.5 s, released onto it): 0 Space changes; a Dock click with
+              no press of the item (ctl debug-dock-lend), then Bravo activated: the window put home back at
+              Bravo's activation (macOS goes to Desktop 2)
   back        (already on Desktop 1 after the activation, else ctl debug-space <back>); checks as guided
               (Desktop 2's pane stays there)
   edge tab    on Desktop 1: [reveal] edge_tab on (a live reload); ctl debug-frame <a shown Desktop 1 window> to
