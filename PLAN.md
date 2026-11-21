@@ -21,9 +21,6 @@ UX-SPEC, "Known gaps".
   minute after it: every `display: a hide while a screen gone is watched` line with
   `mid_change: false` has `home` equal to `on` when `on` is set and nothing was kept, and no
   `window left this Space` follows a Dock click or ⌘Tab to another Desktop.
-- **Live: `SM_ENGINE=spaces scripts/test-stages.sh display-gone`**, for its new Dock step
-  (20 s after the screen goes; it says when no stage qualifies, which may be every round for
-  `main`).
 - **Apple's, one screen at a time** (UX-SPEC, Screens): with the lid and the external screen,
   by hand.
 - **"macOS isn't reporting windows" shows in the menu again.** Quit Stage Manager, then count windows with

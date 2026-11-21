@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Live check: a screen going away keeps every stage's windows.
 
-Run it as `SM_ENGINE=spaces scripts/test-stages.sh display-gone [frames] [main|secondary]
-[--rounds N]` (default: both kinds, 3 rounds each), or without `SM_ENGINE` for the
+Run it as `SM_ENGINE=spaces scripts/test-stages.sh display-gone [frames] [main|secondary|ahead]
+[--rounds N]` (default: every kind, 3 rounds each; `frames` runs main and secondary), or without `SM_ENGINE` for the
 Accessibility (Corner) engine. Nobody needs to be at the Mac, but nobody may use it
 either: the run adds a virtual screen (scripts/virtual-display, a CoreGraphics virtual display)
 and takes it away again, as an unplug would.
@@ -35,8 +35,12 @@ shows. Checks: the clicked app's stage comes in front there; the stage that was 
 a stage of that Desktop with its windows, hidden; the log never says `window left this Space`
 for its windows, and its hide's line (`a hide while a screen gone is watched`) takes the
 Desktop the window was on as its home (`on` = `home`; 11-21: a Dock click 36 s after the change
-hid it into a stage of the Desktop still shown, and it showed up on the other Desktop). With no
-such stage the step is skipped and says so.
+hid it into a stage of the Desktop still shown, and it showed up on the other Desktop), and
+that the Desktop was arranged at the press. With no such stage the step is skipped and says
+so; `main` and `secondary` rounds leave every fixture on the Desktop shown, so the `ahead`
+kind sets it up: Alpha 1 and Bravo 1 opened on another Desktop of the main screen (slid to
+with `ctl debug-space`), a stage each, Bravo's in front, then back, a virtual screen added to
+the right and removed. A run whose Dock step ran in no round fails.
 
 **Frames per screen setup** (`display-gone frames [main|secondary] [--rounds N]`, with
 `[displays] frames_per_setup = true` in the test home's config): the fixture stages are opened
