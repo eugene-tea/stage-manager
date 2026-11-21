@@ -36,6 +36,16 @@
 //! desktop stays: [`super::show_desktop`]). The expectation lasts [`REVEAL_EXPECTED`], a
 //! timer, since no event says macOS showed nothing, and ends when Show Desktop is listed.
 //!
+//! **The window server's notice** ([`OverviewWatch::told`], round r5-notices): type 1508 comes
+//! at Mission Control's and App Exposé's open (~40 ms after the key) and close (~32 ms; the
+//! list shows its window gone ~320 ms after, the Dock's cover ~610 ms), whatever opened them.
+//! It is a trigger for a look, never a fact: the look at it finds an overview opened by a
+//! gesture or a hot corner within a few ms instead of at the tick ([`OVERVIEW_LOOK`]). One heard
+//! while an overview shows ends the settle after its close early: the first look that then
+//! finds macOS's own window and the Dock's cover both gone ends the freeze
+//! ([`OverviewWatch::settled_by_notice`]); without it, [`OVERVIEW_SETTLE`] and
+//! [`OVERVIEW_ARRIVAL_SETTLE`] run as before, and stay the caps.
+//!
 //! **Confirming** ([`Persisting`]): evidence from the window list (windows of another Space
 //! on screen) counts only when the same evidence holds at two checks at least a settle apart,
 //! never from one listing.
@@ -61,6 +71,10 @@ pub const OVERVIEW_STUCK: Duration = Duration::from_secs(300);
 /// window was last listed (measured: its exit lists the Dock's ~0.5 s after Escape; longer,
 /// the pointer is holding the Dock up).
 pub const OVERVIEW_EXIT_CARRY: Duration = Duration::from_millis(1500);
+
+/// The longest an overview opened by a gesture, a hot corner or the Dock's item waits for a
+/// look with no notice and no key heard: the tick at rest ([`super::tick_pace::REST`]).
+pub const OVERVIEW_LOOK: Duration = super::tick_pace::REST;
 
 /// Windows of another Space on screen count only when seen at two checks this far apart.
 pub const FOREIGN_SETTLE: Duration = Duration::from_secs(1);
@@ -172,6 +186,16 @@ pub struct OverviewWatch {
     /// The look before the one the shown overview began at was this long before it: it began
     /// within that much ([`Self::found_within`]).
     found_within: Option<Duration>,
+    /// When the window server's notice (1508) last came while an overview showed
+    /// ([`Self::told`]): the close's, or the open's own when the poll found it first.
+    told: Option<Instant>,
+    /// The last such notice, kept past the close (`ctl space`).
+    last_told: Option<Instant>,
+    /// The look being made was brought by a notice ([`Self::look_at_notice`]).
+    at_notice: bool,
+    /// The last close was found by a look after a notice, with macOS's own window and the
+    /// Dock's cover both gone: no settle follows ([`Self::settled_by_notice`]).
+    quick: bool,
 }
 
 impl OverviewWatch {
@@ -186,6 +210,7 @@ impl OverviewWatch {
             self.told_at = Some(now);
         }
         let carried = self.told_at.is_some_and(|t| now.duration_since(t) < OVERVIEW_EXIT_CARRY);
+        let carrying = sight.overview.is_none() && matches!(self.showing, Some((Overview::MissionControl, _)));
         if sight.overview.is_none()
             && sight.dock_cover
             && !carried
@@ -212,6 +237,15 @@ impl OverviewWatch {
                 self.found_within = gap;
                 self.stuck = false;
                 self.ended = None;
+                self.told = None;
+                self.quick = false;
+                // How the wait for a look ended: at a notice's look, or at the poll's.
+                let within = gap.unwrap_or_default();
+                if self.at_notice {
+                    crate::engine::margin::wait_noticed("OVERVIEW_LOOK", within, OVERVIEW_LOOK);
+                } else {
+                    crate::engine::margin::wait("OVERVIEW_LOOK", within, OVERVIEW_LOOK, crate::engine::margin::End::Met);
+                }
                 if kind == Overview::ShowDesktop {
                     // The expectation is met: the overview holds on its own from here, and its
                     // close is not held back by a click's timer.
@@ -223,6 +257,24 @@ impl OverviewWatch {
                 self.showing = None;
                 self.stuck = false;
                 self.ended = Some(now);
+                // macOS's own window and the Dock's cover both gone at a look after the
+                // close's notice: the windows are in place, no settle follows.
+                self.quick = self.told.take().is_some() && !sight.dock_cover;
+                if self.quick {
+                    crate::engine::margin::wait_noticed("OVERVIEW_SETTLE", Duration::ZERO, OVERVIEW_SETTLE);
+                } else {
+                    crate::engine::margin::wait("OVERVIEW_SETTLE", OVERVIEW_SETTLE, OVERVIEW_SETTLE, crate::engine::margin::End::Cap);
+                }
+                if carrying && !sight.dock_cover && let Some(t) = self.told_at {
+                    // The Dock's cover went within the carry: met, at a look the notice
+                    // brought forward when one came.
+                    let gone = now.saturating_duration_since(t);
+                    if self.quick {
+                        crate::engine::margin::wait_noticed("OVERVIEW_EXIT_CARRY", gone, OVERVIEW_EXIT_CARRY);
+                    } else {
+                        crate::engine::margin::wait("OVERVIEW_EXIT_CARRY", gone, OVERVIEW_EXIT_CARRY, crate::engine::margin::End::Met);
+                    }
+                }
                 Change::Ended(was)
             }
             (None, None) => Change::None,
@@ -248,15 +300,49 @@ impl OverviewWatch {
     }
 
     /// True while Space inference waits: an overview shows, or closed less than
-    /// [`OVERVIEW_SETTLE`] ago.
+    /// [`OVERVIEW_SETTLE`] ago (none after a close found at a look after its notice:
+    /// [`Self::settled_by_notice`]).
     pub fn freezes(&self, now: Instant) -> bool {
-        self.showing().is_some() || self.ended.is_some_and(|t| now.duration_since(t) < OVERVIEW_SETTLE)
+        self.showing().is_some() || self.ended.is_some_and(|t| !self.quick && now.duration_since(t) < OVERVIEW_SETTLE)
     }
 
     /// True while a notified Space change waits: an overview shows, or closed less than
-    /// [`OVERVIEW_ARRIVAL_SETTLE`] ago.
+    /// [`OVERVIEW_ARRIVAL_SETTLE`] ago (none after a close found at a look after its notice).
     pub fn holds_arrival(&self, now: Instant) -> bool {
-        self.showing().is_some() || self.ended.is_some_and(|t| now.duration_since(t) < OVERVIEW_ARRIVAL_SETTLE)
+        self.showing().is_some() || self.ended.is_some_and(|t| !self.quick && now.duration_since(t) < OVERVIEW_ARRIVAL_SETTLE)
+    }
+
+    /// The window server's notice (1508) stamped `at`: noted when an overview shows (the
+    /// close's, or the open's own heard after the poll found it). The caller looks next.
+    pub fn told(&mut self, at: Instant) {
+        if self.showing.is_some_and(|(_, since)| at >= since) {
+            self.told = Some(at);
+            self.last_told = Some(at);
+        }
+    }
+
+    /// The looks from now until `false` are brought by a notice (for the margin's count).
+    pub fn look_at_notice(&mut self, on: bool) {
+        self.at_notice = on;
+    }
+
+    /// True while an overview shows and a notice came during it less than
+    /// [`OVERVIEW_EXIT_CARRY`] ago: its close is looked for at every fast tick.
+    pub fn closing_told(&self, now: Instant) -> bool {
+        self.showing.is_some() && self.told.is_some_and(|t| now.saturating_duration_since(t) < OVERVIEW_EXIT_CARRY)
+    }
+
+    /// True when the last close was found at a look after a notice, with macOS's own window
+    /// and the Dock's cover both gone: no settle followed it.
+    pub fn settled_by_notice(&self) -> bool {
+        self.ended.is_some() && self.quick
+    }
+
+    /// For `ctl space`: ms since the overview shown was found, since the last one closed, and
+    /// since a notice came while one showed.
+    pub fn ages_ms(&self, now: Instant) -> (Option<u64>, Option<u64>, Option<u64>) {
+        let ms = |t: Instant| now.saturating_duration_since(t).as_millis() as u64;
+        (self.showing.map(|(_, t)| ms(t)), self.ended.map(ms), self.last_told.map(ms))
     }
 
     /// A wallpaper click at `now` that macOS answers with Show Desktop: expected for

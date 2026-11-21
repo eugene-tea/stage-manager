@@ -22,9 +22,12 @@
 //! - a notice of the Dock's, which draws it ([`Hint::Dock`]; whether one comes as it opens
 //!   is not measured: the log says which hint came before it showed, and how long before);
 //! - macOS's own window over the display once it shows ([`super::overview`]), found by a
-//!   look at the window list.
+//!   look at the window list;
+//! - the window server's notice at its open (type 1508, [`Hint::Server`], round r5-notices),
+//!   measured for its shortcut; whether it comes for the others is the live check's.
 //!
-//! A gesture, a hot corner and the Dock's Mission Control item give no hint at all. So the
+//! Before that notice, a gesture, a hot corner and the Dock's Mission Control item gave no
+//! hint at all. So the
 //! lend is made when Mission Control is seen showing ([`Mode::Shown`], the default: nothing
 //! moves on a guess), and a hint only makes the looks come at the fast tick for
 //! [`Hint::watch`], so that it is seen within a few tens of ms of the key instead of at the
@@ -110,6 +113,11 @@ pub const KEY_WATCH: Duration = Duration::from_millis(800);
 /// The same after a notice of the Dock's (it sends the same notice for ⌘Tab's switcher and
 /// its menus, so the watch is short).
 pub const DOCK_WATCH: Duration = Duration::from_millis(300);
+
+/// The same after the window server's notice (type 1508, round r5-notices): it comes at
+/// Mission Control's and App Exposé's open ~40 ms after the key, about when macOS's window is
+/// first listed, and at a Desktop change's end.
+pub const SERVER_WATCH: Duration = Duration::from_millis(300);
 
 /// The pause between two looks of a watch.
 pub const WATCH_EVERY: Duration = Duration::from_millis(30);
@@ -294,6 +302,9 @@ pub enum Hint {
     Key(Trigger),
     /// The Dock sent a notice (it draws Mission Control; also ⌘Tab's switcher and its menus).
     Dock,
+    /// The window server's notice (1508: Mission Control's or App Exposé's open or close, a
+    /// Desktop change's end), whatever opened it: a gesture, a hot corner, the Dock's item.
+    Server,
 }
 
 impl Hint {
@@ -302,6 +313,7 @@ impl Hint {
         match self {
             Self::Key(t) => t.name(),
             Self::Dock => "a notice of the Dock's",
+            Self::Server => "the window server's notice",
         }
     }
 
@@ -310,6 +322,7 @@ impl Hint {
         match self {
             Self::Key(_) => KEY_WATCH,
             Self::Dock => DOCK_WATCH,
+            Self::Server => SERVER_WATCH,
         }
     }
 }
