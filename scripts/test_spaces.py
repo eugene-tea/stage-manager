@@ -923,6 +923,7 @@ def run():
     parked_d2 = [w["title"] for w in s["windows"] if w["space"] == d2 and w["parked"]]
     check(bool(parked_d2), f"a window is parked on Desktop 2: {parked_d2}")
     desk_shadow("the first run")
+    ts.notice_report("spaces, the first run")
     ts.stop_app()
     left = parked_anywhere()
     check(not left, "after quit no fixture window is parked on any Desktop" + (f" (left: {[w['id'] for w in left]})" if left else ""))
@@ -1043,6 +1044,7 @@ def run():
         check(sorted(w["id"] for w in s["windows"]) == windows_before,
               f"round {round_no}: no window added or lost (the animation's stand-in is never managed)")
     desk_shadow("the full-screen run")
+    ts.notice_report("spaces, the full-screen run")
     ts.stop_app()
     left = parked_anywhere()
     check(not left, "the end: no fixture window parked on any Desktop")
