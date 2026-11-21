@@ -13,6 +13,7 @@
 //! the threads are joined, so the parks' move notices, which the observer hears on the WM
 //! thread afterwards, find each window counted parked ([`WindowEngine::parked_lend`]).
 
+use crate::platform::clock;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -97,10 +98,10 @@ impl lend_park::Moves for AxMover<'_> {
 
     fn move_to(&mut self, to: Rect) -> Option<Rect> {
         self.element.bounded(PARK_AX_SECONDS, |e| e.set_position(to.origin())).ok()?;
-        let by = Instant::now() + PICK_READ_BACK;
+        let by = clock::now() + PICK_READ_BACK;
         loop {
             let now = self.listed();
-            if now.is_some_and(|r| lend_park::at_origin(r, to)) || Instant::now() >= by {
+            if now.is_some_and(|r| lend_park::at_origin(r, to)) || clock::now() >= by {
                 return now;
             }
             std::thread::sleep(PICK_READ_STEP);
@@ -180,7 +181,7 @@ impl BackSteps for BackMac<'_> {
 impl SpacesEngine {
     /// [`crate::platform::window_engine::WindowEngine::park_round`].
     pub(super) fn park_round_now(&self, asks: Vec<RoundAsk>, deadline: Instant) -> Parks {
-        let began = Instant::now();
+        let began = clock::now();
         let mut parks = Parks::default();
         let Some(sky) = self.sky() else { return parks };
         if self.blocked() {
@@ -225,7 +226,7 @@ impl SpacesEngine {
         parks.apps = apps.len();
         let answers = per_app(&apps, |ws| {
             let mut sum = Duration::ZERO;
-            let parks = lend_round::park_in_turn(ws, deadline, Instant::now, |a| {
+            let parks = lend_round::park_in_turn(ws, deadline, clock::now, |a| {
                 let mut mover = Mover::park(a.id.0, &a.park.window, a.park.ax_seconds.unwrap_or(PARK_AX_SECONDS));
                 let p = lend_park::park(&mut mover, a.park.ask);
                 sum += mover.moves;
@@ -266,7 +267,7 @@ impl SpacesEngine {
 
     /// [`crate::platform::window_engine::WindowEngine::home_round`].
     pub(super) fn home_round_now(&self, ids: &[WindowId]) -> Homes {
-        let began = Instant::now();
+        let began = clock::now();
         let mut homes = Homes::default();
         let Some(sky) = self.sky() else { return homes };
         if self.blocked() {

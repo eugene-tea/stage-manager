@@ -6,6 +6,7 @@
 //! [`CornerUpkeep`] is that state, one value the controller owns ([`Controller::corner`]).
 //! Nothing here is asked by an engine that hides its windows elsewhere.
 
+use crate::platform::clock;
 use std::collections::BTreeMap;
 use std::time::Instant;
 
@@ -61,7 +62,7 @@ impl CornerUpkeep {
             patch_fast_until: None,
             dive: None,
             unrestored: BTreeMap::new(),
-            unrestored_checked: Instant::now(),
+            unrestored_checked: clock::now(),
             strays: BTreeMap::new(),
         }
     }

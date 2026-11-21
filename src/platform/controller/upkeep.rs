@@ -16,6 +16,7 @@
 //! Stage Manager arranges the windows (`platform::apple::controller` does, behind
 //! `platform::conductor`).
 
+use crate::platform::clock;
 use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
@@ -243,7 +244,7 @@ impl Controller {
             }
             EngineKind::Spaces => {
                 // Mission Control first: what it has put home is the engine's to count.
-                self.mission_tick(ob, Instant::now());
+                self.mission_tick(ob, clock::now());
                 self.spaces_tick();
             }
             EngineKind::Apple => {}

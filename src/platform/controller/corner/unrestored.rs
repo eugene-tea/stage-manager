@@ -3,6 +3,7 @@
 //! safety registry and is moved again about once a second until the window server lists it
 //! out of the zone, or nowhere ([`Unrestored`], [`Controller::retry_unrestored`]).
 
+use crate::platform::clock;
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
@@ -185,7 +186,7 @@ impl Controller {
         if self.corner.unrestored.is_empty() {
             return;
         }
-        let now = Instant::now();
+        let now = clock::now();
         if !force && now.duration_since(self.corner.unrestored_checked) < UNRESTORED_RETRY {
             return;
         }
@@ -248,9 +249,9 @@ impl Controller {
                     let element = ob.element(id).unwrap_or_else(|| u.entry.element.clone());
                     let restore = u.entry.restore;
                     let set = |e: &AxElement, end: Instant| {
-                        if force { safety::set_frame_retrying(e, id, restore, end.saturating_duration_since(Instant::now())) } else { e.set_frame(restore) }
+                        if force { safety::set_frame_retrying(e, id, restore, end.saturating_duration_since(clock::now())) } else { e.set_frame(restore) }
                     };
-                    let mut result = set(&element, Instant::now() + leftovers::RESTORE_RETRY.budget);
+                    let mut result = set(&element, clock::now() + leftovers::RESTORE_RETRY.budget);
                     if let Err(e) = result
                         && refresh_element(e, u.refreshed)
                         && let Ok(pid) = element.pid()
@@ -260,10 +261,10 @@ impl Controller {
                         // lookup and its try have a budget of their own (the review of 6X2, 1:
                         // the busy app's budget never fitted them, so at quit it never ran).
                         u.refreshed = true;
-                        let end = Instant::now() + leftovers::REFRESH_BUDGET;
+                        let end = clock::now() + leftovers::REFRESH_BUDGET;
                         match safety::ax_window(pid, id) {
                             // At quit, the try only when it still fits after the lookup.
-                            Ok(fresh) if !force || leftovers::leftover_fits(end.saturating_duration_since(Instant::now()), true) => {
+                            Ok(fresh) if !force || leftovers::leftover_fits(end.saturating_duration_since(clock::now()), true) => {
                                 result = set(&fresh, end);
                                 // The observer keeps it too (stale-handles): every later move.
                                 ob.note_fresh(id, fresh.clone());
@@ -358,7 +359,7 @@ impl Controller {
     /// ([`Self::forget_not_parked`]). Returns how many are left (in a park zone on another
     /// Space, or of an app that does not answer).
     pub fn account_unrestored(&mut self, ob: &Observer) -> usize {
-        self.corner.unrestored_checked = Instant::now().checked_sub(UNRESTORED_RETRY).unwrap_or(self.corner.unrestored_checked);
+        self.corner.unrestored_checked = clock::now().checked_sub(UNRESTORED_RETRY).unwrap_or(self.corner.unrestored_checked);
         self.retry_unrestored(ob, false);
         self.forget_not_parked(ob);
         self.corner.unrestored.len()
@@ -371,7 +372,7 @@ impl Controller {
     /// Not while a Desktop change settles or a slide is held: the list is not to be trusted
     /// then, and the window stays on record as before.
     pub(in crate::platform::controller) fn forget_not_parked(&mut self, ob: &Observer) {
-        if self.corner.unrestored.is_empty() || self.phase.space_settling(Instant::now()) || self.slide_held() {
+        if self.corner.unrestored.is_empty() || self.phase.space_settling(clock::now()) || self.slide_held() {
             return;
         }
         let ids: Vec<u32> = self.corner.unrestored.keys().copied().collect();

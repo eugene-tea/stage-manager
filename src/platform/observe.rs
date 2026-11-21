@@ -52,6 +52,7 @@
 //! server listed for it then; each window placed logs the ms since it was found
 //! ([`TrackedWindow::found_at`]).
 
+use crate::platform::clock;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::c_void;
@@ -667,7 +668,7 @@ impl Observer {
     /// The full list of running regular apps.
     pub fn set_apps(&mut self, list: Vec<AppInfo>, callback: Callback) {
         self.apps = list.into_iter().map(|a| (a.pid, a)).collect();
-        let now = Instant::now();
+        let now = clock::now();
         self.known.retain(|pid, _| self.apps.contains_key(pid));
         for &pid in self.apps.keys() {
             self.known.entry(pid).or_insert((now, "listed at our start"));
@@ -722,7 +723,7 @@ impl Observer {
         self.scan_wanted.extend(held);
         // Every app asked at once, for a bounded time: one that does not answer yet costs the
         // start nothing more and is asked on its own thread (round login-observe).
-        let asked = Instant::now();
+        let asked = clock::now();
         let answered = observe_probe::ask_once(&pids, self.probes.ask(), START_WAIT);
         let waiting = pids.len() - answered.len();
         tracing::debug!(apps = pids.len(), answered = answered.len(), waiting, held = held_n, took_ms = asked.elapsed().as_millis() as u64, "apps asked at once at observation's start");
@@ -781,7 +782,7 @@ impl Observer {
     /// Apps `pids` are read by the launch's recovery scan ([`super::launch_scan`]): none is
     /// observed or asked until [`Self::scan_done`] says its windows are back.
     pub fn hold_for_scan(&mut self, pids: impl IntoIterator<Item = i32>) {
-        let now = Instant::now();
+        let now = clock::now();
         for pid in pids {
             self.scan_held.entry(pid).or_insert(now);
         }
@@ -854,7 +855,7 @@ impl Observer {
         if self.held_for_scan(pid) {
             return;
         }
-        let now = Instant::now();
+        let now = clock::now();
         let fast = self.probes.fast();
         let retry = self.pending.entry(pid).or_insert_with(|| Retry::new(now));
         let due = if missed {
@@ -874,7 +875,7 @@ impl Observer {
     /// App `pid` did not answer the WM thread (`e`): asked on its own thread on the schedule,
     /// or given up.
     fn missed(&mut self, pid: i32, e: AxError) {
-        let now = Instant::now();
+        let now = clock::now();
         let fast = self.probes.fast();
         let retry = self.pending.entry(pid).or_insert_with(|| Retry::new(now));
         match retry.missed(now, fast) {
@@ -944,7 +945,7 @@ impl Observer {
             Ok(ids) => {
                 self.probes.stop(pid);
                 let misses = self.pending.remove(&pid).map_or(0, |r| r.misses());
-                let (since, known) = self.known.get(&pid).copied().unwrap_or((Instant::now(), "unknown"));
+                let (since, known) = self.known.get(&pid).copied().unwrap_or((clock::now(), "unknown"));
                 let listed = cg.values().filter(|w| w.pid == pid && w.layer == 0).count();
                 tracing::debug!(
                     pid,
@@ -973,7 +974,7 @@ impl Observer {
         let observer = AxObserver::new(pid, callback)?;
         // A timeout drops `observer` here, and with it what was registered so far.
         let refused = register_app_level(|name| {
-            let asked = Instant::now();
+            let asked = clock::now();
             (observer.add(&element, name, refcon(pid)), asked.elapsed())
         })?;
         for (name, e) in refused {
@@ -1060,7 +1061,7 @@ impl Observer {
         };
         let tracked: Vec<u32> =
             self.windows.values().filter(|w| self.observed.contains_key(&w.pid) && alive(w.pid)).map(|w| w.id).collect();
-        for id in self.vanished.look(Instant::now(), tracked, &listed, blind) {
+        for id in self.vanished.look(clock::now(), tracked, &listed, blind) {
             let Some(w) = self.windows.remove(&id) else { continue };
             if let Some(app) = self.observed.get(&w.pid) {
                 for name in n::WINDOW_LEVEL {
@@ -1114,7 +1115,7 @@ impl Observer {
             frame: element.frame().unwrap_or(cg_window.bounds),
             minimized,
             element,
-            found_at: Instant::now(),
+            found_at: clock::now(),
         };
         if let Some(app) = self.observed.get(&pid) {
             for name in n::WINDOW_LEVEL {
@@ -1384,7 +1385,7 @@ impl Observer {
             AppEvent::WillLaunch(app) => tracing::debug!(pid = app.pid, bundle = app.bundle_or_unknown(), "app about to launch"),
             AppEvent::Launched(app) => {
                 self.log_app("app launched", &app);
-                let now = Instant::now();
+                let now = clock::now();
                 self.last_launch = Some(now);
                 let pid = app.pid;
                 let allowed = self.allowed(&app);

@@ -28,6 +28,7 @@
 //! [`WindowEngine::about_to_show`]: crate::platform::window_engine::WindowEngine::about_to_show
 //! [`WindowEngine::let_new_out`]: crate::platform::window_engine::WindowEngine::let_new_out
 
+use crate::platform::clock;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -111,7 +112,7 @@ fn alive(pid: i32) -> bool {
 
 /// The watch itself (see the module docs).
 fn watch(engine: &SpacesEngine, pid: i32) {
-    let began = Instant::now();
+    let began = clock::now();
     // Made ahead of the app's first window (a Space is made in a few ms).
     let _ = engine.prepare_new();
     let mut others: HashSet<u32> = HashSet::new();
@@ -120,7 +121,7 @@ fn watch(engine: &SpacesEngine, pid: i32) {
     let (mut held, mut missed, mut left_alone, mut placed, mut unplaced) = (0u32, 0u32, 0u32, 0u32, 0u32);
     let mut first_held_ms: Option<u64> = None;
     loop {
-        let now = Instant::now();
+        let now = clock::now();
         let watching = now.duration_since(began) < WATCH_FOR && alive(pid);
         if !watching && waiting.is_empty() {
             break;
@@ -154,7 +155,7 @@ fn watch(engine: &SpacesEngine, pid: i32) {
         if !waiting.is_empty() {
             let ids: Vec<u32> = waiting.keys().copied().collect();
             let listed = windows::describe(&ids);
-            let now = Instant::now();
+            let now = clock::now();
             for id in ids {
                 if !engine.waits_new(id) {
                     // Placed by the controller (let out, or into its stage's Space).

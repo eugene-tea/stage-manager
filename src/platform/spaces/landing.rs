@@ -36,6 +36,7 @@
 //! first and read back once; if the read-back differs, the bridged call is used for the rest
 //! of the run.
 
+use crate::platform::clock;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::MutexGuard;
@@ -120,7 +121,7 @@ pub(super) struct StretchCounts {
 /// Sleeps until `at` (a millisecond short by sleeping, the rest in short naps).
 fn sleep_until(at: Instant) {
     loop {
-        let now = Instant::now();
+        let now = clock::now();
         if now >= at {
             return;
         }
@@ -185,7 +186,7 @@ impl SpacesEngine {
     /// more. The caller goes on as when there is no stretch.
     pub(super) fn stretches_within(&self, what: &str) -> Option<MutexGuard<'_, BTreeMap<u32, Fly>>> {
         let wait = if self.stretches_busy.load(Ordering::Relaxed) { Duration::ZERO } else { LOCK_WAIT };
-        let by = Instant::now() + wait;
+        let by = clock::now() + wait;
         loop {
             match self.stretches.try_lock() {
                 Ok(l) => {
@@ -195,7 +196,7 @@ impl SpacesEngine {
                     return Some(l);
                 }
                 Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < by => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::TryLockError::WouldBlock) if clock::now() < by => std::thread::sleep(Duration::from_millis(1)),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     if !self.stretches_busy.swap(true, Ordering::Relaxed) {
                         tracing::warn!(what, wait_ms = LOCK_WAIT.as_millis() as u64, "spaces engine: the stretches stayed busy (a stretch's thread is stuck); gone on without them");
@@ -321,7 +322,7 @@ impl SpacesEngine {
         Self::set_landing_level(sky, id, space, s.rank, count);
         // Shown back to front: the Spaces behind it first (round landing-order).
         if let Some(c) = &s.convoy {
-            let waited = c.wait_behind(s.rank, Leg::Shown, Instant::now() + landing_order::SHOW_WAIT, || false);
+            let waited = c.wait_behind(s.rank, Leg::Shown, clock::now() + landing_order::SHOW_WAIT, || false);
             if !matches!(waited, Waited::Ready(d) if d < Duration::from_millis(1)) {
                 tracing::debug!(id, space, rank = s.rank, ?waited, "spaces engine: a landing Space waited for those behind it to show");
             }
@@ -353,7 +354,7 @@ impl SpacesEngine {
                     windows::set_transformed(id, Some(s.frame));
                     let late = first_at.elapsed();
                     // The pose for now, not the handover's, when the thread woke late.
-                    let now_m = s.steps.iter().rev().find(|(at, _)| *at <= Instant::now()).map_or(first, |(_, m)| *m);
+                    let now_m = s.steps.iter().rev().find(|(at, _)| *at <= clock::now()).map_or(first, |(_, m)| *m);
                     self.set_landing_transform(sky, space, now_m);
                     if let Err(e) = sky.add_remove_from(Route::Bridged, space, &[id], ALL_SPACES_MASK) {
                         tracing::debug!(id, space, "spaces engine: a stretch's window could not be sent into its Space: {e}");
@@ -381,8 +382,8 @@ impl SpacesEngine {
             return self.skip(id, Some(space), why);
         }
         // On screen at its first pose: the picture goes.
-        let shown_by = Instant::now() + SHOWN_WAIT;
-        while Instant::now() < shown_by && !windows::describe(&[id]).first().is_some_and(|w| w.onscreen) {
+        let shown_by = clock::now() + SHOWN_WAIT;
+        while clock::now() < shown_by && !windows::describe(&[id]).first().is_some_and(|w| w.onscreen) {
             std::thread::sleep(Duration::from_micros(500));
         }
         self.state().stretch.shown += 1;
@@ -405,7 +406,7 @@ impl SpacesEngine {
         // Landed back to front: a window goes onto its Desktop (listed on top there) only
         // once the windows behind it have; it waits at its frame, at the identity.
         if let Some(c) = &s.convoy {
-            let waited = c.wait_behind(s.rank, Leg::Gone, Instant::now() + landing_order::LAND_WAIT, || self.stretches().get(&id).is_none_or(|f| f.stop));
+            let waited = c.wait_behind(s.rank, Leg::Gone, clock::now() + landing_order::LAND_WAIT, || self.stretches().get(&id).is_none_or(|f| f.stop));
             match waited {
                 Waited::Ready(d) if d < Duration::from_millis(1) => {}
                 Waited::Ready(d) => tracing::debug!(id, rank = s.rank, waited_ms = d.as_millis() as u64, "spaces engine: a window waited at its frame for the windows behind it to land"),
@@ -486,8 +487,8 @@ impl SpacesEngine {
             (l.get(&id).is_some_and(|f| f.ended), l.get(&id).copied())
         };
         if !ended {
-            let by = Instant::now() + STOP_WAIT;
-            while Instant::now() < by && sky.spaces_of(&[id]).contains(&space) {
+            let by = clock::now() + STOP_WAIT;
+            while clock::now() < by && sky.spaces_of(&[id]).contains(&space) {
                 std::thread::sleep(Duration::from_millis(2));
             }
             if sky.spaces_of(&[id]).contains(&space) {
@@ -557,12 +558,12 @@ impl SpacesEngine {
     /// stretches stay busy past [`END_WAIT`] (the Spaces are classic: a process that dies
     /// puts their windows back by itself).
     pub(super) fn end_stretches(&self, why: &str) {
-        let by = Instant::now() + END_WAIT;
+        let by = clock::now() + END_WAIT;
         let mut l = loop {
             match self.stretches.try_lock() {
                 Ok(l) => break l,
                 Err(std::sync::TryLockError::Poisoned(p)) => break p.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < by => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::TryLockError::WouldBlock) if clock::now() < by => std::thread::sleep(Duration::from_millis(1)),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     tracing::warn!(why, "spaces engine: the stretches stayed busy; their windows were not taken home");
                     return;

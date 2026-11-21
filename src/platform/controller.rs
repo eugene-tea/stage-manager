@@ -90,6 +90,7 @@
 //!   waiting and for what, a full-screen Space), with the settle after a Space change and
 //!   the Desktop's slide as its clocks. Every hold above asks it; `ctl space` names it.
 
+use crate::platform::clock;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1266,7 +1267,7 @@ impl Controller {
             config_mtime: mtime(path),
             store,
             config_error,
-            config_checked: Instant::now(),
+            config_checked: clock::now(),
             settings: NativeSettings::default(),
             displays: Vec::new(),
             strip_visible: true,
@@ -1313,7 +1314,7 @@ impl Controller {
             displays_added: Vec::new(),
             setups: crate::engine::setup_frames::Recorder::default(),
             our_switch: None,
-            space_checked: Instant::now(),
+            space_checked: clock::now(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
             pressed_obs: None,
@@ -1352,7 +1353,7 @@ impl Controller {
             macos_reveal_at: None,
             wallpaper_press: None,
             quiet: AppQuiet::default(),
-            quiet_checked: Instant::now(),
+            quiet_checked: clock::now(),
             ax: ax_blind::AxWatch::default(),
             seen_times: HashMap::new(),
             settling: None,
@@ -1485,8 +1486,8 @@ impl Controller {
         }
         let listed: HashMap<u32, Rect> =
             list.iter().filter(|w| w.onscreen && w.layer == 0).map(|w| (w.id, w.bounds)).collect();
-        let settling = self.phase.space_settling(Instant::now());
-        let frames = frames_unless_aside(observed_frames(&reads, &listed, settling), self.overview.moves_windows(Instant::now()));
+        let settling = self.phase.space_settling(clock::now());
+        let frames = frames_unless_aside(observed_frames(&reads, &listed, settling), self.overview.moves_windows(clock::now()));
         ob.note_frames(frames.iter().map(|(id, f)| (id.0, *f)));
         Observation { frames, z_order, focused: focused_window().map(WindowId) }
     }
@@ -1517,7 +1518,7 @@ impl Controller {
         // slides: the list then shows its windows shifted sideways by up to the display's
         // width. Settling after a change, or off the display, or slid on a display where no
         // window is listed at its tracked frame, the tracked frame stays.
-        let settling = self.phase.space_settling(Instant::now());
+        let settling = self.phase.space_settling(clock::now());
         let shown: Vec<(&WindowState, Rect, Option<Rect>)> = m
             .windows()
             .filter(|w| !w.parked && (m.is_shown_space(w.space) || w.sticky))
@@ -1541,7 +1542,7 @@ impl Controller {
                 (w.meta.id, frame)
             })
             .collect();
-        let frames = frames_unless_aside(frames, self.overview.moves_windows(Instant::now()));
+        let frames = frames_unless_aside(frames, self.overview.moves_windows(clock::now()));
         Observation { frames, z_order, focused }
     }
 
@@ -1608,7 +1609,7 @@ impl Controller {
         let bars = pid.and_then(super::dock::bar_frame).into_iter().collect();
         let bar = sliver::DockBar { pid, bars };
         let changed = self.dock_bar.as_ref().is_none_or(|(_, was)| *was != bar);
-        self.dock_bar = Some((Instant::now(), bar));
+        self.dock_bar = Some((clock::now(), bar));
         if changed {
             tracing::debug!(bar = ?self.dock_bar.as_ref().map(|(_, b)| b), "inert slivers: the Dock's bar");
             self.hidden_changed();
@@ -1691,7 +1692,7 @@ impl Controller {
         let answered = match rx {
             Some(rx) => match rx.recv_timeout(PRESS_ITEMS_WAIT) {
                 Ok(answer) => {
-                    self.take_items_answer(answer, Instant::now());
+                    self.take_items_answer(answer, clock::now());
                     true
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -1699,7 +1700,7 @@ impl Controller {
                     false
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                    self.take_items_answer(None, Instant::now());
+                    self.take_items_answer(None, clock::now());
                     true
                 }
             },
@@ -1758,7 +1759,7 @@ impl Controller {
         self.pressed_obs = None;
         let parked = self.parked_entries(ob);
         safety::registry_add(parked.clone());
-        let now = Instant::now();
+        let now = clock::now();
         let mut failed = 0;
         let mut changed = false;
         let mut interrupted = false;
@@ -1989,7 +1990,7 @@ impl Controller {
         } else {
             self.flush_pending(ob);
         }
-        self.last_switch = Some(Instant::now());
+        self.last_switch = Some(clock::now());
         if supersedes(&actions) {
             // A switch of ours begins: an activation that fired before it is older than it.
             self.our_switch = self.last_switch;
@@ -2038,7 +2039,7 @@ impl Controller {
             actions.into_iter().partition(|a| matches!(a, Action::SetFrame { id, .. } if first.contains(&id.0)));
         let mut failed = 0;
         if !early.is_empty() {
-            let started = Instant::now();
+            let started = clock::now();
             let n = early.len();
             // The early batch notes the model as it is now (the windows leaving already parked
             // in its eyes); the transition is planned against the state before the switch, or
@@ -2109,7 +2110,7 @@ impl Controller {
     /// it took.
     fn focus_now(&mut self, ob: &Observer, key: WindowId, id: u64) -> Option<u64> {
         let w = ob.window(key.0)?;
-        let started = Instant::now();
+        let started = clock::now();
         self.echoes.touch_window(key.0, started);
         self.echoes.touch_app(w.pid, started);
         let result = w.element.bounded(EARLY_FOCUS_BUDGET.as_secs_f32(), |e| e.set_main(true)).and_then(|()| {
@@ -2273,7 +2274,7 @@ impl Controller {
             .collect();
         let max = motion_math::unveil_backstop(&self.store.config().style);
         self.pending = Some(Pending { id, actions: later, entries, frames, _quiet: enhanced_ui::Batch::open() });
-        self.phase.feed(phase::Event::SwitchSent { id, max }, Instant::now());
+        self.phase.feed(phase::Event::SwitchSent { id, max }, clock::now());
         let failed = self.execute(ob, now);
         self.note_parked();
         failed
@@ -2285,7 +2286,7 @@ impl Controller {
     /// to reach the screen. No window has moved when this returns.
     fn send_transition(&mut self, ob: &Observer, t: Transition, actions: &[Action], run: &ActivationRun, cover_ms: u64) -> strip_model::Cover {
         let id = t.id;
-        let started = Instant::now();
+        let started = clock::now();
         // An engine that hides in one step: the outgoing windows wait on screen for pictures
         // taken now, none being kept fresh on a timer; the keyboard goes first.
         let waiting = if self.engine.pictures_at_switch() && !t.outgoing.is_empty() {
@@ -2309,7 +2310,7 @@ impl Controller {
         };
         if let Some(t) = waiting {
             switch_pictures::take(&t);
-            self.present_with(Some(Transition { sent: Some(Instant::now()), ..t }));
+            self.present_with(Some(Transition { sent: Some(clock::now()), ..t }));
         }
         let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
         let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
@@ -2371,7 +2372,7 @@ impl Controller {
                     tracing::debug!(id = p.id, why, dropped = ?dropped, "a switch superseded before its landing: its windows come, its focus is dropped");
                 }
             }
-            let now = Instant::now();
+            let now = clock::now();
             let since = self.phase.switching().map_or(now, |s| s.since);
             self.phase.feed(phase::Event::SwitchDone, now);
             tracing::trace!(id = p.id, held_ms = now.duration_since(since).as_millis() as u64, "incoming windows unveiled");
@@ -2457,7 +2458,7 @@ impl Controller {
     /// for the log.
     fn keyboard_withheld(&mut self, id: u32, pid: i32, what: &'static str) -> bool {
         let Some(went) = self.went_elsewhere else { return false };
-        let (now, since_press) = (Instant::now(), input::since_last_press());
+        let (now, since_press) = (clock::now(), input::since_last_press());
         if went.over(since_press, now) {
             self.went_elsewhere = None;
             return false;
@@ -2510,7 +2511,7 @@ impl Controller {
         if self.keyboard_withheld(key, w.pid, "a landing's focus") {
             return;
         }
-        let now = Instant::now();
+        let now = clock::now();
         self.echoes.touch_window(key, now);
         self.echoes.touch_app(w.pid, now);
         let element = ob.element(key).unwrap_or_else(|| w.element.clone());
@@ -2531,7 +2532,7 @@ impl Controller {
     }
 
     fn mark_dirty(&mut self) {
-        self.save.mark(Instant::now());
+        self.save.mark(clock::now());
     }
 
     // ----- strip -------------------------------------------------------------------------
@@ -2719,7 +2720,7 @@ impl Controller {
     /// frame that is not finite) is not written: the file on disk stays. The state is clean
     /// only once the file is replaced; a failure is tried again later ([`SaveClock::failed`]).
     pub fn save_now(&mut self) {
-        let start = Instant::now();
+        let start = clock::now();
         let Some(m) = self.model.as_mut() else {
             self.save.saved();
             return;
@@ -2739,7 +2740,7 @@ impl Controller {
         let text = match file.to_json() {
             Ok(text) => text,
             Err(e) => {
-                let wait = self.save.failed(Instant::now());
+                let wait = self.save.failed(clock::now());
                 tracing::error!(failures = self.save.failures(), retry_s = wait.as_secs(), "{e}; the saved stages on disk are kept");
                 return;
             }
@@ -2759,7 +2760,7 @@ impl Controller {
                 tracing::debug!(ms = ms(took), encode_ms = ms(encoded), write_ms = ms(took - encoded), bytes = text.len(), "state saved to {}", path.display());
             }
             Err(e) => {
-                let wait = self.save.failed(Instant::now());
+                let wait = self.save.failed(clock::now());
                 tracing::warn!(failures = self.save.failures(), retry_s = wait.as_secs(), "cannot save {}: {e}; tried again later", path.display());
             }
         }
@@ -2874,7 +2875,7 @@ impl Controller {
     }
 
     fn on_event(&mut self, ob: &mut Observer, event: WinEvent) {
-        let now = Instant::now();
+        let now = clock::now();
         // Something changed since a card was pressed: the click reads the windows afresh.
         self.pressed_obs = None;
         // macOS raises an activated app's windows, parked ones too, above the corner patch:
@@ -3164,7 +3165,7 @@ impl Controller {
                     return;
                 }
                 if let Some(pid) = pid
-                    && self.upkeep_pick(PickBy::Window(WindowId(id), pid), |m| m.window_focused(WindowId(id), &obs), Instant::now())
+                    && self.upkeep_pick(PickBy::Window(WindowId(id), pid), |m| m.window_focused(WindowId(id), &obs), clock::now())
                 {
                     return;
                 }
@@ -3321,7 +3322,7 @@ impl Controller {
         }
         // A window picked in Mission Control: its stage's windows take their frames as it
         // closes, and the switch may wait for the close (round mc-pick).
-        if self.upkeep_pick(PickBy::App(pid), |m| m.app_activated(pid, &obs), Instant::now()) {
+        if self.upkeep_pick(PickBy::App(pid), |m| m.app_activated(pid, &obs), clock::now()) {
             return;
         }
         let since = ob.activated_at(pid);
@@ -3396,7 +3397,7 @@ impl Controller {
     /// a focus as a held focus whose wait ended.
     pub(super) fn slide_hold_step(&mut self, ob: &mut Observer) {
         let Some(hold) = self.slide_hold else { return };
-        let now = Instant::now();
+        let now = clock::now();
         let step = hold.step(now, self.space_changes, || {
             self.model.as_ref().is_some_and(|m| slide_hold::slide_listed(m, &self.slide_bounds(&listed_bounds(&windows::on_screen()))))
         });
@@ -3454,7 +3455,7 @@ impl Controller {
         }
         let screen = m.window(WindowId(id)).map(|w| m.display(w.meta.display).frame);
         let (pid, title) = ob.window(id).map_or((0, String::new()), |w| (w.pid, w.title.clone()));
-        let read_at = Instant::now();
+        let read_at = clock::now();
         let dock = super::dock::dock_pid();
         let tile = dock.and_then(|d| super::dock::minimized_tile(d, super::dock::app_path(pid).as_deref(), &title));
         // The Dock's edge from its bar when no tile was read.
@@ -3481,7 +3482,7 @@ impl Controller {
         self.hide_once_at(None);
         self.minimizing = None;
         if let Some(w) = ob.window(id) {
-            let now = Instant::now();
+            let now = clock::now();
             self.echoes.touch_window(id, now);
             self.echoes.touch_app(w.pid, now);
             self.unminimizing.retain(|_, at| now.duration_since(*at) < UNMINIMIZE_MAX);
@@ -3735,7 +3736,7 @@ impl Controller {
     /// Global input in another app (mouse down/up, key down). `drop` tells, for a mouse-up
     /// over the visible strip, which slot a dragged window goes to.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent, drop: Option<StripDrop>) {
-        let now = Instant::now();
+        let now = clock::now();
         self.slide_watch_step(now);
         if event.kind == InputKind::CommandKey {
             // ⌘ pressed or let go: only ⌘Tab's switcher cares (its release activates).
@@ -3939,7 +3940,7 @@ impl Controller {
                 }
                 if self.locked {
                     // Recognized once the screen unlocks ([`Self::settle_space`]).
-                    self.phase.feed(phase::Event::SpaceChanged, Instant::now());
+                    self.phase.feed(phase::Event::SpaceChanged, clock::now());
                 }
                 return;
             }
@@ -4008,14 +4009,14 @@ impl Controller {
             self.settling = restore.restoring.then(|| {
                 let login = if restore.new_session { super::apps::login_started() } else { None };
                 tracing::info!(after_restart = restore.new_session, login_ago_s = login.map(|l| l.elapsed().as_secs()), "restore: the restore window opens");
-                Settling::new(Instant::now(), login)
+                Settling::new(clock::now(), login)
             });
             self.rematch_until = self.settling.as_ref().map(Settling::rematch_until);
             model.set_restore(restore);
             model.restore_spaces(state.spaces);
         }
         if main.frame.w > 0.0 && self.screen_seen(ob, &list, main.frame) == Seen::FullScreen {
-            self.phase.feed(phase::Event::LaunchedFullScreen, Instant::now());
+            self.phase.feed(phase::Event::LaunchedFullScreen, clock::now());
             tracing::info!("launched on a full-screen app's Space: no strip until a Desktop shows");
         }
         let hints = launch_hints(&list);
@@ -4055,11 +4056,11 @@ impl Controller {
         if let Some(clock) = self.settling.as_mut()
             && model.restore_summary(0).windows > 0
         {
-            clock.placed(Instant::now());
+            clock.placed(clock::now());
         }
         self.model = Some(model);
         // Following the Dock, the first strip shows in the Dock's order already.
-        self.refresh_dock_order(Instant::now(), ob.last_launch());
+        self.refresh_dock_order(clock::now(), ob.last_launch());
         self.announce = config.style.reveal.launch_reveal;
         self.execute(ob, actions);
         if !self.phase.fullscreen() {
@@ -4395,7 +4396,7 @@ impl Controller {
     /// again for a moment ([`OffScreen`], review H1): a hung app no longer costs a timeout per
     /// window every second on the WM thread.
     fn off_screen_for_a_reason(&self, ob: &Observer, windows: &[(u32, i32)]) -> Vec<u32> {
-        let now = Instant::now();
+        let now = clock::now();
         let mut busy = self.busy_apps.borrow_mut();
         busy.prune(now);
         let mut check = OffScreen::new(&mut busy, now);
@@ -4440,7 +4441,7 @@ impl Controller {
         if self.model.is_none() {
             return;
         }
-        let now = Instant::now();
+        let now = clock::now();
         self.macos_reveal_at = None;
         self.space_changes += 1;
         counters::bump(Count::SpaceChange);
@@ -4472,7 +4473,7 @@ impl Controller {
     fn settle_space(&mut self, ob: &mut Observer) {
         let Some(m) = self.model.as_ref() else { return };
         let main = *m.main_display();
-        let now = Instant::now();
+        let now = clock::now();
         if self.poll_lock(now, true) {
             // Recognized once the screen unlocks (the tick tries again).
             return;
@@ -4582,7 +4583,7 @@ impl Controller {
         let hints = launch_hints(list);
         let hold = self.macos_after_display_change();
         let watch = self.spaces_display_watch();
-        let carried = self.slide_carried(Instant::now());
+        let carried = self.slide_carried(clock::now());
         let Some(m) = self.model.as_mut() else { return };
         m.set_hold_arrivals(hold);
         m.set_display_watch(watch);
@@ -4617,12 +4618,12 @@ impl Controller {
         self.slide_watch_arrived(before, after);
         self.note_dock_arrival(after, before);
         // A Desktop arranged ahead for the window it was shown for: confirmed or undone.
-        let (more, predicted) = self.settle_ahead(ob, list, main.id, after, Instant::now());
+        let (more, predicted) = self.settle_ahead(ob, list, main.id, after, clock::now());
         actions.extend(more);
         actions.extend(self.switch_back_after_arrival(ob));
         // A focus or activation still held for a Desktop not shown: maybe another screen's,
         // recognized below.
-        let awaited = self.awaited_elsewhere(Instant::now());
+        let awaited = self.awaited_elsewhere(clock::now());
         // One batch and one strip snapshot for the arrival: the strip of the Desktop shown
         // takes over in its final order, never first with the stage left active.
         self.defer_present = true;
@@ -4665,7 +4666,7 @@ impl Controller {
         let Some(m) = self.model.as_ref() else { return Vec::new() };
         let frames: Vec<Rect> = self.managed_displays().iter().map(|d| d.frame).collect();
         let on = on_managed_screens(list, &frames, |_| false);
-        let now = Instant::now();
+        let now = clock::now();
         let managed_pids: HashSet<i32> = m.windows().map(|w| w.meta.pid).collect();
         let z = windows::z_order(list);
         let seen: Vec<stranded::Seen> = list
@@ -4766,7 +4767,7 @@ impl Controller {
             return;
         }
         if let Some(held) = came {
-            self.focus_replay.hold(held, Instant::now());
+            self.focus_replay.hold(held, clock::now());
         }
         self.bring_focus_forward(ob, "arrival on another screen", predicted);
     }
@@ -4784,7 +4785,7 @@ impl Controller {
             return None;
         }
         let hints = launch_hints(list);
-        let now = Instant::now();
+        let now = clock::now();
         let mut predicted = None;
         for d in others {
             // A screen showing an overview, a full-screen animation or a full-screen app's
@@ -4931,7 +4932,7 @@ impl Controller {
     /// a Desktop recognized from nothing would leave its windows to be filed as new ones
     /// once they show, and the Desktops saved in `state.json` would be saved again under it.
     fn can_build(&mut self, ob: &Observer, list: &[windows::CgWindow]) -> bool {
-        let now = Instant::now();
+        let now = clock::now();
         let locked = self.poll_lock(now, true);
         let (server, ax) = session::counts(list, |w| ob.observes(w.pid), |id| ob.window(id).is_some());
         let blind = session::blindness(locked, server, ax);
@@ -4999,7 +5000,7 @@ impl Controller {
     /// `predicted`: the window a Desktop arranged ahead came for, counted as the focused one
     /// (Accessibility may still name the previous app's window, in the stage parked ahead).
     fn bring_focus_forward(&mut self, ob: &mut Observer, why: &str, predicted: Option<WindowId>) {
-        let now = Instant::now();
+        let now = clock::now();
         let held_at = self.focus_replay.came(now);
         let held = self.focus_replay.take(now);
         let mut obs = self.observe(ob);
@@ -5044,7 +5045,7 @@ impl Controller {
     /// the screen (their app not hidden, not minimized) left it. A change between a Desktop
     /// and a full-screen Space the notification missed is handled as a Space change.
     fn check_spaces(&mut self, ob: &mut Observer) {
-        let now = Instant::now();
+        let now = clock::now();
         if now.duration_since(self.space_checked) < SPACE_POLL
             || self.phase.space_settling(now)
         {
@@ -5314,7 +5315,7 @@ impl Controller {
 
     /// True for [`DISPLAY_SETTLE`] after a display came or went: what moves now is macOS's.
     fn displays_settling(&self) -> bool {
-        self.displays_changed_at.is_some_and(|t| Instant::now().duration_since(t) < DISPLAY_SETTLE)
+        self.displays_changed_at.is_some_and(|t| clock::now().duration_since(t) < DISPLAY_SETTLE)
     }
 
     /// True while the Spaces engine watches a screen gone
@@ -5328,7 +5329,7 @@ impl Controller {
     /// [`DISPLAY_SETTLE`] of it with no click or key press since
     /// ([`crate::engine::displays::macos_after_display_change`]).
     fn macos_after_display_change(&self) -> bool {
-        let since = self.displays_changed_at.map(|t| Instant::now().duration_since(t));
+        let since = self.displays_changed_at.map(|t| clock::now().duration_since(t));
         crate::engine::displays::macos_after_display_change(since, input::since_last_press(), DISPLAY_SETTLE)
     }
 
@@ -5426,7 +5427,7 @@ impl Controller {
     fn look_soon(&mut self, ob: &Observer, id: u32, listed: Option<Rect>) {
         let launched = ob.window(id).and_then(|w| ob.launched_at(w.pid)).map(|at| at.elapsed());
         if looks_soon(listed, launched) {
-            self.fresh_unplaced.entry(id).or_insert_with(|| Instant::now() + FRESH_LOOK);
+            self.fresh_unplaced.entry(id).or_insert_with(|| clock::now() + FRESH_LOOK);
         }
     }
 
@@ -5484,7 +5485,7 @@ impl Controller {
             self.spaces_found(pid, id);
         }
         let about_to_show = self.engine.about_to_show(WindowId(id));
-        self.ax_window_found(ob, Instant::now());
+        self.ax_window_found(ob, clock::now());
         let displays = desktop::cg_display_bounds();
         if let Some(w) = windows::describe(&[id]).into_iter().find(|w| w.onscreen && w.layer == 0)
             && off_screen_not_ours(w.bounds, &displays, false)
@@ -5498,7 +5499,7 @@ impl Controller {
         }
         if let Some(bundle) = ob.window(id).and_then(|w| ob.bundle_id(w.pid)).map(str::to_string) {
             // A new window: its app is not done reopening windows yet.
-            self.quiet.window(&bundle, Instant::now());
+            self.quiet.window(&bundle, clock::now());
         }
         let list = windows::list_windows();
         let shown = self.shown_managed(&list);
@@ -5538,7 +5539,7 @@ impl Controller {
         } else {
             list
         };
-        let now = Instant::now();
+        let now = clock::now();
         if is_main {
             if self.look_for_overview(&list, screen.frame, now) {
                 // App Exposé lists other Desktops' windows on screen: placed once it has closed
@@ -5597,7 +5598,7 @@ impl Controller {
         }
         let waited = self.unplaced.remove(&id);
         if let Some(until) = self.fresh_unplaced.remove(&id) {
-            let ms = FRESH_LOOK.saturating_sub(until.saturating_duration_since(Instant::now())).as_millis() as u64;
+            let ms = FRESH_LOOK.saturating_sub(until.saturating_duration_since(clock::now())).as_millis() as u64;
             tracing::debug!(id, ms, "a new window shows: placed on the fast tick's look");
         }
         if waited {
@@ -5631,7 +5632,7 @@ impl Controller {
             let mut shift = false;
             if sugar.shift_brings_here && decision.action.shift_counts() {
                 let within = Duration::from_millis(if new_app { sugar.launch_window_ms } else { sugar.activation_window_ms });
-                shift = self.triggers.shift_here(Instant::now(), within, input::live_modifiers());
+                shift = self.triggers.shift_here(clock::now(), within, input::live_modifiers());
                 if shift && new_app {
                     self.triggers.consume();
                 }
@@ -5665,7 +5666,7 @@ impl Controller {
             let settling = m.settling();
             if let (Some(clock), true) = (self.settling.as_mut(), back.is_some()) {
                 // The restore is still under way.
-                clock.placed(Instant::now());
+                clock.placed(clock::now());
             }
             if settling {
                 // While the login settles nothing animates: windows go to their stages quietly.
@@ -5809,10 +5810,10 @@ impl Controller {
         }
         // The desktop is Finder's either way: its activation and focus while the press is down
         // and just after its release are echoes, whether it ends as a click or not.
-        self.desktop_echo.desktop_pressed(Instant::now());
+        self.desktop_echo.desktop_pressed(clock::now());
         // A press on a desktop file or folder (to select it, drag it onto a window, open it) is
         // Finder's, as on Apple's: nothing reveals, ours or macOS's.
-        let icons = self.icons_for_press(p, Instant::now());
+        let icons = self.icons_for_press(p, clock::now());
         let known = icons.as_deref().map_or(desktop_click::Icons::Unknown, desktop_click::Icons::Read);
         if desktop_click::desktop_press(p, known) == desktop_click::DesktopPress::Icon {
             tracing::info!(x = p.x, y = p.y, screen = screen.id.0, "a press on a desktop icon: Finder's, no wallpaper click");
@@ -5827,9 +5828,9 @@ impl Controller {
                 self.wallpaper_press = Some(WallpaperPress { at: p, screen: screen.id, stamp });
             }
             WallpaperClick::LeftToMacOs => {
-                self.macos_reveal_at = Some(Instant::now());
+                self.macos_reveal_at = Some(clock::now());
                 // Opening Show Desktop (not closing it): the patch goes at once.
-                if self.overview.expect_show_desktop(Instant::now()) {
+                if self.overview.expect_show_desktop(clock::now()) {
                     self.look_at_screen();
                 }
                 tracing::info!(
@@ -6027,7 +6028,7 @@ impl Controller {
             // so the click's motion starts without waiting on AX. Not while a transition's
             // windows are still on their way (their frames are not the ones to save).
             let display = self.strip_event_display(&event);
-            self.pressed_obs = (self.phase.switching().is_none() && !self.frozen_on(display) && self.model.is_some()).then(|| (Instant::now(), self.observe(ob)));
+            self.pressed_obs = (self.phase.switching().is_none() && !self.frozen_on(display) && self.model.is_some()).then(|| (clock::now(), self.observe(ob)));
             tracing::trace!(stage, read = self.pressed_obs.is_some(), "card pressed");
             return;
         }
@@ -6340,7 +6341,7 @@ impl Controller {
 
     /// Housekeeping, about every 250 ms: debounced save, config polling, strip refresh.
     pub fn tick(&mut self, ob: &mut Observer) {
-        let now = Instant::now();
+        let now = clock::now();
         self.slide_watch_step(now);
         self.publish_minimizable(ob);
         if let Some(s) = self.phase.switching().filter(|s| s.overdue(now)) {
@@ -6547,7 +6548,7 @@ impl Controller {
             return;
         }
         let Some(clock) = self.settling.take() else { return };
-        let now = Instant::now();
+        let now = clock::now();
         // The entries of apps not running then: given up at the next tick (or the login's
         // minute), before a still-empty front gives way (`front_after_restore`).
         self.absent_due = Some(clock.give_up_absent_at(now));
@@ -6713,7 +6714,7 @@ impl Controller {
                     "locked": self.locked,
                     "changes": self.space_changes,
                     "overview": self.overview.showing().map(Overview::name),
-                    "inference_frozen": self.overview.freezes(Instant::now()),
+                    "inference_frozen": self.overview.freezes(clock::now()),
                 }),
                 None => json!({ "ok": false, "error": not_managing() }),
             },
@@ -6821,7 +6822,7 @@ impl Controller {
                     let Some(w) = ob.window(id).filter(|_| shown) else {
                         return json!({ "ok": false, "error": format!("window {id} is not a managed window shown in its stage") });
                     };
-                    self.echoes.touch_window(id, Instant::now());
+                    self.echoes.touch_window(id, clock::now());
                     let space = self.model.as_ref().and_then(|m| m.space_of(WindowId(id))).map(|s| s.0);
                     let on_shown = self.model.as_ref().is_some_and(|m| !m.waits_on_another_space(WindowId(id)));
                     return match w.element.set_frame(frame) {
@@ -6836,7 +6837,7 @@ impl Controller {
                 match ob.window(id) {
                     Some(w) if shown => {
                         // Placed and brought to the front, so a test's pointer path is over it.
-                        let now = Instant::now();
+                        let now = clock::now();
                         self.echoes.touch_window(id, now);
                         self.echoes.touch_app(w.pid, now);
                         let result = w

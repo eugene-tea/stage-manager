@@ -19,6 +19,7 @@
 //! hide stops, [`HideOutcome::TooLate`], and the job falls back to the round trip). How it
 //! went is read from [`Hiding::outcome`].
 
+use crate::platform::clock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -119,7 +120,7 @@ pub fn start(pid: i32, moment: Moment) -> Result<Hiding, String> {
     let out = outcome.clone();
     let cancel = Arc::new(AtomicBool::new(false));
     let called_off = cancel.clone();
-    let since = Instant::now();
+    let since = clock::now();
     std::thread::Builder::new()
         .name("apple-launch-hide".into())
         .spawn(move || {
@@ -144,7 +145,7 @@ fn hide_loop(pid: i32, since: Instant, cancel: &AtomicBool) -> HideOutcome {
         // stage already, and a hide now would empty the stage in front. Left as it is: the
         // job falls back to the round trip.
         if looked.is_none_or(|t| t.elapsed() >= WINDOW_LOOK) {
-            looked = Some(Instant::now());
+            looked = Some(clock::now());
             if shows_a_window(pid) {
                 return HideOutcome::TooLate { ms: since.elapsed().as_millis() as u64 };
             }

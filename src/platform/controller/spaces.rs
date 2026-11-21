@@ -5,6 +5,7 @@
 //! window server agree on which windows are hidden, on each tick (every 250 ms while
 //! something happens, every 2 s at rest).
 
+use crate::platform::clock;
 use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -87,7 +88,7 @@ pub(super) struct SpacesUpkeep {
 impl SpacesUpkeep {
     /// Nothing kept.
     pub(super) fn new() -> Self {
-        Self { strays: BTreeMap::new(), tidied: Instant::now(), dive: None, frames_owed: BTreeMap::new(), left_behind: false, mission: super::mission_control::MissionWatch::default() }
+        Self { strays: BTreeMap::new(), tidied: clock::now(), dive: None, frames_owed: BTreeMap::new(), left_behind: false, mission: super::mission_control::MissionWatch::default() }
     }
 }
 
@@ -102,7 +103,7 @@ impl Controller {
     /// reason: a switch's windows waiting behind their pictures, a Space change settling, an
     /// overview, an arrangement made ahead, a drag.
     pub(super) fn spaces_tick(&mut self) {
-        let now = Instant::now();
+        let now = clock::now();
         let spaces = engine::shared();
         // A screen gone: windows the window server let out of their stage Spaces go back in,
         // on their own Desktops, whatever else holds the tick back (a slide there comes later);

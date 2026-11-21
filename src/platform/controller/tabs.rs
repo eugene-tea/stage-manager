@@ -25,8 +25,9 @@
 //!
 //! [`Model::tab_selected`]: crate::engine::model::Model::tab_selected
 
+use crate::platform::clock;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::Controller;
 use crate::platform::window_engine::EngineKind;
@@ -84,7 +85,7 @@ impl Controller {
         if found.is_empty() {
             return false;
         }
-        let now = Instant::now();
+        let now = clock::now();
         self.tab_asked.retain(|_, at| now.duration_since(*at) < ASK_AGAIN);
         let z = windows::z_order(list);
         let mut took = false;

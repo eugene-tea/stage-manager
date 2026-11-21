@@ -43,6 +43,7 @@
 //! window's windows have shown, and the save waits for it (the saved stages are not written
 //! over by Apple's fresh arrangement meanwhile).
 
+use crate::platform::clock;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -216,20 +217,20 @@ impl AppleController {
         let saved = file.map(|f| f.for_session(current).0);
         let windows = saved.as_ref().map_or(0, restore::saved_windows);
         let on = store.config().stages.restore_apple_stages;
-        let auto = (after_restart && on && windows > 0).then(|| AutoRestore::new(Instant::now(), apps::login_started()));
+        let auto = (after_restart && on && windows > 0).then(|| AutoRestore::new(clock::now(), apps::login_started()));
         tracing::info!(saved_windows = windows, after_restart, restore_apple_stages = on, waits = auto.is_some(), "apple mode: the stages saved before");
         Self {
             store,
             config_error,
             config_mtime: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
-            config_checked: Instant::now(),
+            config_checked: clock::now(),
             displays: Vec::new(),
             settings: NativeSettings::default(),
             model: None,
             mirror: Arrangement::default(),
             followed: None,
             followed_ids: BTreeSet::new(),
-            read_due: Some(Instant::now()),
+            read_due: Some(clock::now()),
             watch_until: None,
             job_wait: None,
             ax_read: None,
@@ -309,7 +310,7 @@ impl AppleController {
             self.read(ob, false);
         } else if moved {
             // Apple's motion moves the windows: the fast tick reads on.
-            self.read_due.get_or_insert(Instant::now());
+            self.read_due.get_or_insert(clock::now());
         }
     }
 
@@ -317,7 +318,7 @@ impl AppleController {
     /// gesture of ours and its echoes never count), and a mouse-up near the strip may have
     /// changed it.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent) {
-        let now = Instant::now();
+        let now = clock::now();
         if event.kind != InputKind::CommandKey && !post::echo(now) {
             let mods = Modifiers { shift: event.shift, cmd: event.cmd };
             if event.kind == InputKind::MouseUp {
@@ -354,7 +355,7 @@ impl AppleController {
     /// A Desktop change (or a full-screen app's Space coming or going): every screen's groups
     /// go away with it ([`Arrangement::desktop_left`]), and the arrangement is read afresh.
     pub fn on_space_changed(&mut self, ob: &mut Observer) {
-        let now = Instant::now();
+        let now = clock::now();
         self.mirror.desktop_left(now);
         for m in self.others.values_mut() {
             m.desktop_left(now);
@@ -369,19 +370,19 @@ impl AppleController {
     pub fn app_launched(&mut self, ob: &Observer, pid: i32) {
         if ob.admits_pid(pid) {
             let bundle = ob.bundle_id(pid).unwrap_or_default().to_string();
-            self.arrival(pid, &bundle, Moment::Launch, Instant::now());
+            self.arrival(pid, &bundle, Moment::Launch, clock::now());
         }
         if let Some(a) = self.auto.as_mut() {
-            a.busy(Instant::now());
+            a.busy(clock::now());
         }
         self.watch();
-        self.read_due = Some(Instant::now());
+        self.read_due = Some(clock::now());
     }
 
     /// An app about to launch: a newly opened app the rules want here is hidden at once.
     pub fn app_will_launch(&mut self, _ob: &Observer, app: &AppInfo) {
-        self.arrival(app.pid, app.bundle_or_unknown(), Moment::Launch, Instant::now());
-        self.read_due = Some(Instant::now());
+        self.arrival(app.pid, app.bundle_or_unknown(), Moment::Launch, clock::now());
+        self.read_due = Some(clock::now());
     }
 
     /// An app activated (its did-activate notice, before the observer hears it): a running
@@ -391,7 +392,7 @@ impl AppleController {
     /// on another Desktop, minimized, or any window the observer knows: Apple's switches to its
     /// stage, as it should), nor for one launched just now (the launch's own route).
     pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
-        let (pid, now) = (app.pid, Instant::now());
+        let (pid, now) = (app.pid, clock::now());
         // The app opened here activated again while its job runs (live 11-17: Activity
         // Monitor, 1.3 s after its window landed in the strip, no step of ours between):
         // whether the person had just clicked tells their click from the app's own.
@@ -529,7 +530,7 @@ impl AppleController {
     /// the moment before Apple's motion starts shows the stage coming in beside the one
     /// leaving (live 11-16: an activation followed that way put both in one stage).
     fn watch(&mut self) {
-        let now = Instant::now();
+        let now = clock::now();
         self.watch_until = Some(now + WATCH);
         self.mirror.step_began(now);
         for m in self.others.values_mut() {
@@ -553,7 +554,7 @@ impl AppleController {
         }
         tracing::info!(screens = displays.len(), frames = ?displays.iter().map(|d| (d.id.0, d.frame.x, d.frame.y, d.frame.w, d.frame.h)).collect::<Vec<_>>(), "apple mode: the screens, one mirror each");
         self.displays = displays;
-        self.read_due = Some(Instant::now());
+        self.read_due = Some(clock::now());
     }
 
     /// Fresh `com.apple.WindowManager` values.
@@ -592,7 +593,7 @@ impl AppleController {
 
     /// Housekeeping: config polling, the read at rest (Accessibility with it), the save.
     pub fn tick(&mut self, ob: &mut Observer) {
-        let now = Instant::now();
+        let now = clock::now();
         if now.duration_since(self.config_checked) >= CONFIG_POLL {
             self.config_checked = now;
             let current = std::fs::metadata(self.store.path()).and_then(|m| m.modified()).ok();
@@ -663,7 +664,7 @@ impl AppleController {
     /// The fast tick: the list read every [`mirror::MOTION_READ`] while anything moves or a
     /// job runs.
     pub fn fast_tick(&mut self, ob: &mut Observer) {
-        let now = Instant::now();
+        let now = clock::now();
         if self.read_due.is_some_and(|t| now >= t) || (self.read_due.is_none() && !self.jobs.is_empty()) {
             self.read(ob, false);
         }
@@ -698,12 +699,12 @@ impl AppleController {
     /// split by screen ([`screens::split`]) and folded into each screen's mirror with its own
     /// `sm.space`; the main screen's, settled, followed by the model; the jobs moved on.
     fn read(&mut self, ob: &mut Observer, with_ax: bool) {
-        let now = Instant::now();
+        let now = clock::now();
         let Some(screen) = self.screen() else { return };
         if !ob.observing() {
             return;
         }
-        let t0 = Instant::now();
+        let t0 = clock::now();
         if self.manager_checked.is_none_or(|t| now.duration_since(t) >= MANAGER_CHECK) || self.manager.is_none() {
             self.manager = super::strip_ax::manager_pid();
             self.manager_checked = Some(now);
@@ -848,11 +849,11 @@ impl AppleController {
         if done.added > 0
             && let Some(a) = self.auto.as_mut()
         {
-            a.busy(Instant::now());
+            a.busy(clock::now());
         }
         if !done.is_empty() {
             tracing::debug!(added = done.added, removed = done.removed, moved = done.moved, switched = done.switched, "apple mode: the model follows Apple's stages");
-            self.save.mark(Instant::now());
+            self.save.mark(clock::now());
         }
         self.followed = Some(grouping);
         self.followed_ids = managed.clone();
@@ -1027,7 +1028,7 @@ impl AppleController {
             }
             Step::AwaitSettle => return Ok(()),
         };
-        let t0 = Instant::now();
+        let t0 = clock::now();
         let ran = route.run(step, &mut desk);
         let stats = self.stats.entry(route.name()).or_default();
         stats.last_ms = t0.elapsed().as_millis() as u64;
@@ -1081,7 +1082,7 @@ impl AppleController {
     /// Asks for `ask`: planned against the mirror into a job, queued, and run at once when
     /// it can (the first and settled).
     fn ask(&mut self, ob: &mut Observer, ask: Ask) -> Result<Value, Refusal> {
-        let now = Instant::now();
+        let now = clock::now();
         let refused = |this: &mut Self, r: Refusal| {
             tracing::info!(?ask, why = r.0, "apple mode: refused");
             this.stats.entry("plan").or_default().refused += 1;
@@ -1187,11 +1188,11 @@ impl AppleController {
         }
         let Some(screen) = self.screen() else { return json!({ "ok": false, "error": "no screen yet" }) };
         let Some(manager) = self.manager else { return json!({ "ok": false, "error": "WindowManager is not running" }) };
-        let now = Instant::now();
+        let now = clock::now();
         let mut desk = Desk { ob, manager: Some(manager), screen: Some(screen.frame), displays: &self.displays };
         let input = desk.input();
         let point = |w: u32| self.mirror.click_at.get(&w).copied().ok_or(format!("window {w}'s thumbnail shows no part of its own"));
-        let t0 = Instant::now();
+        let t0 = clock::now();
         let ran: Result<Value, String> = match t {
             AppleTry::Focus(w) => Focus.can(&Step::Focus(w), &self.mirror, &input).map_err(|r| r.0).and_then(|()| Focus.run(&Step::Focus(w), &mut desk)).map(|()| json!({})),
             AppleTry::ShiftClick(w) => point(w).and_then(|at| {
@@ -1301,7 +1302,7 @@ impl AppleController {
             "why": "Apple's Stage Manager is on and [windows] apple_stage_manager_on = \"integrate\"",
             "apple_stage_manager_on": self.with_apple().name(),
         });
-        let now = Instant::now();
+        let now = clock::now();
         let apple = json!({
             "settled": self.mirror.settled,
             "age_ms": self.mirror.read_at.map(|t| now.duration_since(t).as_millis() as u64),
@@ -1428,7 +1429,7 @@ impl AppleController {
         let text = match file.to_json() {
             Ok(t) => t,
             Err(e) => {
-                let wait = self.save.failed(Instant::now());
+                let wait = self.save.failed(clock::now());
                 tracing::error!(retry_s = wait.as_secs(), "{e}; state-apple.json on disk is kept");
                 return;
             }
@@ -1441,7 +1442,7 @@ impl AppleController {
                 tracing::debug!(bytes = text.len(), "apple mode: stages saved to {}", path.display());
             }
             Err(e) => {
-                let wait = self.save.failed(Instant::now());
+                let wait = self.save.failed(clock::now());
                 tracing::warn!(retry_s = wait.as_secs(), "cannot save {}: {e}; tried again later", path.display());
             }
         }

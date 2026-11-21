@@ -39,6 +39,7 @@
 //! else every 2 s (less while a duty caps it: [`Controller::tick_rest`]). The tick's duties
 //! share one read of the window list ([`windows::wake`]).
 
+use crate::platform::clock;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -138,7 +139,7 @@ fn stirs(cmd: &WmCommand) -> bool {
 /// rest's cap is asked after a tick only (the inert slivers' answer takes the lock their tap
 /// tries at every press).
 fn pace_tick(after_tick: bool) {
-    let now = Instant::now();
+    let now = clock::now();
     let pace = STATE.with(|s| {
         let mut st = s.try_borrow_mut().ok()?;
         let st = st.as_mut()?;
@@ -423,7 +424,7 @@ thread_local! {
 /// Runs one named step of a task (the tick's parts), keeping the slowest for the task's
 /// slow-task line ([`guarded_state`]).
 fn step<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
-    let start = Instant::now();
+    let start = clock::now();
     let out = f();
     let took = start.elapsed();
     SLOWEST_STEP.with(|s| {
@@ -449,7 +450,7 @@ fn with_state(f: impl FnOnce(&mut WmState)) {
 /// resynced from the model. A run that held the thread [`slow_task::SLOW`] or longer is
 /// logged as task `task` (`detail`: what it handled, or empty), rate-limited.
 fn guarded_state(what: &str, task: &'static str, detail: &str, f: impl FnOnce(&mut WmState)) {
-    let start = Instant::now();
+    let start = clock::now();
     SLOWEST_STEP.with(|s| s.set(None));
     if safety::guarded(what, || with_state(f)).is_none() {
         let _ = safety::guarded("panic recovery", || with_state(WmState::after_panic));
@@ -458,7 +459,7 @@ fn guarded_state(what: &str, task: &'static str, detail: &str, f: impl FnOnce(&m
     if took < slow_task::SLOW {
         return;
     }
-    let Some(held) = SLOW.with(|s| s.borrow_mut().note(task, took, Instant::now())) else { return };
+    let Some(held) = SLOW.with(|s| s.borrow_mut().note(task, took, clock::now())) else { return };
     let ms = took.as_millis() as u64;
     let (slowest, slowest_ms) = SLOWEST_STEP.with(|s| s.take()).map_or(("", 0), |(n, t)| (n, t.as_millis() as u64));
     tracing::debug!(task, detail, ms, slowest, slowest_ms, held, "slow WM task");
@@ -490,7 +491,7 @@ fn drain() {
         guarded_state("a WM command", cmd.name(), "", |s| s.handle(cmd));
     }
     if stirred {
-        with_state(|s| s.pace.stir(Instant::now()));
+        with_state(|s| s.pace.stir(clock::now()));
     }
     arm_fast_tick();
     pace_tick(false);
@@ -526,7 +527,7 @@ unsafe extern "C-unwind" fn ax_callback(
         // A title change moves no window: it does not stir the tick (the strip's label it
         // may change is presented on the next tick, brought in by the strip's wait).
         if name != super::ax::notifications::TITLE_CHANGED {
-            s.pace.stir(Instant::now());
+            s.pace.stir(clock::now());
         }
         s.observer.on_notification(pid, element, &name);
         if !safety::quit_requested() {
@@ -618,7 +619,7 @@ impl WmState {
             WmCommand::App(event) => {
                 // An app quitting during a logout's hold: the logout is still under way.
                 if matches!(event, AppEvent::Terminated(_)) {
-                    self.logout.app_quit(Instant::now());
+                    self.logout.app_quit(clock::now());
                 }
                 let launched = match &event {
                     AppEvent::Launched(app) => Some(app.pid),
@@ -685,7 +686,7 @@ impl WmState {
             WmCommand::Displays(displays, heard) => {
                 let moved = self.displays.as_ref().and_then(|d| d.first()).map(|d| d.frame) != displays.first().map(|d| d.frame);
                 if moved && self.displays.is_some() {
-                    self.display_sweep = Some(Instant::now() + DISPLAY_SWEEP_AFTER);
+                    self.display_sweep = Some(clock::now() + DISPLAY_SWEEP_AFTER);
                 }
                 self.displays = Some(displays.clone());
                 self.conductor.set_displays(&mut self.observer, displays, heard);
@@ -783,7 +784,7 @@ impl WmState {
         }
         // An app whose thread did not start is read here, as every app used to be.
         for (pid, bundle) in not_started {
-            let t0 = Instant::now();
+            let t0 = clock::now();
             let value = Some(launch_scan::read(pid, bundle.as_deref()));
             self.launch_scanned(launch_scan::Done { pid, bundle, value, took: t0.elapsed() });
         }
@@ -807,7 +808,7 @@ impl WmState {
         let answered = run.apply(done);
         let finished = run.finished();
         if !answered {
-            let now = Instant::now();
+            let now = clock::now();
             // Its episode starts here: the rescans log only its end (8M).
             self.rescan_unanswered.missed(pid, now);
             self.rescan.unanswered([pid], Why::Launch, now);
@@ -836,7 +837,7 @@ impl WmState {
         if self.launch_scan.is_none() {
             return;
         }
-        for pid in self.observer.scan_overdue(Instant::now(), launch_scan::HOLD_MAX) {
+        for pid in self.observer.scan_overdue(clock::now(), launch_scan::HOLD_MAX) {
             tracing::warn!(pid, "launch scan: the app's read takes long; it is observed without waiting for it");
             self.observer.scan_done(pid, false, ax_callback);
         }
@@ -857,7 +858,7 @@ impl WmState {
                 Task::NewController => self.replace_conductor(Conductor::ours()),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.conductor.set_displays(&mut self.observer, d, Instant::now());
+                        self.conductor.set_displays(&mut self.observer, d, clock::now());
                     }
                 }
                 Task::ReplaySettings => {
@@ -946,7 +947,7 @@ impl WmState {
         match task {
             Task::ReplayDisplays => {
                 if let Some(d) = self.displays.clone() {
-                    self.conductor.set_displays(&mut self.observer, d, Instant::now());
+                    self.conductor.set_displays(&mut self.observer, d, clock::now());
                 }
             }
             Task::ReplaySettings => {
@@ -1051,7 +1052,7 @@ impl WmState {
                 Task::NewController => self.replace_conductor(Conductor::ours()),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.conductor.set_displays(&mut self.observer, d, Instant::now());
+                        self.conductor.set_displays(&mut self.observer, d, clock::now());
                     }
                 }
                 Task::ReplaySettings => {
@@ -1137,7 +1138,7 @@ impl WmState {
         if self.stand_down.stranded() {
             let all_back = safety::retry_held();
             if self.stand_down_leftovers.is_some() {
-                self.leftovers_look = Some(Instant::now() + UNPARK_SETTLE);
+                self.leftovers_look = Some(clock::now() + UNPARK_SETTLE);
             }
             self.stand_down.released(all_back && self.stand_down_leftovers.is_none());
         }
@@ -1150,7 +1151,7 @@ impl WmState {
     /// an unpark). The app may arrange windows again by now (a resume, a cancelled logout):
     /// the windows its controller parks stay where they are ([`leftovers_now`]).
     fn look_for_leftovers(&mut self, at_once: bool) {
-        if !at_once && !look_due(self.leftovers_look, Instant::now()) {
+        if !at_once && !look_due(self.leftovers_look, clock::now()) {
             return;
         }
         self.leftovers_look = None;
@@ -1164,11 +1165,11 @@ impl WmState {
     }
 
     fn tick(&mut self) {
-        if self.logout.cancelled(Instant::now()) {
+        if self.logout.cancelled(clock::now()) {
             self.logout_cancelled("no quit came in time");
         }
         // About once a second by the clock: every fourth tick while brisk, every tick at rest.
-        let full = self.pace.full_pass(Instant::now());
+        let full = self.pace.full_pass(clock::now());
         // Apps gone without a termination notice (round missed-quit): the pids whose calls
         // failed each tick, the apps with tracked windows about once a second.
         step("reap gone apps", || self.observer.reap_gone(full));
@@ -1246,7 +1247,7 @@ impl WmState {
         if self.rescan.is_empty() {
             return;
         }
-        let now = Instant::now();
+        let now = clock::now();
         let observed: std::collections::HashSet<i32> = self.observer.windows().values().map(|w| w.pid).collect();
         let (pass, expired) = self.rescan.due(now, |p| observed.contains(&p));
         if !expired.is_empty() {
@@ -1272,7 +1273,7 @@ impl WmState {
             tracing::warn!(reason, restored = r.restored, "windows left in the park zone were brought back");
         }
         // Each app's episode of not answering, once at each end (8M: a line every ~3.5 s).
-        let now = Instant::now();
+        let now = clock::now();
         for &pid in &pids {
             if unanswered.contains(&pid) {
                 if self.rescan_unanswered.missed(pid, now) {
@@ -1283,7 +1284,7 @@ impl WmState {
             }
         }
         let missed: Vec<Queued> = pass.into_iter().filter(|q| unanswered.contains(&q.pid)).collect();
-        self.rescan.done(&missed, Instant::now());
+        self.rescan.done(&missed, clock::now());
     }
 
     /// After a main display change ([`DISPLAY_SWEEP_AFTER`]): every allowed app is queued
@@ -1291,7 +1292,7 @@ impl WmState {
     /// back, except those we park (the registry's).
     fn sweep_after_display_change(&mut self) {
         let Some(due) = self.display_sweep else { return };
-        if Instant::now() < due {
+        if clock::now() < due {
             return;
         }
         self.display_sweep = None;
@@ -1428,7 +1429,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
         observer,
         conductor: Conductor::ours(),
         scanned: false,
-        pace: TickPace::new(Instant::now()),
+        pace: TickPace::new(clock::now()),
         rest: tick_pace::REST,
         trusted: false,
         stand_down: StandDown::default(),

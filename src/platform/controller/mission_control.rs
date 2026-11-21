@@ -42,6 +42,7 @@
 //! home as lent and parked, so a hide, a show, a quit's sweep and the guardian bring it
 //! back whatever happens here.
 
+use crate::platform::clock;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -283,7 +284,7 @@ impl Controller {
         let up = lends.up();
         let since_close_ms = lends.closing(now).map(ms);
         if !new.is_empty() {
-            let started = Instant::now();
+            let started = clock::now();
             let asked: Vec<(WindowId, i32)> = new.iter().map(|o| (o.id, o.pid)).collect();
             let set = self.engine.frames_back(&asked);
             tracing::info!(
@@ -532,7 +533,7 @@ impl Controller {
 
     /// The round's summary in the log, once its last window is out.
     fn mission_round_said(&mut self) -> Option<mc::RoundDone> {
-        let done = self.spaces.mission.lends.round_done(Instant::now())?;
+        let done = self.spaces.mission.lends.round_done(clock::now())?;
         let first_to_last_ms = done.first_to_last.map(|d| d.as_secs_f64() * 1000.0);
         if done.by == mc::By::KeyPark {
             tracing::info!(
@@ -600,7 +601,7 @@ impl Controller {
             }
         }
         // A test's round waits as long as it takes.
-        let deadline = Instant::now() + wait.unwrap_or(Duration::from_secs(5));
+        let deadline = clock::now() + wait.unwrap_or(Duration::from_secs(5));
         let parks = self.engine.park_round(asks, deadline);
         self.spaces.mission.lends.parks_made(parks.ms, parks.sum_ms, parks.apps);
         if !parks.late.is_empty() {
@@ -621,7 +622,7 @@ impl Controller {
                 self.spaces.mission.lends.lent(Out { id, pid, parked: at, at_card });
             }
         }
-        let now = Instant::now();
+        let now = clock::now();
         let landed = |id: WindowId| parks.landed.iter().find(|(w, _)| *w == id).and_then(|(_, r)| *r);
         for (id, why) in homes.left.iter().chain(&parks.skipped).chain(&unasked) {
             let (misses, again) = self.spaces.mission.lends.left(*id, *why, now);
@@ -742,7 +743,7 @@ impl Controller {
             }
         }
         if !cornering.is_empty() {
-            let started = Instant::now();
+            let started = clock::now();
             let took = self.engine.to_corner(&cornering);
             for (id, pid, at) in cornering {
                 if took.contains(&id) {
@@ -755,7 +756,7 @@ impl Controller {
             tracing::debug!(windows = took.len(), ms = ms(started.elapsed()), "mission-control: windows put home at their cards wait at the corner for their app's switch");
         }
         if !going.is_empty() {
-            let started = Instant::now();
+            let started = clock::now();
             let backs = self.engine.back_round(&going);
             tracing::debug!(windows = going.len(), ms = ms(started.elapsed()), "mission-control: windows put home go back together");
             for (id, back) in backs {
@@ -763,7 +764,7 @@ impl Controller {
                 self.spaces.mission.lends.settle(id, if back.back { Settled::Back } else { Settled::Missed });
             }
         }
-        if let Some(done) = self.spaces.mission.lends.back_done(Instant::now()) {
+        if let Some(done) = self.spaces.mission.lends.back_done(clock::now()) {
             self.spaces.mission.close.over();
             tracing::info!(
                 back = done.back,
@@ -801,7 +802,7 @@ impl Controller {
     /// parked at the corner, or with `lend card` at their cards, as once Mission Control
     /// shows (in view with none over them: the `mission` phase's kill -9).
     pub(super) fn debug_mission_control(&mut self, ob: &Observer, words: &[String]) -> Value {
-        let now = Instant::now();
+        let now = clock::now();
         match words.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
             ["status"] => json!({ "ok": true, "mission_control": self.mission_status() }),
             ["mode", "config"] => {

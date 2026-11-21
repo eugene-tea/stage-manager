@@ -9,6 +9,7 @@
 //! Under the Corner engine nothing is watched or written (macOS counts a parked window on its
 //! Desktop: the slide this watches for does not arise).
 
+use crate::platform::clock;
 use std::time::Instant;
 
 use serde_json::Value;
@@ -173,7 +174,7 @@ impl Controller {
     /// meant to go when a Desktop was arranged ahead there, the press predicted it, or the
     /// app had no window on the Desktop left and has one there (macOS's own rule).
     pub(super) fn slide_watch_arrived(&mut self, from: SpaceId, to: SpaceId) {
-        let now = Instant::now();
+        let now = clock::now();
         let ahead = self.ahead_space();
         let Some(w) = self.slide_watch.watch.as_ref() else { return };
         let s = w.start();
@@ -188,7 +189,7 @@ impl Controller {
     /// The person did `what` (a ⌃-arrow key, Mission Control showing).
     pub(super) fn slide_watch_person(&mut self, what: Person) {
         if let Some(w) = self.slide_watch.watch.as_mut() {
-            w.person(Instant::now(), what);
+            w.person(clock::now(), what);
         }
     }
 
@@ -229,7 +230,7 @@ impl Controller {
     /// The quit (every window unparked): the watch still open is written, then a summary when
     /// there was activity since the last.
     pub(super) fn slide_watch_quit(&mut self) {
-        let now = Instant::now();
+        let now = clock::now();
         if let Some(w) = self.slide_watch.watch.take() {
             self.slide_watch_write(w, now);
         }

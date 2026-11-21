@@ -31,6 +31,7 @@
 //! [`end_in_flight`] (the engine's bring-all-back: quit, a signal, the panic hook) ends a
 //! gesture still in flight from outside: Shift up, the button up, the pointer back.
 
+use crate::platform::clock;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -142,7 +143,7 @@ pub fn start(posted: Posted, manager: Option<i32>) -> Result<(), String> {
             *l = Some(landed);
         }
         if let Ok(mut e) = ENDED.lock() {
-            *e = Some(Instant::now());
+            *e = Some(clock::now());
         }
         IN_FLIGHT.store(false, Ordering::SeqCst);
     });
@@ -285,7 +286,7 @@ fn shift_press(g: &mut Gesture, presses: &[Press], own_shift: bool, manager: Opt
                 continue;
             }
         }
-        let t0 = Instant::now();
+        let t0 = clock::now();
         if let Err(e) = mouse(CGEventType::LeftMouseDown, p.at, CGEventFlags::MaskShift) {
             failed = Some(e);
             break;
@@ -355,7 +356,7 @@ fn drag(g: &mut Gesture, window: u32, from: Point, to: Point) -> Landed {
         last = *p;
         std::thread::sleep(pause);
     }
-    let held = Instant::now();
+    let held = clock::now();
     while held.elapsed() < DRAG_HOLD {
         std::thread::sleep(Duration::from_millis(30));
         if let Some(why) = person(last) {
@@ -426,7 +427,7 @@ fn pointer_now() -> Option<CGPoint> {
 
 /// Waits up to `limit` for the pointer to read at `p` (within a point): true when it does.
 fn pointer_at(p: Point, limit: Duration) -> bool {
-    let t0 = Instant::now();
+    let t0 = clock::now();
     loop {
         if pointer_now().is_some_and(|q| (q.x - p.x).abs() <= 1.0 && (q.y - p.y).abs() <= 1.0) {
             return true;

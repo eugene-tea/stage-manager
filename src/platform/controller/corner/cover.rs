@@ -3,8 +3,8 @@
 //! raised an activated app's windows above the corner patch, so the switch's overlay draws
 //! the desktop over the corner (the patch's picture, or a still of the desktop).
 
+use crate::platform::clock;
 use std::collections::HashSet;
-use std::time::Instant;
 
 use super::super::*;
 use super::patch::parked_in_zone;
@@ -133,7 +133,7 @@ impl Controller {
         let slivers = zone.iter().map(|w| w.bounds).collect();
         let raised = raised_windows(list, own, arriving, activated, in_zone);
         let staying = staying_windows(list, own, outgoing, arriving, &parked, strip_model::has_snapshot);
-        let now = Instant::now();
+        let now = clock::now();
         let facts = CoverFacts {
             on: config.windows.corner_patch,
             screen: display.id.0,

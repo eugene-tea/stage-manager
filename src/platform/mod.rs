@@ -13,6 +13,7 @@ pub mod capture_frame;
 pub mod capture_gate;
 pub mod capture_pace;
 pub mod capture_pixels;
+pub mod clock;
 pub mod code_sign;
 pub mod conductor;
 pub mod controller;

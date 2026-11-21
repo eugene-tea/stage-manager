@@ -44,6 +44,7 @@
 //! own switch, when nothing was arranged ahead, is part of the arrival's batch and never
 //! animated: the Desktop's slide is the motion (Apple's).
 
+use crate::platform::clock;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -1122,7 +1123,7 @@ impl Controller {
     /// are for the arrival's batch.
     pub(super) fn switch_back_after_arrival(&mut self, ob: &Observer) -> Vec<Action> {
         let Some(back) = self.switch_back.take() else { return Vec::new() };
-        let now = Instant::now();
+        let now = clock::now();
         if !back.holds(crate::platform::input::since_last_press(), now) {
             tracing::debug!(space = back.undo.space.0, "the activation's switch is no longer undone: a click or key since, or too late");
             return Vec::new();
@@ -1168,7 +1169,7 @@ impl Controller {
         // not taken leaves it, where a restore starts from (a parked window's park frame, or
         // where the window server lists it; R11 1). Only the windows moved are asked (R13 3).
         let (expected, before_us) = if verify {
-            let asked = Instant::now();
+            let asked = clock::now();
             let listed = windows::describe(&moved_ids(&actions));
             let before_us = asked.elapsed().as_micros() as u64;
             let before = frames_before(&left, &listed);
@@ -1183,7 +1184,7 @@ impl Controller {
         let deferred = std::mem::replace(&mut self.defer_present, true);
         self.execute(ob, actions);
         self.defer_present = deferred;
-        let sent = Instant::now();
+        let sent = clock::now();
         tracing::info!(
             window = id.0,
             predicted = ahead.space.0,
@@ -1220,7 +1221,7 @@ impl Controller {
     /// True while the WM thread's fast tick has work: an arrangement's moves to check, a held
     /// activation, the corner patch after a focus or through Show Desktop.
     pub fn wants_fast_tick(&self) -> bool {
-        let now = Instant::now();
+        let now = clock::now();
         self.verify.as_ref().is_some_and(|v| v.polling)
             || self.slide_held()
             || self.upkeep_wants_fast_tick(now)
@@ -1235,7 +1236,7 @@ impl Controller {
     /// ([`Self::reveal_fast`]: its close seen within a fast tick).
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         self.slide_hold_step(ob);
-        let now = Instant::now();
+        let now = clock::now();
         // ⌘Tab's switcher list gone with no key for it yet: decided after its wait; a window
         // put home for it taken back when no activation of its app came.
         self.switcher_fast_tick(ob, now);
@@ -1277,7 +1278,7 @@ impl Controller {
             rounds = v.rounds,
             slid = v.slid,
             resent,
-            after_ms = ms(v.sent, Instant::now()),
+            after_ms = ms(v.sent, clock::now()),
             "arrival: the check of the arrangement's moves ends"
         );
     }
@@ -1381,7 +1382,7 @@ impl Controller {
             tracing::info!(missing = ?bounds, round = v.rounds, after_ms = elapsed, "arrival: the window server does not show every move yet; sending them again");
         }
         let mut moves = std::mem::take(&mut v.moves);
-        let round = Instant::now();
+        let round = clock::now();
         let left = send_round(&due, |i| {
             let e = &mut moves[i];
             let bounds = listed(e.id).map(|w| w.bounds);
@@ -1392,7 +1393,7 @@ impl Controller {
             sent
         });
         if !left.is_empty() {
-            tracing::debug!(left = left.len(), took_ms = ms(round, Instant::now()), "arrival: the round's time is up; the rest go next round");
+            tracing::debug!(left = left.len(), took_ms = ms(round, clock::now()), "arrival: the round's time is up; the rest go next round");
         }
         if let Some(v) = self.verify.as_mut() {
             v.moves = moves;
@@ -1466,7 +1467,7 @@ impl Controller {
         let resent: Vec<String> = due.iter().map(|&i| listed_at(list, v.moves[i].id)).collect();
         let sliding = due.iter().filter(|&&i| seen[i] == Some(Seen::Sliding)).count();
         let mut moves = std::mem::take(&mut v.moves);
-        let round = Instant::now();
+        let round = clock::now();
         let out = tail_round(&mut moves, &due, &seen, over, ceiling, |e| self.resend(ob, e, now, round));
         let Some(v) = self.verify.as_mut() else { return };
         v.moves = moves;
@@ -1610,7 +1611,7 @@ impl Controller {
             y = p.y,
             path = item.path,
             prediction = ?prediction.map(|(_, w)| w.0),
-            took_ms = ms(now, Instant::now()),
+            took_ms = ms(now, clock::now()),
             "dock: pressed"
         );
         if let Ok((_, window)) = prediction {
@@ -1645,7 +1646,7 @@ impl Controller {
         tracing::info!(
             path = item.path,
             window = window.0,
-            since_press_ms = ms(now, Instant::now()),
+            since_press_ms = ms(now, clock::now()),
             "dock: the Desktop the press goes to is arranged at the press (its window waited off every Desktop)"
         );
     }
@@ -1727,7 +1728,7 @@ impl Controller {
     /// to another Desktop for it (the prediction made at the press), that Desktop is
     /// arranged now. Returns the window predicted.
     fn dock_clicked(&mut self, ob: &Observer, press: &DockPress<Prediction>, released: Instant) -> Option<WindowId> {
-        let started = Instant::now();
+        let started = clock::now();
         let why = match press.prediction {
             Ok((pid, window)) => {
                 let regated = self.model.as_ref().map_or(Err("not managing"), |m| m.dock_gates(pid));
@@ -1745,7 +1746,7 @@ impl Controller {
                             tracing::info!(
                                 path = press.item.path,
                                 window = window.0,
-                                since_click_ms = ms(press.when, Instant::now()),
+                                since_click_ms = ms(press.when, clock::now()),
                                 "dock: the Desktop the click goes to was arranged at the press"
                             );
                             return Some(window);
@@ -1757,7 +1758,7 @@ impl Controller {
                             if let Some(space) = self.ahead_space() {
                                 self.present_away(space);
                             }
-                            let done = Instant::now();
+                            let done = clock::now();
                             tracing::info!(
                                 path = press.item.path,
                                 window = window.0,
@@ -1773,7 +1774,7 @@ impl Controller {
             }
             Err(why) => why,
         };
-        let done = Instant::now();
+        let done = clock::now();
         tracing::info!(
             path = press.item.path,
             why,
@@ -1802,7 +1803,7 @@ impl Controller {
         // One bounded round with the app (`press_round`): hidden, active, its focused (else
         // main) window; it stops at the first failure and within PRESS_ROUND_CAP.
         let app = AxElement::application(pid);
-        let started = Instant::now();
+        let started = clock::now();
         let answer = app.bounded(QUERY_AX_TIMEOUT_SECONDS, |a| {
             press_round(
                 || a.is_hidden(),
@@ -1819,7 +1820,7 @@ impl Controller {
                 },
             )
         });
-        let took_ms = ms(started, Instant::now());
+        let took_ms = ms(started, clock::now());
         let PressAnswer { hidden, active, focused, main: main_window } = answer;
         let Some(hidden) = hidden else {
             tracing::info!(bundle, pid, took_ms, "dock: the app did not say whether it is hidden");
@@ -1862,20 +1863,20 @@ impl Controller {
             let lend = self.engine.lend_home(home, park);
             noted = Some(LendNote { home: lend.home, parked: lend.parked, asked, park_ms: lend.park_ms });
             if lend.home {
-                self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: None });
+                self.lent = Some(Lent { window: home, pid, at: clock::now(), switcher: None });
                 tracing::info!(
                     bundle,
                     pid,
                     window = home.0,
                     parked = lend.parked.unwrap_or(false),
                     park_ms = lend.park_ms,
-                    took_ms = ms(started, Instant::now()),
+                    took_ms = ms(started, clock::now()),
                     "dock: the app's windows here wait off every Desktop and macOS counts one elsewhere: its stage's window is put home before the release"
                 );
                 if !lend.parked.unwrap_or(false) {
                     tracing::info!(bundle, pid, window = home.0, asked, park_ms = lend.park_ms, "dock: the window put home could not be parked off the screen first (its app did not move it in time): it shows at its frame until its stage's switch");
                 }
-                self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted: None });
+                self.dock_seen = Some(DockSeen { at: clock::now(), pid, active, predicted: None });
                 self.slide_watch_press(&bundle, pid, noted, None);
                 return Err("the app's window here was put home at the press: macOS activates it here");
             }
@@ -1883,7 +1884,7 @@ impl Controller {
         }
         let result = m.dock_arrival(pid, facts, ax_window);
         let predicted = result.ok().and_then(|w| m.space_of(w)).map(|s| s.0);
-        self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted });
+        self.dock_seen = Some(DockSeen { at: clock::now(), pid, active, predicted });
         self.slide_watch_press(&bundle, pid, noted, predicted);
         let window = result?;
         tracing::debug!(bundle, pid, window = window.0, "dock: the window macOS will show");
@@ -1904,7 +1905,7 @@ impl Controller {
             from = from.0,
             arrived = arrived.0,
             right = seen.predicted == Some(arrived.0),
-            since_press_ms = ms(seen.at, Instant::now()),
+            since_press_ms = ms(seen.at, clock::now()),
             "dock: the Desktop a Dock click went to"
         );
     }
@@ -2000,7 +2001,7 @@ impl Controller {
             predicted = sent.ahead.space.0,
             window = sent.ahead.window.0,
             trigger = sent.trigger.name(),
-            since_sent_ms = ms(sent.sent_at, Instant::now()),
+            since_sent_ms = ms(sent.sent_at, clock::now()),
             moves = actions.iter().filter(|a| !matches!(a, Action::StateChanged)).count(),
             "arrival: the arrangement made ahead is undone ({why})"
         );
@@ -2008,7 +2009,7 @@ impl Controller {
         self.execute(ob, actions);
         if sent.trigger.away() {
             // The focus held for the click was the prediction's: it goes with it.
-            if matches!(self.focus_replay.peek(Instant::now()), Some(Wanted::Window { id, .. }) if id == sent.ahead.window) {
+            if matches!(self.focus_replay.peek(clock::now()), Some(Wanted::Window { id, .. }) if id == sent.ahead.window) {
                 self.focus_replay.clear();
             }
             self.present_away(sent.ahead.space);
@@ -2130,9 +2131,9 @@ impl Controller {
             Ok((_, other)) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found another item ({})", other.path) }),
             Err(miss) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
         };
-        let pressed_at = Instant::now();
+        let pressed_at = clock::now();
         self.press_item(ob, list, item, at, pressed_at);
-        let predicted = self.dock_released(ob, at, false, Instant::now());
+        let predicted = self.dock_released(ob, at, false, clock::now());
         let pressed = element.bounded(QUERY_AX_TIMEOUT_SECONDS * 4.0, |e| e.perform_action(names::PRESS));
         tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), pressed = pressed.is_ok(), "debug-dock-click");
         json!({ "ok": pressed.is_ok(), "predicted": predicted.map(|w| w.0), "error": pressed.err().map(|e| e.to_string()) })

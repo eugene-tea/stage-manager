@@ -12,6 +12,7 @@
 //! key's), and never fights the user: a mouse button pressed since the switch began, or
 //! another window brought in front, stops it at once.
 
+use crate::platform::clock;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -63,7 +64,7 @@ impl Controller {
         if asked.len() < 2 || apps.len() < 2 {
             return;
         }
-        let start = Instant::now();
+        let start = clock::now();
         let deadline = start + order::CHECK_CAP;
         let listed = listed_ids();
         let user = UserWatch { since, asked: &asked, front_then: listed.first().copied() };
@@ -76,7 +77,7 @@ impl Controller {
             let now_listed = listed.take().unwrap_or_else(listed_ids);
             let got = order::listed_order(&asked, &now_listed);
             let again = order::to_raise_again(&asked, &got);
-            let now = Instant::now();
+            let now = clock::now();
             if user.acted(&now_listed) {
                 stopped = Some(USER_ACTED);
                 break got;
@@ -102,7 +103,7 @@ impl Controller {
                 stopped = Some(why);
                 break order::listed_order(&asked, &listed_ids());
             }
-            calm_since = Instant::now();
+            calm_since = clock::now();
         };
         let Some(wrong) = first_wrong else { return };
         let fixed = order::to_raise_again(&asked, &got).is_empty();
@@ -136,7 +137,7 @@ impl Controller {
     ) -> Result<(), &'static str> {
         let mut late = false;
         for &id in again {
-            let now = Instant::now();
+            let now = clock::now();
             let is_key = focus == Some(id);
             if now >= deadline && !is_key {
                 late = true;
@@ -163,7 +164,7 @@ impl Controller {
                 if user.acted(&listed) {
                     return Err(USER_ACTED);
                 }
-                let now = Instant::now();
+                let now = clock::now();
                 if order::shows_above(id, order::below(asked, id), &order::listed_order(asked, &listed)) || now >= until {
                     break;
                 }
@@ -176,7 +177,7 @@ impl Controller {
             && let Some(w) = ob.window(key)
             && !self.keyboard_withheld(key, w.pid, "an order check's focus")
         {
-            let now = Instant::now();
+            let now = clock::now();
             self.echoes.touch_window(key, now);
             self.echoes.touch_app(w.pid, now);
             let _ = ax_focus(&ob.element(key).unwrap_or_else(|| w.element.clone()), w.pid);

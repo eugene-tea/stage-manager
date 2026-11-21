@@ -36,6 +36,7 @@
 //! Chosen at launch ([`crate::platform::window_engine::choose_at_launch`]: the launch probe,
 //! the config, and for now an opt-in); the Corner engine is the default.
 
+use crate::platform::clock;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -325,7 +326,7 @@ impl Moves for Mover<'_> {
 
     fn move_to(&mut self, to: Rect) -> Option<Rect> {
         let element = self.element?;
-        let t = Instant::now();
+        let t = clock::now();
         let before = self.listed();
         let sent = element.bounded(self.ax_seconds, |e| e.set_position(to.origin()));
         let out = match sent {
@@ -334,11 +335,11 @@ impl Moves for Mover<'_> {
                 None
             }
             Ok(()) => {
-                let by = Instant::now() + if self.exact { RESTORE_READ_BACK } else { PARK_READ_BACK };
+                let by = clock::now() + if self.exact { RESTORE_READ_BACK } else { PARK_READ_BACK };
                 loop {
                     let now = self.listed();
                     let there = now.is_some_and(|r| lend_park::at_origin(r, to));
-                    if there || (!self.exact && now != before) || Instant::now() >= by {
+                    if there || (!self.exact && now != before) || clock::now() >= by {
                         break now;
                     }
                     std::thread::sleep(READ_BACK_STEP);
@@ -513,11 +514,11 @@ impl SpacesEngine {
     /// (by the thread asking too: a panic hook runs on the panicking thread, before its
     /// guards are dropped, and a blocking lock there never returns, review A-13, B-5).
     fn state_free_within(&self, wait: Duration) -> bool {
-        let by = Instant::now() + wait;
+        let by = clock::now() + wait;
         loop {
             match self.state.try_lock() {
                 Ok(_) | Err(std::sync::TryLockError::Poisoned(_)) => return true,
-                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < by => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::TryLockError::WouldBlock) if clock::now() < by => std::thread::sleep(Duration::from_millis(1)),
                 Err(std::sync::TryLockError::WouldBlock) => return false,
             }
         }
@@ -603,7 +604,7 @@ impl SpacesEngine {
             return false;
         }
         if retry() {
-            let failed = self.state().health.strike(Instant::now(), what);
+            let failed = self.state().health.strike(clock::now(), what);
             tracing::warn!(id, what, failed, "spaces engine: a window not where a call put it was set right by a retry (a strike)");
             return true;
         }
@@ -699,7 +700,7 @@ impl SpacesEngine {
     /// Reads window `id`'s Spaces until `done` says so or [`READ_BACK`] is over; whether it
     /// did, and the last read.
     fn read_back(&self, sky: &Sky, id: u32, done: impl Fn(&[u64]) -> bool) -> (bool, Vec<u64>) {
-        let began = Instant::now();
+        let began = clock::now();
         loop {
             let now = sky.spaces_of(&[id]);
             if done(&now) {
@@ -740,12 +741,12 @@ impl SpacesEngine {
         // gone is watched, the Desktop it was hidden from first ([`spill::hide_home`]).
         let flew_from = flying_guard.as_ref().and_then(|l| self.home_of(id, l.get(&id)));
         let on = desktop_among(&now, &desktops, &shown);
-        let keep = self.watching(Instant::now());
+        let keep = self.watching(clock::now());
         // Only within the change itself may a window in front be listed on another Desktop
         // than its screen shows; past it, or once the user pressed, where it is listed holds.
         let mid_change = keep && {
             let from = self.state().watch_from;
-            spill::mid_change(from.map(|t| Instant::now().saturating_duration_since(t)), crate::platform::input::since_last_press())
+            spill::mid_change(from.map(|t| clock::now().saturating_duration_since(t)), crate::platform::input::since_last_press())
         };
         let hints = {
             let st = self.state();
@@ -1082,7 +1083,7 @@ impl SpacesEngine {
                 tracing::info!(id, "spaces engine: a window owed its show is back");
             }
         }
-        self.retry_frames(force, busy, Instant::now(), |id| !windows::describe(&[id]).is_empty(), |f| f.element.set_frame(f.frame));
+        self.retry_frames(force, busy, clock::now(), |id| !windows::describe(&[id]).is_empty(), |f| f.element.set_frame(f.frame));
         self.owed()
     }
 
@@ -1376,7 +1377,7 @@ impl SpacesEngine {
             for id in &out_ids {
                 st.held.remove(id);
             }
-            let pulls = st.companions.escaped(&out, Instant::now());
+            let pulls = st.companions.escaped(&out, clock::now());
             drop(st);
             for (let_out, pulled) in pulls {
                 tracing::warn!(id = let_out, pulled, "spaces engine: a window let out of a stage's Space pulled a held window out with it; not let out again while that one is held there");
@@ -1391,7 +1392,7 @@ impl SpacesEngine {
     /// their own Desktops, and the stage Spaces of the screen gone, with any a window came out
     /// of, are made again now ([`Self::keep_through_display_change`]).
     pub fn watch_display_change(&self, why: &str) {
-        let now = Instant::now();
+        let now = clock::now();
         {
             let mut st = self.state();
             st.watch = Some(now + spill::WATCH);
@@ -1411,7 +1412,7 @@ impl SpacesEngine {
     /// True while a screen gone is watched: the tick stays brisk for its looks
     /// ([`Self::keep_tick`]).
     pub fn watching_now(&self) -> bool {
-        self.watching(Instant::now())
+        self.watching(clock::now())
     }
 
     /// The tick's look while a screen gone is watched, at most every [`spill::KEEP_EVERY`]
@@ -1419,7 +1420,7 @@ impl SpacesEngine {
     /// model shows on the Desktop of a hidden window (its Space's, not hidden), asked only for
     /// a Desktop that ended.
     pub fn keep_tick(&self, peers: &dyn Fn(u32) -> Vec<u32>) {
-        let now = Instant::now();
+        let now = clock::now();
         {
             let mut st = self.state();
             if !st.watch.is_some_and(|until| now < until) {
@@ -1449,7 +1450,7 @@ impl SpacesEngine {
     /// tick hides it again by the model's word once its Desktop shows, at the Desktop it was
     /// hidden from ([`spill::hide_home`]).
     pub fn keep_through_display_change(&self, why: &str, peers: &dyn Fn(u32) -> Vec<u32>) {
-        if !self.watching(Instant::now()) || self.blocked() {
+        if !self.watching(clock::now()) || self.blocked() {
             return;
         }
         let Some(sky) = self.sky() else { return };
@@ -1483,7 +1484,7 @@ impl SpacesEngine {
             let listing: Vec<(String, Vec<u64>)> = displays.iter().map(|(uuid, _, spaces)| (uuid.clone(), spaces.iter().map(|(id, _)| *id).collect())).collect();
             let mut st = self.state();
             let homes: BTreeSet<u64> = candidates.iter().map(|(_, h)| h.home).collect();
-            let (ended, unlisted) = spill::ended_desktops(homes, &listing, &st.unlisted, Instant::now());
+            let (ended, unlisted) = spill::ended_desktops(homes, &listing, &st.unlisted, clock::now());
             st.unlisted = unlisted;
             map.ended = ended;
         }
@@ -1679,7 +1680,7 @@ impl SpacesEngine {
         let (desktops, shown) = Self::desktops(sky);
         // While a screen gone is watched, one whose Desktop ended is not gone: its stage
         // Space is made again where that Desktop's windows went ([`spill`]).
-        let ended = |home: u64| !desktops.is_empty() && !desktops.contains(&home) && self.watching(Instant::now());
+        let ended = |home: u64| !desktops.is_empty() && !desktops.contains(&home) && self.watching(clock::now());
         held.into_iter().filter(|(id, h)| (shown.contains(&h.home) || ended(h.home)) && sky.spaces_of(&[*id]).contains(&h.space)).map(|(id, _)| id).collect()
     }
 
@@ -1716,7 +1717,7 @@ impl SpacesEngine {
             let Some(home) = home else { continue };
             let _ = sky.add_remove_from(Route::Bridged, home, &[w.id], ALL_SPACES_MASK);
             let (ok, after) = self.read_back(sky, w.id, |s| out_of(s, &ours));
-            self.state().companions.let_out(w.id, *space, Instant::now());
+            self.state().companions.let_out(w.id, *space, clock::now());
             tracing::info!(id = w.id, pid = w.pid, space, desktop = home, ok, listed = ?after, "spaces engine: a window nothing answered for was in a stage's Space: let out");
             out += usize::from(ok);
         }
@@ -1791,7 +1792,7 @@ impl SpacesEngine {
         if !self.left_behind() {
             return false;
         }
-        let now = Instant::now();
+        let now = clock::now();
         {
             let mut st = self.state();
             if st.afterlife.is_some_and(|t| now.duration_since(t) < AFTERLIFE_EVERY) {
@@ -1895,7 +1896,7 @@ impl SpacesEngine {
             "hide_misses": st.counts.hide_misses,
             "show_misses": st.counts.show_misses,
             "read_back_max_us": st.counts.read_back_max_us,
-            "strikes": st.health.strikes(Instant::now()),
+            "strikes": st.health.strikes(clock::now()),
             "failed": st.health.failed(),
             "fail_mode": format!("{:?}", st.fail),
             "new_waiting": st.new,
@@ -1994,7 +1995,7 @@ impl WindowEngine for SpacesEngine {
                 tracing::debug!(id = id.0, "spaces engine: a window parked for a lend shown at its frame");
             }
         } else if away {
-            st.frames.insert(id.0, OwedFrame { frame, element: window.clone(), pid: window.pid().ok(), backoff: Backoff::new(Instant::now()), dead: 0 });
+            st.frames.insert(id.0, OwedFrame { frame, element: window.clone(), pid: window.pid().ok(), backoff: Backoff::new(clock::now()), dead: 0 });
             tracing::warn!(id = id.0, parked = parked.is_some(), "spaces engine: a window came out of its Space away from the frame its show asked and did not take it: owed, tried again");
         }
         framed

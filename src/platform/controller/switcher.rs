@@ -61,6 +61,7 @@
 //! [`WindowEngine::lend_home`]: crate::platform::window_engine::WindowEngine::lend_home
 //! [`WindowEngine::parked_lend`]: crate::platform::window_engine::WindowEngine::parked_lend
 
+use crate::platform::clock;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -263,7 +264,7 @@ impl Controller {
             Choice::Guess(pid) => pid.map(|p| (p, By::Keys)),
             Choice::Keep | Choice::Gone => self.switcher.selected,
         };
-        let took_ms = ms(now, Instant::now());
+        let took_ms = ms(now, clock::now());
         tracing::info!(
             steps,
             step = if by_key { "a key" } else { "the Dock's notice" },
@@ -360,7 +361,7 @@ impl Controller {
                         window = window.0,
                         parked,
                         park_ms = lend.park_ms,
-                        since_tab_ms = self.switcher.opened.map(|t| ms(t, Instant::now())),
+                        since_tab_ms = self.switcher.opened.map(|t| ms(t, clock::now())),
                         "cmd-tab: the app's windows here wait off every Desktop and macOS counts one elsewhere: its stage's window is put home while the switcher shows"
                     );
                     if asked && !parked {
@@ -440,7 +441,7 @@ impl Controller {
         if !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
             return;
         }
-        let now = Instant::now();
+        let now = clock::now();
         switcher_probe::note("dock notice", name);
         // The Dock draws Mission Control too: its notice may come as it opens.
         self.upkeep_dock_notice(name, now);
@@ -512,7 +513,7 @@ impl Controller {
     /// App `pid` activated: a window put home for the switcher for that app is kept for the
     /// activation's switch ([`LetGo`]).
     pub(super) fn switcher_activated(&mut self, pid: i32) {
-        self.switcher.activated = Some((pid, Instant::now()));
+        self.switcher.activated = Some((pid, clock::now()));
         if let Some(go) = self.lent.as_mut().filter(|l| l.pid == pid).and_then(|l| l.switcher.as_mut())
             && !go.activated
         {

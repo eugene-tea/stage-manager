@@ -2,6 +2,7 @@
 //! that the window server lists out of the park zone, or whose park failed, is parked again
 //! or adopted as shown, every tick.
 
+use crate::platform::clock;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -42,7 +43,7 @@ impl Controller {
     pub(in crate::platform::controller) fn reconcile_parked(&mut self, ob: &mut Observer, list: Option<&[windows::CgWindow]>) {
         use crate::engine::corner::corner_patch::desktop_slides;
         use crate::engine::corner::park_reconcile::{Facts, Seen, Verdict, step};
-        let now = Instant::now();
+        let now = clock::now();
         let Some(m) = self.model.as_ref() else {
             self.corner.strays.clear();
             return;
