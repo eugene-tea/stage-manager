@@ -61,8 +61,9 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   snapshots WM → main via GCD.
 - **Time** (review 11-21): the platform layer reads one clock, `platform::clock::now()`
   (under `cfg(test)` a per-thread clock a test freezes and moves, `clock::test::freeze`,
-  `advance`; a frozen clock never ends a read-until-deadline loop, so tests freeze it only
-  around handlers). Every event carries when it was received from macOS: the AX callback's
+  `advance`; a wait on the WM thread goes through `clock::sleep` and an age that decides
+  through `clock::since`, so under a frozen clock a wait moves the clock on and its loop
+  ends: the bench, docs/DEVELOPMENT.md, runs the real controller so). Every event carries when it was received from macOS: the AX callback's
   entry, the NSWorkspace or input monitor's handler on the main thread, an event tap's
   callback (`observe::Stamped`, `InputEvent::heard`, `WmCommand::SpaceChanged`'s instant;
   the controller keeps the one being handled, `received`). An attribution ("is this focus

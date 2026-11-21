@@ -70,6 +70,38 @@ and the fake desk (`Desk`) hide windows the way that engine does. A test of the 
 corner's own geometry goes in `corner_nuance! { .. }` and runs on the Corner engine only;
 the Spaces engine's own tests are in `src/engine/spaces.rs`.
 
+### The bench
+
+The bench (`src/platform/controller/bench.rs`) runs the real controller, the real observer
+and the real window engine (Corner or Spaces) in a unit test, on a fake desk
+(`src/platform/fake.rs`) and a frozen clock. The desk stands in for macOS at the platform's
+leaves only (the window list, Accessibility, input state, the frontmost app, the Dock, the
+screens, the strip, SkyLight's Space calls): each leaf asks the desk first under
+`cfg(test)`, and the desk answers as macOS was measured to (an activation and its notices,
+a Desktop slide and its notice, a window in a stage Space on no Desktop). Notices are queued
+with their measured delays times a **load factor**, and every platform call costs time on
+the clock, so a scenario run at load 3 or 10 is the same script on a slower Mac. Files go
+to a scratch home.
+
+The incidents are in `src/platform/controller/bench/scenarios.rs`: each scripts what the
+person and macOS did, as its log tells it, and its test asserts what came of it at load 1,
+3 and 10. An assertion marked `// TIME DECIDES:` names the constant that changed the
+outcome under load.
+
+- One scenario with its story (the notices handled and the calls made, in order) and the
+  app's own log lines:
+  `BENCH_ONE="Dock click" BENCH_LOAD=3 BENCH_LOG=debug cargo test --lib bench_one -- --nocapture`.
+- Every scenario's outcome at each load, and the time limits crossed only under load:
+  `cargo test --lib load_table -- --nocapture`.
+
+To add a scenario: write a function of the load that builds a `Bench` (the engine, the
+config text, the desk's apps and windows), scripts the incident with the bench's verbs
+(`click`, `card_click`, `dock_click`, `cmd_tab`, `mission_open`, `go_to_desktop`,
+`activate`, `advance(ms)`, or the desk's own through `desk(|d| ..)`) and returns the outcome
+in a few words; cite the doc comment or commit that tells the incident; add it to `ALL` and
+assert its three outcomes in a test. Something macOS does that the desk does not play yet
+goes in the desk, with where it was measured, never in the scenario.
+
 `scripts/test-stages.sh` runs the scripted checks against the real app, driving it through
 its ctl socket and reading the window server's view of the windows:
 
@@ -376,6 +408,7 @@ one-line explanation. That table drives parsing, the commented default file, `co
   hands the swap to `stage-manager --update-helper` at quit.
 - `src/platform` — macOS glue: Accessibility, the window server, ScreenCaptureKit, hotkeys,
   input, displays, the WM thread, safety (registry, signals, guardian), ctl, login item.
+  `src/platform/fake.rs` and `src/platform/controller/bench.rs` are test only (the bench).
 - `src/ui` — the menu bar item, the strip and its motion, Settings, the welcome window and
   the other windows.
 - `scripts/` — signing, bundling, the dev copy, the fixture, the scripted checks, release.
