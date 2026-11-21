@@ -1426,6 +1426,11 @@ pub type DesktopDone = Box<dyn FnOnce(DesktopStill) + Send>;
 /// quitting, Screen Recording granted (never asked for here), and the gate open: window
 /// captures already work, so this one goes with them and is never the process's probe.
 pub fn desktop_may_capture() -> Result<(), &'static str> {
+    // A fake desk has no screen to take a picture of.
+    #[cfg(test)]
+    if super::fake::active() {
+        return Err("window captures are off");
+    }
     if MODE.load(Ordering::SeqCst) != ON {
         return Err("window captures are off");
     }
