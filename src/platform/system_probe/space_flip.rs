@@ -5,9 +5,13 @@
 //! A thread reads, every 1 ms, each screen's "Current Space" from
 //! `SLSCopyManagedDisplaySpaces`, `SLSGetActiveSpace`, and where the two fixture windows are
 //! (`CGWindowListCreateDescriptionFromArray`): on screen at their own frame, or Alpha's
-//! covering the display (full screen); it stamps each change. The main run loop stamps every
-//! `activeSpaceDidChangeNotification` as it is delivered (keys, `open` and Accessibility calls
-//! go out from a thread of their own meanwhile).
+//! covering the display (full screen); it stamps each change. The main thread stamps every
+//! `activeSpaceDidChangeNotification` as it is delivered, observed as the app observes it
+//! ([`apps::observe_space_changes`], on the main queue), the process launched and turning as
+//! `[NSApp run]` does (round r2-probes2: the first run, which only turned the CFRunLoop, heard
+//! none in 24 legs; [`super::app_pump`]). Keys, `open` and Accessibility calls go out from a
+//! thread of their own meanwhile. Legs where no notice came leave the flip against the notice
+//! "not measured", never a verdict.
 //!
 //! Setup: Alpha's window (BUNDLE-A) and Bravo's (BUNDLE-B) on the Desktop shown; Bravo's is
 //! moved to the next Desktop of the main screen (right, else left: the bridged
@@ -28,7 +32,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::{Args, Ctx, at_frame, cell, fixture, main_entry, main_frame, median, ms, off_main, post_plain_stamped, post_stamped, pump, pump_until, sight_of, table};
+// The main thread turns as `[NSApp run]` does (round r2-probes2: the bare run loop heard no
+// Space notice; mod.rs, "listening as an app").
+use super::{
+    Args, Ctx, app_off_main as off_main, app_pump as pump, app_pump_until as pump_until, at_frame, cell, fixture, listen_as_app, main_entry,
+    main_frame, median, ms, post_plain_stamped, post_stamped, sight_of, table,
+};
 use crate::engine::fullscreen::covers_display;
 use crate::engine::geometry::Rect;
 use crate::engine::overview::Overview;
@@ -154,7 +163,7 @@ fn sample(sky: &Sky, s: &Setup, stop: &AtomicBool, main: &AtomicU64, flags: &Ato
 
 /// Moves `ids` onto Desktop `sid` (the bridged move, then the bridged add as the engine's
 /// bring-back does); true when the window server lists them there alone.
-fn put_on(sky: &Sky, ids: &[u32], sid: u64) -> bool {
+pub(super) fn put_on(sky: &Sky, ids: &[u32], sid: u64) -> bool {
     let there = || sky.spaces_of(ids).iter().all(|s| *s == sid) && !sky.spaces_of(ids).is_empty();
     let _ = sky.move_managed(Route::Bridged, ids, sid);
     pump(Duration::from_millis(200));
@@ -167,7 +176,7 @@ fn put_on(sky: &Sky, ids: &[u32], sid: u64) -> bool {
 }
 
 /// `open PATH` (the app by its path, never `open -b`); when it was spawned.
-fn open_path(path: &str) -> Result<Instant, String> {
+pub(super) fn open_path(path: &str) -> Result<Instant, String> {
     let at = Instant::now();
     let mut child = std::process::Command::new("/usr/bin/open").arg(path).spawn().map_err(|e| format!("open: {e}"))?;
     let _ = child.wait();
@@ -175,7 +184,7 @@ fn open_path(path: &str) -> Result<Instant, String> {
 }
 
 /// Window `id` of `pid` into or out of full screen through Accessibility; when it was asked.
-fn full_screen(pid: i32, id: u32, on: bool) -> Result<Instant, String> {
+pub(super) fn full_screen(pid: i32, id: u32, on: bool) -> Result<Instant, String> {
     let w = AxElement::application(pid)
         .windows()
         .map_err(|e| e.to_string())?
@@ -212,6 +221,7 @@ pub(super) fn run(ctx: &Ctx, args: &Args) -> Result<(), String> {
     if !permissions::accessibility_trusted() {
         return Err("no Accessibility for this process (launch it through `open` from the dev app)".into());
     }
+    listen_as_app(ctx);
     let sky = &ctx.sky;
     if sky.copy_managed.is_none() || sky.active.is_none() {
         return Err("SLSCopyManagedDisplaySpaces or SLSGetActiveSpace is missing on this macOS".into());
@@ -439,7 +449,8 @@ fn report(legs: &[Leg], reads: &[(Instant, Read)], notices: &[Instant], label: &
             ]
         })
         .collect();
-    println!("\n  ms from the cause (the key's key-down, the `open`, the Accessibility call); Mission Control's: from the Desktop key inside it");
+    println!("\n  activeSpaceDidChangeNotification heard {} times in the whole run", notices.len());
+    println!("  ms from the cause (the key's key-down, the `open`, the Accessibility call); Mission Control's: from the Desktop key inside it");
     table(&["case", "Escape", "→Current Space", "→ActiveSpace", "→notice", "→listed at frame", "Current Space values", "note"], &rows);
     println!();
     let mut cases: Vec<&str> = Vec::new();
@@ -459,27 +470,38 @@ fn report(legs: &[Leg], reads: &[(Instant, Read)], notices: &[Instant], label: &
         if flips.len() < mine.len() || between > 0 {
             sound = false;
         }
+        let notice = if mine.iter().all(|m| m.notice.is_none()) { "not heard in any leg (not measured)".to_string() } else { after_words(&to_notice, "the flip") };
         println!(
-            "VERDICT {case}: Current Space flipped in {}/{} legs, a median {} ms after the cause; the notice {}; the arriving window listed at its frame {}; SLSGetActiveSpace {}; in-between values in {between} legs",
+            "VERDICT {case}: Current Space flipped in {}/{} legs, a median {} ms after the cause; the notice {notice}; the arriving window listed at its frame {}; SLSGetActiveSpace {}; in-between values in {between} legs",
             flips.len(),
             mine.len(),
             cell(median(&flips)),
-            after_words(&to_notice, "the flip"),
             after_words(&to_list, "the flip"),
             after_words(&active_lag, "the flip"),
         );
     }
+    println!("{}", overall(&measured, sound, notices.len()));
+}
+
+/// The overall verdict: the flip against the notice over every leg with both, or "not
+/// measured" when no leg has both (never "NOT a sound signal" for want of a notice).
+fn overall(measured: &[Measured], sound: bool, heard: usize) -> String {
     let to_notice: Vec<f64> = measured.iter().filter_map(|m| Some(m.notice? - m.flip?)).collect();
+    let between = if measured.iter().any(|m| m.in_between) { "SHOWS" } else { "never shows" };
+    if to_notice.is_empty() {
+        return format!(
+            "VERDICT overall: the flip against the notice is NOT MEASURED (no leg had both a flip and a notice; {heard} notices heard in the whole run); Current Space {between} an in-between value; whether the flip is a sound \"the Desktop is X now\" signal against the notice: not measured"
+        );
+    }
     let before = to_notice.iter().filter(|d| **d > 2.0).count();
     let after = to_notice.iter().filter(|d| **d < -2.0).count();
     let at = to_notice.len() - before - after;
     let when = if after == 0 && before > 0 { "before" } else if before == 0 && after > 0 { "after" } else if before == 0 && after == 0 { "at" } else { "before or after (both seen)" };
-    println!(
-        "VERDICT overall: the flip comes {when} the notice ({before} before, {at} within 2 ms, {after} after, of {} pairs); it {} an in-between value; so the flip {} a sound \"the Desktop is X now\" signal",
+    format!(
+        "VERDICT overall: the flip comes {when} the notice ({before} before, {at} within 2 ms, {after} after, of {} pairs; {heard} notices heard in the whole run); it {between} an in-between value; so the flip {} a sound \"the Desktop is X now\" signal",
         to_notice.len(),
-        if measured.iter().any(|m| m.in_between) { "SHOWS" } else { "never shows" },
-        if sound && !to_notice.is_empty() { "IS" } else { "is NOT" }
-    );
+        if sound { "IS" } else { "is NOT" }
+    )
 }
 
 /// "a median N ms after X (k later, j within 2 ms, i earlier)" from per-leg differences.
@@ -522,6 +544,18 @@ mod tests {
         assert_eq!(m.values, vec![5, 9, 11]);
         assert!(m.in_between);
         assert!(Want::Not(5, A_FULL).met(11, A_FULL) && !Want::Space(5, A_HOME).met(11, A_HOME));
+    }
+
+    #[test]
+    fn no_pair_is_not_measured_never_a_no() {
+        let flip_only = Measured { flip: Some(500.0), values: vec![5, 7], ..Default::default() };
+        let v = overall(&[flip_only], true, 0);
+        assert!(v.contains("NOT MEASURED") && !v.contains("is NOT a sound"), "{v}");
+        let both = Measured { flip: Some(500.0), notice: Some(530.0), values: vec![5, 7], ..Default::default() };
+        let v = overall(&[both], true, 1);
+        assert!(v.contains("comes before the notice") && v.contains("IS a sound"), "{v}");
+        let both = Measured { flip: Some(500.0), notice: Some(530.0), values: vec![5, 7], ..Default::default() };
+        assert!(overall(&[both], false, 1).contains("is NOT a sound"));
     }
 
     #[test]

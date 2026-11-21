@@ -1,6 +1,7 @@
-//! `stage-manager probe-spaces dock-notices|space-flip|names|indicator …`: four live probes
-//! the rework waits on (round r0-probes, 11-21; the review's R3 and R4). Each answers one
-//! question the window server or the Dock can answer and nothing in the repo has measured:
+//! `stage-manager probe-spaces dock-notices|space-flip|names|indicator …`: four live
+//! probes the rework waits on (rounds r0-probes and r2-probes2, 11-21; the review's R3 and R4).
+//! Each answers one question the window server or the Dock can answer and nothing in the repo
+//! has measured:
 //!
 //! - [`dock_notices`]: does the Dock announce Mission Control, App Exposé and Show Desktop
 //!   (`AXExpose…` notices), and how soon against the window list?
@@ -28,9 +29,9 @@
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSRunningApplication};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSEventMask, NSRunningApplication};
 use objc2_core_graphics::CGMainDisplayID;
-use objc2_foundation::MainThreadMarker;
+use objc2_foundation::{MainThreadMarker, NSDate, NSDefaultRunLoopMode};
 
 use super::{fixture_pids, fixture_windows, pump};
 use crate::engine::geometry::Rect;
@@ -211,7 +212,11 @@ pub(super) fn off_main<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 }
 
 /// Turns the run loop until `done` holds or `limit` passes; true when it held.
-pub(super) fn pump_until(limit: Duration, mut done: impl FnMut() -> bool) -> bool {
+pub(super) fn pump_until(limit: Duration, done: impl FnMut() -> bool) -> bool {
+    pump_until_by(pump, limit, done)
+}
+
+fn pump_until_by(turn: fn(Duration), limit: Duration, mut done: impl FnMut() -> bool) -> bool {
     let end = Instant::now() + limit;
     loop {
         if done() {
@@ -220,8 +225,69 @@ pub(super) fn pump_until(limit: Duration, mut done: impl FnMut() -> bool) -> boo
         if Instant::now() >= end {
             return false;
         }
-        pump(Duration::from_millis(1));
+        turn(Duration::from_millis(1));
     }
+}
+
+// ----- listening as an app -------------------------------------------------------------------
+//
+// Round r2-probes2 (11-21): the first space-flip run heard no
+// `activeSpaceDidChangeNotification` in 24 of 24 legs, while the app hears it. The app runs
+// `[NSApp run]`; the probes only turned the CFRunLoop (`CFRunLoopRunInMode`) and never
+// finished launching. AppKit reads the window server's messages to this process's
+// connection (its events, and the connection notices behind AppKit's own notices, such as
+// the Space change) when it fetches events (`nextEventMatchingMask:…`), which `run` does and
+// a bare run loop does not; the same gap would explain why `probe-spaces sources` heard no
+// `SLSRegisterConnectionNotifyProc` notice at all (11-14). yabai, which hears those notices,
+// also ends in `[NSApp run]` (src/yabai.c). So the probes that listen finish launching and
+// turn the main thread as `run` does: AppKit's events fetched and sent, the run loop turning
+// in the default mode meanwhile (main-queue blocks, Accessibility observers).
+
+/// Finishes AppKit's launch for a probe that listens (`finishLaunching`, as `run` would).
+pub(super) fn listen_as_app(ctx: &Ctx) {
+    NSApplication::sharedApplication(ctx.mtm).finishLaunching();
+}
+
+/// Turns the main thread for `d` as `[NSApp run]` does: each AppKit event fetched and sent,
+/// the run loop turning in the default mode while it waits (module notes above).
+pub(super) fn app_pump(d: Duration) {
+    let Some(mtm) = MainThreadMarker::new() else {
+        pump(d);
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let end = Instant::now() + d;
+    let until = NSDate::dateWithTimeIntervalSinceNow(d.as_secs_f64());
+    // SAFETY: the framework's own constant.
+    let mode = unsafe { NSDefaultRunLoopMode };
+    loop {
+        let sent = objc2::rc::autoreleasepool(|_| match app.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, Some(&until), mode, true) {
+            Some(e) => {
+                app.sendEvent(&e);
+                true
+            }
+            None => false,
+        });
+        if !sent || Instant::now() >= end {
+            return;
+        }
+    }
+}
+
+/// [`off_main`] with the main thread turned by [`app_pump`].
+pub(super) fn app_off_main<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| {
+        let h = s.spawn(f);
+        while !h.is_finished() {
+            app_pump(Duration::from_millis(1));
+        }
+        h.join().unwrap_or_else(|e| std::panic::resume_unwind(e))
+    })
+}
+
+/// [`pump_until`] with the main thread turned by [`app_pump`].
+pub(super) fn app_pump_until(limit: Duration, done: impl FnMut() -> bool) -> bool {
+    pump_until_by(app_pump, limit, done)
 }
 
 /// The Control modifier bit and the left Control key's code (as [`space_keys::post`] posts them).
