@@ -408,10 +408,11 @@ a window elsewhere, that stage's window is put home for a while, still counted h
 (`engine::lend_wait`): the app's activation and its switch confirm it; another app's
 activation, a press that was no click and the next press take it back at once; with
 neither it goes back after 5 s (`LEND_WAIT`; it was 1 s, and a busy app's activation after
-it let macOS slide away). The arrangement made at the press for another Desktop is undone by
-the click's activation when no Space change came before it and none of that Desktop's
-windows is on screen (macOS tells the activation only once its slide is over), else by the
-Space change's arrival, or after 3 s (`DOCK_SWITCH_CAP`; the Corner engine keeps 1 s). It is moved to its park frame at the screen's corner first, while still in its
+it let macOS slide away). The arrangement made at the press for another Desktop is confirmed by
+the Space change's arrival and undone by a press that was no click or a switch the
+activation makes on the Desktop shown; the activation alone says nothing (a Dock item's may
+come at the slide's start, before the arriving Desktop's windows are listed), and with no
+notice it goes after 3 s (`DOCK_SWITCH_CAP`; the Corner engine keeps 1 s). It is moved to its park frame at the screen's corner first, while still in its
 stage Space (`engine::lend_park`, as for ⌘Tab): macOS counts a window on a Desktop wherever
 it is, and at its own frame it showed before its stage's switch (under the front windows
 from the press, in front of them from the release). The park's move waits 30 ms for the app

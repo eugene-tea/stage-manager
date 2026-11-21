@@ -22,9 +22,10 @@
 //!   press instead; that arrangement stands until its click's own end: the release (the
 //!   focus held then, nothing sent again), a press that is no click, or no Space change
 //!   within [`DOCK_SWITCH_CAP`]. No tick, focus or activation in between undoes it
-//!   ([`awaits_release`]). After the release the click's activation with no Space change
-//!   notified and none of that Desktop's windows on screen undoes it at once (macOS tells
-//!   the activation only once its slide is over, [`Controller::ahead_at_activation`]).
+//!   ([`awaits_release`]). The click's activation is no word on it: it may come at the
+//!   slide's start, before any window of the arriving Desktop is listed (round
+//!   r2-lends-fix); one whose switch the model makes on the Desktop shown undoes it
+//!   ([`Controller::forget_held`]).
 //! - **At the notice**: an arrangement made at the click whose window the window server
 //!   does not list on its screen now is undone (another Desktop slid in). With none,
 //!   when the held window, or with none held the activated (else frontmost) app's focused
@@ -83,13 +84,16 @@ const QUERY_AX_TIMEOUT_SECONDS: f32 = 0.05;
 pub const DOCK_SWITCH_WAIT: Duration = Duration::from_millis(1000);
 
 /// The cap on an arrangement made at a Dock click under the Spaces engine (round r2-lends):
-/// the Space change notice confirms it; the click's activation with no Space change notified
-/// and no window of the arranged Desktop on screen refutes it at once
-/// ([`Controller::ahead_at_activation`]: macOS tells the activation only once the slide is
-/// over, the arriving Desktop's windows listed from +90 ms, so an activation with none of
-/// them listed went nowhere); a press that is no click refutes it at the release. Time is
-/// left only for a click with neither (an active app's click: no activation notice), and the
-/// arrangement is on a Desktop not shown meanwhile. As long as the click's focus is held
+/// the Space change notice confirms it; a press that is no click refutes it at the release,
+/// and the click's activation switching a stage on the Desktop shown, or the user acting
+/// there, undoes it ([`Controller::forget_held`]). The activation alone refutes nothing:
+/// round r2-lends took one with no Space change and none of the arriving Desktop's windows
+/// listed for a click that went nowhere, but a Dock item's activation may come at the slide's
+/// start (the live check of 11-21: handled ~30 ms before Desktop 1's windows were listed, the
+/// notice ~300 ms after), and the arrangement undone there and made again for the hidden
+/// focus a moment later showed the stage left as the Desktop slid in (round r2-lends-fix).
+/// Time is left for a click with no notice; the arrangement is on a Desktop not shown
+/// meanwhile. As long as the click's focus is held
 /// ([`crate::engine::focus_replay::FOCUS_REPLAY_MAX`]), past which nothing held says it any
 /// more. The 1 s it replaces undid the arrangement before a busy Mac's notice, and the
 /// arrival arranged the Desktop again in view.
@@ -808,14 +812,6 @@ fn expire_step(trigger: Trigger, pending: bool, changed: bool, waited: Duration,
     } else {
         None
     }
-}
-
-/// True when app `pid`'s activation refutes an arrangement made at a Dock click (`trigger`,
-/// for app `ahead_pid`) under the Spaces engine: no Space change notified since it went out
-/// (`changed`), none of its Desktop's windows on screen (`listed`: macOS tells the activation
-/// only once a slide is over), not while its click's release is awaited (`awaiting`).
-fn activation_refutes(trigger: Trigger, ahead_pid: i32, pid: i32, changed: bool, awaiting: bool, listed: usize) -> bool {
-    trigger == Trigger::DockClick && ahead_pid == pid && !changed && !awaiting && listed == 0
 }
 
 /// What a focus within the echo window of an arrangement's own moves is.
@@ -2112,55 +2108,14 @@ impl Controller {
     }
 
     /// The cap on an arrangement made ahead (`trigger`) with no Space change, and its name:
-    /// [`DOCK_SWITCH_CAP`] for a Dock click under the Spaces engine (its activation refutes
-    /// it, [`Self::ahead_at_activation`]), else [`DOCK_SWITCH_WAIT`].
+    /// [`DOCK_SWITCH_CAP`] for a Dock click under the Spaces engine, else
+    /// [`DOCK_SWITCH_WAIT`].
     fn dock_switch_cap(&self, trigger: Trigger) -> (&'static str, Duration) {
         if trigger == Trigger::DockClick && self.engine.kind() == EngineKind::Spaces {
             ("DOCK_SWITCH_CAP", DOCK_SWITCH_CAP)
         } else {
             ("DOCK_SWITCH_WAIT", DOCK_SWITCH_WAIT)
         }
-    }
-
-    /// App `pid` activated (its notice stamped `fired`, not an echo of ours, not stale): what
-    /// was put ahead of macOS for another app's activation is refuted
-    /// ([`Self::lent_activation_elsewhere`]), and under the Spaces engine an arrangement made
-    /// at a Dock click for this app is refuted when no Space change came before its
-    /// activation and no window of the arranged Desktop is on screen
-    /// ([`Self::ahead_at_activation`]).
-    pub(super) fn lends_at_activation(&mut self, ob: &Observer, pid: i32, fired: Instant) {
-        self.lent_activation_elsewhere(pid, fired);
-        self.ahead_at_activation(ob, pid);
-    }
-
-    /// The click's activation for an arrangement made at a Dock click under the Spaces
-    /// engine, no Space change notified since it went out: macOS tells an activation that
-    /// takes it to another Desktop only once the slide is over (`dock.rs`; the arriving
-    /// Desktop's windows are listed on screen from +90 ms, the activation at +324 ms, its
-    /// notice at +346 ms, 10-13), so a window of the arranged Desktop on screen means the
-    /// notice is on its way (kept), and none means the click went nowhere: undone now
-    /// ([`DOCK_SWITCH_CAP`] refuted). Not while the click's release is awaited, or a change
-    /// settles.
-    fn ahead_at_activation(&mut self, ob: &Observer, pid: i32) {
-        if self.engine.kind() != EngineKind::Spaces || self.phase.changing() {
-            return;
-        }
-        let awaiting = self.ahead_awaits_release();
-        let Some(sent) = self.ahead.as_ref() else { return };
-        let changed = sent.changes_at != self.space_changes;
-        if !activation_refutes(sent.trigger, sent.pid, pid, changed, awaiting, 0) {
-            return;
-        }
-        let (space, waited) = (sent.ahead.space, clock::now().saturating_duration_since(sent.sent_at));
-        let Some(m) = self.model.as_ref() else { return };
-        let list = windows::list_windows();
-        let listed = list.iter().filter(|w| w.onscreen && w.layer == 0 && m.space_of(WindowId(w.id)) == Some(space)).count();
-        if !activation_refutes(sent.trigger, sent.pid, pid, changed, awaiting, listed) {
-            tracing::debug!(pid, listed, since_sent_ms = waited.as_millis() as u64, "arrival: the Dock click's activation, its Desktop on screen: the Space change notice is on its way");
-            return;
-        }
-        margin::wait("DOCK_SWITCH_CAP", waited, DOCK_SWITCH_CAP, End::Refuted);
-        self.undo_ahead(ob, "the click's activation came with no Space change and none of its Desktop's windows on screen");
     }
 
     /// Windows an arrangement or an undo brings back stay in the safety registry until the
@@ -2591,21 +2546,6 @@ mod tests {
         // Arranged for a focus the engine hid off its Desktop: away as a Dock click's is.
         assert!(Trigger::Hidden.away());
         assert!(expire_step(Trigger::Hidden, false, false, DOCK_SWITCH_WAIT, DOCK_SWITCH_WAIT, false).is_some(), "no Space change came for the focus");
-    }
-
-    /// Round r2-lends: the Dock click's activation with no Space change notified refutes the
-    /// Desktop arranged at its press only when none of that Desktop's windows is on screen
-    /// (macOS tells the activation once the slide is over, 10-13: windows from +90 ms, the
-    /// activation at +324 ms, the notice at +346 ms).
-    #[test]
-    fn the_clicks_activation_refutes_the_arrangement_only_with_no_slide_seen() {
-        let dock = Trigger::DockClick;
-        assert!(activation_refutes(dock, 40, 40, false, false, 0), "activated here, nothing of that Desktop on screen: it went nowhere");
-        assert!(!activation_refutes(dock, 40, 40, false, false, 2), "its Desktop on screen: the notice is on its way");
-        assert!(!activation_refutes(dock, 40, 40, true, false, 0), "the change came: the arrival decides");
-        assert!(!activation_refutes(dock, 40, 77, false, false, 0), "another app's activation: the held focus decides, as before");
-        assert!(!activation_refutes(dock, 40, 40, false, true, 0), "its release not seen yet");
-        assert!(!activation_refutes(Trigger::Hidden, 40, 40, false, false, 0), "a focus the engine hid: ours, not a click's");
     }
 
     #[test]

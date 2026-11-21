@@ -3289,9 +3289,8 @@ impl Controller {
                     tracing::info!(pid, age_ms, reason = why.reason(), ?front, before_switch_ms, "activation dropped: stale, no switch");
                     return;
                 }
-                // Another app's: a lend for another app is refuted; the Dock click's own may
-                // refute what was arranged at its press (round r2-lends).
-                self.lends_at_activation(ob, pid, fired);
+                // Another app's: a lend for another app is refuted (round r2-lends).
+                self.lent_activation_elsewhere(pid, fired);
                 if self.macos_after_display_change(at) {
                     // The lid closed or opened: macOS activates an app of its choosing (11-05
                     // 20:25:46.8, Mail, whose switch sent the laptop's front to a card and

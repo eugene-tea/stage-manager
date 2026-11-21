@@ -521,6 +521,47 @@ fn dock_click_that_slides(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+/// Live 11-21, `spaces --auto`, "Dock arrival N of 3" (round r2-lends-fix): a Dock click on
+/// Alpha, whose only window waits in a hidden stage of Desktop 1, from Desktop 2; Desktop 1
+/// is arranged at the press (Alpha's stage in front there, Bravo's, the stage left, hidden).
+/// The activation's notice comes at the slide's start, before Desktop 1's windows are listed
+/// ([`fake::Desk::activation_leads_slide`]). Taken at the activation for a click that went
+/// nowhere, the arrangement was undone (Bravo's window put back on Desktop 1) and made again
+/// for the activation's hidden focus a moment later, and the window server listed the stage
+/// left on screen as Desktop 1 slid in (+1015 and +1041 ms). It must be hidden once, never
+/// put back.
+fn dock_click_whose_activation_leads_the_slide(load: f64) -> Run {
+    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, 1.0, 2, |d| {
+        d.add_app(A, "com.example.alpha", "Alpha");
+        d.add_app(B, "com.example.bravo", "Bravo");
+        d.add_window(15, B, frame(5), D2);
+        d.add_window(11, A, frame(1), D1);
+        d.add_window(12, B, frame(2), D1);
+        d.front = Some(B);
+        d.activation_leads_slide = true;
+    });
+    b.go_to_desktop(D2, true);
+    b.advance(4000);
+    let start = (b.desktop_shown(), b.desktop_of(11), b.desktop_of(12));
+    assert_eq!(start, (D2, None, Some(D1)), "the start:\n{}", b.story());
+    b.log.clear();
+    b.desk(|d| {
+        d.calls.clear();
+        d.load = load;
+    });
+    b.dock_click(A, 90);
+    b.advance(8000);
+    let back = b.calls().iter().filter(|c| matches!(c, fake::Call::IntoSpace(s, ids) if *s == D1 && ids.contains(&12))).count();
+    let out = format!("the stage left put back on Desktop 1 {back} times; {}", seen(&mut b));
+    Run::of(&b, out)
+}
+
+#[test]
+fn a_dock_click_whose_activation_leads_the_slide() {
+    let want = "the stage left put back on Desktop 1 0 times; front [11] shows [11] desktop 1 app 101 switches 0 slides 1";
+    expect(dock_click_whose_activation_leads_the_slide, [want, want, want]);
+}
+
 #[test]
 fn space_changes() {
     let keys = "there: front [13] shows [13] desktop 2 app 101 switches 0 slides 1; back: front [12] shows [12] desktop 1 app 102 switches 0 slides 2";
@@ -696,6 +737,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("the first visit to a Desktop by its key (Spaces)", "engine/slide_hold.rs, 11-15", first_visit_to_a_desktop),
     ("an activation that slides to another Desktop (Corner)", "controller/arrival.rs, 10-13", activation_that_slides),
     ("a Dock click that slides to another Desktop (Corner)", "controller/arrival.rs, DOCK_SWITCH_WAIT", dock_click_that_slides),
+    ("a Dock click whose activation leads the slide (Spaces)", "live 11-21 Dock arrivals, r2-lends-fix", dock_click_whose_activation_leads_the_slide),
     ("a screen comes and goes, a Dock click 36 s later (Spaces)", "spaces/engine.rs MID_CHANGE, 11-21", dock_click_after_a_screen_came_and_went),
     ("a new app opened with Shift held", "controller.rs, Shift sugar", new_app_with_shift),
     ("a new app opened", "controller.rs, new-window intake", new_app_plain),
