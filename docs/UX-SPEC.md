@@ -1322,6 +1322,44 @@ inference (before: 1 s more); a hidden window taken out of its stage's Space by 
 hidden again at once (before: at the next tick, up to 2 s), a window in a stage Space nothing
 answers for let out at once (before: up to 10 s).
 
+## The window server's Desktops
+
+Measured on macOS 27.2, 11-21 (`probe-system flip`, `probe-system names`, a process running
+the AppKit event loop). Under the Spaces engine the listing of the Desktops
+(`SLSCopyManagedDisplaySpaces`) says which Desktop each screen shows and which Desktops each
+window is on, in place of guesses from the windows on screen (ARCHITECTURE, "The window
+server's Desktops").
+
+| What | Measured |
+|---|---|
+| "Current Space" at a Desktop change | flips once, never an in-between value, 11-24 ms after the arriving windows are listed at their frames: ~550 ms after a Desktop key, ~330 ms into an activation that slides, ~660 ms before the window list shows the Desktop when it is picked inside Mission Control; full screen: a new id each time |
+| `activeSpaceDidChangeNotification` against the flip | 1-9 ms **before** it, 24 of 24; never after |
+| The window server's own notice of the change's end (1401, 1329) | with the flip (551 ms after a Desktop key) |
+| A read | 37 µs (the listing), 22 µs (one window's Spaces) |
+| Space ids | small, stable through a login session (1, 4); the main screen's first Desktop has an empty uuid; a window on every Desktop lists every Desktop |
+
+What a person sees change under the Spaces engine:
+
+- The first visit to a Desktop since the app started stays there. Before, when that Desktop's
+  front app also had a window in a hidden stage on the Desktop left, its stage came in front
+  on the Desktop left and macOS slid back (on the bench at every load).
+- A window that opens or is found while a Desktop slides in is placed on its own Desktop,
+  never on the one being left.
+- A Desktop change with no notice is followed within a fast tick with the window server's
+  notices, within a second without (before: after two looks a second apart, and the
+  activation during the slide could pull macOS back).
+- A window moved to another Desktop in Mission Control leaves its stage at once with the
+  window server's notices, at the next look without (before: after two looks a second
+  apart); one set to show on all Desktops is shown with every stage from the first Desktop
+  change (before: from the third, in a stage of its own on each Desktop until then).
+- With several screens, a Desktop change on one screen leaves the others' stages alone.
+- After a Desktop arrives, a new window, a window moved here and a hidden window out of its
+  stage are dealt with at once; before, nothing was inferred for a second.
+
+Not measured: what a window's Spaces read while it is dragged between Desktops, the listing
+with "Displays have separate Spaces" off, and whether a Desktop's uuid lasts over a restart
+(logged at each load).
+
 ## Known gaps
 
 - A window coming in from the strip can show one frame of a darker shadow as it lands

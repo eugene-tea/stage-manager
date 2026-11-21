@@ -2,7 +2,10 @@
 //! a Space's stages the first time it is visited.
 //!
 //! macOS has no public id for a Space, so the model gives each one a synthetic [`SpaceId`]
-//! and recognizes it by its windows. The platform reports what the window server lists on
+//! and recognizes it by its windows. (Under the Spaces engine the window server's own
+//! listing names the Desktop and each window's Desktops: an arrival given them is keyed, and
+//! the listing decides in place of the guesses told below: `desks.rs`, [`Model::arrive_on`].
+//! What follows is the arrival with no listing.) The platform reports what the window server lists on
 //! screen: a Space's own windows (parked ones included, since a parked window keeps a
 //! sliver on screen), never another Space's. From that:
 //!

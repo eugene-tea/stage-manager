@@ -349,23 +349,67 @@ windows stay on screen meanwhile and hide behind their pictures in one step each
 in a stage Space still draws and is captured with its current content, so an incoming
 window's picture taken while it is hidden (the pointer on its card) is current too.
 
-The window server's Desktops (design r3, slice 1: read and shadow). The model names its
-Spaces by ids of its own, guessed at each arrival from the windows on screen; the Spaces
-engine also reads the window server's listing (`SLSCopyManagedDisplaySpaces`, through
+The window server's Desktops (design r3). The model names its Spaces by ids of its own; the
+Spaces engine reads the window server's listing (`SLSCopyManagedDisplaySpaces`, through
 `WindowEngine::desktops`: each screen's Space shown and its kind, its Desktops with their ids
 and uuids; `spaces_of` for a window's Spaces; the Corner engine answers `None` to both). The
 controller's one read is `Controller::listing()` (`platform/controller/desktops.rs`): `None`
-when the engine reads none, a managed screen has no entry, or one names no Space shown. Each
-arrival is given its screen's Desktop, read again at the arrival, and binds it to the Space
-the model chose (`engine/model/desks.rs`, `Model::arrive_on`; one id, one Space; an empty
-Space taken for a new Desktop takes it), or checks it (`agree=` on the "Space changed" line).
-The bindings follow a relabel, go with a pruned or merged Space and at a fallback, and are
-saved with their uuids (`state.json`'s `desks`; a load logs how many the listing still has).
-They decide nothing yet: at each arrival and each look for missed changes the shadow
-(`engine/desk_shadow.rs`) compares the Desktop the model says each screen shows with the
-listing's, and each held window's home with the model's Desktop for it, and logs each
-disagreement once when it begins and once when it ends (`ctl state`'s `desks`). The arrival
-still decides by the windows on screen.
+when the engine reads none, a managed screen has no entry, or one names no Space shown or not
+its kind. Each arrival is given its screen's Desktop, read again at the arrival, and the
+Desktop and the model's Space are bound to each other (`engine/model/desks.rs`,
+`Model::arrive_on`; one id, one Space). The bindings follow a relabel, go with a pruned or
+merged Space and at a fallback, and are saved with their uuids (`state.json`'s `desks`; a
+load logs how many the listing still has).
+
+**The listing decides** while it can be read and a Desktop is bound
+(`Controller::keyed_listing`; slices 2 and 3). The paths part on what could be read, never on
+the engine's kind; with no listing each of these runs as before, by the windows on screen.
+
+- *Which Desktop arrived, and on which screen.* Per screen, the listing's Space shown against
+  the Desktop the model's Space there is bound to, and its kind (a Desktop, a full-screen
+  app's Space) against what the controller counts (`desk_differences`). A difference is that
+  screen's Space change; only the screens that differ arrive. The Space change's notice comes
+  1-9 ms before the listing flips, so a notice that finds no difference waits for one on the
+  fast tick (`Hold::Flip`, `flip_step`), `FLIP_WAIT` (300 ms, a cap; its margin is noted) at
+  most, and is then a notice with no change: nothing arrives. Every look for missed changes
+  and the window server's own notice of a change's end compare too (`sync_desktops`): a
+  difference found there is taken at once, and NSWorkspace's notice, when it comes after,
+  does nothing more (`announced_late`). The Space that arrives is the one bound to the
+  Desktop; the model's vote over the windows on screen stands in only for a Desktop bound to
+  none yet, among the Spaces bound to none.
+- *Which windows are on it.* Each window of an arrival is asked for its Spaces
+  (`keyed_live`, 22 µs each): one on another Desktop still listed (a Desktop sliding away, a
+  window just shown elsewhere) is left out; one on two Desktops or more is on every Desktop;
+  a known one of another Space was moved here; one the model counts hidden in another
+  Desktop's stage that nothing lent is hidden again. So the arrival never waits for a list
+  that shows one Desktop only, and nothing settles after it (`phase::Event::ArrivedRead`).
+- *Where a window went.* At the tick, a window of a Desktop shown that is not on screen, or
+  one of another Desktop that is, is asked for its Desktop once (`desk_membership`): on one
+  other, it moved there (`Model::window_on_desk`); on its own or on none, nothing.
+- *A window found, an activation.* A new window is placed only when it is on the Desktop the
+  model shows (`found_on_desk_shown`); an activation whose app's focused window, unknown to
+  the model, is on a Desktop not shown belongs to that Desktop's slide
+  (`focus_on_another_desk`).
+
+**What is still guessed, and where.** With no listing (the Corner engine, the Apple
+mode, a listing that cannot be read): everything, as before (`MIXED_WAIT`, `SPACE_SETTLE`,
+`FOREIGN_SETTLE`, `SPACE_CHECKS`, `BESIDE_ARRIVALS`, `STICKY_HOPS`, `SLIDE_CARRY`, the
+display change's hold of new windows at an arrival); a guess made so is corrected at the
+next good read, where the model's Space is bound to no Desktop or to another. With the
+listing: the launch's first arrival (nothing is bound yet); a Desktop seen for the first
+time (the vote among unbound Spaces, the saved Spaces, by their windows); that a slide is
+under way before its end (`slide_hold`, from the window list, and the Mission Control
+watch: the flip comes at the slide's end); a full-screen animation (a window covering the
+display on a Desktop, `fullscreen::SETTLE_MAX`); Accessibility's silence at an arrival;
+windows moved between screens and off every display (frames, `SPACE_CHECKS`); the Desktop
+a hidden window goes back to (the engine's own record, design r3's next slice); and
+everything a screen coming or going does (`spill`, the adoption).
+
+The shadow stays as the check: at each arrival and each look for missed changes
+(`engine/desk_shadow.rs`) the Desktop the model says each screen shows is compared with the
+listing's, and each held window's home with the model's Desktop for it; each disagreement is
+logged once when it begins and once when it ends (`ctl state`'s `desks`). On the bench it
+reads 0 on the Desktop shown in every scenario.
 
 The window server's notices (round r5-notices, the Spaces engine only). The window server
 tells a process that runs the AppKit event loop of some of its changes: a window created,

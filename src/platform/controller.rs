@@ -4918,6 +4918,12 @@ impl Controller {
     /// windows of other Spaces on screen were moved here; windows of the shown Space gone from
     /// the screen (their app not hidden, not minimized) left it. A change between a Desktop
     /// and a full-screen Space the notification missed is handled as a Space change.
+    ///
+    /// While the window server's listing decides ([`desktops`]): a Space change with no
+    /// notice yet is read from it and taken ([`Self::sync_desktops`]), and where a window
+    /// went is asked of the window server ([`Self::desk_membership`]); the guesses from the
+    /// windows on screen (windows of another Space at two looks, most windows gone, a window
+    /// missing at two looks) are not made.
     fn check_spaces(&mut self, ob: &mut Observer) {
         let now = clock::now();
         if now.duration_since(self.space_checked) < SPACE_POLL

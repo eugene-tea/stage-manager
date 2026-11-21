@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, the first switch to a Desktop after the app starts stays there;
+  before, macOS could slide straight back to the Desktop left. A window that opens while a
+  Desktop slides in goes to its own Desktop's stages.
+- With `engine = "spaces"`, a window moved to another Desktop in Mission Control leaves its
+  stage at once, and a window set to show on all Desktops is shown with every stage from the
+  first Desktop change.
 - A click on a hidden window's edge in the corner, or a drag of a window, right after a
   stage switch now works at once; before, either could be ignored for most of a second.
 - On a busy Mac, an app that reports its own focus late no longer brings back the stage just

@@ -511,15 +511,37 @@ Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
   window taken out of its stage Space" and "Mission Control with no key", each with and
   without).
 
-### The Desktops' shadow
+### The Desktops: what the listing decides, and the shadow
 
-Under the Spaces engine the window server's Desktops are read beside the model's guess and
-the two compared (`src/engine/desk_shadow.rs`, `src/platform/controller/desktops.rs`; design
-r3, slice 1). Nothing in behaviour changes; the Corner engine reads nothing.
+Under the Spaces engine the window server's listing says which Desktop arrived and where
+each window is (`src/platform/controller/desktops.rs`, `src/engine/model/desks.rs`; design
+r3, slices 2 and 3; ARCHITECTURE, "The window server's Desktops"), and the model is compared
+with it at every arrival and look (`src/engine/desk_shadow.rs`). The Corner engine reads
+nothing.
 
-- `Space changed` (and `Space changed on another display`) gain `desk` (the window server's
-  Desktop on that screen, read at the arrival) and `agree`: `new` (bound now), `yes` (the
-  model chose the Space bound to it), `no` (bound otherwise; the bindings stay).
+- `Space changed` (and `Space changed on another display`) carry `desk` (the window server's
+  Desktop on that screen, read at the arrival) and `agree`: `yes` (its Space was bound to it)
+  or `new` (bound now) when the listing decided; `no` only for an arrival guessed without the
+  listing's word (bound otherwise; the next look corrects it). When it decides, `beside`,
+  `held` and `kept_home` stay empty.
+- `desktops: the listing flipped after the Space change's notice` (debug, `waited_ms`);
+  `Space change settled by the window server's listing with no arrival on the main screen`
+  (a notice with no change after `FLIP_WAIT`, or another screen's change);
+  `desktops: the window server's listing shows another Space than the model, with no notice
+  yet: the change is taken now`; `Space change notified after a look had taken it ...`;
+  `desktops: windows listed on screen that the window server has on another Desktop are left
+  out of the arrival` (debug); `window left this Space (the window server has it on another
+  Desktop)` and `window moved to another Desktop that shows` (`from`, `to`: the window
+  server's ids); `the window server has the window on another Desktop than the one shown; the
+  window is placed on its arrival` (debug). The margins table has `FLIP_WAIT`; under the
+  Spaces engine `MIXED_WAIT` and `FOREIGN_SETTLE` no longer appear.
+- `ctl state`'s `desks.decides` (the listing decides now) and `desks.keyed`: `arrivals` (by
+  the listing), `flips_waited` and `flips_capped` (notices that came before the flip and
+  were waited for; those never followed by one), `unannounced` and `announced_late` (changes
+  taken at a look before their notice; notices that came after one), `left_out` (windows
+  left out of an arrival, on another Desktop), `moved` and `left` (windows found on another
+  Desktop at a look), `found_elsewhere` (new windows that waited for their Desktop),
+  `flip_wait_ms`.
 - `desktops: the model and the window server disagree` once when a disagreement begins and
   `... agree again` once when it ends (with `lasted_ms`): `what=shown` (a screen, `id` its
   display) or `what=home` (a hidden window, `id` the window), `space` (the model's),
@@ -533,8 +555,19 @@ r3, slice 1). Nothing in behaviour changes; the Corner engine reads nothing.
   now), `shown_begun` and `homes_begun` (since the launch), `longest_ms` (an open one
   counted to now), `open` (each with `what`, `id`, `space`, `model`, `server`, `since_ms`).
 - `scripts/test-stages.sh spaces --auto` prints them before the first run's quit and at the
-  end, and fails when a disagreement on the Desktop shown is still open 5 s on;
-  `display-gone` prints them and the log's disagreement lines at each round's end.
+  end, with `desks.keyed`, and fails when a disagreement on the Desktop shown is still open
+  5 s on; `display-gone` prints them and the log's disagreement lines at each round's end.
+  Its last step is the first visit to a Desktop never shown since the launch, by its key,
+  with no saved file: one Space change, the Desktop stays, no stage switched on the Desktop
+  left.
+- On the bench (`src/platform/controller/bench/desktops.rs`) the desk keeps the listing
+  apart from the window list: the "Current Space" flips 5 ms after the notice is sent
+  (`flip_leads_notice` for the other order; a load of 3 or 10 handles the notice after the
+  flip), the leaving Desktop's windows may stay listed past it (`leaving_lingers_ms`), the
+  listing may name no Space shown (`listing_unreadable`), a window goes into full screen and
+  out (`Bench::fullscreen`), is on every Desktop (`on_every_desktop`) or is moved to another
+  (`space_moves`), a second screen has Desktops of its own (`screen_comes_with`). Every
+  scenario asserts that the shadow counted no disagreement on the Desktop shown.
 
 ## Configuration keys
 
