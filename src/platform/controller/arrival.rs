@@ -1152,6 +1152,8 @@ impl Controller {
     fn arrange_ahead(&mut self, ob: &Observer, id: WindowId, trigger: Trigger, now: Instant, obs: Option<Observation>) -> bool {
         let focus_at = self.focus_replay.came(now).unwrap_or(now);
         let changes_at = self.space_changes;
+        // The check of the moves (`Verify`), unless the engine reads its own moves back.
+        let verify = trigger.away() && !self.engine.verifies_own_moves();
         let Some(m) = self.model.as_mut() else { return false };
         let pid = m.window(id).map(|w| w.meta.pid).unwrap_or_default();
         // Where the model left each window, read before it arranges them.
@@ -1165,7 +1167,7 @@ impl Controller {
         // Each moved window's frame before the moves, read before they go out: where a park
         // not taken leaves it, where a restore starts from (a parked window's park frame, or
         // where the window server lists it; R11 1). Only the windows moved are asked (R13 3).
-        let (expected, before_us) = if trigger.away() {
+        let (expected, before_us) = if verify {
             let asked = Instant::now();
             let listed = windows::describe(&moved_ids(&actions));
             let before_us = asked.elapsed().as_micros() as u64;

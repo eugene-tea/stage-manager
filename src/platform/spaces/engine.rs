@@ -2129,6 +2129,12 @@ impl WindowEngine for SpacesEngine {
         self.stretches_within("the stretches asked").map(|l| l.iter().filter(|(_, f)| !f.stop).map(|(id, _)| *id).collect()).unwrap_or_default()
     }
 
+    /// True: each hide and show is read back from the window server, and one that did not
+    /// take is owed and tried again ([`Self::retry_owed`]).
+    fn verifies_own_moves(&self) -> bool {
+        true
+    }
+
     /// True: a hide is one window-server call (~2 ms a window), so the outgoing windows wait
     /// on screen for pictures taken at the switch; a window in a stage Space still draws and
     /// is captured with its current content there (`probe-spaces capture`, 11-14).

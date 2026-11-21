@@ -379,6 +379,17 @@ pub trait WindowEngine: Send + Sync {
         false
     }
 
+    /// True when this engine reads back each of its own hides and shows and tries again
+    /// what did not take (its owed retries): the arrival's check of a Desktop arranged ahead
+    /// ([`super::controller`]'s `Verify`, built for moves an app may apply late or not at
+    /// all) is not built. The Corner engine: false, its parks and restores go through
+    /// Accessibility. The Spaces engine: true (under it the check only re-read the engine's
+    /// own answer, held the engine's tick off while it lived, and answered a hide that did not
+    /// take with a move to the Corner engine's park frame).
+    fn verifies_own_moves(&self) -> bool {
+        false
+    }
+
     /// True when an incoming window can fly the last stretch of its switch itself
     /// ([`Self::fly_stretch`]). The Corner engine: never (no live window can be scaled).
     fn lands_live(&self) -> bool {

@@ -122,4 +122,12 @@ mod tests {
         assert!(!e.is_hidden(&d, m.window(w(1)).expect("managed").restore), "never at its restore frame");
         assert_eq!(e.hidden_at(&m, w(9)), None);
     }
+
+    /// The arrival's check of a Desktop arranged ahead stays for the Corner engine's moves,
+    /// which go through Accessibility; the Spaces engine reads its own back.
+    #[test]
+    fn only_the_corner_engines_moves_get_the_arrival_check() {
+        assert!(!CornerEngine.verifies_own_moves());
+        assert!(crate::platform::spaces::engine::shared().verifies_own_moves());
+    }
 }
