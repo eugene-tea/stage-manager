@@ -379,9 +379,10 @@ fn cmd_tab_cancelled_with_and_without_the_key_tap() {
     expect(cmd_tab_escape_tap_refused, [silent, silent, silent]);
     let here = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
     let slid = "front [13] shows [13] desktop 2 app 101 switches 0 slides 1";
-    // The release heard: the window waits for its app's activation (ACTIVATION_WAIT, a 3 s
-    // cap; at load 10 the activation comes 2.95 s into it).
-    expect(cmd_tab_onto_a_slow_app_heard, [here, here, here]);
+    // TIME DECIDES: ACTIVATION_WAIT (a 3 s cap since r2-lends). The release heard, the window
+    // waits for its app's activation; at load 10 that comes 4 s after the release, past the
+    // cap, and macOS slides to Alpha's other Desktop.
+    expect(cmd_tab_onto_a_slow_app_heard, [here, here, slid]);
     // TIME DECIDES: SILENT_ACTIVATION_WAIT (200 ms). With the tap refused the old rule
     // stands: an app 0.4 s slow has its window taken back before it activates, and macOS
     // slides to its other Desktop, on the Mac as measured already.

@@ -1248,11 +1248,17 @@ impl Desk {
         }
     }
 
-    /// The switcher closes: its list goes 1 ms later (`engine/switcher.rs`); with `activates`
+    /// The switcher closes: its list, when it showed, goes 1 ms later (`engine/switcher.rs`;
+    /// "a quicker ⌘Tab never shows it", `controller/switcher.rs`); with `activates`
     /// (⌘ let go, not Escape) macOS activates the app selected.
     pub fn switcher_closes(&mut self, activates: bool) {
-        self.post(1.0, Notice::Step(Step::Switcher(false)));
-        self.post(1.0, Notice::Switcher("AXUIElementDestroyed"));
+        // Closed before the Dock built its list (a quick ⌘Tab, or a slow Dock): no list ever
+        // shows, and none goes.
+        self.queue.retain(|q| !matches!(q.notice, Notice::Step(Step::Switcher(true)) | Notice::Switcher("AXCreated")));
+        if self.switcher.shown {
+            self.post(1.0, Notice::Step(Step::Switcher(false)));
+            self.post(1.0, Notice::Switcher("AXUIElementDestroyed"));
+        }
         if activates && let Some(pid) = self.switcher.pids.get(self.switcher.selected).copied() {
             self.activate(pid, true);
         }
