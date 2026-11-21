@@ -370,11 +370,11 @@ impl Controller {
             let (actions, forgotten) = m.window_on_desk(WindowId(id), to, &hints);
             if forgotten.is_empty() {
                 self.desks.moved += 1;
-                tracing::info!(id, from, to, "desktops: a window is on another Desktop that shows (moved there): it joins that Desktop's stages");
+                tracing::info!(id, from, to, "window moved to another Desktop that shows (the window server has it there): it joins that Desktop's stages");
                 self.execute(ob, actions);
             } else {
                 self.desks.left += 1;
-                tracing::info!(id, from, to, "desktops: a window is on another Desktop (moved there): it left its stage; placed when that Desktop shows");
+                tracing::info!(id, from, to, "window left this Space (the window server has it on another Desktop): it left its stage; placed when that Desktop shows");
                 self.execute(ob, actions);
                 self.let_go_hidden(ob, kept, LetGo::Other);
                 self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
