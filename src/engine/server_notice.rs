@@ -21,7 +21,9 @@
 //!   time window.
 //! - **Bursts** ([`settle`]): the notices of one kind heard in one turn of the main run loop
 //!   are one [`Burst`] (Mission Control's open: 53 of one type).
-//! - **Health** ([`Health`]): whether the launch probe's panel brought its notices.
+//! - **Health** ([`Health::verdict`]): whether any registered type was heard since the
+//!   launch probe (the probe's own panel notices may be lost before the event loop turns:
+//!   live 11-21, its creation's never came); which types never were is `ctl state`'s.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -244,16 +246,16 @@ impl Expected {
 /// main thread's event loop turns, after the launch's setup).
 pub const HEALTH_WAIT: Duration = Duration::from_secs(5);
 
-/// What the launch probe's own panel brought ([`Health::verdict`]).
+/// Whether the notices come ([`Health::verdict`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     /// No probe ran with the notices registered.
     Off,
-    /// Its notices may still come.
+    /// None heard yet, within [`HEALTH_WAIT`] of the probe.
     Waiting,
-    /// The panel's creation, its take-out and its add came.
+    /// A registered type was heard.
     Heard,
-    /// Not all of them within [`HEALTH_WAIT`]: the polls carry on as before (not a failure).
+    /// None within [`HEALTH_WAIT`]: the polls carry on as before (not a failure).
     Silent,
 }
 
@@ -310,10 +312,12 @@ impl Health {
         }
     }
 
-    /// The verdict at `now`.
-    pub fn verdict(&self, now: Instant) -> Verdict {
+    /// The verdict at `now`, `any` registered type heard so far: heard as soon as one was (the
+    /// panel's own notices teach the layout, they are not the test: its creation's is lost
+    /// before the event loop turns).
+    pub fn verdict(&self, now: Instant, any: bool) -> Verdict {
         let Some((_, _, at)) = self.panel else { return Verdict::Off };
-        if self.created && self.added && self.taken_out {
+        if any {
             Verdict::Heard
         } else if now.saturating_duration_since(at) < HEALTH_WAIT {
             Verdict::Waiting
@@ -466,7 +470,7 @@ mod tests {
         let raws = [raw(811, &[42]), raw(1326, &[1, 0, 42]), raw(1325, &[1, 0, 42])];
         let _ = settle(&raws, &mut layout, &mut expected, &mut health);
         assert_eq!(layout, Some(Layout { window: 2, space: 0 }));
-        assert_eq!(health.verdict(t), Verdict::Heard);
+        assert_eq!(health.verdict(t, true), Verdict::Heard);
         expected.asked(900, &[7]);
         let raws = [raw(1326, &[1, 0, 7]), raw(1326, &[900, 0, 7]), raw(1326, &[900, 0, 7])];
         let b = settle(&raws, &mut layout, &mut expected, &mut health);
@@ -488,11 +492,13 @@ mod tests {
     fn the_health_waits_then_says_silent() {
         let t = Instant::now();
         let mut h = Health::default();
-        assert_eq!(h.verdict(t), Verdict::Off);
+        assert_eq!(h.verdict(t, true), Verdict::Off);
         h.probe(42, 1, t);
-        assert_eq!(h.verdict(t + Duration::from_secs(1)), Verdict::Waiting);
-        let _ = h.heard(&raw(811, &[42]));
-        assert_eq!(h.verdict(t + HEALTH_WAIT), Verdict::Silent, "its take-out and add never came");
-        assert!(h.created && !h.added);
+        assert_eq!(h.verdict(t + Duration::from_secs(1), false), Verdict::Waiting);
+        assert_eq!(h.verdict(t + HEALTH_WAIT, false), Verdict::Silent, "none came");
+        // Live 11-21: the panel's take-out and add came, its creation's did not; others came.
+        let _ = h.heard(&raw(1326, &[1, 0, 42]));
+        assert!(!h.created && h.taken_out);
+        assert_eq!(h.verdict(t + Duration::from_secs(1), true), Verdict::Heard, "any type heard: heard at once");
     }
 }

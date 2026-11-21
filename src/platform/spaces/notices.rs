@@ -23,9 +23,11 @@
 //! ([`super::launch_watch::nudge`]) and sends the bursts the WM thread has a use for
 //! (`WmCommand::ServerNotice`, [`set_sink`]).
 //!
-//! **Health** ([`probe_window`], [`health_tick`]): whether the launch probe's own panel
-//! brought its creation, its take-out and its add, matched by content; `heard` or `silent`
-//! in `ctl state` (silent is not a failure: the polls carry on).
+//! **Health** ([`probe_window`], [`health_tick`]): `heard` in `ctl state` as soon as any
+//! registered type was heard, `silent` when none came within its wait (not a failure: the
+//! polls carry on), with the types never heard (`never_heard`: 811 never heard means the
+//! launch watch's nudge never fires). The launch probe's panel only teaches the membership
+//! layout (its creation's notice is lost before the event loop turns, live 11-21).
 
 use std::collections::BTreeMap;
 use std::ffi::c_void;
@@ -278,18 +280,26 @@ pub fn health_tick(now: Instant) {
     if b.health_said {
         return;
     }
-    let v = b.health.verdict(now);
-    match v {
-        Verdict::Heard => tracing::info!("window-server notices: heard (the launch probe's panel brought its creation, take-out and add)"),
-        Verdict::Silent => tracing::info!(
-            created = b.health.created,
-            taken_out = b.health.taken_out,
-            added = b.health.added,
-            "window-server notices: silent for the launch probe's panel; the polls carry on as before"
-        ),
-        Verdict::Off | Verdict::Waiting => return,
+    // Said once its wait is over, with the types not heard by then.
+    if b.health.verdict(now, false) != Verdict::Silent {
+        return;
+    }
+    let never = never_heard(b);
+    match b.health.verdict(now, any_heard(b)) {
+        Verdict::Heard => tracing::info!(never_heard = ?never, "window-server notices: heard (types never heard so far listed)"),
+        _ => tracing::info!("window-server notices: silent (none came); the polls carry on as before"),
     }
     b.health_said = true;
+}
+
+/// True when any registered type was heard.
+fn any_heard(b: &Book) -> bool {
+    b.stats.values().any(|s| s.heard > 0)
+}
+
+/// The registered types never heard so far, by number.
+fn never_heard(b: &Book) -> Vec<u32> {
+    Kind::ALL.iter().filter(|k| b.stats.get(k).is_none_or(|s| s.heard == 0)).map(|k| k.code()).collect()
 }
 
 /// `ctl state`'s `engine.notices`: the registration, the health, the layout, and per type
@@ -321,7 +331,8 @@ pub fn status() -> Value {
         "registered": b.registered.map(|(n, _)| n),
         "call": b.registered.map(|(_, c)| c),
         "forwarded": ON.load(Ordering::Relaxed),
-        "notices": b.health.verdict(now).name(),
+        "notices": b.health.verdict(now, any_heard(b)).name(),
+        "never_heard": never_heard(b),
         "probe": { "created": b.health.created, "taken_out": b.health.taken_out, "added": b.health.added },
         "layout": Layout::unpack(LAYOUT.load(Ordering::Relaxed)).map(|l| json!({ "window": l.window, "space": l.space })),
         "expected": b.expected.len(),
