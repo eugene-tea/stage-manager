@@ -895,7 +895,8 @@ impl Job {
             .filter(|w| missing.contains(w))
             .collect();
         let at = |w: &u32| a.click_at.get(w).copied().or_else(|| by_pid.get(w).and_then(|s| s.click_at));
-        let presses: Vec<Press> = in_strip.iter().filter_map(|w| at(w).map(|at| Press { window: *w, at })).collect();
+        let frame = |w: &u32| a.marks.get(w).map(|m| m.bounds).or_else(|| by_pid.get(w).map(|s| s.bounds));
+        let presses: Vec<Press> = in_strip.iter().filter_map(|w| at(w).map(|at| Press { window: *w, at, frame: frame(w) })).collect();
         if !presses.is_empty() {
             return Need::Step(Step::Post(Posted::Clicks { presses, own_shift: true }));
         }
@@ -1000,7 +1001,7 @@ impl Job {
             }
             // Each item's front of the app's thumbnails in one Shift press (the windows behind
             // have no point till then: module docs), the rest at a later read.
-            let presses: Vec<Press> = thumbs.iter().filter_map(|(w, s)| s.click_at.map(|at| Press { window: *w, at })).collect();
+            let presses: Vec<Press> = thumbs.iter().filter_map(|(w, s)| s.click_at.map(|at| Press { window: *w, at, frame: Some(s.bounds) })).collect();
             if presses.is_empty() {
                 let hold = if thumbs.iter().any(|(_, s)| s.bounds.max_x() <= cx.screen.frame.x) { Hold::StripCovered } else { Hold::NoPoint };
                 if self.waiting.hold(hold, now) {

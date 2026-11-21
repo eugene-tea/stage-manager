@@ -550,8 +550,13 @@ fn same(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() <= SAME && (a.y - b.y).abs() <= SAME && (a.w - b.w).abs() <= SAME && (a.h - b.h).abs() <= SAME
 }
 
+/// [`same`], for the gestures' guard: the window server rounds bounds to whole points.
+pub fn same_bounds(a: Rect, b: Rect) -> bool {
+    same(a, b)
+}
+
 /// True when `r` is an app icon window's size.
-fn icon_sized(r: Rect) -> bool {
+pub fn icon_sized(r: Rect) -> bool {
     (r.w - ICON.0).abs() <= 2.0 && (r.h - ICON.1).abs() <= 2.0
 }
 

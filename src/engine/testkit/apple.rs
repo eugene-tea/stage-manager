@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use crate::engine::apple::desk::{AppleDesk, InputNow, Landed, Posted};
+use crate::engine::apple::desk::{AppleDesk, InputNow, Landed, Posted, press_lands};
 use crate::engine::apple::mirror::{Item, Listed, ListedWindow, Reading};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::Display;
@@ -109,6 +109,9 @@ pub struct FakeWindowManager {
     /// Posted clicks on a window behind another of its item, which Apple's ignores (the
     /// eighth probe of 11-17).
     pub back_refused: u32,
+    /// Clicks of a press the gesture's guard left ([`press_lands`]: the strip laid out again
+    /// under it, [`FakeWindowManager::relayout`]).
+    pub guard_skipped: u32,
     /// Apple's answers no posted gesture (a macOS that changed).
     pub deaf: bool,
     /// "Show windows from an application: All at Once": a drag of a window whose app keeps
@@ -178,6 +181,7 @@ impl FakeWindowManager {
             interrupt_drags: false,
             ignored_mid_motion: 0,
             back_refused: 0,
+            guard_skipped: 0,
             deaf: false,
             stack: 16.0,
             item_room: 3,
@@ -580,7 +584,13 @@ impl FakeWindowManager {
                     return Landed::Posted;
                 }
                 if self.relayout {
+                    // Each click checked by the gesture's guard against the strip as laid out
+                    // after the clicks before (the platform's reads the window list itself).
                     for p in presses {
+                        if press_lands(&self.laid_out().windows, MANAGER, p).is_err() {
+                            self.guard_skipped += 1;
+                            continue;
+                        }
                         if let Some(id) = self.thumbnail_at_rest(p.at) {
                             self.add_to_front(id);
                         }
@@ -645,8 +655,18 @@ impl FakeWindowManager {
         if let Some(before) = self.before_answer() {
             return before;
         }
+        self.listing(self.moving())
+    }
+
+    /// The list as Apple's lays the strip out once its motion is over (every window at its
+    /// place, every twin listed): what a click meets under [`FakeWindowManager::relayout`].
+    fn laid_out(&self) -> Listed {
+        self.listing(None)
+    }
+
+    /// The list with the motion `moving` far along (`None`: at rest).
+    fn listing(&self, moving: Option<f64>) -> Listed {
         let targets = self.targets();
-        let moving = self.moving();
         let at = |id: u32| {
             let to = targets[&id];
             match (moving, self.changed.as_ref().and_then(|(_, from, _, _)| from.get(&id))) {

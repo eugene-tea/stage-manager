@@ -25,8 +25,9 @@
 //!   window's frame back.
 //!
 //! **Guards.** Each gesture checks the window list itself just before it posts: a click goes
-//! only where the topmost window is WindowManager's (a strip item's stand-in), a drag only
-//! where the topmost window is the window dragged. Nothing is posted while a mouse button is
+//! only where the topmost window is the twin of the window meant, at the bounds the read had
+//! ([`press_lands`]: Apple's may lay the strip out again between two clicks of a press, live
+//! 11-17), a drag only where the topmost window is the window dragged. Nothing is posted while a mouse button is
 //! down. A [`Gesture`] guard ends whatever is held if its thread unwinds, and
 //! [`end_in_flight`] (the engine's bring-all-back: quit, a signal, the panic hook) ends a
 //! gesture still in flight from outside: Shift up, the button up, the pointer back.
@@ -42,7 +43,8 @@ use objc2_core_graphics::{
     CGWarpMouseCursorPosition,
 };
 
-use crate::engine::apple::desk::{CLICK_GAP, Landed, Posted, Press};
+use crate::engine::apple::desk::{CLICK_GAP, Landed, Posted, Press, press_lands};
+use crate::engine::apple::mirror::ListedWindow;
 use crate::engine::geometry::Point;
 use crate::platform::{desktop, dock as dock_app, input, windows};
 
@@ -253,9 +255,9 @@ fn release(held: Held) {
 /// The Shift press (module docs): every click of `presses` within one Shift press.
 fn shift_press(g: &mut Gesture, presses: &[Press], own_shift: bool, manager: Option<i32>) -> Landed {
     let Some(manager) = manager else { return Landed::Refused("WindowManager is not running".into()) };
-    let manager_at = |at: Point| top_is(at, |w| w.pid == manager && w.layer == 0);
+    let lands = |p: &Press| press_lands(&drawn_at(p.at), manager, p);
     let Some(first) = presses.first() else { return Landed::Refused("no click to post".into()) };
-    if let Err(why) = manager_at(first.at) {
+    if let Err(why) = lands(first) {
         return Landed::Refused(why);
     }
     if any_button_down() {
@@ -285,7 +287,8 @@ fn shift_press(g: &mut Gesture, presses: &[Press], own_shift: bool, manager: Opt
                 ended = Some("the pointer moved");
                 break;
             }
-            if manager_at(p.at).is_err() {
+            if let Err(why) = lands(p) {
+                tracing::debug!(window = p.window, why, "apple mode: a click of the press left for the next read");
                 skipped += 1;
                 continue;
             }
@@ -389,24 +392,37 @@ fn interrupted(g: &mut Gesture, why: &'static str) -> Landed {
     Landed::Interrupted(why.to_string())
 }
 
+/// The window list now, front to back, each window counted on screen only where it draws
+/// something at `p` (not clear, not one of macOS's own that lets clicks through there): what a
+/// click at `p` meets ([`press_lands`]).
+fn drawn_at(p: Point) -> Vec<ListedWindow> {
+    let list = windows::on_screen();
+    let screens = desktop::cg_display_bounds();
+    let mut dock = None;
+    list.iter()
+        .map(|w| ListedWindow { id: w.id, pid: w.pid, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen && w.alpha > 0.0 && !through(w, p, &mut dock, &screens) })
+        .collect()
+}
+
+/// macOS's own full-screen windows that let clicks through (the mirror's
+/// [`super::desk::lets_clicks_through`]) are passed over where they draw nothing at `p`:
+/// Notification Center's off its banners and panel, the Dock's off its bar.
+fn through(w: &windows::CgWindow, p: Point, dock: &mut Option<Option<i32>>, screens: &[crate::engine::geometry::Rect]) -> bool {
+    super::desk::lets_clicks_through(w, dock, screens)
+        && if w.layer == dock_app::DOCK_LAYER && dock.flatten() == Some(w.pid) {
+            dock_app::bar_frame(w.pid).is_some_and(|bar| !bar.contains(p))
+        } else {
+            desktop::seen_through(w, p)
+        }
+}
+
 /// `Ok` when the topmost window at `p` (on screen, at or above the windows' layer, not
 /// clear) passes `ok`.
 fn top_is(p: Point, ok: impl Fn(&windows::CgWindow) -> bool) -> Result<(), String> {
     let list = windows::on_screen();
     let screens = desktop::cg_display_bounds();
     let mut dock = None;
-    // macOS's own full-screen windows that let clicks through (the mirror's
-    // [`super::desk::lets_clicks_through`]) are passed over where they draw nothing at `p`:
-    // Notification Center's off its banners and panel, the Dock's off its bar.
-    let through = |w: &windows::CgWindow, dock: &mut Option<Option<i32>>| {
-        super::desk::lets_clicks_through(w, dock, &screens)
-            && if w.layer == dock_app::DOCK_LAYER && dock.flatten() == Some(w.pid) {
-                dock_app::bar_frame(w.pid).is_some_and(|bar| !bar.contains(p))
-            } else {
-                desktop::seen_through(w, p)
-            }
-    };
-    match list.iter().find(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !through(w, &mut dock)) {
+    match list.iter().find(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !through(w, p, &mut dock, &screens)) {
         Some(w) if ok(w) => Ok(()),
         Some(w) => Err(format!("the topmost window at {:.0},{:.0} is not the one meant (pid {}, layer {})", p.x, p.y, w.pid, w.layer)),
         None => Err(format!("no window at {:.0},{:.0}", p.x, p.y)),

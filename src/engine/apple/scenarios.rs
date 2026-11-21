@@ -802,7 +802,7 @@ fn a_click_behind_an_items_front_takes_nothing_and_the_merge_waits_for_each_to_b
     let at = Point::new((front.max_x() + back.max_x()) / 2.0, back.center().y);
     assert!(back.contains(at) && !front.contains(at));
     let mut before = f.clone();
-    before.post(&Posted::Clicks { presses: vec![Press { window: 2, at }], own_shift: true }).expect("posted");
+    before.post(&Posted::Clicks { presses: vec![Press { window: 2, at, frame: None }], own_shift: true }).expect("posted");
     assert_eq!((before.current(), before.back_refused), (&[4][..], 1), "nothing joined: {:?}", before.stages());
     let mut job = plan::merge(&a, 1, f.now()).expect("planned");
     let d = drive(&mut f, &mut a, &mut job, 10_000);
@@ -1426,4 +1426,26 @@ fn a_long_motion_is_waited_out_before_the_next_step() {
     d.end.expect("ended").expect("done");
     assert_eq!(presses(&d.steps), vec![vec![1], vec![2]]);
     never_mid_answer(&f, "motion x3");
+}
+
+/// The gesture's guard (live 11-17, a third click that missed its thumbnail): a press of two
+/// items' fronts, Apple's laying the strip out again after the first click, the second click's
+/// point now on another stage's thumbnail at the same bounds. The guard leaves that click (the
+/// window under the twin is not the one meant) and the window comes at the next read; the
+/// stage under the point never joins.
+#[test]
+fn a_click_whose_thumbnail_apple_laid_out_elsewhere_is_left_for_the_next_read() {
+    let mut f = FakeWindowManager::new();
+    for (pid, id) in [(40, 4), (30, 3), (20, 2), (10, 1), (50, 5)] {
+        f.open_app(pid, &[id]);
+    }
+    let mut a = settle(&mut f, &Arrangement::default());
+    f.relayout = true;
+    let mut job = Job::new(plan::Intent::Merge(1), vec![Goal::Gather { windows: vec![5, 1, 3], app: None, focus_app: false }], f.now());
+    let d = drive(&mut f, &mut a, &mut job, 10_000);
+    d.end.expect("ended").expect("done");
+    assert_eq!(presses(&d.steps)[0], vec![1, 3], "both items' fronts in one press");
+    assert_eq!(f.guard_skipped, 1, "the second click left: window 4's thumbnail under its point");
+    assert!(!f.current().contains(&4), "the stage under the point never joined: {:?}", f.current());
+    assert!(f.current().contains(&1) && f.current().contains(&3), "{:?}", f.current());
 }
