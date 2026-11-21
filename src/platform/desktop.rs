@@ -108,16 +108,22 @@ pub fn primary_height(mtm: MainThreadMarker) -> f64 {
 
 /// Every active display's bounds from CoreGraphics (global top-left coordinates), main first.
 pub fn cg_display_bounds() -> Vec<Rect> {
+    cg_displays().into_iter().map(|(_, r)| r).collect()
+}
+
+/// Every active display's id and bounds from CoreGraphics (global top-left coordinates), main
+/// first.
+pub fn cg_displays() -> Vec<(u32, Rect)> {
     let mut ids = [0u32; 16];
     let mut count = 0u32;
     // SAFETY: `ids` holds 16 entries and both pointers are valid for the call.
     let err = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
     let main = CGMainDisplayID();
-    let mut out = vec![bounds_of(main)];
+    let mut out = vec![(main, bounds_of(main))];
     if err.0 == 0 {
         for &id in ids.iter().take(count as usize) {
             if id != main {
-                out.push(bounds_of(id));
+                out.push((id, bounds_of(id)));
             }
         }
     }

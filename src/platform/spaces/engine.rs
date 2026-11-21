@@ -669,6 +669,25 @@ impl SpacesEngine {
         sky.displays().into_iter().find(|(_, _, spaces)| spaces.iter().any(|(id, _)| *id == desktop)).map(|(uuid, _, _)| uuid).unwrap_or_default()
     }
 
+    /// The Desktop shown on window `id`'s own screen, for a window whose Desktop is gone or
+    /// not known: the screen its stage Space (`space`, else the one it is held in) was made
+    /// on ([`State::screens`]), else the screen holding its frame (`frame`, else the window
+    /// server's), else the first screen's ([`spill::shown_on_own_screen`]). Takes the state's
+    /// lock: not with it held.
+    pub(super) fn shown_on_own_screen(&self, sky: &Sky, id: u32, space: Option<u64>, frame: Option<Rect>) -> Option<u64> {
+        let made_on = {
+            let st = self.state();
+            space.or_else(|| st.held.get(&id).map(|h| h.space)).and_then(|s| st.screens.get(&s).cloned())
+        };
+        let listing: Vec<(String, u64)> = sky.displays().into_iter().map(|(screen, current, _)| (screen, current)).collect();
+        spill::shown_on_own_screen(&listing, made_on.as_deref(), || {
+            let frame = frame.or_else(|| windows::describe(&[id]).first().map(|w| w.bounds))?;
+            let screens: Vec<(String, Rect)> =
+                crate::platform::desktop::cg_displays().into_iter().filter_map(|(d, r)| Some((crate::platform::desktop_counts::display_uuid(d)?, r))).collect();
+            spill::screen_holding(&screens, frame)
+        })
+    }
+
     /// Space `made` noted for (Desktop, stage) `key` unless another was noted meanwhile: the
     /// Space kept, and true when `made` lost (the caller ends it: a Space no map names holds
     /// windows nothing answers for, review A-3).
@@ -736,12 +755,13 @@ impl SpacesEngine {
                 held: was.map(|h| h.home).or(flew_from),
                 last: st.homes.get(&id).copied(),
                 stage: st.stages.keys().find(|(d, s)| *s == stage && stage != NO_STAGE && desktops.contains(d)).map(|(d, _)| *d),
-                shown: shown.first().copied(),
+                shown: None,
                 showing: on.and_then(|d| spill::showing_on(&listing, d)),
                 mid_change,
             }
         };
-        let home = spill::hide_home(hints, &desktops, keep);
+        // Last, the Desktop shown on its own screen (`HomeHints::shown`, weighed last).
+        let home = spill::hide_home(hints, &desktops, keep).or_else(|| self.shown_on_own_screen(sky, id, was.map(|h| h.space), None));
         if keep {
             tracing::debug!(id, stage, spaces = ?now, ?shown, ?hints, ?home, "display: a hide while a screen gone is watched");
         }
@@ -848,9 +868,9 @@ impl SpacesEngine {
             st.lent.remove(&id);
             return true;
         }
-        let (desktops, shown) = Self::desktops(sky);
-        // Its own Desktop while that still exists, else the one shown.
-        let home = held.map(|h| h.home).filter(|h| desktops.contains(h)).or(shown.first().copied());
+        let (desktops, _) = Self::desktops(sky);
+        // Its own Desktop while that still exists, else the one shown on its screen.
+        let home = held.map(|h| h.home).filter(|h| desktops.contains(h)).or_else(|| self.shown_on_own_screen(sky, id, held.map(|h| h.space), None));
         let Some(home) = home else {
             tracing::warn!(id, "spaces engine: no Desktop to bring a window back to");
             self.missed_show(id);
@@ -1224,7 +1244,7 @@ impl SpacesEngine {
         }
         let Some(sky) = self.sky() else { return report };
         let own = std::process::id() as i32;
-        let (desktops, shown) = Self::desktops(sky);
+        let (desktops, _) = Self::desktops(sky);
         let homes = self.homes();
         let blocked = self.blocked();
         let mut by_home: BTreeMap<u64, Vec<u32>> = BTreeMap::new();
@@ -1245,14 +1265,11 @@ impl SpacesEngine {
             }
             in_space.insert(w.id, space);
             report.checked += 1;
-            let home = self
-                .state()
-                .held
-                .get(&w.id)
-                .map(|h| h.home)
+            let held_home = self.state().held.get(&w.id).map(|h| h.home);
+            let home = held_home
                 .or_else(|| homes.get(&space).copied())
                 .filter(|h| desktops.contains(h))
-                .or(shown.first().copied());
+                .or_else(|| self.shown_on_own_screen(sky, w.id, Some(space), Some(w.bounds)));
             match home {
                 Some(home) => by_home.entry(home).or_default().push(w.id),
                 None => report.failed += 1,
@@ -1684,7 +1701,7 @@ impl SpacesEngine {
         let Some(sky) = self.sky() else { return 0 };
         let own = std::process::id() as i32;
         let ours: BTreeSet<u64> = spaces.keys().copied().collect();
-        let (desktops, shown) = Self::desktops(sky);
+        let (desktops, _) = Self::desktops(sky);
         let held_windows = self.held_windows(list);
         let mut stayed = BTreeSet::new();
         let mut out = 0;
@@ -1695,7 +1712,7 @@ impl SpacesEngine {
                 stayed.insert(w.id);
                 continue;
             }
-            let home = spaces.get(space).copied().filter(|d| desktops.contains(d)).or(shown.first().copied());
+            let home = spaces.get(space).copied().filter(|d| desktops.contains(d)).or_else(|| self.shown_on_own_screen(sky, w.id, Some(*space), Some(w.bounds)));
             let Some(home) = home else { continue };
             let _ = sky.add_remove_from(Route::Bridged, home, &[w.id], ALL_SPACES_MASK);
             let (ok, after) = self.read_back(sky, w.id, |s| out_of(s, &ours));

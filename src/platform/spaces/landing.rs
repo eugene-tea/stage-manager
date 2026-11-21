@@ -423,8 +423,8 @@ impl SpacesEngine {
         }
         self.set_landing_transform(sky, space, IDENTITY);
         let home = self.home_of(id, l.get(&id));
-        let (desktops, shown) = Self::desktops(sky);
-        let home = home.filter(|h| desktops.contains(h)).or(shown.first().copied());
+        let (desktops, _) = Self::desktops(sky);
+        let home = home.filter(|h| desktops.contains(h)).or_else(|| self.shown_on_own_screen(sky, id, None, None));
         if let Some(home) = home {
             let _ = sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK);
         }
@@ -494,8 +494,7 @@ impl SpacesEngine {
                 // Nothing took it: home, as a show would.
                 let _ = sky.set_transform(Route::Classic, space, affine(IDENTITY));
                 let home = self.home_of(id, fly.as_ref());
-                let (_, shown) = Self::desktops(sky);
-                if let Some(home) = home.or(shown.first().copied()) {
+                if let Some(home) = home.or_else(|| self.shown_on_own_screen(sky, id, None, None)) {
                     let _ = sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK);
                 }
             }
@@ -574,14 +573,13 @@ impl SpacesEngine {
             return;
         }
         let Some(sky) = self.sky() else { return };
-        let (_, shown) = Self::desktops(sky);
         for (id, f) in l.iter_mut() {
             f.stop = true;
             if f.phase != Phase::Flying || f.ended {
                 continue;
             }
             let _ = sky.set_transform(Route::Classic, f.space, affine(IDENTITY));
-            let home = self.home_of(*id, Some(&*f)).or(shown.first().copied());
+            let home = self.home_of(*id, Some(&*f)).or_else(|| self.shown_on_own_screen(sky, *id, None, None));
             if let Some(home) = home {
                 let _ = sky.add_remove_from(Route::Bridged, home, &[*id], ALL_SPACES_MASK);
             }

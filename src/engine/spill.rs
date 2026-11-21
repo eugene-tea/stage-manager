@@ -44,6 +44,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
+use crate::engine::geometry::Rect;
+
 /// How long after a screen went (or after the unlock, when it went while the screen was
 /// locked) hidden windows are kept on their own Desktops ([`plan`], [`hide_home`]): the
 /// window server let windows out of stage Spaces as late as the first look at a moved
@@ -327,9 +329,52 @@ pub fn showing_on(listing: &[(u64, Vec<u64>)], desktop: u64) -> Option<u64> {
     listing.iter().find(|(_, spaces)| spaces.contains(&desktop)).map(|(current, _)| *current).filter(|c| *c != 0)
 }
 
+/// The Desktop a window goes to when its own is gone or not known: the one shown on its own
+/// screen, that is the screen its stage Space was made on (`made_on`), else the screen that
+/// holds its frame (`holding`, asked only then); the first screen's only as the last resort.
+/// `listing`: each screen's identifier, in the window server's order, with its Desktop shown
+/// (0 when none). Before, a window of the second screen whose Desktop went was shown on, or
+/// swept onto, the first screen's Desktop.
+pub fn shown_on_own_screen(listing: &[(String, u64)], made_on: Option<&str>, holding: impl FnOnce() -> Option<String>) -> Option<u64> {
+    let shown_on = |screen: &str| listing.iter().find(|(s, _)| s == screen).map(|(_, current)| *current).filter(|c| *c != 0);
+    made_on
+        .and_then(shown_on)
+        .or_else(|| holding().as_deref().and_then(shown_on))
+        .or_else(|| listing.iter().map(|(_, current)| *current).find(|c| *c != 0))
+}
+
+/// The screen of `screens` (identifier, bounds) that holds the most of `frame`; None when
+/// none holds any of it.
+pub fn screen_holding(screens: &[(String, Rect)], frame: Rect) -> Option<String> {
+    screens
+        .iter()
+        .filter_map(|(s, bounds)| bounds.intersect(&frame).map(|r| (s, r.area())))
+        .filter(|(_, area)| *area > 0.0)
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(s, _)| s.clone())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A window of the second screen whose Desktop is gone: the Desktop shown on its stage
+    /// Space's screen, else on the screen holding its frame; the first screen's only when
+    /// neither is known.
+    #[test]
+    fn a_window_whose_desktop_is_gone_goes_to_the_desktop_shown_on_its_own_screen() {
+        let listing = vec![(LAPTOP.to_string(), 4), (GONE.to_string(), 0), ("studio".to_string(), 9)];
+        let never = || -> Option<String> { panic!("the frame is not asked when the stage's screen tells") };
+        assert_eq!(shown_on_own_screen(&listing, Some("studio"), never), Some(9), "its stage Space's screen");
+        assert_eq!(shown_on_own_screen(&listing, Some(GONE), || Some("studio".into())), Some(9), "that screen shows none: the frame's");
+        assert_eq!(shown_on_own_screen(&listing, None, || Some("studio".into())), Some(9), "no stage Space: the frame's");
+        assert_eq!(shown_on_own_screen(&listing, Some("unplugged"), || None), Some(4), "neither known: the first screen's");
+        assert_eq!(shown_on_own_screen(&[(GONE.to_string(), 0)], None, || None), None, "no screen shows a Desktop");
+        let screens = vec![(LAPTOP.to_string(), Rect::new(0.0, 0.0, 1512.0, 982.0)), ("studio".to_string(), Rect::new(1512.0, -400.0, 2560.0, 1440.0))];
+        assert_eq!(screen_holding(&screens, Rect::new(1400.0, 100.0, 800.0, 600.0)).as_deref(), Some("studio"), "most of it");
+        assert_eq!(screen_holding(&screens, Rect::new(100.0, 100.0, 800.0, 600.0)).as_deref(), Some(LAPTOP));
+        assert_eq!(screen_holding(&screens, Rect::new(-5000.0, 0.0, 10.0, 10.0)), None, "off every screen");
+    }
 
     const GONE: &str = "external";
     const LAPTOP: &str = "laptop";

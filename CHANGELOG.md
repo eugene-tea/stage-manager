@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- With `engine = "spaces"` and more than one screen, a window whose Desktop is gone comes back
+  on the Desktop shown on its own screen, not the first screen's.
 - With `engine = "spaces"`, a window that should be hidden in its stage but stays on screen
   is hidden again later; before, it was left on screen after three tries.
 - With `engine = "spaces"`, the app of a stage brought in always comes in front, also when a
