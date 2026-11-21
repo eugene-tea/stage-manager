@@ -152,7 +152,10 @@ pub struct FocusFacts {
     pub beats_echo: bool,
     /// Its app (`None`: the window is not tracked).
     pub app: Option<AppNow>,
-    /// How long after a press a focus is the user's (`USER_FOCUS`).
+    /// The user's last press was on this window (`Some(false)`: on another; `None`: not
+    /// known: a key, a press elsewhere; [`super::causes::Causes::pressed_on`]).
+    pub pressed_on: Option<bool>,
+    /// How long after a press whose target is not known a focus is the user's (`USER_FOCUS`).
     pub user_focus: Duration,
     /// [`FocusStage::Place`].
     pub place: Option<Place>,
@@ -250,11 +253,21 @@ pub fn focus_may_switch(hidden: Option<bool>, active: Option<bool>, button_down:
     hidden != Some(true) && (active == Some(true) || (active.is_some() && button_down))
 }
 
-/// True when a focus that is not ours follows a press closely enough to be the user's
-/// (`USER_FOCUS`, measured to the notice): its window is touched. Asked once, for a notice
-/// past gate 1.
+/// How long after a press on a window its focus may be told and still be that press's: the
+/// cap, when the press is known to be on it.
+pub const USER_PRESS_MAX: Duration = Duration::from_secs(5);
+
+/// True when a focus that is not ours is the user's own: its window is touched. By cause
+/// when the last press is known: a press on this window (a hit-test at the press), with
+/// [`USER_PRESS_MAX`] as the cap; never after a press on another window. After a key or a
+/// press whose target is not known, time is all there is: within `USER_FOCUS` of it,
+/// measured to the notice. Asked once, for a notice past gate 1.
 pub fn users_focus(f: &FocusFacts) -> bool {
-    margin::within("USER_FOCUS", f.heard.press_before("USER_FOCUS"), f.user_focus)
+    match f.pressed_on {
+        Some(true) => margin::within("USER_PRESS_MAX", f.heard.press_before("USER_PRESS_MAX"), USER_PRESS_MAX),
+        Some(false) => false,
+        None => margin::within("USER_FOCUS", f.heard.press_before("USER_FOCUS"), f.user_focus),
+    }
 }
 
 /// True when a focus is held until its window's Desktop is recognized: its screen frozen,
@@ -547,7 +560,7 @@ mod tests {
 
     /// A focus of a window of the app in front, nothing else known yet.
     fn a_focus(t0: Instant) -> FocusFacts {
-        FocusFacts { heard: heard(t0), echo: false, beats_echo: false, app: Some(FRONT), user_focus: MS(1000), place: None, scene: None, slides: None, moved_on: None }
+        FocusFacts { heard: heard(t0), echo: false, beats_echo: false, app: Some(FRONT), pressed_on: None, user_focus: MS(1000), place: None, scene: None, slides: None, moved_on: None }
     }
 
     /// Asks [`focus`] as the arm does: each stage it needs filled from `full`, in the order
@@ -721,6 +734,18 @@ mod tests {
         let shown_elsewhere = Scene { parked: false, in_another_stage: true };
         let v = walk(click, &all(HERE, shown_elsewhere, false, true, t0));
         assert_eq!(v, (FocusVerdict::Acts, vec![FocusStage::Place, FocusStage::Scene, FocusStage::Slide]));
+    }
+
+    /// A click on the window itself: its focus is the user's by cause, late or not; a click
+    /// on another window never makes this one's focus theirs.
+    #[test]
+    fn a_focus_after_a_press_on_its_window_is_the_users_by_cause() {
+        let t0 = Instant::now();
+        let pressed = |ago: u64, on: Option<bool>| FocusFacts { heard: Heard { since_press: MS(ago), ..heard(t0) }, pressed_on: on, ..a_focus(t0) };
+        assert!(users_focus(&pressed(2500, Some(true))), "told 2.5 s after the click, by a busy app");
+        assert!(!users_focus(&pressed(6000, Some(true))), "the cap");
+        assert!(!users_focus(&pressed(300, Some(false))), "the click was on another window");
+        assert!(users_focus(&pressed(300, None)), "a key: time is all there is");
     }
 
     #[test]

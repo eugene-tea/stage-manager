@@ -901,6 +901,10 @@ pub struct Controller {
     /// Dock press's Desktop, Mission Control's closing key) is measured to it. `None` outside
     /// one: a tick's work is measured to its own time.
     received: Option<Instant>,
+    /// True while the user's own word is handled (a click on our strip, a shortcut of ours,
+    /// a focus that follows a press on its window): a stage switch it makes is the user's
+    /// by its cause, whatever the time since the press ([`Self::note_changes_of`]).
+    users_word: bool,
     /// The launch's stages wait: the app could not see the Desktop ([`session::blindness`])
     /// when observation started; why and since when. Nothing is built or saved meanwhile.
     build_wait: Option<(session::Blind, Instant)>,
@@ -1224,6 +1228,7 @@ impl Controller {
             tab_asked: HashMap::new(),
             shown_by_us: HashMap::new(),
             received: None,
+            users_word: false,
             build_wait: None,
             screens_wait: None,
             build_tried: None,
@@ -2513,8 +2518,11 @@ impl Controller {
             counters::bump(Count::Switch);
             let from = before.and_then(|b| m.stage_number(StageId(b)));
             tracing::info!(from, to = m.stage_number(to), stage = to.0, "stage switch");
-            // Measured to the notice or input that made the switch, when one is handled.
-            if margin::within("USER_SWITCH", input::since_last_press_at(self.received_at(clock::now()), "USER_SWITCH"), USER_SWITCH) {
+            // By cause when the user's own word is being handled (a card, a shortcut, a
+            // focus after a press on its window); else by the time since the last press,
+            // measured to the notice or input that made the switch, when one is handled
+            // (⌘Tab, a Dock click: after a key or a press elsewhere, time is all there is).
+            if self.users_word || margin::within("USER_SWITCH", input::since_last_press_at(self.received_at(clock::now()), "USER_SWITCH"), USER_SWITCH) {
                 // The user's switch (a card or Dock click, ⌘-Tab, a shortcut): its windows
                 // are touched; a late title re-matches them no more.
                 *user_switched = Some(to);
@@ -5699,6 +5707,14 @@ impl Controller {
 
     /// A hotkey was pressed.
     pub fn hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
+        // The user's own word: what it switches is theirs by its cause.
+        let outer = std::mem::replace(&mut self.users_word, true);
+        self.handle_hotkey(ob, command);
+        self.users_word = outer;
+    }
+
+    /// [`Self::hotkey`], with [`Self::users_word`] set.
+    fn handle_hotkey(&mut self, ob: &mut Observer, command: HotkeyCommand) {
         tracing::info!(?command, "hotkey");
         let command = self.end_restore_for_hotkey(ob, command);
         self.flush_pending(ob);
@@ -5809,6 +5825,16 @@ impl Controller {
 
     /// Input from the strip.
     pub fn strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
+        // The user's own word (a click or a drop on the strip; not the strip's own news of
+        // a motion): what it switches is theirs by its cause.
+        let users = !matches!(event, StripEvent::Unveil { .. } | StripEvent::StretchEnded { .. });
+        let outer = std::mem::replace(&mut self.users_word, users);
+        self.handle_strip_event(ob, event);
+        self.users_word = outer;
+    }
+
+    /// [`Self::strip_event`], with [`Self::users_word`] set.
+    fn handle_strip_event(&mut self, ob: &mut Observer, event: StripEvent) {
         if !matches!(event, StripEvent::Unveil { .. } | StripEvent::StretchEnded { .. }) {
             self.end_restore(ob, "a card click", End::User);
         }

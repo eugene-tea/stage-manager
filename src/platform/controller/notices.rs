@@ -81,10 +81,12 @@ impl Controller {
         // the arrangement that may overrule either.
         let echo = self.causes.focus_heard(id, pid, at) || (self.ahead.is_some() && self.causes.wrote_before(id, at));
         let beats_echo = echo && self.focus_beats_echo(ob, id, now);
+        let heard = self.heard(bundle.as_deref(), Told::Focus, at);
         let mut facts = FocusFacts {
-            heard: self.heard(bundle.as_deref(), Told::Focus, at),
+            heard,
             echo,
             beats_echo,
+            pressed_on: self.causes.pressed_on(id, heard.now.checked_sub(heard.since_press)),
             app: pid.map(|pid| AppNow { hidden: apps::is_hidden(pid), active: apps::is_active(pid) }),
             user_focus: USER_FOCUS,
             place: None,
@@ -96,7 +98,8 @@ impl Controller {
         let mut verdict = attribution::focus(&facts);
         // What the gates passed leave behind, in the chain's order: past 1, a focus that
         // follows a press is the user's (the press measured to the focus's receipt).
-        if verdict != FocusVerdict::Ours && attribution::users_focus(&facts) {
+        let users = verdict != FocusVerdict::Ours && attribution::users_focus(&facts);
+        if users {
             // Focused by a click or a key press on it: a late title re-matches it no more
             // (a focus an app makes by itself at login leaves it).
             if let Some(m) = self.model.as_mut() {
@@ -264,7 +267,11 @@ impl Controller {
             if let Some(pid) = pid {
                 self.activation = self.activation_for(pid, &actions, ob);
             }
+            // A switch made by the user's own focus is the user's by its cause.
+            let outer = self.users_word;
+            self.users_word = outer || users;
             self.execute_animated(ob, actions);
+            self.users_word = outer;
         }
     }
 

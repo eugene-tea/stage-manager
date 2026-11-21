@@ -59,6 +59,10 @@ pub const LATE_ACTIVATION_MAX: Duration = Duration::from_secs(5);
 /// back, whose own focus is then told late in turn.
 pub const EXPECT_MAX: Duration = Duration::from_secs(30);
 
+/// A press the input monitor heard is the session's last press when the session's clock
+/// puts that one no later than this after it (two clocks, read at two moments).
+const HEARD_SLACK: Duration = Duration::from_millis(100);
+
 /// Two frames a point apart or less are the same place (a frame read back is rounded).
 const SAME_FRAME: f64 = 1.0;
 
@@ -117,6 +121,8 @@ pub struct Causes {
     /// A focus on it awaits no activation, since macOS reports none for an app already in
     /// front.
     front: Option<i32>,
+    /// The last press of the user's the input monitor heard, and when.
+    last_press: Option<(Pressed, Instant)>,
     /// Each app's focused window as we believe it is, or will be once the app has done what
     /// we asked: the window we last asked it to focus, or the one a focus notice not ours
     /// named since.
@@ -129,7 +135,7 @@ impl Default for Causes {
         // The echo window: `[windows] focus_echo_ms` as the config has it by default (set from
         // the config in force at the controller's start, [`Self::set_window`]).
         let window = Duration::from_millis(crate::config::Config::default().windows.focus_echo_ms);
-        Self { wrote: HashMap::new(), focus: HashMap::new(), moves: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), front: None, believed: HashMap::new(), window }
+        Self { wrote: HashMap::new(), focus: HashMap::new(), moves: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), front: None, last_press: None, believed: HashMap::new(), window }
     }
 }
 
@@ -218,6 +224,7 @@ impl Causes {
     /// is theirs; a press elsewhere (or a ⌘ key, [`Pressed::Elsewhere`]) may have caused any
     /// focus, so none is ours by order any more.
     pub fn pressed(&mut self, on: Pressed, now: Instant) {
+        self.last_press = Some((on, now));
         let refute = |e: &mut FocusExpected| {
             if e.left > 0 {
                 margin::wait("EXPECTED_FOCUS", now.saturating_duration_since(e.asked), EXPECT_MAX, End::Refuted);
@@ -231,6 +238,22 @@ impl Causes {
                 e.pressed = true;
             }),
             Pressed::Elsewhere => all.for_each(refute),
+        }
+    }
+
+    /// Whether the user's last press was on window `id`, when that is known: `last` is when
+    /// the session's last press of a button or key came (its own clock, which also counts
+    /// keys and clicks on our own windows, unheard by the monitor). `Some(true)`: the press
+    /// heard last is that one and was on this window; `Some(false)`: on another window;
+    /// `None`: not known (a key, a press elsewhere, one never heard): time is all there is.
+    pub fn pressed_on(&self, id: u32, last: Option<Instant>) -> Option<bool> {
+        let (on, heard) = self.last_press?;
+        if last? > heard + HEARD_SLACK {
+            return None;
+        }
+        match on {
+            Pressed::Window(w) => Some(w == id),
+            Pressed::Elsewhere => None,
         }
     }
 
@@ -517,6 +540,21 @@ mod tests {
         c.expect_focus(7, 42, t0 + MS(4000));
         c.pressed(Pressed::Elsewhere, t0 + MS(4100));
         assert!(!c.focus_heard(7, Some(42), t0 + MS(5500)), "⌘` back to it, or the late echo: not ours by order");
+    }
+
+    /// The user's own: the press heard last is told from a later one the monitor never
+    /// heard (a key, a click on our own strip) by the session's clock.
+    #[test]
+    fn the_last_press_is_on_a_window_only_while_no_later_press_came() {
+        let t0 = Instant::now();
+        let mut c = Causes::default();
+        assert_eq!(c.pressed_on(7, Some(t0)), None, "none heard");
+        c.pressed(Pressed::Window(7), t0);
+        assert_eq!(c.pressed_on(7, Some(t0 + MS(3))), Some(true));
+        assert_eq!(c.pressed_on(8, Some(t0 + MS(3))), Some(false), "the click was on another window");
+        assert_eq!(c.pressed_on(7, Some(t0 + MS(900))), None, "a key since, or a click on our own strip");
+        c.pressed(Pressed::Elsewhere, t0 + MS(2000));
+        assert_eq!(c.pressed_on(7, Some(t0 + MS(2000))), None, "the Dock, the menu bar: not known");
     }
 
     /// A raise makes a window its app's key window only when that app is in front: behind,
