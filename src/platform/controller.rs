@@ -137,6 +137,7 @@ use crate::engine::corner::sliver;
 use crate::engine::fullscreen::{self, Seen, Settle, Verdict};
 use crate::engine::overview::{self, FOREIGN_SETTLE, Overview, OverviewWatch, Persisting, Sighting};
 use crate::engine::margin;
+use crate::engine::model::desks::{Desk, Listed};
 use crate::engine::phase::{self, Hold, SPACE_SETTLE};
 use crate::engine::show_desktop::{self, CloseWatch, Cover, CoverLook, PanelPlace, PushedCover, RevealFacts};
 use crate::engine::geometry::{Point, Rect};
@@ -2994,10 +2995,18 @@ impl Controller {
         let present = self.app_present(pid);
         let needs_focus = self.model.as_ref().is_none_or(|m| m.activation_needs_focus(pid));
         let watch = watch_slide && !present;
-        let asks = watch && self.model.as_ref().is_some_and(|m| slide_hold::asks_focus(m, pid));
+        // While the listing decides, the app's focused window is asked for whenever a switch
+        // may follow: a window the model does not know may be on a Desktop never visited.
+        let keyed = watch && self.keyed_listing().is_some();
+        let asks = watch && (keyed || self.model.as_ref().is_some_and(|m| slide_hold::asks_focus(m, pid)));
         let focused = if needs_focus || asks { arrival::focused_window_of(pid) } else { None };
         let wait = if watch {
-            self.model.as_ref().and_then(|m| slide_hold::activation_waits(m, slide_hold::slide_listed(m, &self.slide_bounds(&listed_bounds(&list))), focused))
+            self.model
+                .as_ref()
+                .and_then(|m| slide_hold::activation_waits(m, slide_hold::slide_listed(m, &self.slide_bounds(&listed_bounds(&list))), focused))
+                // The window server has the focused window on a Desktop not shown (one never
+                // visited, sliding in): the activation is that Desktop's.
+                .or_else(|| focused.filter(|f| keyed && self.focus_on_another_desk(*f)).map(slide_hold::Wait::FocusElsewhere))
         } else {
             None
         };
@@ -3687,8 +3696,10 @@ impl Controller {
                 let list = windows::list_windows();
                 // Every screen: the main one's arrival goes on to the others. A second
                 // arrival on them from the same list counted as two in a row (a Desktop seen
-                // beside the one shown had its windows taken as moved at once).
-                self.arrive_here(ob, &list, main, None);
+                // beside the one shown had its windows taken as moved at once). While the
+                // window server's listing decides, each screen's Desktop is the one it names.
+                let every: Option<Vec<DisplayId>> = self.keyed_listing().map(|l| l.0.iter().map(|(d, _)| *d).collect());
+                self.arrive_here(ob, &list, main, None, every.as_deref());
             }
             return;
         }
@@ -3909,6 +3920,11 @@ impl Controller {
             .filter(|w| w.onscreen && w.layer == 0 && fullscreen::could_be_fullscreen(w.bounds, display))
             .collect();
         let covering = big.iter().filter(|w| fullscreen::covers_display(w.bounds, display)).count();
+        if let Some(kind) = self.listed_kind(display) {
+            // The window server says what kind of Space the screen shows; no app is asked.
+            // A window covering the display on a Desktop is still an animation to wait out.
+            return Seen::of(covering, kind != 0);
+        }
         let mut apps: HashMap<i32, Vec<AxElement>> = HashMap::new();
         let full = big.iter().any(|w| match ob.window(w.id) {
             Some(t) => t.element.is_fullscreen().unwrap_or(false),
@@ -3971,7 +3987,10 @@ impl Controller {
     /// screen for no visible reason at [`SPACE_CHECKS`] checks in a row are let go (most of
     /// them at once: its Desktop changed instead). Nothing is inferred on a screen showing an
     /// overview, a full-screen animation or a full-screen app's Space.
-    fn check_other_screens(&mut self, ob: &mut Observer, list: &[windows::CgWindow], now: Instant) {
+    ///
+    /// `keyed`: the listing decides which Desktop each screen shows and where its windows
+    /// are ([`desktops`]): each screen's watches run, nothing is inferred from its windows.
+    fn check_other_screens(&mut self, ob: &mut Observer, list: &[windows::CgWindow], now: Instant, keyed: bool) {
         let others: Vec<Display> = self.model.as_ref().map(|m| m.displays().iter().skip(1).copied().collect()).unwrap_or_default();
         if others.is_empty() {
             self.screens.clear();
@@ -3982,7 +4001,7 @@ impl Controller {
         let mut arrive = false;
         let mut left: Vec<u32> = Vec::new();
         for d in others {
-            if self.other_screen_seen(ob, list, d, now) != OtherSeen::Desktop {
+            if self.other_screen_seen(ob, list, d, now) != OtherSeen::Desktop || keyed {
                 continue;
             }
             let Some(m) = self.model.as_ref() else { return };
@@ -4036,7 +4055,7 @@ impl Controller {
         if arrive {
             // What is held for that Desktop is replayed there at once.
             let awaited = self.awaited_elsewhere(now);
-            self.arrive_others_for(ob, list, awaited);
+            self.arrive_others_for(ob, list, awaited, None);
         }
         for id in left {
             let Some(m) = self.model.as_mut() else { return };
@@ -4172,6 +4191,10 @@ impl Controller {
     /// stages and strip. On a full-screen app's Space: no strip, nothing changes.
     /// `heard`: when the main thread got the notice.
     pub fn on_space_changed(&mut self, ob: &mut Observer, heard: Instant) {
+        // A look took this change from the window server's listing before its notice came.
+        if self.announced_late(heard) {
+            return;
+        }
         // Windows still held behind a switch's snapshots belong to the Space being left:
         // bring them in before anything is counted for the new one. macOS posts the notice
         // once its slide is over: they land out of sight, and their pictures go with them, or
@@ -4252,6 +4275,23 @@ impl Controller {
             }
             return;
         }
+        // While the window server's listing can be read it says which screens changed: none
+        // yet (the notice comes a few ms before the flip) is looked at again on the fast tick.
+        let keyed = match self.keyed_listing().map(|listing| self.flip_step(&listing, now)) {
+            Some(desktops::Flip::Wait) => {
+                if self.phase.hold() != Some(Hold::Flip) {
+                    self.phase.feed(phase::Event::Held(Hold::Flip), now);
+                }
+                return;
+            }
+            Some(desktops::Flip::Unchanged) => {
+                self.settled_by_listing("the listing never named another Space: no change", now);
+                self.present();
+                return;
+            }
+            Some(desktops::Flip::Differs(screens)) => Some(screens),
+            None => None,
+        };
         let was_waiting = self.settle.waiting(now);
         match self.settle.step(self.screen_seen(ob, &list, main.frame), now) {
             Verdict::Wait => {
@@ -4276,31 +4316,74 @@ impl Controller {
                 // recognized as at any Space change, whatever the main one shows.
                 let awaited = self.awaited_elsewhere(now);
                 self.defer_present = true;
-                self.arrive_others_for(ob, &list, awaited);
+                self.arrive_others_for(ob, &list, awaited, keyed.as_deref());
                 self.defer_present = false;
                 self.present();
             }
             Verdict::Desktop => {
                 let mut view = None;
-                if self.arrival_waits(ob, &list, main, now, &mut view) {
+                if self.arrival_waits(ob, &list, main, now, &mut view, keyed.is_some()) {
                     return;
                 }
-                self.phase.feed(phase::Event::Arrived, now);
+                // Named by the listing, nothing settles after the arrival.
+                self.phase.feed(if keyed.is_some() { phase::Event::ArrivedRead } else { phase::Event::Arrived }, now);
                 // A sliver grab let go while the change settled runs first, so the arrival
                 // finds the window where the user dropped it, already unparked (R2 L1).
                 if self.focus_after_press.is_some() && !input::left_button_down() {
                     self.focus_after_press_done(ob);
                 }
-                self.arrive_here(ob, &list, main, view);
+                match keyed {
+                    // Another screen's Desktop changed, not this one's: only that one arrives.
+                    Some(screens) if !screens.contains(&main.id) => {
+                        tracing::debug!(screens = ?screens.iter().map(|d| d.0).collect::<Vec<_>>(), "Space change: the main screen shows the Desktop it showed; the screens that changed arrive");
+                        let awaited = self.awaited_elsewhere(now);
+                        self.defer_present = true;
+                        self.arrive_others_for(ob, &list, awaited, Some(&screens));
+                        self.defer_present = false;
+                        self.present();
+                        self.mark_dirty();
+                    }
+                    Some(screens) => self.arrive_here(ob, &list, main, None, Some(&screens)),
+                    None => self.arrive_here(ob, &list, main, view, None),
+                }
             }
         }
+    }
+
+    /// What an arrival on screen `d` is given ([`Self::screen_view`]), and, when the listing
+    /// decides (`keyed`, and `desk` could be read again for this arrival), only the windows
+    /// the window server has on `desk`, with what it says of them ([`Self::keyed_live`]); the
+    /// sweep for windows missing from the screen is made only for a Desktop bound to no
+    /// Space yet (the vote stands in for it). `view`: a view read already for the same list.
+    fn arrival_view(
+        &mut self,
+        ob: &Observer,
+        list: &[windows::CgWindow],
+        d: Display,
+        desk: Option<&Desk>,
+        keyed: bool,
+        view: Option<ScreenView>,
+    ) -> (Vec<WindowMeta>, Vec<WindowId>, Option<Listed>) {
+        let listing = if keyed { self.keyed_listing() } else { None };
+        let (Some(desk), Some(listing)) = (desk, listing) else {
+            let (live, absent) = view.unwrap_or_else(|| self.screen_view(ob, list, d));
+            return (live, absent, None);
+        };
+        let live = view.map(|v| v.0).unwrap_or_else(|| self.screen_live(ob, list, d));
+        let (live, listed) = self.keyed_live(live, desk, &listing);
+        let bound = self.model.as_ref().is_some_and(|m| m.space_of_desk(desk.id).is_some());
+        let absent = if bound { Vec::new() } else { self.absent_windows(ob, &self.present_in(list), d.id) };
+        (live, absent, Some(listed))
     }
 
     /// A Desktop shows: the engine recognizes it by the windows on screen ([`Model::arrive`]),
     /// its stages and strip come back. `view` is what [`Self::arrival_waits`] read from the
     /// same `list` ([`Self::screen_view`]), when it did: the absent sweep (Accessibility asked
     /// about every window not on screen) is not made twice.
-    fn arrive_here(&mut self, ob: &mut Observer, list: &[windows::CgWindow], main: Display, view: Option<ScreenView>) {
+    ///
+    /// `only`: the listing decided this Space change and these are the screens that changed
+    /// ([`desktops`]): the arrival is keyed, and of the other screens only these arrive.
+    fn arrive_here(&mut self, ob: &mut Observer, list: &[windows::CgWindow], main: Display, view: Option<ScreenView>, only: Option<&[DisplayId]>) {
         let Some(m) = self.model.as_ref() else { return };
         let before = m.current_space(main.id);
         let shown = self.shown_managed(list);
@@ -4320,20 +4403,19 @@ impl Controller {
         // a view read before with a kind that changed is read again.
         let waited: Vec<u32> = self.unplaced.iter().copied().filter(|id| shown.contains(id)).collect();
         let rekinded = waited.into_iter().fold(false, |any, id| ob.recheck_kind(id) | any);
-        let view = view.filter(|_| !rekinded);
-        let Some(m) = self.model.as_ref() else { return };
-        let (live, absent) = match view {
-            Some((mut live, absent)) => {
-                // The frames just read again.
-                for meta in &mut live {
-                    if let Some(w) = ob.window(meta.id.0) {
-                        meta.frame = w.frame;
-                    }
+        let view = view.filter(|_| !rekinded).map(|(mut live, absent)| {
+            // The frames just read again.
+            for meta in &mut live {
+                if let Some(w) = ob.window(meta.id.0) {
+                    meta.frame = w.frame;
                 }
-                (live, absent)
             }
-            None => self.screen_view(ob, list, main),
-        };
+            (live, absent)
+        });
+        // The Desktop this arrival is for, read again now, never carried from the notice.
+        let desk = self.arrival_desk(main.id);
+        let (live, absent, listed) = self.arrival_view(ob, list, main, desk.as_ref(), only.is_some(), view);
+        let Some(m) = self.model.as_ref() else { return };
         let arrivals: Vec<WindowMeta> = live.iter().filter(|meta| m.window(meta.id).is_none()).cloned().collect();
         for meta in &live {
             self.unplaced.remove(&meta.id.0);
@@ -4342,12 +4424,11 @@ impl Controller {
         let hold = self.macos_after_display_change(clock::now());
         let watch = self.spaces_display_watch();
         let carried = self.slide_carried(clock::now());
-        let desk = self.arrival_desk(main.id);
         let Some(m) = self.model.as_mut() else { return };
         m.set_hold_arrivals(hold);
         m.set_display_watch(watch);
         m.set_slide_carried(carried);
-        let mut actions = m.arrive_on(main.id, desk.as_ref(), None, &live, &absent, &hints);
+        let mut actions = m.arrive_on(main.id, desk.as_ref(), listed.as_ref(), &live, &absent, &hints);
         m.set_hold_arrivals(false);
         let after = m.current_space(main.id);
         let note = m.last_arrival().clone();
@@ -4393,7 +4474,7 @@ impl Controller {
         // Arriving through an app (Dock, ⌘Tab, an activation) whose window waits in a stage
         // here: show it, as Apple's does, at once (the Desktop's slide is the motion).
         self.bring_focus_forward(ob, "arrival", predicted);
-        self.arrive_others_for(ob, list, awaited);
+        self.arrive_others_for(ob, list, awaited, only);
         self.defer_present = false;
         self.present();
         self.mark_dirty();
@@ -4404,11 +4485,16 @@ impl Controller {
     /// no visible reason ([`Self::absent_windows`]; a window on another display is not
     /// missing).
     fn screen_view(&self, ob: &Observer, list: &[windows::CgWindow], display: Display) -> ScreenView {
-        let Some(m) = self.model.as_ref() else { return (Vec::new(), Vec::new()) };
+        (self.screen_live(ob, list, display), self.absent_windows(ob, &self.present_in(list), display.id))
+    }
+
+    /// The windows on `display`'s screen the engine knows or waits to place, rules applied
+    /// ([`Self::screen_view`]'s first half: no app is asked anything).
+    fn screen_live(&self, ob: &Observer, list: &[windows::CgWindow], display: Display) -> Vec<WindowMeta> {
+        let Some(m) = self.model.as_ref() else { return Vec::new() };
         let shown = self.shown_managed(list);
         let z = windows::z_order(list);
-        let live = ob
-            .windows()
+        ob.windows()
             .keys()
             .copied()
             .filter(|id| shown.contains(id))
@@ -4416,8 +4502,7 @@ impl Controller {
             .filter_map(|id| self.meta(ob, id, &z))
             .filter(|meta| meta.display == display.id)
             .filter(|meta| self.allowed_by_rules(meta))
-            .collect();
-        (live, self.absent_windows(ob, &self.present_in(list), display.id))
+            .collect()
     }
 
     /// Windows stranded on screen (round stage-lost, [`stranded`]): seen by the window server
@@ -4522,8 +4607,9 @@ impl Controller {
     /// replay came first and could do nothing for it: its Desktop was not recognized yet (a
     /// Dock click or ⌘-Tab to an app on the laptop's other Desktop slid it in with the app's
     /// window left in its card).
-    fn arrive_others_for(&mut self, ob: &mut Observer, list: &[windows::CgWindow], awaited: Option<(Wanted, Vec<SpaceId>)>) {
-        let predicted = self.arrive_others(ob, list);
+    /// `only`: the listing decided, and only these screens arrive ([`desktops`]).
+    fn arrive_others_for(&mut self, ob: &mut Observer, list: &[windows::CgWindow], awaited: Option<(Wanted, Vec<SpaceId>)>, only: Option<&[DisplayId]>) {
+        let predicted = self.arrive_others(ob, list, only);
         self.look_at_desks("arrival");
         let Some(m) = self.model.as_ref() else { return };
         let came = awaited.filter(|(_, spaces)| spaces.iter().any(|s| m.is_shown_space(*s))).map(|(held, _)| held);
@@ -4543,8 +4629,10 @@ impl Controller {
     /// ([`Self::settle_ahead`]); the window it was confirmed for is returned. Called after
     /// every arrival on the main display and when windows of another Desktop show on a
     /// secondary screen.
-    fn arrive_others(&mut self, ob: &mut Observer, list: &[windows::CgWindow]) -> Option<WindowId> {
+    fn arrive_others(&mut self, ob: &mut Observer, list: &[windows::CgWindow], only: Option<&[DisplayId]>) -> Option<WindowId> {
         let others: Vec<Display> = self.model.as_ref().map(|m| m.displays().iter().skip(1).copied().collect()).unwrap_or_default();
+        // The listing decided: the screens whose Desktop is the one the model has stay as they are.
+        let others: Vec<Display> = others.into_iter().filter(|d| only.is_none_or(|only| only.contains(&d.id))).collect();
         if others.is_empty() {
             return None;
         }
@@ -4557,7 +4645,8 @@ impl Controller {
             if self.other_screen_seen(ob, list, d, now) != OtherSeen::Desktop {
                 continue;
             }
-            let (live, absent) = self.screen_view(ob, list, d);
+            let desk = self.arrival_desk(d.id);
+            let (live, absent, listed) = self.arrival_view(ob, list, d, desk.as_ref(), only.is_some(), None);
             let Some(m) = self.model.as_ref() else { return predicted };
             let new = live.iter().filter(|meta| m.window(meta.id).is_none()).count();
             for meta in &live {
@@ -4566,13 +4655,12 @@ impl Controller {
             let hold = self.macos_after_display_change(clock::now());
             let watch = self.spaces_display_watch();
             let carried = self.slide_carried(now);
-            let desk = self.arrival_desk(d.id);
             let Some(m) = self.model.as_mut() else { return predicted };
             let before = m.current_space(d.id);
             m.set_hold_arrivals(hold);
             m.set_display_watch(watch);
             m.set_slide_carried(carried);
-            let mut actions = m.arrive_on(d.id, desk.as_ref(), None, &live, &absent, &hints);
+            let mut actions = m.arrive_on(d.id, desk.as_ref(), listed.as_ref(), &live, &absent, &hints);
             m.set_hold_arrivals(false);
             let after = m.current_space(d.id);
             let note = m.last_arrival().clone();
@@ -4620,6 +4708,7 @@ impl Controller {
         main: Display,
         now: Instant,
         view: &mut Option<ScreenView>,
+        keyed: bool,
     ) -> bool {
         let Some(m) = self.model.as_ref() else { return false };
         let (known, listed) = session::counts(
@@ -4649,6 +4738,11 @@ impl Controller {
         }
         self.ax_silent_since = None;
         self.ax_silent_rescan = None;
+        if keyed {
+            // The listing named the Desktop: each window is asked for its own, and one of a
+            // Desktop still listed beside it is left out. No list is waited for.
+            return false;
+        }
         let since_notice = self.phase.since_change(now).unwrap_or(MIXED_WAIT);
         if since_notice >= MIXED_WAIT && self.phase.hold() == Some(Hold::TwoDesktops) {
             // Read again until the wait ran out: two Desktops still, or not, it arrives now.
@@ -4836,14 +4930,22 @@ impl Controller {
         let main = *m.main_display();
         // The tick's read, shared with its other duties ([`windows::wake_list`]).
         let list = windows::wake_list();
+        // The window server's listing, while it decides ([`desktops`]).
+        let keyed = self.keyed_listing();
         // The other screens first (round displays-2): each is judged on its own, whatever
         // the main screen shows.
-        self.check_other_screens(ob, &list, now);
+        self.check_other_screens(ob, &list, now, keyed.is_some());
         // Mission Control, App Exposé, Show Desktop: the list shows their layout (other
         // Desktops' windows, windows slid aside), not the Desktop. Nothing is inferred while
         // one shows and for a settle after; a Desktop clicked there comes with its
         // notification.
         if self.look_for_overview(&list, main.frame, now) {
+            return;
+        }
+        // A Space change with no notice yet: the listing shows it, and it is taken now.
+        if let Some(listing) = &keyed
+            && self.sync_desktops(ob, &list, listing, now)
+        {
             return;
         }
         if !self.phase.fullscreen()
@@ -4902,7 +5004,6 @@ impl Controller {
         self.leave_off_screen(ob, &list);
         // A managed window off screen whose handle died: found again, or let go if closed.
         self.check_stale_handles(ob, &list);
-
         let Some(m) = self.model.as_ref() else { return };
         let space = m.current_space(main.id);
         let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;
@@ -5107,10 +5208,10 @@ impl Controller {
         self.engine.kind() == crate::platform::window_engine::EngineKind::Spaces && crate::platform::spaces::engine::shared().watching_now()
     }
 
-    /// [`phase::Phase::space_settling`], its margin noted ([`SPACE_SETTLE`]) for the reads an
-    /// activation takes.
+    /// [`phase::Tracker::frames_settling`], its margin noted ([`SPACE_SETTLE`]) for the frames
+    /// an activation or an observation reads from the window list.
     fn space_settling_noted(&self, now: Instant) -> bool {
-        let settling = self.phase.space_settling(now);
+        let settling = self.phase.frames_settling(now);
         if !self.phase.changing()
             && let Some(since) = self.phase.since_change(now)
         {
@@ -5381,7 +5482,17 @@ impl Controller {
             self.new_window_waits(id);
             return;
         }
-        if self.space_in_doubt(ob, &self.present_in(&list), screen.id) {
+        // While the listing decides, it says whether the window is on the Desktop shown: one
+        // of a Desktop sliding in (or one listed before its Desktop's arrival) waits for it.
+        let on_desk = if about_to_show { None } else { self.found_on_desk_shown(id, screen.id) };
+        if on_desk == Some(false) {
+            if self.unplaced.insert(id) {
+                tracing::debug!(id, "the window server has the window on another Desktop than the one shown; the window is placed on its arrival");
+            }
+            self.new_window_waits(id);
+            return;
+        }
+        if on_desk.is_none() && self.space_in_doubt(ob, &self.present_in(&list), screen.id) {
             // Its notification came before the Space change's: placing it now would put it
             // (and maybe a stage switch, a focus) on the Space being left.
             if self.unplaced.insert(id) {

@@ -24,11 +24,14 @@ pub(super) struct Run {
     pub(super) story: String,
     /// What each focus and activation notice came to, in order.
     pub(super) trail: Vec<String>,
+    /// The shadow's count since the launch: how often the model's Desktop shown and the
+    /// window server's listing disagreed (`ctl state`'s `desks.disagree.shown_begun`).
+    pub(super) disagreed: u64,
 }
 
 impl Run {
     pub(super) fn of(b: &Bench, outcome: String) -> Self {
-        Self { outcome, margins: b.margins(), story: b.story(), trail: b.trail() }
+        Self { outcome, margins: b.margins(), story: b.story(), trail: b.trail(), disagreed: b.disagreed().0 }
     }
 }
 
@@ -41,6 +44,9 @@ pub(super) fn expect<S: AsRef<str>>(script: fn(f64) -> Run, want: [S; 3]) {
     for (load, want) in LOADS.iter().zip(want) {
         let run = script(*load);
         assert_eq!(run.outcome, want.as_ref(), "at load {load}:\n{}", run.story);
+        // Design r3: while the listing decides, the model never shows another Desktop than
+        // the window server lists (the shadow, kept as the check).
+        assert_eq!(run.disagreed, 0, "at load {load}: the model and the window server's listing disagreed on the Desktop shown:\n{}", run.story);
     }
 }
 
@@ -709,12 +715,14 @@ fn a_dock_click_after_a_screen_came_and_went() {
 
 #[test]
 fn the_first_visit_to_a_desktop() {
-    // Not time: the person pressed ⌃→ and is back on Desktop 1 (two slides), with Alpha's
-    // stage in front there. The Desktop's windows are unknown before its first visit and no
-    // saved file names them, so the slide is not seen and Alpha's activation switches
-    // stages on the Desktop being left (`engine/slide_hold.rs` covers saved Desktops only).
-    let pulled_back = "front [11] shows [11] desktop 1 app 101 switches 1 slides 2";
-    expect(first_visit_to_a_desktop, [pulled_back, pulled_back, pulled_back]);
+    // The person pressed ⌃→ and is on Desktop 2, one slide, Alpha's window there in front.
+    // The Desktop's windows are unknown before its first visit, but the window server says
+    // which Desktop Alpha's focused window is on: its activation is the slide's, held for the
+    // arrival (`controller/desktops.rs`, `focus_on_another_desk`). Before: not seen as a
+    // slide, the activation switched stages on the Desktop being left and macOS slid back
+    // (front [11] on Desktop 1, two slides, at every load).
+    let there = "front [13] shows [13] desktop 2 app 101 switches 0 slides 1";
+    expect(first_visit_to_a_desktop, [there, there, there]);
 }
 
 // ----- the window server's notices (Spaces) --------------------------------------------------
@@ -882,6 +890,7 @@ pub(super) fn table() -> String {
                 }
             }
         }
+        assert_eq!(runs.iter().map(|r| r.disagreed).sum::<u64>(), 0, "{name}: the model and the window server's listing disagreed on the Desktop shown");
         let same = |i: usize| if runs[i].outcome == runs[0].outcome { "same".to_string() } else { format!("**{}**", runs[i].outcome) };
         out.push_str(&format!("| {name} | {told} | {} | {} | {} | {} |\n", runs[0].outcome, same(1), same(2), if changed.is_empty() { "none".into() } else { changed.join(", ") }));
     }

@@ -1244,6 +1244,7 @@ impl Controller {
             || self.upkeep_wants_fast_tick(now)
             || self.fresh_waiting()
             || self.switcher_wants_fast_tick()
+            || self.flip_awaited()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -1252,6 +1253,8 @@ impl Controller {
     /// ([`Self::slide_hold_step`]), and the corner patch planned while Show Desktop is up
     /// ([`Self::reveal_fast`]: its close seen within a fast tick).
     pub fn fast_tick(&mut self, ob: &mut Observer) {
+        // A Space change's notice that came before the listing's flip: looked at again.
+        self.flip_fast_tick(ob);
         self.slide_hold_step(ob);
         let now = clock::now();
         // ⌘Tab's switcher list gone with no key for it yet: decided after its wait; a window

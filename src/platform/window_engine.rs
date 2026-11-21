@@ -272,6 +272,12 @@ pub trait WindowEngine: Send + Sync {
         Back::default()
     }
 
+    /// True while window `id`, hidden by this engine, is on its Desktop for a while
+    /// ([`Self::lend_home`]): on a Desktop on purpose, not let out by something else.
+    fn lent(&self, _id: WindowId) -> bool {
+        false
+    }
+
     /// The window server's listing of every screen's Desktops, read now
     /// (`SLSCopyManagedDisplaySpaces`: each screen's Space shown and its kind, its Desktops
     /// with their uuids). `None`: this engine does not read it (the Corner engine).

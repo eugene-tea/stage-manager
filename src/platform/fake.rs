@@ -445,9 +445,9 @@ pub struct Desk {
     /// (or before round r5-notices); every poll then decides alone.
     pub server_notices: bool,
     /// The "Current Space" flips with the leaving Desktop's windows going from the list,
-    /// before the notice is sent (as the desk played it before the 11-21 measurement; the
-    /// order a slow main thread gives). False: [`delays::FLIP_AFTER_NOTICE`] after the
-    /// notice is sent, as measured.
+    /// before the notice is sent (never measured so; the order a slow main thread gives at
+    /// any load). False, the desk's way: [`delays::FLIP_AFTER_NOTICE`] after the notice is
+    /// sent, as measured.
     pub flip_leads_notice: bool,
     /// The leaving Desktop's windows stay listed on screen this long past the flip (ms, the
     /// machine's own time): the window list read at the arrival shows both Desktops. 0: gone
@@ -619,7 +619,7 @@ impl Desk {
             tap_switcher: false,
             activation_leads_slide: false,
             server_notices: false,
-            flip_leads_notice: true,
+            flip_leads_notice: false,
             leaving_lingers_ms: 0.0,
             listing_unreadable: false,
             overlays: Vec::new(),

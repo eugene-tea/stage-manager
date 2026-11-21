@@ -731,6 +731,14 @@ impl Bench {
         (g["shown_begun"].as_u64().unwrap_or(0), g["homes_begun"].as_u64().unwrap_or(0), g["shown"].as_u64().unwrap_or(0))
     }
 
+    /// What the listing decided since the launch (`ctl state`'s `desks.keyed`): the notices
+    /// that waited for the flip, the changes taken at a look before their notice, and the
+    /// notices that came after one.
+    pub(super) fn keyed(&self) -> (u64, u64, u64) {
+        let k = &self.c.desks_json()["keyed"];
+        (k["flips_waited"].as_u64().unwrap_or(0), k["unannounced"].as_u64().unwrap_or(0), k["announced_late"].as_u64().unwrap_or(0))
+    }
+
     /// The windows the model counts hidden.
     pub(super) fn hidden(&self) -> BTreeSet<u32> {
         self.c.model.as_ref().map(|m| m.windows().filter(|w| w.parked).map(|w| w.meta.id.0).collect()).unwrap_or_default()

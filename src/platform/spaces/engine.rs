@@ -2071,6 +2071,10 @@ impl WindowEngine for SpacesEngine {
         self.take_back_window(id.0)
     }
 
+    fn lent(&self, id: WindowId) -> bool {
+        SpacesEngine::lent(self, id.0)
+    }
+
     fn desktops(&self) -> Option<Vec<ScreenDesks>> {
         self.sky().map(Sky::displays)
     }
