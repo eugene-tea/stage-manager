@@ -381,7 +381,7 @@ pub const KEYS: &[KeyDef] = &[
     k("windows", "minimize_to_strip", Kind::Bool, "true",
         "Cmd-M (minimize) sends the window to the strip as a card of its own, as Apple does, instead of the Dock."),
     k("windows", "focus_echo_ms", i(0, 10_000), "700",
-        "Focus changes this soon after we moved a window are taken as our own and never switch stages."),
+        "How long after an action of ours on a window or an app a further notice about it still counts as our own doing. The first answer to a focus or a move of ours is told by order, however late."),
     k("windows", "park_inside", f(-10_000.0, 32.0), "1.0",
         "Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it."),
     k("windows", "park_drop", f(-32.0, 10_000.0), "-1.0",
@@ -636,6 +636,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-49.toml"),
     include_str!("legacy/default-50.toml"),
     include_str!("legacy/default-51.toml"),
+    include_str!("legacy/default-52.toml"),
 ];
 
 #[cfg(test)]
