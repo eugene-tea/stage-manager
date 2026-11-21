@@ -54,6 +54,10 @@ had on the built-in screen alone. The screen is added again: every window on the
 frame was kept on is back at its frame of the two-screen setup; one macOS put on another
 screen is counted `elsewhere` by the log, never moved across.
 
+Under the Spaces engine each round ends by printing the shadow of design r3 (`ctl state`'s
+`desks`: where the model's Desktop and the window server's disagree, open and begun, the
+longest) and the log's disagreement lines; printed only, never a check.
+
 The virtual screen is removed and the screens put back where they were whatever happens (the
 tool does it on SIGTERM too); the app is quit and the fixtures closed after each round. It
 refuses to start while another Stage Manager runs.
@@ -423,6 +427,7 @@ def ahead_round(n):
         seen = desktops_tour(before, out, home)
         away = False
         check(not out, f"ahead {n}: on every Desktop ({len(seen)}), the same" + (f": {sorted(out)[:8]}" if out else ""))
+        desk_shadow(f"ahead {n}", 0)
     finally:
         if screen is not None and screen.proc.poll() is None:
             say(f"    screen removed (cleanup): {screen.stop()}")
@@ -431,6 +436,30 @@ def ahead_round(n):
         ts.stop_app()
         ts.stop_all_fixtures()
         say(f"    log kept: {ts.archive_log()}")
+
+
+SHADOW_LINE = "desktops: the model and the window server disagree"
+
+
+def desk_shadow(label, since_line):
+    """The shadow's counts for this round (design r3, slice 1; `ctl state`'s `desks`) and the
+    log's disagreements since `since_line`: printed only, never a check (they are the
+    incidents the later slices remove). Under the Corner engine the listing is not read."""
+    try:
+        d = ts.state().get("desks") or {}
+    except Exception as e:  # noqa: BLE001 - the app may be busy or gone
+        say(f"    desks ({label}): not read: {e}")
+        return
+    if d.get("listing") is None:
+        say(f"    desks ({label}): the window server's listing is not read (not the Spaces engine)")
+        return
+    g = d["disagree"]
+    say(f"    desks ({label}): Desktop shown: {g['shown']} open, {g['shown_begun']} begun; window homes: {g['homes']} open, "
+        f"{g['homes_begun']} begun; the longest {g['longest_ms']} ms")
+    for o in g["open"]:
+        say(f"      open: {o}")
+    for ln in [ln for ln in log_lines(ts.log_text(), since_line) if SHADOW_LINE in ln][:12]:
+        say(f"    log: {ln[:300]}")
 
 
 def app_up():
@@ -492,6 +521,7 @@ def one_round(kind, n):
         out.clear()
         seen = desktops_tour(before, out, home)
         check(not out, f"{kind} {n}: on every Desktop ({len(seen)}), the same" + (f": {sorted(out)[:8]}" if out else ""))
+        desk_shadow(f"{kind} {n}", log_mark)
         lines = log_lines(ts.log_text(), log_mark)
         kept = [ln for ln in lines if KEPT in ln]
         lost = [ln for ln in kept if not re.search(r"\blost=0\b", ln)]

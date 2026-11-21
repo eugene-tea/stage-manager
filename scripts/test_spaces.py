@@ -49,6 +49,10 @@ comes back on the same Desktop with each Desktop's pane still on its own Desktop
 strip is covered (Desktop 1 covered, Desktop 2 clear: a tab on 1, none on 2; Desktop 2
 covered: its own), and back on Desktop 1 its strip and tab are as before.
 
+Under the Spaces engine, before the first run's quit and at the end, the shadow of design r3
+(`ctl state`'s `desks`) is printed: where the model's Desktop and the window server's
+disagree; hands-free, an open disagreement on the Desktop shown once settled fails.
+
 Every app run's log is kept (stage-manager.run-NN.log in the test home, renamed from the
 day's YYYY-MM-DD.log; the guardian writes on into its run's file).
 """
@@ -106,6 +110,28 @@ def wait_for(what, cond, timeout):
         time.sleep(0.3)
     say(f"    (gave up waiting for {what})")
     return None
+
+
+def desk_shadow(label):
+    """The shadow's counts for this app run (design r3, slice 1; `ctl state`'s `desks`): the
+    Desktop the app's model says each screen shows against the window server's, and each held
+    window's home against the model's Desktop for it, open now and begun since the launch,
+    with the longest. Under the Spaces engine, hands-free, the Desktop shown must agree once
+    settled (no open disagreement within 5 s); a guided run and window homes only print.
+    Under the Corner engine the listing is not read: it says so."""
+    d = (state() or {}).get("desks") or {}
+    if d.get("listing") is None:
+        say(f"    desks ({label}): the window server's listing is not read (not the Spaces engine)")
+        return
+    settled = wait_for("the Desktop shown to agree", lambda: state()["desks"]["disagree"]["shown"] == 0, 5)
+    d = state()["desks"]
+    g = d["disagree"]
+    say(f"    desks ({label}): Desktop shown: {g['shown']} open, {g['shown_begun']} begun; window homes: {g['homes']} open, "
+        f"{g['homes_begun']} begun; the longest {g['longest_ms']} ms; bindings {[(b['desk'], b['space']) for b in d['bindings']]}")
+    for o in g["open"]:
+        say(f"      open: {o}")
+    if AUTO:
+        check(settled is True and g["shown"] == 0, f"desks ({label}): the model and the window server agree on the Desktop shown once settled")
 
 
 def holds(cond, seconds):
@@ -896,6 +922,7 @@ def run():
     s = state()
     parked_d2 = [w["title"] for w in s["windows"] if w["space"] == d2 and w["parked"]]
     check(bool(parked_d2), f"a window is parked on Desktop 2: {parked_d2}")
+    desk_shadow("the first run")
     ts.stop_app()
     left = parked_anywhere()
     check(not left, "after quit no fixture window is parked on any Desktop" + (f" (left: {[w['id'] for w in left]})" if left else ""))
@@ -1015,6 +1042,7 @@ def run():
         check(stages_now == stages_before, f"round {round_no}: the Desktop's stages are unchanged")
         check(sorted(w["id"] for w in s["windows"]) == windows_before,
               f"round {round_no}: no window added or lost (the animation's stand-in is never managed)")
+    desk_shadow("the full-screen run")
     ts.stop_app()
     left = parked_anywhere()
     check(not left, "the end: no fixture window parked on any Desktop")
