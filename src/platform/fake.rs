@@ -74,6 +74,18 @@ pub(crate) mod delays {
     pub const SLIDE_LEAVES: f64 = 327.0;
     /// The slide's end to `activeSpaceDidChangeNotification` (times the load): +346 ms.
     pub const SPACE_NOTICE: f64 = 19.0;
+    /// The Space change's notice to the flip of the window server's "Current Space"
+    /// (`SLSCopyManagedDisplaySpaces`), the machine's own time: the notice came 1-9 ms before
+    /// the flip, 24 of 24 (`probe-system flip`, 11-21). The notice is told as late as the load
+    /// makes it; the flip is not the load's.
+    pub const FLIP_AFTER_NOTICE: f64 = 5.0;
+    /// Full screen, in or out: macOS's stand-in covers the display from the start, the Space
+    /// changes about here into the animation, and the window says `AXFullScreen` (or the
+    /// stand-in goes) at its end (`engine/fullscreen.rs`: "the Space change notification
+    /// comes in the middle of it"). The desk's own plain lengths; never the load's.
+    pub const FULLSCREEN_SPACE: f64 = 350.0;
+    /// See [`FULLSCREEN_SPACE`].
+    pub const FULLSCREEN_ENDS: f64 = 700.0;
     /// A Desktop key or swipe: the activation of the arriving Desktop's front app, this long
     /// into the slide (`engine/slide_hold.rs`, 10-23: its notice 100-185 ms before the Space
     /// change's).
@@ -226,8 +238,13 @@ pub struct Screen {
     pub uuid: String,
     /// Its Desktops, left to right (window-server Space ids).
     pub desktops: Vec<u64>,
-    /// The Desktop shown.
+    /// The Space whose windows the window list shows (a Desktop, or a full-screen app's).
     pub shown: u64,
+    /// The Space the window server's listing names as shown ("Current Space"): it flips
+    /// once, at a slide's end ([`Step::Flips`]), never with the window list.
+    pub current: u64,
+    /// Its full-screen Spaces (type 4), one per window in full screen.
+    pub fullscreen: Vec<u64>,
     /// A Desktop sliding in: listed on screen beside the one shown.
     pub sliding_in: Option<u64>,
     /// The Desktop a slide under way goes to, from its start.
@@ -274,6 +291,14 @@ pub enum Step {
     SlideShows { screen: usize, to: u64 },
     /// A slide's leaving Desktop is gone from the list; the arriving one is the one shown.
     SlideLeaves { screen: usize, to: u64 },
+    /// The window server's "Current Space" of `screen` is `to` from now on.
+    Flips { screen: usize, to: u64 },
+    /// A full-screen animation's Space change: window `id` is in Space `to` alone (`frame`
+    /// its frame there), which the window list shows from now on; `ended`: a full-screen
+    /// Space left, gone from the listing.
+    FullScreenSpace { screen: usize, id: u32, to: u64, frame: Rect, ended: Option<u64> },
+    /// A full-screen animation's end: the stand-in goes, window `id` says `full`.
+    FullScreenEnds { id: u32, full: bool },
     /// A window the window server lists on screen from now on.
     WindowShows(u32),
     /// An overlay window of macOS's own listed from now on (`true`) or no longer.
@@ -419,6 +444,18 @@ pub struct Desk {
     /// the AppKit event loop turning, 11-21). False: none come, as on a Mac where they do not
     /// (or before round r5-notices); every poll then decides alone.
     pub server_notices: bool,
+    /// The "Current Space" flips with the leaving Desktop's windows going from the list,
+    /// before the notice is sent (as the desk played it before the 11-21 measurement; the
+    /// order a slow main thread gives). False: [`delays::FLIP_AFTER_NOTICE`] after the
+    /// notice is sent, as measured.
+    pub flip_leads_notice: bool,
+    /// The leaving Desktop's windows stay listed on screen this long past the flip (ms, the
+    /// machine's own time): the window list read at the arrival shows both Desktops. 0: gone
+    /// [`delays::SLIDE_LEAVES`] into the slide.
+    pub leaving_lingers_ms: f64,
+    /// The window server's listing names no Space shown (`SLSCopyManagedDisplaySpaces` with
+    /// no "Current Space"): the controller's listing is not readable.
+    pub listing_unreadable: bool,
     /// macOS's own windows listed above the apps' (Mission Control's covers, Show Desktop's).
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
@@ -454,6 +491,9 @@ pub struct Desk {
     queue: Vec<Queued>,
     seq: u64,
     next_space: u64,
+    next_fullscreen: u64,
+    /// The frame and Desktop each window in full screen came from.
+    before_fullscreen: BTreeMap<u32, (Rect, u64)>,
     started: Instant,
     spaces_engine: Option<Arc<SpacesEngine>>,
 }
@@ -533,6 +573,10 @@ pub fn spaces_engine() -> Option<Arc<SpacesEngine>> {
 pub const FIRST_DESKTOP: u64 = 1;
 /// The first Space id SkyLight's fake gives a Space the app makes.
 const FIRST_MADE_SPACE: u64 = 1000;
+/// The first full-screen Space's id on the desk (a new one each time a window goes in).
+pub const FIRST_FULLSCREEN_SPACE: u64 = 300;
+/// The window id of macOS's stand-in through a full-screen animation.
+const STAND_IN: u32 = 8;
 /// The Dock's pid on the desk.
 pub const DOCK_PID: i32 = 90;
 /// Finder's pid on the desk.
@@ -560,7 +604,7 @@ impl Desk {
             windows: BTreeMap::new(),
             z: Vec::new(),
             front: None,
-            screens: vec![Screen { display, uuid: "Main".into(), shown: ids[0], desktops: ids, sliding_in: None, sliding_to: None }],
+            screens: vec![Screen { display, uuid: "Main".into(), shown: ids[0], current: ids[0], fullscreen: Vec::new(), desktops: ids, sliding_in: None, sliding_to: None }],
             pointer: Point::new(700.0, 450.0),
             left_down: false,
             shift: false,
@@ -575,6 +619,9 @@ impl Desk {
             tap_switcher: false,
             activation_leads_slide: false,
             server_notices: false,
+            flip_leads_notice: true,
+            leaving_lingers_ms: 0.0,
+            listing_unreadable: false,
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
             mission: false,
@@ -592,6 +639,8 @@ impl Desk {
             queue: Vec::new(),
             seq: 0,
             next_space: FIRST_MADE_SPACE,
+            next_fullscreen: FIRST_FULLSCREEN_SPACE,
+            before_fullscreen: BTreeMap::new(),
             started: clock::now(),
             spaces_engine: None,
         };
@@ -636,13 +685,34 @@ impl Desk {
         self.apps.values().filter(|a| !a.gone).map(|a| self.app_info(a.pid)).collect()
     }
 
+    /// The desk starts on Desktop `desktop` of the main screen (a setup's word, before the
+    /// app looks).
+    pub fn starts_on(&mut self, desktop: u64) {
+        self.screens[0].shown = desktop;
+        self.screens[0].current = desktop;
+    }
+
+    /// Window `id` is on every Desktop of its screen ("Assign To: All Desktops").
+    pub fn on_every_desktop(&mut self, id: u32) {
+        let Some(w) = self.windows.get(&id) else { return };
+        let Some(all) = self.screens.iter().find(|s| w.spaces.iter().any(|x| s.desktops.contains(x))).map(|s| s.desktops.clone()) else { return };
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.spaces = all;
+        }
+    }
+
     /// A second screen comes, to the right of the main one, with one Desktop of its own;
     /// the app is told the screens ([`delays::ACTIVATION`] later).
     pub fn screen_comes(&mut self) {
+        self.screen_comes_with(vec![50]);
+    }
+
+    /// [`Self::screen_comes`] with `desktops` as the second screen's Desktops, the first shown.
+    pub fn screen_comes_with(&mut self, desktops: Vec<u64>) {
         let main = self.screens[0].display;
         let frame = Rect::new(main.frame.max_x(), 0.0, 1920.0, 1080.0);
         let display = Display { id: DisplayId(2), key: ScreenKey::new(0x1e6d, 0x5b11, 0x77), frame, visible: Rect::new(frame.x, 25.0, frame.w, frame.h - 25.0), corner: Default::default() };
-        self.screens.push(Screen { display, uuid: "External".into(), desktops: vec![50], shown: 50, sliding_in: None, sliding_to: None });
+        self.screens.push(Screen { display, uuid: "External".into(), shown: desktops[0], current: desktops[0], fullscreen: Vec::new(), desktops, sliding_in: None, sliding_to: None });
         let displays = self.displays();
         self.post(delays::ACTIVATION, Notice::Displays(displays));
     }
@@ -1161,12 +1231,70 @@ impl Desk {
         self.post(own, Notice::Step(Step::Activation { pid, raise_all }));
     }
 
-    /// The Desktop of `screen` slides to `to`, as measured ([`delays`]).
+    /// The Desktop of `screen` slides to `to`, as measured ([`delays`]): the arriving
+    /// Desktop's windows listed, the leaving one's gone ([`Self::leaving_lingers_ms`]), the
+    /// Space change's notice and the listing's flip ([`Self::space_changes`]).
     pub fn slide(&mut self, screen: usize, to: u64) {
         self.screens[screen].sliding_to = Some(to);
         self.post_after(delays::SLIDE_SHOWS, 0.0, Notice::Step(Step::SlideShows { screen, to }));
-        self.post_after(delays::SLIDE_LEAVES, 0.0, Notice::Step(Step::SlideLeaves { screen, to }));
-        self.post_after(delays::SLIDE_LEAVES, delays::SPACE_NOTICE, Notice::SpaceChanged);
+        let flip = self.space_changes(screen, to, delays::SLIDE_LEAVES);
+        let leaves = if self.leaving_lingers_ms > 0.0 { flip + self.leaving_lingers_ms } else { delays::SLIDE_LEAVES };
+        self.post_after(leaves, 0.0, Notice::Step(Step::SlideLeaves { screen, to }));
+    }
+
+    /// A Space change of `screen` to `to` whose animation ends `ends_ms` from now: its
+    /// notice is sent [`delays::SPACE_NOTICE`] after that (told as late as the load makes
+    /// it), the listing's "Current Space" flips [`delays::FLIP_AFTER_NOTICE`] after the
+    /// notice is sent (or at the animation's end, [`Self::flip_leads_notice`]), and the
+    /// window server's own notice of the change's end comes with the flip. When the flip
+    /// comes, in ms from now.
+    fn space_changes(&mut self, screen: usize, to: u64, ends_ms: f64) -> f64 {
+        let flip = if self.flip_leads_notice { ends_ms } else { ends_ms + delays::SPACE_NOTICE + delays::FLIP_AFTER_NOTICE };
+        self.post_after(flip, 0.0, Notice::Step(Step::Flips { screen, to }));
+        self.post_after(ends_ms, delays::SPACE_NOTICE, Notice::SpaceChanged);
+        self.server_notice(flip + 1.0, Kind::DesktopChanged, Vec::new());
+        flip
+    }
+
+    /// Window `id` goes into full screen (its green button): macOS's stand-in covers the
+    /// display, the window gets a Space of its own (a new id each time, type 4) which the
+    /// screen shows from [`delays::FULLSCREEN_SPACE`] on, and it says `AXFullScreen` at the
+    /// animation's end ([`delays::FULLSCREEN_ENDS`]).
+    pub fn enters_fullscreen(&mut self, id: u32) {
+        let Some(w) = self.windows.get(&id) else { return };
+        let Some(home) = self.desktop_of(id) else { return };
+        let Some(screen) = self.screens.iter().position(|s| s.desktops.contains(&home)) else { return };
+        let space = self.next_fullscreen;
+        self.next_fullscreen += 1;
+        self.before_fullscreen.insert(id, (w.frame, home));
+        let (pid, frame) = (w.pid, self.screens[screen].display.frame);
+        self.stand_in(pid, screen, true);
+        self.post_after(delays::FULLSCREEN_SPACE, 0.0, Notice::Step(Step::FullScreenSpace { screen, id, to: space, frame, ended: None }));
+        self.space_changes(screen, space, delays::FULLSCREEN_SPACE);
+        self.post_after(delays::FULLSCREEN_ENDS, 0.0, Notice::Step(Step::FullScreenEnds { id, full: true }));
+    }
+
+    /// Window `id` leaves full screen: the stand-in, the screen back on the window's Desktop
+    /// with the window at its old frame, its full-screen Space ended.
+    pub fn leaves_fullscreen(&mut self, id: u32) {
+        let Some((frame, home)) = self.before_fullscreen.remove(&id) else { return };
+        let Some(w) = self.windows.get(&id) else { return };
+        let Some(screen) = self.screens.iter().position(|s| s.desktops.contains(&home)) else { return };
+        let (pid, ended) = (w.pid, w.spaces.first().copied());
+        self.stand_in(pid, screen, true);
+        self.post_after(delays::FULLSCREEN_SPACE, 0.0, Notice::Step(Step::FullScreenSpace { screen, id, to: home, frame, ended }));
+        self.space_changes(screen, home, delays::FULLSCREEN_SPACE);
+        self.post_after(delays::FULLSCREEN_ENDS, 0.0, Notice::Step(Step::FullScreenEnds { id, full: false }));
+    }
+
+    /// macOS's stand-in through a full-screen animation (a window of the app covering the
+    /// whole display that Accessibility does not list) listed (`on`) or gone.
+    fn stand_in(&mut self, pid: i32, screen: usize, on: bool) {
+        self.overlays.retain(|w| w.id != STAND_IN);
+        if on {
+            let owner = self.apps.get(&pid).map(|a| a.name.clone()).unwrap_or_default();
+            self.overlays.push(CgWindow { id: STAND_IN, pid, owner, name: None, layer: 0, bounds: self.screens[screen].display.frame, onscreen: true, alpha: 1.0 });
+        }
     }
 
     /// The user goes to Desktop `to` of the main screen (⌃→, a swipe): the slide, and near
@@ -1236,6 +1364,30 @@ impl Desk {
                 self.screens[screen].shown = to;
                 self.screens[screen].sliding_in = None;
                 self.screens[screen].sliding_to = None;
+            }
+            Step::Flips { screen, to } => self.screens[screen].current = to,
+            Step::FullScreenSpace { screen, id, to, frame, ended } => {
+                if let Some(w) = self.windows.get_mut(&id) {
+                    w.spaces = vec![to];
+                    w.frame = frame;
+                    if ended.is_some() {
+                        w.fullscreen = false;
+                    }
+                }
+                let s = &mut self.screens[screen];
+                match ended {
+                    Some(gone) => s.fullscreen.retain(|f| *f != gone),
+                    None => s.fullscreen.push(to),
+                }
+                s.shown = to;
+                s.sliding_in = None;
+                s.sliding_to = None;
+            }
+            Step::FullScreenEnds { id, full } => {
+                self.overlays.retain(|w| w.id != STAND_IN);
+                if let Some(w) = self.windows.get_mut(&id) {
+                    w.fullscreen = full;
+                }
             }
             Step::WindowShows(id) => {
                 if let Some(w) = self.windows.get_mut(&id) {
@@ -1534,10 +1686,10 @@ impl Desk {
             .iter()
             .map(|s| super::spaces::ffi::ScreenDesks {
                 screen: s.uuid.clone(),
-                current: s.shown,
-                current_kind: if s.desktops.contains(&s.shown) { 0 } else { 4 },
+                current: if self.listing_unreadable { 0 } else { s.current },
+                current_kind: if s.desktops.contains(&s.current) { 0 } else { 4 },
                 desks: s.desktops.iter().map(|d| crate::engine::model::desks::Desk { id: *d, uuid: format!("DESK-{d}") }).collect(),
-                others: Vec::new(),
+                others: s.fullscreen.iter().map(|f| (*f, 4)).collect(),
             })
             .collect()
     }

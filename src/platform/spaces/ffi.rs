@@ -247,7 +247,7 @@ impl Sky {
     /// The Space of the screen with the keyboard (`SLSGetActiveSpace`), when exported.
     pub(crate) fn active_space(&self) -> Option<u64> {
         #[cfg(test)]
-        if let Some(out) = crate::platform::fake::with(|d| d.screens[0].shown) {
+        if let Some(out) = crate::platform::fake::with(|d| d.screens[0].current) {
             return Some(out);
         }
         // SAFETY: plain query on this process's connection.

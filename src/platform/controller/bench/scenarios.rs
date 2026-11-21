@@ -37,10 +37,10 @@ pub(super) type Scenario = (&'static str, &'static str, fn(f64) -> Run);
 
 /// Asserts a scenario's outcome at load 1, 3 and 10, printing the story of the first that
 /// differs.
-pub(super) fn expect(script: fn(f64) -> Run, want: [&str; 3]) {
+pub(super) fn expect<S: AsRef<str>>(script: fn(f64) -> Run, want: [S; 3]) {
     for (load, want) in LOADS.iter().zip(want) {
         let run = script(*load);
-        assert_eq!(run.outcome, want, "at load {load}:\n{}", run.story);
+        assert_eq!(run.outcome, want.as_ref(), "at load {load}:\n{}", run.story);
     }
 }
 
@@ -61,7 +61,7 @@ pub(super) fn two_apps(d: &mut Desk) {
 
 /// Alpha with a window on each of two Desktops and Bravo with one on the first, Bravo in
 /// front there: on Desktop 1 Alpha's window waits in a hidden stage.
-fn alpha_on_two_desktops(d: &mut Desk) {
+pub(super) fn alpha_on_two_desktops(d: &mut Desk) {
     d.add_app(A, "com.example.alpha", "Alpha");
     d.add_app(B, "com.example.bravo", "Bravo");
     d.add_window(13, A, frame(3), D2);
@@ -145,7 +145,7 @@ fn taken_back(b: &mut Bench, id: u32, max_ms: u64) -> &'static str {
 }
 
 /// How many Space change notices the story holds.
-fn slides(b: &Bench) -> usize {
+pub(super) fn slides(b: &Bench) -> usize {
     b.log.iter().filter(|l| l.contains("space change notice")).count()
 }
 
@@ -680,7 +680,7 @@ fn dock_click_after_a_screen_came_and_went(load: f64) -> Run {
         d.add_window(13, A, frame(3), D2);
         d.add_window(15, B, frame(5), D2);
         d.front = Some(B);
-        d.screens[0].shown = D2;
+        d.starts_on(D2);
     });
     b.go_to_desktop(D1, true);
     b.advance(5000);
@@ -834,7 +834,7 @@ fn load_table() {
 fn bench_one() {
     let Ok(want) = std::env::var("BENCH_ONE") else { return };
     let load: f64 = std::env::var("BENCH_LOAD").ok().and_then(|l| l.parse().ok()).unwrap_or(1.0);
-    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).filter(|(name, _, _)| name.contains(&want)) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).filter(|(name, _, _)| name.contains(&want)) {
         let run = script(load);
         println!("== {name} ({told}) at load {load}\n{}\n=> {}", run.story, run.outcome);
         for m in &run.margins {
@@ -863,7 +863,7 @@ fn verdicts(run: &Run) -> std::collections::BTreeMap<&'static str, (usize, usize
 /// The load table as Markdown.
 pub(super) fn table() -> String {
     let mut out = String::from("| Scenario | Told by | Load 1 | Load 3 | Load 10 | Limits crossed only under load |\n|---|---|---|---|---|---|\n");
-    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL) {
         let runs = LOADS.map(script);
         let base = verdicts(&runs[0]);
         let mut changed: Vec<String> = Vec::new();

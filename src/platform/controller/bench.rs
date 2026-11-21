@@ -50,6 +50,7 @@ use crate::platform::{safety, windows};
 use crate::ui::strip_model::StripEvent;
 
 mod causes;
+mod desktops;
 mod scenarios;
 mod switch;
 
@@ -644,6 +645,11 @@ impl Bench {
         panic!("window {window} never showed:\n{}", self.story());
     }
 
+    /// Window `id` goes into full screen (`on`) or leaves it: its green button.
+    pub(super) fn fullscreen(&mut self, id: u32, on: bool) {
+        self.desk(|d| if on { d.enters_fullscreen(id) } else { d.leaves_fullscreen(id) });
+    }
+
     /// The person goes to Desktop `to` (⌃→ or a swipe; `heard`: the input monitor hears the
     /// key, which macOS may keep to itself).
     pub(super) fn go_to_desktop(&mut self, to: u64, heard: bool) {
@@ -682,6 +688,47 @@ impl Bench {
     pub(super) fn space_shown(&self) -> Option<SpaceId> {
         let m = self.c.model.as_ref()?;
         Some(m.current_space(m.main_display().id))
+    }
+
+    /// Every stage's windows on the model's Space of window `of`, each sorted, the stages
+    /// sorted (empty: the model does not know the window).
+    pub(super) fn stages_with(&self, of: u32) -> Vec<Vec<u32>> {
+        let Some(m) = self.c.model.as_ref() else { return Vec::new() };
+        let Some(space) = m.space_of(WindowId(of)) else { return Vec::new() };
+        let mut out: Vec<Vec<u32>> = m
+            .stages_in(space)
+            .map(|s| {
+                let mut ids: Vec<u32> = s.windows.iter().map(|w| w.0).collect();
+                ids.sort_unstable();
+                ids
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// True when the model counts window `id` on every Desktop.
+    pub(super) fn sticky(&self, id: u32) -> bool {
+        self.c.model.as_ref().is_some_and(|m| m.is_sticky(WindowId(id)))
+    }
+
+    /// True while the controller counts a full-screen app's Space shown on the main screen.
+    pub(super) fn in_fullscreen(&self) -> bool {
+        self.c.phase.fullscreen()
+    }
+
+    /// True while a Space change waits to be recognized.
+    pub(super) fn changing(&self) -> bool {
+        self.c.phase.changing()
+    }
+
+    /// The shadow's counts since the launch (`ctl state`'s `desks.disagree`): the
+    /// disagreements begun on the Desktop shown and on a hidden window's Desktop, and those
+    /// on the Desktop shown still open.
+    pub(super) fn disagreed(&self) -> (u64, u64, u64) {
+        let g = &self.c.desks_json()["disagree"];
+        (g["shown_begun"].as_u64().unwrap_or(0), g["homes_begun"].as_u64().unwrap_or(0), g["shown"].as_u64().unwrap_or(0))
     }
 
     /// The windows the model counts hidden.
