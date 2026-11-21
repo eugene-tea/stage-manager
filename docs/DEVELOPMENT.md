@@ -386,6 +386,31 @@ polled, and the Corner engine writes nothing. Read a day with
   fed the switcher; `ctl state` `mission_control.tap` has `switcher_armed`,
   `switcher_escapes_heard` and `command_ups_heard`.
 
+### The Desktops' shadow
+
+Under the Spaces engine the window server's Desktops are read beside the model's guess and
+the two compared (`src/engine/desk_shadow.rs`, `src/platform/controller/desktops.rs`; design
+r3, slice 1). Nothing in behaviour changes; the Corner engine reads nothing.
+
+- `Space changed` (and `Space changed on another display`) gain `desk` (the window server's
+  Desktop on that screen, read at the arrival) and `agree`: `new` (bound now), `yes` (the
+  model chose the Space bound to it), `no` (bound otherwise; the bindings stay).
+- `desktops: the model and the window server disagree` once when a disagreement begins and
+  `... agree again` once when it ends (with `lasted_ms`): `what=shown` (a screen, `id` its
+  display) or `what=home` (a hidden window, `id` the window), `space` (the model's),
+  `model_desk` (bound to it), `server_desk` (the listing's current one, or the engine's home),
+  `why=arrival|check`. Ids only.
+- At a load, `desktops: Desktops saved in state.json by uuid that the window server lists
+  now`: `saved`, `named` (with a uuid), `listed_now`, `empty_saved`, `empty_listed`.
+- `ctl state`'s `desks`: `listing` (per managed screen: `display`, `current`,
+  `current_kind`, `desks` with `id` and `uuid`, `others` with their types; `null` when not
+  read), `bindings` (`desk`, `space`, `uuid`), and `disagree`: `shown` and `homes` (open
+  now), `shown_begun` and `homes_begun` (since the launch), `longest_ms` (an open one
+  counted to now), `open` (each with `what`, `id`, `space`, `model`, `server`, `since_ms`).
+- `scripts/test-stages.sh spaces --auto` prints them before the first run's quit and at the
+  end, and fails when a disagreement on the Desktop shown is still open 5 s on;
+  `display-gone` prints them and the log's disagreement lines at each round's end.
+
 ## Configuration keys
 
 Every key is defined once, in `src/config/schema.rs`, with its type, range, default and a

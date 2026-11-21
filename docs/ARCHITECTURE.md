@@ -317,6 +317,24 @@ windows stay on screen meanwhile and hide behind their pictures in one step each
 in a stage Space still draws and is captured with its current content, so an incoming
 window's picture taken while it is hidden (the pointer on its card) is current too.
 
+The window server's Desktops (design r3, slice 1: read and shadow). The model names its
+Spaces by ids of its own, guessed at each arrival from the windows on screen; the Spaces
+engine also reads the window server's listing (`SLSCopyManagedDisplaySpaces`, through
+`WindowEngine::desktops`: each screen's Space shown and its kind, its Desktops with their ids
+and uuids; `spaces_of` for a window's Spaces; the Corner engine answers `None` to both). The
+controller's one read is `Controller::listing()` (`platform/controller/desktops.rs`): `None`
+when the engine reads none, a managed screen has no entry, or one names no Space shown. Each
+arrival is given its screen's Desktop, read again at the arrival, and binds it to the Space
+the model chose (`engine/model/desks.rs`, `Model::arrive_on`; one id, one Space; an empty
+Space taken for a new Desktop takes it), or checks it (`agree=` on the "Space changed" line).
+The bindings follow a relabel, go with a pruned or merged Space and at a fallback, and are
+saved with their uuids (`state.json`'s `desks`; a load logs how many the listing still has).
+They decide nothing yet: at each arrival and each look for missed changes the shadow
+(`engine/desk_shadow.rs`) compares the Desktop the model says each screen shows with the
+listing's, and each held window's home with the model's Desktop for it, and logs each
+disagreement once when it begins and once when it ends (`ctl state`'s `desks`). The arrival
+still decides by the windows on screen.
+
 Window pictures (`platform/capture.rs`, `platform/capture_fast.rs`, 1.9): every capture asks
 the window server first, one call a window and no listing (`SLSHWCaptureWindowList` for a
 window within the displays, on screen or in a stage Space; `CGWindowListCreateImage` for one
