@@ -79,8 +79,10 @@ use crate::ui::strip_model::{StripDrop, StripEvent};
 pub const AX_TIMEOUT_SECONDS: f32 = 0.25;
 
 /// Housekeeping period of the WM run loop (saves, config polling, strip refresh) while
-/// something happens; at rest it is longer ([`tick_pace`]).
-const TICK_SECONDS: f64 = 0.25;
+/// something happens ([`tick_pace::BRISK`]); at rest it is longer ([`tick_pace`]).
+fn tick_seconds() -> f64 {
+    tick_pace::BRISK.as_secs_f64()
+}
 
 /// The fast tick: work that must land within a Desktop slide (~0.25–0.45 s), such as
 /// checking an arrangement made ahead against the window server
@@ -1448,9 +1450,9 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
     // The timer keeps the run loop alive (CFRunLoopRun returns at once with no sources)
     // and drives housekeeping.
     let tick_block = RcBlock::new(|_timer: *mut CFRunLoopTimer| tick());
-    let first_fire = CFAbsoluteTimeGetCurrent() + TICK_SECONDS;
+    let first_fire = CFAbsoluteTimeGetCurrent() + tick_seconds();
     // SAFETY: valid arguments; the block is copied by CoreFoundation.
-    let timer = unsafe { CFRunLoopTimer::with_handler(None, first_fire, TICK_SECONDS, 0, 0, Some(&tick_block)) };
+    let timer = unsafe { CFRunLoopTimer::with_handler(None, first_fire, tick_seconds(), 0, 0, Some(&tick_block)) };
     match &timer {
         Some(t) => {
             // SAFETY: the default-mode constant is a valid static.

@@ -23,7 +23,7 @@
 //! Quit counts as clean only when, after unparking, the window server lists no window of an
 //! allowed app in the park zone on any Space ([`stranded_allowed`]). Every unpark path at
 //! quit (the WM thread's, the registry's fallback, the signal watcher's) and a stand-down
-//! ends with [`leftovers_back`]: each window still listed there is brought back, known to
+//! ends with the leftovers check ([`leftovers_retry`]): each window still listed there is brought back, known to
 //! this run or not (its registry frame, its `state.json` frame, else centered); one that
 //! cannot be reached leaves the exit unclean, so the guardian waits for it (6X). The unpark
 //! saves the stages and hands the check the frames it restored, so a window its app moved
@@ -1382,26 +1382,15 @@ pub fn set_frame_retrying(element: &AxElement, id: u32, frame: Rect, left: Durat
     r.result
 }
 
-/// Every unpark path's last look (6X): reads the window server's list until no window of an
-/// allowed app is left in the park zone, or [`UNPARK_SETTLE`] has passed; brings back each
-/// one still there ([`bring_back_leftovers`]) and reads again. True when none is left; else
-/// each one is logged and the exit must not count as clean (the guardian waits for them).
-/// `managed`: the model's windows, when the caller has them ([`Ours`]). Never takes more
-/// than [`leftovers::LEFTOVERS_MAX`]: the second read gets what is left.
-pub fn leftovers_back(reason: &str, managed: BTreeSet<u32>) -> bool {
-    leftovers_back_knowing(reason, Ours::now(managed)).is_none()
-}
-
-/// [`leftovers_back`] with what is known of the windows given (`ours`: an earlier check's,
-/// [`Ours::merged`] with now). `None` when no window is left in the park zone; else what this
-/// check knew, the windows left judged ours ([`Ours::kept_for_retry`]), for the next try:
-/// a stand-down's retries pass it until each window is back (the review of 6X2, 2).
-pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
-    leftovers_check(reason, ours, true)
-}
-
-/// A later look for the windows an earlier check left ([`leftovers_back_knowing`]'s answer,
-/// merged with what is known now), with no unpark before it (a Desktop showed while a
+/// Every unpark path's last look (6X), and a later look for the windows an earlier one left
+/// (its answer, merged with what is known now): reads the window server's list until no
+/// window of an allowed app is left in the park zone, or [`UNPARK_SETTLE`] has passed;
+/// brings back each one still there ([`bring_back`]) and reads again. `None` when none is
+/// left; else each one is logged and the exit must not count as clean (the guardian waits
+/// for them), and what this check knew, the windows left judged ours
+/// ([`Ours::kept_for_retry`]), is given back for the next try: a stand-down's retries pass it
+/// until each window is back (the review of 6X2, 2). Never takes more than
+/// [`leftovers::LEFTOVERS_MAX`]: the second read gets what is left. With no unpark before it (a Desktop showed while a
 /// stand-down's window is still away). `moved`: the list may still be changing (windows
 /// moved a moment ago), and gets its settle as after an unpark. Else the caller has let it
 /// settle already: it is read as it stands, and read again without a wait when no window
@@ -1412,7 +1401,7 @@ pub fn leftovers_retry(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     leftovers_check(reason, ours, moved)
 }
 
-/// The leftovers check ([`leftovers_back_knowing`], [`leftovers_retry`]); `moved`: windows
+/// The leftovers check ([`leftovers_retry`]); `moved`: windows
 /// were moved a moment before it (the list needs its settle).
 fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     let start = Instant::now();
@@ -1470,13 +1459,8 @@ fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
 /// registry's element or the app's own list.
 /// A window is tried only when its try fits in the time left ([`leftovers::leftover_fits`]),
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
-/// Desktop's, an app that does not answer, no time left).
-pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> Vec<u32> {
-    bring_back(reason, left, deadline, ours).0
-}
-
-/// [`bring_back_leftovers`], with how many windows it asked to move (reached, whether the
-/// move went through or not).
+/// Desktop's, an app that does not answer, no time left), with how many windows it asked
+/// to move (reached, whether the move went through or not).
 fn bring_back(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> (Vec<u32>, usize) {
     // Each app's enhanced UI off once for all its windows here, not once per window.
     let _quiet = enhanced_ui::Batch::open();

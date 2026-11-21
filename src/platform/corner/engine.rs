@@ -86,7 +86,7 @@ impl WindowEngine for CornerEngine {
     }
 
     /// The leftovers check: the windows the window server still lists in a park zone
-    /// ([`safety::leftovers_back_knowing`], [`safety::leftovers_retry`]).
+    /// ([`safety::leftovers_retry`]).
     fn bring_back_rest(&self, why: &str, ours: Ours, moved: bool) -> Option<Ours> {
         safety::leftovers_retry(why, ours, moved)
     }

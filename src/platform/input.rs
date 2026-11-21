@@ -278,11 +278,6 @@ pub fn left_button_down() -> bool {
     CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)
 }
 
-/// How long after a Shift-held trigger a newly opened app's first window still counts.
-pub const LAUNCH_WINDOW: Duration = Duration::from_secs(10);
-/// How long after a Shift-held trigger an activation or another app's new window counts.
-pub const ACTIVATION_WINDOW: Duration = Duration::from_millis(2000);
-
 /// The latest user action, for the Shift sugar.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Triggers {
@@ -883,34 +878,44 @@ mod tests {
         assert!(!monitor_again(false, false));
     }
 
+    /// `[sugar] launch_window_ms` as the config has it by default.
+    fn launch_window() -> Duration {
+        Duration::from_millis(crate::config::Config::default().sugar.launch_window_ms)
+    }
+
+    /// `[sugar] activation_window_ms` as the config has it by default.
+    fn activation_window() -> Duration {
+        Duration::from_millis(crate::config::Config::default().sugar.activation_window_ms)
+    }
+
     #[test]
     fn the_release_of_a_used_shift_click_does_not_re_arm_it() {
         let t0 = Instant::now();
         let mut t = Triggers::default();
         t.record(t0, SHIFT); // Shift-click in the Dock: down
-        assert!(t.shift_here(t0 + Duration::from_millis(50), ACTIVATION_WINDOW, NONE));
+        assert!(t.shift_here(t0 + Duration::from_millis(50), activation_window(), NONE));
         t.consume(); // the app's windows came here
         t.record_release(t0 + Duration::from_millis(100), SHIFT); // and up
         assert!(
-            !t.shift_here(t0 + Duration::from_millis(900), ACTIVATION_WINDOW, NONE),
+            !t.shift_here(t0 + Duration::from_millis(900), activation_window(), NONE),
             "another app activating on its own is not pulled here"
         );
         // A new press counts again.
         t.record(t0 + Duration::from_millis(1000), SHIFT);
-        assert!(t.shift_here(t0 + Duration::from_millis(1050), ACTIVATION_WINDOW, NONE));
+        assert!(t.shift_here(t0 + Duration::from_millis(1050), activation_window(), NONE));
     }
 
     #[test]
     fn a_recent_shift_trigger_counts_once() {
         let t0 = Instant::now();
         let mut t = Triggers::default();
-        assert!(!t.shift_here(t0, LAUNCH_WINDOW, NONE));
+        assert!(!t.shift_here(t0, launch_window(), NONE));
         t.record(t0, SHIFT);
-        assert!(t.shift_here(t0 + Duration::from_secs(3), LAUNCH_WINDOW, NONE));
-        assert!(!t.shift_here(t0 + Duration::from_secs(3), ACTIVATION_WINDOW, NONE), "too late for an activation");
-        assert!(!t.shift_here(t0 + Duration::from_secs(11), LAUNCH_WINDOW, NONE), "too late for a launch");
+        assert!(t.shift_here(t0 + Duration::from_secs(3), launch_window(), NONE));
+        assert!(!t.shift_here(t0 + Duration::from_secs(3), activation_window(), NONE), "too late for an activation");
+        assert!(!t.shift_here(t0 + Duration::from_secs(11), launch_window(), NONE), "too late for a launch");
         t.consume();
-        assert!(!t.shift_here(t0 + Duration::from_secs(1), LAUNCH_WINDOW, NONE), "used");
+        assert!(!t.shift_here(t0 + Duration::from_secs(1), launch_window(), NONE), "used");
     }
 
     #[test]
@@ -919,8 +924,8 @@ mod tests {
         let mut t = Triggers::default();
         t.record(t0, SHIFT);
         t.record(t0 + Duration::from_millis(500), NONE);
-        assert!(!t.shift_here(t0 + Duration::from_secs(1), LAUNCH_WINDOW, NONE));
-        assert!(t.shift_here(t0 + Duration::from_secs(1), LAUNCH_WINDOW, SHIFT), "held now");
+        assert!(!t.shift_here(t0 + Duration::from_secs(1), launch_window(), NONE));
+        assert!(t.shift_here(t0 + Duration::from_secs(1), launch_window(), SHIFT), "held now");
     }
 
     #[test]
@@ -929,13 +934,13 @@ mod tests {
         let mut t = Triggers::default();
         // ⌘⇧Tab: the Tab key-down carries Command and Shift.
         t.record(t0, CMD_SHIFT);
-        assert!(!t.shift_here(t0 + Duration::from_millis(300), ACTIVATION_WINDOW, SHIFT));
+        assert!(!t.shift_here(t0 + Duration::from_millis(300), activation_window(), SHIFT));
         // ⌘Tab released while Shift is still down.
         t.record(t0, CMD);
-        assert!(!t.shift_here(t0 + Duration::from_millis(300), ACTIVATION_WINDOW, SHIFT));
+        assert!(!t.shift_here(t0 + Duration::from_millis(300), activation_window(), SHIFT));
         // Long after, the live state decides alone.
-        assert!(t.shift_here(t0 + Duration::from_secs(30), ACTIVATION_WINDOW, SHIFT));
-        assert!(!t.shift_here(t0 + Duration::from_secs(30), ACTIVATION_WINDOW, CMD_SHIFT));
+        assert!(t.shift_here(t0 + Duration::from_secs(30), activation_window(), SHIFT));
+        assert!(!t.shift_here(t0 + Duration::from_secs(30), activation_window(), CMD_SHIFT));
     }
 
     fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {

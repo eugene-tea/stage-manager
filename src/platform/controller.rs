@@ -8,7 +8,7 @@
 //!   (the window engine's hide, [`WindowEngine::hide`]: the Corner engine's park frame);
 //!   `Raise` = `AXRaise`; `Focus` = raise, `AXMain`, then the app's `AXFrontmost`.
 //! - **Echoes**: focus and activation events for windows and apps we just touched are our
-//!   own actions coming back late; they are dropped for [`ECHO_WINDOW`] so a stale focus
+//!   own actions coming back late; they are dropped for `[windows] focus_echo_ms` so a stale focus
 //!   never bounces us back to the stage we left.
 //! - **Safety**: the parked-window registry is synced around every batch. Once Quit is
 //!   requested ([`safety::quit_requested`]) a batch skips its remaining parks, raises and
@@ -178,10 +178,6 @@ const USER_SWITCH: Duration = Duration::from_millis(1500);
 /// The windows read at a card's press serve its click this long (a press held longer reads
 /// them again at the release).
 const PRESSED_OBS_MAX: Duration = Duration::from_secs(1);
-
-/// How long focus and activation events for windows and apps we just touched are ignored
-/// by default (`[windows] focus_echo_ms`).
-pub const ECHO_WINDOW: Duration = Duration::from_millis(700);
 
 /// How long after our own batch showed a window an arrival of a Space change still counts it
 /// as carried by our switch, not moved by the user ([`Model::set_slide_carried`]): macOS's
@@ -403,7 +399,8 @@ pub(crate) fn notify_ui(update: UiUpdate) {
 
 /// How long an app we made frontmost may take to report its activation and still have it
 /// count as ours ([`Echoes::is_app_echo`]): a busy app (Electron under load, an app answering
-/// Accessibility at the 0.25 s timeout) can report it well after [`ECHO_WINDOW`].
+/// Accessibility at the 0.25 s timeout) can report it well after the echo window
+/// (`[windows] focus_echo_ms`).
 pub const LATE_ACTIVATION_MAX: Duration = Duration::from_secs(5);
 
 /// Recently touched windows and apps, whose focus and activation events are our echoes.
@@ -429,7 +426,11 @@ pub struct Echoes {
 
 impl Default for Echoes {
     fn default() -> Self {
-        Self { windows: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), front: None, window: ECHO_WINDOW }
+        // How long focus and activation events for windows and apps we just touched are
+        // ignored: `[windows] focus_echo_ms` as the config has it by default (set from the
+        // config in force at the controller's start, [`Self::set_window`]).
+        let window = Duration::from_millis(crate::config::Config::default().windows.focus_echo_ms);
+        Self { windows: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), front: None, window }
     }
 }
 
@@ -472,7 +473,7 @@ impl Echoes {
     /// landing: the fixture's activation never came, Alpha's switch 1.8 s later was reported,
     /// and the user's activation of the fixture 1.3 s after that was taken for the late
     /// echo). Quick switches keep theirs: within the echo window of each other the first
-    /// app may still be answering ([`ECHO_WINDOW`]), and one switch focuses one window.
+    /// app may still be answering, and one switch focuses one window.
     pub fn is_app_echo(&mut self, pid: i32, now: Instant) -> bool {
         self.front = Some(pid);
         let asked = self.awaiting.remove(&pid);
@@ -7922,8 +7923,9 @@ mod tests {
         assert!(e.is_window_echo(7, t0 + Duration::from_millis(100)));
         assert!(e.is_app_echo(42, t0 + Duration::from_millis(100)));
         assert!(!e.is_window_echo(8, t0));
-        assert!(!e.is_window_echo(7, t0 + ECHO_WINDOW));
-        e.prune(t0 + ECHO_WINDOW);
+        let echo = Duration::from_millis(crate::config::Config::default().windows.focus_echo_ms);
+        assert!(!e.is_window_echo(7, t0 + echo));
+        e.prune(t0 + echo);
         assert!(e.windows.is_empty() && e.apps.is_empty());
     }
 

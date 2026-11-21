@@ -232,16 +232,8 @@ impl FrameSource {
     }
 }
 
-/// For every stranded window in `windows`, its index and the frame to move it to.
-pub fn plan(
-    windows: &[LiveWindow],
-    state: Option<&StateFile>,
-    displays: &ScanDisplays,
-) -> Vec<(usize, Rect)> {
-    plan_sourced(windows, state, displays).into_iter().map(|(i, f, _)| (i, f)).collect()
-}
-
-/// [`plan_sourced`] with no registered frames.
+/// For every stranded window in `windows`, its index, the frame to move it to and where that
+/// frame comes from: [`plan_with`] with no registered frames.
 pub fn plan_sourced(
     windows: &[LiveWindow],
     state: Option<&StateFile>,
@@ -250,7 +242,7 @@ pub fn plan_sourced(
     plan_with(windows, &BTreeMap::new(), state, displays)
 }
 
-/// [`plan`], with where each frame comes from. `registered`: the frames a crashed copy
+/// [`plan_sourced`] with registered frames. `registered`: the frames a crashed copy
 /// registered (its parked file), by window id, for windows of the process that registered
 /// them (the caller checks): a stranded window named there goes back to that frame, a
 /// window we parked whatever its size or sliver (S4). Saved windows are matched by
@@ -505,6 +497,11 @@ pub fn safe_restore(frame: Rect, displays: &ScanDisplays) -> Rect {
 mod tests {
     use super::*;
     use crate::engine::geometry::Size;
+
+    /// For every stranded window in `windows`, its index and the frame to move it to.
+    fn plan(windows: &[LiveWindow], state: Option<&StateFile>, displays: &ScanDisplays) -> Vec<(usize, Rect)> {
+        plan_sourced(windows, state, displays).into_iter().map(|(i, f, _)| (i, f)).collect()
+    }
     use crate::engine::corner::park::{MACOS_KEEPS_TITLE, is_parked, park_frame, park_frame_at};
     use crate::engine::persist::{SavedSpace, SavedStage, SavedWindow};
 

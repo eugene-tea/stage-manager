@@ -81,7 +81,7 @@ fn drive_every(f: &mut FakeWindowManager, a: &mut Arrangement, job: &mut Job, ma
                     Step::Focus(w) => f.focus(*w).is_ok(),
                     Step::Post(p) => f.post(p).is_ok(),
                     Step::Unhide(pid) => f.unhide(*pid).is_ok(),
-                    Step::AwaitSettle | Step::AwaitStrip(_) => true,
+                    Step::AwaitSettle => true,
                 };
                 job.ran(&step, ok);
                 if let Some(l) = f.landed() {
@@ -398,7 +398,7 @@ fn a_drag_its_guard_refuses_is_given_up_with_the_guards_words() {
                     Step::Focus(w) => f.focus(*w).is_ok(),
                     Step::Post(p) => f.post(p).is_ok(),
                     Step::Unhide(pid) => f.unhide(*pid).is_ok(),
-                    Step::AwaitSettle | Step::AwaitStrip(_) => true,
+                    Step::AwaitSettle => true,
                 };
                 job.ran(&step, ok);
                 if let Some(l) = f.landed() {

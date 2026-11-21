@@ -62,8 +62,6 @@ pub enum Step {
     Focus(u32),
     /// A gesture posted (the Shift-click and drag routes).
     Post(Posted),
-    /// Wait until the strip shows item `slot`.
-    AwaitStrip(usize),
     /// Wait until the arrangement is settled.
     AwaitSettle,
     /// App `0`, hidden by us at its activation, shown again without activating it once its

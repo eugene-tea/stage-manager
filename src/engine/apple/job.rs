@@ -510,7 +510,7 @@ impl Job {
             }
             Step::Post(Posted::Drag { .. }) => self.report.drags += 1,
             Step::Unhide(_) => self.unhidden = true,
-            Step::AwaitSettle | Step::AwaitStrip(_) => {}
+            Step::AwaitSettle => {}
         }
     }
 
@@ -1014,7 +1014,7 @@ impl Job {
                 }
             }),
             // Nothing posted, no pointer: the app shown again at once.
-            Step::Unhide(_) | Step::AwaitSettle | Step::AwaitStrip(_) => Ok(()),
+            Step::Unhide(_) | Step::AwaitSettle => Ok(()),
         };
         if let Err(hold) = gated {
             if self.waiting.hold(hold, now) {
@@ -1063,7 +1063,7 @@ impl Job {
                     *own_shift = go.own_shift;
                 }
             }),
-            Step::Unhide(_) | Step::AwaitSettle | Step::AwaitStrip(_) => Ok(()),
+            Step::Unhide(_) | Step::AwaitSettle => Ok(()),
         };
         if let Err(hold) = gated {
             if self.waiting.hold(hold, now) {
@@ -1113,7 +1113,6 @@ fn step_key(step: &Step) -> (u8, u32) {
         Step::Post(p @ Posted::Clicks { .. }) => (1, p.window()),
         Step::Post(p @ Posted::Drag { .. }) => (2, p.window()),
         Step::AwaitSettle => (3, 0),
-        Step::AwaitStrip(slot) => (4, *slot as u32),
         Step::Unhide(pid) => (5, *pid as u32),
     }
 }
@@ -1125,7 +1124,7 @@ pub fn step_name(step: &Step) -> &'static str {
         Step::Post(Posted::Clicks { .. }) => "shift_click",
         Step::Post(Posted::Drag { .. }) => "drag",
         Step::Unhide(_) => "unhide",
-        Step::AwaitSettle | Step::AwaitStrip(_) => "wait",
+        Step::AwaitSettle => "wait",
     }
 }
 

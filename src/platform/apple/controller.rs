@@ -1025,7 +1025,7 @@ impl AppleController {
                 self.read_due = Some(now + mirror::MOTION_READ);
                 return ran;
             }
-            Step::AwaitSettle | Step::AwaitStrip(_) => return Ok(()),
+            Step::AwaitSettle => return Ok(()),
         };
         let t0 = Instant::now();
         let ran = route.run(step, &mut desk);
