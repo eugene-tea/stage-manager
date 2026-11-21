@@ -123,8 +123,7 @@ pub fn take_watch(windows: &[Registered], corners: &[Corner]) -> (Vec<u32>, usiz
     if let Ok(mut c) = CORNERS.lock() {
         c.extend(corners.iter().copied());
     }
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
+    write_parked_file();
     taken
 }
 
@@ -192,8 +191,7 @@ fn set_ordered_out(ids: BTreeSet<u32>) {
         }
         *now = ids;
     }
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
+    write_parked_file();
 }
 
 /// Set by a quit whose only windows not back are children their apps ordered out while
@@ -249,8 +247,7 @@ pub fn taken_forget(ids: &[u32]) {
         taken.len() != before
     };
     if changed {
-        let listed = registered(&lock_registry());
-        write_parked_file(&listed);
+        write_parked_file();
     }
 }
 
@@ -330,18 +327,14 @@ fn lock_registry() -> MutexGuard<'static, BTreeMap<u32, ParkedEntry>> {
 
 /// Adds entries (before a batch: windows about to be parked are covered at once).
 pub fn registry_add(entries: impl IntoIterator<Item = (u32, ParkedEntry)>) {
-    let listed = {
-        let mut guard = lock_registry();
-        guard.extend(entries);
-        registered(&guard)
-    };
-    write_parked_file(&listed);
+    lock_registry().extend(entries);
+    write_parked_file();
 }
 
 /// Replaces the registry with `entries` (after a batch), plus the held windows (a
 /// stand-down's) that `entries` does not take over.
 pub fn registry_replace(entries: BTreeMap<u32, ParkedEntry>) {
-    let listed = {
+    {
         let mut held = lock_held();
         // A held window the controller parks itself is its own again.
         held.retain(|id, _| !entries.contains_key(id));
@@ -349,9 +342,8 @@ pub fn registry_replace(entries: BTreeMap<u32, ParkedEntry>) {
         drop(held);
         let mut guard = lock_registry();
         *guard = merged;
-        registered(&guard)
-    };
-    write_parked_file(&listed);
+    }
+    write_parked_file();
 }
 
 /// A stand-down's leftovers: every window still in the registry is held until it is back.
@@ -397,12 +389,8 @@ pub fn retry_held() -> bool {
         counters::bump(Count::Recovery);
         tracing::info!(back = back.len(), left = held.len() - back.len(), "safety: held windows brought back");
         lock_held().retain(|id, _| !back.contains(id));
-        let listed = {
-            let mut guard = lock_registry();
-            guard.retain(|id, _| !back.contains(id));
-            registered(&guard)
-        };
-        write_parked_file(&listed);
+        lock_registry().retain(|id, _| !back.contains(id));
+        write_parked_file();
     }
     lock_held().is_empty()
 }
@@ -446,15 +434,19 @@ static LOGOUT_QUIT: AtomicBool = AtomicBool::new(false);
 /// logout's cancel through its recovery watch and opens the app again at one.
 pub fn mark_logout_quit() {
     LOGOUT_QUIT.store(true, Ordering::SeqCst);
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
+    write_parked_file();
 }
 
 /// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, with the
 /// main display's visible frame, written atomically and flushed to disk before the rename
 /// ([`super::durable`]); removed when the registry is empty (unless it marks a logout's quit,
-/// [`mark_logout_quit`]).
-fn write_parked_file(listed: &[Registered]) {
+/// [`mark_logout_quit`]). The registry is read under the lock that orders the writes: each
+/// write takes the list as it is then, so of two threads changing the registry the last
+/// write on disk is never the older list (before, each took its list before that lock and
+/// could write it after the other's newer one).
+fn write_parked_file() {
+    let mut written = lock_written();
+    let listed = registered(&lock_registry());
     let logout = LOGOUT_QUIT.load(Ordering::SeqCst);
     let empty = listed.is_empty() && !logout;
     let file =
@@ -463,7 +455,7 @@ fn write_parked_file(listed: &[Registered]) {
             ParkedFile {
                 engine: engine.kind(),
                 visible: visible_frame(),
-                windows: listed.to_vec(),
+                windows: listed,
                 corners: corners_used(),
                 zones: zones_used(),
                 logout,
@@ -471,7 +463,6 @@ fn write_parked_file(listed: &[Registered]) {
                 lends: lends_used(),
             }
         };
-    let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
     }
@@ -495,8 +486,7 @@ fn write_parked_file(listed: &[Registered]) {
 /// Writes the parked file again from the registry as it is: the engine that runs changed
 /// (a fallback mid-run), so the guardian brings the windows back that engine's way.
 pub fn rewrite_parked_file() {
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
+    write_parked_file();
 }
 
 /// What the app process `pid` left in its parked file: its registered windows and the main
@@ -539,12 +529,8 @@ fn registry_forget(ids: &[u32]) {
     }
     lock_held().retain(|id, _| !ids.contains(id));
     lock_taken().retain(|id, _| !ids.contains(id));
-    let listed = {
-        let mut guard = lock_registry();
-        guard.retain(|id, _| !ids.contains(id));
-        registered(&guard)
-    };
-    write_parked_file(&listed);
+    lock_registry().retain(|id, _| !ids.contains(id));
+    write_parked_file();
 }
 
 /// Remembers every managed display's park zone (the main one first: its visible frame and
@@ -561,8 +547,7 @@ pub fn set_displays(displays: &[Display]) {
     });
     set_main_display(main.visible, main.corner);
     if changed {
-        let listed = registered(&lock_registry());
-        write_parked_file(&listed);
+        write_parked_file();
     }
 }
 
@@ -608,8 +593,7 @@ pub fn set_main_display(visible: Rect, corner: Corner) {
     };
     let new_corner = CORNERS.lock().is_ok_and(|mut c| c.insert(corner));
     if changed || new_corner {
-        let listed = registered(&lock_registry());
-        write_parked_file(&listed);
+        write_parked_file();
     }
 }
 
