@@ -154,7 +154,7 @@ impl Controller {
                 focused: user_focused,
                 user_moved: false,
                 busy: self.busy_apps.borrow().busy(pid, now),
-                echo: self.echoes.is_window_echo(id, now),
+                echo: self.causes.wrote_recently(id, now),
             };
             let s = self.corner.strays.entry(id).or_default();
             let verdict = step(s, facts, now);

@@ -1558,7 +1558,7 @@ impl Controller {
             return Resent::Full;
         };
         e.tries += 1;
-        self.echoes.touch_window(e.id, now);
+        self.causes.expect_move(e.id, e.frame, None, now);
         let (frame, park) = (e.frame, e.park);
         let nudged = Rect::new(frame.x + 1.0, frame.y, frame.w, frame.h);
         let send = |el: &AxElement, r: Rect| if park { el.set_position(r.origin()) } else { el.set_frame(r) };

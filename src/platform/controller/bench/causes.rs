@@ -57,7 +57,7 @@ fn alpha_in_two_stages(load: f64, edit: impl FnOnce(&mut Desk)) -> Bench {
     b
 }
 
-// ----- the window echo (`Echoes::is_window_echo`, `focus_may_switch`, `focus_moved_on`) --------
+// ----- a focus of ours (`engine/causes.rs`, `focus_may_switch`, `focus_moved_on`) ---------------
 
 /// `controller.rs`, `focus_may_switch` (11-02: with Accessibility slow, focus notices came
 /// up to a second late, past the echo window, and each switched stages nobody asked for):
@@ -218,9 +218,9 @@ fn next_window_key_to_another_stage(load: f64) -> Run {
     Run::of(&b, out)
 }
 
-// ----- the activation echo (`Echoes::is_app_echo`, `stale_activation`) ---------------------------
+// ----- an activation of ours (`Causes::is_app_echo`, `stale_activation`) -------------------------
 
-/// `controller.rs`, `Echoes::is_app_echo` (11-14, the live landing: "the fixture's activation
+/// `engine/causes.rs`, `Causes::is_app_echo` (11-14, the live landing: "the fixture's activation
 /// never came, Alpha's switch 1.8 s later was reported, and the user's activation of the
 /// fixture 1.3 s after that was taken for the late echo"): a card click for Charlie's
 /// stage, whose activation is never reported; one for Alpha's 1.8 s later; 1.3 s after that
@@ -446,7 +446,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("a drag of a window 200 ms after our switch showed it", "review 11-21 core.md 5d 3", drag_right_after_a_show),
     ("an app focuses its other window after our focus", "review 11-21 core.md 5d 4", app_focuses_its_other_window_after_ours),
     ("Cmd-` to a window in another stage", "controller.rs USER_FOCUS", next_window_key_to_another_stage),
-    ("an awaited activation that never came, then the user's", "controller.rs Echoes::is_app_echo, 11-14", awaited_activation_that_never_came),
+    ("an awaited activation that never came, then the user's", "engine/causes.rs is_app_echo, 11-14", awaited_activation_that_never_came),
     ("a Dock click's activation handled 0.46 s late", "engine/slow_task.rs, 11-06", activation_handled_half_a_second_late),
     ("a Dock click's activation handled 3.3 s late", "engine/slow_task.rs, 11-06", activation_handled_three_seconds_late),
     ("an activation, then its window's focus", "review 11-21 core.md 5d 6", activation_then_its_focus),
@@ -468,50 +468,49 @@ fn pin(script: fn(f64) -> Run, saw: [&str; 3], trail: [&str; 3]) {
 }
 
 #[test]
-fn a_late_focus_notice_never_brings_a_stage_back_but_for_a_slow_app() {
-    // Two apps: the late notice's app is no longer in front.
+fn a_late_focus_notice_is_ours_however_late() {
+    // Since the cause ledger (round r4-causes) a focus is expected of the window we focused,
+    // and its first notice after our request is ours by order at every load. Before: by
+    // the 700 ms since anything touched the window, then by the gates after it.
+    // Two apps: the late notice's app is no longer in front. (Before: ours by our hide of
+    // the window at load 1, "its app is behind" at load 3 and 10.)
     let bravo = "front [12] shows [12] desktop 1 app 102 switches 2 slides 0";
     let ours = "activation 101: ours, activation 102: ours, focus 12: ours, focus 11: ours";
-    let behind = "activation 101: ours, activation 102: ours, focus 12: ours, focus 11: its app is behind";
-    // TIME DECIDES: ECHO_WINDOW, with no change a person sees. On the Mac as measured the
-    // notice comes within 700 ms of our hide of its window (not of our focus, 1 s before
-    // it): ours by a hide. Slower, `focus_may_switch` answers: its app is behind.
-    pin(late_focus_of_an_app_left_behind, [bravo, bravo, bravo], [ours, behind, behind]);
+    pin(late_focus_of_an_app_left_behind, [bravo, bravo, bravo], [ours, ours, ours]);
 
-    // One app, two stages: its app is in front, and only the question "where is your focus
-    // now" stands between the late notice and a switch back.
+    // One app, two stages: its app is in front. (Before: the app was asked where its focus
+    // is now, "stale"; and the second focus's own echo was taken for the user's under load.)
     let first = "front [11] shows [11] desktop 1 app 101 switches 2 slides 0";
-    let stale_then_ours = "focus 17: stale, focus 11: ours";
-    let stale = "focus 17: stale, focus 11: the user's: nothing to switch";
-    // TIME DECIDES: ECHO_WINDOW for the second focus's own echo (taken for the user's under
-    // load: its window's stage is in front, nothing a person sees).
-    pin(late_focus_of_a_window_left_behind, [first, first, first], [stale_then_ours, stale, stale]);
-    // A focus right after a hide of ours on the same window: ours by the hide at load 1.
-    let by_the_hide = "focus 17: ours, focus 11: ours";
-    pin(late_focus_right_after_our_hide, [first, first, first], [by_the_hide, stale, stale]);
-    // TIME DECIDES: the 50 ms the question may take (`arrival::focused_window_of`). At load
-    // 10 the app answers past it, the late notice is taken for the user's, and the stage
-    // left comes back: three switches for two clicks, the wrong stage in front.
-    let back = "front [17] shows [17] desktop 1 app 101 switches 3 slides 0";
-    let taken = "focus 17: the user's: its stage comes, focus 11: ours, focus 17: the user's: nothing to switch";
-    pin(late_focus_of_a_slow_app, [first, first, back], [by_the_hide, stale, taken]);
+    let ours = "focus 17: ours, focus 11: ours";
+    pin(late_focus_of_a_window_left_behind, [first, first, first], [ours, ours, ours]);
+    // A focus right after a hide of ours on the same window. (Before: ours by the hide.)
+    pin(late_focus_right_after_our_hide, [first, first, first], [ours, ours, ours]);
+    // An app slow to answer. (Before, TIME DECIDED: the 50 ms the question "where is your
+    // focus now" may take; at load 10 the app answered past it, the late notice was taken
+    // for the user's and the stage left came back, three switches for two clicks.)
+    pin(late_focus_of_a_slow_app, [first, first, first], [ours, ours, ours]);
 }
 
 #[test]
 fn the_users_own_act_right_after_ours() {
-    // The click on the sliver of a window parked 0.6 s before: its focus is taken for the
-    // echo of our hide, and nothing comes.
-    let stays = "front [17] shows [17] desktop 1 app 101 switches 1 slides 0";
-    let swallowed = "focus 17: ours, focus 11: ours";
-    pin(sliver_click_right_after_its_park, [stays, stays, stays], [swallowed, swallowed, swallowed]);
-    // The click on a window shown 300 ms before: taken for the echo of our show (its stage
-    // is in front already: nothing a person sees).
+    // The click on the sliver of a window parked 0.6 s before: the user's (a hide of ours
+    // expects no focus), and its stage comes at the release. Before the cause ledger its
+    // focus was taken for the echo of our hide at every load and nothing came: the bug.
+    let comes = "front [11] shows [11] desktop 1 app 101 switches 2 slides 0";
+    let grabbed = "focus 17: ours, focus 11: a parked window grabbed";
+    // At load 10 the focus is told after the button is up: the same stage, by the focus.
+    let after = "focus 17: ours, focus 11: the user's: its stage comes";
+    pin(sliver_click_right_after_its_park, [comes, comes, comes], [grabbed, grabbed, after]);
+    // The click on a window shown 300 ms before: the user's (a press on the window itself;
+    // before: the echo of our show). Its stage is in front already.
     let both = "front [12, 18] shows [12, 18] desktop 1 app 102 switches 1 slides 0";
-    let echo = "activation 102: ours, focus 12: ours, focus 18: ours";
-    pin(click_on_a_window_just_shown, [both, both, both], [echo, echo, echo]);
-    // The drag begun 200 ms after the show is no drag until 700 ms after it.
-    let late = "a drag 220 ms in: false, at its end: true; the frame kept moved by Some((240.0, 120.0)); front [12] shows [12] desktop 1 app 102 switches 1 slides 0; activation 102: ours, focus 12: ours";
-    expect(drag_right_after_a_show, [late, late, late]);
+    let users = "activation 102: ours, focus 12: ours, focus 18: the user's: nothing to switch";
+    pin(click_on_a_window_just_shown, [both, both, both], [users, users, users]);
+    // The drag begun 200 ms after the show is a drag from its first move (a move under the
+    // user's hand that leaves the window elsewhere than we put it; before: none until
+    // 700 ms after the show).
+    let drag = "a drag 220 ms in: true, at its end: true; the frame kept moved by Some((240.0, 120.0)); front [12] shows [12] desktop 1 app 102 switches 1 slides 0; activation 102: ours, focus 12: ours";
+    expect(drag_right_after_a_show, [drag, drag, drag]);
 }
 
 #[test]
@@ -593,11 +592,29 @@ fn macos_own_activation_after_a_display_change() {
 /// while the restore window is open an app's activation and focus are its own.
 #[test]
 fn the_apps_own_while_the_login_settles() {
-    let settles = "activation 101: the app's own while the login settles, focus 21: the app's own while the login settles, activation 103: the app's own while the login settles, focus 24: ours, activation 102: the app's own while the login settles, focus 22: the app's own while the login settles, focus 27: the app's own while the login settles";
+    let settles = "activation 101: the app's own while the login settles, focus 21: the app's own while the login settles, activation 103: the app's own while the login settles, focus 24: the app's own while the login settles, activation 102: the app's own while the login settles, focus 22: the app's own while the login settles, focus 27: the app's own while the login settles";
     // TIME DECIDES: the restore window's own end (`engine/restore.rs`, its quiet times): at
     // load 10 the last window's focus comes after it, the user's with nothing to switch.
-    let slow = "activation 101: the app's own while the login settles, activation 103: the app's own while the login settles, activation 102: the app's own while the login settles, focus 21: its app is behind, focus 24: ours, focus 22: the app's own while the login settles, focus 27: the user's: nothing to switch";
+    let slow = "activation 101: the app's own while the login settles, activation 103: the app's own while the login settles, activation 102: the app's own while the login settles, focus 21: its app is behind, focus 24: its app is behind, focus 22: the app's own while the login settles, focus 27: the user's: nothing to switch";
     for (load, want) in super::scenarios::LOADS.iter().zip([settles, settles, slow]) {
         assert_eq!(super::scenarios::restore_after_a_restart(*load).trail.join(", "), want, "at load {load}");
+    }
+}
+
+/// Every scenario of this file at each load, printed (what to assert after a change):
+/// `BENCH_PRINT=1 cargo test --lib causes::print_them -- --nocapture`. Nothing without
+/// `BENCH_PRINT`.
+#[test]
+fn print_them() {
+    if std::env::var("BENCH_PRINT").is_err() {
+        return;
+    }
+    for (name, _, script) in ALL {
+        for load in super::scenarios::LOADS {
+            println!("{name} @{load}: {}", script(load).outcome);
+        }
+    }
+    for load in super::scenarios::LOADS {
+        println!("the restore after a restart @{load}: {}", super::scenarios::restore_after_a_restart(load).trail.join(", "));
     }
 }

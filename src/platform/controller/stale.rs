@@ -213,7 +213,7 @@ impl Controller {
             .windows()
             .filter(|w| (w.sticky || m.is_shown_space(w.space)) && !onscreen.contains(&w.meta.id.0))
             .filter_map(|w| ob.window(w.meta.id.0).map(|t| (t.id, t.pid)))
-            .filter(|&(id, _)| !self.echoes.is_window_echo(id, now))
+            .filter(|&(id, _)| !self.causes.wrote_recently(id, now))
             .collect();
         let ids: HashSet<u32> = candidates.iter().map(|&(id, _)| id).collect();
         self.stale.sightings.retain(|id| ids.contains(&id));

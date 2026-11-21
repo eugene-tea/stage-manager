@@ -47,7 +47,7 @@ use crate::ui::strip_model::{Cover, StripEvent, StripSnapshot};
 /// the desk multiplies them by its load factor.
 pub mod delays {
     /// Our `AXMain` on a window to its app's `AXFocusedWindowChanged` (an idle app answers
-    /// within a frame or two; `controller.rs`, "Echoes").
+    /// within a frame or two; `engine/causes.rs`).
     pub const FOCUS: f64 = 15.0;
     /// An app made frontmost (our `AXFrontmost`, a Dock click's release, ⌘'s release) to
     /// NSWorkspace's activation notice (`engine/switcher.rs`: 3-12 ms after ⌘'s release;

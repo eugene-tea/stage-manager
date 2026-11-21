@@ -156,13 +156,13 @@ impl Controller {
                 continue;
             }
             let budget = deadline.saturating_duration_since(now).clamp(order::POLL, order::PER_WINDOW);
-            self.echoes.touch_window(id, now);
+            self.causes.expect_raise(id, w.pid, now);
             // A fresh handle found this batch for a dead one wins (stale-handles).
             let element = ob.element(id).unwrap_or_else(|| w.element.clone());
             let _ = element.bounded(budget.as_secs_f32(), |e| e.raise());
             for child in children_raised_after(raises, id, |c| ob.window(c).is_some_and(|w| w.kind == WindowKind::Child)) {
                 if let Some(c) = ob.window(child) {
-                    self.echoes.touch_window(child, now);
+                    self.causes.expect_raise(child, c.pid, now);
                     let _ = c.element.bounded(budget.as_secs_f32(), |e| e.raise());
                 }
             }
@@ -186,8 +186,7 @@ impl Controller {
             && !self.keyboard_withheld(key, w.pid, "an order check's focus")
         {
             let now = clock::now();
-            self.echoes.touch_window(key, now);
-            self.echoes.touch_app(w.pid, now);
+            self.causes.expect_focus(key, w.pid, now);
             let _ = ax_focus(&ob.element(key).unwrap_or_else(|| w.element.clone()), w.pid);
         }
         if late { Err(OUT_OF_TIME) } else { Ok(()) }

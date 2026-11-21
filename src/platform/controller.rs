@@ -7,9 +7,12 @@
 //! - **Actions**: `SetFrame` = size, position, size; `Hide` = position into the park zone
 //!   (the window engine's hide, [`WindowEngine::hide`]: the Corner engine's park frame);
 //!   `Raise` = `AXRaise`; `Focus` = raise, `AXMain`, then the app's `AXFrontmost`.
-//! - **Echoes**: focus and activation events for windows and apps we just touched are our
-//!   own actions coming back late; they are dropped for `[windows] focus_echo_ms` so a stale focus
-//!   never bounces us back to the stage we left.
+//! - **Causes**: macOS never says who caused a notice. Each action of ours registers what
+//!   it expects (a focus of the window focused, an activation of its app, the frame set), and
+//!   a notice that answers one is ours by the order of events, however late it comes
+//!   ([`Causes`]), so a stale focus never bounces us back to the stage we left. A focus or
+//!   activation notice is then judged by one written chain of gates over the facts gathered
+//!   for it ([`attribution`], [`notices`]).
 //! - **Safety**: the parked-window registry is synced around every batch. Once Quit is
 //!   requested ([`safety::quit_requested`]) a batch skips its remaining parks, raises and
 //!   focus, so Quit is answered soon, but never a `SetFrame`: the model already counts those
@@ -110,6 +113,7 @@ use super::{capture_pace, desktop, desktop_shot, enhanced_ui, hidden_tabs, loggi
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::attribution::{self, Notice};
 use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply};
+use crate::engine::causes::{Causes, Pressed};
 use self::corner::CornerUpkeep;
 use self::corner::unrestored::LetGo;
 use crate::engine::corner::park_reconcile::{self, Stray};
@@ -403,120 +407,6 @@ pub(crate) fn notify_ui(update: UiUpdate) {
     }
 }
 
-/// How long an app we made frontmost may take to report its activation and still have it
-/// count as ours ([`Echoes::is_app_echo`]): a busy app (Electron under load, an app answering
-/// Accessibility at the 0.25 s timeout) can report it well after the echo window
-/// (`[windows] focus_echo_ms`).
-pub const LATE_ACTIVATION_MAX: Duration = Duration::from_secs(5);
-
-/// Recently touched windows and apps, whose focus and activation events are our echoes.
-///
-/// An activation is ours when it comes within the echo window of our `AXFrontmost`, or when
-/// it is the first activation reported for an app we made frontmost and the user has not
-/// switched apps since (a mouse-down or ⌘ key press the global monitor saw, or an activation
-/// of another app that was not ours): a late echo after two quick switches must never pull
-/// the user back to the first stage. Card clicks and hotkeys are not seen by the monitor,
-/// so they keep a late echo ours.
-#[derive(Debug)]
-pub struct Echoes {
-    windows: HashMap<u32, Instant>,
-    apps: HashMap<i32, Instant>,
-    /// Apps we made frontmost whose activation has not been reported yet.
-    awaiting: HashMap<i32, Instant>,
-    /// The app whose activation was reported last (ours or not): frontmost as far as we know.
-    /// A focus on it awaits no activation, since macOS reports none for an app already in
-    /// front.
-    front: Option<i32>,
-    window: Duration,
-}
-
-impl Default for Echoes {
-    fn default() -> Self {
-        // How long focus and activation events for windows and apps we just touched are
-        // ignored: `[windows] focus_echo_ms` as the config has it by default (set from the
-        // config in force at the controller's start, [`Self::set_window`]).
-        let window = Duration::from_millis(crate::config::Config::default().windows.focus_echo_ms);
-        Self { windows: HashMap::new(), apps: HashMap::new(), awaiting: HashMap::new(), front: None, window }
-    }
-}
-
-impl Echoes {
-    /// Sets how long an echo lasts.
-    pub fn set_window(&mut self, window: Duration) {
-        self.window = window;
-    }
-
-    /// We just moved, raised or focused this window.
-    pub fn touch_window(&mut self, id: u32, now: Instant) {
-        self.windows.insert(id, now);
-    }
-
-    /// We just made this app frontmost. Its activation is awaited only when another app was
-    /// in front: a switch focuses its key window twice (at once, then again at the landing),
-    /// and the second focus, after the activation was reported, left one awaited that never
-    /// came, so macOS's own activation of that app up to 5 s later was taken for ours
-    /// (11-09 suite: the front app quit, macOS activated the fixture 4.4 s after the
-    /// landing, and its stage never came).
-    pub fn touch_app(&mut self, pid: i32, now: Instant) {
-        self.apps.insert(pid, now);
-        if self.front != Some(pid) {
-            self.awaiting.insert(pid, now);
-        }
-    }
-
-    /// True when a focus event for `id` is probably our own.
-    pub fn is_window_echo(&self, id: u32, now: Instant) -> bool {
-        self.windows.get(&id).is_some_and(|t| now.duration_since(*t) < self.window)
-    }
-
-    /// [`Self::is_window_echo`] for a notice received at `at` (a move, a focus), its margin
-    /// noted ([`margin`]): a notice stamped before our touch counts as at it.
-    pub fn is_window_echo_of_notice(&self, id: u32, at: Instant) -> bool {
-        let Some(t) = self.windows.get(&id) else { return false };
-        margin::within("ECHO_WINDOW", margin::age("ECHO_WINDOW", at, *t), self.window)
-    }
-
-    /// True when an activation of `pid` is probably our own: within the echo window, or
-    /// the first activation reported since we made it frontmost with no user input between.
-    /// Call it once per reported activation: it consumes the awaited one.
-    ///
-    /// An awaited one it consumes also ends the awaits of the apps we made frontmost more
-    /// than an echo window before it: our later switch made this app frontmost and macOS
-    /// says so, so an older request is answered by now or never will be (11-14, the live
-    /// landing: the fixture's activation never came, Alpha's switch 1.8 s later was reported,
-    /// and the user's activation of the fixture 1.3 s after that was taken for the late
-    /// echo). Quick switches keep theirs: within the echo window of each other the first
-    /// app may still be answering, and one switch focuses one window.
-    pub fn is_app_echo(&mut self, pid: i32, now: Instant) -> bool {
-        self.front = Some(pid);
-        let asked = self.awaiting.remove(&pid);
-        if let Some(at) = asked {
-            let window = self.window;
-            self.awaiting.retain(|_, t| at.saturating_duration_since(*t) < window);
-        }
-        let late = asked.is_some_and(|t| margin::within("LATE_ACTIVATION_MAX", margin::age("LATE_ACTIVATION_MAX", now, t), LATE_ACTIVATION_MAX));
-        let window = self.window;
-        late || self.apps.get(&pid).is_some_and(|t| margin::within("ECHO_WINDOW", margin::age("ECHO_WINDOW", now, *t), window))
-    }
-
-    /// The user may have switched apps (a click, a ⌘ key press, another app activated on
-    /// purpose): an activation reported from now on beyond the echo window is theirs, not a
-    /// late echo.
-    pub fn user_switched(&mut self) {
-        self.awaiting.clear();
-    }
-
-    /// Forgets old entries. Touches are kept up to [`LATE_ACTIVATION_MAX`], longer than the
-    /// echo window they answer for: a notice handled late is judged by its receipt, which may
-    /// be that much older than now.
-    pub fn prune(&mut self, now: Instant) {
-        let keep = self.window.max(LATE_ACTIVATION_MAX);
-        self.windows.retain(|_, t| now.duration_since(*t) < keep);
-        self.apps.retain(|_, t| now.duration_since(*t) < keep);
-        self.awaiting.retain(|_, t| now.saturating_duration_since(*t) < LATE_ACTIVATION_MAX);
-    }
-}
-
 /// Interprets raw `com.apple.WindowManager` values.
 pub fn native_settings(raw: &RawSettings) -> NativeSettings {
     let values: HashMap<String, PrefValue> = raw.iter().map(|(k, v)| (k.clone(), PrefValue::Int(*v))).collect();
@@ -784,6 +674,18 @@ fn press_reads_list(managing: bool, frozen: bool, pressed_frozen: Option<bool>) 
     managing && (!frozen || pressed_frozen == Some(false))
 }
 
+/// Where a press at `p` landed ([`Pressed`]), from the window list read for it (front to
+/// back): on the frontmost window of another app there when that is an app's own window
+/// (layer 0); elsewhere when something else is in front there (the Dock, the menu bar, an
+/// overlay) or nothing is. Our own windows never take another app's click.
+fn pressed_on(list: &[windows::CgWindow], p: Point) -> Pressed {
+    let own = std::process::id() as i32;
+    match list.iter().find(|w| w.onscreen && w.pid != own && w.bounds.contains(p)) {
+        Some(w) if w.layer == 0 => Pressed::Window(w.id),
+        _ => Pressed::Elsewhere,
+    }
+}
+
 /// True when a move of a shown window while the left button is down is the user dragging
 /// it: the press was on the window (`frame`, its frame at the press, with a margin for the
 /// resize edge) and the pointer has moved since. An app moving its own window while the
@@ -929,7 +831,7 @@ pub struct Controller {
     settings: NativeSettings,
     displays: Vec<Display>,
     strip_visible: bool,
-    echoes: Echoes,
+    causes: Causes,
     /// When `state.json` is written next ([`SaveClock`]: dirty until a save succeeds).
     save: SaveClock,
     strip_dirty: bool,
@@ -1283,8 +1185,8 @@ impl Controller {
     /// scratch file.
     fn with_store(store: ConfigStore, path: &Path, config_error: Option<String>) -> Self {
         let style = Arc::new(store.config().strip_style());
-        let mut echoes = Echoes::default();
-        echoes.set_window(Duration::from_millis(store.config().windows.focus_echo_ms));
+        let mut causes = Causes::default();
+        causes.set_window(Duration::from_millis(store.config().windows.focus_echo_ms));
         Self {
             style,
             model: None,
@@ -1295,7 +1197,7 @@ impl Controller {
             settings: NativeSettings::default(),
             displays: Vec::new(),
             strip_visible: true,
-            echoes,
+            causes,
             save: SaveClock::default(),
             strip_dirty: false,
             closing: Vec::new(),
@@ -1857,13 +1759,20 @@ impl Controller {
             if matches!(action, Action::Raise { .. } | Action::Focus { .. }) && self.keyboard_withheld(id, w.pid, "a batch's raise or focus") {
                 continue;
             }
-            self.echoes.touch_window(id, now);
+            // What the action expects of macOS, for the notices that answer it.
+            match action {
+                Action::SetFrame { frame, .. } => self.causes.expect_move(id, frame, Some(w.frame), now),
+                Action::Hide { .. } => match park {
+                    Some(at) => self.causes.expect_move(id, at, Some(w.frame), now),
+                    None => self.causes.wrote(id, now),
+                },
+                Action::Raise { .. } => self.causes.expect_raise(id, w.pid, now),
+                Action::Focus { .. } => self.causes.expect_focus(id, w.pid, now),
+                Action::StateChanged => {}
+            }
             if matches!(action, Action::Hide { .. }) {
                 // A focus before this park is not the user's choice about where it is now.
                 self.user_focus.remove(&id);
-            }
-            if matches!(action, Action::Focus { .. }) {
-                self.echoes.touch_app(w.pid, now);
             }
             let pid = w.pid;
             // A dead handle is looked up afresh and the move tried once more (stale-handles).
@@ -2138,8 +2047,7 @@ impl Controller {
     fn focus_now(&mut self, ob: &Observer, key: WindowId, id: u64) -> Option<u64> {
         let w = ob.window(key.0)?;
         let started = clock::now();
-        self.echoes.touch_window(key.0, started);
-        self.echoes.touch_app(w.pid, started);
+        self.causes.expect_focus(key.0, w.pid, started);
         let result = w.element.bounded(EARLY_FOCUS_BUDGET.as_secs_f32(), |e| e.set_main(true)).and_then(|()| {
             let left = EARLY_FOCUS_BUDGET.saturating_sub(clock::since(started));
             if left < EARLY_FOCUS_MIN_CALL {
@@ -2502,10 +2410,10 @@ impl Controller {
     }
 
     /// The user may have switched apps (a click, a ⌘ key press, an activation not ours): no
-    /// late echo is awaited any more ([`Echoes::user_switched`]), and no focus of a switch
+    /// late echo is awaited any more ([`Causes::user_switched`]), and no focus of a switch
     /// left behind runs when its windows land.
     fn user_switched(&mut self) {
-        self.echoes.user_switched();
+        self.causes.user_switched();
         self.landing_focus = None;
     }
 
@@ -2542,8 +2450,7 @@ impl Controller {
             return;
         }
         let now = clock::now();
-        self.echoes.touch_window(key, now);
-        self.echoes.touch_app(w.pid, now);
+        self.causes.expect_focus(key, w.pid, now);
         let element = ob.element(key).unwrap_or_else(|| w.element.clone());
         match ax_focus(&element, w.pid) {
             Ok(()) => tracing::debug!(id, key, pid = w.pid, "landing: the window is on its Desktop; the switch's focus again, so its app comes in front"),
@@ -2957,6 +2864,7 @@ impl Controller {
                 self.unplaced.remove(&id);
                 self.absent.remove(&id);
                 self.user_focus.remove(&id);
+                self.causes.forget_window(id);
                 // A tab no longer selected may be reported destroyed while its app keeps it
                 // (8J): when the tab selected shows in its place already, it takes that place in
                 // the stage, as at the Space check (round tab-lost).
@@ -2985,10 +2893,12 @@ impl Controller {
                 self.let_go_hidden(ob, kept, LetGo::Destroyed);
             }
             WinEvent::Moved(id) => {
-                self.maybe_start_drag(ob, id, now, at);
-                self.publish_minimizable(ob);
+                // Ours by where the window is, or the first answer to a frame we set; never
+                // one under the user's hand that leaves it elsewhere ([`Causes::move_heard`]).
                 let frame = ob.window(id).map(|w| w.frame);
-                let ours = self.echoes.is_window_echo_of_notice(id, at);
+                let ours = self.causes.move_heard(id, frame, input::left_button_down(), at);
+                self.maybe_start_drag(ob, id, now, ours);
+                self.publish_minimizable(ob);
                 if !ours
                     && input::left_button_down()
                     && let Some(m) = self.model.as_mut()
@@ -3297,8 +3207,7 @@ impl Controller {
         self.minimizing = None;
         if let Some(w) = ob.window(id) {
             let now = clock::now();
-            self.echoes.touch_window(id, now);
-            self.echoes.touch_app(w.pid, now);
+            self.causes.expect_focus(id, w.pid, now);
             self.unminimizing.retain(|_, at| now.duration_since(*at) < UNMINIMIZE_MAX);
             self.unminimizing.insert(id, now);
             if let Err(e) = w.element.set_minimized(false) {
@@ -3496,10 +3405,10 @@ impl Controller {
     }
 
     /// A move event while the left button is down after a mouse-down in another app: the
-    /// user is dragging a shown managed window (our own moves are echoes and do not count:
-    /// measured to the move's receipt `at`).
-    fn maybe_start_drag(&mut self, ob: &Observer, id: u32, now: Instant, at: Instant) {
-        if self.drag.is_some() || self.echoes.is_window_echo_of_notice(id, at) {
+    /// user is dragging a shown managed window (`ours`: the move answers a frame we set, and
+    /// does not count).
+    fn maybe_start_drag(&mut self, ob: &Observer, id: u32, now: Instant, ours: bool) {
+        if self.drag.is_some() || ours {
             return;
         }
         let (Some(_), Some(m)) = (&self.press, &self.model) else { return };
@@ -3596,6 +3505,10 @@ impl Controller {
                 // never an empty one, where every press would be on the wallpaper.
                 let pressed = self.managed_displays().into_iter().find(|d| d.frame.contains(event.at)).map(|d| self.frozen_on(d.id));
                 let list = press_reads_list(self.model.is_some(), self.frozen(), pressed).then(windows::list_windows);
+                // Where the press landed, before anything it lands registers what it expects:
+                // a focus of the window pressed is the user's, and no late focus is ours by
+                // order after a press that may have caused it ([`Causes::pressed`]).
+                self.causes.pressed(list.as_deref().map_or(Pressed::Elsewhere, |list| pressed_on(list, event.at)), heard);
                 self.dock_pressed(ob, list.as_deref().unwrap_or_default(), event.at, now);
                 // A click where an arriving window is about to be was meant for it: it
                 // arrives now, and the click is no wallpaper click.
@@ -3691,6 +3604,8 @@ impl Controller {
                 // new stage's (its focus ran before the windows arrived).
                 if event.cmd {
                     self.user_switched();
+                    // ⌘Tab, ⌘`: the focus that follows may be of any window.
+                    self.causes.pressed(Pressed::Elsewhere, heard);
                 }
                 if self.desktop_echo.user_acted() {
                     tracing::debug!("a key press after a wallpaper click: Finder's next activation is deliberate");
@@ -4091,7 +4006,7 @@ impl Controller {
                 .windows()
                 .filter(standard)
                 .filter(|w| w.space == space && !shown.contains(&w.meta.id.0))
-                .filter(|w| !self.echoes.is_window_echo(w.meta.id.0, now))
+                .filter(|w| !self.causes.wrote_recently(w.meta.id.0, now))
                 .filter(|w| !ob.noted_closed(w.meta.id.0))
                 .filter(|w| ob.window(w.meta.id.0).is_some())
                 .map(|w| (w.meta.id.0, w.meta.pid))
@@ -5009,7 +4924,7 @@ impl Controller {
             .windows()
             .filter(standard)
             .filter(|w| w.space == space && !shown.contains(&w.meta.id.0))
-            .filter(|w| !self.echoes.is_window_echo(w.meta.id.0, now))
+            .filter(|w| !self.causes.wrote_recently(w.meta.id.0, now))
             // Judged closed just now (its handle dead): it goes as destroyed, not elsewhere.
             .filter(|w| !ob.noted_closed(w.meta.id.0))
             .map(|w| (w.meta.id.0, w.meta.pid))
@@ -6177,7 +6092,7 @@ impl Controller {
                 if *self.style != style {
                     self.style = Arc::new(style);
                 }
-                self.echoes.set_window(Duration::from_millis(config.windows.focus_echo_ms));
+                self.causes.set_window(Duration::from_millis(config.windows.focus_echo_ms));
                 if self.model.is_some() && config.displays.main_only != self.main_only() {
                     tracing::warn!(
                         main_only = config.displays.main_only,
@@ -6227,7 +6142,7 @@ impl Controller {
             let (id, after) = (f.switch(), f.lapse());
             self.landing_focus_after(ob, id, after);
         }
-        self.echoes.prune(now);
+        self.causes.prune(now);
         if !safety::quit_requested() {
             self.retry_shows(ob, false);
         }
@@ -6702,7 +6617,7 @@ impl Controller {
                     let Some(w) = ob.window(id).filter(|_| shown) else {
                         return json!({ "ok": false, "error": format!("window {id} is not a managed window shown in its stage") });
                     };
-                    self.echoes.touch_window(id, clock::now());
+                    self.causes.expect_move(id, frame, Some(w.frame), clock::now());
                     let space = self.model.as_ref().and_then(|m| m.space_of(WindowId(id))).map(|s| s.0);
                     let on_shown = self.model.as_ref().is_some_and(|m| !m.waits_on_another_space(WindowId(id)));
                     return match w.element.set_frame(frame) {
@@ -6718,8 +6633,8 @@ impl Controller {
                     Some(w) if shown => {
                         // Placed and brought to the front, so a test's pointer path is over it.
                         let now = clock::now();
-                        self.echoes.touch_window(id, now);
-                        self.echoes.touch_app(w.pid, now);
+                        self.causes.expect_move(id, frame, Some(w.frame), now);
+                        self.causes.expect_focus(id, w.pid, now);
                         let result = w
                             .element
                             .set_frame(frame)
@@ -7763,22 +7678,6 @@ mod tests {
     /// our touch but was handled 600 ms later still (the WM thread busy in a wait) is our
     /// echo, judged by when it came; the touch is kept past the echo window for it.
     #[test]
-    fn an_echo_is_judged_by_when_its_notice_came_not_when_it_was_handled() {
-        let t0 = Instant::now();
-        let mut e = Echoes::default();
-        e.touch_window(7, t0);
-        e.touch_app(42, t0);
-        e.user_switched();
-        let fired = t0 + Duration::from_millis(200);
-        let handled = fired + Duration::from_millis(600);
-        e.prune(handled);
-        assert!(!e.is_window_echo(7, handled), "measured at the handling, as before, it was the user's");
-        assert!(e.is_window_echo(7, fired), "measured at the notice: ours");
-        assert!(e.is_app_echo(42, fired), "the activation too, past the awaited one");
-        assert!(!e.is_window_echo(7, t0 + e.window), "a notice that came past the window is not");
-    }
-
-    #[test]
     fn a_desktop_with_nothing_left_on_screen_is_recognized_again_not_forgotten() {
         // S5 / R1-platform 12: one window, gone from the screen: another Space shows.
         assert!(missed_space_change(1, 0, 1));
@@ -7791,23 +7690,6 @@ mod tests {
         // One of five gone, even with a second one missing but not yet twice: not a change.
         assert!(!missed_space_change(5, 3, 1));
         assert!(!missed_space_change(1, 0, 0), "nothing gone, nothing to decide");
-    }
-
-    #[test]
-    fn echoes_expire() {
-        let mut e = Echoes::default();
-        let t0 = Instant::now();
-        e.touch_window(7, t0);
-        e.touch_app(42, t0);
-        assert!(e.is_window_echo(7, t0 + Duration::from_millis(100)));
-        assert!(e.is_app_echo(42, t0 + Duration::from_millis(100)));
-        assert!(!e.is_window_echo(8, t0));
-        let echo = Duration::from_millis(crate::config::Config::default().windows.focus_echo_ms);
-        assert!(!e.is_window_echo(7, t0 + echo));
-        e.prune(t0 + echo);
-        assert!(!e.windows.is_empty() && !e.apps.is_empty(), "kept for a notice handled late");
-        e.prune(t0 + LATE_ACTIVATION_MAX);
-        assert!(e.windows.is_empty() && e.apps.is_empty());
     }
 
     #[test]
@@ -8066,19 +7948,6 @@ mod tests {
     }
 
     #[test]
-    fn a_late_activation_after_a_second_quick_switch_is_still_ours() {
-        let (slack, mail) = (10, 20);
-        let mut e = Echoes::default();
-        let t0 = Instant::now();
-        e.touch_app(slack, t0);
-        e.touch_app(mail, t0 + Duration::from_millis(400));
-        assert!(e.is_app_echo(mail, t0 + Duration::from_millis(450)));
-        // Slack, busy, reports its activation 800 ms after our focus: past the echo window.
-        assert!(e.is_app_echo(slack, t0 + Duration::from_millis(800)), "late, but the one we asked for");
-        assert!(!e.is_app_echo(slack, t0 + Duration::from_millis(900)), "a second one is not");
-    }
-
-    #[test]
     fn our_own_activation_never_lands_a_held_switch_through_a_window_still_away() {
         // 11-09 10:06:42.737: a card click; the keyboard goes to Messages (pid 740) while its
         // and Telegram's windows wait behind their growing snapshots. Messages also has window
@@ -8091,7 +7960,7 @@ mod tests {
         };
         let unplaced = [176u32, 314];
         let listed: HashSet<u32> = [134, 166, 299].into();
-        let mut e = Echoes::default();
+        let mut e = Causes::default();
         let t0 = Instant::now();
         e.touch_app(messages, t0);
         // 24 ms later macOS says Messages activated: its waiting windows are offered first,
@@ -8105,77 +7974,6 @@ mod tests {
         // A window of the app that does show now (un-minimized, say) is a new window: placed.
         let shows: HashSet<u32> = [134, 166, 176].into();
         assert_eq!(offered_at_notice(unplaced, &shows), vec![176]);
-    }
-
-    #[test]
-    fn a_landing_focus_after_the_activation_awaits_no_second_one() {
-        // The 11-09 suite: a card click to the fixture's stage focuses its window at once
-        // (46.981) and macOS reports the activation (46.996); the landing focuses it again
-        // (~47.5). A card click to Alpha follows (49.8, its activation ours), then Alpha quits
-        // and macOS activates the fixture (51.939): the user's, not an echo.
-        let (fixture, alpha) = (67303, 67932);
-        let mut e = Echoes::default();
-        let t0 = Instant::now();
-        e.touch_app(fixture, t0);
-        assert!(e.is_app_echo(fixture, t0 + Duration::from_millis(15)));
-        e.touch_app(fixture, t0 + Duration::from_millis(560));
-        e.touch_app(alpha, t0 + Duration::from_millis(2850));
-        assert!(e.is_app_echo(alpha, t0 + Duration::from_millis(2910)));
-        assert!(!e.is_app_echo(fixture, t0 + Duration::from_millis(4960)), "macOS's activation after the front app quit");
-        // A landing focus that comes before the activation is reported still awaits it.
-        let mut e = Echoes::default();
-        e.touch_app(alpha, t0);
-        e.touch_app(fixture, t0 + Duration::from_millis(10));
-        e.touch_app(fixture, t0 + Duration::from_millis(500));
-        assert!(e.is_app_echo(fixture, t0 + Duration::from_millis(1500)), "late, but the one we asked for");
-    }
-
-    #[test]
-    fn our_later_switch_ends_an_older_apps_late_echo() {
-        // The suite on 9af41d3 (11-14, the live landing): the switch to the fixture's stage
-        // focuses its window (14.578, again at the unveil 15.121) and no activation comes; a
-        // switch to Alpha's new stage (16.880) is reported (16.937); the test's ⌘Tab-style
-        // activation of the fixture (18.265) is the user's, not that late echo.
-        let (fixture, alpha) = (85618, 86476);
-        let mut e = Echoes::default();
-        let t0 = Instant::now();
-        let at = |ms: u64| t0 + Duration::from_millis(ms);
-        e.touch_app(fixture, at(0));
-        e.touch_app(fixture, at(543));
-        e.touch_app(alpha, at(2302));
-        assert!(e.is_app_echo(alpha, at(2359)));
-        assert!(!e.is_app_echo(fixture, at(3687)), "the user's activation brings the fixture's stage");
-        // Only an awaited activation ends the others': one reported within the echo window
-        // of a focus that awaited none (the app was in front) leaves them.
-        let mut e = Echoes::default();
-        e.touch_app(fixture, at(0));
-        e.front = Some(alpha);
-        e.touch_app(alpha, at(1000));
-        assert!(e.is_app_echo(alpha, at(1050)));
-        assert!(e.is_app_echo(fixture, at(1400)), "still the late echo we asked for");
-        // Two apps focused by one batch (or two quick switches): the first one's late echo
-        // stays ours after the second one's activation.
-        let (mail, slack) = (20, 10);
-        let mut e = Echoes::default();
-        e.touch_app(slack, at(0));
-        e.touch_app(mail, at(5));
-        assert!(e.is_app_echo(mail, at(30)));
-        assert!(e.is_app_echo(slack, at(1500)), "busy, but the one we asked for");
-    }
-
-    #[test]
-    fn a_user_switch_ends_a_pending_late_echo() {
-        let slack = 10;
-        let mut e = Echoes::default();
-        let t0 = Instant::now();
-        e.touch_app(slack, t0);
-        e.user_switched();
-        assert!(!e.is_app_echo(slack, t0 + Duration::from_millis(900)), "a Dock click or ⌘Tab to it is the user's");
-        assert!(e.is_app_echo(slack, t0 + Duration::from_millis(100)), "still within the echo window");
-        // Never awaited forever: an app that was already frontmost never reports one.
-        e.touch_app(slack, t0);
-        e.prune(t0 + LATE_ACTIVATION_MAX);
-        assert!(!e.is_app_echo(slack, t0 + LATE_ACTIVATION_MAX));
     }
 
     #[test]

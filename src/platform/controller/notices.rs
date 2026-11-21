@@ -75,8 +75,11 @@ impl Controller {
         let said = |verdict: &'static str| attribution::judged(Notice::Focus, i64::from(id), verdict);
         let pid = ob.window(id).map(|w| w.pid);
         let bundle = pid.and_then(|pid| ob.bundle_id(pid)).map(str::to_owned);
-        // 1: the echo ledger, and the arrangement ahead that may overrule it.
-        let echo = self.echoes.is_window_echo_of_notice(id, at);
+        // 1: the cause ledger (the answer to a focus or raise of ours), or a window an
+        // arrangement made ahead just moved (macOS's own focus at the arrival it arranged
+        // for: its rules are the arrival's, by the echo window of its moves as before); and
+        // the arrangement that may overrule either.
+        let echo = self.causes.focus_heard(id, pid, at) || (self.ahead.is_some() && self.causes.wrote_before(id, at));
         let beats_echo = echo && self.focus_beats_echo(ob, id, now);
         let mut facts = FocusFacts {
             heard: self.heard(bundle.as_deref(), at),
@@ -284,7 +287,7 @@ impl Controller {
             heard: self.heard(bundle.as_deref(), at),
             pid,
             // 1: the echo ledger (`at` is the notice's `fired`: when the main thread got it).
-            echo: self.echoes.is_app_echo(pid, at),
+            echo: self.causes.is_app_echo(pid, at),
             fired,
             our_switch: self.our_switch,
             front: apps::frontmost_pid(),

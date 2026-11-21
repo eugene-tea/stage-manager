@@ -176,7 +176,7 @@ fn a_card_clicks_own_late_echo_is_not_taken_for_the_users() {
 
 // ----- 2. our activation reported late by a busy app ------------------------------------------
 
-/// `controller.rs`, `Echoes::is_app_echo` (11-14, the awaited path): a card click for Alpha's
+/// `engine/causes.rs`, `Causes::is_app_echo` (11-14, the awaited path): a card click for Alpha's
 /// stage; Alpha, busy, reports the activation 1.2 s later, past the echo window. It is ours
 /// (the first activation of the app since we asked, nothing pressed between): no second
 /// switch, and Bravo's stage, clicked 2 s after, stays.
@@ -720,7 +720,7 @@ fn the_first_visit_to_a_desktop() {
 /// Every scenario, for the load table.
 pub(super) const ALL: &[Scenario] = &[
     ("card clicks while the WM thread is held up", "engine/stale_activation.rs, 11-03", card_clicks_under_a_busy_wm_thread),
-    ("our activation reported 1.2 s late", "controller.rs Echoes::is_app_echo, 11-14", our_activation_reported_late),
+    ("our activation reported 1.2 s late", "engine/causes.rs is_app_echo, 11-14", our_activation_reported_late),
     ("Dock click, stage hidden here (Spaces)", "controller/arrival.rs, dock-put-home", dock_click_on_a_stage_hidden_here),
     ("Dock click, activation 0.4 s late (Spaces)", "review 11-21 R2, LEND_WAIT", dock_click_with_a_slow_activation),
     ("Dock click, activation 1.2 s late (Spaces)", "review 11-21 R2, LEND_WAIT", dock_click_with_a_late_activation),
