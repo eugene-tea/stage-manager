@@ -67,6 +67,10 @@ pub(super) fn take(t: &Transition) -> Taken {
     let targets = targets(t, strip_model::snapshot_age);
     let fresh = t.outgoing.len() - targets.len();
     let taken = switch_shots::take(targets, WAIT_MAX);
+    if taken.skipped.is_none() && taken.asked > 0 {
+        let how = if taken.answered < taken.asked { crate::engine::margin::End::Cap } else { crate::engine::margin::End::Met };
+        crate::engine::margin::wait("switch_pictures::WAIT_MAX", Duration::from_millis(taken.ms), WAIT_MAX, how);
+    }
     tracing::debug!(
         id = t.id,
         asked = taken.asked,

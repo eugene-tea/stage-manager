@@ -242,6 +242,11 @@ impl Controller {
 
     fn slide_watch_write(&mut self, w: Watch, now: Instant) {
         tracing::info!("slide-watch: outcome {}", w.line());
+        if let Some(at_ms) = w.first_change_ms() {
+            let window = crate::engine::slide_watch::WINDOW;
+            let at = std::time::Duration::from_millis(at_ms);
+            crate::engine::margin::note("slide_watch::WINDOW", at, window, at <= window);
+        }
         self.slide_watch.tally.add(&w, now);
     }
 

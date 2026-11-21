@@ -467,6 +467,13 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
     let still_reads = if moved { 0 } else { prev.still_reads.saturating_add(1) };
     let since_change = changed_at.is_none_or(|t| now.saturating_duration_since(t) >= SETTLE);
     let settled = !in_motion && still_reads >= STILL_READS && since_change;
+    if settled
+        && !prev.settled
+        && let Some(t) = changed_at
+    {
+        // Settled once the motion's quiet ran out: a wait ended by its cap.
+        crate::engine::margin::wait("apple::SETTLE", now.saturating_duration_since(t), SETTLE, crate::engine::margin::End::Cap);
+    }
 
     let mut next = Arrangement {
         frames,

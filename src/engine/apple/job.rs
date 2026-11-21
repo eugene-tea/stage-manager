@@ -878,7 +878,8 @@ impl Job {
                 if cx.in_flight {
                     return Some(self.wait(Hold::InFlight.why()));
                 }
-                if self.hidden_at.is_some_and(|t| now >= t + UNHIDE_AFTER) {
+                if let Some(t) = self.hidden_at.filter(|t| now >= *t + UNHIDE_AFTER) {
+                    crate::engine::margin::wait("apple::UNHIDE_AFTER", now.saturating_duration_since(t), UNHIDE_AFTER, crate::engine::margin::End::Cap);
                     self.unhide_at = Some(now);
                     self.report.unhide_ms.get_or_insert(ms(now, self.since));
                     self.report.round_trip_why.get_or_insert("Apple switched at the activation, before the hide took: shown again, the round trip");
@@ -908,6 +909,10 @@ impl Job {
             // launch: as soon as a window of it is known).
             let due = self.hidden_at.is_some_and(|t| now >= t + UNHIDE_AFTER);
             if due || (!self.reopen && cx.pids.values().any(|p| *p == pid)) {
+                if let Some(t) = self.hidden_at {
+                    let how = if due { crate::engine::margin::End::Cap } else { crate::engine::margin::End::Met };
+                    crate::engine::margin::wait("apple::UNHIDE_AFTER", now.saturating_duration_since(t), UNHIDE_AFTER, how);
+                }
                 if !windows.iter().all(|w| a.seen.iter().any(|(id, s)| id == w && s.full)) {
                     self.report.round_trip_why.get_or_insert("Apple switched at the activation, before the hide took: shown again, the round trip");
                 }

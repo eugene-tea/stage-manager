@@ -603,8 +603,13 @@ impl Controller {
             }
         }
         // A test's round waits as long as it takes.
-        let deadline = clock::now() + wait.unwrap_or(Duration::from_secs(5));
+        let began = clock::now();
+        let deadline = began + wait.unwrap_or(Duration::from_secs(5));
         let parks = self.engine.park_round(asks, deadline);
+        if let Some(cap) = wait {
+            let how = if parks.late.is_empty() { crate::engine::margin::End::Met } else { crate::engine::margin::End::Cap };
+            crate::engine::margin::wait("ROUND_WAIT", clock::now().saturating_duration_since(began), cap, how);
+        }
         self.spaces.mission.lends.parks_made(parks.ms, parks.sum_ms, parks.apps);
         if !parks.late.is_empty() {
             tracing::debug!(late = ?parks.late.iter().map(|w| w.0).collect::<Vec<_>>(), "mission-control: windows whose park's turn came after the round's wait: the next round's");

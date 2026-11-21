@@ -86,6 +86,12 @@ impl DesktopEcho {
 
     /// Classifies an activation of the app `bundle_id`, or a focus of one of its windows.
     pub fn classify(&self, bundle_id: Option<&str>, now: Instant) -> Cause {
+        if bundle_id == Some(DESKTOP_OWNER)
+            && let Some(t) = self.since
+        {
+            let age = crate::engine::margin::age("WALLPAPER_ECHO", now, t);
+            crate::engine::margin::note("WALLPAPER_ECHO", age, WALLPAPER_ECHO, self.pending(now));
+        }
         if bundle_id == Some(DESKTOP_OWNER) && self.pending(now) {
             Cause::WallpaperEcho
         } else {

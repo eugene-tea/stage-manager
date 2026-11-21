@@ -54,6 +54,7 @@ use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
 use crate::engine::lend_park;
+use crate::engine::margin::{self, End};
 use crate::engine::switcher::{LetGo, LetGoStep};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Display, DisplayId, Model, Observation, SpaceId, StageId, WindowId};
@@ -907,7 +908,7 @@ fn press_round(
 impl Controller {
     /// Milliseconds since the user's latest input, when it is recent (a Dock click, a key).
     pub(super) fn since_input_ms(&self, now: Instant) -> Option<u64> {
-        self.triggers.last_at().filter(|t| now.saturating_duration_since(*t) < INPUT_RECENT).map(|t| ms(t, now))
+        self.triggers.last_at().filter(|t| margin::within("INPUT_RECENT", now.saturating_duration_since(*t), INPUT_RECENT)).map(|t| ms(t, now))
     }
 
     /// The Desktop arranged ahead, if any.
@@ -1683,6 +1684,15 @@ impl Controller {
             },
             _ => lent_step(parked, in_front, now.saturating_duration_since(lent.at)),
         };
+        let how = match step {
+            LentStep::Keep => None,
+            LentStep::Forget => Some(End::Met),
+            LentStep::NoActivation => Some(End::Refuted),
+            LentStep::TakeBack => Some(End::Cap),
+        };
+        if let Some(how) = how {
+            margin::wait("LEND_WAIT", now.saturating_duration_since(lent.at), LEND_WAIT, how);
+        }
         match step {
             LentStep::Keep => {}
             LentStep::NoActivation => {
@@ -1897,7 +1907,7 @@ impl Controller {
         let Some(seen) = self.dock_seen.take() else { return };
         // Measured to the Space change's notice when this arrival is its own.
         let heard = self.received_at(clock::now());
-        if heard.saturating_duration_since(seen.at) > DOCK_SEEN_FOR {
+        if !margin::note("DOCK_SEEN_FOR", margin::age("DOCK_SEEN_FOR", heard, seen.at), DOCK_SEEN_FOR, heard.saturating_duration_since(seen.at) <= DOCK_SEEN_FOR) {
             return;
         }
         tracing::info!(
@@ -2036,7 +2046,12 @@ impl Controller {
         let Some(sent) = &self.ahead else { return };
         let changed = self.space_changes != sent.changes_at;
         let waited = now.saturating_duration_since(sent.sent_at);
+        let away = sent.trigger.away() && !changed;
         if let Some(why) = expire_step(sent.trigger, self.phase.changing(), changed, waited, self.ahead_contradicted(now)) {
+            // Undone for want of a Space change: the wait ended by its cap.
+            if away && waited >= DOCK_SWITCH_WAIT {
+                margin::wait("DOCK_SWITCH_WAIT", waited, DOCK_SWITCH_WAIT, End::Cap);
+            }
             self.undo_ahead(ob, why);
         }
     }

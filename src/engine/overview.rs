@@ -186,6 +186,15 @@ impl OverviewWatch {
             self.told_at = Some(now);
         }
         let carried = self.told_at.is_some_and(|t| now.duration_since(t) < OVERVIEW_EXIT_CARRY);
+        if sight.overview.is_none()
+            && sight.dock_cover
+            && !carried
+            && let (Some((Overview::MissionControl, _)), Some(t)) = (self.showing, self.told_at)
+        {
+            // The Dock's cover still listed, Mission Control's own windows gone longer than the
+            // carry: it is taken as closed now, by the carry's cap.
+            crate::engine::margin::wait("OVERVIEW_EXIT_CARRY", now.duration_since(t), OVERVIEW_EXIT_CARRY, crate::engine::margin::End::Cap);
+        }
         let seen = match (sight.overview, self.showing) {
             (None, Some((Overview::MissionControl, _))) if sight.dock_cover && carried => Some(Overview::MissionControl),
             (seen, _) => seen,
@@ -230,6 +239,12 @@ impl OverviewWatch {
     /// The overview shown at the last look (not one listed too long to be trusted).
     pub fn showing(&self) -> Option<Overview> {
         self.showing.filter(|_| !self.stuck).map(|(k, _)| k)
+    }
+
+    /// How long ago the last overview closed, while none shows (`None`: one shows, or none
+    /// closed since the launch).
+    pub fn since_closed(&self, now: Instant) -> Option<Duration> {
+        self.ended.filter(|_| self.showing().is_none()).map(|t| now.saturating_duration_since(t))
     }
 
     /// True while Space inference waits: an overview shows, or closed less than

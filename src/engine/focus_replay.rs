@@ -101,7 +101,18 @@ impl FocusReplay {
 
     /// The held event, if it is recent enough; it is gone from here either way.
     pub fn take(&mut self, now: Instant) -> Option<Wanted> {
-        self.held.take().filter(|h| h.fresh(now)).map(|h| h.wanted)
+        let held = self.held.take()?;
+        let (waited, came) = (now.duration_since(held.since), now.duration_since(held.came));
+        use crate::engine::margin::{End, wait};
+        if held.fresh(now) {
+            wait("FOCUS_REPLAY_MAX", waited, FOCUS_REPLAY_MAX, End::Met);
+            Some(held.wanted)
+        } else {
+            let (name, elapsed, cap) =
+                if came >= FOCUS_REPLAY_CAP { ("FOCUS_REPLAY_CAP", came, FOCUS_REPLAY_CAP) } else { ("FOCUS_REPLAY_MAX", waited, FOCUS_REPLAY_MAX) };
+            wait(name, elapsed, cap, End::Cap);
+            None
+        }
     }
 
     /// The held event, left held.

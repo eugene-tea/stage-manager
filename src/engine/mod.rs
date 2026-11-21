@@ -26,6 +26,7 @@ pub mod leftovers;
 pub mod landing_order;
 pub mod lend_park;
 pub mod lend_round;
+pub mod margin;
 pub mod logout_watch;
 pub mod minimize;
 pub mod minimize_press;

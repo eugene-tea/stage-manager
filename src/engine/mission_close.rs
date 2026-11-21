@@ -77,7 +77,8 @@ impl CloseWatch {
     /// click after that key.
     pub fn closed_by_key(&self, now: Instant) -> bool {
         let Some(key) = self.key else { return false };
-        now.saturating_duration_since(key) < KEY_COUNTS && self.click.is_none_or(|c| c < key)
+        let since = crate::engine::margin::age("KEY_COUNTS", now, key);
+        crate::engine::margin::within("KEY_COUNTS", since, KEY_COUNTS) && self.click.is_none_or(|c| c < key)
     }
 
     /// The app found no pick at this close, if any.

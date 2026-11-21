@@ -143,6 +143,7 @@ impl Switcher {
     pub fn gone_due(&mut self, now: Instant) -> Heard {
         match self.gone {
             Some(at) if now.saturating_duration_since(at) >= GONE_WAIT => {
+                crate::engine::margin::wait("GONE_WAIT", now.saturating_duration_since(at), GONE_WAIT, crate::engine::margin::End::Cap);
                 self.gone = None;
                 match self.open.take() {
                     Some(steps) => Heard::Released { steps },
@@ -283,10 +284,14 @@ impl LetGo {
             None => lent_at,
         };
         let since = now.saturating_duration_since(base);
-        let wait = if self.unread { UNREAD_WAIT } else { ACTIVATION_WAIT };
+        let (name, wait) = if self.unread { ("UNREAD_WAIT", UNREAD_WAIT) } else { ("ACTIVATION_WAIT", ACTIVATION_WAIT) };
         match self.activated {
             true if since >= lend_wait => LetGoStep::NoSwitch,
-            false if since >= wait => LetGoStep::NoActivation,
+            false if since >= wait => {
+                // The caller ends the lend at this answer: noted once.
+                crate::engine::margin::wait(name, since, wait, crate::engine::margin::End::Cap);
+                LetGoStep::NoActivation
+            }
             _ => LetGoStep::Keep,
         }
     }

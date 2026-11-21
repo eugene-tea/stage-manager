@@ -470,6 +470,10 @@ pub fn fate(shown: bool, front_app: bool, since_close: Duration) -> Fate {
     } else if front_app && since_close < PICK_WAIT {
         Fate::Wait
     } else {
+        if front_app {
+            // Its app in front, and no switch came within the wait.
+            crate::engine::margin::wait("PICK_WAIT", since_close, PICK_WAIT, crate::engine::margin::End::Cap);
+        }
         Fate::TakeBack
     }
 }
@@ -757,6 +761,9 @@ impl Lends {
     pub fn guess_over(&mut self, now: Instant) -> bool {
         if self.up.is_some() || !self.guess.is_some_and(|t| now.saturating_duration_since(t) >= KEY_WAIT) {
             return false;
+        }
+        if let Some(t) = self.guess {
+            crate::engine::margin::wait("KEY_WAIT", now.saturating_duration_since(t), KEY_WAIT, crate::engine::margin::End::Cap);
         }
         self.guess = None;
         self.wanted = None;
@@ -1103,10 +1110,13 @@ impl Lends {
     /// gone (the Dock's cover may still be listed for its exit), or [`PICK_HOLD`] over.
     pub fn pick_due(&mut self, now: Instant) -> Option<PickBy> {
         let (by, at) = self.pick?;
-        let due = self.up.is_none() || !self.own_listed || now.saturating_duration_since(at) >= PICK_HOLD;
+        let met = self.up.is_none() || !self.own_listed;
+        let due = met || now.saturating_duration_since(at) >= PICK_HOLD;
         if !due {
             return None;
         }
+        let how = if met { crate::engine::margin::End::Met } else { crate::engine::margin::End::Cap };
+        crate::engine::margin::wait("PICK_HOLD", now.saturating_duration_since(at), PICK_HOLD, how);
         self.pick = None;
         self.released = Some(by);
         Some(by)

@@ -565,7 +565,8 @@ impl Controller {
     /// although a window was put home).
     pub(super) fn switcher_space_changed(&mut self, now: Instant) {
         let Some((at, lent)) = self.switcher.released else { return };
-        if now.saturating_duration_since(at) > RELEASE_SEEN_FOR {
+        let seen = now.saturating_duration_since(at);
+        if !crate::engine::margin::note("RELEASE_SEEN_FOR", crate::engine::margin::age("RELEASE_SEEN_FOR", now, at), RELEASE_SEEN_FOR, seen <= RELEASE_SEEN_FOR) {
             self.switcher.released = None;
             return;
         }

@@ -271,9 +271,15 @@ pub fn since_last_press() -> Duration {
 
 /// [`since_last_press`] as of `at` (a notice's receipt, [`crate::platform::clock`]): how long
 /// before `at` the last press came. Zero when it came after `at`: a press between the notice
-/// and its handling counts as at the notice.
-pub fn since_last_press_at(at: Instant) -> Duration {
-    since_last_press().saturating_sub(clock::now().saturating_duration_since(at))
+/// and its handling counts as at the notice, and is counted for time window `name`
+/// ([`crate::engine::margin::predated`]).
+pub fn since_last_press_at(at: Instant, name: &'static str) -> Duration {
+    let since = since_last_press();
+    let ago = clock::now().saturating_duration_since(at);
+    if since < ago {
+        crate::engine::margin::predated(name);
+    }
+    since.saturating_sub(ago)
 }
 
 /// Left mouse-ups the monitor has seen (another app's, any source): a synthetic drag posts

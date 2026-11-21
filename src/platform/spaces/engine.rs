@@ -335,11 +335,16 @@ impl Moves for Mover<'_> {
                 None
             }
             Ok(()) => {
-                let by = clock::now() + if self.exact { RESTORE_READ_BACK } else { PARK_READ_BACK };
+                let (name, cap) = if self.exact { ("RESTORE_READ_BACK", RESTORE_READ_BACK) } else { ("PARK_READ_BACK", PARK_READ_BACK) };
+                let began = clock::now();
+                let by = began + cap;
                 loop {
                     let now = self.listed();
                     let there = now.is_some_and(|r| lend_park::at_origin(r, to));
-                    if there || (!self.exact && now != before) || clock::now() >= by {
+                    let met = there || (!self.exact && now != before);
+                    if met || clock::now() >= by {
+                        let how = if met { crate::engine::margin::End::Met } else { crate::engine::margin::End::Cap };
+                        crate::engine::margin::wait(name, clock::now().saturating_duration_since(began), cap, how);
                         break now;
                     }
                     std::thread::sleep(READ_BACK_STEP);
@@ -704,12 +709,14 @@ impl SpacesEngine {
         loop {
             let now = sky.spaces_of(&[id]);
             if done(&now) {
+                crate::engine::margin::wait("READ_BACK", clock::now().saturating_duration_since(began), READ_BACK, crate::engine::margin::End::Met);
                 let us = began.elapsed().as_micros() as u64;
                 let mut st = self.state();
                 st.counts.read_back_max_us = st.counts.read_back_max_us.max(us);
                 return (true, now);
             }
             if began.elapsed() >= READ_BACK {
+                crate::engine::margin::wait("READ_BACK", clock::now().saturating_duration_since(began), READ_BACK, crate::engine::margin::End::Cap);
                 return (false, now);
             }
             std::thread::sleep(READ_BACK_STEP);
@@ -746,7 +753,13 @@ impl SpacesEngine {
         // than its screen shows; past it, or once the user pressed, where it is listed holds.
         let mid_change = keep && {
             let from = self.state().watch_from;
-            spill::mid_change(from.map(|t| clock::now().saturating_duration_since(t)), crate::platform::input::since_last_press())
+            let since = from.map(|t| clock::now().saturating_duration_since(t));
+            let mid = spill::mid_change(since, crate::platform::input::since_last_press());
+            if let Some(since) = since {
+                // Measured to the hide, which carries no notice's stamp.
+                crate::engine::margin::note("MID_CHANGE", since, spill::MID_CHANGE, mid);
+            }
+            mid
         };
         let hints = {
             let st = self.state();

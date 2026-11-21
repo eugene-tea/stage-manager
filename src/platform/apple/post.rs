@@ -109,7 +109,11 @@ pub fn take_landed() -> Option<Landed> {
 /// True when an input event heard at `now` may be a gesture of ours: one is in flight, or
 /// ended less than [`ECHO`] ago.
 pub fn echo(now: Instant) -> bool {
-    in_flight() || ENDED.lock().ok().and_then(|e| *e).is_some_and(|t| now.saturating_duration_since(t) < ECHO)
+    in_flight()
+        || ENDED.lock().ok().and_then(|e| *e).is_some_and(|t| {
+            let age = crate::engine::margin::age("apple::post::ECHO", now, t);
+            crate::engine::margin::within("apple::post::ECHO", age, ECHO)
+        })
 }
 
 /// Starts `posted` on a thread of its own (`manager`: WindowManager's pid, whose window a

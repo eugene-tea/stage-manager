@@ -155,10 +155,16 @@ impl SlideHold {
     /// [`Step::Decide`] after [`SLIDE_ACTIVATION_HOLD`] when the list shows no slide
     /// (`sliding`, asked only then), or after [`SLIDE_ACTIVATION_CAP`] whatever it shows.
     pub fn step(&self, now: Instant, changes: u64, sliding: impl FnOnce() -> bool) -> Step {
+        use crate::engine::margin::{End, wait};
         let age = now.saturating_duration_since(self.came);
         if changes != self.changes {
+            wait("SLIDE_ACTIVATION_HOLD", age, SLIDE_ACTIVATION_HOLD, End::Met);
             Step::Arrived
-        } else if age >= SLIDE_ACTIVATION_CAP || (age >= SLIDE_ACTIVATION_HOLD && !sliding()) {
+        } else if age >= SLIDE_ACTIVATION_CAP {
+            wait("SLIDE_ACTIVATION_CAP", age, SLIDE_ACTIVATION_CAP, End::Cap);
+            Step::Decide
+        } else if age >= SLIDE_ACTIVATION_HOLD && !sliding() {
+            wait("SLIDE_ACTIVATION_HOLD", age, SLIDE_ACTIVATION_HOLD, End::Cap);
             Step::Decide
         } else {
             Step::Wait

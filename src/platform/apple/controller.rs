@@ -436,7 +436,10 @@ impl AppleController {
         // times over until the person clicked another app): an app we activated ourselves, or
         // one macOS made active as our hide of another app took.
         // Judged at the notice's receipt; kept twice as long, for a notice handled late.
-        let ours = self.activated_by_us.get(&pid).is_some_and(|t| fired.saturating_duration_since(*t) < OWN_ACTIVATION);
+        let ours = self.activated_by_us.get(&pid).is_some_and(|t| {
+            let age = crate::engine::margin::age("apple::OWN_ACTIVATION", fired, *t);
+            crate::engine::margin::within("apple::OWN_ACTIVATION", age, OWN_ACTIVATION)
+        });
         self.activated_by_us.retain(|_, t| now.saturating_duration_since(*t) < OWN_ACTIVATION * 2);
         if ours {
             tracing::debug!(pid, "apple mode: an app activated by us: nothing started");
@@ -1275,7 +1278,7 @@ impl AppleController {
     pub fn ctl(&mut self, ob: &mut Observer, cmd: Command) -> Value {
         let asked = |r: Result<Value, Refusal>| r.unwrap_or_else(|Refusal(e)| json!({ "ok": false, "error": e }));
         match cmd {
-            Command::State => self.state_json(),
+            Command::State => crate::engine::margin::with_table(self.state_json()),
             Command::Switch(n) => asked(self.ask(ob, Ask::Switch(n))),
             Command::Merge(n) => asked(self.ask(ob, Ask::Merge(n))),
             Command::Send(n, id) => asked(self.ask(ob, Ask::Send(n, id))),

@@ -278,6 +278,12 @@ impl Watch {
         }
     }
 
+    /// When the first change to another Desktop came, in milliseconds from the release (the
+    /// change [`WINDOW`] judges).
+    pub fn first_change_ms(&self) -> Option<u64> {
+        self.changes.iter().find(|c| c.from != c.to).map(|c| c.at_ms)
+    }
+
     /// True once the outcome is known at `now`: [`WINDOW`] has passed, no notice waits for its
     /// Desktop and no slide waits for its return; or [`WAIT_MAX`] has passed.
     pub fn due(&self, now: Instant) -> bool {

@@ -105,6 +105,14 @@ impl Controller {
             }
             calm_since = clock::now();
         };
+        let elapsed = clock::now().saturating_duration_since(start);
+        let how = match stopped {
+            Some(USER_ACTED) => crate::engine::margin::End::Refuted,
+            Some(OUT_OF_TIME) => crate::engine::margin::End::Cap,
+            _ if elapsed >= order::CHECK_CAP => crate::engine::margin::End::Cap,
+            _ => crate::engine::margin::End::Met,
+        };
+        crate::engine::margin::wait("CHECK_CAP", elapsed, order::CHECK_CAP, how);
         let Some(wrong) = first_wrong else { return };
         let fixed = order::to_raise_again(&asked, &got).is_empty();
         tracing::info!(

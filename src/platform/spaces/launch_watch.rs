@@ -76,7 +76,10 @@ pub fn first_look(layer: i64, onscreen: bool, on_a_space: bool) -> FirstLook {
 /// watch is over (`watching` false).
 pub fn let_out_unplaced(ordered: Option<Instant>, watching: bool, now: Instant) -> Option<&'static str> {
     match ordered {
-        Some(t) if now.saturating_duration_since(t) >= NOT_PLACED_AFTER => Some("not placed in time"),
+        Some(t) if now.saturating_duration_since(t) >= NOT_PLACED_AFTER => {
+            crate::engine::margin::wait("NOT_PLACED_AFTER", now.saturating_duration_since(t), NOT_PLACED_AFTER, crate::engine::margin::End::Cap);
+            Some("not placed in time")
+        }
         None if !watching => Some("never shown by its app"),
         _ => None,
     }
