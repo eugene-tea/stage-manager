@@ -5004,6 +5004,14 @@ impl Controller {
         self.leave_off_screen(ob, &list);
         // A managed window off screen whose handle died: found again, or let go if closed.
         self.check_stale_handles(ob, &list);
+        if let Some(listing) = &keyed {
+            // Where the windows are is the window server's to say: no window of another
+            // Desktop on screen means a Space change went unseen, and none missing is counted
+            // towards a second look.
+            self.desk_membership(ob, &list, listing, now);
+            return;
+        }
+
         let Some(m) = self.model.as_ref() else { return };
         let space = m.current_space(main.id);
         let standard = |w: &&crate::engine::model::WindowState| w.meta.role == WindowRole::Standard && !w.sticky;

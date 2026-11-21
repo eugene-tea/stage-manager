@@ -16,10 +16,14 @@
 //!   its app's windows in a stage Space that nothing answers for are let out now
 //!   ([`engine::SpacesEngine::let_strangers_out`]) in place of at the next tidy. Not while the
 //!   two may differ for a reason ([`Controller::spaces_held_back`]): the tick checks once it
-//!   may.
+//!   may. For a window the model shows, while the window server's listing decides where the
+//!   windows are (design r3): the tick's check of the Spaces now, which asks the window for
+//!   its Desktop ([`Controller::desk_membership`]: moved to another Desktop by hand).
 //! - **1401 / 1329** (a Desktop change's end): NSWorkspace's notice drives the Space-change
 //!   path; only when none came within one fast tick of it ([`WORKSPACE_WAIT`]) is the tick's
-//!   check of the Spaces brought forward (a thin hook for design r3's Desktops).
+//!   check of the Spaces brought forward, which looks at the window server's listing first
+//!   ([`Controller::sync_desktops`], design r3): a Desktop change with no notice is taken
+//!   within a fast tick of its end.
 
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
@@ -61,6 +65,8 @@ pub(super) struct ServerWatch {
     /// Desktop changes: the tick's check brought forward, or NSWorkspace's notice first.
     space_checks: u64,
     workspace_first: u64,
+    /// Checks of the Spaces made at a membership notice about a window the model shows.
+    member_checks: u64,
 }
 
 impl ServerWatch {
@@ -86,7 +92,7 @@ impl Controller {
         let _wake = windows::wake();
         match burst.kind {
             Kind::Overview => self.overview_noticed(ob, burst.at, now),
-            Kind::Added | Kind::TakenOut => self.membership_noticed(&burst, now),
+            Kind::Added | Kind::TakenOut => self.membership_noticed(ob, &burst, now),
             Kind::DesktopChanged | Kind::DesktopChangedToo => self.desktop_change_noticed(burst.at),
             Kind::Created | Kind::Visible | Kind::Invisible => {}
         }
@@ -114,12 +120,13 @@ impl Controller {
 
     /// 1325 / 1326 not our own: the check of the model against the window server now, and the
     /// strangers of the apps of windows nothing knows let out now.
-    fn membership_noticed(&mut self, burst: &Burst, now: Instant) {
+    fn membership_noticed(&mut self, ob: &mut Observer, burst: &Burst, now: Instant) {
         let spaces = engine::shared();
         let Some(m) = self.model.as_ref() else { return };
         // A notice that names nothing readable may be about any window.
         let every = burst.unnamed > 0;
         let mut hidden = every;
+        let mut shown = false;
         let mut unknown: Vec<u32> = Vec::new();
         for (w, _) in &burst.members {
             let counted_hidden = m.window(WindowId(*w)).is_some_and(|x| x.parked);
@@ -127,7 +134,16 @@ impl Controller {
                 hidden = true;
             } else if m.window(WindowId(*w)).is_none() {
                 unknown.push(*w);
+            } else {
+                shown = true;
             }
+        }
+        if shown && self.keyed_listing().is_some() && !self.spaces_held_back(now) {
+            // A window the model shows changed Spaces by something else's hand (Mission
+            // Control's drag to another Desktop): where it is now is asked at once.
+            self.spaces.server.member_checks += 1;
+            margin::wait_noticed("SPACE_POLL", now.saturating_duration_since(self.space_checked), super::SPACE_POLL);
+            self.check_spaces_now(ob);
         }
         let own = std::process::id() as i32;
         let apps: BTreeSet<i32> = windows::describe(&unknown).into_iter().filter(|w| w.pid != own && w.layer == 0).map(|w| w.pid).collect();
@@ -211,6 +227,7 @@ impl Controller {
             "held_back": s.held_back,
             "strangers_out": s.strangers_out,
             "space_checks": s.space_checks,
+            "member_checks": s.member_checks,
             "workspace_first": s.workspace_first,
             "stray_look_ms": STRAY_LOOK.as_millis() as u64,
         })

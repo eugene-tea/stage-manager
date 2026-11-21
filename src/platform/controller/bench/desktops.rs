@@ -384,10 +384,12 @@ fn the_first_visit_to_an_unknown_apps_desktop() {
 #[test]
 fn a_window_moved_and_a_window_on_every_desktop() {
     let moved = "here: front [] shows [] desktop 1 app 102 switches 0 slides 0; there: stages [[12, 15], [13]] front [12, 15] shows [12, 15] desktop 2 app 102 switches 0 slides 1; shadow 0 shown (0 open) 0 homes";
-    // SPACE_CHECKS still: gone at two looks a second apart, whatever the window server tells.
-    let counted = format!("left its stage within 3.5 s; {moved}");
-    expect(window_moved_server_tells, [&counted, &counted, &counted]);
-    expect(window_moved_nothing_tells, [&counted, &counted, &counted]);
+    // One read of its Desktop at the look its membership notice brings forward.
+    let at_once = format!("left its stage at once; {moved}");
+    expect(window_moved_server_tells, [&at_once, &at_once, &at_once]);
+    // Or at the tick's next look (at rest, 2 s apart): one look, where SPACE_CHECKS took two.
+    let ticked = format!("left its stage within 2.5 s; {moved}");
+    expect(window_moved_nothing_tells, [&ticked, &ticked, &ticked]);
     // Listed on both Desktops: on every Desktop from the first arrival that sees it, never
     // taken for moved (before: STICKY_HOPS, a stage of its own on each Desktop in turn for
     // two arrivals).
@@ -412,8 +414,8 @@ pub(super) const ALL: &[Scenario] = &[
     ("both Desktops listed at the arrival (Spaces)", "controller/desktops.rs keyed_live (before: MIXED_WAIT)", both_desktops_listed_at_the_arrival),
     ("the listing not readable for one arrival (Spaces)", "design r3, decision 1's fallback", listing_unreadable_for_one_arrival),
     ("the first visit to a Desktop with an unknown app in front (Spaces)", "the bench's author, 11-21", first_visit_to_an_unknown_apps_desktop),
-    ("a window moved to another Desktop by hand, the window server tells (Spaces)", "controller.rs check_spaces, SPACE_CHECKS", window_moved_server_tells),
-    ("a window moved to another Desktop by hand, nothing tells (Spaces)", "controller.rs check_spaces, SPACE_CHECKS", window_moved_nothing_tells),
+    ("a window moved to another Desktop by hand, the window server tells (Spaces)", "controller/desktops.rs desk_membership; server_notices.rs 1325", window_moved_server_tells),
+    ("a window moved to another Desktop by hand, nothing tells (Spaces)", "controller/desktops.rs desk_membership, the tick", window_moved_nothing_tells),
     ("a window on every Desktop (Spaces)", "engine/model/desks.rs Listed::every (before: STICKY_HOPS)", window_on_every_desktop),
     ("a window into full screen and out (Spaces)", "engine/fullscreen.rs, 10-12", full_screen_in_and_out),
     ("another screen's Desktop changes (Spaces)", "design r3 decision 9 (before: every screen arrived)", another_screens_desktop_changes),

@@ -19,6 +19,11 @@
 //!   Desktop still listed while it slides away, a window just shown on another), one on two
 //!   Desktops or more is on every Desktop. No wait for a list that shows one Desktop only,
 //!   no second look, no settle after.
+//! - **Where a window went** ([`Controller::desk_membership`], at the tick): a window of the
+//!   Desktop shown that is not on screen, or one of another Desktop that is, is asked for
+//!   its Desktop once: on its own, nothing; on one other, it moved there
+//!   ([`Model::window_on_desk`]); on none (hidden in a stage's Space, in full screen),
+//!   nothing.
 //! - **A window found** ([`Controller::found_on_desk_shown`]) is placed only when it is on
 //!   the Desktop the model shows, and an activation whose app's focused window is on another
 //!   Desktop belongs to that Desktop ([`Controller::focus_on_another_desk`]).
@@ -36,12 +41,13 @@
 //!
 //! [`WindowEngine::desktops`]: crate::platform::window_engine::WindowEngine::desktops
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::Controller;
+use super::corner::unrestored::LetGo;
+use super::{Controller, launch_hints};
 use crate::engine::desk_shadow::{self, Change, Shadow, Sight, Subject};
 use crate::engine::margin;
 use crate::engine::model::desks::{Desk, Listed, SavedDesk};
@@ -49,7 +55,7 @@ use crate::engine::model::{Display, DisplayId, WindowId, WindowMeta, WindowRole}
 use crate::engine::phase::{self, Hold};
 use crate::platform::observe::Observer;
 use crate::platform::spaces::ffi::ScreenDesks;
-use crate::platform::{clock, windows};
+use crate::platform::{clock, input, windows};
 
 /// How long after a Space change's notice the listing may still name the Space left before
 /// the notice is taken for one with no change. Measured 11-21: the notice 1-9 ms before the
@@ -318,6 +324,62 @@ impl Controller {
         }
         let on: Vec<u64> = self.engine.spaces_of(focused).unwrap_or_default().into_iter().filter(|s| listing.1.contains(s)).collect();
         !on.is_empty() && !m.displays().iter().any(|d| m.shown_desk(d.id).is_some_and(|shown| on.contains(&shown)))
+    }
+
+    /// The tick's look at where the windows are, by the window server's word (module docs):
+    /// each standard window of a Desktop shown that is not on screen, and each of another
+    /// Desktop that is, is asked for its Desktop once. Nothing while a button is down (a
+    /// drag to another Desktop goes on), for a window written to a moment ago, or for one the
+    /// model counts hidden that was not lent (the engine's own check hides it again).
+    pub(super) fn desk_membership(&mut self, ob: &mut Observer, list: &[windows::CgWindow], listing: &Listing, now: Instant) {
+        if input::left_button_down() {
+            return;
+        }
+        let Some(m) = self.model.as_ref() else { return };
+        let shown: HashSet<u32> = self.present_in(list);
+        let mut found: Vec<(u32, u64, u64)> = Vec::new();
+        for w in m.windows().filter(|w| w.meta.role == WindowRole::Standard && !w.sticky) {
+            let id = w.meta.id.0;
+            let Some(own) = m.desk_of_space(w.space) else { continue };
+            // In place as far as a look can tell: shown with its Desktop, or away with it.
+            if m.is_shown_space(w.space) == shown.contains(&id) {
+                continue;
+            }
+            if (w.parked && !self.engine.lent(w.meta.id)) || self.causes.wrote_recently(id, now) || ob.noted_closed(id) {
+                continue;
+            }
+            let Some(spaces) = self.engine.spaces_of(w.meta.id) else { return };
+            let on: Vec<u64> = spaces.into_iter().filter(|s| listing.1.contains(s)).collect();
+            if let [desk] = on[..]
+                && desk != own
+            {
+                found.push((id, own, desk));
+            }
+        }
+        if found.is_empty() {
+            return;
+        }
+        // What a card press read no longer holds.
+        self.pressed_obs = None;
+        let hints = launch_hints(list);
+        for (id, from, to) in found {
+            let Some(m) = self.model.as_mut() else { return };
+            let group = m.group_of(WindowId(id));
+            let kept = self.parked_entries_of(&group);
+            let Some(m) = self.model.as_mut() else { return };
+            let (actions, forgotten) = m.window_on_desk(WindowId(id), to, &hints);
+            if forgotten.is_empty() {
+                self.desks.moved += 1;
+                tracing::info!(id, from, to, "desktops: a window is on another Desktop that shows (moved there): it joins that Desktop's stages");
+                self.execute(ob, actions);
+            } else {
+                self.desks.left += 1;
+                tracing::info!(id, from, to, "desktops: a window is on another Desktop (moved there): it left its stage; placed when that Desktop shows");
+                self.execute(ob, actions);
+                self.let_go_hidden(ob, kept, LetGo::Other);
+                self.unplaced.extend(forgotten.into_iter().map(|w| w.0).filter(|w| ob.window(*w).is_some()));
+            }
+        }
     }
 
     /// The listing took the Space change with no arrival on the main screen: the phase is
