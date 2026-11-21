@@ -76,6 +76,8 @@
 //!   round sm-tick: which could stir the WM tick); reads only.
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
+//! - `dock-notices`, `space-flip`, `names`, `indicator` (round r0-probes): the four live probes
+//!   of [`system`], plain tables and verdicts, through `scripts/probe_system.py`.
 
 
 use std::io::Write as _;
@@ -93,6 +95,8 @@ use super::windows::{self, CgWindow};
 
 #[path = "spaces_probe_capture.rs"]
 mod capture;
+#[path = "system_probe/mod.rs"]
+mod system;
 
 /// Where the probe keeps its record of the Spaces it made, and screenshots.
 pub const PROBE_DIR: &str = "/tmp/sm-spaces-probe";
@@ -201,7 +205,7 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle|pixels|notices …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle|pixels|notices|dock-notices|space-flip|names|indicator …");
     };
     // Read only (no window moves): any app, their own arguments.
     if cmd == "sources" {
@@ -218,6 +222,9 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     if cmd == "notices" {
         return super::new_window_probe::notices(rest);
+    }
+    if let Some(code) = system::run(cmd, rest) {
+        return code;
     }
     let o = match parse(rest) {
         Ok(o) => o,
