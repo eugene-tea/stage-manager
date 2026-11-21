@@ -179,8 +179,8 @@ impl Model {
     }
 
     /// Takes the bindings `state.json` saved (`desks`): kept for the saved Spaces not visited
-    /// yet, so a save before their visit writes them again. Call it after
-    /// [`Model::restore_spaces`].
+    /// yet, so a save before their visit writes them again. Nothing is bound from them yet
+    /// (slice 6 of design r3 finds a Desktop again by its uuid).
     pub fn restore_desks(&mut self, saved: Vec<SavedDesk>) {
         self.saved_desks = saved;
     }

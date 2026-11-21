@@ -156,6 +156,7 @@ mod ax_blind;
 #[cfg(test)]
 mod bench;
 mod corner;
+mod desktops;
 mod dock_order;
 mod fallback;
 mod landing_focus;
@@ -1051,6 +1052,8 @@ pub struct Controller {
     our_switch: Option<Instant>,
     /// When the window server's list was last checked for Space changes.
     space_checked: Instant,
+    /// Where the model and the window server's Desktops disagree (`controller/desktops.rs`).
+    desks: desktops::DeskWatch,
     /// Managed windows of other Spaces on screen: counted once the same ones show at two
     /// checks a settle apart ([`Persisting`]).
     foreign: Persisting,
@@ -1336,6 +1339,7 @@ impl Controller {
             setups: crate::engine::setup_frames::Recorder::default(),
             our_switch: None,
             space_checked: clock::now(),
+            desks: desktops::DeskWatch::default(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
             pressed_obs: None,
@@ -4070,7 +4074,11 @@ impl Controller {
             saved_spaces = state.as_ref().map_or(0, |s| s.0.spaces.len()),
             "building stages"
         );
-        if let Some((state, restore)) = state {
+        // The window server's Desktops, for the arrivals below (design r3, slice 1).
+        let listing = self.listing_for(model.displays());
+        if let Some((mut state, restore)) = state {
+            Self::note_saved_desks(&state.desks, listing.as_ref());
+            model.restore_desks(std::mem::take(&mut state.desks));
             self.seen_times = state.seen_times();
             self.settling = restore.restoring.then(|| {
                 let login = if restore.new_session { super::apps::login_started() } else { None };
@@ -4100,7 +4108,8 @@ impl Controller {
                 if d.id != main.id && here.is_empty() && !model.awaits_travellers(d.id) && !model.forms_saved_desktop(d.id) {
                     continue;
                 }
-                let more = model.arrive(d.id, &here, &[], &hints);
+                let desk = listing.as_ref().and_then(|l| l.desk(d.id));
+                let more = model.arrive_on(d.id, desk.as_ref(), &here, &[], &hints);
                 all.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
             }
             // None is left (every screen arrived on); never one unmanaged for good if it is.
@@ -4662,11 +4671,12 @@ impl Controller {
         let hold = self.macos_after_display_change(clock::now());
         let watch = self.spaces_display_watch();
         let carried = self.slide_carried(clock::now());
+        let desk = self.arrival_desk(main.id);
         let Some(m) = self.model.as_mut() else { return };
         m.set_hold_arrivals(hold);
         m.set_display_watch(watch);
         m.set_slide_carried(carried);
-        let mut actions = m.arrive(main.id, &live, &absent, &hints);
+        let mut actions = m.arrive_on(main.id, desk.as_ref(), &live, &absent, &hints);
         m.set_hold_arrivals(false);
         let after = m.current_space(main.id);
         let note = m.last_arrival().clone();
@@ -4690,6 +4700,8 @@ impl Controller {
             held = note.held.len(),
             kept_home = note.kept_home.len(),
             sticky = note.sticky.len(),
+            desk = ?note.desk.map(|d| d.0),
+            agree = note.desk.map(|d| d.1.word()),
             "Space changed"
         );
         log_arrival_lets(&note);
@@ -4842,6 +4854,7 @@ impl Controller {
     /// window left in its card).
     fn arrive_others_for(&mut self, ob: &mut Observer, list: &[windows::CgWindow], awaited: Option<(Wanted, Vec<SpaceId>)>) {
         let predicted = self.arrive_others(ob, list);
+        self.look_at_desks("arrival");
         let Some(m) = self.model.as_ref() else { return };
         let came = awaited.filter(|(_, spaces)| spaces.iter().any(|s| m.is_shown_space(*s))).map(|(held, _)| held);
         if came.is_none() && predicted.is_none() {
@@ -4883,12 +4896,13 @@ impl Controller {
             let hold = self.macos_after_display_change(clock::now());
             let watch = self.spaces_display_watch();
             let carried = self.slide_carried(now);
+            let desk = self.arrival_desk(d.id);
             let Some(m) = self.model.as_mut() else { return predicted };
             let before = m.current_space(d.id);
             m.set_hold_arrivals(hold);
             m.set_display_watch(watch);
             m.set_slide_carried(carried);
-            let mut actions = m.arrive(d.id, &live, &absent, &hints);
+            let mut actions = m.arrive_on(d.id, desk.as_ref(), &live, &absent, &hints);
             m.set_hold_arrivals(false);
             let after = m.current_space(d.id);
             let note = m.last_arrival().clone();
@@ -4905,6 +4919,8 @@ impl Controller {
                     other_screen = note.other_screen,
                     moved = note.moved,
                     carried = note.carried,
+                    desk = ?note.desk.map(|d| d.0),
+                    agree = note.desk.map(|d| d.1.word()),
                     "Space changed on another display"
                 );
             }
@@ -5183,6 +5199,8 @@ impl Controller {
         if self.phase.fullscreen() {
             return;
         }
+        // The model's Desktops against the window server's (design r3, slice 1: logs only).
+        self.look_at_desks("check");
         // A window tab selected takes the place of the tab it hides, before the tab left is
         // counted missing or the tab selected is taken for a new window (round tab-lost).
         self.take_tabs(ob, &list);
@@ -7164,6 +7182,8 @@ impl Controller {
         state["displays"] = Value::Array(displays_json);
         state["strays"] = Value::Array(strays);
         state["mission_control"] = self.status_mission_control();
+        // The window server's Desktops, their bindings and where they disagree (design r3).
+        state["desks"] = self.desks_json();
         // Windows whose handle died judged closed once, waiting for a second look.
         state["stale_closing"] = json!(self.stale.waiting());
         // Keep stages in place (9B): the order, the active stage's mode and its empty slot.
