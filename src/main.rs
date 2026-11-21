@@ -896,6 +896,11 @@ mod app {
             }
         };
         let _ = WM.set(wm.clone());
+        // The window server's notices (the Spaces engine; registered at the choice above).
+        let wm_notices = wm.clone();
+        stage_manager::platform::spaces::notices::set_sink(move |burst| {
+            wm_notices.send(WmCommand::ServerNotice(burst));
+        });
         guardian::spawn();
         let wm_signals = wm.clone();
         if let Err(e) = safety::watch_signals(move |sig| {

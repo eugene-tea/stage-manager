@@ -51,6 +51,7 @@ pub mod rescan;
 pub mod restore;
 pub mod rules;
 pub mod save_clock;
+pub mod server_notice;
 pub mod settings;
 pub mod setup_frames;
 pub mod show_desktop;

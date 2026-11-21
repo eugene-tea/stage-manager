@@ -100,7 +100,7 @@ impl Controller {
     pub(super) fn upkeep_wants_fast_tick(&self, now: Instant) -> bool {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_replans(now) || self.reveal_fast(now),
-            EngineKind::Spaces => self.mission_wants_fast(now),
+            EngineKind::Spaces => self.mission_wants_fast(now) || self.server_wants_fast(now),
             EngineKind::Apple => false,
         }
     }
@@ -157,7 +157,10 @@ impl Controller {
     pub(super) fn upkeep_fast_tick(&mut self, ob: &mut Observer, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_fast_tick(now),
-            EngineKind::Spaces => self.mission_fast_tick(ob, now),
+            EngineKind::Spaces => {
+                self.mission_fast_tick(ob, now);
+                self.server_fast_tick(ob, now);
+            }
             EngineKind::Apple => {}
         }
     }
@@ -468,6 +471,11 @@ impl Controller {
             EngineKind::Spaces => {
                 let mut status = crate::platform::spaces::engine::shared().status();
                 status["kind"] = json!(EngineKind::Spaces.name());
+                // The window server's notices (round r5-notices): what was heard, and what it
+                // brought forward.
+                let mut notices = crate::platform::spaces::notices::status();
+                notices["uses"] = self.server_status();
+                status["notices"] = notices;
                 status
             }
             EngineKind::Apple => json!({ "kind": EngineKind::Apple.name() }),

@@ -130,6 +130,8 @@ fn stirs(cmd: &WmCommand) -> bool {
         // ⌘ pressed or let go alone moves nothing; the Tab that opens ⌘Tab's switcher stirs.
         WmCommand::Input(e, _) if e.kind == input::InputKind::CommandKey => false,
         WmCommand::Input(e, _) => e.kind != input::InputKind::KeyDown || e.cmd || e.other_modifiers,
+        // A notice brings its own look forward; the tick's pace follows what that look finds.
+        WmCommand::ServerNotice(_) => false,
         _ => true,
     }
 }
@@ -242,6 +244,9 @@ pub enum WmCommand {
     Probe(observe_probe::Note),
     /// The launch's recovery scan read an app after observation's start ([`launch_scan`]).
     LaunchScan(launch_scan::Done<launch_scan::Read>),
+    /// The window server's notices of one kind heard in one turn of the main run loop
+    /// ([`super::spaces::notices`], the Spaces engine only): a trigger for a look, never a fact.
+    ServerNotice(crate::engine::server_notice::Burst),
 }
 
 impl WmCommand {
@@ -266,6 +271,7 @@ impl WmCommand {
             WmCommand::LogoutSignal(..) => "command LogoutSignal",
             WmCommand::Probe(_) => "command Probe",
             WmCommand::LaunchScan(_) => "command LaunchScan",
+            WmCommand::ServerNotice(_) => "command ServerNotice",
         }
     }
 }
@@ -590,6 +596,9 @@ impl WmState {
             // Nothing is arranged during the hold, but a window the head start could not reach
             // may show on this Space now (as while standing down).
             WmCommand::SpaceChanged(_) if !self.logout.admits(Work::SpaceChange) => self.retry_held(),
+            // Nothing is looked at for a notice while nothing is arranged; the polls resume.
+            WmCommand::ServerNotice(_) if !self.logout.admits(Work::SpaceChange) || !self.stand_down.admits(Work::SpaceChange) => {}
+            WmCommand::ServerNotice(burst) => self.conductor.server_notice(&mut self.observer, burst),
             WmCommand::LogoutSignal(name, signal, at) => self.logout_signal(&name, signal, at),
             // The tap swallowed the person's minimize: never lost. While nothing is arranged
             // it is macOS's, genie and all.

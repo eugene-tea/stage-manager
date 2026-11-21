@@ -122,6 +122,15 @@ impl Conductor {
         }
     }
 
+    /// The window server's notices of one kind ([`crate::engine::server_notice::Burst`]): the
+    /// Spaces engine's looks brought forward. Nothing in the Apple mode.
+    pub fn server_notice(&mut self, ob: &mut Observer, burst: crate::engine::server_notice::Burst) {
+        match self {
+            Self::Ours(c) => c.server_notice(ob, burst),
+            Self::Apples(_) => {}
+        }
+    }
+
     /// An app just opened.
     pub fn app_launched(&mut self, ob: &Observer, pid: i32) {
         match self {

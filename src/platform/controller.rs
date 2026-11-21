@@ -166,6 +166,7 @@ mod landing_focus;
 mod mission_control;
 mod notices;
 mod raise_order;
+mod server_notices;
 mod setup_frames;
 mod slide_watch;
 mod spaces;
@@ -4175,6 +4176,8 @@ impl Controller {
         let heard = heard.min(now);
         self.macos_reveal_at = None;
         self.space_changes += 1;
+        // A Desktop change's notice of the window server's needs no check of its own now.
+        self.spaces.server.workspace_heard(heard);
         counters::bump(Count::SpaceChange);
         tracing::debug!(changes = self.space_changes, "Space change notified");
         self.slide_watch_notice(heard);
@@ -4222,8 +4225,13 @@ impl Controller {
             && held_for_overview
             && let Some(since) = self.overview.since_closed(now)
         {
-            // The arrival waited for an overview's close: it ends by its settle, a cap.
-            margin::wait("OVERVIEW_ARRIVAL_SETTLE", since, crate::engine::overview::OVERVIEW_ARRIVAL_SETTLE, margin::End::Cap);
+            // The arrival waited for an overview's close: it ends by its settle, a cap, or at
+            // once at a look after the close's notice that found macOS's windows gone.
+            if self.overview.settled_by_notice() {
+                margin::wait_noticed("OVERVIEW_ARRIVAL_SETTLE", since, crate::engine::overview::OVERVIEW_ARRIVAL_SETTLE);
+            } else {
+                margin::wait("OVERVIEW_ARRIVAL_SETTLE", since, crate::engine::overview::OVERVIEW_ARRIVAL_SETTLE, margin::End::Cap);
+            }
         }
         if self.overview.holds_arrival(now) {
             if self.phase.hold() != Some(Hold::Overview) {
@@ -4792,6 +4800,15 @@ impl Controller {
             );
         }
         self.execute(ob, actions);
+    }
+
+    /// [`Self::check_spaces`] now, whatever its poll's pace: a Desktop change's notice of the
+    /// window server's that no NSWorkspace notice followed ([`server_notices`]).
+    fn check_spaces_now(&mut self, ob: &mut Observer) {
+        if let Some(t) = clock::now().checked_sub(SPACE_POLL) {
+            self.space_checked = self.space_checked.min(t);
+        }
+        self.check_spaces(ob);
     }
 
     /// About once a second: windows waiting that now show on screen are new windows; known
@@ -6507,6 +6524,15 @@ impl Controller {
                     "changes": self.space_changes,
                     "overview": self.overview.showing().map(Overview::name),
                     "inference_frozen": self.overview.freezes(clock::now()),
+                    // Round r5-notices: when the overview shown was found, the last one closed,
+                    // a window-server notice came while one showed (ms ago), and whether the
+                    // last close's settle was ended by a look after its notice.
+                    "overview_ms_ago": {
+                        "found": self.overview.ages_ms(clock::now()).0,
+                        "closed": self.overview.ages_ms(clock::now()).1,
+                        "told": self.overview.ages_ms(clock::now()).2,
+                        "settled_by_notice": self.overview.settled_by_notice(),
+                    },
                 }),
                 None => json!({ "ok": false, "error": not_managing() }),
             },

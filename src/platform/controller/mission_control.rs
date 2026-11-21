@@ -207,6 +207,14 @@ impl Controller {
         self.spaces.mission.lends.hint(Hint::Dock, now);
     }
 
+    /// The window server's notice (1508, round r5-notices): a hint whatever opened it (a
+    /// gesture, a hot corner, the Dock's item), the looks at the fast tick for a moment.
+    pub(super) fn mission_server_hint(&mut self, now: Instant) {
+        let mode = self.mission_mode();
+        self.spaces.mission.lends.set_mode(mode);
+        self.spaces.mission.lends.hint(Hint::Server, now);
+    }
+
     /// True while Mission Control's lends have work for the fast tick, or a focus waits for
     /// its close.
     pub(super) fn mission_wants_fast(&self, now: Instant) -> bool {

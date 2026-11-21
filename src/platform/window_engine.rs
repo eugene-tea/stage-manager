@@ -518,6 +518,9 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     let asked = Asked { config, test: super::spaces::engine::from_env() };
     // `"spaces"` opens the landing variants as a test run does: the review build (11-14).
     crate::ui::landing_math::Landing::open_for_review(config == ConfigEngine::Spaces);
+    // The window server's notices, registered before the probe so its panel's are heard
+    // (round r5-notices); forwarded only if the Spaces engine is chosen, else removed.
+    let notices = asked.probes() && super::spaces::notices::register();
     let probe = asked.probes().then(|| super::spaces::probe::run(mtm));
     match &probe {
         Some(p) if p.ok => tracing::info!(ms = format!("{:.1}", p.ms), steps = p.steps, "window engine: launch probe passed: {}", p.reason),
@@ -531,6 +534,9 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
         tracing::info!(landing = landing.name(), "window engine: a test or review run lands switches this way");
     }
     install(of(choice.kind));
+    if notices {
+        super::spaces::notices::chosen(choice.kind == EngineKind::Spaces);
+    }
     *lock_choice() = Some(choice.clone());
     choice
 }
@@ -540,6 +546,7 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
 /// for `ctl state`; the parked file names the engine from its next write.
 pub fn fall_back(why: &str) {
     install(of(EngineKind::Corner));
+    super::spaces::notices::stop();
     let mut c = lock_choice();
     match c.as_mut() {
         Some(choice) => {

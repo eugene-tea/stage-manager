@@ -61,6 +61,10 @@ impl Stray {
 /// window in a stage Space that the engine does not hold is let out.
 pub(super) const TIDY_EVERY: Duration = Duration::from_secs(10);
 
+/// The longest a window taken out of its stage's Space waits for the tick's look with no
+/// notice of the window server's (the tick at rest, [`crate::engine::tick_pace::REST`]).
+pub(super) const STRAY_LOOK: Duration = crate::engine::tick_pace::REST;
+
 /// What the Spaces engine's upkeep keeps between ticks, on the WM thread.
 pub(super) struct SpacesUpkeep {
     /// Windows the model counts hidden that were found out of their stage's Space, and how
@@ -83,12 +87,27 @@ pub(super) struct SpacesUpkeep {
     /// Mission Control's lends: the hidden stages' windows on their Desktop while it shows
     /// ([`super::mission_control`]).
     pub(super) mission: super::mission_control::MissionWatch,
+    /// What the window server's notices brought forward ([`super::server_notices`]).
+    pub(super) server: super::server_notices::ServerWatch,
+    /// When the model and the window server were last checked against each other
+    /// ([`Controller::spaces_reconcile`]).
+    reconciled: Instant,
 }
 
 impl SpacesUpkeep {
     /// Nothing kept.
     pub(super) fn new() -> Self {
-        Self { strays: BTreeMap::new(), tidied: clock::now(), dive: None, frames_owed: BTreeMap::new(), left_behind: false, mission: super::mission_control::MissionWatch::default() }
+        let now = clock::now();
+        Self {
+            strays: BTreeMap::new(),
+            tidied: now,
+            dive: None,
+            frames_owed: BTreeMap::new(),
+            left_behind: false,
+            mission: super::mission_control::MissionWatch::default(),
+            server: super::server_notices::ServerWatch::default(),
+            reconciled: now,
+        }
     }
 }
 
@@ -117,11 +136,34 @@ impl Controller {
         if let Some(m) = self.model.as_mut() {
             m.set_display_watch(watching);
         }
-        let Some(m) = self.model.as_ref() else {
+        // The window server's notices: their health, said once it is in.
+        crate::platform::spaces::notices::health_tick(now);
+        if self.model.is_none() {
             self.spaces.strays.clear();
             return;
-        };
-        if self.frozen()
+        }
+        if self.spaces_held_back(now) {
+            return;
+        }
+        self.spaces_reconcile(now, false);
+        let Some(m) = self.model.as_ref() else { return };
+        if now.duration_since(self.spaces.tidied) >= TIDY_EVERY {
+            self.spaces.tidied = now;
+            // The tick's read of every window, shared with its other duties (read afresh
+            // for the strangers only when the tidy ended a Space).
+            let alive: HashSet<u32> = windows::wake_list().iter().map(|w| w.id).collect();
+            spaces.tidy(&alive, |stage| m.stages().iter().any(|s| s.id.0 == stage));
+            if spaces.let_strangers_out(&windows::wake_list(), |id| m.window(WindowId(id)).is_some()) > 0 {
+                crate::engine::margin::wait("TIDY_EVERY", TIDY_EVERY, TIDY_EVERY, crate::engine::margin::End::Cap);
+            }
+        }
+    }
+
+    /// True while the model and the window server may differ for a reason, so nothing is
+    /// checked: a switch's windows waiting behind their pictures, a Space change settling, an
+    /// overview, an arrangement made ahead, a drag.
+    pub(super) fn spaces_held_back(&self, now: Instant) -> bool {
+        self.frozen()
             || self.overview.freezes(now)
             || self.phase.space_settling(now)
             || self.macos_reveal_at.is_some()
@@ -131,9 +173,18 @@ impl Controller {
             || self.slide_held()
             || self.drag.is_some()
             || input::left_button_down()
-        {
-            return;
-        }
+    }
+
+    /// The check of the model against the window server (the tick's, or brought forward by a
+    /// notice of the window server's, `by_notice`): a show not carried out tried again, held
+    /// windows taken out of their stage Space forgotten and every window the model counts
+    /// hidden out of its stage's Space hidden again, windows the model shows let out. Each
+    /// window hidden again is noted by which look found it (`STRAY_LOOK`).
+    pub(super) fn spaces_reconcile(&mut self, now: Instant, by_notice: bool) {
+        let since = now.saturating_duration_since(self.spaces.reconciled);
+        self.spaces.reconciled = now;
+        let spaces = engine::shared();
+        let Some(m) = self.model.as_ref() else { return };
         let owed = spaces.retry_owed(false, &mut self.busy_apps.borrow_mut());
         self.spaces.frames_owed.retain(|id, _| owed.contains(id));
         let shown: Vec<SpaceId> = m.displays().iter().map(|d| m.current_space(d.id)).collect();
@@ -152,7 +203,12 @@ impl Controller {
             let ok = spaces.hide_again(m, id);
             let Some(s) = self.spaces.strays.get_mut(&id) else { continue };
             if ok {
-                tracing::info!(id, "a window the model counts hidden was out of its stage's Space: hidden again");
+                if by_notice {
+                    crate::engine::margin::wait_noticed("STRAY_LOOK", Duration::ZERO, STRAY_LOOK);
+                } else {
+                    crate::engine::margin::wait("STRAY_LOOK", since, STRAY_LOOK, crate::engine::margin::End::Met);
+                }
+                tracing::info!(id, by_notice, "a window the model counts hidden was out of its stage's Space: hidden again");
             } else {
                 s.missed(now);
                 if s.tries == HIDE_TRIES {
@@ -165,14 +221,11 @@ impl Controller {
         if !shown_held.is_empty() {
             spaces.release(&shown_held, "the model shows them");
         }
-        if now.duration_since(self.spaces.tidied) >= TIDY_EVERY {
-            self.spaces.tidied = now;
-            // The tick's read of every window, shared with its other duties (read afresh
-            // for the strangers only when the tidy ended a Space).
-            let alive: HashSet<u32> = windows::wake_list().iter().map(|w| w.id).collect();
-            spaces.tidy(&alive, |stage| m.stages().iter().any(|s| s.id.0 == stage));
-            spaces.let_strangers_out(&windows::wake_list(), |id| m.window(WindowId(id)).is_some());
-        }
+    }
+
+    /// When the tidy last ran ([`TIDY_EVERY`]).
+    pub(super) fn spaces_tidied(&self) -> Instant {
+        self.spaces.tidied
     }
 
     /// A window of an observed app found (`WinEvent::Found`) that the model does not know:

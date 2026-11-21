@@ -463,6 +463,8 @@ impl Sky {
     /// of Space, as [`ALL_SPACES_MASK`] is).
     pub(crate) fn add_remove_from(&self, route: Route, sid: u64, ids: &[u32], options: i32) -> Result<i32, String> {
         crate::platform::windows::note_write();
+        // Its notices are ours: they trigger nothing (round r5-notices).
+        super::notices::expect(sid, ids);
         #[cfg(test)]
         if crate::platform::fake::with(|d| d.sky_add_remove(route == Route::Bridged, sid, ids, options)).is_some() {
             return Ok(0);
@@ -496,6 +498,7 @@ impl Sky {
     /// The windows onto the managed Space (a Desktop) `sid`.
     pub(crate) fn move_managed(&self, route: Route, ids: &[u32], sid: u64) -> Result<i32, String> {
         crate::platform::windows::note_write();
+        super::notices::expect(sid, ids);
         #[cfg(test)]
         if crate::platform::fake::with(|d| d.sky_add_remove(route == Route::Bridged, sid, ids, 0xf)).is_some() {
             return Ok(0);
