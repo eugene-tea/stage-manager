@@ -176,13 +176,15 @@ fn pace_tick(after_tick: bool) {
 /// Arms the fast tick while the controller wants it, else parks its timer far in the future
 /// (no wake-ups while nothing needs it).
 fn arm_fast_tick() {
-    let wanted = STATE.with(|s| s.borrow().as_ref().is_some_and(|s| s.conductor.wants_fast_tick()));
+    let (wanted, soon) = STATE.with(|s| s.borrow().as_ref().map_or((false, None), |s| (s.conductor.wants_fast_tick(), s.conductor.fast_tick_soon())));
+    // Sooner while the raise-order check reads (`Controller::fast_tick_soon`).
+    let period = soon.map_or(FAST_TICK_SECONDS, |d| d.as_secs_f64().min(FAST_TICK_SECONDS));
     FAST_TIMER.with(|t| {
         let Some(timer) = t.borrow().as_ref().cloned() else { return };
         let now = CFAbsoluteTimeGetCurrent();
         let next = timer.next_fire_date();
-        if wanted && next > now + FAST_TICK_SECONDS {
-            timer.set_next_fire_date(now + FAST_TICK_SECONDS);
+        if wanted && next > now + period {
+            timer.set_next_fire_date(now + period);
         } else if !wanted && next < now + 3600.0 {
             timer.set_next_fire_date(now + 1.0e9);
         }

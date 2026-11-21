@@ -183,10 +183,12 @@ impl Bench {
     /// After anything handled: `arm_fast_tick` and `pace_tick` (`after_tick` after a tick).
     fn retime(&mut self, after_tick: bool) {
         let now = clock::now();
-        self.next_fast = match (self.c.wants_fast_tick(), self.next_fast) {
+        // Sooner while the raise-order check reads (`wm_thread::arm_fast_tick`).
+        let period = self.c.fast_tick_soon().map_or(FAST_TICK, |d| d.min(FAST_TICK));
+        self.next_fast = match (self.c.fast_tick_wanted(), self.next_fast) {
             (false, _) => None,
-            (true, Some(at)) if at <= now + FAST_TICK => Some(at),
-            (true, _) => Some(now + FAST_TICK),
+            (true, Some(at)) if at <= now + period => Some(at),
+            (true, _) => Some(now + period),
         };
         if after_tick {
             self.rest = self.c.tick_rest();
@@ -228,7 +230,7 @@ impl Bench {
 
     /// `wm_thread::fast_tick`.
     fn fast_tick(&mut self) {
-        self.c.fast_tick(&mut self.ob);
+        self.c.run_fast_tick(&mut self.ob);
         self.pump();
         self.next_fast = None;
         self.after();

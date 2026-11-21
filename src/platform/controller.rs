@@ -853,6 +853,11 @@ pub struct Controller {
     /// The last switch's focus, owed again once its windows flying their last stretch have
     /// landed ([`landing_focus`]).
     landing_focus: Option<landing_focus::LandingFocus>,
+    /// The check of a batch's raises under way ([`raise_order`]), read on the fast tick.
+    order_check: Option<raise_order::OrderCheck>,
+    /// When the fast tick's other duties run next while the order check reads sooner
+    /// ([`Self::run_fast_tick`]).
+    fast_rest_at: Option<Instant>,
     /// An app's own focus on its window of another Desktop mid-switch: our raises and focuses
     /// of its other windows off that Desktop are withheld for a while ([`focus_elsewhere`]).
     went_elsewhere: Option<WentElsewhere>,
@@ -1192,6 +1197,8 @@ impl Controller {
             before: transition_plan::Before::default(),
             pending: None,
             landing_focus: None,
+            order_check: None,
+            fast_rest_at: None,
             went_elsewhere: None,
             activation_switch: None,
             switch_back: None,
@@ -1665,6 +1672,8 @@ impl Controller {
         if actions.is_empty() {
             return 0;
         }
+        // A check of an earlier batch's order ends when this one stacks or moves its windows.
+        self.order_check_meets(&actions);
         // Each app's enhanced UI off once for all its windows' moves (round enhanced-ui).
         let _quiet = enhanced_ui::Batch::open();
         self.pressed_obs = None;

@@ -200,7 +200,7 @@ impl Conductor {
     /// The fast tick.
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         match self {
-            Self::Ours(c) => c.fast_tick(ob),
+            Self::Ours(c) => c.run_fast_tick(ob),
             Self::Apples(a) => a.fast_tick(ob),
         }
     }
@@ -208,8 +208,17 @@ impl Conductor {
     /// True while the fast tick has work.
     pub fn wants_fast_tick(&self) -> bool {
         match self {
-            Self::Ours(c) => c.wants_fast_tick(),
+            Self::Ours(c) => c.fast_tick_wanted(),
             Self::Apples(a) => a.wants_fast_tick(),
+        }
+    }
+
+    /// How soon the fast tick should come when sooner than its period (the raise-order
+    /// check's next read).
+    pub fn fast_tick_soon(&self) -> Option<Duration> {
+        match self {
+            Self::Ours(c) => c.fast_tick_soon(),
+            Self::Apples(_) => None,
         }
     }
 

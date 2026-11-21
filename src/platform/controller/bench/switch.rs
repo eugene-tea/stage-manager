@@ -374,9 +374,12 @@ fn pinned_order_late_40_spaces() {
 /// an app's activation during the order check.
 #[test]
 fn pinned_activation_during_the_check() {
-    let at_1 = "front [12] shows [12] desktop 1 app 102 switches 2 slides 0; pictures 2, at once 0; strip, park 12, raise 13, main 13, front 103, show 11, show 13, raise 11, raise 13, raise 13, main 13, front 103, raise 13, raise 13, main 13, front 103, show 12, strip, park 13, park 11, raise 12, main 12, front 102, raise 12, raise 12, main 12, front 102; stacked [13, 11]";
-    // TIME DECIDES: WATCH_AFTER_FIX: at load 3 Alpha's reorder lands after the watch; COVER_TIMEOUT at 10.
-    expect(activation_during_the_check, [at_1, "front [12] shows [12] desktop 1 app 102 switches 2 slides 0; pictures 2, at once 0; strip, park 12, raise 13, main 13, front 103, show 11, show 13, raise 11, raise 13, raise 13, main 13, front 103, show 12, strip, park 13, park 11, raise 12, main 12, front 102, raise 12, raise 12, main 12, front 102; stacked [11, 13]", "front [12] shows [12] desktop 1 app 102 switches 2 slides 0; pictures 0, at once 2; strip, park 12, show 11, show 13, raise 11, raise 13, raise 13, main 13, front 103, show 12, strip, park 13, park 11, raise 12, raise 12, main 12, front 102; stacked [11, 13]"]);
+    // Load 1 changed by r6-waits (the calls only): the check reads between notices, so
+    // Bravo's windows in front stop it before its fix; the blocking check fixed the order
+    // first, Bravo's activation held behind it.
+    let at_1 = "front [12] shows [12] desktop 1 app 102 switches 2 slides 0; pictures 2, at once 0; strip, park 12, raise 13, main 13, front 103, show 11, show 13, raise 11, raise 13, raise 13, main 13, front 103, show 12, strip, park 13, park 11, raise 12, main 12, front 102, raise 12, raise 12, main 12, front 102; stacked [11, 13]";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(activation_during_the_check, [at_1, at_1, "front [12] shows [12] desktop 1 app 102 switches 2 slides 0; pictures 0, at once 2; strip, park 12, show 11, show 13, raise 11, raise 13, raise 13, main 13, front 103, show 12, strip, park 13, park 11, raise 12, raise 12, main 12, front 102; stacked [11, 13]"]);
 }
 
 /// a click during the order check.
