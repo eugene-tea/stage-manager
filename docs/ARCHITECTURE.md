@@ -59,6 +59,18 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   afresh by id; one unlisted and off screen on two looks a second apart is let go as closed
   (`engine::stale_handle`). Commands go main → WM by channel plus `CFRunLoopPerformBlock`;
   snapshots WM → main via GCD.
+- **Time** (review 11-21): the platform layer reads one clock, `platform::clock::now()`
+  (under `cfg(test)` a per-thread clock a test freezes and moves, `clock::test::freeze`,
+  `advance`; a frozen clock never ends a read-until-deadline loop, so tests freeze it only
+  around handlers). Every event carries when it was received from macOS: the AX callback's
+  entry, the NSWorkspace or input monitor's handler on the main thread, an event tap's
+  callback (`observe::Stamped`, `InputEvent::heard`, `WmCommand::SpaceChanged`'s instant;
+  the controller keeps the one being handled, `received`). An attribution ("is this focus
+  within 700 ms of our own action, or of a press") is measured to that stamp, never to when
+  the WM thread got to it, so a wait on that thread does not eat the window; a stamp older
+  than the action counts as at it (age zero) and is counted. A deadline keeps the clock's
+  now. Every such decision, and every wait's end, notes its margin by name
+  (`engine::margin`; DEVELOPMENT, "Time values that came close").
 - **The WM tick** (`engine::tick_pace`): the duties no event announces (a window closed or
   an app gone with no notice, the Space check, the engine's upkeep, the debounced save, the
   config poll, the controller's own deadlines) run on one timer, every 0.25 s for 3 s after

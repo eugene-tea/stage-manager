@@ -284,6 +284,31 @@ title cannot be confirmed from a log alone) unless `[log] titles = true`;
 lines name windows by id, pid and bundle id. `ctl dump` and `ctl state` still answer with
 titles. Logs still name your apps and your stages: never commit one.
 
+### Time values that came close
+
+Every decision made by a time window ("this focus came within 700 ms of our own, so it is
+ours") and every wait's end is counted by its constant's name (`src/engine/margin.rs`):
+how far into its limit it was, as a share (0.93 is 93 % of the limit), and which way it was
+judged. Nothing in behaviour changes. A value that is often judged close to its limit, or a
+wait that often ends by its cap, is the one a slower or busier Mac may get wrong.
+
+- `log summary` ends with **Time values that came close**, one row per name: `limit`,
+  `inside` (the closest share still judged inside), `outside` (the closest judged outside),
+  `close` (judged inside at 0.5 to 1 of the limit), `near` (outside, at 1 to 2), `waits`
+  and `capped` (waits ended, and ended by their cap rather than by what they waited for),
+  `predated` (notices stamped before the action they were compared with: macOS delivered
+  them late, or out of order). Only names with a close call, a near miss, a cap or a
+  predated notice are written.
+- The rows come from `margin summary:` info lines, one per name that came close, written
+  with the hourly and the quit counts; each covers the time since the one before.
+- At `debug`, `margin: name=… elapsed_ms=… limit_ms=… inside=…` says each run of close calls
+  as it happens (once as it comes close and once as it crosses, not at every check), and
+  every wait ended by its cap (`ended=cap`).
+- `ctl state`'s `margins` has the whole run's table.
+
+Shares are measured to when macOS's notice reached the app, not to when the window thread
+got to it (docs/ARCHITECTURE.md, "Time"): a busy thread no longer shrinks a window.
+
 ### The slide watch
 
 Under the Spaces engine every Dock click on an app's item and every ⌘Tab release is watched

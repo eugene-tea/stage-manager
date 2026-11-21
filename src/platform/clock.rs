@@ -2,7 +2,8 @@
 //! controller, the observers, the input monitor, the WM thread and the engines read comes
 //! from [`now`]: the real `Instant::now()` in a build, and under `cfg(test)` a per-thread
 //! override a test can freeze and move ([`test::freeze`], [`test::advance`]), so a handler
-//! judged "600 ms after the notice" can be driven without sleeping.
+//! judged "600 ms after the notice" can be driven without sleeping. A frozen clock never
+//! ends a "read until the deadline" loop: a test freezes it around handlers only.
 
 use std::time::Instant;
 
