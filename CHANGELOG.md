@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- A switch that comes while the app is busy no longer plays its pictures over windows already
+  in their places.
 - With `engine = "spaces"`, a window its app closes and opens again while its stage is hidden
   shows at once; before, it could stay invisible for up to ten seconds.
 - With `engine = "spaces"` and more than one screen, a window whose Desktop is gone comes back

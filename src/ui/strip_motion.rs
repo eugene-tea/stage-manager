@@ -708,7 +708,13 @@ impl Strip {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
         self.finish_transition(false);
-        if !draws_motion(self.style.animation.animates(), self.snapshot.fullscreen) {
+        // The WM thread stopped waiting for this one (a busy main thread presents it late): its
+        // windows are at their frames already; it lands at once, no picture over them.
+        let given_up = strip_model::given_up(t.id);
+        if given_up {
+            tracing::debug!(id = t.id, "transition: the switch moved its windows without the strip's answer; it lands at once");
+        }
+        if given_up || !draws_motion(self.style.animation.animates(), self.snapshot.fullscreen) {
             strip_model::cover(t.id, Cover::default());
             return;
         }
@@ -942,7 +948,8 @@ impl Strip {
         self.motion.landing = None;
         // The cards' thumbnails are not captured while the snapshots move.
         self.capturer.hold_until(Some(Instant::now() + Duration::from_secs_f64(THUMBS_HOLD_MAX)));
-        strip_model::cover(t.id, cover);
+        // Answered after the WM thread stopped waiting: cut once set up, as at a landing.
+        let answered_late = !strip_model::cover(t.id, cover);
         let id = t.id;
         let mut timers = Vec::new();
         // The incoming windows take their place once their snapshots as shown are within a
@@ -1051,6 +1058,11 @@ impl Strip {
                 stretched: Vec::new(),
                 taken: Vec::new(),
             });
+        if answered_late {
+            tracing::debug!(id, "transition: the strip's answer came after the switch moved its windows; it lands at once");
+            self.cut_transition(id);
+            return;
+        }
         if rises_now {
             self.start_motion(id, false);
         }
