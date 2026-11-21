@@ -56,6 +56,11 @@
 #                                          # [displays] frames_per_setup: windows resized on the built-in
 #                                          # screen, the virtual screen added, resized there, removed: the
 #                                          # built-in screen's frames back; added again: the two-screen ones
+#   scripts/test-stages.sh probe-system [dock|flip|names|indicator] [--rounds N] [--window ID]
+#                                          # four probes (round r0-probes): the Dock's AXExpose notices,
+#                                          # when Current Space flips in a slide, the window server's
+#                                          # screen and Space names, which capture lights the purple
+#                                          # indicator (indicator by name only, the owner at the Mac)
 #   scripts/test-stages.sh spaces          # guided two-Desktop check (asks you to switch Desktops)
 #   scripts/test-stages.sh spaces --auto   # the same hands-free (SM_AUTO=1 too): the app switches
 #                                          # Desktops and toggles full screen; nobody at the Mac
@@ -107,6 +112,11 @@ if [ "${1:-}" = "spaces" ]; then
     *) scripts/dev-app.sh >/dev/null || exit 1 ;;
   esac
   exec python3 scripts/test_spaces.py "${@:2}"
+fi
+# `probe-system` (scripts/probe_system.py): the four live probes of round r0-probes, run alone.
+if [ "${1:-}" = "probe-system" ]; then
+  scripts/dev-app.sh >/dev/null || exit 1
+  exec python3 scripts/probe_system.py "${@:2}"
 fi
 # `display-gone` (scripts/test_display_gone.py) adds and removes a virtual screen, run alone.
 if [ "${1:-}" = "display-gone" ]; then

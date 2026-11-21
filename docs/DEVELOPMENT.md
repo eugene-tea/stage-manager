@@ -242,6 +242,14 @@ handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` wi
   pick in Mission Control, its opening, its close by key with the pointer over a hidden
   window (each also under the Spaces engine), frames per screen setup.
   `SM_PROBE_DOCK_CLICK=real` posts a real click on the Dock item instead of `AXPress`.
+- `scripts/test-stages.sh probe-system [dock|flip|names|indicator] [--rounds N] [--window ID]`
+  (`scripts/probe_system.py`, `src/platform/system_probe/`) runs four probes from the dev app
+  on fixture windows and prints tables and verdicts: whether the Dock announces Mission
+  Control, App Exposé and Show Desktop (`AXExpose…`) and how soon against the window list;
+  when the window server's current Desktop flips during a slide against its notice; what
+  `SLSCopyManagedDisplaySpaces` calls the screens and Spaces, what an "All Desktops" window
+  lists, and the call's cost; which capture lights the purple screen-recording indicator
+  (`indicator` by name only: it may raise the screen-capture alert).
 - `stage-manager probe-shadow` measures how far an inactive window's shadow reaches past
   each side of its frame, from windows of its own (the corner patch's reach). `--profile`
   prints the falloff of a key and an inactive window's shadow and the colour across each

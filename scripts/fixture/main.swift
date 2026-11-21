@@ -112,6 +112,8 @@
 //                                      key and in front, as Activity Monitor reopens its own:
 //                                      the window shows as the app activates, before a hide at
 //                                      the activation can take (live 11-17)
+//   --all-spaces                      the first window joins every Space (canJoinAllSpaces: on
+//                                      every Desktop, as "All Desktops"; probe-spaces names)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -167,6 +169,7 @@ struct Options {
     var frameClock: String? = nil
     var frameClockNormal = false
     var reopen = false
+    var allSpaces = false
 
     static func parseColors(_ text: String) -> [NSColor] {
         text.split(separator: ",").compactMap { part in
@@ -253,6 +256,7 @@ struct Options {
             case "--frame-clock": if let f = args.next() { o.frameClock = f }
             case "--frame-clock-normal": o.frameClockNormal = true
             case "--reopen": o.reopen = true
+            case "--all-spaces": o.allSpaces = true
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -715,6 +719,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.raiseDelayMs = options.raiseDelayMs
         window.title = name
         window.isReleasedWhenClosed = false
+        if options.allSpaces && i == 0 { window.collectionBehavior.insert(.canJoinAllSpaces) }
         let fill = options.colors.isEmpty ? palette[i % palette.count] : options.colors[i % options.colors.count]
         window.contentView = LabelView(frame: .zero, color: fill, label: options.noLabel ? "" : name)
         if !options.styles.isEmpty {
