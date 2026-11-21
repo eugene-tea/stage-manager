@@ -407,16 +407,18 @@ polled, and the Corner engine writes nothing. Read a day with
 
 Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
 
-- At the launch: `window-server notices: registered` (`types`, `remove`), and once the
-  launch probe's panel brought its notices or did not, `window-server notices: heard` or
-  `... silent ...` (`created`, `taken_out`, `added`). The first notice of each type logs one
+- At the launch: `window-server notices: registered` (`types`, `remove`), and 5 s after the
+  launch probe `window-server notices: heard` (`never_heard`: the types not heard by then) or
+  `... silent (none came) ...`. The first notice of each type logs one
   line; `a membership notice's window and Space read by content` once the layout is learned.
 - `a window the model counts hidden was out of its stage's Space: hidden again` carries
   `by_notice`; `window-server notice: windows nothing answered for let out ...` says the
   notice let strangers out in place of the tidy; the launch watch's line has
   `held_by_notice`.
-- `ctl state`'s `engine.notices`: `registered`, `notices` (`heard`, `silent`, `waiting`),
-  `probe`, `layout`, `expected`, `dropped`, `types` (per type `heard`, `last_ms_ago`, `sent`
+- `ctl state`'s `engine.notices`: `registered`, `notices` (`heard` once any type came,
+  `silent` when none came within 5 s, `waiting`), `never_heard` (the types never heard: 811
+  there means the launch watch's nudge never fires, as on 11-21), `probe` (the panel's own
+  notices, which teach the membership layout), `layout`, `expected`, `dropped`, `types` (per type `heard`, `last_ms_ago`, `sent`
   bursts, `coalesced` notices folded into them, `ours`) and `uses` (what was brought forward:
   `overview_looks`, `reconciles`, `held_back`, `strangers_out`, `space_checks`,
   `workspace_first`). `margins` names the waits: `OVERVIEW_LOOK`, `OVERVIEW_SETTLE`,
@@ -426,9 +428,11 @@ Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
   overview showed) and `settled_by_notice`.
 - The live phases `mission`, `expose`, `launch` (`SM_ENGINE=spaces`) and `spaces --auto`
   print, per wait, how many ended at the notice's look, at the poll's and by the cap;
-  `mission` checks that Mission Control and App Exposé opened by their shortcuts are found
-  within 100 ms of the key and that the close's notice is looked at within 100 ms of the
-  closing key, its look ending the freeze (skipped when no notice 1508 came).
+  `mission` checks by order and cause, never by a time limit: Mission Control and App Exposé
+  opened by their shortcuts are found at their notice's look (`OVERVIEW_LOOK` ended by the
+  notice), the close's notice comes after the closing key and before the list shows the close,
+  and the look after it ends the freeze (`OVERVIEW_SETTLE` ended by the notice); the ms are
+  printed (skipped when no notice 1508 came).
 - On the bench the desk sends them only with `d.server_notices = true` (scenarios "a hidden
   window taken out of its stage Space" and "Mission Control with no key", each with and
   without).

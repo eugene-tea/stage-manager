@@ -1308,7 +1308,10 @@ looks, never as facts (ARCHITECTURE, "The window server's notices").
 | 815 / 816 | the window | a window shown / hidden |
 | 1401, 1329 | | a Desktop change's end (551 ms) |
 
-The Dock's `AXExpose…` notices never came (0 of 9 opens). Not measured: Mission Control opened
+In the app (the live suite, 11-21) 1325, 1326 and 1508 came in the dozens; 811, 815 and 816
+never did (the probe also asked `SLSRequestNotificationsForWindows` for its windows), so a new
+app's windows are still held by the launch watch's own read. The Dock's `AXExpose…` notices
+never came (0 of 9 opens). Not measured: Mission Control opened
 by a gesture, a hot corner or the Dock's item (`ctl state`'s `engine.notices` says whether
 1508 counts them), and other macOS versions.
 

@@ -364,13 +364,15 @@ per kind (`engine/server_notice.rs`), drops those of the engine's own adds (by t
 and the Space it asked, never by a time window) and sends the rest to the WM thread
 (`WmCommand::ServerNotice`). **A notice is a trigger for a read, never a fact**: each brings
 forward a look that a poll makes today (`platform/controller/server_notices.rs`): the look
-for an overview, the check of the model against the window server, the launch watch's read,
-the check for a missed Desktop change. What the look finds decides; every poll stays as the
+for an overview, the check of the model against the window server, the check for a missed
+Desktop change (and the launch watch's read at a window's creation, but that notice, 811, has
+never reached the app: the launch watch rests on its own read, live 11-21). What the look finds decides; every poll stays as the
 cap behind it, so a Mac whose window server sends none behaves as before. Which word of a
 membership notice is the window and which the Space is read by content (the launch probe's
 own panel, or a window the engine just showed); until then such a notice names nothing and
-its look covers every window. The launch probe's panel is the health check: `ctl state`'s
-`engine.notices` says `heard` or `silent` (silent is no failure), with each type's counts,
+its look covers every window. `ctl state`'s `engine.notices` says `heard` once any registered
+type came, `silent` when none came within 5 s of the launch probe (silent is no failure),
+`never_heard` (the types that never came) and each type's counts,
 and `margins` says per wait how often it ended at a notice's look (`noticed`), at the poll's,
 or by its cap.
 

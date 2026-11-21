@@ -25,10 +25,13 @@
 //! created and ordered in within one read (Stickies' second note, once) shows unheld: counted
 //! (`new_missed`), placed as before.
 //!
-//! The window server's notice of a window's creation (type 811, 3-11 ms after the cause,
-//! measured 11-21 with the AppKit event loop turning: [`super::notices`]) wakes the watch for a
-//! look at once ([`nudge`]); the read every [`EVERY`] stays as the cap. Each window held is
-//! noted by which look found it (`margin` `launch_watch::EVERY`: `noticed`, else the poll's).
+//! The window server's notice of a window's creation (type 811, 3-11 ms after the cause in
+//! `probe-spaces cgs`, 11-21: [`super::notices`]) would wake the watch for a look at once
+//! ([`nudge`]), but the app has never heard it: in the live `launch` phase (11-21, 20
+//! launches) no 811, 815 or 816 came and every one of the 100 windows held was found by the
+//! read every [`EVERY`] (the probe also asked `SLSRequestNotificationsForWindows` for its
+//! fixtures' windows; the app does not). So the watch rests on its read; each window held is
+//! noted by which look found it (`margin` `launch_watch::EVERY`: `noticed`, else the read's).
 //!
 //! [`WindowEngine::about_to_show`]: crate::platform::window_engine::WindowEngine::about_to_show
 //! [`WindowEngine::let_new_out`]: crate::platform::window_engine::WindowEngine::let_new_out
