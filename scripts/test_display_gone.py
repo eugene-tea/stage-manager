@@ -69,7 +69,7 @@ say, check, ctl = ts.say, ts.check, ts.ctl
 
 ARGS = sys.argv[1:]
 FRAMES = "frames" in ARGS
-KINDS = [k for k in ARGS if k in ("main", "secondary")] or ["main", "secondary"]
+KINDS = [k for k in ARGS if k in ("main", "secondary", "ahead")] or ["main", "secondary", "ahead"]
 ROUNDS = int(ARGS[ARGS.index("--rounds") + 1]) if "--rounds" in ARGS else 3
 WATCH_SECONDS = float(os.environ.get("SM_DISPLAY_GONE_WATCH") or 65)
 TOOL_BUILD = os.path.join(ts.ROOT, "scripts", "virtual-display", "build.sh")
@@ -87,6 +87,7 @@ FOREIGN = "windows of another Space are on screen"
 # The Dock click to a Desktop not shown: past the change's settle (10 s), within the watch (60 s).
 AHEAD_AT = 20
 LEFT_SPACE = "window left this Space"
+ARRANGED_AT_PRESS = "the Desktop the press goes to is arranged at the press"
 WATCHED_HIDE = "display: a hide while a screen gone is watched"
 
 
@@ -297,7 +298,7 @@ def dock_ahead(what):
     found = ahead_candidate(s)
     if not found:
         say(f"    {what}: no hidden stage on a Desktop not shown whose app is there only; the Dock step is skipped")
-        return
+        return False
     st, bundle, front = found
     title = names(s)
     front_ids = set(front["windows"])
@@ -306,7 +307,7 @@ def dock_ahead(what):
     mark = len(ts.log_text().splitlines())
     r = ctl("debug-dock-click", bundle)
     if not check(r.get("ok"), f"{what}: the Dock item was pressed ({r.get('error') or 'ok'})"):
-        return
+        return True
 
     def arrived(x):
         here = next((y for y in x.get("stages", []) if y["id"] == st["id"]), None)
@@ -321,6 +322,8 @@ def dock_ahead(what):
           f"{what}: the stage that was in front ({front['id']}) stays on Desktop {front['space']} with its windows, hidden"
           + ("" if now else ": gone") + (f": now {now}" if now and set(now["windows"]) != front_ids else ""))
     lines = log_lines(ts.log_text(), mark)
+    check(any(ARRANGED_AT_PRESS in ln for ln in lines), f"{what}: the Desktop was arranged at the press, ahead of the slide "
+          "(else the front stage is hidden only once its Desktop shows, and nothing is tried)")
     left = [ln[:200] for ln in lines if LEFT_SPACE in ln and any(re.search(rf"\bid={i}\b", ln) for i in front_ids)]
     check(not left, f"{what}: no '{LEFT_SPACE}' for the front stage's windows" + (f": {left[:2]}" if left else ""))
     homes = []
@@ -333,6 +336,101 @@ def dock_ahead(what):
     say(f"    {what}: the front stage's hides while watched (id, on, home): {homes}")
     check(bool(homes) and all(on == home for _, on, home in homes),
           f"{what}: each was hidden on the Desktop it was on" + ("" if homes else ": no such log line"))
+    return True
+
+
+# Rounds whose Dock step ran (pressed the Dock item): none in a whole run is a failure.
+DOCK_RAN = []
+
+
+def slide(direction):
+    """One Desktop over on the screen there (`ctl debug-space`); True when it changed."""
+    r = ctl("debug-space", direction)
+    time.sleep(1.5)
+    return bool(r.get("ok") and r.get("changed"))
+
+
+def ahead_round(n):
+    """The 11-21 shape, two screens going to one: on the main screen, a Desktop not shown holds
+    Bravo 1 in front and Alpha 1 hidden (Alpha's only window). A virtual screen is added to the
+    right and removed; 20 s later Alpha's Dock item is pressed (the Dock step)."""
+    say(f"\n== a Dock click to a Desktop not shown after a screen went, round {n} ==")
+    p = os.path.join(ts.HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    home = others_shown()
+    ts.stop_all_fixtures()
+    screen = None
+    back = None
+    away = False  # on the fixtures' Desktop, to slide back from at the end
+    try:
+        if not check(ts.start_app(0, extra_env={"STAGE_MANAGER_TEST": "1"}) is not None, f"ahead {n}: app up"):
+            return
+        went = next((d for d in ("right", "left") if slide(d)), None)
+        if not check(went is not None, f"ahead {n}: another Desktop on the main screen"):
+            return
+        back = "left" if went == "right" else "right"
+        away = True
+        for k, x in (("a", 300), ("b", 700)):
+            bundle, path, _, title = ts.EXTRA[k]
+            ts.stop_extra(k)
+            subprocess.run(["open", "-n", "-g", path, "--args", "--windows", "1", "--title", title, "--background",
+                            "--frames", fixture_frames(0, 1, x)], check=True)
+            time.sleep(2.0)
+
+        def both(x):
+            ws = [w for w in x["windows"] if w["bundle_id"] in (ts.EXTRA["a"][0], ts.EXTRA["b"][0])]
+            return len(ws) == 2 and len({w["stage"] for w in ws}) == 2
+
+        s = ts.wait_state(both, f"ahead {n}: Alpha 1 and Bravo 1 in stages of their own", timeout=10)
+        if not check(s is not None, f"ahead {n}: Alpha 1 and Bravo 1, a stage each, on the other Desktop"):
+            return
+        d2 = s["space"]
+        if not check(slide(back), f"ahead {n}: back on the Desktop the run started on"):
+            return
+        away = False
+        screen = Screen(False)
+        say(f"    virtual screen: {screen.info}")
+        time.sleep(4)
+        s = ts.state()
+        before = {"stages": stages_by_id(s)}
+        say(f"    stages: {before['stages']}; on Desktop {d2}: {[(st['id'], st.get('active')) for st in s['stages'] if st['space'] == d2]}")
+        check(ahead_candidate(s) is not None, f"ahead {n}: a hidden stage on the Desktop not shown, its front another app's")
+        t0 = time.time()
+        say(f"    screen removed: {screen.stop()}")
+        out = set()
+        ran = False
+        while time.time() - t0 < WATCH_SECONDS:
+            try:
+                look(before, f"{int(time.time() - t0)} s", out)
+            except Exception as e:  # noqa: BLE001 - the app may be busy with the change
+                say(f"    look at {int(time.time() - t0)} s: {e}")
+            if not ran and time.time() - t0 >= AHEAD_AT:
+                if ahead_candidate(ts.state()) is None and ctl("space").get("space") == d2:
+                    say("    macOS shows the Desktop with the fixtures: back to the other one first")
+                    slide(back)
+                if dock_ahead(f"ahead {n}: Dock click at {int(time.time() - t0)} s"):
+                    DOCK_RAN.append(f"ahead {n}")
+                    away = ctl("space").get("space") == d2
+                ran = True
+            time.sleep(1.0)
+        check(not out, f"ahead {n}: every stage keeps its windows and no hidden one shows" + (f": {sorted(out)[:8]}" if out else ""))
+        out.clear()
+        seen = desktops_tour(before, out, home)
+        away = False
+        check(not out, f"ahead {n}: on every Desktop ({len(seen)}), the same" + (f": {sorted(out)[:8]}" if out else ""))
+    finally:
+        if screen is not None and screen.proc.poll() is None:
+            say(f"    screen removed (cleanup): {screen.stop()}")
+        if away and back is not None and app_up():
+            slide(back)
+        ts.stop_app()
+        ts.stop_all_fixtures()
+        say(f"    log kept: {ts.archive_log()}")
+
+
+def app_up():
+    return bool(ctl("ping").get("ok"))
 
 
 def one_round(kind, n):
@@ -381,7 +479,8 @@ def one_round(kind, n):
                 say(f"    look at {int(time.time() - t0)} s: {e}")
             if not ahead_done and time.time() - t0 >= AHEAD_AT:
                 ahead_done = True
-                dock_ahead(f"{kind} {n}: Dock click at {int(time.time() - t0)} s")
+                if dock_ahead(f"{kind} {n}: Dock click at {int(time.time() - t0)} s"):
+                    DOCK_RAN.append(f"{kind} {n}")
             time.sleep(1.0)
         problems_watch = sorted(out)
         check(not problems_watch, f"{kind} {n}: {WATCH_SECONDS:.0f} s after the screen went, every stage keeps its windows "
@@ -603,9 +702,14 @@ def main():
         for kind in KINDS:
             for n in range(1, ROUNDS + 1):
                 if FRAMES:
-                    frames_round(kind, n)
+                    if kind != "ahead":
+                        frames_round(kind, n)
+                elif kind == "ahead":
+                    ahead_round(n)
                 else:
                     one_round(kind, n)
+        if not FRAMES:
+            check(bool(DOCK_RAN), "the Dock step ran in at least one round" + (f": {DOCK_RAN}" if DOCK_RAN else ": skipped in every round"))
     finally:
         ts.stop_app()
         ts.stop_all_fixtures()
