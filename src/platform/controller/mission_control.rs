@@ -141,6 +141,8 @@ impl Controller {
         match heard.what {
             Heard::Key { code, mods } => self.mission_key_heard(ob, code, mods, "the key tap", heard.at),
             Heard::Click => self.mission_click(heard.at),
+            // ⌘Tab's switcher's only ([`Self::switcher_tap`]).
+            Heard::CommandUp => {}
         }
     }
 
