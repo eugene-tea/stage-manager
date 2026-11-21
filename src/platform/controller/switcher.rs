@@ -542,7 +542,9 @@ impl Controller {
         }
         let quiet = self.switcher.last_key.is_some_and(|t| now.saturating_duration_since(t) >= SWITCHER_MAX);
         // A probe's posted ⌘ may not show in the session's state: its own release is posted.
-        if (!input::command_held() && !switcher_probe::posting()) || quiet {
+        // The probe (`ctl debug-cmd-tab`) runs only in a test run, so only a test run asks it.
+        let probe_posting = std::env::var_os("STAGE_MANAGER_TEST").is_some() && switcher_probe::posting();
+        if (!input::command_held() && !probe_posting) || quiet {
             let steps = self.switcher.keys.steps();
             self.switcher.keys.reset();
             let heard = if quiet { Heard::Lost } else { Heard::Released { steps } };
