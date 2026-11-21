@@ -153,6 +153,8 @@ use crate::ui::{assistive, motion_math, transition_plan};
 
 mod arrival;
 mod ax_blind;
+#[cfg(test)]
+mod bench;
 mod corner;
 mod dock_order;
 mod fallback;
