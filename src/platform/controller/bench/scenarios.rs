@@ -22,11 +22,13 @@ pub(super) struct Run {
     pub(super) margins: Vec<margin::test::Seen>,
     /// The notices handled, in order.
     pub(super) story: String,
+    /// What each focus and activation notice came to, in order.
+    pub(super) trail: Vec<String>,
 }
 
 impl Run {
-    fn of(b: &Bench, outcome: String) -> Self {
-        Self { outcome, margins: b.margins(), story: b.story() }
+    pub(super) fn of(b: &Bench, outcome: String) -> Self {
+        Self { outcome, margins: b.margins(), story: b.story(), trail: b.trail() }
     }
 }
 
@@ -35,21 +37,21 @@ pub(super) type Scenario = (&'static str, &'static str, fn(f64) -> Run);
 
 /// Asserts a scenario's outcome at load 1, 3 and 10, printing the story of the first that
 /// differs.
-fn expect(script: fn(f64) -> Run, want: [&str; 3]) {
+pub(super) fn expect(script: fn(f64) -> Run, want: [&str; 3]) {
     for (load, want) in LOADS.iter().zip(want) {
         let run = script(*load);
         assert_eq!(run.outcome, want, "at load {load}:\n{}", run.story);
     }
 }
 
-const A: i32 = 101;
-const B: i32 = 102;
-const C: i32 = 103;
-const D1: u64 = fake::FIRST_DESKTOP;
-const D2: u64 = fake::FIRST_DESKTOP + 1;
+pub(super) const A: i32 = 101;
+pub(super) const B: i32 = 102;
+pub(super) const C: i32 = 103;
+pub(super) const D1: u64 = fake::FIRST_DESKTOP;
+pub(super) const D2: u64 = fake::FIRST_DESKTOP + 1;
 
 /// Two apps with a window each on one Desktop, Bravo in front: a stage each, Bravo's shown.
-fn two_apps(d: &mut Desk) {
+pub(super) fn two_apps(d: &mut Desk) {
     d.add_app(A, "com.example.alpha", "Alpha");
     d.add_app(B, "com.example.bravo", "Bravo");
     d.add_window(11, A, frame(1), D1);
@@ -72,7 +74,7 @@ fn alpha_on_two_desktops(d: &mut Desk) {
 /// both Desktops visited once (the model knows a Desktop's windows from its first visit):
 /// Desktop 2 was left with Alpha's stage in front there (a card click); back on Desktop 1
 /// Bravo's stage is in front and Alpha's window there hidden.
-fn both_desktops_known(engine: EngineKind, load: f64, edit: impl FnOnce(&mut Desk)) -> Bench {
+pub(super) fn both_desktops_known(engine: EngineKind, load: f64, edit: impl FnOnce(&mut Desk)) -> Bench {
     // The history runs on the Mac as measured; the load is the incident's.
     let mut b = Bench::new(engine, DEFAULTS, 1.0, 2, |d| {
         d.add_app(A, "com.example.alpha", "Alpha");
@@ -94,6 +96,7 @@ fn both_desktops_known(engine: EngineKind, load: f64, edit: impl FnOnce(&mut Des
     let start = (b.front(), b.desktop_shown(), b.front_app(), b.on_screen().into_iter().collect::<Vec<_>>());
     assert_eq!(start, (Some(vec![12]), D1, Some(B), vec![12]), "the start:\n{}", b.story());
     b.log.clear();
+    crate::engine::attribution::trail::clear();
     b.desk(|d| {
         d.strip.transitions = 0;
         d.calls.clear();
@@ -104,7 +107,7 @@ fn both_desktops_known(engine: EngineKind, load: f64, edit: impl FnOnce(&mut Des
 
 /// What a person sees: the stage in front, the Desktop, the app in front, and how many
 /// animated switches and Desktop slides it took.
-fn seen(b: &mut Bench) -> String {
+pub(super) fn seen(b: &mut Bench) -> String {
     let slides = slides(b);
     let front = b.front().map_or("none".to_string(), |w| format!("{w:?}"));
     let shows: Vec<u32> = b.on_screen().into_iter().collect();
@@ -613,7 +616,7 @@ fn a_new_app() {
 /// `engine/restore.rs` (the restore window: `SETTLE_QUIET`, `QUIET`, `WINDOW`): Alpha's and
 /// Bravo's windows share a stage, Charlie's has its own; after a restart the apps reopen
 /// their windows over 30 s. Each goes back to its saved stage.
-fn restore_after_a_restart(load: f64) -> Run {
+pub(super) fn restore_after_a_restart(load: f64) -> Run {
     let state = {
         let mut b = Bench::new(EngineKind::Corner, DEFAULTS, 1.0, 1, |d| {
             two_apps(d);
@@ -758,7 +761,7 @@ fn load_table() {
 fn bench_one() {
     let Ok(want) = std::env::var("BENCH_ONE") else { return };
     let load: f64 = std::env::var("BENCH_LOAD").ok().and_then(|l| l.parse().ok()).unwrap_or(1.0);
-    for (name, told, script) in ALL.iter().filter(|(name, _, _)| name.contains(&want)) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).filter(|(name, _, _)| name.contains(&want)) {
         let run = script(load);
         println!("== {name} ({told}) at load {load}\n{}\n=> {}", run.story, run.outcome);
         for m in &run.margins {
@@ -787,7 +790,7 @@ fn verdicts(run: &Run) -> std::collections::BTreeMap<&'static str, (usize, usize
 /// The load table as Markdown.
 pub(super) fn table() -> String {
     let mut out = String::from("| Scenario | Told by | Load 1 | Load 3 | Load 10 | Limits crossed only under load |\n|---|---|---|---|---|---|\n");
-    for (name, told, script) in ALL {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL) {
         let runs = LOADS.map(script);
         let base = verdicts(&runs[0]);
         let mut changed: Vec<String> = Vec::new();

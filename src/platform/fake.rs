@@ -155,6 +155,14 @@ pub struct App {
     /// How long it takes to report an activation, in ms before the load factor (`None`:
     /// [`delays::ACTIVATION`]): the knob for "an app busy at the Accessibility timeout".
     pub activates_ms: Option<f64>,
+    /// How long it takes to say its key window changed (`AXFocusedWindowChanged`), in ms
+    /// before the load factor (`None`: [`delays::FOCUS`], or [`delays::FOCUS_AFTER_ACTIVATION`]
+    /// after an activation): the knob for "a busy app's focus notice came a second late"
+    /// (`controller.rs`, `focus_may_switch`, 11-02).
+    pub reports_focus_ms: Option<f64>,
+    /// Its focus notice after an activation comes before NSWorkspace's activation notice
+    /// (the two come through two queues, in either order: `engine/focus_replay.rs`, 10-12).
+    pub focus_before_activation: bool,
     /// What one of its Accessibility answers costs, in ms before the load factor (`None`:
     /// [`Costs::ax`]); beyond the messaging timeout the call fails as `CannotComplete`.
     pub answers_ms: Option<f64>,
@@ -560,7 +568,7 @@ impl Desk {
     pub fn add_app(&mut self, pid: i32, bundle: &str, name: &str) {
         self.apps.insert(
             pid,
-            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, answers_ms: None, timeout: 0.0, enhanced: false, gone: false },
+            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, timeout: 0.0, enhanced: false, gone: false },
         );
         let n = self.dock.items.len() as f64;
         self.dock.items.push((format!("/Applications/{name}.app/"), Rect::new(self.dock.bar.x + 8.0 + 58.0 * n, self.dock.bar.y + 8.0, 50.0, 50.0)));
@@ -997,7 +1005,29 @@ impl Desk {
             return;
         }
         app.focused = Some(id);
+        let after_ms = app.reports_focus_ms.unwrap_or(after_ms);
         self.post(after_ms, Notice::Ax { pid, el: El::Window(id), name: n::FOCUSED_WINDOW_CHANGED });
+    }
+
+    /// The user drags window `id` to `frame` (one step of a drag: the button is down): it
+    /// is there at once, and its app says it moved ([`delays::MOVED`] later).
+    pub fn user_moves(&mut self, id: u32, frame: Rect) {
+        let Some(w) = self.windows.get_mut(&id) else { return };
+        if w.frame == frame {
+            return;
+        }
+        w.frame = frame;
+        let pid = w.pid;
+        self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_MOVED });
+    }
+
+    /// An app brings its window `id` forward by itself: raised, its key window (its focus
+    /// notice at once), and macOS follows it to its Desktop when the app is frontmost
+    /// ([`Self::follow`]).
+    pub fn app_brings_forward(&mut self, id: u32) {
+        self.raise(id);
+        self.make_key(id, 0.0);
+        self.follow(id);
     }
 
     /// The frontmost app's window `id` made key or raised while it is on a Desktop that does
@@ -1101,10 +1131,15 @@ impl Desk {
                 if let Some(key) = key {
                     self.raise(key);
                 }
-                self.post_after(after, 0.0, Notice::Activated(pid));
-                self.post_after(after, delays::TOOK_ACTIVATION, Notice::Ax { pid, el: El::App(pid), name: n::APPLICATION_ACTIVATED });
+                let (reports, focus_first) = self.apps.get(&pid).map_or((None, false), |a| (a.reports_focus_ms, a.focus_before_activation));
+                let focus_after = reports.unwrap_or(delays::FOCUS_AFTER_ACTIVATION);
+                // The two queues: the focus first for an app that says so, the activation
+                // notice then as late after it as the focus would have been.
+                let (activated, focused) = if focus_first { (focus_after, 0.0) } else { (0.0, focus_after) };
+                self.post_after(after, activated, Notice::Activated(pid));
+                self.post_after(after, activated + delays::TOOK_ACTIVATION, Notice::Ax { pid, el: El::App(pid), name: n::APPLICATION_ACTIVATED });
                 if let Some(key) = key {
-                    self.post_after(after, delays::FOCUS_AFTER_ACTIVATION, Notice::Ax { pid, el: El::Window(key), name: n::FOCUSED_WINDOW_CHANGED });
+                    self.post_after(after, focused, Notice::Ax { pid, el: El::Window(key), name: n::FOCUSED_WINDOW_CHANGED });
                 }
             }
             Step::SlideShows { screen, to } => self.screens[screen].sliding_in = Some(to),

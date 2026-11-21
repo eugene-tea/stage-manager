@@ -4,6 +4,7 @@
 //! executes the [`model::Action`]s it returns.
 
 pub mod apple;
+pub mod attribution;
 pub mod ax_blind;
 pub mod busy_apps;
 pub mod card_park;

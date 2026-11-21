@@ -108,6 +108,7 @@ use super::safety::{self, ParkedEntry};
 use super::window_engine::{self, Motion, ShowHow, WindowEngine};
 use super::{capture_pace, desktop, desktop_shot, enhanced_ui, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
+use crate::engine::attribution::{self, Notice};
 use crate::engine::busy_apps::{BUSY_BACKOFF, BusyApps, Episode, OffScreen, Reply};
 use self::corner::CornerUpkeep;
 use self::corner::unrestored::LetGo;
@@ -3056,6 +3057,7 @@ impl Controller {
                 }
                 if self.echoes.is_window_echo_of_notice(id, at) && !self.focus_beats_echo(ob, id, now) {
                     tracing::debug!(id, "focus echo of our own action ignored");
+                    attribution::judged(Notice::Focus, i64::from(id), "ours");
                     return;
                 }
                 // The press measured to the focus's receipt: one after it counts as at it.
@@ -3072,11 +3074,13 @@ impl Controller {
                     let (hidden, active) = (super::apps::is_hidden(pid), super::apps::is_active(pid));
                     if !focus_may_switch(hidden, active, input::left_button_down()) {
                         tracing::debug!(id, pid, ?hidden, ?active, "a focus in an app not in front (hidden, or not the active app): its own, or a late echo of ours; no switch");
+                        attribution::judged(Notice::Focus, i64::from(id), "its app is behind");
                         return;
                     }
                 }
                 if self.macos_after_display_change(at) {
                     tracing::debug!(id, "a focus macOS made after a display change (no click or key since): no switch");
+                    attribution::judged(Notice::Focus, i64::from(id), "macOS's after a display change");
                     return;
                 }
                 // Not our echo: the user's (or an app's own), remembered for the reconciler.
@@ -3084,6 +3088,7 @@ impl Controller {
                 let bundle = ob.window(id).and_then(|w| ob.bundle_id(w.pid));
                 if self.desktop_echo.classify(bundle, at) == Cause::WallpaperEcho {
                     tracing::debug!(id, "Finder window focus after a wallpaper click: ignored (the desktop is Finder's)");
+                    attribution::judged(Notice::Focus, i64::from(id), "the wallpaper press's echo");
                     return;
                 }
                 if self.model.as_ref().is_some_and(Model::settling) {
@@ -3094,6 +3099,7 @@ impl Controller {
                         // At login a focus is the app's (a click or key press would have
                         // ended the settling): no switch, nothing held for later.
                         tracing::debug!(id, "a focus while the login settles: no switch");
+                        attribution::judged(Notice::Focus, i64::from(id), "the app's own while the login settles");
                         return;
                     }
                 }
@@ -3125,6 +3131,7 @@ impl Controller {
                         // sit at its frame under its picture still growing from the card.
                         let switch = self.pending.as_ref().map(|p| p.id);
                         tracing::debug!(id, ?switch, "a focus on a window the switch brings in: the switch lands as planned, behind its picture");
+                        attribution::judged(Notice::Focus, i64::from(id), "on a window the switch brings in");
                         return;
                     }
                     FocusOnSwitch::Supersede => self.flush_superseded(ob, "a focus", Landing::Superseded),
@@ -3158,9 +3165,11 @@ impl Controller {
                     if let Some(h) = hidden.filter(|h| h.arrive) {
                         self.arrive_for_hidden_focus(ob, WindowId(standard), pid, h.switch_back, now);
                     }
+                    attribution::judged(Notice::Focus, i64::from(id), "held for its Desktop");
                     return;
                 }
                 if frozen {
+                    attribution::judged(Notice::Focus, i64::from(id), "nothing while frozen");
                     return;
                 }
                 self.forget_held(ob);
@@ -3177,6 +3186,7 @@ impl Controller {
                     // comes once the button is up (Apple's parked windows cannot be grabbed).
                     tracing::debug!(id, "a parked window was grabbed; its stage comes when the button is up");
                     self.focus_after_press = Some(id);
+                    attribution::judged(Notice::Focus, i64::from(id), "a parked window grabbed");
                     return;
                 }
                 let list = windows::list_windows();
@@ -3188,6 +3198,7 @@ impl Controller {
                     // focus a window of the Desktop being left, and macOS would slide back.
                     tracing::info!(id, pid, "focus held: a Desktop slides; decided once the Space is recognized");
                     self.hold_for_slide(ob, Wanted::Window { id: WindowId(id), pid }, false, now);
+                    attribution::judged(Notice::Focus, i64::from(id), "held for a slide");
                     return;
                 }
                 if let Some(pid) = pid
@@ -3207,6 +3218,7 @@ impl Controller {
                         && stale_activation::focus_moved_on(was, is)
                     {
                         tracing::info!(id, pid, now_focused = ?now_focused.map(|w| w.0), reason = "its app's focus is in another stage now", "focus dropped: stale, no switch");
+                        attribution::judged(Notice::Focus, i64::from(id), "stale");
                         return;
                     }
                 }
@@ -3215,11 +3227,13 @@ impl Controller {
                     && self.window_elsewhere(id)
                     && self.bring_here_if_shift(ob, pid, &obs, now)
                 {
+                    attribution::judged(Notice::Focus, i64::from(id), "the user's: Shift brings it here");
                     return;
                 }
                 if let Some(pid) = pid
                     && self.upkeep_pick(PickBy::Window(WindowId(id), pid), |m| m.window_focused(WindowId(id), &obs), clock::now())
                 {
+                    attribution::judged(Notice::Focus, i64::from(id), "the user's: a pick in Mission Control");
                     return;
                 }
                 if let Some(m) = self.model.as_mut() {
@@ -3227,6 +3241,7 @@ impl Controller {
                     if !actions.is_empty() {
                         tracing::info!(id, "focused window is in another stage; switching");
                     }
+                    attribution::judged(Notice::Focus, i64::from(id), if actions.is_empty() { "the user's: nothing to switch" } else { "the user's: its stage comes" });
                     if let Some(pid) = pid {
                         self.activation = self.activation_for(pid, &actions, ob);
                     }
@@ -3271,10 +3286,12 @@ impl Controller {
                 // `at` is the notice's `fired`: when the main thread got it.
                 if self.echoes.is_app_echo(pid, at) {
                     tracing::debug!(pid, "activation echo of our own action ignored");
+                    attribution::judged(Notice::Activation, i64::from(pid), "ours");
                     return;
                 }
                 if self.desktop_echo.classify(ob.bundle_id(pid), at) == Cause::WallpaperEcho {
                     tracing::debug!(pid, "Finder activation after a wallpaper click: ignored (the desktop is Finder's)");
+                    attribution::judged(Notice::Activation, i64::from(pid), "the wallpaper press's echo");
                     return;
                 }
                 // Late under load: no longer true, or older than a switch we began since
@@ -3287,6 +3304,10 @@ impl Controller {
                         stale_activation::Stale::NotFrontmost { .. } => None,
                     };
                     tracing::info!(pid, age_ms, reason = why.reason(), ?front, before_switch_ms, "activation dropped: stale, no switch");
+                    attribution::judged(Notice::Activation, i64::from(pid), match why {
+                        stale_activation::Stale::BeforeOurSwitch { .. } => "stale: older than our switch",
+                        stale_activation::Stale::NotFrontmost { .. } => "stale: another app is in front",
+                    });
                     return;
                 }
                 // Another app's: a lend for another app is refuted (round r2-lends).
@@ -3296,6 +3317,7 @@ impl Controller {
                     // 20:25:46.8, Mail, whose switch sent the laptop's front to a card and
                     // slid the 5K back to the Desktop it had left).
                     tracing::info!(pid, "an activation macOS made after a display change (no click or key since): no switch");
+                    attribution::judged(Notice::Activation, i64::from(pid), "macOS's after a display change");
                     return;
                 }
                 if self.model.as_ref().is_some_and(Model::settling) {
@@ -3308,6 +3330,7 @@ impl Controller {
                         // click the restore window outlives while Accessibility lists no
                         // window): no switch, nothing held for later.
                         tracing::debug!(pid, "an activation while the login settles: no switch");
+                        attribution::judged(Notice::Activation, i64::from(pid), "the app's own while the login settles");
                         return;
                     }
                 }
@@ -3320,6 +3343,7 @@ impl Controller {
                     tracing::debug!(pid, "activation held until the Desktop is recognized");
                     self.focus_replay.hold(Wanted::App(pid), now);
                     self.after_hold(ob, now);
+                    attribution::judged(Notice::Activation, i64::from(pid), "held: frozen");
                     return;
                 }
                 self.decide_activation(ob, pid, now, true);
@@ -3368,6 +3392,7 @@ impl Controller {
                 // arrival is made ours (the Spaces engine; never the Corner's).
                 self.arrange_for_hidden_focus(ob, id, pid, now);
             }
+            attribution::judged(Notice::Activation, i64::from(pid), "held for a slide");
             return;
         }
         let list = if self.adopt_stranded_before_switch(ob, "an activation") { windows::list_windows() } else { list };
@@ -3377,11 +3402,13 @@ impl Controller {
         ob.note_frames(obs.frames.iter().map(|(id, f)| (id.0, *f)));
         if self.bring_here_if_shift(ob, pid, &obs, now) {
             self.forget_held(ob);
+            attribution::judged(Notice::Activation, i64::from(pid), "the user's: Shift brings it here");
             return;
         }
         // A window picked in Mission Control: its stage's windows take their frames as it
         // closes, and the switch may wait for the close (round mc-pick).
         if self.upkeep_pick(PickBy::App(pid), |m| m.app_activated(pid, &obs), clock::now()) {
+            attribution::judged(Notice::Activation, i64::from(pid), "the user's: a pick in Mission Control");
             return;
         }
         let since = ob.activated_at(pid);
@@ -3397,7 +3424,9 @@ impl Controller {
                 // on another Desktop (its focus may have come first and be held).
                 self.focus_replay.hold(Wanted::App(pid), now);
                 self.after_hold(ob, now);
+                attribution::judged(Notice::Activation, i64::from(pid), "held: nothing of it here");
             } else if actions.is_empty() && self.held_is_of(pid, now) {
+                attribution::judged(Notice::Activation, i64::from(pid), "its window's focus stays held");
                 // The app's own activation, its window's focus held (either order):
                 // that focus still says where the user goes (R5 2).
                 tracing::debug!(pid, "activation of the app whose window focus is held; the focus stays held");
@@ -3407,6 +3436,7 @@ impl Controller {
                     let decide_ms = now.elapsed().as_millis() as u64;
                     tracing::info!(pid, since_activation_ms, decide_ms, asked_focus = needs_focus, "activated app lives in another stage; switching");
                 }
+                attribution::judged(Notice::Activation, i64::from(pid), if actions.is_empty() { "the user's: nothing to switch" } else { "the user's: its stage comes" });
                 self.forget_held(ob);
             }
             self.activation = self.activation_for(pid, &actions, ob);

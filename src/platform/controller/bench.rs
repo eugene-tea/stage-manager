@@ -49,6 +49,7 @@ use crate::platform::observe_probe::Note;
 use crate::platform::{safety, windows};
 use crate::ui::strip_model::StripEvent;
 
+mod causes;
 mod scenarios;
 
 /// The fast tick's period (`wm_thread::FAST_TICK_SECONDS`).
@@ -104,6 +105,7 @@ impl Bench {
         let started = Instant::now();
         let frozen = clock::test::freeze(started);
         margin::test::start();
+        crate::engine::attribution::trail::start();
         let mut desk = Desk::new(desktops, load);
         setup(&mut desk);
         let home = desk.home.clone();
@@ -410,6 +412,29 @@ impl Bench {
         self.input(InputKind::MouseUp, None, |_| {});
     }
 
+    /// The user drags `window` by its title bar, `by` in all, in `steps` steps 16 ms apart:
+    /// the press (macOS raises it, makes it key and activates its app, as at any click),
+    /// 60 ms held still, then the steps; the button stays down ([`Self::release`] ends it),
+    /// and a second call drags on from where the first left it.
+    pub(super) fn drag_window(&mut self, window: u32, by: Point, steps: u32) {
+        let from = self.desk(|d| d.windows[&window].frame);
+        let grab = Point::new(from.x + 60.0, from.y + 10.0);
+        if !self.desk(|d| d.left_down) {
+            self.press(grab);
+            self.advance(60);
+        }
+        let grab = self.desk(|d| d.pointer);
+        for i in 1..=steps {
+            let k = f64::from(i) / f64::from(steps);
+            let to = Rect::new(from.x + by.x * k, from.y + by.y * k, from.w, from.h);
+            self.desk(|d| {
+                d.pointer = Point::new(grab.x + by.x * k, grab.y + by.y * k);
+                d.user_moves(window, to);
+            });
+            self.advance(16);
+        }
+    }
+
     /// A click at `p`: a press, held 80 ms, and its release.
     pub(super) fn click(&mut self, p: Point) {
         self.press(p);
@@ -476,9 +501,14 @@ impl Bench {
     }
 
     /// A click on stage `stage`'s card in our strip: its press, then its click 80 ms later
-    /// (the strip's own events; the input monitor hears nothing of our own windows).
+    /// (the strip's own events; the input monitor hears nothing of our own windows, while
+    /// the session's "since the last press", `input::since_last_press`, counts every click).
     pub(super) fn card_click(&mut self, stage: u64) {
-        self.desk(|d| d.post(0.0, Notice::Strip(StripEvent::CardPressed { stage })));
+        self.desk(|d| {
+            d.last_press = Some(clock::now());
+            d.last_click = d.last_press;
+            d.post(0.0, Notice::Strip(StripEvent::CardPressed { stage }));
+        });
         self.advance(80);
         self.desk(|d| d.post(0.0, Notice::Strip(StripEvent::CardClicked { stage, shift: false })));
     }
@@ -609,6 +639,24 @@ impl Bench {
         self.desk(|d| d.make_key(window, 0.0));
     }
 
+    /// An app brings `window` forward by itself (a link opened in it): its key window, in
+    /// front; when the app is frontmost and the window on a Desktop not shown, macOS slides
+    /// there (`engine/focus_elsewhere.rs`, 11-19 13:13).
+    pub(super) fn app_brings_forward(&mut self, window: u32) {
+        self.desk(|d| d.app_brings_forward(window));
+    }
+
+    /// Time moves on, 10 ms at a time, until a person sees `window` (5 s at most).
+    pub(super) fn until_shown(&mut self, window: u32) {
+        for _ in 0..500 {
+            if self.on_screen().contains(&window) {
+                return;
+            }
+            self.advance(10);
+        }
+        panic!("window {window} never showed:\n{}", self.story());
+    }
+
     /// The person goes to Desktop `to` (⌃→ or a swipe; `heard`: the input monitor hears the
     /// key, which macOS may keep to itself).
     pub(super) fn go_to_desktop(&mut self, to: u64, heard: bool) {
@@ -690,6 +738,22 @@ impl Bench {
     /// How many transitions the strip was sent so far (animated switches).
     pub(super) fn transitions(&mut self) -> usize {
         self.desk(|d| d.strip.transitions)
+    }
+
+    /// What each focus and activation notice handled so far came to, in order
+    /// ([`crate::engine::attribution::trail`]).
+    pub(super) fn trail(&self) -> Vec<String> {
+        crate::engine::attribution::trail::so_far()
+    }
+
+    /// True while the app counts a drag of a window by the user under way.
+    pub(super) fn dragging(&self) -> bool {
+        self.c.drag.is_some()
+    }
+
+    /// The frame the model keeps for window `id` (where it shows when its stage is in front).
+    pub(super) fn model_frame(&self, id: u32) -> Option<Rect> {
+        self.c.model.as_ref()?.window(WindowId(id)).map(|w| w.restore)
     }
 
     /// The time decisions and waits' ends noted so far, in order ([`margin::test`]).
