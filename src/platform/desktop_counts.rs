@@ -93,6 +93,10 @@ pub fn read_monitors() -> Vec<MonitorDesktops> {
 
 /// The UUID macOS keeps for display `id` (upper case, as the settings write it).
 pub fn display_uuid(id: u32) -> Option<String> {
+    #[cfg(test)]
+    if let Some(uuid) = crate::platform::fake::with(|d| d.screens.iter().find(|s| s.display.id.0 == id).map(|s| s.uuid.clone())) {
+        return uuid;
+    }
     // SAFETY: a plain C call with a display id; the result is a +1 CFUUID or null, owned by
     // the `CFRetained` made from it.
     let uuid = unsafe { CGDisplayCreateUUIDFromDisplayID(id) }.map(|p| unsafe { CFRetained::from_raw(p) })?;

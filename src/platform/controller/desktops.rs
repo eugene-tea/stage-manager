@@ -218,4 +218,36 @@ mod tests {
         let list = [entry("Main", 4, 0, &[1, 4]), entry("11-22", 7, 0, &[7])];
         assert_eq!(match_screens(&[(main, Some("11-22".into()), true)], &list).and_then(|l| l.desk(main)).map(|d| d.id), Some(7));
     }
+
+    /// On the bench (the real controller on the fake desk, Spaces engine): Desktop keys
+    /// between two Desktops (two stages on the first, one hidden) bind each Desktop to its own
+    /// Space and the shadow finds nothing, at every load.
+    #[test]
+    fn desktop_keys_bind_each_desktop_and_nothing_disagrees() {
+        use super::super::bench::{Bench, DEFAULTS, frame};
+        use crate::engine::recovery::EngineKind;
+        use crate::platform::fake::FIRST_DESKTOP as D1;
+        let d2 = D1 + 1;
+        for load in [1.0, 3.0, 10.0] {
+            let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, load, 2, |d| {
+                d.add_app(101, "com.example.alpha", "Alpha");
+                d.add_app(102, "com.example.bravo", "Bravo");
+                d.add_window(11, 101, frame(1), D1);
+                d.add_window(12, 102, frame(2), D1);
+                d.add_window(13, 101, frame(3), d2);
+                d.front = Some(102);
+            });
+            for to in [d2, D1, d2, D1] {
+                b.go_to_desktop(to, true);
+                b.advance(4000);
+            }
+            let desks = b.c.desks_json();
+            let bound: Vec<(u64, u64)> = desks["bindings"].as_array().expect("bindings").iter().map(|x| (x["desk"].as_u64().unwrap_or(0), x["space"].as_u64().unwrap_or(0))).collect();
+            let spaces: Vec<u64> = [11, 13].iter().filter_map(|w| b.space_of(*w)).map(|s| s.0).collect();
+            assert_eq!(bound, vec![(D1, spaces[0]), (d2, spaces[1])], "load {load}: each Desktop its own Space\n{}", b.story());
+            assert!(!b.hidden().is_empty(), "load {load}: a stage hidden, its home compared");
+            let g = &desks["disagree"];
+            assert_eq!((g["shown_begun"].as_u64(), g["homes_begun"].as_u64()), (Some(0), Some(0)), "load {load}: {desks}\n{}", b.story());
+        }
+    }
 }
