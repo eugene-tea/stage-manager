@@ -77,6 +77,10 @@ impl Flags for AxFlags {
 /// The process still runs.
 fn alive(pid: i32) -> bool {
     // SAFETY: signal 0 only checks that the process exists.
+    #[cfg(test)]
+    if let Some(alive) = super::fake::with(|d| d.apps.get(&pid).is_some_and(|a| !a.gone)) {
+        return alive;
+    }
     unsafe { libc::kill(pid, 0) == 0 }
 }
 

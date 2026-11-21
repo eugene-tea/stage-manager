@@ -2,8 +2,10 @@
 //! controller, the observers, the input monitor, the WM thread and the engines read comes
 //! from [`now`]: the real `Instant::now()` in a build, and under `cfg(test)` a per-thread
 //! override a test can freeze and move ([`test::freeze`], [`test::advance`]), so a handler
-//! judged "600 ms after the notice" can be driven without sleeping. A frozen clock never
-//! ends a "read until the deadline" loop: a test freezes it around handlers only.
+//! judged "600 ms after the notice" can be driven without sleeping. A wait goes through
+//! [`sleep`] and an age that decides through [`since`]: under a frozen clock the wait moves
+//! the clock on, so a "read until the deadline" loop that uses both ends there too (one
+//! that still reads `Instant::now()` or `elapsed()` would not).
 
 use std::time::Instant;
 
@@ -20,6 +22,34 @@ pub fn now() -> Instant {
 #[cfg(test)]
 pub fn now() -> Instant {
     test::frozen().unwrap_or_else(Instant::now)
+}
+
+/// How long ago `at` was on this clock (zero for an instant ahead of it): `at.elapsed()`
+/// wherever the answer decides something, so a test's frozen clock decides it too.
+#[inline]
+pub fn since(at: Instant) -> std::time::Duration {
+    now().saturating_duration_since(at)
+}
+
+/// Waits `d` on this thread: `std::thread::sleep` in a build. Under `cfg(test)` with the
+/// clock frozen, the frozen clock moves on by `d` instead and nothing sleeps: a handler
+/// that waits (the cover's `cover_ms`, the raise-order check's polls) takes that long on the
+/// test clock, so what was received meanwhile is handled that much later, as on a Mac.
+#[cfg(not(test))]
+#[inline]
+pub fn sleep(d: std::time::Duration) {
+    std::thread::sleep(d);
+}
+
+/// Waits `d` on this thread: `std::thread::sleep` in a build. Under `cfg(test)` with the
+/// clock frozen, the frozen clock moves on by `d` instead and nothing sleeps.
+#[cfg(test)]
+pub fn sleep(d: std::time::Duration) {
+    if test::frozen().is_some() {
+        test::advance(d);
+    } else {
+        std::thread::sleep(d);
+    }
 }
 
 /// The test clock: frozen per thread, moved by hand, restored when the guard drops.

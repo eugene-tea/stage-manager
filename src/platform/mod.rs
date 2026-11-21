@@ -27,6 +27,21 @@ pub mod desktop_shot;
 pub mod dock;
 pub mod durable;
 pub mod enhanced_ui;
+#[cfg(test)]
+pub mod fake;
+
+/// True on a thread a test gave a fake desk ([`fake`]); always false in a build.
+#[cfg(test)]
+pub(crate) fn fake_active() -> bool {
+    fake::active()
+}
+
+/// True on a thread a test gave a fake desk; always false in a build.
+#[cfg(not(test))]
+#[inline]
+pub(crate) fn fake_active() -> bool {
+    false
+}
 pub mod guardian;
 pub mod handoff;
 pub mod hidden_tabs;

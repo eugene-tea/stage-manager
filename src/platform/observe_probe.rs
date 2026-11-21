@@ -148,6 +148,16 @@ impl Probes {
         if self.running.contains_key(&pid) {
             return true;
         }
+        // On the fake desk no thread asks: the desk says when the app answers, and the bench
+        // hands the observer the note this probe would have sent.
+        #[cfg(test)]
+        if super::fake::active() {
+            let id = self.last + 1;
+            self.last = id;
+            self.running.insert(pid, (id, Arc::new(AtomicBool::new(false))));
+            super::fake::with(|d| d.probe_started(pid, id, retry));
+            return true;
+        }
         let Some(notify) = self.notify.clone() else { return false };
         let stop = Arc::new(AtomicBool::new(false));
         let id = self.last + 1;
@@ -225,6 +235,10 @@ fn probe(pid: i32, id: u64, mut retry: Retry, mut due: Instant, ask: Ask, fast: 
 /// Asks every app of `pids` once, all at the same time, each on a thread of its own, and
 /// waits at most `wait`: the apps that answered within it. One that answers late is not in it.
 pub fn ask_once(pids: &[i32], ask: Ask, wait: Duration) -> HashSet<i32> {
+    #[cfg(test)]
+    if let Some(answered) = super::fake::with(|d| pids.iter().copied().filter(|p| d.apps.get(p).is_some_and(|a| !a.gone)).collect()) {
+        return answered;
+    }
     let (tx, rx) = mpsc::channel();
     let mut asked = 0usize;
     for &pid in pids {

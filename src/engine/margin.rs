@@ -221,6 +221,8 @@ fn worth_a_line(name: &'static str, share: f64, inside: bool) -> bool {
 /// own verdict: `<` or `<=`, and any other condition, are its). Returns `inside`, so a check
 /// can be noted where it is made. Within 0.5 to 2 of the limit: one debug line.
 pub fn note(name: &'static str, elapsed: Duration, limit: Duration, inside: bool) -> bool {
+    #[cfg(test)]
+    test::seen(test::Seen { name, elapsed, limit, inside: Some(inside), ended: None });
     let share = share(elapsed, limit);
     let limit_ms = ms(limit);
     with_row(name, |r| {
@@ -241,6 +243,8 @@ pub fn within(name: &'static str, elapsed: Duration, limit: Duration) -> bool {
 /// A wait `name` ended after `elapsed`, its cap `cap`, `how`. One ended by its cap logs one
 /// debug line.
 pub fn wait(name: &'static str, elapsed: Duration, cap: Duration, how: End) {
+    #[cfg(test)]
+    test::seen(test::Seen { name, elapsed, limit: cap, inside: None, ended: Some(how) });
     let cap_ms = ms(cap);
     with_row(name, |r| {
         r.limit_ms = cap_ms;
@@ -264,6 +268,57 @@ pub fn age(name: &'static str, at: std::time::Instant, since: std::time::Instant
         predated(name);
     }
     at.saturating_duration_since(since)
+}
+
+/// Test only: what this thread noted, kept apart from the process's table (tests run side by
+/// side): a scenario reads the time decisions its own run made, each with its verdict.
+#[cfg(test)]
+pub mod test {
+    use super::End;
+    use std::cell::RefCell;
+    use std::time::Duration;
+
+    /// One decision or one wait's end noted on this thread.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct Seen {
+        /// The constant's name.
+        pub name: &'static str,
+        /// What had passed.
+        pub elapsed: Duration,
+        /// Its limit or cap.
+        pub limit: Duration,
+        /// A decision's verdict (`None`: a wait's end).
+        pub inside: Option<bool>,
+        /// How a wait ended (`None`: a decision).
+        pub ended: Option<End>,
+    }
+
+    thread_local! {
+        static SEEN: RefCell<Option<Vec<Seen>>> = const { RefCell::new(None) };
+    }
+
+    /// Starts keeping what this thread notes (dropping what was kept).
+    pub fn start() {
+        SEEN.with(|s| *s.borrow_mut() = Some(Vec::new()));
+    }
+
+    /// What was noted since [`start`], in order; nothing is kept after.
+    pub fn take() -> Vec<Seen> {
+        SEEN.with(|s| s.borrow_mut().take().unwrap_or_default())
+    }
+
+    /// What was noted since [`start`], in order, still kept.
+    pub fn so_far() -> Vec<Seen> {
+        SEEN.with(|s| s.borrow().clone().unwrap_or_default())
+    }
+
+    pub(super) fn seen(seen: Seen) {
+        SEEN.with(|s| {
+            if let Some(kept) = s.borrow_mut().as_mut() {
+                kept.push(seen);
+            }
+        });
+    }
 }
 
 /// The whole run's table, by name.

@@ -90,6 +90,10 @@ static WATCHED: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
 
 /// Starts watching app `pid`'s new windows on a thread of its own.
 pub fn start(engine: Arc<SpacesEngine>, pid: i32) {
+    // On a fake desk no thread watches: a new app's windows show as their app orders them in.
+    if cfg!(test) && crate::platform::fake_active() {
+        return;
+    }
     let fresh = WATCHED.lock().map(|mut w| w.insert(pid)).unwrap_or(false);
     if !fresh {
         return;

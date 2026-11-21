@@ -228,6 +228,10 @@ pub struct Modifiers {
 
 /// The modifiers held now (any thread).
 pub fn live_modifiers() -> Modifiers {
+    #[cfg(test)]
+    if let Some(m) = super::fake::with(|d| Modifiers { shift: d.shift, cmd: d.cmd }) {
+        return m;
+    }
     let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
     Modifiers { shift: flags.contains(CGEventFlags::MaskShift), cmd: flags.contains(CGEventFlags::MaskCommand) }
 }
@@ -235,16 +239,28 @@ pub fn live_modifiers() -> Modifiers {
 /// True when ⌘ is held now, by a person's keyboard or a posted event (the session's combined
 /// state; any thread): ⌘Tab's switcher closed with its release unheard is found so.
 pub fn command_held() -> bool {
+    #[cfg(test)]
+    if let Some(held) = super::fake::with(|d| d.cmd) {
+        return held;
+    }
     CGEventSource::flags_state(CGEventSourceStateID::CombinedSessionState).contains(CGEventFlags::MaskCommand)
 }
 
 /// Where the pointer is now, global top-left coordinates (any thread).
 pub fn pointer() -> Option<Point> {
+    #[cfg(test)]
+    if let Some(p) = super::fake::with(|d| d.pointer) {
+        return Some(p);
+    }
     pointer_now().map(|p| Point::new(p.x, p.y))
 }
 
 /// Since the last keyboard, mouse or trackpad event in this login session (any thread).
 pub fn since_last_input() -> Duration {
+    #[cfg(test)]
+    if let Some(d) = super::fake::with(|d| d.since_press(false)) {
+        return d;
+    }
     // kCGAnyInputEventType is all ones.
     let secs = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType(u32::MAX));
     Duration::try_from_secs_f64(secs).unwrap_or(Duration::ZERO)
@@ -253,6 +269,10 @@ pub fn since_last_input() -> Duration {
 /// Since the user last pressed a mouse button in this login session (any thread): unlike
 /// [`since_last_input`], a pointer move, a scroll or a key does not count.
 pub fn since_last_click() -> Duration {
+    #[cfg(test)]
+    if let Some(d) = super::fake::with(|d| d.since_press(true)) {
+        return d;
+    }
     [CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown]
         .into_iter()
         .map(|kind| CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, kind))
@@ -264,6 +284,10 @@ pub fn since_last_click() -> Duration {
 /// Since the user last pressed a mouse button or a key in this login session (any thread):
 /// a pointer move or a scroll does not count.
 pub fn since_last_press() -> Duration {
+    #[cfg(test)]
+    if let Some(d) = super::fake::with(|d| d.since_press(false)) {
+        return d;
+    }
     let key = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType::KeyDown);
     let key = Duration::try_from_secs_f64(key).unwrap_or(Duration::MAX);
     since_last_click().min(key)
@@ -294,6 +318,10 @@ pub fn left_ups() -> u64 {
 
 /// True while the left mouse button is down (any thread).
 pub fn left_button_down() -> bool {
+    #[cfg(test)]
+    if let Some(down) = super::fake::with(|d| d.left_down) {
+        return down;
+    }
     CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)
 }
 

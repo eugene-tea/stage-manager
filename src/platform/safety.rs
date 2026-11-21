@@ -1703,6 +1703,8 @@ mod tests {
 
     #[test]
     fn empty_registry_unparks_nothing() {
+        // The registry is the process's: no bench fills it meanwhile.
+        let _alone = crate::platform::fake::exclusive();
         let r = unpark_registry(Duration::from_millis(10), Duration::ZERO).unwrap_or_default();
         assert_eq!(r.failed, 0);
     }

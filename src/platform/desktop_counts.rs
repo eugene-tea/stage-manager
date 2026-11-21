@@ -102,6 +102,10 @@ pub fn display_uuid(id: u32) -> Option<String> {
 /// How many Desktops macOS keeps for each of `displays` it names (read only; see the module
 /// docs).
 pub fn desktop_counts(displays: &[Display]) -> Vec<(ScreenKey, u32)> {
+    #[cfg(test)]
+    if let Some(counts) = crate::platform::fake::with(|d| d.screens.iter().map(|s| (s.display.key, s.desktops.len() as u32)).collect()) {
+        return counts;
+    }
     let main = CGMainDisplayID();
     let screens: Vec<NamedScreen> =
         displays.iter().map(|d| NamedScreen { key: d.key, uuid: display_uuid(d.id.0), main: d.id.0 == main }).collect();

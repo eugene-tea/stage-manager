@@ -43,7 +43,9 @@ fn per_app<W: Sync, T: Send>(apps: &[(i32, Vec<W>)], each: impl Fn(&[W]) -> T + 
         let _batch = enhanced_ui::Batch::open();
         each(ws)
     };
-    if apps.len() <= 1 {
+    // On a fake desk (a test's thread) the apps are asked in turn here: the desk is its
+    // thread's own, and no other thread reaches it.
+    if apps.len() <= 1 || cfg!(test) && crate::platform::fake_active() {
         return apps.iter().map(|(_, ws)| Some(run(ws))).collect();
     }
     std::thread::scope(|scope| {
@@ -104,7 +106,7 @@ impl lend_park::Moves for AxMover<'_> {
             if now.is_some_and(|r| lend_park::at_origin(r, to)) || clock::now() >= by {
                 return now;
             }
-            std::thread::sleep(PICK_READ_STEP);
+            clock::sleep(PICK_READ_STEP);
         }
     }
 }
@@ -261,7 +263,7 @@ impl SpacesEngine {
         }
         drop(st);
         self.lends_to_file();
-        parks.ms = ms(began.elapsed());
+        parks.ms = ms(clock::since(began));
         parks
     }
 
@@ -333,7 +335,7 @@ impl SpacesEngine {
         }
         self.lends_to_file();
         homes.calls = done.calls;
-        homes.ms = ms(began.elapsed());
+        homes.ms = ms(clock::since(began));
         homes
     }
 

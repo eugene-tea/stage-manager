@@ -1551,7 +1551,7 @@ impl Controller {
     /// with [`MOVE_NEEDS`] of it left ([`Resent::Deferred`]: nothing sent, not counted), each
     /// call's timeout what is left; an exact move the cap cut is [`Resent::Cut`] (R13 2).
     fn resend(&mut self, ob: &Observer, e: &mut Expect, now: Instant, round: Instant) -> Resent {
-        let Some(first) = round_timeout(RESEND_ROUND_CAP, round.elapsed()).filter(|_| move_fits(round.elapsed())) else {
+        let Some(first) = round_timeout(RESEND_ROUND_CAP, clock::since(round)).filter(|_| move_fits(clock::since(round))) else {
             return Resent::Deferred;
         };
         // A fresh handle found for a dead one (stale-handles) wins over the tracked one.
@@ -1573,7 +1573,7 @@ impl Controller {
                 return (Ok(()), send(el, frame), full(first));
             }
             let nudge = send(el, nudged);
-            match (&nudge, round_timeout(RESEND_ROUND_CAP, round.elapsed())) {
+            match (&nudge, round_timeout(RESEND_ROUND_CAP, clock::since(round))) {
                 (Err(_), _) => (nudge, Ok(()), true),
                 (Ok(()), Some(seconds)) => {
                     let _ = el.set_messaging_timeout(seconds);
@@ -1870,9 +1870,9 @@ impl Controller {
                 || a.is_hidden(),
                 || a.is_frontmost(),
                 // The window element is on the global timeout: bounded too (R11 4).
-                || a.focused_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, started.elapsed()))),
-                || a.main_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, started.elapsed()))),
-                || match round_timeout(PRESS_ROUND_CAP, started.elapsed()) {
+                || a.focused_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, clock::since(started)))),
+                || a.main_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, clock::since(started)))),
+                || match round_timeout(PRESS_ROUND_CAP, clock::since(started)) {
                     Some(seconds) => {
                         let _ = a.set_messaging_timeout(seconds);
                         false

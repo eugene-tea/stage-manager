@@ -425,6 +425,8 @@ pub fn set_event_sink(f: impl Fn(StripEvent) + Send + Sync + 'static) {
 
 /// Hands a snapshot to the strip (called by the controller on any thread).
 pub fn present(snapshot: StripSnapshot) {
+    #[cfg(test)]
+    let Some(snapshot) = crate::platform::fake::present(snapshot) else { return };
     match presenter().lock() {
         Ok(p) => match p.as_ref() {
             Some(f) => f(snapshot),
@@ -483,6 +485,10 @@ pub fn every_published_card() -> Vec<(u64, Rect)> {
 
 /// The cards' frames a display's strip last published (any thread; [`publish_cards`]).
 pub fn published_cards_of(display: u32) -> Vec<(u64, Rect)> {
+    #[cfg(test)]
+    if let Some(cards) = crate::platform::fake::with(|d| d.strip.cards.get(&display).cloned().unwrap_or_default()) {
+        return cards;
+    }
     card_frames().lock().ok().and_then(|f| f.get(&display).cloned()).unwrap_or_default()
 }
 
@@ -828,6 +834,10 @@ pub fn given_up(id: u64) -> bool {
 /// Waits up to `timeout` for the strip's answer to transition `id` (WM thread). No answer
 /// (no strip, or a busy main thread) counts as nothing covered, so windows move at once.
 pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
+    #[cfg(test)]
+    if let Some(cover) = crate::platform::fake::with(|d| d.wait_cover(id, timeout)) {
+        return cover;
+    }
     let (lock, cv) = covers();
     let deadline = Instant::now() + timeout;
     let Ok(mut c) = lock.lock() else { return Cover::default() };

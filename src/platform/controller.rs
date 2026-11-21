@@ -2134,7 +2134,7 @@ impl Controller {
         self.echoes.touch_window(key.0, started);
         self.echoes.touch_app(w.pid, started);
         let result = w.element.bounded(EARLY_FOCUS_BUDGET.as_secs_f32(), |e| e.set_main(true)).and_then(|()| {
-            let left = EARLY_FOCUS_BUDGET.saturating_sub(started.elapsed());
+            let left = EARLY_FOCUS_BUDGET.saturating_sub(clock::since(started));
             if left < EARLY_FOCUS_MIN_CALL {
                 return Err(AxError::CANNOT_COMPLETE);
             }
@@ -2350,7 +2350,7 @@ impl Controller {
             "transition covered"
         );
         if cover.outgoing || cover.incoming {
-            std::thread::sleep(Duration::from_millis(cover_ms));
+            clock::sleep(Duration::from_millis(cover_ms));
         }
         cover
     }
@@ -3624,7 +3624,7 @@ impl Controller {
     /// wait for it to rest, so it shows outside the corner a frame or two at most.
     fn on_deminiaturized(&mut self, ob: &mut Observer, id: u32) {
         let Some(at) = self.unminimizing.remove(&id) else { return };
-        if at.elapsed() >= UNMINIMIZE_MAX {
+        if clock::since(at) >= UNMINIMIZE_MAX {
             return;
         }
         let Some(frame) = self.model.as_ref().filter(|m| m.window(WindowId(id)).is_some_and(|w| w.parked)).and_then(|m| m.frame_left(WindowId(id)))
@@ -5525,7 +5525,7 @@ impl Controller {
     /// from its first wait (a later offer never lengthens it) when it may be about to show
     /// ([`looks_soon`]).
     fn look_soon(&mut self, ob: &Observer, id: u32, listed: Option<Rect>) {
-        let launched = ob.window(id).and_then(|w| ob.launched_at(w.pid)).map(|at| at.elapsed());
+        let launched = ob.window(id).and_then(|w| ob.launched_at(w.pid)).map(clock::since);
         if looks_soon(listed, launched) {
             self.fresh_unplaced.entry(id).or_insert_with(|| clock::now() + FRESH_LOOK);
         }
@@ -6194,7 +6194,7 @@ impl Controller {
                 self.pressed_obs = None;
             }
         }
-        let pressed = self.pressed_obs.take().filter(|(at, _)| at.elapsed() < PRESSED_OBS_MAX).map(|(_, obs)| obs);
+        let pressed = self.pressed_obs.take().filter(|(at, _)| clock::since(*at) < PRESSED_OBS_MAX).map(|(_, obs)| obs);
         let obs = match pressed {
             Some(obs) if matches!(event, StripEvent::CardClicked { .. } | StripEvent::IconClicked { .. }) => obs,
             _ => self.observe(ob),
@@ -6478,7 +6478,7 @@ impl Controller {
         // No capture round while nobody can see the screen (8M: rounds failing for minutes).
         let away = if self.locked {
             Some(capture_pace::Away::Locked)
-        } else if objc2_core_graphics::CGDisplayIsAsleep(objc2_core_graphics::CGMainDisplayID()) {
+        } else if session::main_display_asleep() {
             Some(capture_pace::Away::Asleep)
         } else {
             None

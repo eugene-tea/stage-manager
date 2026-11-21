@@ -47,6 +47,12 @@ pub fn finder_icons() -> Option<DesktopIcons> {
 /// when the thread could not start).
 pub fn start_read() -> Option<mpsc::Receiver<Option<DesktopIcons>>> {
     let (tx, rx) = mpsc::channel();
+    #[cfg(test)]
+    if super::fake::active() {
+        // The fake desk's Finder shows no icon: answered at once, no thread.
+        let _ = tx.send(Some(DesktopIcons::Icons(Vec::new())));
+        return Some(rx);
+    }
     let spawned = std::thread::Builder::new().name("finder-desktop-icons".into()).spawn(move || {
         // A panic here must not take the app down (review M2): the icons are unknown, so the
         // patch stays off, and the read is tried again later.

@@ -1090,10 +1090,7 @@ impl Observer {
         // the console's): no observation.
         let blind = !list.iter().any(|w| w.onscreen);
         let listed: HashSet<u32> = list.iter().map(|w| w.id).collect();
-        let alive = |pid: i32| {
-            // SAFETY: signal 0 only checks that the process exists; nothing is sent.
-            unsafe { libc::kill(pid, 0) == 0 }
-        };
+        let alive = |pid: i32| !process_gone(pid);
         let tracked: Vec<u32> =
             self.windows.values().filter(|w| self.observed.contains_key(&w.pid) && alive(w.pid)).map(|w| w.id).collect();
         for id in self.vanished.look(clock::now(), tracked, &listed, blind) {
@@ -1585,6 +1582,10 @@ impl Observer {
 fn process_gone(pid: i32) -> bool {
     if pid <= 0 {
         return false;
+    }
+    #[cfg(test)]
+    if let Some(gone) = super::fake::with(|d| d.apps.get(&pid).is_none_or(|a| a.gone)) {
+        return gone;
     }
     // SAFETY: signal 0 only checks that the process exists; nothing is sent.
     let r = unsafe { libc::kill(pid, 0) };

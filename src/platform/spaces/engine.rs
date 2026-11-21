@@ -347,11 +347,11 @@ impl Moves for Mover<'_> {
                         crate::engine::margin::wait(name, clock::now().saturating_duration_since(began), cap, how);
                         break now;
                     }
-                    std::thread::sleep(READ_BACK_STEP);
+                    clock::sleep(READ_BACK_STEP);
                 }
             }
         };
-        self.moves += t.elapsed();
+        self.moves += clock::since(t);
         out
     }
 }
@@ -419,9 +419,22 @@ pub struct SpacesEngine {
     stretches_busy: AtomicBool,
 }
 
+#[cfg(test)]
+impl SpacesEngine {
+    /// A fresh engine with nothing held: a fake desk's own ([`crate::platform::fake`]).
+    pub(crate) fn for_test() -> Self {
+        SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) }
+    }
+}
+
 /// The one Spaces engine of this process: the stage Spaces belong to the process's
 /// window-server connection, so there is one map of them.
 pub fn shared() -> Arc<SpacesEngine> {
+    // On a thread with a fake desk: that desk's own engine, over its fake SkyLight.
+    #[cfg(test)]
+    if let Some(engine) = crate::platform::fake::spaces_engine() {
+        return engine;
+    }
     static ENGINE: OnceLock<Arc<SpacesEngine>> = OnceLock::new();
     ENGINE.get_or_init(|| Arc::new(SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) })).clone()
 }
@@ -715,11 +728,11 @@ impl SpacesEngine {
                 st.counts.read_back_max_us = st.counts.read_back_max_us.max(us);
                 return (true, now);
             }
-            if began.elapsed() >= READ_BACK {
+            if clock::since(began) >= READ_BACK {
                 crate::engine::margin::wait("READ_BACK", clock::now().saturating_duration_since(began), READ_BACK, crate::engine::margin::End::Cap);
                 return (false, now);
             }
-            std::thread::sleep(READ_BACK_STEP);
+            clock::sleep(READ_BACK_STEP);
         }
     }
 

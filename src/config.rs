@@ -1216,10 +1216,38 @@ pub const HOME_ENV: &str = "STAGE_MANAGER_HOME";
 
 /// `$STAGE_MANAGER_HOME` when set (and not empty), else `~/.config/stage-manager`.
 pub fn config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = test_home::get() {
+        return Some(dir);
+    }
     if let Some(dir) = std::env::var_os(HOME_ENV).filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("stage-manager"))
+}
+
+/// Test only: a home of this thread's own ([`config_dir`] answers it while set), so a test
+/// that builds the real controller writes its `state.json` and parked file in a scratch
+/// folder, never in the real one and never through the process's environment (tests run
+/// side by side).
+#[cfg(test)]
+pub mod test_home {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        static HOME: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    /// This thread's home from now on (`None`: the environment's again).
+    pub fn set(dir: Option<PathBuf>) {
+        HOME.with(|h| *h.borrow_mut() = dir);
+    }
+
+    /// This thread's home, when a test set one.
+    pub fn get() -> Option<PathBuf> {
+        HOME.with(|h| h.borrow().clone())
+    }
 }
 
 /// `config.toml` in [`config_dir`].

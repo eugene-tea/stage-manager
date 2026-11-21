@@ -138,10 +138,23 @@ pub fn accessibility_blind() -> bool {
     AX_BLIND.load(Ordering::Relaxed)
 }
 
+/// True while the main display sleeps (`CGDisplayIsAsleep`).
+pub fn main_display_asleep() -> bool {
+    #[cfg(test)]
+    if super::fake::active() {
+        return false;
+    }
+    objc2_core_graphics::CGDisplayIsAsleep(objc2_core_graphics::CGMainDisplayID())
+}
+
 /// True while the screen is locked or this login session is not the one on the console.
 /// `false` when the session cannot be read (never blocks the app on an unknown).
 pub fn screen_locked() -> bool {
     super::costs::bump(super::costs::Cost::LockPoll);
+    #[cfg(test)]
+    if let Some(locked) = super::fake::with(|d| d.locked) {
+        return locked;
+    }
     let Some(dict) = CGSessionCopyCurrentDictionary() else {
         return false;
     };
@@ -168,6 +181,10 @@ unsafe extern "C" {
 /// playing, a call, a presentation), which is how macOS itself knows someone is watching
 /// with no input. `false` when the assertions cannot be read.
 pub fn display_kept_awake() -> bool {
+    #[cfg(test)]
+    if super::fake::active() {
+        return false;
+    }
     let mut raw: *const CFDictionary = std::ptr::null();
     // SAFETY: a valid out-pointer; on success (0) IOKit stores a dictionary we own (the
     // Copy rule) or leaves it null.
@@ -214,6 +231,10 @@ pub fn since_rest(now: Instant) -> Option<Duration> {
 /// login they start over. Read once (it cannot change while the process lives); `None` when
 /// neither the boot time nor the session can be read.
 pub fn window_session() -> Option<&'static str> {
+    #[cfg(test)]
+    if let Some(session) = super::fake::with(|d| d.session) {
+        return Some(session);
+    }
     static SESSION: OnceLock<Option<String>> = OnceLock::new();
     SESSION.get_or_init(read_window_session).as_deref()
 }

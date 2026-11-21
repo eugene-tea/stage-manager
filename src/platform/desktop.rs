@@ -91,6 +91,10 @@ pub(crate) fn screen_number(screen: &NSScreen) -> Option<u32> {
 /// from CoreGraphics ([`ScreenKey`]; the serial is 0 for many displays, and identical ones
 /// are told apart by their order, [`number_duplicates`]).
 pub fn screen_key(id: u32) -> ScreenKey {
+    #[cfg(test)]
+    if let Some(key) = super::fake::with(|d| d.screens.iter().find(|s| s.display.id.0 == id).map_or(ScreenKey::NONE, |s| s.display.key)) {
+        return key;
+    }
     ScreenKey::new(CGDisplayVendorNumber(id), CGDisplayModelNumber(id), CGDisplaySerialNumber(id))
 }
 
@@ -114,6 +118,10 @@ pub fn cg_display_bounds() -> Vec<Rect> {
 /// Every active display's id and bounds from CoreGraphics (global top-left coordinates), main
 /// first.
 pub fn cg_displays() -> Vec<(u32, Rect)> {
+    #[cfg(test)]
+    if let Some(screens) = super::fake::with(|d| d.screens.iter().map(|s| (s.display.id.0, s.display.frame)).collect()) {
+        return screens;
+    }
     let mut ids = [0u32; 16];
     let mut count = 0u32;
     // SAFETY: `ids` holds 16 entries and both pointers are valid for the call.

@@ -44,7 +44,7 @@ struct UserWatch<'a> {
 
 impl UserWatch<'_> {
     fn acted(&self, listed: &[u32]) -> bool {
-        input::since_last_click() < self.since.elapsed() || order::front_moved(listed, self.asked, self.front_then)
+        input::since_last_click() < clock::since(self.since) || order::front_moved(listed, self.asked, self.front_then)
     }
 }
 
@@ -86,7 +86,7 @@ impl Controller {
                 if now.duration_since(calm_since) >= order::calm_needed(fixes) || now >= deadline {
                     break got;
                 }
-                std::thread::sleep(order::POLL.min(deadline - now));
+                clock::sleep(order::POLL.min(deadline - now));
                 continue;
             }
             first_wrong.get_or_insert_with(|| got.clone());
@@ -176,7 +176,7 @@ impl Controller {
                 if order::shows_above(id, order::below(asked, id), &order::listed_order(asked, &listed)) || now >= until {
                     break;
                 }
-                std::thread::sleep(order::POLL.min(until - now));
+                clock::sleep(order::POLL.min(until - now));
             }
         }
         // A focus the landing owes waits for it (the key window flies on no Desktop).

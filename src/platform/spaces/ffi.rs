@@ -95,7 +95,37 @@ pub(crate) unsafe fn load<F: Copy>(handle: *mut c_void, name: &'static CStr, nam
 }
 
 impl Sky {
+    /// Test only: no SkyLight behind it. On a thread with a fake desk
+    /// ([`crate::platform::fake`]) each call is answered by the desk before it would need one.
+    #[cfg(test)]
+    pub(crate) fn hollow() -> Self {
+        Self {
+            cid: 0,
+            copy_managed: None,
+            copy_spaces: None,
+            spaces_for_windows: None,
+            create: None,
+            destroy: None,
+            level: None,
+            get_level: None,
+            show: None,
+            hide: None,
+            add_remove: None,
+            move_managed: None,
+            set_transform: None,
+            get_transform: None,
+            space_type: None,
+            active: None,
+            msg_send: std::ptr::null(),
+            names: Vec::new(),
+        }
+    }
+
     pub(crate) fn open() -> Result<Self, String> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Ok(Self::hollow());
+        }
         // SAFETY: a system framework path; RTLD_NOW resolves everything at load.
         let h = unsafe { libc::dlopen(SKYLIGHT.as_ptr(), libc::RTLD_NOW) };
         if h.is_null() {
@@ -134,6 +164,10 @@ impl Sky {
 
     /// The Desktops per display: (display uuid, current Space, [(Space, type)]).
     pub(crate) fn displays(&self) -> Vec<DisplaySpaces> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.sky_displays()) {
+            return out;
+        }
         let Some(f) = self.copy_managed else { return Vec::new() };
         // SAFETY: returns a +1 CFArray of CFDictionary (or null).
         let Some(list) = (unsafe { take_array(f(self.cid)) }) else { return Vec::new() };
@@ -165,12 +199,20 @@ impl Sky {
 
     /// The Space of the screen with the keyboard (`SLSGetActiveSpace`), when exported.
     pub(crate) fn active_space(&self) -> Option<u64> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.screens[0].shown) {
+            return Some(out);
+        }
         // SAFETY: plain query on this process's connection.
         self.active.map(|f| unsafe { f(self.cid) }).filter(|s| *s != 0)
     }
 
     /// Every Space the window server lists for this mask.
     pub(crate) fn all_spaces(&self, mask: i32) -> Vec<u64> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.sky_all_spaces(mask)) {
+            return out;
+        }
         let Some(f) = self.copy_spaces else { return Vec::new() };
         // SAFETY: returns a +1 CFArray of CFNumber (or null).
         unsafe { take_array(f(self.cid, mask)) }.map(|a| numbers(&a)).unwrap_or_default()
@@ -178,6 +220,10 @@ impl Sky {
 
     /// The Spaces each window is on.
     pub(crate) fn spaces_of(&self, ids: &[u32]) -> Vec<u64> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.sky_spaces_of(ids)) {
+            return out;
+        }
         let Some(f) = self.spaces_for_windows else { return Vec::new() };
         let arr = wid_array(ids);
         // SAFETY: a CFArray of window numbers; returns a +1 CFArray of CFNumber (or null).
@@ -185,11 +231,19 @@ impl Sky {
     }
 
     pub(crate) fn space_type(&self, sid: u64) -> Option<i32> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| if d.is_desktop(sid) { 0 } else { 2 }) {
+            return Some(out);
+        }
         // SAFETY: plain query.
         self.space_type.map(|f| unsafe { f(self.cid, sid) })
     }
 
     pub(crate) fn get_transform(&self, sid: u64) -> Option<[f64; 6]> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        }
         let f = self.get_transform?;
         let mut options = 0i32;
         // SAFETY: returns the transform by value (indirect result); `options` is writable.
@@ -236,6 +290,10 @@ impl Sky {
     }
 
     pub(crate) fn create(&self, route: Route, managed: bool) -> Result<u64, String> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.sky_create()) {
+            return Ok(out);
+        }
         match route {
             Route::Classic => {
                 let f = self.create.ok_or("SLSSpaceCreate is missing")?;
@@ -279,6 +337,10 @@ impl Sky {
     pub(crate) fn destroy(&self, route: Route, sid: u64) -> Result<i32, String> {
         // Ending a Space that holds windows puts them on the Desktop shown.
         crate::platform::windows::note_write();
+        #[cfg(test)]
+        if crate::platform::fake::with(|d| d.sky_destroy(sid)).is_some() {
+            return Ok(0);
+        }
         match route {
             Route::Classic => {
                 let f = self.destroy.ok_or("SLSSpaceDestroy is missing")?;
@@ -300,11 +362,19 @@ impl Sky {
 
     /// Space `sid`'s level ([`Self::set_level`]), when exported.
     pub(crate) fn get_level(&self, sid: u64) -> Option<i32> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Some(0);
+        }
         // SAFETY: plain query on this process's connection.
         self.get_level.map(|f| unsafe { f(self.cid, sid) })
     }
 
     pub(crate) fn set_level(&self, route: Route, sid: u64, level: i32) -> Result<i32, String> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Ok(0);
+        }
         match route {
             Route::Classic => {
                 let f = self.level.ok_or("SLSSpaceSetAbsoluteLevel is missing")?;
@@ -325,6 +395,10 @@ impl Sky {
     }
 
     pub(crate) fn show_hide(&self, route: Route, sids: &[u64], show: bool) -> Result<i32, String> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Ok(0);
+        }
         let arr = sid_array(sids);
         match route {
             Route::Classic => {
@@ -348,6 +422,10 @@ impl Sky {
     /// of Space, as [`ALL_SPACES_MASK`] is).
     pub(crate) fn add_remove_from(&self, route: Route, sid: u64, ids: &[u32], options: i32) -> Result<i32, String> {
         crate::platform::windows::note_write();
+        #[cfg(test)]
+        if crate::platform::fake::with(|d| d.sky_add_remove(route == Route::Bridged, sid, ids, options)).is_some() {
+            return Ok(0);
+        }
         let arr = wid_array(ids);
         match route {
             Route::Classic => {
@@ -377,6 +455,10 @@ impl Sky {
     /// The windows onto the managed Space (a Desktop) `sid`.
     pub(crate) fn move_managed(&self, route: Route, ids: &[u32], sid: u64) -> Result<i32, String> {
         crate::platform::windows::note_write();
+        #[cfg(test)]
+        if crate::platform::fake::with(|d| d.sky_add_remove(route == Route::Bridged, sid, ids, 0xf)).is_some() {
+            return Ok(0);
+        }
         let arr = wid_array(ids);
         match route {
             Route::Classic => {
@@ -399,6 +481,10 @@ impl Sky {
     }
 
     pub(crate) fn set_transform(&self, route: Route, sid: u64, t: CGAffineTransform) -> Result<i32, String> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Ok(0);
+        }
         match route {
             Route::Classic => {
                 let f = self.set_transform.ok_or("SLSSpaceSetTransform is missing")?;
