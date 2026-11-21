@@ -151,6 +151,11 @@ pub fn publish(wanted: bool, keys: Option<Keys>, armed: bool) {
 /// its Tab heard to its end). The tap is on meanwhile, whatever Mission Control's mode, and
 /// forwards Escape, ⌘'s release and presses.
 pub fn switcher_up(up: bool) {
+    // On a fake desk: its own tap is armed, the process's is left alone.
+    #[cfg(test)]
+    if super::fake::with(|d| d.tap_switcher = up).is_some() {
+        return;
+    }
     if SWITCHER.swap(up, Ordering::Relaxed) != up {
         sync();
     }
@@ -160,6 +165,10 @@ pub fn switcher_up(up: bool) {
 /// switcher's Escape and ⌘'s release are heard then; else a missing activation is all that
 /// tells a cancel ([`crate::engine::switcher::activation_cap`]).
 pub fn hears() -> bool {
+    #[cfg(test)]
+    if let Some(hears) = super::fake::with(|d| d.tap_hears) {
+        return hears;
+    }
     tap_on() && !PORT.load(Ordering::SeqCst).is_null() && !OFF_BY_INPUT.load(Ordering::Relaxed)
 }
 

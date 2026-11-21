@@ -390,6 +390,7 @@ impl Bench {
         self.desk(|d| d.pointer = p);
         self.input(InputKind::MouseDown, None, |_| {});
         self.desk(|d| {
+            d.tap_forwards(crate::platform::mission_key_tap::Heard::Click);
             // The wallpaper: macOS hands the desktop to Finder (`engine/desktop_echo.rs`).
             if d.window_at(p).is_none() && !d.dock.bar.contains(p) {
                 d.post(fake::delays::FINDER_AFTER_WALLPAPER, Notice::Step(fake::Step::Activation { pid: fake::FINDER_PID, raise_all: false }));
@@ -436,15 +437,36 @@ impl Bench {
     /// ⌘ let go with the switcher up: it closes and macOS activates the app selected.
     pub(super) fn cmd_tab_release(&mut self) {
         self.command(false);
-        self.desk(|d| d.switcher_closes(true));
+        self.desk(|d| {
+            d.tap_forwards(crate::platform::mission_key_tap::Heard::CommandUp);
+            d.switcher_closes(true);
+        });
     }
 
     /// Escape with the switcher up: it closes, nothing is activated; the input monitor does
-    /// not hear the key (`engine/switcher.rs`, live 11-15). ⌘ is let go `after_ms` later.
+    /// not hear the key (`engine/switcher.rs`, live 11-15), the key tap does while it is
+    /// armed for the switcher and macOS lets it run (`mission_key_tap.rs`, round r2-lends).
+    /// ⌘ is let go `after_ms` later.
     pub(super) fn cmd_tab_escape(&mut self, after_ms: u64) {
-        self.desk(|d| d.switcher_closes(false));
+        self.cmd_tab_escape_key();
         self.advance(after_ms);
+        self.cmd_tab_command_up();
+    }
+
+    /// [`Self::cmd_tab_escape`]'s Escape alone, ⌘ still held.
+    pub(super) fn cmd_tab_escape_key(&mut self) {
+        let mods = crate::engine::mission_control::Mods { control: false, option: false, command: true };
+        self.desk(|d| {
+            d.last_press = Some(clock::now());
+            d.tap_forwards(crate::platform::mission_key_tap::Heard::Key { code: crate::engine::switcher::KEY_ESCAPE, mods });
+            d.switcher_closes(false);
+        });
+    }
+
+    /// ⌘ let go after the switcher closed (the input monitor and, while armed, the tap).
+    pub(super) fn cmd_tab_command_up(&mut self) {
         self.command(false);
+        self.desk(|d| d.tap_forwards(crate::platform::mission_key_tap::Heard::CommandUp));
     }
 
     /// ⌘ pressed or let go.
@@ -495,6 +517,9 @@ impl Bench {
         let mods = crate::engine::mission_control::Mods { control: true, option: false, command: false };
         self.desk(|d| {
             d.last_press = Some(clock::now());
+            if !d.tap_hears {
+                return;
+            }
             d.post(0.0, Notice::Mission(crate::platform::mission_key_tap::Heard::Key { code: crate::platform::input::KEY_UP, mods }));
         });
     }
@@ -524,7 +549,9 @@ impl Bench {
         self.desk(|d| {
             d.last_press = Some(clock::now());
             d.last_click = d.last_press;
-            d.post(0.0, Notice::Mission(crate::platform::mission_key_tap::Heard::Click));
+            if d.tap_hears {
+                d.post(0.0, Notice::Mission(crate::platform::mission_key_tap::Heard::Click));
+            }
         });
         self.advance(150);
         self.desk(|d| {

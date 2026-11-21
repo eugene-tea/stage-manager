@@ -372,6 +372,12 @@ pub struct Desk {
     pub strip: Strip,
     /// ⌘Tab's switcher.
     pub switcher: Switcher,
+    /// The HID key tap hears (`mission_key_tap::hears`): false is "macOS refused the tap" (or
+    /// keeps it off for secure input), and nothing it would forward reaches the app.
+    pub tap_hears: bool,
+    /// The app armed the tap for ⌘Tab's switcher (`mission_key_tap::switcher_up`): while it
+    /// is, the tap forwards Escape, ⌘ let go and mouse-downs.
+    pub tap_switcher: bool,
     /// macOS's own windows listed above the apps' (Mission Control's covers, Show Desktop's).
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
@@ -518,6 +524,8 @@ impl Desk {
             locked: false,
             strip: Strip { draws: true, covers_ms: delays::STRIP_COVERS, ..Strip::default() },
             switcher: Switcher::default(),
+            tap_hears: true,
+            tap_switcher: false,
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
             mission: false,
@@ -1229,6 +1237,15 @@ impl Desk {
         self.switcher = Switcher { shown: false, pids: order, selected: 1 };
         self.post(delays::SWITCHER_SHOWS, Notice::Step(Step::Switcher(true)));
         self.post(delays::SWITCHER_SHOWS, Notice::Switcher("AXCreated"));
+    }
+
+    /// What the key tap heard while it is armed for ⌘Tab's switcher and hears: forwarded as
+    /// the real tap does (`WmCommand::MissionInput`, stamped at its callback). Nothing when
+    /// the tap is not armed or macOS refused it.
+    pub fn tap_forwards(&mut self, heard: super::mission_key_tap::Heard) {
+        if self.tap_hears && self.tap_switcher {
+            self.post(0.0, Notice::Mission(heard));
+        }
     }
 
     /// The switcher closes: its list goes 1 ms later (`engine/switcher.rs`); with `activates`

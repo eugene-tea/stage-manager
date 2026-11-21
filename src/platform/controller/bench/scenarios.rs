@@ -111,6 +111,36 @@ fn seen(b: &mut Bench) -> String {
     format!("front {front} shows {shows:?} desktop {} app {:?} switches {} slides {slides}", b.desktop_shown(), b.front_app().unwrap_or(0), b.transitions())
 }
 
+/// Time moves on until window `id` is on no Desktop again (a window put home taken back),
+/// `max_ms` at most; how long that took (`None`: it is still there).
+fn ms_until_back(b: &mut Bench, id: u32, max_ms: u64) -> Option<u64> {
+    let mut waited = 0;
+    while b.desktop_of(id).is_some() {
+        if waited >= max_ms {
+            return None;
+        }
+        b.advance(10);
+        waited += 10;
+    }
+    Some(waited)
+}
+
+/// How soon, in words (the exact ms vary with the load's costs).
+fn soon(ms: Option<u64>) -> &'static str {
+    match ms {
+        None => "never",
+        Some(0..=100) => "at once",
+        Some(101..=1000) => "within 1 s",
+        Some(1001..=4500) => "within 4.5 s",
+        Some(_) => "at the 5 s cap",
+    }
+}
+
+/// [`ms_until_back`] in words.
+fn taken_back(b: &mut Bench, id: u32, max_ms: u64) -> &'static str {
+    soon(ms_until_back(b, id, max_ms))
+}
+
 /// How many Space change notices the story holds.
 fn slides(b: &Bench) -> usize {
     b.log.iter().filter(|l| l.contains("space change notice")).count()
@@ -186,7 +216,8 @@ fn a_dock_click_on_an_app_whose_stage_is_hidden_here_brings_it_with_no_slide() {
 }
 
 /// The same with Alpha taking the activation 1.2 s after the click (review 11-21, R2: "a
-/// busy app that activates after 1 s gets the slide the lend exists to stop").
+/// busy app that activates after 1 s gets the slide the lend exists to stop"; since round
+/// r2-lends the lend ends by events, `LEND_WAIT` a 5 s cap).
 fn dock_click_with_a_late_activation(load: f64) -> Run {
     let mut b = both_desktops_known(EngineKind::Spaces, load, |_| {});
     b.desk(|d| d.apps.get_mut(&A).expect("Alpha").activates_ms = Some(1200.0));
@@ -196,8 +227,8 @@ fn dock_click_with_a_late_activation(load: f64) -> Run {
     Run::of(&b, out)
 }
 
-/// The same with Alpha taking it 0.4 s after the click: inside the lend's wait on the Mac
-/// as measured, outside it three times slower.
+/// The same with Alpha taking it 0.4 s after the click (before r2-lends: inside the lend's
+/// 1 s on the Mac as measured, outside it three times slower).
 fn dock_click_with_a_slow_activation(load: f64) -> Run {
     let mut b = both_desktops_known(EngineKind::Spaces, load, |_| {});
     b.desk(|d| d.apps.get_mut(&A).expect("Alpha").activates_ms = Some(400.0));
@@ -211,11 +242,53 @@ fn dock_click_with_a_slow_activation(load: f64) -> Run {
 fn a_dock_click_whose_activation_comes_late() {
     let here = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
     let slid = "front [13] shows [13] desktop 2 app 101 switches 0 slides 1";
-    // TIME DECIDES: LEND_WAIT (1 s). Three times slower, the activation comes 1.2 s after the
-    // click: the window put home went back at 1 s, and macOS slides to Alpha's other Desktop.
-    expect(dock_click_with_a_slow_activation, [here, slid, slid]);
-    // TIME DECIDES: LEND_WAIT, on the Mac as measured already (review 11-21, R2).
-    expect(dock_click_with_a_late_activation, [slid, slid, slid]);
+    // Since r2-lends the lend waits for its app's activation (before: back after 1 s, and
+    // the slide at load 3 and 10).
+    expect(dock_click_with_a_slow_activation, [here, here, here]);
+    // TIME DECIDES: LEND_WAIT (a 5 s cap since r2-lends; before, 1 s and the slide at every
+    // load). At load 10 Alpha takes the activation 12 s after the click: the cap took the
+    // window back, and macOS slides to Alpha's other Desktop.
+    expect(dock_click_with_a_late_activation, [here, here, slid]);
+    let refuted = "put home true, back at once after the other activation; front [12] shows [12] desktop 1 app 91 switches 0 slides 0";
+    expect(dock_click_then_another_apps_activation, [refuted, refuted, refuted]);
+    // TIME DECIDES: LEND_WAIT, as meant: with no activation and no press, its 5 s cap is
+    // the only end.
+    let capped = "put home true, back at the 5 s cap; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(dock_click_whose_activation_never_comes, [capped, capped, capped]);
+}
+
+/// `engine/lend_wait.rs`, `controller/arrival.rs` `lent_activation_elsewhere` (round
+/// r2-lends): a Dock click on Alpha, which never takes the activation; 300 ms after the
+/// release another app (Finder) is activated. That refutes the lend: the window put home goes
+/// back at once, nothing switches.
+fn dock_click_then_another_apps_activation(load: f64) -> Run {
+    let mut b = both_desktops_known(EngineKind::Spaces, load, |_| {});
+    b.desk(|d| d.apps.get_mut(&A).expect("Alpha").activates_ms = Some(10_000_000.0));
+    b.dock_click(A, 90);
+    b.advance(300);
+    let lent = b.desktop_of(11).is_some();
+    b.activate(fake::FINDER_PID);
+    // The other app's own activation delay comes first.
+    let notice = b.desk(|d| d.at_load(fake::delays::ACTIVATION).as_millis() as u64) + 1;
+    b.advance(notice);
+    let back = taken_back(&mut b, 11, 8000);
+    b.advance(8000);
+    let out = format!("put home {lent}, back {back} after the other activation; {}", seen(&mut b));
+    Run::of(&b, out)
+}
+
+/// The same with nothing after the click: no activation, no press. Only the lend's cap ends
+/// it (`LEND_WAIT`, 5 s since r2-lends).
+fn dock_click_whose_activation_never_comes(load: f64) -> Run {
+    let mut b = both_desktops_known(EngineKind::Spaces, load, |_| {});
+    b.desk(|d| d.apps.get_mut(&A).expect("Alpha").activates_ms = Some(10_000_000.0));
+    b.dock_click(A, 90);
+    b.advance(300);
+    let lent = b.desktop_of(11).is_some();
+    let back = taken_back(&mut b, 11, 9000);
+    b.advance(8000);
+    let out = format!("put home {lent}, back {back}; {}", seen(&mut b));
+    Run::of(&b, out)
 }
 
 // ----- 5. ⌘Tab to such an app ----------------------------------------------------------------
@@ -244,6 +317,75 @@ fn cmd_tab_cancelled(load: f64) -> Run {
     b.advance(8000);
     let out = seen(&mut b);
     Run::of(&b, out)
+}
+
+/// `controller/switcher.rs`, `mission_key_tap.rs` (round r2-lends): ⌘Tab to Alpha, Escape
+/// 400 ms after the Tab, ⌘ let go 300 ms later. `tap`: the key tap hears (else macOS refused
+/// it, and only the missing activation tells the cancel: the silent waits).
+fn cmd_tab_escape(load: f64, tap: bool) -> Run {
+    let mut b = both_desktops_known(EngineKind::Spaces, load, |d| d.tap_hears = tap);
+    b.cmd_tab(vec![B, A]);
+    b.advance(400);
+    let lent = b.desktop_of(11).is_some();
+    b.cmd_tab_escape_key();
+    let held = ms_until_back(&mut b, 11, 300);
+    b.cmd_tab_command_up();
+    // Not back while ⌘ was held: how long after Escape in all.
+    let back = soon(held.or_else(|| ms_until_back(&mut b, 11, 2000).map(|ms| ms + 300)));
+    b.advance(8000);
+    let out = format!("put home {lent}, back {back}; {}", seen(&mut b));
+    Run::of(&b, out)
+}
+
+/// ⌘Tab let go onto Alpha, which takes the activation 0.4 s later (`engine/switcher.rs`,
+/// `ACTIVATION_WAIT`: a 3 s cap while the tap hears the release, `SILENT_ACTIVATION_WAIT`
+/// 200 ms when it does not).
+fn cmd_tab_onto_a_slow_app(load: f64, tap: bool) -> Run {
+    let mut b = both_desktops_known(EngineKind::Spaces, load, |d| d.tap_hears = tap);
+    b.desk(|d| d.apps.get_mut(&A).expect("Alpha").activates_ms = Some(400.0));
+    b.cmd_tab(vec![B, A]);
+    b.advance(400);
+    b.cmd_tab_release();
+    b.advance(30_000);
+    let out = seen(&mut b);
+    Run::of(&b, out)
+}
+
+fn cmd_tab_onto_a_slow_app_heard(load: f64) -> Run {
+    cmd_tab_onto_a_slow_app(load, true)
+}
+
+fn cmd_tab_onto_a_slow_app_tap_refused(load: f64) -> Run {
+    cmd_tab_onto_a_slow_app(load, false)
+}
+
+fn cmd_tab_escape_heard(load: f64) -> Run {
+    cmd_tab_escape(load, true)
+}
+
+fn cmd_tab_escape_tap_refused(load: f64) -> Run {
+    cmd_tab_escape(load, false)
+}
+
+#[test]
+fn cmd_tab_cancelled_with_and_without_the_key_tap() {
+    // The tap hears Escape: the window put home goes back at its key-down.
+    let heard = "put home true, back at once; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(cmd_tab_escape_heard, [heard, heard, heard]);
+    // TIME DECIDES: GONE_WAIT (150 ms) then SILENT_ACTIVATION_WAIT (200 ms). With the tap
+    // refused no key says the switcher was cancelled: its list gone with no key is taken for
+    // the release, and the missing activation for the cancel, about 350 ms after Escape.
+    let silent = "put home true, back within 1 s; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(cmd_tab_escape_tap_refused, [silent, silent, silent]);
+    let here = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
+    let slid = "front [13] shows [13] desktop 2 app 101 switches 0 slides 1";
+    // The release heard: the window waits for its app's activation (ACTIVATION_WAIT, a 3 s
+    // cap; at load 10 the activation comes 2.95 s into it).
+    expect(cmd_tab_onto_a_slow_app_heard, [here, here, here]);
+    // TIME DECIDES: SILENT_ACTIVATION_WAIT (200 ms). With the tap refused the old rule
+    // stands: an app 0.4 s slow has its window taken back before it activates, and macOS
+    // slides to its other Desktop, on the Mac as measured already.
+    expect(cmd_tab_onto_a_slow_app_tap_refused, [slid, slid, slid]);
 }
 
 #[test]
@@ -537,8 +679,14 @@ pub(super) const ALL: &[Scenario] = &[
     ("Dock click, stage hidden here (Spaces)", "controller/arrival.rs, dock-put-home", dock_click_on_a_stage_hidden_here),
     ("Dock click, activation 0.4 s late (Spaces)", "review 11-21 R2, LEND_WAIT", dock_click_with_a_slow_activation),
     ("Dock click, activation 1.2 s late (Spaces)", "review 11-21 R2, LEND_WAIT", dock_click_with_a_late_activation),
+    ("Dock click, then another app's activation (Spaces)", "engine/lend_wait.rs, r2-lends", dock_click_then_another_apps_activation),
+    ("Dock click, its activation never comes (Spaces)", "engine/lend_wait.rs, LEND_WAIT cap", dock_click_whose_activation_never_comes),
     ("Cmd-Tab released (Spaces)", "controller/switcher.rs, 11-15", cmd_tab_released),
     ("Cmd-Tab cancelled with Escape (Spaces)", "controller/switcher.rs, 11-15", cmd_tab_cancelled),
+    ("Cmd-Tab, Escape heard by the key tap (Spaces)", "mission_key_tap.rs, r2-lends", cmd_tab_escape_heard),
+    ("Cmd-Tab, Escape with the key tap refused (Spaces)", "engine/switcher.rs SILENT_* waits", cmd_tab_escape_tap_refused),
+    ("Cmd-Tab let go onto an app 0.4 s slow, the tap hears (Spaces)", "engine/switcher.rs ACTIVATION_WAIT", cmd_tab_onto_a_slow_app_heard),
+    ("Cmd-Tab let go onto an app 0.4 s slow, the tap refused (Spaces)", "engine/switcher.rs SILENT_ACTIVATION_WAIT", cmd_tab_onto_a_slow_app_tap_refused),
     ("Mission Control closed by its key over another app", "controller/mission_control.rs, mc-key", mission_control_key_close),
     ("the same with mission_control_key_keeps_stage", "controller/mission_control.rs, mc-key", mission_control_key_close_keeps_stage),
     ("Mission Control: a hidden stage's window picked", "engine/mission_control.rs, mc-pick 11-19", mission_control_pick),
