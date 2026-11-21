@@ -18,12 +18,21 @@
 //! stage here, every window of it here waits off every Desktop and macOS counts one of its
 //! windows on another Desktop, the key window of its most recent stage here is put home
 //! ([`WindowEngine::lend_home`]); the selection moving on, a key not followed or ⌘ let go on
-//! another app take it back. Once the switcher closes (⌘ let go, or the Dock's list gone,
-//! the later counts) it stays only if its app is activated within
-//! [`switcher::ACTIVATION_WAIT`]: Escape never reaches the input monitor while the switcher
-//! shows (live 11-15, the switcher takes it), so the keys cannot tell a cancel from a
-//! release, and the activation (3-12 ms after ⌘'s release) does. Activated, the activation's
-//! switch takes it as after a Dock press; not, it goes back unshown ("no activation came").
+//! another app take it back.
+//!
+//! **Its end heard** (round r2-lends): Escape never reaches the input monitor while the
+//! switcher shows (live 11-15, the switcher takes it), nor does ⌘'s release always. The HID
+//! key tap ([`crate::platform::mission_key_tap`]) is on from the Tab heard to the switcher's
+//! end ([`mission_key_tap::switcher_up`], whatever Mission Control's mode) and forwards
+//! Escape, ⌘'s release and a mouse-down ([`Controller::switcher_tap`]): Escape takes the
+//! window back at once; ⌘'s release on its app starts the wait for that app's activation
+//! ([`crate::engine::lend_wait::LendWait`]), which with its switch confirms it, while another
+//! app's activation refutes it, and [`switcher::ACTIVATION_WAIT`] is only the cap (long: the
+//! window waits parked off the screen); a mouse-down is a pick, its activation at the mouse's
+//! release ([`switcher::UNREAD_WAIT`]). Its app already in front at the release (no
+//! activation comes for it) counts as activated. A tap that does not hear (macOS refused
+//! it, or keeps it off for secure input) leaves the time before it: the wait as short as
+//! before ([`switcher::SILENT_ACTIVATION_WAIT`]), a missing activation taken for a cancel.
 //!
 //! **Parked while lent** (round cmdtab-park): at its full frame the window put home showed
 //! under the front stage, and browsing the switcher made it blink in and out (the owner,
@@ -72,12 +81,14 @@ use super::slide_watch::LendNote;
 use crate::engine::corner;
 use crate::engine::lend_park::{ParkAsk, Zone};
 use crate::engine::model::{AppFacts, WindowId};
-use crate::engine::switcher::{self, Act, Choice, Heard, Key, LetGo, List, Switcher};
+use crate::engine::lend_wait::LendWait;
+use crate::engine::switcher::{self, Act, Choice, Heard, Key, List, Switcher};
 use crate::platform::ctl::CmdTabProbe;
 use crate::platform::input::{self, InputEvent, InputKind};
 use crate::platform::observe::Observer;
 use crate::platform::ax::{AxElement, AxObserver};
 use crate::platform::window_engine::LendPark;
+use crate::platform::mission_key_tap::{self, HeardAt};
 use crate::platform::{apps, dock, switcher_ax, switcher_probe, windows};
 
 /// The Dock's notices about the switcher (observed on its application element, live 11-15):
@@ -137,14 +148,12 @@ pub(super) struct SwitcherWatch {
     /// `ctl debug-cmd-tab … nolend`: nothing put home for this switcher (the probe's measure
     /// of macOS's own way).
     lend_off: bool,
+    /// The key tap heard the switcher's end (Escape, ⌘'s release, a click) for this switcher:
+    /// its activation's wait takes the long cap ([`switcher::activation_cap`]).
+    tap_heard: bool,
 }
 
 impl Controller {
-    /// True while ⌘Tab's switcher is up as the keys show it.
-    pub(super) fn switcher_up(&self) -> bool {
-        self.switcher.keys.is_open()
-    }
-
     /// A key event from the input monitor: ⌘ pressed or let go, or a key pressed. Anything but
     /// a switcher key with the switcher down returns at once.
     pub(super) fn switcher_key(&mut self, ob: &Observer, event: &InputEvent, now: Instant) {
@@ -167,11 +176,61 @@ impl Controller {
             self.switcher.dock = dock::dock_pid();
             self.watch_dock();
         }
-        let heard = self.switcher.keys.hear(key);
+        let heard = self.switcher.keys.hear_at(key, now);
         if heard != Heard::Nothing || self.switcher.keys.is_open() {
             switcher_probe::note("heard", format!("{key:?} -> {heard:?}"));
         }
         self.switcher_heard(ob, heard, true, now);
+        self.switcher_arm_tap();
+    }
+
+    /// What the key tap heard while the switcher is up ([`mission_key_tap`]): Escape (the
+    /// switcher's cancel, never heard by the input monitor while it shows), ⌘ let go, or a
+    /// mouse-down (a pick: the switcher activates the app under the pointer at the mouse's
+    /// release). Fed to the switcher as the keys it already has names for; told at `heard.at`,
+    /// when the tap got it. Nothing while the switcher is down: a cancel or release the
+    /// monitor told first leaves the tap's copy nothing to do.
+    pub(super) fn switcher_tap(&mut self, ob: &Observer, heard: HeardAt) {
+        if !self.switcher.keys.is_open() || !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
+            return;
+        }
+        let at = heard.at;
+        let key = match heard.what {
+            mission_key_tap::Heard::Key { code: switcher::KEY_ESCAPE, mods } => Key::Down { code: switcher::KEY_ESCAPE, cmd: mods.command, shift: false },
+            mission_key_tap::Heard::CommandUp => Key::Command(false),
+            mission_key_tap::Heard::Click => {
+                self.switcher.tap_heard = true;
+                self.switcher_picked(at);
+                return;
+            }
+            mission_key_tap::Heard::Key { .. } => return,
+        };
+        self.switcher.tap_heard = true;
+        let heard = self.switcher.keys.hear_at(key, at);
+        switcher_probe::note("key tap", format!("{key:?} -> {heard:?}"));
+        tracing::info!(key = ?key, heard = ?heard, since_tab_ms = self.switcher.opened.map(|t| ms(t, at)), "cmd-tab: the key tap heard the switcher's end");
+        self.switcher_heard(ob, heard, true, at);
+        self.switcher_arm_tap();
+    }
+
+    /// A mouse-down heard by the key tap at `at` with the switcher up: a pick (the switcher
+    /// activates the app under the pointer at the mouse's release, its selection the Dock's
+    /// last reading) or a click outside it. The window put home waits from now for its app's
+    /// activation ([`switcher::UNREAD_WAIT`]); another app's activation refutes it. The keys
+    /// still have the switcher up: ⌘'s release, or the list gone, closes it for them.
+    fn switcher_picked(&mut self, at: Instant) {
+        let cap = switcher::activation_cap(true, mission_key_tap::hears());
+        if let Some(l) = self.lent.as_mut().filter(|l| l.switcher) {
+            l.wait.begin(at, cap);
+            tracing::info!(pid = l.pid, window = l.window.0, cap = cap.name, "cmd-tab: a click while the switcher shows (heard by the key tap): the window put home stays for its app's activation at the mouse's release");
+            switcher_probe::note("picked", format!("window={} cap={}", l.window.0, cap.name));
+        }
+    }
+
+    /// The key tap on while the switcher is up, off once it closes (unless Mission Control
+    /// wants it).
+    fn switcher_arm_tap(&self) {
+        mission_key_tap::switcher_up(self.switcher.keys.is_open());
     }
 
     /// What the switcher did (`heard`; `by_key`: told by a key, else by the Dock or the tick)
@@ -185,6 +244,7 @@ impl Controller {
                     self.switcher.selected = None;
                     self.switcher.released = None;
                     self.switcher.listed = false;
+                    self.switcher.tap_heard = false;
                     self.switcher.dock = dock::dock_pid();
                     self.watch_dock();
                 }
@@ -200,7 +260,7 @@ impl Controller {
                 }
             }
             Heard::Released { steps } => {
-                let lent = self.lent.is_some_and(|l| l.switcher.is_some());
+                let lent = self.lent.is_some_and(|l| l.switcher);
                 // When the monitor heard the release: a Space change is measured to its notice.
                 self.switcher.released = Some((self.received_at(now), lent));
                 tracing::info!(
@@ -215,17 +275,17 @@ impl Controller {
             Heard::Cancelled | Heard::Lost => {}
         }
         let selected = self.switcher.selected.map(|(pid, _)| pid);
-        let lent = self.lent.filter(|l| l.switcher.is_some()).map(|l| (l.pid, l.window));
+        let lent = self.lent.filter(|l| l.switcher).map(|l| (l.pid, l.window));
         let acts = switcher::plan(heard, selected, lent, |pid| self.switcher_home(ob, pid));
         // The first Tab's lend is a quick ⌘Tab's only chance: made even when its park does
         // not take ([`crate::engine::lend_park::ParkAsk::must`]).
         let first = matches!(heard, Heard::Selected { first: true, .. });
         for act in acts {
-            self.switcher_act(ob, act, first, now);
+            self.switcher_act(ob, act, first, by_key, now);
         }
         if let (Heard::Released { .. }, Some(pid)) = (heard, selected) {
             // Watched for a Desktop slide from ⌘'s release ([`Self::slide_watch_cmd_tab`]).
-            let lent = self.lent.is_some_and(|l| l.pid == pid && l.switcher.is_some());
+            let lent = self.lent.is_some_and(|l| l.pid == pid && l.switcher);
             let since_tab_ms = self.switcher.opened.map(|t| ms(t, now));
             let opened = self.switcher.opened;
             let activated = self.switcher.activated.filter(|(_, t)| opened.is_some_and(|o| *t >= o)).map(|(p, _)| p);
@@ -342,13 +402,16 @@ impl Controller {
         Some(LendPark { ask: ParkAsk { at, zone: Zone::Corner, display, frame: w.meta.frame, must, kept: false }, window: element, ax_seconds })
     }
 
-    /// Carries out one act of the switcher's plan (`first`: the switcher's first selection).
-    fn switcher_act(&mut self, ob: &Observer, act: Act, first: bool, now: Instant) {
+    /// Carries out one act of the switcher's plan (`first`: the switcher's first selection;
+    /// `by_key`: told by a key the monitor or the key tap heard, not taken from the Dock's
+    /// list gone or the live modifiers).
+    fn switcher_act(&mut self, ob: &Observer, act: Act, first: bool, by_key: bool, now: Instant) {
         match act {
             Act::Lend { pid, window } => {
-                if let Some(prev) = self.lent.take() {
+                if self.lent.is_some() {
                     // A Dock press's window still home goes back first.
-                    let _ = self.engine.take_back(prev.window);
+                    let outcome = self.lent.as_mut().and_then(|l| l.wait.refute("⌘Tab's switcher selects another app", now));
+                    self.lent_ended(outcome, now);
                 }
                 let park = self.lend_park(ob, window, first, None);
                 let asked = park.is_some();
@@ -356,7 +419,7 @@ impl Controller {
                 self.slide_watch_lend(pid, LendNote { home: lend.home, parked: lend.parked, asked, park_ms: lend.park_ms });
                 let parked = lend.parked.unwrap_or(false);
                 if lend.home {
-                    self.lent = Some(Lent { window, pid, at: now, switcher: Some(LetGo::default()) });
+                    self.lent = Some(Lent { window, pid, at: now, switcher: true, wait: LendWait::held(pid) });
                     tracing::info!(
                         pid,
                         window = window.0,
@@ -384,21 +447,35 @@ impl Controller {
             }
             Act::TakeBack { window, why } => {
                 if self.lent.is_some_and(|l| l.window == window) {
-                    self.lent = None;
-                    let back = self.engine.take_back(window);
-                    tracing::info!(window = window.0, back = back.back, restored = ?back.restored, why, "cmd-tab: the window put home for the switcher goes back");
-                    switcher_probe::note("taken back", format!("window={} why={why} restored={:?}", window.0, back.restored));
+                    let outcome = self.lent.as_mut().and_then(|l| l.wait.refute(why, now));
+                    self.lent_ended(outcome, now);
                 }
             }
             Act::Release { window } => {
-                if let Some(go) = self.lent.as_mut().filter(|l| l.window == window).and_then(|l| l.switcher.as_mut()) {
-                    go.let_go(now);
+                let heard = by_key && mission_key_tap::hears();
+                let heard = heard || (self.switcher.tap_heard && mission_key_tap::hears());
+                let cap = switcher::activation_cap(false, heard);
+                // Its app already in front at the release: no activation comes for it (or its
+                // notice is on its way): counted as activated, its switch shows it.
+                let front = apps::frontmost_pid();
+                // From when the release was heard (the monitor's or the tap's stamp): another
+                // app's activation stamped after it refutes the lend.
+                let at = self.received_at(now);
+                if let Some(l) = self.lent.as_mut().filter(|l| l.window == window && l.switcher) {
+                    l.wait.begin(at, cap);
+                    let in_front = front == Some(l.pid);
+                    if in_front {
+                        l.wait.activation(l.pid, now, now);
+                    }
                     tracing::info!(
                         window = window.0,
-                        activated = go.activated,
-                        "cmd-tab: ⌘ let go on the app its window was put home for: kept only if that app is activated now (the activation's switch takes it)"
+                        activated = l.wait.is_activated(),
+                        app_in_front = in_front,
+                        cap = cap.name,
+                        cap_ms = cap.limit.as_millis() as u64,
+                        "cmd-tab: ⌘ let go on the app its window was put home for: kept for that app's activation and switch; another app's activation takes it back"
                     );
-                    switcher_probe::note("released", format!("window={}", window.0));
+                    switcher_probe::note("released", format!("window={} cap={} app_in_front={in_front}", window.0, cap.name));
                 }
             }
         }
@@ -462,6 +539,7 @@ impl Controller {
                 }
                 let steps = self.switcher.keys.steps();
                 self.switcher_heard(ob, Heard::Selected { steps, first: false }, false, now);
+                self.switcher_arm_tap();
             }
             "AXUIElementDestroyed" if self.switcher.keys.is_open() => {
                 if self.switcher.dock.is_some_and(|d| switcher_ax::read(d) != switcher_ax::Read::NoSwitcher) {
@@ -482,16 +560,16 @@ impl Controller {
     /// on (or from ⌘'s release, the later), [`switcher::UNREAD_WAIT`] when unread.
     fn switcher_list_gone(&mut self, now: Instant, unread: bool) {
         self.switcher.keys.list_gone(now);
-        let lent = self.lent.as_mut().and_then(|l| l.switcher.as_mut().map(|go| (l.pid, l.window.0, go)));
-        if let Some((pid, window, go)) = lent {
-            go.let_go(now);
-            go.unread |= unread;
+        let cap = switcher::activation_cap(unread, self.switcher.tap_heard && mission_key_tap::hears());
+        if let Some(l) = self.lent.as_mut().filter(|l| l.switcher) {
+            l.wait.begin(now, cap);
             if unread {
                 tracing::info!(
-                    pid,
-                    window,
-                    activated = go.activated,
-                    "cmd-tab: the Dock's switcher list is gone (a pick with the mouse): the window put home stays only if its app is activated now"
+                    pid = l.pid,
+                    window = l.window.0,
+                    activated = l.wait.is_activated(),
+                    cap = cap.name,
+                    "cmd-tab: the Dock's switcher list is gone (a pick with the mouse): the window put home stays for its app's activation"
                 );
             }
         }
@@ -500,27 +578,26 @@ impl Controller {
 
     /// True while the Dock's list is gone and its key not heard yet (at most
     /// [`switcher::GONE_WAIT`]), or a window put home for a closed switcher waits for its
-    /// app's activation (at most [`switcher::ACTIVATION_WAIT`]): the fast tick.
+    /// app's activation on a short cap (the key tap not hearing,
+    /// [`switcher::SILENT_ACTIVATION_WAIT`]): the fast tick. The long caps are the tick's.
     pub(super) fn switcher_wants_fast_tick(&self) -> bool {
         self.switcher.keys.waits_gone() || self.lent_awaits_activation()
     }
 
-    /// True while a window put home for the switcher waits for its app's activation, the
-    /// switcher closed.
+    /// True while a window put home for the switcher waits for its app's activation on a
+    /// short cap (under a second), the switcher closed.
     pub(super) fn lent_awaits_activation(&self) -> bool {
-        self.lent.and_then(|l| l.switcher).is_some_and(|go| go.at.is_some() && !go.activated)
+        self.lent.is_some_and(|l| {
+            l.switcher && !l.wait.is_activated() && l.wait.cap().is_some_and(|c| c.limit < Duration::from_secs(1))
+        })
     }
 
-    /// App `pid` activated: a window put home for the switcher for that app is kept for the
-    /// activation's switch ([`LetGo`]).
-    pub(super) fn switcher_activated(&mut self, pid: i32) {
+    /// App `pid` activated (its notice stamped `fired`), before anything else is judged of
+    /// it: the slide watch's record of it, and a window put home for that app kept for the
+    /// activation's switch ([`Self::lent_activated`]).
+    pub(super) fn switcher_activated(&mut self, pid: i32, fired: Instant) {
         self.switcher.activated = Some((pid, clock::now()));
-        if let Some(go) = self.lent.as_mut().filter(|l| l.pid == pid).and_then(|l| l.switcher.as_mut())
-            && !go.activated
-        {
-            go.activated = true;
-            tracing::info!(pid, "cmd-tab: the app its window was put home for is activated: kept for its switch");
-        }
+        self.lent_activated(pid, fired);
     }
 
     /// The fast tick (and the tick): the Dock's list gone [`switcher::GONE_WAIT`] ago with no
@@ -529,9 +606,15 @@ impl Controller {
     pub(super) fn switcher_fast_tick(&mut self, ob: &Observer, now: Instant) {
         let heard = self.switcher.keys.gone_due(now);
         if heard != Heard::Nothing {
-            tracing::info!("cmd-tab: the Dock's switcher is gone and no key came for it: taken as the release");
+            // The key tap hears Escape and ⌘'s release as they happen: none within the wait
+            // means it did not hear (macOS refused it, or keeps it off).
+            tracing::info!(
+                tap_hears = mission_key_tap::hears(),
+                "cmd-tab: the Dock's switcher is gone and no key came for it: taken as the release (the fallback for a key tap that does not hear)"
+            );
             self.switcher_heard(ob, heard, false, now);
         }
+        self.switcher_arm_tap();
     }
 
     /// The tick, while the switcher is up: ⌘ found let go without its event (the monitor
@@ -558,6 +641,7 @@ impl Controller {
                 self.switcher.lend_off = false;
             }
         }
+        self.switcher_arm_tap();
     }
 
     /// A Space change: logged with the time since ⌘'s release when it came right after one

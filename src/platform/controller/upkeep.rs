@@ -173,12 +173,16 @@ impl Controller {
     }
 
     /// One of Mission Control's keys, or a press while it may show, heard by its key tap
-    /// ([`crate::platform::mission_key_tap`]). The Spaces engine: a hint, or the key that
-    /// closed it ([`Self::mission_heard`]); the Corner engine's hidden windows are on their
-    /// Desktop, where Mission Control shows them.
+    /// ([`crate::platform::mission_key_tap`]). The Spaces engine: Escape, ⌘'s release or a
+    /// press while ⌘Tab's switcher is up first ([`Self::switcher_tap`]), then a hint, or the
+    /// key that closed Mission Control ([`Self::mission_heard`]); the Corner engine's hidden
+    /// windows are on their Desktop, where Mission Control shows them.
     pub fn mission_input(&mut self, ob: &mut Observer, heard: crate::platform::mission_key_tap::HeardAt) {
         match self.engine.kind() {
-            EngineKind::Spaces => self.mission_heard(ob, heard),
+            EngineKind::Spaces => {
+                self.switcher_tap(ob, heard);
+                self.mission_heard(ob, heard);
+            }
             EngineKind::Corner | EngineKind::Apple => {}
         }
     }

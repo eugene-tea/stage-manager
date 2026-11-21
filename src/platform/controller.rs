@@ -3251,8 +3251,9 @@ impl Controller {
             }
             WinEvent::AppActivated(pid, fired) => {
                 crate::platform::switcher_probe::note("activated", format!("pid={pid} notice_age_ms={}", fired.elapsed().as_millis()));
-                // A window put home for ⌘Tab's switcher is kept only for its app's activation.
-                self.switcher_activated(pid);
+                // A window put home for this app (a Dock press, ⌘Tab's switcher) has its
+                // activation: kept for its switch.
+                self.switcher_activated(pid, fired);
                 self.slide_watch_activated(ob, pid);
                 // Its enhanced UI is read again at its next move (round enhanced-ui).
                 enhanced_ui::forget(pid);
@@ -3282,6 +3283,9 @@ impl Controller {
                     tracing::info!(pid, age_ms, reason = why.reason(), ?front, before_switch_ms, "activation dropped: stale, no switch");
                     return;
                 }
+                // Another app's: a lend for another app is refuted; the Dock click's own may
+                // refute what was arranged at its press (round r2-lends).
+                self.lends_at_activation(ob, pid, fired);
                 if self.macos_after_display_change(at) {
                     // The lid closed or opened: macOS activates an app of its choosing (11-05
                     // 20:25:46.8, Mail, whose switch sent the laptop's front to a card and
@@ -3314,6 +3318,8 @@ impl Controller {
                     return;
                 }
                 self.decide_activation(ob, pid, now, true);
+                // Its switch decided: a window put home for it is the switch's at once.
+                self.lent_decided(pid);
             }
         }
     }

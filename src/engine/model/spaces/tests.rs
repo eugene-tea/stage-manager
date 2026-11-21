@@ -1861,11 +1861,10 @@ mod arranged_ahead {
                 assert!(mac.m.activation_stays_here(40, true), "window 5 home: macOS activates Mail here");
                 // The release order: ⌘ up, Mail's activation 10 ms later: kept for its switch.
                 let t0 = std::time::Instant::now();
-                let mut go = switcher::LetGo::default();
-                go.let_go(t0);
-                go.activated = true;
-                let wait = std::time::Duration::from_millis(1000);
-                assert_eq!(go.step(false, t0 + switcher::ACTIVATION_WAIT * 2, t0, wait), switcher::LetGoStep::Keep);
+                let mut go = crate::engine::lend_wait::LendWait::held(40);
+                go.begin(t0, switcher::activation_cap(false, true));
+                go.activation(40, t0, t0);
+                assert_eq!(go.step(t0 + switcher::ACTIVATION_WAIT / 2), None);
             }
             EngineKind::Apple => unreachable!("the engine matrix runs the Corner and Spaces engines"),
         }
@@ -1922,22 +1921,21 @@ mod arranged_ahead {
             assert!(acts.is_empty());
         }
         assert_eq!(keys.gone_due(t0 + switcher::GONE_WAIT * 2), switcher::Heard::Nothing, "nothing left for the wait");
-        // The rerun's order: Escape never heard; the list gone, then ⌘ up heard as a release on
-        // Mail; no activation of Mail: back after the activation wait.
+        // The rerun's order, the key tap not hearing: Escape never heard; the list gone, then ⌘
+        // up heard as a release on Mail; no activation of Mail: back after the silent wait.
         let mut keys = switcher::Switcher::default();
         cmd_tab(&mac, &mut keys, tab(false), None);
-        let mut go = switcher::LetGo::default();
+        let mut go = crate::engine::lend_wait::LendWait::held(40);
         keys.list_gone(t0);
-        go.let_go(t0);
+        go.begin(t0, switcher::activation_cap(false, false));
         let acts = cmd_tab(&mac, &mut keys, Key::Command(false), lent);
         if spaces {
             assert_eq!(acts, vec![Act::Release { window: w(5) }], "the keys take it for a release");
         }
         let up = t0 + std::time::Duration::from_millis(87);
-        go.let_go(up);
-        let wait = std::time::Duration::from_millis(1000);
-        assert_eq!(go.step(false, up + switcher::ACTIVATION_WAIT / 2, t0, wait), switcher::LetGoStep::Keep);
-        assert_eq!(go.step(false, up + switcher::ACTIVATION_WAIT, t0, wait), switcher::LetGoStep::NoActivation, "no activation came: back");
+        go.begin(up, switcher::activation_cap(false, false));
+        assert_eq!(go.step(up + switcher::SILENT_ACTIVATION_WAIT / 2), None);
+        assert_eq!(go.step(up + switcher::SILENT_ACTIVATION_WAIT), Some(crate::engine::lend_wait::Outcome::Cap), "no activation came (the key tap not hearing): back");
         assert!(mac.parked(5), "Mail's window stays hidden in its stage");
         // Mail selected, then a key the keys do not follow (H hides it): back.
         let mut keys = switcher::Switcher::default();

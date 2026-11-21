@@ -21,13 +21,20 @@
 //! - [`plan`] says what becomes of the window put home for the switcher: put home for the
 //!   app selected ([`Act::Lend`]), taken back when the selection moves on, the switcher is
 //!   cancelled or the keys lose it ([`Act::TakeBack`]), kept for the activation at the
-//!   release ([`Act::Release`]).
+//!   release ([`Act::Release`]), which then waits for it ([`activation_cap`],
+//!   [`crate::engine::lend_wait`]).
+//!
+//! The input monitor never hears Escape while the switcher shows, nor always ⌘'s release;
+//! the platform's HID key tap hears both, and a mouse-down, while the switcher is up, and
+//! feeds them here as the same [`Key`]s.
 //!
 //! The platform prefers the switcher's own selection, read from the Dock's Accessibility at
 //! these key events, over [`predict`]; the decision is the same either way.
 
 use std::time::{Duration, Instant};
 
+use super::lend_wait::Cap;
+use super::margin::{self, End};
 use super::model::{Pid, WindowId};
 
 /// The Tab key's virtual key code.
@@ -86,7 +93,9 @@ pub enum Heard {
 
 /// How long after the Dock's switcher list is gone with no key heard for it the switcher is
 /// taken as let go ([`Switcher::gone_due`]). Live 11-15: the list goes 1 ms after Escape's
-/// key down, the monitor's Escape comes later; ⌘'s release likewise.
+/// key down, the monitor's Escape comes later; ⌘'s release likewise. The key tap hears both
+/// as they happen (round r2-lends), so this is the fallback for a tap macOS refused or keeps
+/// off, and the log says so when it ends a switcher.
 pub const GONE_WAIT: Duration = Duration::from_millis(150);
 
 /// The switcher as the keys show it.
@@ -143,7 +152,7 @@ impl Switcher {
     pub fn gone_due(&mut self, now: Instant) -> Heard {
         match self.gone {
             Some(at) if now.saturating_duration_since(at) >= GONE_WAIT => {
-                crate::engine::margin::wait("GONE_WAIT", now.saturating_duration_since(at), GONE_WAIT, crate::engine::margin::End::Cap);
+                margin::wait("GONE_WAIT", now.saturating_duration_since(at), GONE_WAIT, End::Cap);
                 self.gone = None;
                 match self.open.take() {
                     Some(steps) => Heard::Released { steps },
@@ -152,6 +161,19 @@ impl Switcher {
             }
             _ => Heard::Nothing,
         }
+    }
+
+    /// [`Self::hear`] at `now`: a key that ends a list gone's wait notes it met
+    /// ([`GONE_WAIT`]).
+    pub fn hear_at(&mut self, key: Key, now: Instant) -> Heard {
+        let waited = self.gone;
+        let heard = self.hear(key);
+        if let Some(at) = waited
+            && self.gone.is_none()
+        {
+            margin::wait("GONE_WAIT", now.saturating_duration_since(at), GONE_WAIT, End::Met);
+        }
+        heard
     }
 
     /// Follows one key event.
@@ -228,72 +250,43 @@ pub fn predict(order: &[Pid], running: usize, steps: i32) -> Option<Pid> {
     order.get(at).copied()
 }
 
-/// After the switcher closes (⌘ let go, or its list gone), a window put home for it stays only
-/// when its app is activated within this long of the later of the two. macOS activates the
-/// app 3-12 ms after ⌘'s release (live 11-15). Escape is never heard by the input monitor
-/// while the switcher shows (the switcher takes it), so the keys cannot tell a cancel from a
-/// release: the activation does.
-pub const ACTIVATION_WAIT: Duration = Duration::from_millis(200);
+/// After ⌘'s release heard on the app a window was put home for (or the Dock's list gone),
+/// that app's activation is waited for at most this long ([`activation_cap`]); its activation
+/// and switch confirm the lend, another app's activation refutes it, Escape heard took it back
+/// already ([`crate::engine::lend_wait`]). macOS activates the app 3-12 ms after ⌘'s release
+/// (live 11-15), later on a busy Mac. The cap is long because waiting costs nothing seen: the
+/// window waits parked off the screen (a sliver at its display's corner at most) and the key
+/// tap hears Escape and ⌘'s release while the switcher shows, so silence no longer stands for
+/// a cancel. It ends only a release whose activation never comes (the app hung or quit). The
+/// 200 ms wait it replaces took the window back before a busy app's activation, and macOS slid
+/// to the app's other Desktop: the slide the lend is for.
+pub const ACTIVATION_WAIT: Duration = Duration::from_millis(3000);
 
-/// The wait of [`ACTIVATION_WAIT`] once the switcher went with no reading of its end
-/// ([`Choice::Gone`]: a mouse pick dismissed it, with ⌘ still held): a click's activation
-/// comes at the mouse's release, later than a key's. Counted, as [`ACTIVATION_WAIT`] is, from
-/// the later of the list gone and ⌘'s release (heard, or taken after [`GONE_WAIT`]).
-pub const UNREAD_WAIT: Duration = Duration::from_millis(400);
+/// [`ACTIVATION_WAIT`] once the switcher went with no reading of its end ([`Choice::Gone`]:
+/// a mouse pick dismissed it, with ⌘ still held): the click's activation comes at the mouse's
+/// release. Counted from the click heard by the key tap, else from the list gone (the later
+/// of it and ⌘'s release). As long, for the same reason.
+pub const UNREAD_WAIT: Duration = Duration::from_millis(3000);
 
-/// A window put home for the switcher, as the switcher's end and its app's activation leave
-/// it ([`LetGo::step`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LetGo {
-    /// The later of ⌘'s release heard (on the app it was put home for) and the Dock's list
-    /// gone.
-    pub at: Option<Instant>,
-    /// Its app was activated since it was put home.
-    pub activated: bool,
-    /// The switcher went unread ([`Choice::Gone`]): its activation is waited for
-    /// [`UNREAD_WAIT`], not [`ACTIVATION_WAIT`].
-    pub unread: bool,
-}
+/// The wait of [`ACTIVATION_WAIT`] when the key tap does not hear (macOS refused it, or keeps
+/// it off for secure input) or the release was not heard at all (taken after [`GONE_WAIT`],
+/// or from the live modifiers): Escape is then never heard (the switcher takes it from the
+/// input monitor), and a missing activation is all that tells a cancel, so the wait stays
+/// short, as before the tap.
+pub const SILENT_ACTIVATION_WAIT: Duration = Duration::from_millis(200);
 
-/// What becomes of a window put home for the switcher, at a look.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LetGoStep {
-    /// The switcher is up, or its app's activation may still come.
-    Keep,
-    /// No activation of its app came within [`ACTIVATION_WAIT`]: the switcher was cancelled
-    /// (Escape, a click outside it), or let go on another app.
-    NoActivation,
-    /// Its app was activated, but its stage did not come in front within the Dock's wait.
-    NoSwitch,
-}
+/// [`UNREAD_WAIT`] in the same case as [`SILENT_ACTIVATION_WAIT`].
+pub const SILENT_UNREAD_WAIT: Duration = Duration::from_millis(400);
 
-impl LetGo {
-    /// ⌘ let go on its app, or the Dock's list gone, at `at`: the later counts.
-    pub fn let_go(&mut self, at: Instant) {
-        self.at = Some(self.at.map_or(at, |t| t.max(at)));
-    }
-
-    /// The step at `now`: `up` while the keys still have the switcher up, `lent_at` when it was
-    /// put home (the base when the switcher closed unseen), `lend_wait` the Dock press's wait
-    /// for the switch once activated. Its stage in front, or the model showing it, is the
-    /// caller's to see first.
-    pub fn step(&self, up: bool, now: Instant, lent_at: Instant, lend_wait: Duration) -> LetGoStep {
-        let base = match self.at {
-            Some(t) => t,
-            None if up => return LetGoStep::Keep,
-            None => lent_at,
-        };
-        let since = now.saturating_duration_since(base);
-        let (name, wait) = if self.unread { ("UNREAD_WAIT", UNREAD_WAIT) } else { ("ACTIVATION_WAIT", ACTIVATION_WAIT) };
-        match self.activated {
-            true if since >= lend_wait => LetGoStep::NoSwitch,
-            false if since >= wait => {
-                // The caller ends the lend at this answer: noted once.
-                crate::engine::margin::wait(name, since, wait, crate::engine::margin::End::Cap);
-                LetGoStep::NoActivation
-            }
-            _ => LetGoStep::Keep,
-        }
+/// The cap for a window put home for the switcher once it closed: `unread` after a mouse pick
+/// ([`UNREAD_WAIT`]), `heard` when the key tap hears and the release (or the click) was
+/// heard, else the short ones of the time before the tap.
+pub fn activation_cap(unread: bool, heard: bool) -> Cap {
+    match (unread, heard) {
+        (false, true) => Cap { name: "ACTIVATION_WAIT", limit: ACTIVATION_WAIT },
+        (true, true) => Cap { name: "UNREAD_WAIT", limit: UNREAD_WAIT },
+        (false, false) => Cap { name: "SILENT_ACTIVATION_WAIT", limit: SILENT_ACTIVATION_WAIT },
+        (true, false) => Cap { name: "SILENT_UNREAD_WAIT", limit: SILENT_UNREAD_WAIT },
     }
 }
 
@@ -318,7 +311,7 @@ pub enum Choice {
     /// The Dock gave no reading at its own notice: the last reading stands, nothing moves.
     Keep,
     /// The Dock's list, seen this switcher, is gone: the last reading stands, and the window
-    /// put home waits for its app's activation ([`LetGo::unread`], [`UNREAD_WAIT`]). A click
+    /// put home waits for its app's activation ([`UNREAD_WAIT`]). A click
     /// in the switcher dismisses it with ⌘ still held; the keys' steps know nothing of the
     /// mouse (hovering an icon moves the selection), so a guess from them would take the
     /// window back as the click activates its app (live 11-18).
@@ -370,8 +363,8 @@ pub enum Act {
         /// Why, for the log.
         why: &'static str,
     },
-    /// ⌘ let go on the app it was put home for: it stays home only if that app's activation
-    /// comes within [`ACTIVATION_WAIT`] ([`LetGo`]); its switch takes it then.
+    /// ⌘ let go on the app it was put home for: it stays home for that app's activation and
+    /// switch, at most [`ACTIVATION_WAIT`] ([`crate::engine::lend_wait::LendWait`]).
     Release {
         /// The window.
         window: WindowId,
@@ -410,6 +403,7 @@ pub fn plan(heard: Heard, selected: Option<Pid>, lent: Option<(Pid, WindowId)>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::lend_wait::{LendWait, Outcome};
 
     fn tab(shift: bool) -> Key {
         Key::Down { code: KEY_TAB, cmd: true, shift }
@@ -524,56 +518,81 @@ mod tests {
         assert!(!s.waits_gone());
     }
 
-    /// Live 11-15 (rerun): Escape is never heard; the list goes at +300 ms, ⌘ up is heard at
-    /// +387 ms as a release on the app put home for. No activation: back at +587 ms.
+    /// Live 11-15 (rerun), before the key tap: Escape is never heard; the list goes at +300 ms,
+    /// ⌘ up is heard at +387 ms as a release on the app put home for. No activation: back
+    /// after the short wait of a tap that does not hear (the silent fallback).
     #[test]
-    fn escape_order_no_activation_takes_the_window_back() {
+    fn escape_unheard_no_activation_takes_the_window_back_after_the_silent_wait() {
         let t0 = Instant::now();
         let ms = |n: u64| t0 + Duration::from_millis(n);
-        let lend_wait = Duration::from_millis(1000);
         let mut s = Switcher::default();
         s.hear(tab(false));
         let w = WindowId(5);
         assert_eq!(plan(Heard::Selected { steps: Some(1), first: true }, Some(40), None, |_| Some(w)), vec![Act::Lend { pid: 40, window: w }]);
-        let mut lent = LetGo::default();
-        assert_eq!(lent.step(s.is_open(), ms(250), t0, lend_wait), LetGoStep::Keep, "the switcher up");
+        let mut lent = LendWait::held(40);
+        assert_eq!(lent.step(ms(250)), None, "the switcher up: no cap runs");
         s.list_gone(ms(300));
-        lent.let_go(ms(300));
-        let heard = s.hear(Key::Command(false));
+        lent.begin(ms(300), activation_cap(false, false));
+        let heard = s.hear_at(Key::Command(false), ms(387));
         assert_eq!(heard, Heard::Released { steps: Some(1) }, "Escape unheard: ⌘ up looks like a release");
         assert_eq!(plan(heard, Some(40), Some((40, w)), |_| None), vec![Act::Release { window: w }]);
-        lent.let_go(ms(387));
-        assert_eq!(lent.at, Some(ms(387)), "the later of the two");
-        assert_eq!(lent.step(false, ms(500), t0, lend_wait), LetGoStep::Keep, "the activation may still come");
-        assert_eq!(lent.step(false, ms(586), t0, lend_wait), LetGoStep::Keep);
-        assert_eq!(lent.step(false, ms(587), t0, lend_wait), LetGoStep::NoActivation, "no activation came: cancelled");
-        // ⌘ held after Escape: the list gone alone starts the wait.
-        let mut held = LetGo::default();
-        held.let_go(ms(300));
-        assert_eq!(held.step(true, ms(499), t0, lend_wait), LetGoStep::Keep);
-        assert_eq!(held.step(true, ms(500), t0, lend_wait), LetGoStep::NoActivation);
-        // The switcher closed unseen: from when it was put home.
-        assert_eq!(LetGo::default().step(false, ms(200), t0, lend_wait), LetGoStep::NoActivation);
+        lent.begin(ms(387), activation_cap(false, false));
+        assert_eq!(lent.step(ms(586)), None, "the activation may still come");
+        assert_eq!(lent.step(ms(587)), Some(Outcome::Cap), "no activation came: taken for a cancel");
+    }
+
+    /// With the key tap: Escape heard while the switcher shows cancels at once; a release
+    /// heard waits for the activation, its cap long (the window waits parked off the screen).
+    #[test]
+    fn with_the_key_tap_escape_cancels_at_once_and_a_release_waits_long() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let w = WindowId(5);
+        // Escape at the tap (⌘ held): cancelled, back now; the list gone after it decides nothing.
+        let mut s = Switcher::default();
+        s.hear(tab(false));
+        let heard = s.hear_at(Key::Down { code: KEY_ESCAPE, cmd: true, shift: false }, ms(300));
+        assert_eq!(heard, Heard::Cancelled);
+        assert_eq!(plan(heard, Some(40), Some((40, w)), |_| None), vec![Act::TakeBack { window: w, why: "the switcher was cancelled" }]);
+        s.list_gone(ms(301));
+        assert!(!s.waits_gone(), "closed for the keys: nothing waits");
+        // ⌘ up at the tap: released; a slow activation 1.5 s later still keeps it.
+        let mut s = Switcher::default();
+        s.hear(tab(false));
+        assert_eq!(s.hear_at(Key::Command(false), ms(400)), Heard::Released { steps: Some(1) });
+        let mut lent = LendWait::held(40);
+        lent.begin(ms(400), activation_cap(false, true));
+        assert_eq!(lent.step(ms(1000)), None, "past the old 200 ms: kept");
+        assert_eq!(lent.activation(40, ms(1900), ms(1900)), None);
+        assert_eq!(lent.shown(ms(1910)), Some(Outcome::Met));
+        // Released on the app put home for, then another app activated: back at once.
+        let mut lent = LendWait::held(40);
+        lent.begin(ms(400), activation_cap(false, true));
+        assert!(matches!(lent.activation(77, ms(420), ms(420)), Some(Outcome::Refuted(_))));
+        // No activation at all: the cap says so.
+        let mut lent = LendWait::held(40);
+        lent.begin(ms(400), activation_cap(false, true));
+        assert_eq!(lent.step(ms(400) + ACTIVATION_WAIT), Some(Outcome::Cap));
     }
 
     /// The release order: ⌘ up, the activation 10 ms later: kept until its switch (the caller
-    /// forgets it once its stage is in front), back only if no switch came in the Dock's wait.
+    /// forgets it once its stage is in front), back only if no switch came within the cap.
     #[test]
     fn release_order_with_the_activation_keeps_the_window() {
         let t0 = Instant::now();
         let ms = |n: u64| t0 + Duration::from_millis(n);
-        let lend_wait = Duration::from_millis(1000);
-        let mut lent = LetGo::default();
-        lent.let_go(ms(400));
-        lent.activated = true; // +410 ms
-        lent.let_go(ms(401)); // the list gone after ⌘ up
-        assert_eq!(lent.step(false, ms(700), t0, lend_wait), LetGoStep::Keep, "activated: past the activation wait, kept");
-        assert_eq!(lent.step(false, ms(1401), t0, lend_wait), LetGoStep::NoSwitch, "activated, but no switch in the Dock's wait");
+        let mut lent = LendWait::held(40);
+        lent.begin(ms(400), activation_cap(false, true));
+        lent.activation(40, ms(410), ms(410));
+        lent.begin(ms(401), activation_cap(false, true)); // the list gone after ⌘ up
+        assert_eq!(lent.step(ms(700)), None, "activated: kept");
+        assert_eq!(lent.step(ms(410) + ACTIVATION_WAIT), Some(Outcome::Cap), "activated, but no switch within the cap");
         // The activation before ⌘ up is heard (both orders reach the WM thread).
-        let mut early = LetGo { activated: true, ..LetGo::default() };
-        assert_eq!(early.step(true, ms(900), t0, lend_wait), LetGoStep::Keep);
-        early.let_go(ms(410));
-        assert_eq!(early.step(false, ms(700), t0, lend_wait), LetGoStep::Keep);
+        let mut early = LendWait::held(40);
+        early.activation(40, ms(405), ms(405));
+        assert_eq!(early.step(ms(900)), None, "held: no cap");
+        early.begin(ms(410), activation_cap(false, true));
+        assert_eq!(early.shown(ms(420)), Some(Outcome::Met));
     }
 
     #[test]
@@ -598,7 +617,6 @@ mod tests {
     fn a_mouse_pick_keeps_the_window_put_home_for_its_activation() {
         let t0 = Instant::now();
         let ms = |n: u64| t0 + Duration::from_millis(n);
-        let lend_wait = Duration::from_millis(1000);
         let (code, mail, w) = (757, 765, WindowId(3077));
         let sel = Heard::Selected { steps: Some(1), first: false };
         // A reading from the Dock that moves on: back at once, as before.
@@ -610,22 +628,29 @@ mod tests {
         // The list gone: the guess is no selection; the last reading (VS Code) stands, and the
         // window waits for its app's activation.
         assert_eq!(choose(None, List::Gone, true, false, Some(mail)), Choice::Gone);
-        let mut go = LetGo::default();
-        go.let_go(ms(0));
-        go.unread = true;
-        assert_eq!(go.step(true, ms(33), t0, lend_wait), LetGoStep::Keep);
-        // VS Code activated by the click (+33 ms): kept for its switch, past every wait.
+        let mut go = LendWait::held(code);
+        go.begin(ms(0), activation_cap(true, false));
+        assert_eq!(go.step(ms(33)), None);
+        // VS Code activated by the click (+33 ms): kept for its switch.
         let mut kept = go;
-        kept.activated = true;
-        assert_eq!(kept.step(false, ms(500), t0, lend_wait), LetGoStep::Keep, "its switch takes it");
+        kept.activation(code, ms(33), ms(33));
+        assert_eq!(kept.step(ms(300)), None, "its switch takes it");
+        assert_eq!(kept.shown(ms(320)), Some(Outcome::Met));
         // ⌘'s release (taken after GONE_WAIT) still names VS Code: released, not taken back.
         assert_eq!(plan(Heard::Released { steps: Some(1) }, Some(code), Some((code, w)), |_| None), vec![Act::Release { window: w }]);
-        // No activation of VS Code (a click elsewhere): back once the cap passes.
-        assert_eq!(go.step(true, ms(399), t0, lend_wait), LetGoStep::Keep, "past ACTIVATION_WAIT, inside the cap");
-        assert_eq!(go.step(true, ms(400), t0, lend_wait), LetGoStep::NoActivation, "the cap: back");
-        go.let_go(ms(150));
-        assert_eq!(go.step(false, ms(549), t0, lend_wait), LetGoStep::Keep, "from ⌘'s release, the later");
-        assert_eq!(go.step(false, ms(550), t0, lend_wait), LetGoStep::NoActivation);
+        // No activation of VS Code (a click elsewhere), the tap not hearing: back after the
+        // silent cap; from ⌘'s release, the later.
+        assert_eq!(go.step(ms(399)), None, "past SILENT_ACTIVATION_WAIT, inside the cap");
+        let mut later = go;
+        later.begin(ms(150), activation_cap(false, false));
+        assert_eq!(later.step(ms(549)), None, "from ⌘'s release, the later");
+        assert_eq!(later.step(ms(550)), Some(Outcome::Cap));
+        assert_eq!(go.step(ms(400)), Some(Outcome::Cap), "the cap: back");
+        // The click heard by the key tap: the long cap, from the click.
+        let mut tapped = LendWait::held(code);
+        tapped.begin(ms(0), activation_cap(true, true));
+        assert_eq!(tapped.step(ms(1500)), None, "a slow activation at the mouse's release");
+        assert_eq!(tapped.step(ms(0) + UNREAD_WAIT), Some(Outcome::Cap));
     }
 
     #[test]
