@@ -517,7 +517,7 @@ def notice_report(label, names=NOTICE_WAITS):
     types = n.get("types") or {}
     heard = ", ".join(f"{k}: {v.get('heard')} ({v.get('sent')} sent, {v.get('coalesced')} folded, {v.get('ours')} ours)"
                       for k, v in sorted(types.items()) if v.get("heard"))
-    say(f"  {label}: notices {n.get('notices')} (the probe's panel: {n.get('probe')}), layout {n.get('layout')}, "
+    say(f"  {label}: notices {n.get('notices')} (never heard: {n.get('never_heard')}; the probe's panel: {n.get('probe')}), layout {n.get('layout')}, "
         f"heard {heard or 'none'}; brought forward: {n.get('uses')}")
     m = s.get("margins") or {}
     for name in names:
@@ -10242,10 +10242,11 @@ def phase_mission():
         say(f"  -- {label} --")
         mark = len(log_text())
         changes = ctl("space").get("changes")
+        look_before = margin_row("OVERVIEW_LOOK")
         opened = mission_open(which, f"mission {label}")
         if not opened:
             break
-        mission_found_at_notice(opened[0], label)
+        mission_found_at_notice(opened[0], label, look_before)
         out = wait_until(lambda: len(mission_status().get("out") or []) == n and mission_status(), 3, "every hidden window put home")
         ws = mission_listed()
         check(bool(out) and not any(ws.get(i, {}).get("staged") for i in hidden),
@@ -10264,8 +10265,9 @@ def phase_mission():
         if which == "mission-control":
             mission_at_cards(out, hidden, label)
         mission_shot(which)
+        settle_before = margin_row("OVERVIEW_SETTLE")
         mission_close_seen(opened[1], hidden, parked, f"mission {label}")
-        mission_closed_at_notice(label)
+        mission_closed_at_notice(label, settle_before)
         mission_back(ids, titles, frames, f"mission {label}")
         text = log_text()[mark:]
         for what in ("mission-control: shown", f"mission-control: lent {n} windows", "mission-control: Mission Control lays out", "mission-control: closed", f"mission-control: put back {n} windows"):
@@ -10383,33 +10385,39 @@ def mission_close_seen(before, hidden, parked, label):
 
 # When `mission_close_seen` asked for the closing key (round r5-notices).
 MISSION_ESCAPE = [None]
-# The window server's notice's bound (round r5-notices): Mission Control found within this of
-# its key, its close's notice looked at within this of the closing key (before the notices:
-# found at the key tap's watch ~40 ms; the close listed 320-610 ms after the key).
-MISSION_NOTICE_MS = 100
+def margin_row(name):
+    """`ctl state`'s margins row `name` now: (waits, noticed, capped)."""
+    r = (ctl("state").get("margins") or {}).get(name) or {}
+    return r.get("waits", 0), r.get("noticed", 0), r.get("capped", 0)
 
 
-def mission_found_at_notice(t0, label):
-    """Round r5-notices: Mission Control (or App Exposé) opened by its shortcut is found within
-    MISSION_NOTICE_MS of the key (`ctl space`'s `overview_ms_ago.found`). Skipped when no
-    window-server notice of its type (1508) came in this run: the polls decide alone."""
+def ended_by(before, after):
+    """How the waits between two `margin_row`s ended: (by the notice's look, by the poll, by the cap)."""
+    waits, noticed, capped = (a - b for a, b in zip(after, before))
+    return noticed, waits - noticed - capped, capped
+
+
+def mission_found_at_notice(t0, label, before):
+    """Round r5-notices: Mission Control (or App Exposé) opened by its shortcut is found at the
+    look its window-server notice brought (`OVERVIEW_LOOK` ended by the notice's look, not by
+    the poll); the ms from the key are printed, not judged (a slower Mac takes longer). Skipped
+    when no notice 1508 came in this run: the polls decide alone."""
     if not SPACES:
         return
     if not notices_heard(1508):
         skip(f"mission {label}: found at its notice", "no window-server notice 1508 heard in this run (engine.notices): the polls decide alone")
         return
     found, _, _, _ = overview_ages()
-    ms = None if found is None else (found - t0) * 1000.0
-    check(ms is not None and ms <= MISSION_NOTICE_MS,
-          f"mission {label}: found {ms and round(ms)} ms after its key was asked (under {MISSION_NOTICE_MS})")
+    ms = None if found is None else round((found - t0) * 1000.0)
+    by = ended_by(before, margin_row("OVERVIEW_LOOK"))
+    check(by == (1, 0, 0), f"mission {label}: found at its notice's look (OVERVIEW_LOOK ended by notice, poll, cap: {by}; {ms} ms after its key was asked)")
 
 
-def mission_closed_at_notice(label):
-    """Round r5-notices: the close's notice is looked at within MISSION_NOTICE_MS of the closing
-    key, and the look that then found macOS's own window and the Dock's cover both gone ended
-    the Space-inference freeze with no settle after (`settled_by_notice`). When the list showed
-    it closed is printed (macOS's windows go 320-610 ms after the key: no look can find the
-    close before that)."""
+def mission_closed_at_notice(label, before):
+    """Round r5-notices: the close's notice came after the closing key and was looked at before
+    the window list showed macOS's own window and the Dock's cover gone, and the look that then
+    found them gone ended the Space-inference freeze (`OVERVIEW_SETTLE` ended by the notice's
+    look, not by its cap; `settled_by_notice`). The ms are printed, not judged."""
     if not SPACES or MISSION_ESCAPE[0] is None:
         return
     if not notices_heard(1508):
@@ -10417,12 +10425,13 @@ def mission_closed_at_notice(label):
         return
     _, closed, told, quick = overview_ages()
     esc = MISSION_ESCAPE[0]
-    told_ms = None if told is None or told < esc else (told - esc) * 1000.0
-    closed_ms = None if closed is None else (closed - esc) * 1000.0
-    check(told_ms is not None and told_ms <= MISSION_NOTICE_MS,
-          f"mission {label}: its close's notice looked at {told_ms and round(told_ms)} ms after the closing key (under {MISSION_NOTICE_MS})")
-    check(quick, f"mission {label}: the look after it that found macOS's windows gone ended the freeze, no settle after "
-          f"(listed closed {closed_ms and round(closed_ms)} ms after the key; before: closed at 320-610 ms, then 1 s frozen)")
+    ms = lambda t: None if t is None else round((t - esc) * 1000.0)
+    check(told is not None and told >= esc and closed is not None and told <= closed,
+          f"mission {label}: its close's notice came after the closing key and before the list showed it closed "
+          f"(notice {ms(told)} ms, listed closed {ms(closed)} ms after the key)")
+    by = ended_by(before, margin_row("OVERVIEW_SETTLE"))
+    check(quick and by == (1, 0, 0), f"mission {label}: the look after it that found macOS's windows gone ended the freeze "
+          f"(OVERVIEW_SETTLE ended by notice, poll, cap: {by}; before the notices: 1 s by its cap)")
 
 
 def mission_close_key(ids, titles, frames, space, active, n):
