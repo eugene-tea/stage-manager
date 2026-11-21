@@ -27,6 +27,17 @@ one):
 The main screen gone, macOS ends the Desktop it made on the built-in screen when the virtual
 one took the main role: that Desktop's hidden stage (Charlie 2) is kept whole too.
 
+**A Dock click past the settle** (every round, 20 s after the screen went, within the 60 s
+watch): when a Desktop not shown holds a hidden fixture stage whose app has windows on that
+Desktop only, its Dock item is pressed (`ctl debug-dock-click`). The app arranges that Desktop
+before macOS slides to it, so its stage in front goes to a card while the other Desktop still
+shows. Checks: the clicked app's stage comes in front there; the stage that was in front stays
+a stage of that Desktop with its windows, hidden; the log never says `window left this Space`
+for its windows, and its hide's line (`a hide while a screen gone is watched`) takes the
+Desktop the window was on as its home (`on` = `home`; 11-21: a Dock click 36 s after the change
+hid it into a stage of the Desktop still shown, and it showed up on the other Desktop). With no
+such stage the step is skipped and says so.
+
 **Frames per screen setup** (`display-gone frames [main|secondary] [--rounds N]`, with
 `[displays] frames_per_setup = true` in the test home's config): the fixture stages are opened
 on the built-in screen alone (Fixture 1-2, Alpha 1) and each stage's windows resized there, one
@@ -73,6 +84,10 @@ SETTLE_WAIT = 15
 QUIET_WAIT = 8
 FRAME_TOL = 2.0
 FOREIGN = "windows of another Space are on screen"
+# The Dock click to a Desktop not shown: past the change's settle (10 s), within the watch (60 s).
+AHEAD_AT = 20
+LEFT_SPACE = "window left this Space"
+WATCHED_HIDE = "display: a hide while a screen gone is watched"
 
 
 def tool():
@@ -252,6 +267,74 @@ def desktops_tour(before, out, home):
     return seen
 
 
+def ahead_candidate(s):
+    """A hidden fixture stage on a Desktop not shown whose app has windows on that Desktop only,
+    with that Desktop's stage in front (of another app): (stage, its bundle, the front stage),
+    else None."""
+    shown = {d.get("space") for d in s.get("displays", [])}
+    win = {w["id"]: w for w in s["windows"]}
+    fixture = set(ts.ALL_IDS)
+
+    def bundles(st):
+        return {win[i]["bundle_id"] for i in st["windows"] if i in win}
+
+    for st in s.get("stages", []):
+        b = bundles(st)
+        if st["space"] in shown or st.get("active") or len(b) != 1 or not b <= fixture or not st["windows"]:
+            continue
+        bundle = next(iter(b))
+        if any(w["space"] != st["space"] for w in s["windows"] if w["bundle_id"] == bundle):
+            continue
+        front = next((f for f in s["stages"] if f["space"] == st["space"] and f.get("active")), None)
+        if front and front["windows"] and bundles(front) <= fixture and bundle not in bundles(front):
+            return st, bundle, front
+    return None
+
+
+def dock_ahead(what):
+    """The Dock click to a Desktop not shown, past the settle (module docs)."""
+    s = ts.state()
+    found = ahead_candidate(s)
+    if not found:
+        say(f"    {what}: no hidden stage on a Desktop not shown whose app is there only; the Dock step is skipped")
+        return
+    st, bundle, front = found
+    title = names(s)
+    front_ids = set(front["windows"])
+    say(f"    {what}: Dock click to {bundle} (stage {st['id']} on Desktop {st['space']}); in front there: stage {front['id']} "
+        f"{sorted(title.get(i, i) for i in front_ids)}")
+    mark = len(ts.log_text().splitlines())
+    r = ctl("debug-dock-click", bundle)
+    if not check(r.get("ok"), f"{what}: the Dock item was pressed ({r.get('error') or 'ok'})"):
+        return
+
+    def arrived(x):
+        here = next((y for y in x.get("stages", []) if y["id"] == st["id"]), None)
+        return here is not None and here.get("active") and st["space"] in {d.get("space") for d in x.get("displays", [])}
+
+    x = ts.wait_state(arrived, f"{what}: the clicked app's stage in front on its Desktop", timeout=6)
+    check(x is not None, f"{what}: the clicked app's stage {st['id']} comes in front on Desktop {st['space']}")
+    time.sleep(4)  # a window hidden on another Desktop is counted gone 3 s later
+    x = ts.state()
+    now = next((y for y in x.get("stages", []) if y["id"] == front["id"]), None)
+    check(now is not None and now["space"] == front["space"] and set(now["windows"]) == front_ids and not now.get("active"),
+          f"{what}: the stage that was in front ({front['id']}) stays on Desktop {front['space']} with its windows, hidden"
+          + ("" if now else ": gone") + (f": now {now}" if now and set(now["windows"]) != front_ids else ""))
+    lines = log_lines(ts.log_text(), mark)
+    left = [ln[:200] for ln in lines if LEFT_SPACE in ln and any(re.search(rf"\bid={i}\b", ln) for i in front_ids)]
+    check(not left, f"{what}: no '{LEFT_SPACE}' for the front stage's windows" + (f": {left[:2]}" if left else ""))
+    homes = []
+    for ln in lines:
+        if WATCHED_HIDE not in ln:
+            continue
+        m = re.search(r"\bid=(\d+)\b.*\bon: (Some\(\d+\)|None),.*\bhome=(Some\(\d+\)|None)", ln)
+        if m and int(m.group(1)) in front_ids:
+            homes.append((int(m.group(1)), m.group(2), m.group(3)))
+    say(f"    {what}: the front stage's hides while watched (id, on, home): {homes}")
+    check(bool(homes) and all(on == home for _, on, home in homes),
+          f"{what}: each was hidden on the Desktop it was on" + ("" if homes else ": no such log line"))
+
+
 def one_round(kind, n):
     say(f"\n== screen gone ({kind}), round {n} ==")
     p = os.path.join(ts.HOME, "state.json")
@@ -290,11 +373,15 @@ def one_round(kind, n):
         t0 = time.time()
         say(f"    screen removed: {screen.stop()}")
         time.sleep(1)
+        ahead_done = False
         while time.time() - t0 < WATCH_SECONDS:
             try:
                 look(before, f"{int(time.time() - t0)} s", out)
             except Exception as e:  # noqa: BLE001 - the app may be busy with the change
                 say(f"    look at {int(time.time() - t0)} s: {e}")
+            if not ahead_done and time.time() - t0 >= AHEAD_AT:
+                ahead_done = True
+                dock_ahead(f"{kind} {n}: Dock click at {int(time.time() - t0)} s")
             time.sleep(1.0)
         problems_watch = sorted(out)
         check(not problems_watch, f"{kind} {n}: {WATCH_SECONDS:.0f} s after the screen went, every stage keeps its windows "

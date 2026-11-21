@@ -17,6 +17,15 @@ UX-SPEC, "Known gaps".
   - no `app activated … queued_ms` over 100 in the first two minutes, and if there is one, the
     `slow WM task` line names what held the thread
   - the `restore:` summary line
+- **A screen plugged in or out (one screen at a time too).** In that day's log, within the
+  minute after it: every `display: a hide while a screen gone is watched` line with
+  `mid_change: false` has `home` equal to `on` when `on` is set and nothing was kept, and no
+  `window left this Space` follows a Dock click or ⌘Tab to another Desktop.
+- **Live: `SM_ENGINE=spaces scripts/test-stages.sh display-gone`**, for its new Dock step
+  (20 s after the screen goes; it says when no stage qualifies, which may be every round for
+  `main`).
+- **Apple's, one screen at a time** (UX-SPEC, Screens): with the lid and the external screen,
+  by hand.
 - **"macOS isn't reporting windows" shows in the menu again.** Quit Stage Manager, then count windows with
   System Events (`osascript -e 'tell application "System Events" to count windows of every process'`). If
   any are listed, our quit fixed it: the menu line then says "Quit and reopen Stage Manager", and the bug
