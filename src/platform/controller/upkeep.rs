@@ -122,7 +122,7 @@ impl Controller {
                 }
             }
             EngineKind::Spaces => {
-                if self.spaces.strays.values().any(|tries| *tries < spaces::HIDE_TRIES) {
+                if self.spaces.strays.values().any(|s| s.tries < spaces::HIDE_TRIES) {
                     Some("hidden windows out of their Space")
                 } else if !crate::platform::spaces::engine::shared().owed().is_empty() {
                     Some("shows owed")

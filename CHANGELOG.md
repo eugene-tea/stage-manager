@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, a window that should be hidden in its stage but stays on screen
+  is hidden again later; before, it was left on screen after three tries.
 - With `engine = "spaces"`, the app of a stage brought in always comes in front, also when a
   window's landing motion is cut short.
 - With `engine = "spaces"`, a window no longer ends up on another Desktop when the Dock or ⌘Tab

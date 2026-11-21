@@ -178,11 +178,16 @@ impl Backoff {
         now >= self.next
     }
 
+    /// The next try after one at `now`: twice the last wait, up to [`RETRY_CAP`].
+    pub fn doubled(self, now: Instant) -> Self {
+        let wait = (self.wait * 2).min(RETRY_CAP);
+        Self { next: now + wait, wait }
+    }
+
     /// A try at `now` that did not take, its app's `reply`: a timeout doubles the wait (up to
     /// [`RETRY_CAP`]), any other answer brings the first pace back. Noted in `busy` too.
     pub fn failed(&mut self, pid: Option<i32>, reply: Reply, busy: &mut BusyApps, now: Instant) {
-        self.wait = if reply == Reply::TimedOut { (self.wait * 2).min(RETRY_CAP) } else { RETRY_FIRST };
-        self.next = now + self.wait;
+        *self = if reply == Reply::TimedOut { self.doubled(now) } else { Self { next: now + RETRY_FIRST, wait: RETRY_FIRST } };
         if let Some(pid) = pid {
             busy.note(pid, reply, now);
         }
