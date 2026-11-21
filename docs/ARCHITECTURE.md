@@ -352,6 +352,28 @@ listing's, and each held window's home with the model's Desktop for it, and logs
 disagreement once when it begins and once when it ends (`ctl state`'s `desks`). The arrival
 still decides by the windows on screen.
 
+The window server's notices (round r5-notices, the Spaces engine only). The window server
+tells a process that runs the AppKit event loop of some of its changes: a window created,
+shown or hidden, added to or taken out of a Space, Mission Control's or App Exposé's open and
+close, a Desktop change's end (UX-SPEC, "The window server's notices"). The launch registers
+them before its probe when it may run the Spaces engine (`platform/spaces/notices.rs`,
+`SLSRegisterNotifyProc`), forwards them once that engine is chosen and removes them
+otherwise; under the Corner engine nothing is registered. The callback only stamps the notice
+and copies its payload; the main run loop's next pass folds a turn's notices into one burst
+per kind (`engine/server_notice.rs`), drops those of the engine's own adds (by the window
+and the Space it asked, never by a time window) and sends the rest to the WM thread
+(`WmCommand::ServerNotice`). **A notice is a trigger for a read, never a fact**: each brings
+forward a look that a poll makes today (`platform/controller/server_notices.rs`): the look
+for an overview, the check of the model against the window server, the launch watch's read,
+the check for a missed Desktop change. What the look finds decides; every poll stays as the
+cap behind it, so a Mac whose window server sends none behaves as before. Which word of a
+membership notice is the window and which the Space is read by content (the launch probe's
+own panel, or a window the engine just showed); until then such a notice names nothing and
+its look covers every window. The launch probe's panel is the health check: `ctl state`'s
+`engine.notices` says `heard` or `silent` (silent is no failure), with each type's counts,
+and `margins` says per wait how often it ended at a notice's look (`noticed`), at the poll's,
+or by its cap.
+
 Window pictures (`platform/capture.rs`, `platform/capture_fast.rs`, 1.9): every capture asks
 the window server first, one call a window and no listing (`SLSHWCaptureWindowList` for a
 window within the displays, on screen or in a stage Space; `CGWindowListCreateImage` for one
@@ -458,8 +480,9 @@ engine the same lend is made for every hidden window of the Desktops shown while
 shows (`engine::mission_control` decides when, `platform/controller/mission_control.rs`
 carries it out on the fast tick, 40 ms of lends at a time, each window parked first). It is
 found from macOS's own window over the display (`engine::overview`); one of its shortcuts,
-or a notice of the Dock's, only brings that look to the fast tick (`[windows]
-mission_control_stages = "key"` lends at the shortcut itself). The window server takes its
+a notice of the Dock's, or the window server's notice of its open (whatever opened it) only
+brings that look forward (`[windows] mission_control_stages = "key"` lends at the shortcut
+itself). The window server takes its
 shortcuts before any app gets the key, so the global input monitor never hears them: a
 listen-only event tap at the HID level does (`platform::mission_key_tap`, the Accessibility
 permission; it forwards Mission Control's shortcuts and key, while it shows Escape and

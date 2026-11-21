@@ -339,8 +339,9 @@ wait that often ends by its cap, is the one a slower or busier Mac may get wrong
   `close` (judged inside at 0.5 to 1 of the limit), `near` (outside, at 1 to 2), `waits`
   and `capped` (waits ended, and ended by their cap rather than by what they waited for),
   `predated` (notices stamped before the action they were compared with: macOS delivered
-  them late, or out of order). Only names with a close call, a near miss, a cap or a
-  predated notice are written.
+  them late, or out of order), `noticed` (waits met at a look a window-server notice brought
+  forward; the other met ones were met at the poll's look). Only names with a close call, a
+  near miss, a cap, a predated notice or a noticed wait are written.
 - The rows come from `margin summary:` info lines, one per name that came close, written
   with the hourly and the quit counts; each covers the time since the one before.
 - At `debug`, `margin: name=… elapsed_ms=… limit_ms=… inside=…` says each run of close calls
@@ -401,6 +402,36 @@ polled, and the Corner engine writes nothing. Read a day with
   (`capped`: by time). `cmd-tab: the key tap heard the switcher's end` says what the HID tap
   fed the switcher; `ctl state` `mission_control.tap` has `switcher_armed`,
   `switcher_escapes_heard` and `command_ups_heard`.
+
+### The window server's notices
+
+Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
+
+- At the launch: `window-server notices: registered` (`types`, `remove`), and once the
+  launch probe's panel brought its notices or did not, `window-server notices: heard` or
+  `... silent ...` (`created`, `taken_out`, `added`). The first notice of each type logs one
+  line; `a membership notice's window and Space read by content` once the layout is learned.
+- `a window the model counts hidden was out of its stage's Space: hidden again` carries
+  `by_notice`; `window-server notice: windows nothing answered for let out ...` says the
+  notice let strangers out in place of the tidy; the launch watch's line has
+  `held_by_notice`.
+- `ctl state`'s `engine.notices`: `registered`, `notices` (`heard`, `silent`, `waiting`),
+  `probe`, `layout`, `expected`, `dropped`, `types` (per type `heard`, `last_ms_ago`, `sent`
+  bursts, `coalesced` notices folded into them, `ours`) and `uses` (what was brought forward:
+  `overview_looks`, `reconciles`, `held_back`, `strangers_out`, `space_checks`,
+  `workspace_first`). `margins` names the waits: `OVERVIEW_LOOK`, `OVERVIEW_SETTLE`,
+  `OVERVIEW_ARRIVAL_SETTLE`, `OVERVIEW_EXIT_CARRY`, `STRAY_LOOK`, `TIDY_EVERY`,
+  `SPACE_POLL`, `launch_watch::EVERY`.
+- `ctl space`'s `overview_ms_ago`: `found`, `closed`, `told` (the last notice while an
+  overview showed) and `settled_by_notice`.
+- The live phases `mission`, `expose`, `launch` (`SM_ENGINE=spaces`) and `spaces --auto`
+  print, per wait, how many ended at the notice's look, at the poll's and by the cap;
+  `mission` checks that Mission Control and App Exposé opened by their shortcuts are found
+  within 100 ms of the key and that the close's notice is looked at within 100 ms of the
+  closing key, its look ending the freeze (skipped when no notice 1508 came).
+- On the bench the desk sends them only with `d.server_notices = true` (scenarios "a hidden
+  window taken out of its stage Space" and "Mission Control with no key", each with and
+  without).
 
 ### The Desktops' shadow
 

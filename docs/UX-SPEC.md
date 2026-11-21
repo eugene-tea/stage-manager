@@ -1294,6 +1294,31 @@ screen-capture service reads 0 and the window server, measured with other apps o
 | An animating window shown from a hidden stage: drawing again, ms | 161 | 153 |
 | Missed refreshes of a call window, at rest and switching | 0 | 0 |
 
+## The window server's notices
+
+Measured on macOS 27.2, 11-21 (`probe-spaces cgs`, a process running the AppKit event loop;
+no notice of these types in 52 rests of 3 s). The Spaces engine uses them as triggers for its
+looks, never as facts (ARCHITECTURE, "The window server's notices").
+
+| Type | Payload | Comes |
+|---|---|---|
+| 1508 | none | at Mission Control's open (40 ms after its shortcut) and close (32 ms; the window list shows its window gone ~320 ms after, the Dock's cover ~610 ms), App Exposé's open and close (13, 12 ms), a Desktop change's end (551 ms); not at Show Desktop |
+| 1325 / 1326 | a window and a Space (12 bytes) | a window added to / taken out of a Space (3 of 3 for a window put into a classic Space and back, 3 ms) |
+| 811 | the window | a window created, 3-11 ms after the cause |
+| 815 / 816 | the window | a window shown / hidden |
+| 1401, 1329 | | a Desktop change's end (551 ms) |
+
+The Dock's `AXExpose…` notices never came (0 of 9 opens). Not measured: Mission Control opened
+by a gesture, a hot corner or the Dock's item (`ctl state`'s `engine.notices` says whether
+1508 counts them), and other macOS versions.
+
+What they change under the Spaces engine: Mission Control and App Exposé are found at the look
+the notice brings (before: at the next tick, up to 2 s, without a key); after their close the
+look that finds macOS's own window and the Dock's cover gone ends the freeze on Space
+inference (before: 1 s more); a hidden window taken out of its stage's Space by macOS is
+hidden again at once (before: at the next tick, up to 2 s), a window in a stage Space nothing
+answers for let out at once (before: up to 10 s).
+
 ## Known gaps
 
 - A window coming in from the strip can show one frame of a darker shadow as it lands

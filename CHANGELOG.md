@@ -6,6 +6,8 @@
   stage switch now works at once; before, either could be ignored for most of a second.
 - On a busy Mac, an app that reports its own focus late no longer brings back the stage just
   left, and a click on the wallpaper no longer brings Finder's windows in front.
+- With `engine = "spaces"`, the app follows Mission Control and App Exposé closing at once, and a
+  hidden window that macOS brings out goes back at once instead of up to two seconds later.
 - With `engine = "spaces"`, ⌘Tab or a Dock click to an app that is slow to come in front
   no longer slides to another Desktop; ⌘Tab cancelled with Escape takes its window back at once.
 - A switch that comes while the app is busy no longer plays its pictures over windows already
