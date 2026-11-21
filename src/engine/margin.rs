@@ -6,7 +6,8 @@
 //! - [`note`]: a time-window decision, its elapsed time against its limit, and whether it was
 //!   judged inside.
 //! - [`wait`]: a wait's end, met (the state it waits for read back), refuted (an event said
-//!   no) or ended by its cap.
+//!   no) or ended by its cap; [`wait_noticed`]: met at a look a window-server notice brought
+//!   forward (round r5-notices), so the table says how often the notice beat the poll.
 //! - [`predated`]: a notice whose receipt stamp is older than the action it is compared with
 //!   (judged as at the action: age zero).
 //!
@@ -63,6 +64,9 @@ pub struct Row {
     pub longest_wait_ms: u64,
     /// Notices stamped before the action they were compared with.
     pub predated: u64,
+    /// Waits met at a look a window-server notice brought forward ([`wait_noticed`]); the
+    /// rest of the met ones were met by the poll.
+    pub noticed: u64,
 }
 
 impl Row {
@@ -90,16 +94,17 @@ impl Row {
     }
 
     /// True when the row has something worth a summary line: a close call, a near miss, a
-    /// wait ended by its cap or a notice older than its action.
+    /// wait ended by its cap, a notice older than its action, or a wait a window-server
+    /// notice ended (how often it beat the poll).
     pub fn notable(&self) -> bool {
-        self.close_inside + self.just_outside + self.capped + self.predated > 0
+        self.close_inside + self.just_outside + self.capped + self.predated + self.noticed > 0
     }
 
     /// The row as a summary line's fields (`log summary` reads them back, [`parse_line`]).
     pub fn line(&self, name: &str) -> String {
         let share = |s: Option<f64>| s.map_or_else(|| "-".to_string(), |s| format!("{s:.2}"));
         format!(
-            "name={name} limit_ms={} decisions={} closest_inside={} closest_outside={} close_inside={} just_outside={} waits={} capped={} longest_wait_ms={} predated={}",
+            "name={name} limit_ms={} decisions={} closest_inside={} closest_outside={} close_inside={} just_outside={} waits={} capped={} longest_wait_ms={} predated={} noticed={}",
             self.limit_ms,
             self.decisions,
             share(self.closest_inside),
@@ -109,7 +114,8 @@ impl Row {
             self.waits,
             self.capped,
             self.longest_wait_ms,
-            self.predated
+            self.predated,
+            self.noticed
         )
     }
 
@@ -125,6 +131,7 @@ impl Row {
         self.capped += other.capped;
         self.longest_wait_ms = self.longest_wait_ms.max(other.longest_wait_ms);
         self.predated += other.predated;
+        self.noticed += other.noticed;
     }
 }
 
@@ -162,6 +169,7 @@ pub fn parse_line(text: &str) -> Option<(String, Row)> {
             "capped" => row.capped = n()?,
             "longest_wait_ms" => row.longest_wait_ms = n()?,
             "predated" => row.predated = n()?,
+            "noticed" => row.noticed = n()?,
             _ => {}
         }
     }
@@ -253,6 +261,19 @@ pub fn wait(name: &'static str, elapsed: Duration, cap: Duration, how: End) {
     if how == End::Cap {
         tracing::debug!("margin: name={name} elapsed_ms={} limit_ms={cap_ms} inside=false ended=cap", ms(elapsed));
     }
+}
+
+/// A wait `name` met after `elapsed` at a look a window-server notice brought forward (its cap
+/// `cap`: the poll that would have looked otherwise). Counted as met, and as `noticed`.
+pub fn wait_noticed(name: &'static str, elapsed: Duration, cap: Duration) {
+    #[cfg(test)]
+    test::seen(test::Seen { name, elapsed, limit: cap, inside: None, ended: Some(End::Met) });
+    let cap_ms = ms(cap);
+    with_row(name, |r| {
+        r.limit_ms = cap_ms;
+        r.ended(elapsed, End::Met);
+        r.noticed += 1;
+    });
 }
 
 /// A notice stamped before the action `name` compares it with: counted, and judged as at the
@@ -408,6 +429,7 @@ mod tests {
             capped: 0,
             longest_wait_ms: 0,
             predated: 1,
+            noticed: 2,
         };
         let (name, back) = parse_line(&r.line("ECHO_WINDOW")).expect("parses");
         assert_eq!(name, "ECHO_WINDOW");

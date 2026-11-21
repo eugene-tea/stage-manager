@@ -277,12 +277,12 @@ impl fmt::Display for Summary {
         }
         if !self.margins.is_empty() {
             writeln!(f, "Time values that came close (share of the limit; close: 0.5-1 inside, near: 1-2 outside):")?;
-            writeln!(f, "  {:<28} {:>8} {:>7} {:>7} {:>6} {:>5} {:>5} {:>6} {:>8}", "name", "limit", "inside", "outside", "close", "near", "waits", "capped", "predated")?;
+            writeln!(f, "  {:<28} {:>8} {:>7} {:>7} {:>6} {:>5} {:>5} {:>6} {:>8} {:>8}", "name", "limit", "inside", "outside", "close", "near", "waits", "capped", "predated", "noticed")?;
             let share = |s: Option<f64>| s.map_or_else(|| "-".to_string(), |s| format!("{s:.2}"));
             for (name, r) in &self.margins {
                 writeln!(
                     f,
-                    "  {:<28} {:>6}ms {:>7} {:>7} {:>6} {:>5} {:>5} {:>6} {:>8}",
+                    "  {:<28} {:>6}ms {:>7} {:>7} {:>6} {:>5} {:>5} {:>6} {:>8} {:>8}",
                     name,
                     r.limit_ms,
                     share(r.closest_inside),
@@ -291,7 +291,8 @@ impl fmt::Display for Summary {
                     r.just_outside,
                     r.waits,
                     r.capped,
-                    r.predated
+                    r.predated,
+                    r.noticed
                 )?;
             }
         }
