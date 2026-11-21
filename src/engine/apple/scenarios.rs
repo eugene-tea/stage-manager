@@ -1293,3 +1293,116 @@ fn no_step_runs_while_a_full_screen_app_shows() {
     let r = d.end.expect("ended").expect_err("given up");
     assert!(r.given_up.as_deref().is_some_and(|w| w.contains("full-screen")), "{r:?}");
 }
+
+// ── A slower Apple ──────────────────────────────────────────────────────────────────────
+
+/// Apple's lag before its answer starts, as a multiple of the measured one
+/// ([`crate::engine::testkit::apple::LAG`]): a slow Mac, a busy WindowManager.
+const LAGS: [u32; 3] = [1, 3, 10];
+
+/// [`three`], then Apple's answer from now on `lag` times the measured lag and `motion` times
+/// the measured motion.
+fn three_slowed(lag: u32, motion: u32) -> (FakeWindowManager, Arrangement) {
+    let (f, a) = three();
+    (f.slower(lag, motion), a)
+}
+
+/// No step of ours went while Apple's answer to an earlier one was still to start or in
+/// motion: no second focus, no second press.
+fn never_mid_answer(f: &FakeWindowManager, what: &str) {
+    assert_eq!((f.busy_posts, f.busy_focuses, f.ignored_mid_motion), (0, 0, 0), "{what}: a step of ours went while Apple's answer was under way: {:?} {:?}", f.posted, f.focused);
+}
+
+#[test]
+#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
+fn a_slow_apple_gets_one_focus_for_a_switch() {
+    for k in LAGS {
+        let (mut f, mut a) = three_slowed(k, 1);
+        let mut job = plan::switch_job(&a, 2, |_| None, f.now()).expect("planned");
+        let r = drive(&mut f, &mut a, &mut job, 6000).end.expect("ended").unwrap_or_else(|r| panic!("lag x{k}: {r:?}"));
+        assert_eq!((r.focuses, f.focused.clone()), (1, vec![1]), "lag x{k}: one focus");
+        never_mid_answer(&f, &format!("lag x{k}"));
+        assert_eq!(sorted(f.current()), vec![1, 2]);
+    }
+}
+
+#[test]
+#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
+fn a_slow_apple_gets_one_press_per_window_of_a_merge() {
+    for k in LAGS {
+        let (mut f, mut a) = three_slowed(k, 1);
+        let mut job = plan::merge(&a, 2, f.now()).expect("stage 2 is Alpha's");
+        let d = drive(&mut f, &mut a, &mut job, 15_000);
+        let r = d.end.expect("ended").unwrap_or_else(|r| panic!("lag x{k}: {r:?}"));
+        assert_eq!(presses(&d.steps), vec![vec![1], vec![2]], "lag x{k}: a press per window, none twice");
+        assert_eq!((r.presses, f.focused.clone()), (2, vec![1]), "lag x{k}");
+        never_mid_answer(&f, &format!("lag x{k}"));
+        assert_eq!(f.current(), &[1, 2, 4]);
+    }
+}
+
+#[test]
+#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
+fn a_slow_apple_gets_one_switch_one_press_and_one_switch_back_for_a_send() {
+    for k in LAGS {
+        let mut f = FakeWindowManager::new();
+        f.open_app(20, &[3]);
+        f.open_app(10, &[1, 2]);
+        let mut a = settle(&mut f, &Arrangement::default());
+        let mut f = f.slower(k, 1);
+        let mut job = plan::send(&a, 1, 1, |_| None, f.now()).expect("window 1 to Bravo's stage");
+        let d = drive(&mut f, &mut a, &mut job, 15_000);
+        d.end.expect("ended").unwrap_or_else(|r| panic!("lag x{k}: {r:?}"));
+        let kinds: Vec<&str> = d.steps.iter().map(|(_, s)| super::job::step_name(s)).collect();
+        assert_eq!(kinds, vec!["focus", "shift_click", "focus"], "lag x{k}");
+        never_mid_answer(&f, &format!("lag x{k}"));
+        assert_eq!(f.current(), &[2]);
+    }
+}
+
+#[test]
+#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
+fn a_slow_apple_gets_one_drag_to_take_a_window_out() {
+    for k in LAGS {
+        let mut f = FakeWindowManager::new();
+        f.open_app(20, &[3]);
+        f.open_app(10, &[1, 2]);
+        let mut a = settle(&mut f, &Arrangement::default());
+        let mut f = f.slower(k, 1);
+        let mut job = plan::new_stage(&a, 1, f.now()).expect("planned");
+        let r = drive(&mut f, &mut a, &mut job, 10_000).end.expect("ended").unwrap_or_else(|r| panic!("lag x{k}: {r:?}"));
+        assert_eq!(r.drags, 1, "lag x{k}");
+        never_mid_answer(&f, &format!("lag x{k}"));
+        assert_eq!(f.current(), &[2]);
+    }
+}
+
+/// A newly opened app hidden at its launch on a slow Mac: its thumbnail pressed once, its
+/// window focused once in front.
+#[test]
+#[ignore = "fails at lag x10 while the mirror counts 700 ms after a step blind"]
+fn a_slow_apple_gets_one_press_for_a_new_app_opened_here() {
+    for k in LAGS {
+        let (mut f, mut a) = three_slowed(k, 1);
+        let mut job = plan::open_here(&a, 40, f.now()).expect("a stage in front");
+        f.launch(40, &[5], true);
+        // The platform's watch at the launch notice.
+        a.step_began(f.now());
+        let d = drive_every(&mut f, &mut a, &mut job, 10_000, FAST, |_, _| {});
+        let r = d.end.expect("ended").unwrap_or_else(|r| panic!("lag x{k}: {r:?}"));
+        assert_eq!(presses(&d.steps), vec![vec![5]], "lag x{k}");
+        never_mid_answer(&f, &format!("lag x{k}"));
+        assert_eq!(sorted(f.current()), vec![4, 5], "lag x{k}: {r:?}");
+    }
+}
+
+/// Apple's motion three times as long as measured: nothing goes until it is over.
+#[test]
+fn a_long_motion_is_waited_out_before_the_next_step() {
+    let (mut f, mut a) = three_slowed(1, 3);
+    let mut job = plan::merge(&a, 2, f.now()).expect("stage 2 is Alpha's");
+    let d = drive(&mut f, &mut a, &mut job, 15_000);
+    d.end.expect("ended").expect("done");
+    assert_eq!(presses(&d.steps), vec![vec![1], vec![2]]);
+    never_mid_answer(&f, "motion x3");
+}
