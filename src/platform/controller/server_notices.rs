@@ -99,10 +99,16 @@ impl Controller {
             return;
         }
         self.overview.told(at);
-        self.mission_server_hint(now);
+        let lends = self.mission_server_hint(now);
         self.spaces.server.overview_looks += 1;
         self.overview.look_at_notice(true);
-        self.mission_step(ob, true, now);
+        if lends {
+            // Mission Control's step looks, and its lends follow what the look finds.
+            self.mission_step(ob, true, now);
+        } else if let Some(main) = self.model.as_ref().map(|m| *m.main_display()) {
+            let list = windows::wake_on_screen();
+            self.look_for_overview(&list, main.frame, now);
+        }
         self.overview.look_at_notice(false);
     }
 
