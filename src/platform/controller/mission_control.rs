@@ -339,7 +339,9 @@ impl Controller {
             m.windows().any(|w| w.meta.pid == pid && !w.parked && m.stage_of(w.meta.id).is_some_and(|s| m.stage_in_front(s)))
         });
         let watch = self.spaces.mission.close;
-        match mission_close::verdict(&watch, pid, now, own_front, !self.store.config().windows.mission_key_keeps_stage) {
+        // The key is stamped by the key tap; the activation or focus at its notice's receipt.
+        let at = self.received_at(now);
+        match mission_close::verdict(&watch, pid, at, own_front, !self.store.config().windows.mission_key_keeps_stage) {
             Verdict::Pick => false,
             Verdict::NoPick { own_front } => {
                 let first = watch.refused() != Some(pid);

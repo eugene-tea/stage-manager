@@ -201,7 +201,8 @@ impl Controller {
             }
             Heard::Released { steps } => {
                 let lent = self.lent.is_some_and(|l| l.switcher.is_some());
-                self.switcher.released = Some((now, lent));
+                // When the monitor heard the release: a Space change is measured to its notice.
+                self.switcher.released = Some((self.received_at(now), lent));
                 tracing::info!(
                     steps,
                     selected = ?self.switcher.selected.map(|(pid, _)| pid),

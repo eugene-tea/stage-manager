@@ -196,8 +196,9 @@ const DISPLAY_SWEEP_AFTER: Duration = Duration::from_secs(3);
 pub enum WmCommand {
     /// The full list of running regular apps (sent once at launch).
     Apps(Vec<AppInfo>),
-    /// A workspace event.
-    App(AppEvent),
+    /// A workspace event, and when the main thread's NSWorkspace handler got it (an
+    /// activation also carries its own: [`AppEvent::Activated`]).
+    App(AppEvent, Instant),
     /// Accessibility trust changed: start or stop observation. The first grant starts the
     /// recovery scan: each app is observed once its windows are back ([`launch_scan`]).
     Accessibility(bool),
@@ -220,8 +221,9 @@ pub enum WmCommand {
     Hotkey(HotkeyCommand),
     /// Input from the strip.
     Strip(StripEvent),
-    /// The user went to another Space (`activeSpaceDidChangeNotification`).
-    SpaceChanged,
+    /// The user went to another Space (`activeSpaceDidChangeNotification`), and when the main
+    /// thread's handler got the notice.
+    SpaceChanged(Instant),
     /// Show or hide the strip.
     ToggleStrip,
     /// Re-read config.toml.
@@ -247,7 +249,7 @@ impl WmCommand {
     fn name(&self) -> &'static str {
         match self {
             WmCommand::Apps(_) => "command Apps",
-            WmCommand::App(_) => "command App",
+            WmCommand::App(..) => "command App",
             WmCommand::Accessibility(_) => "command Accessibility",
             WmCommand::NativeSettings(_) => "command NativeSettings",
             WmCommand::Displays(..) => "command Displays",
@@ -256,7 +258,7 @@ impl WmCommand {
             WmCommand::MissionInput(_) => "command MissionInput",
             WmCommand::Hotkey(_) => "command Hotkey",
             WmCommand::Strip(_) => "command Strip",
-            WmCommand::SpaceChanged => "command SpaceChanged",
+            WmCommand::SpaceChanged(_) => "command SpaceChanged",
             WmCommand::ToggleStrip => "command ToggleStrip",
             WmCommand::ReloadConfig => "command ReloadConfig",
             WmCommand::Ctl(..) => "command Ctl",
@@ -518,6 +520,9 @@ unsafe extern "C-unwind" fn ax_callback(
     notification: NonNull<CFString>,
     refcon: *mut c_void,
 ) {
+    // When macOS's notice reached us: its events are judged by it, not by when the
+    // controller gets to them (the reads below and a batch's earlier events take time).
+    let received = clock::now();
     let pid = observe::pid_of_refcon(refcon);
     // SAFETY: AX passes a live element and notification name for the callback's duration.
     let element = unsafe { AxElement::from_borrowed(element) };
@@ -529,7 +534,9 @@ unsafe extern "C-unwind" fn ax_callback(
         if name != super::ax::notifications::TITLE_CHANGED {
             s.pace.stir(clock::now());
         }
+        s.observer.receiving(Some(received));
         s.observer.on_notification(pid, element, &name);
+        s.observer.receiving(None);
         if !safety::quit_requested() {
             s.pump();
         }
@@ -564,7 +571,7 @@ impl WmState {
     /// not answer yet follows the restore window (fast while it is open).
     fn pump(&mut self) {
         loop {
-            let events = self.observer.take_events();
+            let events = self.observer.take_stamped();
             if events.is_empty() {
                 break;
             }
@@ -582,7 +589,7 @@ impl WmState {
             }
             // Nothing is arranged during the hold, but a window the head start could not reach
             // may show on this Space now (as while standing down).
-            WmCommand::SpaceChanged if !self.logout.admits(Work::SpaceChange) => self.retry_held(),
+            WmCommand::SpaceChanged(_) if !self.logout.admits(Work::SpaceChange) => self.retry_held(),
             WmCommand::LogoutSignal(name, signal, at) => self.logout_signal(&name, signal, at),
             // The tap swallowed the person's minimize: never lost. While nothing is arranged
             // it is macOS's, genie and all.
@@ -616,7 +623,7 @@ impl WmState {
                 return;
             }
             WmCommand::Apps(list) => self.observer.set_apps(list, ax_callback),
-            WmCommand::App(event) => {
+            WmCommand::App(event, received) => {
                 // An app quitting during a logout's hold: the logout is still under way.
                 if matches!(event, AppEvent::Terminated(_)) {
                     self.logout.app_quit(clock::now());
@@ -634,13 +641,15 @@ impl WmState {
                 }
                 // An app activated: the Apple mode may hide a running app with no window at
                 // once, before the window it reopens shows.
-                if let AppEvent::Activated(app, _) = &event
+                if let AppEvent::Activated(app, fired) = &event
                     && self.arranging()
                     && self.observer.admits(app)
                 {
-                    self.conductor.app_activated(&self.observer, app);
+                    self.conductor.app_activated(&self.observer, app, *fired);
                 }
+                self.observer.receiving(Some(received));
                 self.observer.on_app_event(event, ax_callback);
+                self.observer.receiving(None);
                 // A just-opened app: the engine may hold its new windows until placed.
                 if let Some(pid) = launched
                     && self.arranging()
@@ -682,7 +691,7 @@ impl WmState {
             {
                 tracing::debug!("Apple's Stage Manager is on: input ignored");
             }
-            WmCommand::SpaceChanged if !self.stand_down.admits(Work::SpaceChange) => self.retry_held(),
+            WmCommand::SpaceChanged(_) if !self.stand_down.admits(Work::SpaceChange) => self.retry_held(),
             WmCommand::Displays(displays, heard) => {
                 let moved = self.displays.as_ref().and_then(|d| d.first()).map(|d| d.frame) != displays.first().map(|d| d.frame);
                 if moved && self.displays.is_some() {
@@ -703,10 +712,10 @@ impl WmState {
             WmCommand::MissionInput(heard) => self.conductor.mission_input(&mut self.observer, heard),
             WmCommand::Hotkey(command) => self.conductor.hotkey(&mut self.observer, command),
             WmCommand::Strip(event) => self.conductor.strip_event(&mut self.observer, event),
-            WmCommand::SpaceChanged => {
+            WmCommand::SpaceChanged(heard) => {
                 // A window a stand-down could not reach may show on this Space now.
                 self.retry_held();
-                self.conductor.on_space_changed(&mut self.observer);
+                self.conductor.on_space_changed(&mut self.observer, heard);
             }
             WmCommand::ToggleStrip => self.conductor.toggle_strip(),
             WmCommand::ReloadConfig => {
@@ -1515,7 +1524,7 @@ mod tests {
         use input::{InputEvent, InputKind};
         let event = |kind, cmd, other_modifiers| {
             WmCommand::Input(
-                InputEvent { kind, at: Point::new(10.0, 10.0), shift: false, cmd, other_modifiers, control: false, option: false, clicks: 0, key: None, stamp: 0.0 },
+                InputEvent { kind, at: Point::new(10.0, 10.0), shift: false, cmd, other_modifiers, control: false, option: false, clicks: 0, key: None, stamp: 0.0, heard: Instant::now() },
                 None,
             )
         };
@@ -1527,7 +1536,7 @@ mod tests {
         assert!(stirs(&event(InputKind::MouseDown, false, false)));
         assert!(stirs(&event(InputKind::MouseUp, false, false)));
         assert!(stirs(&event(InputKind::OtherMouseDown, false, false)));
-        assert!(stirs(&WmCommand::SpaceChanged));
+        assert!(stirs(&WmCommand::SpaceChanged(Instant::now())));
         assert!(stirs(&WmCommand::ReloadConfig));
     }
 

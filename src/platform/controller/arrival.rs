@@ -1876,7 +1876,7 @@ impl Controller {
                 if !lend.parked.unwrap_or(false) {
                     tracing::info!(bundle, pid, window = home.0, asked, park_ms = lend.park_ms, "dock: the window put home could not be parked off the screen first (its app did not move it in time): it shows at its frame until its stage's switch");
                 }
-                self.dock_seen = Some(DockSeen { at: clock::now(), pid, active, predicted: None });
+                self.dock_seen = Some(DockSeen { at: self.received_at(clock::now()), pid, active, predicted: None });
                 self.slide_watch_press(&bundle, pid, noted, None);
                 return Err("the app's window here was put home at the press: macOS activates it here");
             }
@@ -1884,7 +1884,7 @@ impl Controller {
         }
         let result = m.dock_arrival(pid, facts, ax_window);
         let predicted = result.ok().and_then(|w| m.space_of(w)).map(|s| s.0);
-        self.dock_seen = Some(DockSeen { at: clock::now(), pid, active, predicted });
+        self.dock_seen = Some(DockSeen { at: self.received_at(clock::now()), pid, active, predicted });
         self.slide_watch_press(&bundle, pid, noted, predicted);
         let window = result?;
         tracing::debug!(bundle, pid, window = window.0, "dock: the window macOS will show");
@@ -1895,7 +1895,9 @@ impl Controller {
     /// day's log tells whether the rule holds).
     pub(super) fn note_dock_arrival(&mut self, arrived: SpaceId, from: SpaceId) {
         let Some(seen) = self.dock_seen.take() else { return };
-        if seen.at.elapsed() > DOCK_SEEN_FOR {
+        // Measured to the Space change's notice when this arrival is its own.
+        let heard = self.received_at(clock::now());
+        if heard.saturating_duration_since(seen.at) > DOCK_SEEN_FOR {
             return;
         }
         tracing::info!(
@@ -1905,7 +1907,7 @@ impl Controller {
             from = from.0,
             arrived = arrived.0,
             right = seen.predicted == Some(arrived.0),
-            since_press_ms = ms(seen.at, clock::now()),
+            since_press_ms = ms(seen.at, heard),
             "dock: the Desktop a Dock click went to"
         );
     }

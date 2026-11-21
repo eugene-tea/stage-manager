@@ -80,7 +80,7 @@ use crate::platform::apps::AppInfo;
 use crate::platform::ctl::{AppleTry, Command};
 use crate::platform::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use crate::platform::native_settings::RawSettings;
-use crate::platform::observe::{Observer, WinEvent, WindowKind};
+use crate::platform::observe::{Observer, Stamped, WinEvent, WindowKind};
 use crate::platform::ax::AxElement;
 use crate::platform::{apps, logging, paths, session};
 
@@ -302,9 +302,9 @@ impl AppleController {
     // ── What the WM thread tells it ─────────────────────────────────────────────────────
 
     /// The observer's events: each one that may change Apple's arrangement asks a read now.
-    pub fn on_events(&mut self, ob: &mut Observer, events: Vec<WinEvent>) {
-        let stirs = events.iter().any(|e| !matches!(e, WinEvent::Retitled(_) | WinEvent::Moved(_)));
-        let moved = events.iter().any(|e| matches!(e, WinEvent::Moved(_)));
+    pub fn on_events(&mut self, ob: &mut Observer, events: Vec<Stamped>) {
+        let stirs = events.iter().any(|(e, _)| !matches!(e, WinEvent::Retitled(_) | WinEvent::Moved(_)));
+        let moved = events.iter().any(|(e, _)| matches!(e, WinEvent::Moved(_)));
         if stirs {
             self.watch();
             self.read(ob, false);
@@ -319,7 +319,8 @@ impl AppleController {
     /// changed it.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent) {
         let now = clock::now();
-        if event.kind != InputKind::CommandKey && !post::echo(now) {
+        // Our posted gesture's echo is measured to when the monitor heard the event.
+        if event.kind != InputKind::CommandKey && !post::echo(event.heard.min(now)) {
             let mods = Modifiers { shift: event.shift, cmd: event.cmd };
             if event.kind == InputKind::MouseUp {
                 self.triggers.record_release(now, mods);
@@ -391,8 +392,12 @@ impl AppleController {
     /// own in front (the sixth probe of 11-16). Never for an app that has a window (in a stage,
     /// on another Desktop, minimized, or any window the observer knows: Apple's switches to its
     /// stage, as it should), nor for one launched just now (the launch's own route).
-    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
+    ///
+    /// `fired`: when the main thread got the notice; whether we activated the app ourselves
+    /// ([`OWN_ACTIVATION`]) is measured to it.
+    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo, fired: Instant) {
         let (pid, now) = (app.pid, clock::now());
+        let fired = fired.min(now);
         // The app opened here activated again while its job runs (live 11-17: Activity
         // Monitor, 1.3 s after its window landed in the strip, no step of ours between):
         // whether the person had just clicked tells their click from the app's own.
@@ -430,8 +435,10 @@ impl AppleController {
         // window, gave up by activating Finder, whose activation started the job again, six
         // times over until the person clicked another app): an app we activated ourselves, or
         // one macOS made active as our hide of another app took.
-        self.activated_by_us.retain(|_, t| now.saturating_duration_since(*t) < OWN_ACTIVATION);
-        if self.activated_by_us.contains_key(&pid) {
+        // Judged at the notice's receipt; kept twice as long, for a notice handled late.
+        let ours = self.activated_by_us.get(&pid).is_some_and(|t| fired.saturating_duration_since(*t) < OWN_ACTIVATION);
+        self.activated_by_us.retain(|_, t| now.saturating_duration_since(*t) < OWN_ACTIVATION * 2);
+        if ours {
             tracing::debug!(pid, "apple mode: an app activated by us: nothing started");
             return;
         }

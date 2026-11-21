@@ -136,6 +136,10 @@ pub struct TrackedWindow {
     pub found_at: Instant,
 }
 
+/// An event with when it was received from macOS ([`Observer::take_stamped`]): attribution
+/// ("within X of our action") is measured to it, never to when the WM thread got to it.
+pub type Stamped = (WinEvent, Instant);
+
 /// What changed, for the controller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WinEvent {
@@ -297,7 +301,12 @@ pub struct Observer {
     /// Apps with a window the window server did not list yet (just created): rescanned on
     /// the next retry passes, counting attempts.
     recheck: HashMap<i32, u32>,
-    events: Vec<WinEvent>,
+    /// The events since the last [`Self::take_stamped`], each with when it was received from
+    /// macOS ([`Stamped`]).
+    events: Vec<Stamped>,
+    /// When the notice being handled was received ([`Self::receiving`]): the stamp of the
+    /// events it makes. `None`: what is found now is stamped now.
+    receipt: Option<Instant>,
     /// When the main thread got each app's last activation notice.
     activated_at: HashMap<i32, Instant>,
     /// When the last regular app launched (any app, managed or not): the restore window's
@@ -357,6 +366,7 @@ impl Observer {
             known: HashMap::new(),
             recheck: HashMap::new(),
             events: Vec::new(),
+            receipt: None,
             activated_at: HashMap::new(),
             last_launch: None,
             vanished: Vanished::default(),
@@ -368,8 +378,33 @@ impl Observer {
     /// The events since the last call (dead handles noted since are applied first: a window
     /// judged closed is among them as destroyed).
     pub fn take_events(&mut self) -> Vec<WinEvent> {
+        self.take_stamped().into_iter().map(|(e, _)| e).collect()
+    }
+
+    /// [`Self::take_events`], each event with when it was received from macOS: the AX
+    /// callback's or the NSWorkspace notice's handler's instant ([`Self::receiving`]), the
+    /// activation notice's own ([`WinEvent::AppActivated`]), else when it was found (a
+    /// rescan, a retry, a dead handle applied now).
+    pub fn take_stamped(&mut self) -> Vec<Stamped> {
         self.apply_stale();
         std::mem::take(&mut self.events)
+    }
+
+    /// The notice handled next was received from macOS at `at` (the AX callback's entry, the
+    /// NSWorkspace handler on the main thread): the events it makes carry that instant.
+    /// `None` after it: events found later are stamped when found.
+    pub fn receiving(&mut self, at: Option<Instant>) {
+        self.receipt = at;
+    }
+
+    /// Queues `event`, stamped with the notice's receipt ([`Self::receiving`]) or now; an
+    /// activation carries its own.
+    fn emit(&mut self, event: WinEvent) {
+        let at = match event {
+            WinEvent::AppActivated(_, at) => at,
+            _ => self.receipt.unwrap_or_else(clock::now),
+        };
+        self.events.push((event, at));
     }
 
     /// Window `id`'s element: a fresh one noted for it ([`Self::note_fresh`]), else the
@@ -503,7 +538,7 @@ impl Observer {
                 bundle = self.bundle_of(w.pid),
                 "a window whose handle died is gone: let go (its app lists it no more and the window server shows it off screen, or not at all)"
             );
-            self.events.push(WinEvent::Destroyed(id));
+            self.emit(WinEvent::Destroyed(id));
         }
     }
 
@@ -745,7 +780,7 @@ impl Observer {
             }
         }
         tracing::info!("observing {} apps, {} manageable windows", self.observed.len(), self.windows.len());
-        self.events.push(WinEvent::Started);
+        self.emit(WinEvent::Started);
     }
 
     /// Drops every observer and window.
@@ -761,7 +796,7 @@ impl Observer {
         self.recheck.clear();
         self.gone.borrow_mut().clear();
         if was {
-            self.events.push(WinEvent::Stopped);
+            self.emit(WinEvent::Stopped);
         }
     }
 
@@ -1003,7 +1038,7 @@ impl Observer {
             let gone: Vec<u32> = self.windows.values().filter(|w| w.pid == pid).map(|w| w.id).collect();
             for id in &gone {
                 self.windows.remove(id);
-                self.events.push(WinEvent::Destroyed(*id));
+                self.emit(WinEvent::Destroyed(*id));
             }
             tracing::debug!(pid, dropped = gone.len(), "stopped observing app");
         }
@@ -1074,7 +1109,7 @@ impl Observer {
                 bundle = self.bundle_of(w.pid),
                 "window closed while its app did not answer: the window server no longer lists it on any Desktop and no destroyed notification came; dropped"
             );
-            self.events.push(WinEvent::Destroyed(id));
+            self.emit(WinEvent::Destroyed(id));
         }
     }
 
@@ -1134,7 +1169,7 @@ impl Observer {
 
     fn found(&mut self, id: u32, what: &str) {
         self.log_window(what, id);
-        self.events.push(WinEvent::Found(id));
+        self.emit(WinEvent::Found(id));
     }
 
     fn log_window(&self, what: &str, id: u32) {
@@ -1313,7 +1348,7 @@ impl Observer {
                 match id {
                     Some(id) => {
                         tracing::debug!(id, pid, bundle = self.bundle_of(pid), "window focused");
-                        self.events.push(WinEvent::Focused(id));
+                        self.emit(WinEvent::Focused(id));
                     }
                     None => tracing::debug!(pid, "focus moved to an unmanaged window"),
                 }
@@ -1321,7 +1356,7 @@ impl Observer {
             n::APPLICATION_ACTIVATED => {
                 tracing::debug!(pid, bundle = self.bundle_of(pid), "AX application activated");
                 self.rescan_app(pid);
-                self.events.push(WinEvent::AppTookActivation(pid));
+                self.emit(WinEvent::AppTookActivation(pid));
             }
             n::ELEMENT_DESTROYED => {
                 if drop_destroyed() {
@@ -1335,7 +1370,7 @@ impl Observer {
                         }
                     }
                     tracing::info!(id, pid, bundle = self.bundle_of(pid), "window destroyed");
-                    self.events.push(WinEvent::Destroyed(id));
+                    self.emit(WinEvent::Destroyed(id));
                 }
             }
             n::WINDOW_MOVED | n::WINDOW_RESIZED => {
@@ -1345,7 +1380,7 @@ impl Observer {
                         w.frame = frame;
                         let what = if name == n::WINDOW_MOVED { "moved" } else { "resized" };
                         tracing::trace!(id, pid, "window {what} to {frame}");
-                        self.events.push(WinEvent::Moved(id));
+                        self.emit(WinEvent::Moved(id));
                     }
                 }
             }
@@ -1356,7 +1391,7 @@ impl Observer {
                     && title != w.title
                 {
                     w.title = title;
-                    self.events.push(WinEvent::Retitled(id));
+                    self.emit(WinEvent::Retitled(id));
                 }
             }
             n::WINDOW_MINIATURIZED => {
@@ -1364,13 +1399,13 @@ impl Observer {
                     w.minimized = true;
                     tracing::debug!(id = w.id, pid, "window minimized");
                     let id = w.id;
-                    self.events.push(WinEvent::Minimized(id));
+                    self.emit(WinEvent::Minimized(id));
                 }
             }
             n::WINDOW_DEMINIATURIZED => {
                 if let Some(id) = self.find_window(pid, &element) {
                     tracing::debug!(id, pid, "window un-minimized");
-                    self.events.push(WinEvent::Deminiaturized(id));
+                    self.emit(WinEvent::Deminiaturized(id));
                 }
             }
             other => tracing::debug!(pid, "unhandled AX notification {other}"),
@@ -1418,7 +1453,7 @@ impl Observer {
                     }
                 }
                 if self.observing {
-                    self.events.push(WinEvent::AppTerminated(app.pid));
+                    self.emit(WinEvent::AppTerminated(app.pid));
                 }
             }
             AppEvent::Activated(app, at) => {
@@ -1438,19 +1473,19 @@ impl Observer {
                             self.found(id, "window found");
                         }
                     }
-                    self.events.push(WinEvent::AppActivated(pid, at));
+                    self.emit(WinEvent::AppActivated(pid, at));
                 }
             }
             AppEvent::Hidden(app) => {
                 self.log_app("app hidden", &app);
                 if self.observing && self.allowed(&app) {
-                    self.events.push(WinEvent::AppHidden(app.pid));
+                    self.emit(WinEvent::AppHidden(app.pid));
                 }
             }
             AppEvent::Unhidden(app) => {
                 self.log_app("app unhidden", &app);
                 if self.observing && self.allowed(&app) {
-                    self.events.push(WinEvent::AppUnhidden(app.pid));
+                    self.emit(WinEvent::AppUnhidden(app.pid));
                 }
             }
         }
@@ -1464,7 +1499,7 @@ impl Observer {
         self.apps.remove(&app.pid);
         self.unobserve_app(app.pid);
         if self.observing {
-            self.events.push(WinEvent::AppTerminated(app.pid));
+            self.emit(WinEvent::AppTerminated(app.pid));
         }
     }
 
@@ -1672,6 +1707,31 @@ mod tests {
         ob.set_apps(apps, no_callback);
         ob.observing = true;
         ob
+    }
+
+    /// Stamps at receipt (review 11-21, R1): an event carries when its notice reached us,
+    /// not when the controller got to it; one found with no notice under way is stamped when
+    /// found, and an activation keeps its own.
+    #[test]
+    fn events_carry_when_their_notice_was_received() {
+        let app = AppInfo { pid: 4545, bundle_id: Some("com.example.notes".into()), name: Some("Notes".into()) };
+        let mut ob = observing(vec![app.clone()]);
+        let t0 = Instant::now();
+        let _frozen = clock::test::freeze(t0 + Duration::from_millis(600));
+        ob.receiving(Some(t0));
+        ob.on_app_event(AppEvent::Hidden(app.clone()), no_callback);
+        ob.receiving(None);
+        ob.on_app_event(AppEvent::Unhidden(app.clone()), no_callback);
+        let fired = t0 + Duration::from_millis(40);
+        ob.emit(WinEvent::AppActivated(app.pid, fired));
+        assert_eq!(
+            ob.take_stamped(),
+            vec![
+                (WinEvent::AppHidden(app.pid), t0),
+                (WinEvent::AppUnhidden(app.pid), t0 + Duration::from_millis(600)),
+                (WinEvent::AppActivated(app.pid, fired), fired),
+            ]
+        );
     }
 
     #[test]

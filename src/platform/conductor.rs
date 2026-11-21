@@ -19,7 +19,7 @@ use super::ctl::Command;
 use super::input::InputEvent;
 use super::minimize_tap::MinimizeAsk;
 use super::native_settings::RawSettings;
-use super::observe::{Observer, WinEvent};
+use super::observe::{Observer, Stamped};
 use super::safety;
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
@@ -58,8 +58,8 @@ impl Conductor {
         }
     }
 
-    /// The observer's events.
-    pub fn on_events(&mut self, ob: &mut Observer, events: Vec<WinEvent>) {
+    /// The observer's events, each with when it was received ([`Stamped`]).
+    pub fn on_events(&mut self, ob: &mut Observer, events: Vec<Stamped>) {
         match self {
             Self::Ours(c) => c.on_events(ob, events),
             Self::Apples(a) => a.on_events(ob, events),
@@ -115,9 +115,9 @@ impl Conductor {
     }
 
     /// A Desktop change.
-    pub fn on_space_changed(&mut self, ob: &mut Observer) {
+    pub fn on_space_changed(&mut self, ob: &mut Observer, heard: Instant) {
         match self {
-            Self::Ours(c) => c.on_space_changed(ob),
+            Self::Ours(c) => c.on_space_changed(ob, heard),
             Self::Apples(a) => a.on_space_changed(ob),
         }
     }
@@ -141,10 +141,10 @@ impl Conductor {
 
     /// An app activated (the Apple mode hides a running app with no window that the rules
     /// want here, before the window it reopens shows; ours places that window when it comes).
-    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
+    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo, fired: Instant) {
         match self {
             Self::Ours(_) => {}
-            Self::Apples(a) => a.app_activated(ob, app),
+            Self::Apples(a) => a.app_activated(ob, app, fired),
         }
     }
 

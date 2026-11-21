@@ -921,7 +921,7 @@ mod app {
             if matches!(event, apps::AppEvent::Terminated(_)) {
                 shell::app_quit(Instant::now());
             }
-            wm_events.send(WmCommand::App(event));
+            wm_events.send(WmCommand::App(event, Instant::now()));
         };
         // A live check's late notices (round stale-activations; the fixtures' runs only).
         let workspace = match apps::debug_activation_delay() {
@@ -942,7 +942,7 @@ mod app {
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::space_changed(mtm);
             }
-            wm_spaces.send(WmCommand::SpaceChanged);
+            wm_spaces.send(WmCommand::SpaceChanged(Instant::now()));
         });
         // A display change heard as AppKit has it, not up to a second later at the poll: its
         // settle starts before macOS's activation that follows it (Mail, 0.4 s after the lid).

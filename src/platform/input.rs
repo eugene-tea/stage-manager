@@ -33,7 +33,7 @@ use objc2_core_graphics::{
 use objc2_foundation::{MainThreadMarker, NSString};
 
 use super::desktop::{point_to_top_left, primary_height};
-use super::windows;
+use super::{clock, windows};
 use crate::ui::strip_model;
 use crate::engine::geometry::{Point, Rect};
 
@@ -83,6 +83,10 @@ pub struct InputEvent {
     /// When it happened: macOS's timestamp, seconds since the Mac started (a press's hold is
     /// measured on these, not on when the main thread got to each event).
     pub stamp: f64,
+    /// When the monitor's handler got it on the main thread ([`crate::platform::clock`]):
+    /// what it is compared with ("a focus within X of this press") is measured to this, not
+    /// to when the WM thread got to it.
+    pub heard: Instant,
 }
 
 /// The Tab key's virtual key code.
@@ -137,6 +141,7 @@ impl Drop for InputMonitor {
 /// only while a strip may show (round idle-subsystems: each move wakes the main thread).
 pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Option<InputMonitor> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| {
+        let heard = clock::now();
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event = unsafe { event.as_ref() };
         if event.r#type() == NSEventType::FlagsChanged {
@@ -168,6 +173,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Op
             clicks,
             key,
             stamp: event.timestamp(),
+            heard,
         });
     });
     let mask = NSEventMask::LeftMouseDown
@@ -261,6 +267,13 @@ pub fn since_last_press() -> Duration {
     let key = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType::KeyDown);
     let key = Duration::try_from_secs_f64(key).unwrap_or(Duration::MAX);
     since_last_click().min(key)
+}
+
+/// [`since_last_press`] as of `at` (a notice's receipt, [`crate::platform::clock`]): how long
+/// before `at` the last press came. Zero when it came after `at`: a press between the notice
+/// and its handling counts as at the notice.
+pub fn since_last_press_at(at: Instant) -> Duration {
+    since_last_press().saturating_sub(clock::now().saturating_duration_since(at))
 }
 
 /// Left mouse-ups the monitor has seen (another app's, any source): a synthetic drag posts
@@ -944,7 +957,7 @@ mod tests {
     }
 
     fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {
-        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, control: false, option: false, clicks, key, stamp: 0.0 }
+        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, control: false, option: false, clicks, key, stamp: 0.0, heard: Instant::now() }
     }
 
     #[test]
