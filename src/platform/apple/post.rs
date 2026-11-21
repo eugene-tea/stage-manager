@@ -73,7 +73,8 @@ const MOVED: f64 = 4.0;
 pub const POINTER_WAIT: Duration = Duration::from_millis(20);
 
 /// Input events heard this soon after a gesture of ours ended are its own echoes (the global
-/// monitor hears posted events), never the person's.
+/// monitor hears posted events), never the person's. A plain time: the monitor hears our Shift
+/// and the person's alike; telling them apart by a tag on the posted events is not probed.
 pub const ECHO: Duration = Duration::from_millis(300);
 
 /// Shift's virtual key code.

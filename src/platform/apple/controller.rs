@@ -59,6 +59,7 @@ use super::routes::shift_click::ShiftClick;
 use super::routes::{Route, RouteStats};
 use super::post;
 use crate::config::{ConfigStore, HotkeyCommand};
+use crate::engine::apple::cause::{Cause, Causes};
 use crate::engine::apple::desk::{AppleDesk, Landed, Posted};
 use crate::engine::apple::follow;
 use crate::engine::apple::gate;
@@ -107,16 +108,10 @@ const WATCH: Duration = Duration::from_millis(1200);
 const JOB_READ: Duration = Duration::from_millis(25);
 
 /// A launch's own activation comes within this of its launch notice: the launch's route
-/// decides for it ([`AppleController::app_activated`] leaves it).
+/// decides for it ([`AppleController::app_activated`] leaves it). A plain time: an app may
+/// activate more than once as it starts, and nothing heard ties those to the launch but time
+/// (a job or hiding for the pid refuses a second "open here" anyway).
 const LAUNCH_ACTIVATION: Duration = Duration::from_secs(3);
-
-/// How long after our own activation of an app, or our hide of another taking, an app's
-/// did-activate notice is taken as ours, not the person's ([`AppleController::app_activated`]).
-const OWN_ACTIVATION: Duration = Duration::from_millis(1500);
-
-/// How long after our hide of an app took another app's activation is taken as macOS handing
-/// it the focus (live 11-17: Finder, 13 ms after Contacts was hidden).
-const HANDED_OVER: Duration = Duration::from_millis(500);
 
 /// The Apple mode's conductor. WM thread only.
 pub struct AppleController {
@@ -149,9 +144,9 @@ pub struct AppleController {
     posting: Option<Posted>,
     /// Newly opened apps being hidden at their launch, by pid.
     hidings: BTreeMap<i32, Hiding>,
-    /// Apps we activated ourselves (a give-up's activation given back), and when: their
-    /// did-activate notice starts nothing ([`AppleController::app_activated`]).
-    activated_by_us: BTreeMap<i32, Instant>,
+    /// Our activations and hides waiting for the activation that answers them, and the
+    /// person's latest input: told apart by order ([`Causes`]).
+    causes: Causes,
     /// Each managed window's app, at the last read.
     pids: BTreeMap<u32, i32>,
     /// Each route's counts.
@@ -240,7 +235,7 @@ impl AppleController {
             jobs: VecDeque::new(),
             posting: None,
             hidings: BTreeMap::new(),
-            activated_by_us: BTreeMap::new(),
+            causes: Causes::default(),
             pids: BTreeMap::new(),
             stats: BTreeMap::new(),
             last_refusal: None,
@@ -320,7 +315,12 @@ impl AppleController {
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent) {
         let now = clock::now();
         // Our posted gesture's echo is measured to when the monitor heard the event.
-        if event.kind != InputKind::CommandKey && !post::echo(event.heard.min(now)) {
+        let echo = post::echo(event.heard.min(now));
+        if !echo {
+            // The person's own input, as heard: an activation after it is not ours.
+            self.causes.person(event.heard.min(now));
+        }
+        if event.kind != InputKind::CommandKey && !echo {
             let mods = Modifiers { shift: event.shift, cmd: event.cmd };
             if event.kind == InputKind::MouseUp {
                 self.triggers.record_release(now, mods);
@@ -393,8 +393,9 @@ impl AppleController {
     /// on another Desktop, minimized, or any window the observer knows: Apple's switches to its
     /// stage, as it should), nor for one launched just now (the launch's own route).
     ///
-    /// `fired`: when the main thread got the notice; whether we activated the app ourselves
-    /// ([`OWN_ACTIVATION`]) is measured to it.
+    /// `fired`: when the main thread got the notice; whether we caused it is told by its
+    /// order against our activations, hides and the person's input ([`Causes`]), each
+    /// stamped at its receipt.
     pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo, fired: Instant) {
         let (pid, now) = (app.pid, clock::now());
         let fired = fired.min(now);
@@ -433,29 +434,30 @@ impl AppleController {
         // Not the person's activation (live 11-17, Contacts opened here: its hide handed the
         // focus to Finder, which has a `current` rule and no window; the job waited 3 s for a
         // window, gave up by activating Finder, whose activation started the job again, six
-        // times over until the person clicked another app): an app we activated ourselves, or
-        // one macOS made active as our hide of another app took.
-        // Judged at the notice's receipt; kept twice as long, for a notice handled late.
-        let ours = self.activated_by_us.get(&pid).is_some_and(|t| {
-            let age = crate::engine::margin::age("apple::OWN_ACTIVATION", fired, *t);
-            crate::engine::margin::within("apple::OWN_ACTIVATION", age, OWN_ACTIVATION)
-        });
-        self.activated_by_us.retain(|_, t| now.saturating_duration_since(*t) < OWN_ACTIVATION * 2);
-        if ours {
-            tracing::debug!(pid, "apple mode: an app activated by us: nothing started");
-            return;
+        // times over until the person clicked another app): the first activation of an app we
+        // activated ourselves, or of another app once our hide of one took, with no input of
+        // the person's between ([`Causes`]).
+        self.causes.keep_hides(|p| self.hidings.contains_key(&p));
+        for h in self.hidings.values() {
+            if let Some(launch_hide::HideOutcome::Hidden { ms, .. }) = h.outcome() {
+                self.causes.hide_took(h.pid, h.since + Duration::from_millis(ms));
+            }
+        }
+        self.causes.prune(now);
+        match self.causes.activation(pid, fired) {
+            Cause::Ours => {
+                tracing::debug!(pid, "apple mode: an app activated by us: nothing started");
+                return;
+            }
+            Cause::HandedOver => {
+                tracing::debug!(pid, "apple mode: an app made active as our hide of another took: nothing started");
+                return;
+            }
+            Cause::Other => {}
         }
         // A hide under way counts too: its notice may come before the hide's thread says so.
-        let handed_over = self.hidings.values().any(|h| {
-            h.pid != pid
-                && match h.outcome() {
-                    None => true,
-                    Some(launch_hide::HideOutcome::Hidden { ms, .. }) => now.saturating_duration_since(h.since + Duration::from_millis(ms)) < HANDED_OVER,
-                    Some(_) => false,
-                }
-        });
-        if handed_over {
-            tracing::debug!(pid, "apple mode: an app made active as our hide of another took: nothing started");
+        if self.hidings.values().any(|h| h.pid != pid && h.outcome().is_none()) {
+            tracing::debug!(pid, "apple mode: an app made active as our hide of another is under way: nothing started");
             return;
         }
         self.arrival(pid, app.bundle_or_unknown(), Moment::Activation, now);
@@ -953,7 +955,7 @@ impl AppleController {
                     && self.hidings.contains_key(&pid)
                 {
                     tracing::info!(pid, "apple mode: given up: the app hidden at its activation shown again and activated, as asked");
-                    self.activated_by_us.insert(pid, now);
+                    self.causes.activated_by_us(pid, now);
                     launch_hide::activate(pid);
                 }
                 if let Some((w, frame)) = report.set_back
