@@ -8010,7 +8010,7 @@ mod tests {
         assert!(!e.is_window_echo(7, handled), "measured at the handling, as before, it was the user's");
         assert!(e.is_window_echo(7, fired), "measured at the notice: ours");
         assert!(e.is_app_echo(42, fired), "the activation too, past the awaited one");
-        assert!(!e.is_window_echo(7, t0 + ECHO_WINDOW), "a notice that came past the window is not");
+        assert!(!e.is_window_echo(7, t0 + e.window), "a notice that came past the window is not");
     }
 
     #[test]
