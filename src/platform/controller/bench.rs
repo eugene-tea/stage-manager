@@ -51,6 +51,7 @@ use crate::ui::strip_model::StripEvent;
 
 mod causes;
 mod scenarios;
+mod switch;
 
 /// The fast tick's period (`wm_thread::FAST_TICK_SECONDS`).
 const FAST_TICK: Duration = Duration::from_millis(20);
@@ -360,9 +361,10 @@ impl Bench {
                 self.deliver(q);
             } else if self.next_fast.is_some_and(|at| at <= now) {
                 self.fast_tick();
-            } else {
+            } else if self.next_tick <= now {
                 self.tick();
             }
+            // Else an act of macOS came due: the desk ran it as it was asked (`Desk::at`).
         }
         let now = clock::now();
         if until > now {
@@ -394,27 +396,12 @@ impl Bench {
     /// input monitor hears it; macOS activates the app of the window under it and makes that
     /// window its key window (nothing for the wallpaper here: [`Self::wallpaper_click`]).
     pub(super) fn press(&mut self, p: Point) {
-        self.desk(|d| d.pointer = p);
-        self.input(InputKind::MouseDown, None, |_| {});
-        self.desk(|d| {
-            d.tap_forwards(crate::platform::mission_key_tap::Heard::Click);
-            // The wallpaper: macOS hands the desktop to Finder (`engine/desktop_echo.rs`).
-            if d.window_at(p).is_none() && !d.dock.bar.contains(p) {
-                d.post(fake::delays::FINDER_AFTER_WALLPAPER, Notice::Step(fake::Step::Activation { pid: fake::FINDER_PID, raise_all: false }));
-            }
-            let Some(id) = d.window_at(p) else { return };
-            let pid = d.windows[&id].pid;
-            d.raise(id);
-            d.make_key(id, fake::delays::FOCUS);
-            if d.front != Some(pid) {
-                d.activate(pid, false);
-            }
-        });
+        self.desk(|d| d.press(p));
     }
 
     /// The left button let go where the pointer is.
     pub(super) fn release(&mut self) {
-        self.input(InputKind::MouseUp, None, |_| {});
+        self.desk(|d| d.release());
     }
 
     /// The user drags `window` by its title bar, `by` in all, in `steps` steps 16 ms apart:

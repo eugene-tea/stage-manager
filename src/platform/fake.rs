@@ -103,6 +103,9 @@ pub mod delays {
     /// The strip: a transition presented to its pictures drawn (its answer to the cover
     /// wait; the main thread's next frame or two).
     pub const STRIP_COVERS: f64 = 20.0;
+    /// The strip: its answer to its pictures on screen (the layers committed, then a frame of
+    /// the display shown: 8-17 ms at 120 Hz). Assumed, not measured.
+    pub const STRIP_SHOWS: f64 = 12.0;
     /// A new window: `AXWindowCreated` to the window server listing it on screen.
     pub const WINDOW_SHOWS: f64 = 60.0;
     /// A launched app answering Accessibility after its launch notice.
@@ -182,6 +185,11 @@ pub struct App {
     pub enhanced: bool,
     /// The process is gone.
     pub gone: bool,
+    /// How long after answering an `AXRaise` the window server reorders its window, in ms
+    /// before the load factor (`None`: at once): the knob for "an app answers its raise before
+    /// its reorder reaches the window server" (`engine/raise_order.rs`: the fixture's 40 ms
+    /// lag; a slow app's longer).
+    pub reorders_ms: Option<f64>,
 }
 
 /// A window on the desk.
@@ -284,6 +292,9 @@ pub enum Step {
 }
 
 /// A queued notice.
+/// Something macOS does at its own time ([`Desk::at`]).
+type Act = Box<dyn FnOnce(&mut Desk)>;
+
 #[derive(Debug, Clone)]
 pub struct Queued {
     /// When macOS sends it.
@@ -320,6 +331,14 @@ pub struct Strip {
     pub draws: bool,
     /// How long its pictures take to cover the windows, in ms before the load factor.
     pub covers_ms: f64,
+    /// How long after its answer its pictures are on screen (the layers committed and a frame
+    /// shown), in ms before the load factor.
+    pub shows_ms: f64,
+    /// Transitions whose pictures covered the windows in time (the switch played with them),
+    /// and those the switch moved windows for without them.
+    pub covered: usize,
+    /// See [`Self::covered`].
+    pub uncovered: usize,
     /// The last snapshot presented.
     pub last: Option<StripSnapshot>,
     /// Transitions presented and not answered for yet.
@@ -431,6 +450,15 @@ pub struct Desk {
     /// How long after a transition's pictures cover the windows the strip unveils them (the
     /// motion's length; the bench sets it from the config in force).
     pub unveil_after: Duration,
+    /// macOS acts on its own clock, whatever the app's thread is doing: each act runs at its
+    /// time at the desk's first use after it ([`Self::at`]), a handler that waits included.
+    acts: Vec<(Instant, u64, Act)>,
+    /// Windows raised whose reorder reaches the window server later ([`App::reorders_ms`]):
+    /// in front from their time on.
+    late_raises: Vec<(Instant, u32)>,
+    /// What macOS does a while after the app's `count`-th `AXRaise` of a window
+    /// ([`Self::on_raise`]): window, raises left to skip, how long after, the act.
+    raise_hooks: Vec<(u32, usize, Duration, Act)>,
     queue: Vec<Queued>,
     seq: u64,
     next_space: u64,
@@ -476,7 +504,10 @@ pub fn install(desk: Desk) -> Installed {
 pub fn with<T>(f: impl FnOnce(&mut Desk) -> T) -> Option<T> {
     DESK.with(|d| {
         let mut d = d.try_borrow_mut().expect("the fake desk asked while it answers: a leaf called from inside the desk");
-        d.as_mut().map(f)
+        d.as_mut().map(|d| {
+            d.run_acts();
+            f(d)
+        })
     })
 }
 
@@ -552,7 +583,7 @@ impl Desk {
             last_click: None,
             dock: Dock { pid: DOCK_PID, bar: Rect::new(420.0, 830.0, 600.0, 66.0), items: Vec::new() },
             locked: false,
-            strip: Strip { draws: true, covers_ms: delays::STRIP_COVERS, ..Strip::default() },
+            strip: Strip { draws: true, covers_ms: delays::STRIP_COVERS, shows_ms: delays::STRIP_SHOWS, ..Strip::default() },
             switcher: Switcher::default(),
             tap_hears: true,
             tap_switcher: false,
@@ -569,6 +600,9 @@ impl Desk {
             session: "bench-session",
             shot_ms: 40.0,
             unveil_after: Duration::from_millis(300),
+            acts: Vec::new(),
+            late_raises: Vec::new(),
+            raise_hooks: Vec::new(),
             queue: Vec::new(),
             seq: 0,
             next_space: FIRST_MADE_SPACE,
@@ -585,7 +619,7 @@ impl Desk {
     pub fn add_app(&mut self, pid: i32, bundle: &str, name: &str) {
         self.apps.insert(
             pid,
-            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, timeout: 0.0, enhanced: false, gone: false },
+            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None },
         );
         let n = self.dock.items.len() as f64;
         self.dock.items.push((format!("/Applications/{name}.app/"), Rect::new(self.dock.bar.x + 8.0 + 58.0 * n, self.dock.bar.y + 8.0, 50.0, 50.0)));
@@ -687,10 +721,64 @@ impl Desk {
         self.queue.push(Queued { due, seq: self.seq, notice });
     }
 
-    /// When the next queued notice is due.
+    /// When the next queued notice or act of macOS is due.
     pub fn next_due(&self) -> Option<Instant> {
-        self.queue.iter().map(|q| q.due).min()
+        self.queue.iter().map(|q| q.due).chain(self.acts.iter().map(|a| a.0)).chain(self.late_raises.iter().map(|r| r.0)).min()
     }
+
+    /// macOS does `act` at `due` (the script's own time), on its own clock: at the desk's first
+    /// use from then on, even inside a handler that holds the app's thread (a press, an app
+    /// activated by itself, while the app waits for the strip).
+    pub fn at(&mut self, due: Instant, act: impl FnOnce(&mut Desk) + 'static) {
+        self.seq += 1;
+        self.acts.push((due, self.seq, Box::new(act)));
+    }
+
+    /// macOS does `act` `after` the app's `nth` `AXRaise` of window `window` from now on (1:
+    /// the next): a person's click while the app checks the order of a switch's raises, say.
+    pub fn on_raise(&mut self, window: u32, nth: usize, after: Duration, act: impl FnOnce(&mut Desk) + 'static) {
+        self.raise_hooks.push((window, nth.max(1), after, Box::new(act)));
+    }
+
+    /// The app raised `window`: its hooks counted, those due scheduled ([`Self::on_raise`]).
+    fn raised_hooks(&mut self, window: u32) {
+        let now = clock::now();
+        for hook in std::mem::take(&mut self.raise_hooks) {
+            match hook {
+                (w, 1, after, act) if w == window => {
+                    self.seq += 1;
+                    self.acts.push((now + after, self.seq, act));
+                }
+                (w, n, after, act) if w == window => self.raise_hooks.push((w, n - 1, after, act)),
+                other => self.raise_hooks.push(other),
+            }
+        }
+    }
+
+    /// Runs the acts due by now, in their order.
+    fn run_acts(&mut self) {
+        loop {
+            let now = clock::now();
+            let Some(i) = self.acts.iter().enumerate().filter(|(_, a)| a.0 <= now).min_by_key(|(_, a)| (a.0, a.1)).map(|(i, _)| i) else { break };
+            let (_, _, act) = self.acts.remove(i);
+            act(self);
+        }
+        self.settle_raises();
+    }
+
+    /// The late reorders due by now reach the window server, in their order.
+    fn settle_raises(&mut self) {
+        let now = clock::now();
+        self.late_raises.sort_by_key(|r| r.0);
+        while self.late_raises.first().is_some_and(|r| r.0 <= now) {
+            let (_, id) = self.late_raises.remove(0);
+            if self.windows.contains_key(&id) {
+                self.z.retain(|w| *w != id);
+                self.z.insert(0, id);
+            }
+        }
+    }
+
 
     /// Takes the queued notice due first, when it is due by `by`.
     pub fn take_due(&mut self, by: Instant) -> Option<Queued> {
@@ -745,6 +833,7 @@ impl Desk {
     /// and the Dock's bar first), then with `all` every other window.
     pub fn list(&mut self, all: bool) -> Vec<CgWindow> {
         self.spend(self.costs.list);
+        self.settle_raises();
         let mut out: Vec<CgWindow> = self.overlays.clone();
         out.push(CgWindow { id: 9, pid: self.dock.pid, owner: "Dock".into(), name: None, layer: super::dock::DOCK_LAYER, bounds: self.dock.bar, onscreen: true, alpha: 1.0 });
         let (on, off): (Vec<&Win>, Vec<&Win>) = self.z.iter().filter_map(|id| self.windows.get(id)).partition(|w| self.on_screen(w));
@@ -963,7 +1052,15 @@ impl Desk {
         match (el, name) {
             (El::Window(id), names::RAISE) => {
                 self.call(Call::Raise(id));
-                self.raise(id);
+                self.raised_hooks(id);
+                let late = self.windows.get(&id).and_then(|w| self.apps.get(&w.pid)).and_then(|a| a.reorders_ms);
+                match late {
+                    Some(ms) => {
+                        let due = clock::now() + self.at_load(ms);
+                        self.late_raises.push((due, id));
+                    }
+                    None => self.raise(id),
+                }
                 self.follow(id);
                 Ok(())
             }
@@ -1007,6 +1104,7 @@ impl Desk {
 
     /// Window `id` to the front of the window order.
     pub fn raise(&mut self, id: u32) {
+        self.settle_raises();
         if self.windows.contains_key(&id) {
             self.z.retain(|w| *w != id);
             self.z.insert(0, id);
@@ -1346,6 +1444,35 @@ impl Desk {
         }
     }
 
+    // ----- the person -----------------------------------------------------------------------
+
+    /// A press of the left button at `p`, in another app's window or on the desktop: the
+    /// input monitor hears it; macOS activates the app of the window under it and makes that
+    /// window its key window (the bench's `press`; [`Self::at`] plays it at a time of its own).
+    pub fn press(&mut self, p: Point) {
+        self.pointer = p;
+        let event = self.input(InputKind::MouseDown, None);
+        self.post(0.0, Notice::Input(event));
+        self.tap_forwards(super::mission_key_tap::Heard::Click);
+        // The wallpaper: macOS hands the desktop to Finder (`engine/desktop_echo.rs`).
+        if self.window_at(p).is_none() && !self.dock.bar.contains(p) {
+            self.post(delays::FINDER_AFTER_WALLPAPER, Notice::Step(Step::Activation { pid: FINDER_PID, raise_all: false }));
+        }
+        let Some(id) = self.window_at(p) else { return };
+        let pid = self.windows[&id].pid;
+        self.raise(id);
+        self.make_key(id, delays::FOCUS);
+        if self.front != Some(pid) {
+            self.activate(pid, false);
+        }
+    }
+
+    /// The left button let go where the pointer is.
+    pub fn release(&mut self) {
+        let event = self.input(InputKind::MouseUp, None);
+        self.post(0.0, Notice::Input(event));
+    }
+
     // ----- input state ----------------------------------------------------------------------
 
     /// An input event of kind `kind` at the pointer, heard now, with the modifiers held.
@@ -1409,9 +1536,11 @@ impl Desk {
         let now = clock::now();
         if !self.strip.draws || ready > now + timeout {
             clock::test::advance(timeout);
+            self.strip.uncovered += 1;
             return Cover::default();
         }
         clock::test::advance(ready.saturating_duration_since(now));
+        self.strip.covered += 1;
         if self.strip.answered.insert(id) {
             self.post_at(clock::now() + unveil, Notice::Strip(StripEvent::Unveil { id }));
         }
