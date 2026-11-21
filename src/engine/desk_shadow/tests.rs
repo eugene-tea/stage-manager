@@ -16,7 +16,7 @@ fn two_desktops() -> Model {
     let mut m = model();
     let mut arrive = |d: u64, live: &[WindowMeta], absent: &[u32]| {
         let absent: Vec<WindowId> = absent.iter().map(|&id| w(id)).collect();
-        m.arrive_on(MAIN, Some(&Desk { id: d, uuid: format!("U{d}") }), live, &absent, &LaunchHints::default());
+        m.arrive_on(MAIN, Some(&Desk { id: d, uuid: format!("U{d}") }), None, live, &absent, &LaunchHints::default());
     };
     let terminal = |id| meta(id, 30, "com.example.terminal");
     arrive(1, &[terminal(1)], &[]);
@@ -55,7 +55,7 @@ fn the_11_21_screen_change_the_hide_on_the_desktop_shown_disagrees_until_the_win
     assert_eq!(shadow.look(seen, at(t0, 36.4)), vec![Change::Began(shown)], "the window's own goes on, said once");
     assert_eq!((shadow.shown_open(), shadow.homes_open()), (1, 1));
     // The arrival on 4 (Terminal's window 3 on screen): the model and the listing agree again.
-    m.arrive_on(MAIN, Some(&Desk { id: 4, uuid: "U4".into() }), &[meta(3, 30, "com.example.terminal")], &[w(1)], &LaunchHints::default());
+    m.arrive_on(MAIN, Some(&Desk { id: 4, uuid: "U4".into() }), None, &[meta(3, 30, "com.example.terminal")], &[w(1)], &LaunchHints::default());
     assert_eq!(m.last_arrival().desk.map(|d| d.1), Some(crate::engine::model::desks::Agree::Yes));
     let seen = disagreements(&m, &[(MAIN, 4)], &[(w(2), 1), (w(1), 1)]);
     let ended = shadow.look(seen, at(t0, 36.5));

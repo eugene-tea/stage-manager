@@ -1,14 +1,24 @@
-//! The window server's Desktops, bound to the model's Spaces (design r3, slice 1: read and
-//! shadow).
+//! The window server's Desktops, bound to the model's Spaces (design r3).
 //!
-//! The model names its Spaces by ids of its own ([`SpaceId`]), guessed at each arrival from
-//! the windows on screen. Under the Spaces engine the window server's listing names the
-//! Desktop shown on each screen too (`SLSCopyManagedDisplaySpaces`: a small id of the login
-//! session and a uuid). Each arrival the model guessed is then given that Desktop
-//! ([`Model::arrive_on`]): the first time, the Desktop and the Space are bound to each other
-//! (one id, one Space); after that the guess either names the Space the Desktop is bound to
-//! or it does not ([`Agree`]). Nothing here decides anything yet: the bindings only let the
-//! platform say when the model's guess and the window server disagree
+//! The model names its Spaces by ids of its own ([`SpaceId`]). Under the Spaces engine the
+//! window server's listing names the Desktop shown on each screen (`SLSCopyManagedDisplaySpaces`:
+//! a small id of the login session and a uuid) and the Desktops each window is on. An
+//! arrival is given that Desktop ([`Model::arrive_on`]) and the two are bound to each other
+//! (one id, one Space).
+//!
+//! - **Keyed** (the platform read the listing and the windows' Desktops for this arrival,
+//!   [`Listed`]): the listing decides. The Desktop that arrived is the Space bound to it;
+//!   the model's vote over the windows on screen stands in only for a Desktop not bound yet,
+//!   and then only among the Spaces bound to none. A known window of another Space among the
+//!   arrival's windows was moved here, at once; one listed on two Desktops or more is on
+//!   every Desktop, at once; one the model counts hidden that nothing lent is hidden again,
+//!   never moved. A window found on another Desktop between arrivals goes by
+//!   [`Model::window_on_desk`].
+//! - **Not keyed** (no [`Listed`]: the launch, a listing that could not be read): the
+//!   arrival is guessed from the windows on screen as ever, and its Desktop, when one is
+//!   given, is bound to the Space guessed or checked against it ([`Agree`]).
+//!
+//! The bindings also let the platform say when the model and the window server disagree
 //! ([`crate::engine::desk_shadow`]), and are saved with their uuids (`state.json`'s `desks`)
 //! to learn whether a uuid lasts over a restart.
 //!
@@ -29,6 +39,18 @@ use crate::engine::persist::LaunchHints;
 pub struct Desk {
     pub id: u64,
     pub uuid: String,
+}
+
+/// What the window server says of an arrival's windows, read by the platform with the
+/// arrival's Desktop ([`Model::arrive_on`]): given, every window of the arrival is on that
+/// Desktop by the window server's word, and the arrival is keyed (module docs).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Listed {
+    /// Windows listed on two Desktops or more: on every Desktop.
+    pub every: Vec<WindowId>,
+    /// Windows the window engine holds hidden and has put on their Desktop for a while (a
+    /// Dock press, ⌘Tab's switcher, Mission Control): on a Desktop on purpose.
+    pub lent: Vec<WindowId>,
 }
 
 /// A Desktop's binding: the model's Space for it and the uuid it was listed with.
@@ -72,27 +94,78 @@ impl Agree {
 }
 
 impl Model {
-    /// [`Model::arrive`], then the Desktop `desk` the window server lists on `display` now
-    /// bound to the Space the arrival chose, or checked against it ([`Agree`], in
-    /// [`super::ArrivalNote::desk`]). `None` (no listing: another engine, the listing not
-    /// readable now): the arrival alone, as [`Model::arrive`]. The arrival runs as ever; the
-    /// binding decides nothing.
-    pub fn arrive_on(&mut self, display: DisplayId, desk: Option<&Desk>, live: &[WindowMeta], absent: &[WindowId], hints: &LaunchHints) -> Vec<Action> {
+    /// An arrival on `display` with the Desktop `desk` the window server lists there now
+    /// ([`super::ArrivalNote::desk`] says how the two stood).
+    ///
+    /// With `listed` (the platform read each window's Desktops: `live` holds only windows on
+    /// `desk`) the arrival is keyed: the Space bound to `desk` arrives, or, for a Desktop
+    /// not bound yet, the Space the windows vote for among those bound to none; then the two
+    /// are bound (module docs). Without `listed` the arrival is guessed as [`Model::arrive`]
+    /// guesses it, and `desk` is bound to the Space guessed or checked against it. With no
+    /// `desk` (another engine, the listing not readable now): [`Model::arrive`].
+    pub fn arrive_on(
+        &mut self,
+        display: DisplayId,
+        desk: Option<&Desk>,
+        listed: Option<&Listed>,
+        live: &[WindowMeta],
+        absent: &[WindowId],
+        hints: &LaunchHints,
+    ) -> Vec<Action> {
         let prev = self.current_space(display);
         let reused = self.space_is_empty(prev);
-        let actions = self.arrive(display, live, absent, hints);
+        let key = desk.zip(listed);
+        let actions = self.arrive_keyed(display, key, live, absent, hints);
         if let Some(desk) = desk {
             let space = self.current_space(display);
-            if reused && space == prev && self.desk_of_space(space) != Some(desk.id) {
-                // An empty Space stands for no Desktop: the arrival took the one shown, empty,
-                // for this Desktop (the model's way with a Desktop it never saw), and its
-                // binding goes with what it held.
-                self.unbind_space(space);
-            }
-            let agree = self.bind_desk(space, desk);
+            let agree = if key.is_some() {
+                self.rebind_desk(space, desk)
+            } else {
+                if reused && space == prev && self.desk_of_space(space) != Some(desk.id) {
+                    // An empty Space stands for no Desktop: the arrival took the one shown,
+                    // empty, for this Desktop (the model's way with a Desktop it never saw),
+                    // and its binding goes with what it held.
+                    self.unbind_space(space);
+                }
+                self.bind_desk(space, desk)
+            };
             self.last_arrival.desk = Some((desk.id, agree));
         }
         actions
+    }
+
+    /// Desktop `desk` and `space` bound to each other, whatever either was bound to (a keyed
+    /// arrival: the listing said so). [`Agree::Yes`] when they were already.
+    fn rebind_desk(&mut self, space: SpaceId, desk: &Desk) -> Agree {
+        let was = self.space_of_desk(desk.id) == Some(space);
+        self.unbind_space(space);
+        self.desks.insert(desk.id, Bound { space, uuid: desk.uuid.clone() });
+        if was { Agree::Yes } else { Agree::New }
+    }
+
+    /// The window server lists managed window `id` on Desktop `desk` alone, and its own
+    /// Space is bound to another Desktop: it was moved there (Mission Control's drag, "Move
+    /// to Desktop"). When a screen shows that Desktop it goes where a window of its app
+    /// opening there goes ([`Model::arrive`]'s rule for a moved window); else it leaves its
+    /// stage and comes back as a new arrival when its Desktop is visited
+    /// ([`Model::window_left_space`]). Returns the actions and every window the model forgot.
+    pub fn window_on_desk(&mut self, id: WindowId, desk: u64, hints: &LaunchHints) -> (Vec<Action>, Vec<WindowId>) {
+        let Some(id) = self.resolve_standard(id) else { return (Vec::new(), Vec::new()) };
+        let Some(own) = self.space_of(id) else { return (Vec::new(), Vec::new()) };
+        match self.space_of_desk(desk) {
+            Some(space) if space == own => (Vec::new(), Vec::new()),
+            Some(space) if self.is_shown_space(space) => {
+                let mut actions = Vec::new();
+                self.move_in(space, &[id], &[], hints, &mut actions);
+                if self.space_is_empty(own) && !self.is_shown_space(own) {
+                    self.prune_space(own);
+                }
+                self.normalize_slots();
+                actions.push(Action::StateChanged);
+                (actions, Vec::new())
+            }
+            _ => self.window_left_space(id),
+        }
     }
 
     /// Binds Desktop `desk` to `space` when neither is bound; else whether they are bound to

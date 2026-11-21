@@ -13,7 +13,9 @@
 //! Two measured clocks live beside the phase, because no event says when they end:
 //!
 //! - **the settle after a Space change** ([`SPACE_SETTLE`]): the window server's list may
-//!   still be the old Space's for a moment after the arrival, so nothing is inferred from it;
+//!   still be the old Space's for a moment after the arrival, so nothing is inferred from it.
+//!   Not after an arrival the window server's own listing named ([`Event::ArrivedRead`]):
+//!   what is inferred after it is read from that listing, which has no such moment;
 //! - **the Desktop's slide** as the corner patch's plan reads it from the list (the parked
 //!   windows shifted sideways together before the Space change's notice): the plan stays as
 //!   it was for at most [`super::corner::corner_patch::SLIDE_HOLD`].
@@ -61,6 +63,9 @@ pub enum Hold {
     Silence,
     /// The list shows two Desktops at once (one still sliding).
     TwoDesktops,
+    /// The window server's listing still names the Space left: the notice comes a few ms
+    /// before its "Current Space" flips (11-21).
+    Flip,
 }
 
 impl Hold {
@@ -71,6 +76,7 @@ impl Hold {
             Hold::Animation => "a full-screen animation",
             Hold::Silence => "Accessibility's silence",
             Hold::TwoDesktops => "two Desktops listed",
+            Hold::Flip => "the listing's flip",
         }
     }
 }
@@ -124,6 +130,10 @@ pub enum Event {
     FullScreenCame,
     /// The Space change settled on a Desktop, recognized now.
     Arrived,
+    /// The Space change settled by the window server's listing: the Desktop it names
+    /// arrived, or it names the one shown already (no change). No settle follows
+    /// ([`Tracker::space_settling`]).
+    ArrivedRead,
     /// The screen unlocked: the list is looked at afresh after a settle (a Space change
     /// waiting counts from now).
     Unlocked,
@@ -140,6 +150,9 @@ pub struct Tracker {
     /// When the last Space change was handled: the arrival, or the full-screen Space's
     /// notice. `None` before any.
     changed_at: Option<Instant>,
+    /// The last Space change was settled by the window server's listing
+    /// ([`Event::ArrivedRead`]): no settle after it.
+    read: bool,
     /// Since when the corner patch's plan reads the Desktop sliding in the window server's
     /// list; `None` while it does not.
     slide_since: Option<Instant>,
@@ -147,7 +160,7 @@ pub struct Tracker {
 
 impl Default for Tracker {
     fn default() -> Self {
-        Self { phase: Phase::Steady, changed_at: None, slide_since: None }
+        Self { phase: Phase::Steady, changed_at: None, read: false, slide_since: None }
     }
 }
 
@@ -157,6 +170,10 @@ impl Tracker {
     /// taken as well as it can be, so the controller never sticks.
     pub fn feed(&mut self, event: Event, now: Instant) {
         let was = self.phase;
+        if event != Event::Held(Hold::Flip) && !matches!(event, Event::SwitchSent { .. } | Event::SwitchDone) {
+            self.read = event == Event::ArrivedRead;
+        }
+        let event = if event == Event::ArrivedRead { Event::Arrived } else { event };
         self.phase = match (event, was) {
             (Event::LaunchedFullScreen, _) => Phase::FullScreen,
             (Event::SpaceChanged, p) => {
@@ -187,6 +204,8 @@ impl Tracker {
                 self.changed_at = Some(now);
                 Phase::Steady
             }
+            // Folded into `Arrived` above.
+            (Event::ArrivedRead, p) => p,
             (Event::Unlocked, Phase::Changing { from_fullscreen, hold, .. }) => Phase::Changing { since: now, from_fullscreen, hold },
             (Event::Unlocked, p) => {
                 self.changed_at = Some(now);
@@ -254,8 +273,17 @@ impl Tracker {
     }
 
     /// True while the window server's list is not the shown Space's for sure: a Space change
-    /// waits, or one settled less than [`SPACE_SETTLE`] ago.
+    /// waits, or one settled less than [`SPACE_SETTLE`] ago by the windows on screen (one
+    /// settled by the window server's listing has no such second, [`Event::ArrivedRead`]).
     pub fn space_settling(&self, now: Instant) -> bool {
+        self.changing() || (!self.read && self.since_change(now).is_some_and(|d| d < SPACE_SETTLE))
+    }
+
+    /// True while the frames the window server's list shows may still be a slide's (windows
+    /// shifted sideways): a Space change waits, or one settled less than [`SPACE_SETTLE`]
+    /// ago, however it was recognized. Frames are read from the list, never from the
+    /// listing of the Desktops.
+    pub fn frames_settling(&self, now: Instant) -> bool {
         self.changing() || self.since_change(now).is_some_and(|d| d < SPACE_SETTLE)
     }
 
@@ -294,6 +322,35 @@ mod tests {
 
     fn ms(t0: Instant, n: u64) -> Instant {
         t0 + Duration::from_millis(n)
+    }
+
+    #[test]
+    fn an_arrival_the_listing_named_has_no_settle_after_it() {
+        let t0 = Instant::now();
+        let mut t = Tracker::default();
+        t.feed(Event::SpaceChanged, t0);
+        t.feed(Event::Held(Hold::Flip), ms(t0, 1));
+        assert_eq!(t.hold(), Some(Hold::Flip));
+        assert!(t.space_settling(ms(t0, 10)), "a change waits");
+        t.feed(Event::ArrivedRead, ms(t0, 20));
+        assert_eq!(t.phase(), Phase::Steady);
+        assert!(!t.space_settling(ms(t0, 21)), "read from the listing: nothing settles");
+        assert!(t.frames_settling(ms(t0, 21)), "the frames listed may still be the slide's");
+        assert_eq!(t.since_change(ms(t0, 120)), Some(Duration::from_millis(100)));
+        // A switch after it changes nothing of that.
+        t.feed(Event::SwitchSent { id: 1, max: Duration::from_secs(1) }, ms(t0, 30));
+        t.feed(Event::SwitchDone, ms(t0, 40));
+        assert!(!t.space_settling(ms(t0, 41)));
+        // The next one, recognized by the windows on screen: the settle as ever.
+        t.feed(Event::SpaceChanged, ms(t0, 2000));
+        t.feed(Event::Arrived, ms(t0, 2100));
+        assert!(t.space_settling(ms(t0, 2200)));
+        assert!(!t.space_settling(ms(t0, 2100) + SPACE_SETTLE));
+        // An unlock is looked at afresh after a settle, whatever came before.
+        t.feed(Event::SpaceChanged, ms(t0, 5000));
+        t.feed(Event::ArrivedRead, ms(t0, 5010));
+        t.feed(Event::Unlocked, ms(t0, 6000));
+        assert!(t.space_settling(ms(t0, 6500)));
     }
 
     #[test]

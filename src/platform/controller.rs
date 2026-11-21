@@ -3773,7 +3773,7 @@ impl Controller {
                     continue;
                 }
                 let desk = listing.as_ref().and_then(|l| l.desk(d.id));
-                let more = model.arrive_on(d.id, desk.as_ref(), &here, &[], &hints);
+                let more = model.arrive_on(d.id, desk.as_ref(), None, &here, &[], &hints);
                 all.extend(more.into_iter().filter(|a| *a != Action::StateChanged));
             }
             // None is left (every screen arrived on); never one unmanaged for good if it is.
@@ -4347,7 +4347,7 @@ impl Controller {
         m.set_hold_arrivals(hold);
         m.set_display_watch(watch);
         m.set_slide_carried(carried);
-        let mut actions = m.arrive_on(main.id, desk.as_ref(), &live, &absent, &hints);
+        let mut actions = m.arrive_on(main.id, desk.as_ref(), None, &live, &absent, &hints);
         m.set_hold_arrivals(false);
         let after = m.current_space(main.id);
         let note = m.last_arrival().clone();
@@ -4572,7 +4572,7 @@ impl Controller {
             m.set_hold_arrivals(hold);
             m.set_display_watch(watch);
             m.set_slide_carried(carried);
-            let mut actions = m.arrive_on(d.id, desk.as_ref(), &live, &absent, &hints);
+            let mut actions = m.arrive_on(d.id, desk.as_ref(), None, &live, &absent, &hints);
             m.set_hold_arrivals(false);
             let after = m.current_space(d.id);
             let note = m.last_arrival().clone();
