@@ -41,6 +41,7 @@ use super::windows::CgWindow;
 use crate::engine::displays::ScreenKey;
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::model::{Display, DisplayId};
+use crate::engine::server_notice::{Burst, Kind};
 use crate::ui::strip_model::{Cover, StripEvent, StripSnapshot};
 
 /// The base delay of each notice kind, in milliseconds, as measured (each line names where);
@@ -88,6 +89,15 @@ pub mod delays {
     /// Mission Control closing: the Dock's cover goes ~0.5 s after the closing key, when the
     /// windows are back in place (`engine/overview.rs`).
     pub const MISSION_DOCK_GOES: f64 = 500.0;
+    /// The window server's notices, as the machine sends them, not the load's
+    /// (`engine/server_notice.rs`, `probe-spaces cgs` 11-21): a window put into a Space and back
+    /// to its membership notices (1325/1326, 3 ms); Mission Control's key to its open's notice
+    /// (1508, 40 ms) and its closing key to its close's (32 ms).
+    pub const SERVER_MEMBERSHIP: f64 = 3.0;
+    /// See [`SERVER_MEMBERSHIP`].
+    pub const SERVER_MISSION_OPENS: f64 = 40.0;
+    /// See [`SERVER_MEMBERSHIP`].
+    pub const SERVER_MISSION_CLOSES: f64 = 32.0;
     /// ⌘Tab's switcher: its list shows ~180 ms after the first Tab (`engine/switcher.rs`).
     pub const SWITCHER_SHOWS: f64 = 180.0;
     /// The strip: a transition presented to its pictures drawn (its answer to the cover
@@ -244,6 +254,8 @@ pub enum Notice {
     Switcher(&'static str),
     /// Mission Control's key tap heard something.
     Mission(super::mission_key_tap::Heard),
+    /// The window server's notices of one kind in one turn (its `at` is set as delivered).
+    Server(crate::engine::server_notice::Burst),
     /// An app waited for answers Accessibility now (the observer's probe).
     Answers(i32),
     /// A step of the desk's own (macOS moving on), nothing told to the app.
@@ -392,6 +404,10 @@ pub struct Desk {
     /// listed, the Space change's notice ~300 ms after it). False: as measured 10-13 for an
     /// `open` ([`delays::SLIDE_ACTIVATES`]).
     pub activation_leads_slide: bool,
+    /// The window server tells the app its notices (`engine/server_notice.rs`: measured with
+    /// the AppKit event loop turning, 11-21). False: none come, as on a Mac where they do not
+    /// (or before round r5-notices); every poll then decides alone.
+    pub server_notices: bool,
     /// macOS's own windows listed above the apps' (Mission Control's covers, Show Desktop's).
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
@@ -541,6 +557,7 @@ impl Desk {
             tap_hears: true,
             tap_switcher: false,
             activation_leads_slide: false,
+            server_notices: false,
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
             mission: false,
@@ -1262,11 +1279,34 @@ impl Desk {
         self.post_after(delays::MISSION_SHOWS, 0.0, Notice::Step(Step::Overlay { owner: "WindowManager", layer: 19, on: true }));
         self.post_after(delays::MISSION_SHOWS, 0.0, Notice::Step(Step::Overlay { owner: "Dock", layer: 20, on: true }));
         self.mission = true;
+        self.server_notice(delays::SERVER_MISSION_OPENS, Kind::Overview, Vec::new());
+    }
+
+    /// The window server's notice of `kind` naming `members` (window, Space), `ms` from now
+    /// (the machine's time), when it tells the app ([`Self::server_notices`]).
+    pub fn server_notice(&mut self, ms: f64, kind: Kind, members: Vec<(u32, u64)>) {
+        if self.server_notices {
+            let count = u32::try_from(members.len().max(1)).unwrap_or(u32::MAX);
+            let burst = Burst { kind, at: clock::now(), count, windows: Vec::new(), members, unnamed: 0, ours: 0 };
+            self.post_after(ms, 0.0, Notice::Server(burst));
+        }
+    }
+
+    /// Something other than the app (macOS, its app ordering it out and in) puts window `id`
+    /// into Space `to`, out of the others: listed there from now on, on screen when `to` is a
+    /// Desktop shown; the window server's notices follow ([`delays::SERVER_MEMBERSHIP`]).
+    pub fn space_moves(&mut self, id: u32, to: u64) {
+        let Some(w) = self.windows.get_mut(&id) else { return };
+        let from = std::mem::replace(&mut w.spaces, vec![to]);
+        let out: Vec<(u32, u64)> = from.into_iter().filter(|s| *s != to).map(|s| (id, s)).collect();
+        self.server_notice(delays::SERVER_MEMBERSHIP, Kind::TakenOut, out);
+        self.server_notice(delays::SERVER_MEMBERSHIP, Kind::Added, vec![(id, to)]);
     }
 
     /// Mission Control closes: WindowManager's window first, the windows back in place and
     /// the Dock's cover gone ~0.5 s after ([`delays::MISSION_DOCK_GOES`]).
     pub fn mission_closes(&mut self) {
+        self.server_notice(delays::SERVER_MISSION_CLOSES, Kind::Overview, Vec::new());
         self.post_after(delays::MISSION_WM_GOES, 0.0, Notice::Step(Step::Overlay { owner: "WindowManager", layer: 19, on: false }));
         self.post_after(delays::MISSION_DOCK_GOES - 10.0, 0.0, Notice::Step(Step::MissionRestores));
         self.post_after(delays::MISSION_DOCK_GOES, 0.0, Notice::Step(Step::Overlay { owner: "Dock", layer: 20, on: false }));

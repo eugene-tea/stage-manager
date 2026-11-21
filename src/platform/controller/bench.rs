@@ -324,6 +324,11 @@ impl Bench {
                 self.pace.stir(now);
                 self.c.mission_input(&mut self.ob, HeardAt { what, at: sent });
             }
+            Notice::Server(burst) => {
+                self.note(format!("window-server notice {} x{} {:?}{lag}", burst.kind.code(), burst.count, burst.members));
+                // Stamped at its callback, when macOS sent it.
+                self.c.server_notice(&mut self.ob, crate::engine::server_notice::Burst { at: sent, ..burst });
+            }
             Notice::Answers(pid) => {
                 let Some((probe, retry)) = fake::with(|d| d.probes.remove(&pid)).flatten() else { return };
                 self.note(format!("app answers pid={pid}{lag}"));

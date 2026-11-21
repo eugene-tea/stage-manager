@@ -717,6 +717,75 @@ fn the_first_visit_to_a_desktop() {
     expect(first_visit_to_a_desktop, [pulled_back, pulled_back, pulled_back]);
 }
 
+// ----- the window server's notices (Spaces) --------------------------------------------------
+
+/// `controller/server_notices.rs` (round r5-notices; `probe-spaces cgs` 11-21: a window put
+/// into a Space and back, its notices 1326 and 1325 3 ms after): Alpha's window hidden in its
+/// stage's Space, the app at rest; then something other than the app (macOS, its app ordering
+/// it out and in) puts it onto the Desktop shown. With the window server's notices it goes
+/// back at the notice's look; without them, at the tick's (at rest, up to `STRAY_LOOK`).
+fn window_taken_out_of_its_stage_space(load: f64, notices: bool) -> Run {
+    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, load, 1, |d| {
+        two_apps(d);
+        d.server_notices = notices;
+    });
+    b.advance(6000);
+    let hidden = b.desktop_of(11).is_none();
+    b.desk(|d| d.space_moves(11, D1));
+    let back = taken_back(&mut b, 11, 5000);
+    let out = format!("hidden at the start {hidden}; hidden again {back}; {}", seen(&mut b));
+    Run::of(&b, out)
+}
+
+fn window_taken_out_noticed(load: f64) -> Run {
+    window_taken_out_of_its_stage_space(load, true)
+}
+
+fn window_taken_out_unnoticed(load: f64) -> Run {
+    window_taken_out_of_its_stage_space(load, false)
+}
+
+/// `engine/overview.rs`, `controller/server_notices.rs` (round r5-notices; review 11-21 R4:
+/// Mission Control opened by a gesture, a hot corner or the Dock's item gave no hint and was
+/// found at the tick, up to 2.2 s late): Mission Control opens with no key heard. With the
+/// window server's notice (1508, 40 ms) it is found at its look and the hidden stage's window
+/// is lent at once; without, at the tick at rest.
+fn mission_control_without_its_key(load: f64, notices: bool) -> Run {
+    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, load, 1, |d| {
+        two_apps(d);
+        d.server_notices = notices;
+    });
+    b.advance(6000);
+    b.desk(|d| d.mission_opens());
+    b.advance(300);
+    let soon = b.on_a_desktop();
+    b.advance(2700);
+    let later = b.on_a_desktop();
+    let out = format!("on the Desktop 0.3 s after it opened {soon:?}, 3 s after {later:?}");
+    Run::of(&b, out)
+}
+
+fn mission_control_by_gesture_noticed(load: f64) -> Run {
+    mission_control_without_its_key(load, true)
+}
+
+fn mission_control_by_gesture_unnoticed(load: f64) -> Run {
+    mission_control_without_its_key(load, false)
+}
+
+#[test]
+fn the_window_servers_notices() {
+    let at_once = "hidden at the start true; hidden again at once; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(window_taken_out_noticed, [at_once, at_once, at_once]);
+    let lent = "on the Desktop 0.3 s after it opened [11, 12], 3 s after [11, 12]";
+    expect(mission_control_by_gesture_noticed, [lent, lent, lent]);
+    // Without them, as before: the tick's look.
+    let ticked = "hidden at the start true; hidden again within 1 s; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(window_taken_out_unnoticed, [ticked, ticked, ticked]);
+    let late = "on the Desktop 0.3 s after it opened [12], 3 s after [11, 12]";
+    expect(mission_control_by_gesture_unnoticed, [late, late, late]);
+}
+
 /// Every scenario, for the load table.
 pub(super) const ALL: &[Scenario] = &[
     ("card clicks while the WM thread is held up", "engine/stale_activation.rs, 11-03", card_clicks_under_a_busy_wm_thread),
@@ -745,6 +814,10 @@ pub(super) const ALL: &[Scenario] = &[
     ("a new app opened with Shift held", "controller.rs, Shift sugar", new_app_with_shift),
     ("a new app opened", "controller.rs, new-window intake", new_app_plain),
     ("the restore after a restart", "engine/restore.rs", restore_after_a_restart),
+    ("a hidden window taken out of its stage Space, notices on (Spaces)", "controller/server_notices.rs, r5-notices", window_taken_out_noticed),
+    ("a hidden window taken out of its stage Space, no notices (Spaces)", "controller/spaces.rs STRAY_LOOK", window_taken_out_unnoticed),
+    ("Mission Control with no key, notices on (Spaces)", "engine/overview.rs, r5-notices", mission_control_by_gesture_noticed),
+    ("Mission Control with no key, no notices (Spaces)", "review 11-21 R4, OVERVIEW_LOOK", mission_control_by_gesture_unnoticed),
 ];
 
 /// The load table: every scenario's outcome at load 1, 3 and 10, and the constants whose
