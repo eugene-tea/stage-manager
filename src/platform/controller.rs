@@ -115,13 +115,12 @@ use self::corner::unrestored::LetGo;
 use crate::engine::corner::park_reconcile::{self, Stray};
 use crate::engine::corner::corner_patch::{CoverPicture, Refused, Staying, SwitchCover};
 use crate::engine::desktop_click;
-use crate::engine::desktop_echo::{Cause, DesktopEcho};
+use crate::engine::desktop_echo::DesktopEcho;
 use crate::engine::displays::{display_kept, display_moves_now, display_of, off_every_display, off_screen_not_ours, on_other_display, returned_screens};
 use crate::engine::early_start;
-use crate::engine::focus_elsewhere::{self, FocusFacts, FocusOnSwitch, SwitchBack, WentElsewhere, focus_on_switch};
+use crate::engine::focus_elsewhere::{SwitchBack, WentElsewhere};
 use crate::engine::focus_replay::{FocusReplay, Wanted};
 use crate::engine::slide_hold::{self, SlideHold};
-use crate::engine::stale_activation;
 use crate::engine::stranded;
 use crate::engine::switch_landing::{self, Landing, Pictures};
 use crate::engine::hidden_tab::Candidate;
@@ -162,6 +161,7 @@ mod dock_order;
 mod fallback;
 mod landing_focus;
 mod mission_control;
+mod notices;
 mod raise_order;
 mod setup_frames;
 mod slide_watch;
@@ -3051,203 +3051,7 @@ impl Controller {
                     }
                 }
             }
-            WinEvent::Focused(id) => {
-                if self.unplaced.contains(&id) {
-                    self.offer_waiting(ob, vec![id]);
-                }
-                if self.echoes.is_window_echo_of_notice(id, at) && !self.focus_beats_echo(ob, id, now) {
-                    tracing::debug!(id, "focus echo of our own action ignored");
-                    attribution::judged(Notice::Focus, i64::from(id), "ours");
-                    return;
-                }
-                // The press measured to the focus's receipt: one after it counts as at it.
-                let users = margin::within("USER_FOCUS", input::since_last_press_at(at, "USER_FOCUS"), USER_FOCUS);
-                if users && let Some(m) = self.model.as_mut() {
-                    // Focused by a click or a key press on it: a late title re-matches it no
-                    // more (a focus an app makes by itself at login leaves it).
-                    m.touch_window(WindowId(id));
-                }
-                if users {
-                    self.frames_touched(id);
-                }
-                if let Some(pid) = ob.window(id).map(|w| w.pid) {
-                    let (hidden, active) = (super::apps::is_hidden(pid), super::apps::is_active(pid));
-                    if !focus_may_switch(hidden, active, input::left_button_down()) {
-                        tracing::debug!(id, pid, ?hidden, ?active, "a focus in an app not in front (hidden, or not the active app): its own, or a late echo of ours; no switch");
-                        attribution::judged(Notice::Focus, i64::from(id), "its app is behind");
-                        return;
-                    }
-                }
-                if self.macos_after_display_change(at) {
-                    tracing::debug!(id, "a focus macOS made after a display change (no click or key since): no switch");
-                    attribution::judged(Notice::Focus, i64::from(id), "macOS's after a display change");
-                    return;
-                }
-                // Not our echo: the user's (or an app's own), remembered for the reconciler.
-                self.user_focus.insert(id, now);
-                let bundle = ob.window(id).and_then(|w| ob.bundle_id(w.pid));
-                if self.desktop_echo.classify(bundle, at) == Cause::WallpaperEcho {
-                    tracing::debug!(id, "Finder window focus after a wallpaper click: ignored (the desktop is Finder's)");
-                    attribution::judged(Notice::Focus, i64::from(id), "the wallpaper press's echo");
-                    return;
-                }
-                if self.model.as_ref().is_some_and(Model::settling) {
-                    if input::left_button_down() {
-                        // A click whose press the input monitor has not told us about yet.
-                        self.end_restore(ob, "a click", End::User);
-                    } else {
-                        // At login a focus is the app's (a click or key press would have
-                        // ended the settling): no switch, nothing held for later.
-                        tracing::debug!(id, "a focus while the login settles: no switch");
-                        attribution::judged(Notice::Focus, i64::from(id), "the app's own while the login settles");
-                        return;
-                    }
-                }
-                let pid = ob.window(id).map(|w| w.pid);
-                let unknown = self.model.as_ref().is_some_and(|m| m.window(WindowId(id)).is_none());
-                let elsewhere = self.model.as_ref().is_some_and(|m| m.waits_on_another_space(WindowId(id)));
-                // Its own screen's answer: a full-screen app on the other screen stops nothing here.
-                let frozen = self.frozen_for_window(id);
-                let held = pid.is_some() && (frozen || elsewhere || (unknown && self.unplaced.contains(&id)));
-                // No switch's start known while one is held: any input counts, as before.
-                let input_since_switch =
-                    self.phase.switching().is_none_or(|s| input::since_last_press() < now.saturating_duration_since(s.since));
-                // A window the switch still brings in (or a child of one).
-                let standard = self.model.as_ref().and_then(|m| m.resolve_standard(WindowId(id))).map_or(id, |w| w.0);
-                let arriving = self.pending.as_ref().is_some_and(|p| p.entries.contains_key(&id) || p.entries.contains_key(&standard));
-                // Held off every Desktop (a stage Space): macOS goes nowhere for it by itself.
-                let hidden = pid.map(|pid| {
-                    let since_press = input::since_last_press();
-                    focus_elsewhere::hidden_focus(FocusFacts {
-                        elsewhere,
-                        off_every_desktop: elsewhere && self.engine.off_every_desktop(WindowId(standard)),
-                        frozen,
-                        activation_switched: self.activation_switch.as_ref().is_some_and(|a| a.pid == pid && a.holds(since_press, now)),
-                    })
-                });
-                match focus_on_switch(arriving, held, input_since_switch) {
-                    FocusOnSwitch::LandAsPlanned => {
-                        // The switch already brings it in front: shown now, the window would
-                        // sit at its frame under its picture still growing from the card.
-                        let switch = self.pending.as_ref().map(|p| p.id);
-                        tracing::debug!(id, ?switch, "a focus on a window the switch brings in: the switch lands as planned, behind its picture");
-                        attribution::judged(Notice::Focus, i64::from(id), "on a window the switch brings in");
-                        return;
-                    }
-                    FocusOnSwitch::Supersede => self.flush_superseded(ob, "a focus", Landing::Superseded),
-                    FocusOnSwitch::LandWithoutFocus => {
-                        // The app put its focus on a window of another Desktop (a link opened
-                        // in its window there, 11-19): macOS goes there, and the switch's focus
-                        // or a raise of the app's window here would pull it back.
-                        if let Some(pid) = pid {
-                            let space = self.model.as_ref().and_then(|m| m.space_of(WindowId(standard)));
-                            self.went_elsewhere = Some(WentElsewhere { pid, window: WindowId(standard), space, at: now });
-                            if let Some(p) = self.pending.as_mut() {
-                                let pid_of = |w: WindowId| ob.window(w.0).map(|w| w.pid);
-                                let (kept, withdrawn) = focus_elsewhere::without_keyboard(std::mem::take(&mut p.actions), pid, pid_of);
-                                p.actions = kept;
-                                tracing::debug!(id, switch = p.id, dropped = ?withdrawn.focus, raises_dropped = ?withdrawn.raises, "a focus held for its Desktop, no click or key since the switch: the switch lands as planned, without its focus or its raises of the app's windows");
-                            }
-                        }
-                    }
-                }
-                self.show_strip_after_desktop("a window was focused");
-                if let Some(pid) = pid
-                    && held
-                {
-                    // Its Desktop is not recognized yet (a Dock click or ⌘Tab to a window of
-                    // another Desktop, often before the Space change notice): replayed once
-                    // it is, never dropped.
-                    let predicted = self.predicted_space(id);
-                    tracing::debug!(id, pid, settling = self.phase.changing(), elsewhere, unknown, predicted, "focus held until its Desktop is recognized");
-                    self.focus_replay.hold(Wanted::Window { id: WindowId(id), pid }, now);
-                    self.after_hold(ob, now);
-                    if let Some(h) = hidden.filter(|h| h.arrive) {
-                        self.arrive_for_hidden_focus(ob, WindowId(standard), pid, h.switch_back, now);
-                    }
-                    attribution::judged(Notice::Focus, i64::from(id), "held for its Desktop");
-                    return;
-                }
-                if frozen {
-                    attribution::judged(Notice::Focus, i64::from(id), "nothing while frozen");
-                    return;
-                }
-                self.forget_held(ob);
-                if input::left_button_down() {
-                    // Clicked or grabbed by the user: a move made ahead for it is no longer
-                    // sent again under them (R11 3). A focus alone may be macOS's own at an
-                    // arrival, and keeps it.
-                    self.user_took(id, "clicked");
-                }
-                if self.model.as_ref().and_then(|m| m.window(WindowId(id))).is_some_and(|w| w.parked)
-                    && input::left_button_down()
-                {
-                    // Grabbed by its sliver: nothing moves under the user's drag; its stage
-                    // comes once the button is up (Apple's parked windows cannot be grabbed).
-                    tracing::debug!(id, "a parked window was grabbed; its stage comes when the button is up");
-                    self.focus_after_press = Some(id);
-                    attribution::judged(Notice::Focus, i64::from(id), "a parked window grabbed");
-                    return;
-                }
-                let list = windows::list_windows();
-                if let Some(pid) = pid
-                    && self.window_elsewhere(id)
-                    && self.model.as_ref().is_some_and(|m| slide_hold::slide_listed(m, &self.slide_bounds(&listed_bounds(&list))))
-                {
-                    // A Desktop slides before its notice: a stage switch here would raise and
-                    // focus a window of the Desktop being left, and macOS would slide back.
-                    tracing::info!(id, pid, "focus held: a Desktop slides; decided once the Space is recognized");
-                    self.hold_for_slide(ob, Wanted::Window { id: WindowId(id), pid }, false, now);
-                    attribution::judged(Notice::Focus, i64::from(id), "held for a slide");
-                    return;
-                }
-                if let Some(pid) = pid
-                    && self.window_elsewhere(id)
-                    && !input::left_button_down()
-                {
-                    // A focus that would switch stages, still true? Its notice carries no
-                    // stamp, so its app is asked (bounded) where its focus is now: a late
-                    // focus of a window its app has left since never switches (round
-                    // stale-activations).
-                    let now_focused = arrival::focused_window_of(pid);
-                    let stages = self.model.as_ref().map(|m| {
-                        let stage = |w: WindowId| m.resolve_standard(w).and_then(|s| m.stage_of(s));
-                        (stage(WindowId(id)), now_focused.and_then(stage))
-                    });
-                    if let Some((was, is)) = stages
-                        && stale_activation::focus_moved_on(was, is)
-                    {
-                        tracing::info!(id, pid, now_focused = ?now_focused.map(|w| w.0), reason = "its app's focus is in another stage now", "focus dropped: stale, no switch");
-                        attribution::judged(Notice::Focus, i64::from(id), "stale");
-                        return;
-                    }
-                }
-                let obs = self.observe_with(ob, &list);
-                if let Some(pid) = ob.window(id).map(|w| w.pid)
-                    && self.window_elsewhere(id)
-                    && self.bring_here_if_shift(ob, pid, &obs, now)
-                {
-                    attribution::judged(Notice::Focus, i64::from(id), "the user's: Shift brings it here");
-                    return;
-                }
-                if let Some(pid) = pid
-                    && self.upkeep_pick(PickBy::Window(WindowId(id), pid), |m| m.window_focused(WindowId(id), &obs), clock::now())
-                {
-                    attribution::judged(Notice::Focus, i64::from(id), "the user's: a pick in Mission Control");
-                    return;
-                }
-                if let Some(m) = self.model.as_mut() {
-                    let actions = m.window_focused(WindowId(id), &obs);
-                    if !actions.is_empty() {
-                        tracing::info!(id, "focused window is in another stage; switching");
-                    }
-                    attribution::judged(Notice::Focus, i64::from(id), if actions.is_empty() { "the user's: nothing to switch" } else { "the user's: its stage comes" });
-                    if let Some(pid) = pid {
-                        self.activation = self.activation_for(pid, &actions, ob);
-                    }
-                    self.execute_animated(ob, actions);
-                }
-            }
+            WinEvent::Focused(id) => self.on_focused(ob, id, at, now),
             WinEvent::Minimized(id) => self.on_minimized(ob, id),
             WinEvent::Deminiaturized(id) => self.on_deminiaturized(ob, id),
             WinEvent::AppHidden(pid) => self.on_app_hidden(ob, pid),
@@ -3270,86 +3074,7 @@ impl Controller {
                 enhanced_ui::gone(pid);
                 self.front_after_quit(ob, &left);
             }
-            WinEvent::AppActivated(pid, fired) => {
-                crate::platform::switcher_probe::note("activated", format!("pid={pid} notice_age_ms={}", fired.elapsed().as_millis()));
-                // A window put home for this app (a Dock press, ⌘Tab's switcher) has its
-                // activation: kept for its switch.
-                self.switcher_activated(pid, fired);
-                self.slide_watch_activated(ob, pid);
-                // Its enhanced UI is read again at its next move (round enhanced-ui).
-                enhanced_ui::forget(pid);
-                // Before the echo check: a window of the app that shows now is placed whoever
-                // activated it. One still away is left alone ([`offered_at_notice`]).
-                let waiting: Vec<u32> =
-                    self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
-                self.offer_waiting(ob, waiting);
-                // `at` is the notice's `fired`: when the main thread got it.
-                if self.echoes.is_app_echo(pid, at) {
-                    tracing::debug!(pid, "activation echo of our own action ignored");
-                    attribution::judged(Notice::Activation, i64::from(pid), "ours");
-                    return;
-                }
-                if self.desktop_echo.classify(ob.bundle_id(pid), at) == Cause::WallpaperEcho {
-                    tracing::debug!(pid, "Finder activation after a wallpaper click: ignored (the desktop is Finder's)");
-                    attribution::judged(Notice::Activation, i64::from(pid), "the wallpaper press's echo");
-                    return;
-                }
-                // Late under load: no longer true, or older than a switch we began since
-                // (round stale-activations). Not the owner's: nothing below runs for it.
-                let front = super::apps::frontmost_pid();
-                if let Some(why) = stale_activation::judge(pid, fired, self.our_switch, front) {
-                    let age_ms = fired.elapsed().as_millis() as u64;
-                    let before_switch_ms = match why {
-                        stale_activation::Stale::BeforeOurSwitch { by } => Some(by.as_millis() as u64),
-                        stale_activation::Stale::NotFrontmost { .. } => None,
-                    };
-                    tracing::info!(pid, age_ms, reason = why.reason(), ?front, before_switch_ms, "activation dropped: stale, no switch");
-                    attribution::judged(Notice::Activation, i64::from(pid), match why {
-                        stale_activation::Stale::BeforeOurSwitch { .. } => "stale: older than our switch",
-                        stale_activation::Stale::NotFrontmost { .. } => "stale: another app is in front",
-                    });
-                    return;
-                }
-                // Another app's: a lend for another app is refuted (round r2-lends).
-                self.lent_activation_elsewhere(pid, fired);
-                if self.macos_after_display_change(at) {
-                    // The lid closed or opened: macOS activates an app of its choosing (11-05
-                    // 20:25:46.8, Mail, whose switch sent the laptop's front to a card and
-                    // slid the 5K back to the Desktop it had left).
-                    tracing::info!(pid, "an activation macOS made after a display change (no click or key since): no switch");
-                    attribution::judged(Notice::Activation, i64::from(pid), "macOS's after a display change");
-                    return;
-                }
-                if self.model.as_ref().is_some_and(Model::settling) {
-                    if input::left_button_down() {
-                        // A Dock click whose press the input monitor has not told us about yet.
-                        self.end_restore(ob, "a click (or a Dock click)", End::User);
-                    }
-                    if self.model.as_ref().is_some_and(Model::settling) {
-                        // A launch-time activation at login is the app's, not the user's (or a
-                        // click the restore window outlives while Accessibility lists no
-                        // window): no switch, nothing held for later.
-                        tracing::debug!(pid, "an activation while the login settles: no switch");
-                        attribution::judged(Notice::Activation, i64::from(pid), "the app's own while the login settles");
-                        return;
-                    }
-                }
-                // The user switched apps: a late echo of an earlier focus of ours is no
-                // longer one.
-                self.user_switched();
-                self.flush_superseded(ob, "an activation", Landing::Superseded);
-                self.show_strip_after_desktop("an app was activated");
-                if self.activation_frozen(pid) {
-                    tracing::debug!(pid, "activation held until the Desktop is recognized");
-                    self.focus_replay.hold(Wanted::App(pid), now);
-                    self.after_hold(ob, now);
-                    attribution::judged(Notice::Activation, i64::from(pid), "held: frozen");
-                    return;
-                }
-                self.decide_activation(ob, pid, now, true);
-                // Its switch decided: a window put home for it is the switch's at once.
-                self.lent_decided(pid);
-            }
+            WinEvent::AppActivated(pid, fired) => self.on_activated(ob, pid, fired, at, now),
         }
     }
 
@@ -7438,17 +7163,6 @@ fn without_focus(actions: Vec<Action>) -> (Vec<Action>, Vec<u32>) {
     (kept, dropped)
 }
 
-/// Whether a window's focus notice may switch stages: its app is not `hidden` and is the
-/// `active` app now (`None`: not running), or the left button is down (a sliver grabbed, its
-/// app becoming active). A hidden app's window cannot be the user's choice, and a focus in an
-/// app behind is the app's own (an app's key window changes as it is hidden, unhidden or
-/// passed over) or a late echo of ours: 11-02, with Accessibility slow, such notices came up
-/// to a second late, past the echo window, and each switched stages nobody asked for. An
-/// activation of the app, the user's way to it, decides through its own notice.
-fn focus_may_switch(hidden: Option<bool>, active: Option<bool>, button_down: bool) -> bool {
-    hidden != Some(true) && (active == Some(true) || (active.is_some() && button_down))
-}
-
 /// The window an activation's switch focuses at once, before the motion (`Ok(None)`: none
 /// to focus). `Err`: the key window is on no Desktop and its app has a window on another
 /// one ([`WindowEngine::focus_waits_for_show`]): a focus now would take macOS to that other
@@ -7987,19 +7701,6 @@ mod tests {
         assert!(!supersedes(&[]));
     }
 
-    /// 11-02: Telegram, hidden by us, posted its window's focus a second late, and the stage
-    /// switched to it; Mail's, an app behind, the same. A focus switches only in the active app
-    /// (or with the button down on a sliver), never in a hidden one.
-    #[test]
-    fn only_a_focus_in_the_app_in_front_switches() {
-        assert!(focus_may_switch(Some(false), Some(true), false), "the active app's: ⌘`, a click");
-        assert!(!focus_may_switch(Some(false), Some(false), false), "an app behind: its own, or a late echo");
-        assert!(focus_may_switch(Some(false), Some(false), true), "a sliver grabbed, its app on its way to the front");
-        assert!(!focus_may_switch(Some(true), Some(true), true), "a hidden app's window is never the user's");
-        assert!(!focus_may_switch(Some(true), Some(false), false));
-        assert!(!focus_may_switch(None, None, true), "the app is gone");
-    }
-
     /// 11-19: the early focus of a window on no Desktop, its app with a window on another,
     /// took macOS to that Desktop. It waits for the window's show; any other goes at once.
     #[test]
@@ -8019,6 +7720,7 @@ mod tests {
     fn a_switch_landing_after_the_apps_focus_elsewhere_keeps_its_moves_not_its_focus() {
         let frame = Rect { x: 389.0, y: 60.0, w: 1800.0, h: 1282.0 };
         let batch = vec![Action::SetFrame { id: WindowId(151), frame }, Action::Raise { id: WindowId(151) }, Action::Focus { id: WindowId(151) }];
+        use crate::engine::focus_elsewhere::{FocusOnSwitch, focus_on_switch};
         assert_eq!(focus_on_switch(false, true, false), FocusOnSwitch::LandWithoutFocus);
         let (kept, dropped) = without_focus(batch);
         assert_eq!(dropped, vec![151]);

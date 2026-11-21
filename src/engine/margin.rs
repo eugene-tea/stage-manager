@@ -270,6 +270,16 @@ pub fn age(name: &'static str, at: std::time::Instant, since: std::time::Instant
     at.saturating_duration_since(since)
 }
 
+/// How long before a notice the last press came, for window `name`: the press `since` ago
+/// as of now, the notice received `ago` before now. Zero, and counted [`predated`], when the
+/// press came after the notice (a press between a notice and its handling counts as at it).
+pub fn before(name: &'static str, since: Duration, ago: Duration) -> Duration {
+    if since < ago {
+        predated(name);
+    }
+    since.saturating_sub(ago)
+}
+
 /// Test only: what this thread noted, kept apart from the process's table (tests run side by
 /// side): a scenario reads the time decisions its own run made, each with its verdict.
 #[cfg(test)]
