@@ -34,12 +34,14 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   Nothing acts on another Space's windows except the safety paths.
 - **Spaces by their windows.** No public API names a Space: each gets a synthetic id,
   recognized on `activeSpaceDidChangeNotification` from the window server's on-screen list.
-  A window reaches the engine only once it shows on a display. A once-a-second check
-  catches Space moves and missed notices. No SkyLight/CGS calls.
+  A window reaches the engine only once it shows on a display. A check on the tick (every
+  250 ms while something happens, every 2 s at rest) catches Space moves and missed notices.
+  The Corner engine makes no SkyLight/CGS calls; the Spaces engine does (below).
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`), unit tested: observations
   in, `Action`s out (`Hide`, `SetFrame`, `Raise`, `Focus`).
 - **Platform layer** (`src/platform`): AX, CGWindowList, ScreenCaptureKit, Carbon hotkeys,
-  NSWorkspace events, safety. Public APIs only, plus `_AXUIElementGetWindow`.
+  NSWorkspace events, safety. Public APIs only, plus `_AXUIElementGetWindow`, under the
+  Corner engine; the Spaces engine adds SkyLight's Space calls, loaded at run time.
 - **UI** (`src/ui`): status item and menu, Settings, a strip panel per screen (CALayer
   cards), the motion overlay (just below floating windows; above everything only while a
   dragged window's card shows).
@@ -278,10 +280,12 @@ of a Desktop's windows adds to the on-screen list (a window gone from the screen
 Desktop; a hidden one did not). No return code is trusted: after every hide and show the
 window's Spaces are read back, a miss is logged and counted (`ctl state`, `engine`), a show
 that left a window hidden is owed and tried again by the tick (so is the frame a show asked
-of a window parked for ⌘Tab's lend that it did not take), and about once a second the
-upkeep checks, by the window server's word, that the windows the model counts hidden are the
-ones in stage Spaces, and
-every few seconds lets out any window found in a stage Space that the engine does not hold.
+of a window parked for ⌘Tab's lend that it did not take), and on each tick (every 250 ms
+while something happens, every 2 s at rest) the upkeep checks, by the window server's word,
+that the windows the model counts hidden are the ones in stage Spaces (one that does not go
+in is tried again, ever more slowly, up to 30 s apart), and every 10 s lets out any window
+found in a stage Space that the engine does not hold (at once for a window of an observed
+app found there, one its app ordered out while hidden and in again).
 Two things the window server does not say for a window in a stage Space, so the shared code
 asks otherwise: a window its app closed without a notice is listed exactly as before, so the
 dead-handle look takes in the hidden windows too; and macOS shows a window it un-minimizes

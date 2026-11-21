@@ -2,7 +2,8 @@
 //! controller does on the WM thread, around the engine's calls, only because hidden windows
 //! sit in window-server Spaces. Little: no window of a stage Space shows on screen, so there
 //! is nothing to patch, shield or cover. What is left is the check that the model and the
-//! window server agree on which windows are hidden, about once a second.
+//! window server agree on which windows are hidden, on each tick (every 250 ms while
+//! something happens, every 2 s at rest).
 
 use std::collections::{BTreeMap, HashSet};
 use std::time::{Duration, Instant};
