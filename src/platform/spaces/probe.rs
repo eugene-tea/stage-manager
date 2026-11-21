@@ -132,7 +132,7 @@ fn trial(mtm: MainThreadMarker, fail: Option<&str>, clock: &mut Clock) -> Result
         return Err(why);
     }
     clock.lap("calls");
-    let desktops: Vec<u64> = sky.displays().iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
+    let desktops: Vec<u64> = sky.displays().iter().flat_map(|d| d.every().collect::<Vec<_>>()).collect();
     if desktops.is_empty() {
         return Err("the window server listed no Desktop".into());
     }

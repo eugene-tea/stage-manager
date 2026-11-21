@@ -41,7 +41,7 @@ use crate::engine::geometry::Rect;
 use crate::engine::overview::{self, Sight, Sighting};
 use crate::platform::park_probe::FIXTURE_PREFIX;
 use crate::platform::space_keys::{self, SpaceKey};
-use crate::platform::spaces::ffi::{DisplaySpaces, Sky};
+use crate::platform::spaces::ffi::{ScreenDesks, Sky};
 use crate::platform::{desktop, desktop_counts, windows};
 
 mod cgs;
@@ -347,11 +347,11 @@ pub(super) fn main_uuid() -> Option<String> {
 
 /// Which entry of `SLSCopyManagedDisplaySpaces` is the main screen's: the one named `Main`,
 /// else the one named by the main display's UUID.
-pub(super) fn main_entry(list: &[DisplaySpaces]) -> Option<usize> {
+pub(super) fn main_entry(list: &[ScreenDesks]) -> Option<usize> {
     let uuid = main_uuid();
     list.iter()
-        .position(|d| d.0 == "Main")
-        .or_else(|| uuid.and_then(|u| list.iter().position(|d| d.0.eq_ignore_ascii_case(&u))))
+        .position(|d| d.screen == "Main")
+        .or_else(|| uuid.and_then(|u| list.iter().position(|d| d.screen.eq_ignore_ascii_case(&u))))
 }
 
 /// What the window list shows over `display` now, as [`overview::overview_in`] tells it.
@@ -412,7 +412,8 @@ mod tests {
 
     #[test]
     fn the_main_entry_is_main_or_its_uuid() {
-        let list: Vec<DisplaySpaces> = vec![("ABC".into(), 1, vec![]), ("Main".into(), 2, vec![])];
+        let entry = |screen: &str, current| ScreenDesks { screen: screen.into(), current, ..ScreenDesks::default() };
+        let list = vec![entry("ABC", 1), entry("Main", 2)];
         assert_eq!(main_entry(&list), Some(1));
     }
 }

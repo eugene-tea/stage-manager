@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use super::ffi::{ALL_SPACES_MASK, DisplaySpaces, Route, Sky};
+use super::ffi::{ALL_SPACES_MASK, Route, ScreenDesks, Sky};
 use crate::engine::busy_apps::{Backoff, BusyApps, Reply};
 use crate::engine::engine_choice::Health;
 use crate::engine::geometry::Rect;
@@ -643,9 +643,9 @@ impl SpacesEngine {
     }
 
     /// Every Desktop of `displays` (one read of the window server's), and the ones shown.
-    fn desktops_of(displays: &[DisplaySpaces]) -> (BTreeSet<u64>, Vec<u64>) {
-        let all = displays.iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
-        let shown = displays.iter().map(|(_, current, _)| *current).filter(|c| *c != 0).collect();
+    fn desktops_of(displays: &[ScreenDesks]) -> (BTreeSet<u64>, Vec<u64>) {
+        let all = displays.iter().flat_map(ScreenDesks::every).collect();
+        let shown = displays.iter().map(|d| d.current).filter(|c| *c != 0).collect();
         (all, shown)
     }
 
@@ -685,7 +685,7 @@ impl SpacesEngine {
     /// The screen (the window server's display identifier) listing Desktop `desktop` now;
     /// empty when none does.
     fn screen_of(sky: &Sky, desktop: u64) -> String {
-        sky.displays().into_iter().find(|(_, _, spaces)| spaces.iter().any(|(id, _)| *id == desktop)).map(|(uuid, _, _)| uuid).unwrap_or_default()
+        sky.displays().into_iter().find(|d| d.every().any(|id| id == desktop)).map(|d| d.screen).unwrap_or_default()
     }
 
     /// The Desktop shown on window `id`'s own screen, for a window whose Desktop is gone or
@@ -698,7 +698,7 @@ impl SpacesEngine {
             let st = self.state();
             space.or_else(|| st.held.get(&id).map(|h| h.space)).and_then(|s| st.screens.get(&s).cloned())
         };
-        let listing: Vec<(String, u64)> = sky.displays().into_iter().map(|(screen, current, _)| (screen, current)).collect();
+        let listing: Vec<(String, u64)> = sky.displays().into_iter().map(|d| (d.screen, d.current)).collect();
         spill::shown_on_own_screen(&listing, made_on.as_deref(), || {
             let frame = frame.or_else(|| windows::describe(&[id]).first().map(|w| w.bounds))?;
             let screens: Vec<(String, Rect)> =
@@ -776,7 +776,7 @@ impl SpacesEngine {
         };
         let hints = {
             let st = self.state();
-            let listing: Vec<(u64, Vec<u64>)> = displays.iter().map(|(_, current, spaces)| (*current, spaces.iter().map(|(s, _)| *s).collect())).collect();
+            let listing: Vec<(u64, Vec<u64>)> = displays.iter().map(|d| (d.current, d.every().collect())).collect();
             spill::HomeHints {
                 on,
                 held: was.map(|h| h.home).or(flew_from),
@@ -1499,15 +1499,15 @@ impl SpacesEngine {
             // The window server lists no screen (mid-change): looked at again by the tick.
             return;
         }
-        map.screens_now = displays.iter().map(|(uuid, _, _)| uuid.clone()).filter(|u| !u.is_empty()).collect();
-        map.desktops = displays.iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
-        map.shown = displays.iter().map(|(_, current, _)| *current).filter(|c| *c != 0).collect();
-        map.screen_shown = displays.iter().filter(|(uuid, current, _)| !uuid.is_empty() && *current != 0).map(|(uuid, current, _)| (uuid.clone(), *current)).collect();
+        map.screens_now = displays.iter().map(|d| d.screen.clone()).filter(|u| !u.is_empty()).collect();
+        map.desktops = displays.iter().flat_map(ScreenDesks::every).collect();
+        map.shown = displays.iter().map(|d| d.current).filter(|c| *c != 0).collect();
+        map.screen_shown = displays.iter().filter(|d| !d.screen.is_empty() && d.current != 0).map(|d| (d.screen.clone(), d.current)).collect();
         // A Desktop held windows were hidden from that is unlisted for a while, the display
         // list still, ended (its screen still there or not); its stages join where its shown
         // windows went.
         {
-            let listing: Vec<(String, Vec<u64>)> = displays.iter().map(|(uuid, _, spaces)| (uuid.clone(), spaces.iter().map(|(id, _)| *id).collect())).collect();
+            let listing: Vec<(String, Vec<u64>)> = displays.iter().map(|d| (d.screen.clone(), d.every().collect())).collect();
             let mut st = self.state();
             let homes: BTreeSet<u64> = candidates.iter().map(|(_, h)| h.home).collect();
             let (ended, unlisted) = spill::ended_desktops(homes, &listing, &st.unlisted, clock::now());
@@ -2068,8 +2068,12 @@ impl WindowEngine for SpacesEngine {
         self.take_back_window(id.0)
     }
 
-    fn shown_desktops(&self) -> Option<Vec<u64>> {
-        self.sky().map(|sky| Self::desktops(sky).1)
+    fn desktops(&self) -> Option<Vec<ScreenDesks>> {
+        self.sky().map(Sky::displays)
+    }
+
+    fn spaces_of(&self, id: WindowId) -> Option<Vec<u64>> {
+        self.sky().map(|sky| sky.spaces_of(&[id.0]))
     }
 
     fn home_of(&self, id: WindowId) -> Option<u64> {

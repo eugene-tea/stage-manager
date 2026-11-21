@@ -1356,8 +1356,17 @@ impl Desk {
     // ----- SkyLight ----------------------------------------------------------------------
 
     /// `SLSCopyManagedDisplaySpaces`.
-    pub fn sky_displays(&self) -> Vec<super::spaces::ffi::DisplaySpaces> {
-        self.screens.iter().map(|s| (s.uuid.clone(), s.shown, s.desktops.iter().map(|d| (*d, 0)).collect())).collect()
+    pub fn sky_displays(&self) -> Vec<super::spaces::ffi::ScreenDesks> {
+        self.screens
+            .iter()
+            .map(|s| super::spaces::ffi::ScreenDesks {
+                screen: s.uuid.clone(),
+                current: s.shown,
+                current_kind: if s.desktops.contains(&s.shown) { 0 } else { 4 },
+                desks: s.desktops.iter().map(|d| crate::engine::model::desks::Desk { id: *d, uuid: format!("DESK-{d}") }).collect(),
+                others: Vec::new(),
+            })
+            .collect()
     }
 
     /// `SLSCopySpaces`: the Desktops, and with the orphans' bit the Spaces the app made.

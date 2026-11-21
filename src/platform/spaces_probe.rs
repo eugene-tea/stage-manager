@@ -455,7 +455,7 @@ fn new_space(sky: &Sky, o: &Opts) -> Result<(u64, Value), String> {
         "create_ms": create_ms,
         "type": sky.space_type(sid),
         "listed_all": sky.all_spaces(0xf).contains(&sid),
-        "managed": sky.displays().iter().any(|d| d.2.iter().any(|s| s.0 == sid)),
+        "managed": sky.displays().iter().any(|d| d.every().any(|s| s == sid)),
         "level": level.map(|r| format!("{r:?}")),
     });
     Ok((sid, info))
@@ -525,7 +525,7 @@ fn read(sky: &Sky, bundle: Option<&str>) -> Value {
         "symbols": sky.names.iter().map(|(n, f)| json!({ "name": n, "found": f })).collect::<Vec<_>>(),
         "classes": classes.iter().map(|c| json!({ "name": c.to_str().unwrap_or("?"), "found": Sky::class(c).is_some() })).collect::<Vec<_>>(),
         "active": sky.active.map(|f| unsafe { f(sky.cid) }), // SAFETY: plain query.
-        "displays": sky.displays().iter().map(|(u, c, s)| json!({ "uuid": u, "current": c, "spaces": s })).collect::<Vec<_>>(),
+        "displays": sky.displays().iter().map(|d| json!({ "uuid": d.screen, "current": d.current, "spaces": d.spaces().collect::<Vec<_>>() })).collect::<Vec<_>>(),
         "recorded": recorded().iter().map(|&s| json!({ "space": s, "type": sky.space_type(s), "exists": sky.all_spaces(0xf).contains(&s) })).collect::<Vec<_>>(),
         "windows": windows,
     })
@@ -998,7 +998,7 @@ fn cleanup(sky: &Sky, bundle: Option<&str>) -> Value {
     }
     let mut spaces = Vec::new();
     // Never a Desktop, whatever the record says.
-    let desktops: std::collections::BTreeSet<u64> = sky.displays().iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
+    let desktops: std::collections::BTreeSet<u64> = sky.displays().iter().flat_map(|d| d.every().collect::<Vec<_>>()).collect();
     for sid in recorded().into_iter().filter(|sid| !desktops.contains(sid)) {
         let mut gone = !sky.all_spaces(0xf).contains(&sid);
         if !gone {
