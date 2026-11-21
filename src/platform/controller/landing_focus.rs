@@ -26,9 +26,13 @@
 //! and raises the key's again, holding the WM thread while it watches, and the focus with
 //! it (11-16 09:23:16, VS Code's 49841 and Terminal's 214: Terminal in front for ~160 ms
 //! after the landing, until the check's raise; the focus at 16.824, 170 ms after it).
+//!
+//! A stretch that never tells how it ended would hold all this for good, so the wait has the
+//! switch's own backstop as its cap ([`LandingFocus::overdue`]): past it the tick ends the
+//! wait as if the stretches still flying had ended off their Desktop ([`LandingFocus::lapse`]).
 
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::engine::model::Action;
 
@@ -84,6 +88,9 @@ pub(super) struct LandingFocus {
     owed: bool,
     /// The batch's order check, held for the owed focus ([`Self::hold_order_check`]).
     order_check: Option<OrderCheck>,
+    /// The unveil, and the longest the stretches are waited for after it.
+    since: Instant,
+    cap: Duration,
 }
 
 /// What a stretch's end leaves of a [`LandingFocus`].
@@ -101,12 +108,31 @@ pub(super) enum AfterEnd {
 impl LandingFocus {
     /// What switch `switch` owes after its unveil focused `key` with `asked` brought in: the
     /// ones among them that have a stretch now (`stretching`, read before the unveil's shows,
-    /// which stop a stretch not taken over yet; that one then ends too). None without a
-    /// focus or with no stretch among them.
-    pub(super) fn after_unveil(switch: u64, key: Option<u32>, asked: impl IntoIterator<Item = u32>, stretching: &HashSet<u32>) -> Option<Self> {
+    /// which stop a stretch not taken over yet; that one then ends too), at `now`, waited for
+    /// at most `cap` ([`Self::overdue`]). None without a focus or with no stretch among them.
+    pub(super) fn after_unveil(switch: u64, key: Option<u32>, asked: impl IntoIterator<Item = u32>, stretching: &HashSet<u32>, now: Instant, cap: Duration) -> Option<Self> {
         let key = key?;
         let flying: HashSet<u32> = asked.into_iter().filter(|id| stretching.contains(id)).collect();
-        (!flying.is_empty()).then_some(Self { switch, key, flying, landed: false, owed: false, order_check: None })
+        (!flying.is_empty()).then_some(Self { switch, key, flying, landed: false, owed: false, order_check: None, since: now, cap })
+    }
+
+    /// True once the cap has passed since the unveil with a stretch still flying: the tick
+    /// ends the wait ([`Self::lapse`]).
+    pub(super) fn overdue(&self, now: Instant) -> bool {
+        now.duration_since(self.since) >= self.cap
+    }
+
+    /// The wait ended by its cap: the stretches still flying count as ended off their
+    /// Desktop, so the focus runs when one landed or the unveil left it out, as after the
+    /// last one's end ([`Self::ended`]).
+    pub(super) fn lapse(&mut self) -> AfterEnd {
+        self.flying.clear();
+        if self.landed || self.owed { AfterEnd::Refocus(self.key) } else { AfterEnd::Done }
+    }
+
+    /// The transition the stretches belong to.
+    pub(super) fn switch(&self) -> u64 {
+        self.switch
     }
 
     /// The window the switch focuses.
@@ -163,12 +189,19 @@ impl LandingFocus {
 mod tests {
     use super::*;
 
+    /// A switch's backstop, the cap here.
+    const CAP: Duration = Duration::from_millis(1500);
+
+    fn t0() -> Instant {
+        Instant::now()
+    }
+
     /// The suite's switch on 9af41d3 (11-14 21:02:14): one window, 45223, flies from 14.733
     /// and lands at 15.201, after the unveil's focus (15.121): its focus runs again then.
     #[test]
     fn the_focus_runs_again_once_the_flying_window_lands() {
         let stretching: HashSet<u32> = [45223].into();
-        let mut f = LandingFocus::after_unveil(5, Some(45223), [45223], &stretching).expect("it flies");
+        let mut f = LandingFocus::after_unveil(5, Some(45223), [45223], &stretching, t0(), CAP).expect("it flies");
         assert_eq!(f.ended(4, 45223, true), AfterEnd::Waiting, "another switch's note");
         assert_eq!(f.ended(5, 45223, true), AfterEnd::Refocus(45223));
     }
@@ -178,7 +211,7 @@ mod tests {
     #[test]
     fn the_focus_waits_for_every_flying_window() {
         let stretching: HashSet<u32> = [1, 2, 9].into();
-        let mut f = LandingFocus::after_unveil(7, Some(3), [1, 2, 3], &stretching).expect("two fly");
+        let mut f = LandingFocus::after_unveil(7, Some(3), [1, 2, 3], &stretching, t0(), CAP).expect("two fly");
         assert_eq!(f.ended(7, 9, true), AfterEnd::Waiting, "not one of this batch");
         assert_eq!(f.ended(7, 1, true), AfterEnd::Waiting, "2 still flies");
         assert_eq!(f.ended(7, 1, true), AfterEnd::Waiting, "a second note of the same window");
@@ -190,10 +223,10 @@ mod tests {
     #[test]
     fn stretches_that_never_landed_owe_nothing() {
         let stretching: HashSet<u32> = [1].into();
-        let mut f = LandingFocus::after_unveil(2, Some(1), [1], &stretching).expect("it was planned");
+        let mut f = LandingFocus::after_unveil(2, Some(1), [1], &stretching, t0(), CAP).expect("it was planned");
         assert_eq!(f.ended(2, 1, false), AfterEnd::Done);
-        assert_eq!(LandingFocus::after_unveil(2, Some(1), [1], &HashSet::new()), None, "no stretch: the pictures landing");
-        assert_eq!(LandingFocus::after_unveil(2, None, [1], &stretching), None, "no focus in the batch");
+        assert_eq!(LandingFocus::after_unveil(2, Some(1), [1], &HashSet::new(), t0(), CAP), None, "no stretch: the pictures landing");
+        assert_eq!(LandingFocus::after_unveil(2, None, [1], &stretching, t0(), CAP), None, "no focus in the batch");
     }
 
     /// The owner's card click of 11-15 06:42:57: VS Code's 240 and Terminal's 214 fly, VS Code
@@ -202,7 +235,7 @@ mod tests {
     #[test]
     fn a_focus_left_out_at_the_unveil_runs_after_the_last_stretch_whatever_its_end() {
         let stretching: HashSet<u32> = [214, 240].into();
-        let mut f = LandingFocus::after_unveil(37, Some(240), [214, 240], &stretching).expect("both fly");
+        let mut f = LandingFocus::after_unveil(37, Some(240), [214, 240], &stretching, t0(), CAP).expect("both fly");
         assert!(!f.owes(240), "not left out yet");
         f.defer();
         assert!(f.owes(240) && !f.owes(214), "only the key's focus is owed");
@@ -218,7 +251,7 @@ mod tests {
     fn the_order_check_waits_for_an_owed_focus() {
         let stretching: HashSet<u32> = [214, 49841].into();
         let check = OrderCheck { raises: vec![214, 49841], focus: Some(49841), since: Instant::now() };
-        let mut f = LandingFocus::after_unveil(6, Some(49841), [214, 49841], &stretching).expect("both fly");
+        let mut f = LandingFocus::after_unveil(6, Some(49841), [214, 49841], &stretching, t0(), CAP).expect("both fly");
         assert_eq!(f.hold_order_check(check.clone()), Some(check.clone()), "the focus ran at the unveil: the check runs now");
         assert_eq!(f.take_order_check(), None);
         f.defer();
@@ -227,6 +260,29 @@ mod tests {
         assert_eq!(f.ended(6, 49841, true), AfterEnd::Refocus(49841));
         assert_eq!(f.take_order_check(), Some(check), "run after that focus");
         assert_eq!(f.take_order_check(), None, "once");
+    }
+
+    /// A stretch that never tells its end (the main thread reports one only when its note
+    /// ends): the wait lasts the switch's backstop, then the tick ends it. With the focus
+    /// owed it runs then, as with one landed; with neither, nothing is owed.
+    #[test]
+    fn a_stretch_that_never_ends_is_waited_for_only_the_backstop() {
+        let stretching: HashSet<u32> = [214, 240].into();
+        let at = t0();
+        let mut f = LandingFocus::after_unveil(37, Some(240), [214, 240], &stretching, at, CAP).expect("both fly");
+        f.defer();
+        assert_eq!(f.ended(37, 214, false), AfterEnd::Waiting, "240 never tells");
+        assert!(!f.overdue(at + CAP - Duration::from_millis(1)));
+        assert!(f.overdue(at + CAP));
+        assert_eq!(f.lapse(), AfterEnd::Refocus(240), "the owed focus runs at the cap");
+        assert!(f.flying().is_empty());
+
+        let mut f = LandingFocus::after_unveil(38, Some(240), [214, 240], &stretching, at, CAP).expect("both fly");
+        assert_eq!(f.ended(38, 214, true), AfterEnd::Waiting);
+        assert_eq!(f.lapse(), AfterEnd::Refocus(240), "one landed: the focus again");
+
+        let mut f = LandingFocus::after_unveil(39, Some(240), [214, 240], &stretching, at, CAP).expect("both fly");
+        assert_eq!(f.lapse(), AfterEnd::Done, "none landed, the focus ran at the unveil");
     }
 
     /// The same switch's unveil: Terminal's 214 and VS Code's 49841 fly, the focus owed; their

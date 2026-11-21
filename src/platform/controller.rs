@@ -2391,7 +2391,8 @@ impl Controller {
             let (raises, focus) = raise_order::raises_and_focus(&p.actions);
             // Read before the shows below, which stop a stretch not taken over yet (it ends
             // and tells so all the same).
-            self.landing_focus = landing_focus::LandingFocus::after_unveil(p.id, focus, asked.iter().map(|(id, _)| *id), &self.engine.stretching());
+            let cap = motion_math::unveil_backstop(&self.store.config().style);
+            self.landing_focus = landing_focus::LandingFocus::after_unveil(p.id, focus, asked.iter().map(|(id, _)| *id), &self.engine.stretching(), now, cap);
             // The key window still flying, on no Desktop, its app with a window elsewhere: a
             // focus now activates the app and macOS goes to that other window (the owner's log
             // of 11-15 06:42:57). The focus after the landing is the switch's only one.
@@ -2482,7 +2483,15 @@ impl Controller {
     /// flies in its landing Space never activates its app), when its stage is still in front.
     fn stretch_ended(&mut self, ob: &Observer, id: u64, window: u32, landed: bool) {
         let Some(f) = self.landing_focus.as_mut() else { return };
-        let key = match f.ended(id, window, landed) {
+        let after = f.ended(id, window, landed);
+        self.landing_focus_after(ob, id, after);
+    }
+
+    /// What a [`landing_focus::LandingFocus`] of transition `id` does after `after`: a
+    /// stretch's end, or its cap passed ([`landing_focus::LandingFocus::lapse`]).
+    fn landing_focus_after(&mut self, ob: &Observer, id: u64, after: landing_focus::AfterEnd) {
+        let Some(f) = self.landing_focus.as_mut() else { return };
+        let key = match after {
             landing_focus::AfterEnd::Waiting => return,
             landing_focus::AfterEnd::Done => {
                 self.landing_focus = None;
@@ -6334,6 +6343,11 @@ impl Controller {
             tracing::warn!(id = s.id, max_ms = s.max.as_millis() as u64, "the strip never unveiled a transition's windows; they come back now");
             self.land_pending(ob, Landing::Backstop);
         }
+        if let Some(f) = self.landing_focus.as_mut().filter(|f| f.overdue(now)) {
+            tracing::debug!(id = f.switch(), flying = ?f.flying(), "landing: a stretch never told its end within the switch's backstop; the wait ends");
+            let (id, after) = (f.switch(), f.lapse());
+            self.landing_focus_after(ob, id, after);
+        }
         self.echoes.prune(now);
         if !safety::quit_requested() {
             self.retry_shows(ob, false);
@@ -6486,7 +6500,7 @@ impl Controller {
             ),
             (self.overview.showing_or_expected(now) || self.overview.freezes(now) || self.macos_reveal_at.is_some(), "an overview"),
             (!self.absent.is_empty() || self.foreign.is_pending() || !self.stale.waiting().is_empty(), "windows counted missing"),
-            (self.focus_replay.peek(now).is_some(), "a focus held"),
+            (self.focus_replay.peek(now).is_some() || self.landing_focus.is_some(), "a focus held"),
             (self.unminimizing.values().any(|at| now.duration_since(*at) < UNMINIMIZE_MAX), "an un-minimize"),
             (self.fresh_waiting(), "a new window"),
             (self.ax_sees_nothing(), "Accessibility lists no window"),
@@ -7569,6 +7583,9 @@ mod tests {
             ("an overview", |c, now| c.macos_reveal_at = Some(now)),
             ("windows counted missing", |c, _| {
                 c.absent.insert(1, 1);
+            }),
+            ("a focus held", |c, now| {
+                c.landing_focus = landing_focus::LandingFocus::after_unveil(1, Some(1), [1], &[1].into(), now, Duration::from_secs(1));
             }),
             ("an un-minimize", |c, now| {
                 c.unminimizing.insert(1, now);

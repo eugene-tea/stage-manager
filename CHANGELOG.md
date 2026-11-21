@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, the app of a stage brought in always comes in front, also when a
+  window's landing motion is cut short.
 - With `engine = "spaces"`, a window no longer ends up on another Desktop when the Dock or ⌘Tab
   switches Desktops in the minute after a screen is plugged in or out.
 - With `engine = "spaces"`, Mission Control shows the hidden stages' windows as soon as it
