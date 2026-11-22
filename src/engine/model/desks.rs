@@ -168,6 +168,40 @@ impl Model {
         }
     }
 
+    /// macOS ended Desktop `from` (it is listed no more, on a screen still there or not) and
+    /// its windows are on Desktop `into` now: the Space bound to `from` joins the Space bound
+    /// to `into` whole ([`Model::merge_space`]: its stages keep their windows, its front
+    /// comes in front there). Nothing when either is bound to no Space or they are the same;
+    /// the caller executes the actions.
+    pub fn desk_ended(&mut self, from: u64, into: u64) -> Vec<Action> {
+        let (Some(gone), Some(kept)) = (self.space_of_desk(from), self.space_of_desk(into)) else { return Vec::new() };
+        if gone == kept {
+            return Vec::new();
+        }
+        let display = self.space_display(kept);
+        // A screen that still showed the ended Desktop's Space shows the one it joined.
+        for c in self.current.values_mut() {
+            if *c == gone {
+                *c = kept;
+            }
+        }
+        for w in self.windows.values_mut() {
+            if w.space == gone {
+                w.meta.display = display;
+            }
+        }
+        for st in &mut self.stages {
+            if st.space == gone {
+                st.display = display;
+            }
+        }
+        let mut actions = Vec::new();
+        self.merge_space(gone, kept, &mut actions);
+        self.normalize_slots();
+        actions.push(Action::StateChanged);
+        actions
+    }
+
     /// Binds Desktop `desk` to `space` when neither is bound; else whether they are bound to
     /// each other. A uuid that changed under the same id is taken.
     pub(crate) fn bind_desk(&mut self, space: SpaceId, desk: &Desk) -> Agree {

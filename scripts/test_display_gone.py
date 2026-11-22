@@ -57,7 +57,8 @@ screen is counted `elsewhere` by the log, never moved across.
 
 Under the Spaces engine each round ends by printing the shadow of design r3 (`ctl state`'s
 `desks`: where the model's Desktop and the window server's disagree, open and begun, the
-longest) and the log's disagreement lines; printed only, never a check.
+longest) and the log's disagreement lines. A disagreement on a hidden window's Desktop still
+open 10 s after the round's last look fails (design r3, slice 4).
 
 The virtual screen is removed and the screens put back where they were whatever happens (the
 tool does it on SIGTERM too); the app is quit and the fixtures closed after each round. It
@@ -444,9 +445,12 @@ SHADOW_LINE = "desktops: the model and the window server disagree"
 
 
 def desk_shadow(label, since_line):
-    """The shadow's counts for this round (design r3, slice 1; `ctl state`'s `desks`) and the
-    log's disagreements since `since_line`: printed only, never a check (they are the
-    incidents the later slices remove). Under the Corner engine the listing is not read."""
+    """The shadow's counts for this round (design r3; `ctl state`'s `desks`) and the log's
+    disagreements since `since_line`. A disagreement on a hidden window's Desktop (the
+    engine's home against the Desktop the model has the window on) still open 10 s after
+    this look fails (design r3, slice 4: one record; the look returns as soon as none is
+    open, so a round that agrees waits for nothing). Under the Corner engine the listing is
+    not read."""
     try:
         d = ts.state().get("desks") or {}
     except Exception as e:  # noqa: BLE001 - the app may be busy or gone
@@ -455,11 +459,23 @@ def desk_shadow(label, since_line):
     if d.get("listing") is None:
         say(f"    desks ({label}): the window server's listing is not read (not the Spaces engine)")
         return
-    g = d["disagree"]
+    def homes_agree():
+        try:
+            return (ts.state().get("desks") or {}).get("disagree", {}).get("homes") == 0 or None
+        except Exception:  # noqa: BLE001 - the app may be busy
+            return None
+
+    agreed = d["disagree"]["homes"] == 0 or ts.wait_until(homes_agree, 10, "the hidden windows' Desktops to agree") is not None
+    try:
+        g = (ts.state().get("desks") or d)["disagree"]
+    except Exception:  # noqa: BLE001
+        g = d["disagree"]
     say(f"    desks ({label}): Desktop shown: {g['shown']} open, {g['shown_begun']} begun; window homes: {g['homes']} open, "
         f"{g['homes_begun']} begun; the longest {g['longest_ms']} ms")
     for o in g["open"]:
         say(f"      open: {o}")
+    check(agreed and g["homes"] == 0, f"desks ({label}): the engine and the model agree on every hidden window's Desktop within 10 s "
+          f"({g['homes']} open)")
     for ln in [ln for ln in log_lines(ts.log_text(), since_line) if SHADOW_LINE in ln][:12]:
         say(f"    log: {ln[:300]}")
 

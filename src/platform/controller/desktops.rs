@@ -50,6 +50,7 @@ use super::corner::unrestored::LetGo;
 use super::{Controller, launch_hints};
 use crate::engine::desk_shadow::{self, Change, Shadow, Sight, Subject};
 use crate::engine::margin;
+use crate::engine::spill;
 use crate::engine::model::desks::{Desk, Listed, SavedDesk};
 use crate::engine::model::{Display, DisplayId, WindowId, WindowMeta, WindowRole};
 use crate::engine::phase::{self, Hold};
@@ -135,6 +136,10 @@ pub(super) struct DeskWatch {
     left: u64,
     /// New windows not placed because they were on another Desktop than the one shown.
     found_elsewhere: u64,
+    /// The bound Desktops the looks found unlisted, since when ([`spill::ended_desktops`]),
+    /// and how many ended and were taken into the Desktop their windows landed on.
+    unlisted: spill::Unlisted,
+    ended: u64,
 }
 
 impl Controller {
@@ -326,6 +331,50 @@ impl Controller {
         !on.is_empty() && !m.displays().iter().any(|d| m.shown_desk(d.id).is_some_and(|shown| on.contains(&shown)))
     }
 
+    /// The tick's look for Desktops macOS ended (design r3, section 4): a Desktop bound to a
+    /// Space that no screen lists any more, for [`spill::ENDED_AFTER`] with the display list
+    /// still (one look mid-change may list a screen's Desktops only in part), ended; its Space
+    /// joins the Space of the Desktop its shown windows are on now ([`spill::landed_on`]),
+    /// else of the Desktop its screen shows ([`Model::desk_ended`]). The engine's copies of
+    /// its hidden windows' Desktop follow at the tick's check (`SpacesEngine::rehome`).
+    /// `raw`: every screen's entry, as the window server lists them now.
+    pub(super) fn ended_desktops(&mut self, ob: &mut Observer, listing: &Listing, now: Instant) {
+        let Some(m) = self.model.as_ref() else { return };
+        let Some(raw) = self.engine.desktops() else { return };
+        let displays: Vec<(String, Vec<u64>)> = raw.iter().map(|d| (d.screen.clone(), d.every().collect())).collect();
+        let bound: Vec<u64> = m.desks().keys().copied().collect();
+        let (ended, unlisted) = spill::ended_desktops(bound, &displays, &self.desks.unlisted, now);
+        self.desks.unlisted = unlisted;
+        let shown: Vec<u64> = raw.iter().map(|d| d.current).filter(|c| *c != 0).collect();
+        for from in ended {
+            let Some(m) = self.model.as_ref() else { return };
+            let Some(space) = m.space_of_desk(from) else { continue };
+            // Where its shown windows are now; else what its screen shows.
+            let peers: Vec<Vec<u64>> = m
+                .windows()
+                .filter(|w| w.space == space && !w.parked && w.meta.role == WindowRole::Standard)
+                .filter_map(|w| self.engine.spaces_of(w.meta.id))
+                .collect();
+            let screen = m.spaces().iter().find(|s| s.id == space).map(|s| s.display);
+            let into = spill::landed_on(&peers, &listing.1, &shown).or_else(|| screen.and_then(|d| listing.desk(d)).map(|d| d.id));
+            let Some(into) = into.filter(|d| m.space_of_desk(*d).is_some()) else {
+                tracing::debug!(desk = from, space = space.0, "desktops: a Desktop ended; where its windows are is bound to no Space yet (its arrival binds it)");
+                continue;
+            };
+            let Some(m) = self.model.as_mut() else { return };
+            let actions = m.desk_ended(from, into);
+            if actions.is_empty() {
+                continue;
+            }
+            self.desks.ended += 1;
+            self.pressed_obs = None;
+            tracing::info!(from, into, space = space.0, "desktops: a Desktop ended (listed no more); its stages join the Desktop its windows are on");
+            self.execute(ob, actions);
+            self.present();
+            self.mark_dirty();
+        }
+    }
+
     /// The tick's look at where the windows are, by the window server's word (module docs):
     /// each standard window of a Desktop shown that is not on screen, and each of another
     /// Desktop that is, is asked for its Desktop once. Nothing while a button is down (a
@@ -469,6 +518,7 @@ impl Controller {
                 "moved": k.moved,
                 "left": k.left,
                 "found_elsewhere": k.found_elsewhere,
+                "ended": k.ended,
                 "flip_wait_ms": ms(FLIP_WAIT),
             },
             "disagree": {

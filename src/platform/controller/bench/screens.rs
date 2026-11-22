@@ -62,7 +62,7 @@ fn told(b: &mut Bench) -> String {
 /// later (11-18). 90 s on, past the watch.
 fn second_screen_goes(load: f64, keeps_ids: bool) -> Run {
     let mut b = two_screens(load, |_| {});
-    b.desk(|d| d.screen_goes_how(Goes { main: false, keeps_ids, lets_out_ms: vec![150.0, 20_000.0] }));
+    b.desk(|d| d.screen_goes_how(Goes { main: false, keeps_ids, lets_out_ms: vec![150.0, 20_000.0], ..Goes::default() }));
     b.advance(90_000);
     let out = told(&mut b);
     Run::of(&b, out)
@@ -79,11 +79,14 @@ fn second_goes_desktop_ended(load: f64) -> Run {
 /// The main screen goes (the second one is the main screen from then on), as above.
 /// `locked`: while the screen is locked, unlocked 30 s later (`controller.rs`,
 /// `spill_at_unlock`).
-fn main_screen_goes(load: f64, keeps_ids: bool, locked: bool) -> Run {
+/// `ends_own`: the screen left shows the gone screen's Desktop and its own ends (a virtual
+/// main screen, live 11-21: 5 hidden windows homed on Desktop 1 by the engine while the
+/// model kept them on the ended Desktop for 88 s).
+fn main_screen_goes(load: f64, keeps_ids: bool, ends_own: bool, locked: bool) -> Run {
     let mut b = two_screens(load, |_| {});
     b.desk(|d| {
         d.locked = locked;
-        d.screen_goes_how(Goes { main: true, keeps_ids, lets_out_ms: vec![150.0, 20_000.0] });
+        d.screen_goes_how(Goes { main: true, keeps_ids, ends_own, lets_out_ms: vec![150.0, 20_000.0] });
     });
     b.advance(30_000);
     b.desk(|d| d.locked = false);
@@ -93,15 +96,19 @@ fn main_screen_goes(load: f64, keeps_ids: bool, locked: bool) -> Run {
 }
 
 fn main_goes_ids_kept(load: f64) -> Run {
-    main_screen_goes(load, true, false)
+    main_screen_goes(load, true, false, false)
+}
+
+fn main_goes_other_desktop_ends(load: f64) -> Run {
+    main_screen_goes(load, true, true, false)
 }
 
 fn main_goes_desktop_ended(load: f64) -> Run {
-    main_screen_goes(load, false, false)
+    main_screen_goes(load, false, false, false)
 }
 
 fn main_goes_while_locked(load: f64) -> Run {
-    main_screen_goes(load, false, true)
+    main_screen_goes(load, false, false, true)
 }
 
 /// A hide inside the change's first seconds and one 36 s later (`engine/spill.rs`: the
@@ -110,7 +117,7 @@ fn main_goes_while_locked(load: f64) -> Run {
 /// stage in front goes to a card); 34 s on, Bravo's.
 fn hides_after_the_second_screen_goes(load: f64, keeps_ids: bool) -> Run {
     let mut b = two_screens(load, |_| {});
-    b.desk(|d| d.screen_goes_how(Goes { main: false, keeps_ids, lets_out_ms: vec![150.0, 20_000.0] }));
+    b.desk(|d| d.screen_goes_how(Goes { main: false, keeps_ids, lets_out_ms: vec![150.0, 20_000.0], ..Goes::default() }));
     b.advance(2000);
     let alpha = b.stage_of(11);
     b.card_click(alpha);
@@ -134,7 +141,7 @@ fn hides_after_desktop_ended(load: f64) -> Run {
 /// time", 11-20 to 11-21): its Desktop back on it under its id (`keeps_ids`), else a new one.
 fn second_screen_goes_and_comes_back(load: f64, keeps_ids: bool) -> Run {
     let mut b = two_screens(load, |_| {});
-    b.desk(|d| d.screen_goes_how(Goes { main: false, keeps_ids, lets_out_ms: vec![150.0, 20_000.0] }));
+    b.desk(|d| d.screen_goes_how(Goes { main: false, keeps_ids, lets_out_ms: vec![150.0, 20_000.0], ..Goes::default() }));
     b.advance(40_000);
     b.desk(|d| d.screen_comes_back());
     b.advance(90_000);
@@ -180,6 +187,17 @@ fn a_screen_goes_and_its_desktop_moves_under_its_id() {
 }
 
 #[test]
+fn the_main_screen_goes_and_the_other_screens_desktop_ends() {
+    // The Desktop the screen left had ended, listed no more: its stages join the Desktop
+    // moved in, where its windows landed (`Controller::ended_desktops`), and the engine's
+    // homes follow. Before (live 11-21, and here at every load): the model kept its hidden
+    // windows on the ended Desktop while the engine homed them on Desktop 1, 4 disagreements
+    // that stayed open.
+    let joined = format!("{STAGES}; shows [12]; hidden but on a Desktop []; homes [(11, Some(1)), (21, Some(1)), (22, Some(1)), (23, Some(1))]; disagree 0 shown 0 homes");
+    expect(main_goes_other_desktop_ends, [&joined, &joined, &joined]);
+}
+
+#[test]
 fn hides_after_a_screen_went_and_a_screen_back() {
     let ended = format!("{STAGES}; shows [12]; hidden but on a Desktop []; homes [(11, Some(1)), (21, Some(1)), (22, Some(1)), (23, Some(1))]; disagree 0 shown 0 homes");
     expect(hides_after_desktop_ended, [&ended, &ended, &ended]);
@@ -201,6 +219,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("the second screen goes and comes back, its Desktop kept (Spaces)", "engine/spill.rs, 11-20 to 11-21", back_ids_kept),
     ("the second screen goes and comes back, its Desktop ended (Spaces)", "engine/spill.rs, a virtual screen", back_desktop_ended),
     ("the main screen goes, its Desktop kept under its id (Spaces)", "engine/spill.rs, 11-18", main_goes_ids_kept),
-    ("the main screen goes, its Desktop ended (Spaces)", "live display-gone main, 11-21", main_goes_desktop_ended),
+    ("the main screen goes, its Desktop ended (Spaces)", "engine/spill.rs, 11-18", main_goes_desktop_ended),
+    ("the main screen goes, its Desktop moves over and the other screen's ends (Spaces)", "live display-gone main, 11-21", main_goes_other_desktop_ends),
     ("the main screen goes while locked, its Desktop ended (Spaces)", "controller.rs spill_at_unlock", main_goes_while_locked),
 ];

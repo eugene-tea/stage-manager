@@ -5014,6 +5014,11 @@ impl Controller {
         // A managed window off screen whose handle died: found again, or let go if closed.
         self.check_stale_handles(ob, &list);
         if let Some(listing) = &keyed {
+            // A Desktop macOS ended (a screen went, or took the main role): its stages join
+            // the Desktop its windows landed on.
+            self.ended_desktops(ob, listing, now);
+        }
+        if let Some(listing) = &keyed {
             // Where the windows are is the window server's to say: no window of another
             // Desktop on screen means a Space change went unseen, and none missing is counted
             // towards a second look.

@@ -261,6 +261,11 @@ pub struct Goes {
     /// end, and their windows go onto the Desktop the screen left shows (a virtual screen,
     /// live 11-18 and 11-21).
     pub keeps_ids: bool,
+    /// With [`Self::keeps_ids`]: the screen left shows the gone screen's Desktop from then
+    /// on and its own Desktops end, their shown windows landing on the Desktop moved in,
+    /// their stage Spaces left where they were (`engine/spill.rs`, "A Desktop that ends on a
+    /// screen still there": the main screen gone, a virtual one, live 11-18 and 11-21).
+    pub ends_own: bool,
     /// The window server takes the windows hidden in stage Spaces of the gone screen's
     /// Desktops out, onto the Desktop the screen left shows (not theirs), in waves: each
     /// wave this many ms after the change, the machine's own time (`engine/spill.rs`: a
@@ -778,10 +783,20 @@ impl Desk {
                 }
             }
         }
-        let (shown, main) = (self.screens[0].shown, self.screens[0].display);
-        if how.keeps_ids {
+        if how.keeps_ids && how.ends_own {
+            let s = &mut self.screens[0];
+            let own = std::mem::replace(&mut s.desktops, gone.desktops.clone());
+            (s.shown, s.current, s.sliding_in, s.sliding_to) = (gone.shown, gone.current, None, None);
+            for w in self.windows.values_mut() {
+                if w.spaces.iter().any(|x| own.contains(x)) {
+                    w.spaces.retain(|x| !own.contains(x));
+                    w.spaces.push(gone.shown);
+                }
+            }
+        } else if how.keeps_ids {
             self.screens[0].desktops.extend(gone.desktops.iter().copied());
         }
+        let (shown, main) = (self.screens[0].shown, self.screens[0].display);
         for w in self.windows.values_mut() {
             let theirs = w.spaces.iter().any(|s| gone.desktops.contains(s)) || !main.frame.contains(w.frame.center());
             if theirs {

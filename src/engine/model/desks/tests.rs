@@ -258,3 +258,25 @@ fn a_window_found_on_another_desktop_moves_there_or_leaves() {
     let (_, forgotten) = m.window_on_desk(w(3), 77, &hints);
     assert_eq!(forgotten, vec![w(3)]);
 }
+
+/// A Desktop macOS ended (the main screen gone, a virtual one, live 11-21: the screen left
+/// showed the Desktop moved in and its own ended): its Space joins the Space of the Desktop
+/// its windows landed on, whole, and its binding goes.
+#[test]
+fn a_desktop_ended_joins_the_desktop_its_windows_landed_on() {
+    let (mut m, one, four) = two_desktops();
+    let stages_of_one: Vec<Vec<WindowId>> = m.stages_in(one).map(|s| s.windows.clone()).filter(|s| !s.is_empty()).collect();
+    assert_eq!(stages_of_one.len(), 2, "windows 1 and 2, a stage each");
+    // Desktop 1 ended; its windows are on Desktop 4, which shows.
+    arrive_keyed(&mut m, &desk(4, "U4"), &Listed::default(), &[3]);
+    let actions = m.desk_ended(1, 4);
+    assert!(actions.contains(&Action::StateChanged));
+    assert!(!m.has_space(one) && m.space_of_desk(1).is_none(), "the ended Desktop's Space and binding are gone");
+    assert_eq!((m.space_of(w(1)), m.space_of(w(2)), m.space_of(w(3))), (Some(four), Some(four), Some(four)));
+    let mut stages: Vec<Vec<WindowId>> = m.stages_in(four).map(|s| s.windows.clone()).filter(|s| !s.is_empty()).collect();
+    stages.sort();
+    assert_eq!(stages, vec![vec![w(1)], vec![w(2)], vec![w(3)]], "its stages join whole, each window in its own");
+    assert_eq!(m.desk_of(w(1)), Some(4), "and a hide takes the Desktop they are on now");
+    // Bound to nothing, or the same Desktop: nothing.
+    assert!(m.desk_ended(1, 4).is_empty() && m.desk_ended(4, 4).is_empty() && m.desk_ended(77, 4).is_empty());
+}

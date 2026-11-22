@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- With `engine = "spaces"`, after a screen is plugged in or out a hidden window goes back to
+  the Desktop its stage is on, whenever it is hidden or shown again, and the stages of a
+  Desktop that macOS removes move to the Desktop its windows went to.
 - With `engine = "spaces"`, the first switch to a Desktop after the app starts stays there;
   before, macOS could slide straight back to the Desktop left. A window that opens while a
   Desktop slides in goes to its own Desktop's stages.

@@ -373,7 +373,11 @@ showing most of it (macOS's rule).
   to a card as the Dock or ⌘-Tab arranges that Desktop before macOS slides to it, stays on its
   own Desktop (`spill::home_for`: the Desktop the app's own record has the window on; before,
   the engine kept a second record and weighed it by the 10 s since the change and the last
-  press, and two windows of the log ended up on the other Desktop). Apple's Stage Manager here is not measured: with it on, two Desktops each
+  press, and two windows of the log ended up on the other Desktop). When macOS ends a Desktop
+  (a virtual main screen going: the screen left shows the Desktop moved in and its own is
+  listed no more, live 11-21), that Desktop's stages join the Desktop its windows landed on,
+  each with its windows, 2.5 s after it stopped being listed; before, its hidden windows
+  stayed counted on the ended Desktop for a minute and a half. Apple's Stage Manager here is not measured: with it on, two Desktops each
   with a stage in front and one hidden, the lid closed on the external screen, the external
   unplugged and the lid opened, then back, and on each Desktop a Dock click to the other
   Desktop's hidden app within a minute; which Desktop each window is on after.

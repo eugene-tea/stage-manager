@@ -417,6 +417,17 @@ hidden again from the model's Desktop (`forget_escaped`, then the tick's hide). 
 decides any of it: the engine's second record of the last Desktop, the change's 10 s settle
 and the last press (`hide_home`, `MID_CHANGE`) are gone.
 
+**A Desktop macOS ended** (the first step of slice 5). At the tick, while the listing
+decides, a Desktop bound to a Space that no screen lists any more, for `spill::ENDED_AFTER`
+with the display list still, has ended (`Controller::ended_desktops`): its Space joins the
+Space of the Desktop its shown windows are on now (`spill::landed_on`), else of the Desktop
+its screen shows, whole (`Model::desk_ended`, `Model::merge_space`: the half of the gone
+screen's adoption that takes one Space into another), and the engine's homes follow. Still
+the old way, by the windows and the clock: the adoption of a gone screen's Desktop into the
+main screen's whether macOS kept that Desktop or not (`adopt_display`), `spill`'s watch and
+its own choice of where an ended Desktop's stage Spaces are made again, the model's
+`handed_hidden` and `display_watch`.
+
 The shadow stays as the check: at each arrival and each look for missed changes
 (`engine/desk_shadow.rs`) the Desktop the model says each screen shows is compared with the
 listing's, and each held window's home with the model's Desktop for it; each disagreement is
