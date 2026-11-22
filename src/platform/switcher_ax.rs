@@ -264,6 +264,7 @@ pub fn list(dock: i32) -> Value {
     })
 }
 
+#[cfg(feature = "probes")]
 /// What the Dock shows to Accessibility, two levels down (the probe's dump): each child's
 /// role, subrole, title and attribute names; for each, up to `items` of its own children
 /// with role, subrole, title, `AXSelected` and `AXURL`. Titles are app names; the dump is

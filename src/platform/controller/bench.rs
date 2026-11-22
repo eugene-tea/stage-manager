@@ -283,13 +283,6 @@ impl Bench {
                 self.ob.on_app_event(AppEvent::Terminated(app), no_callback);
                 self.ob.receiving(None);
             }
-            Notice::Hidden(pid, hidden) => {
-                self.pace.stir(now);
-                let app = fake::with(|d| d.app_info(pid)).expect("a desk");
-                self.ob.receiving(Some(sent));
-                self.ob.on_app_event(if hidden { AppEvent::Hidden(app) } else { AppEvent::Unhidden(app) }, no_callback);
-                self.ob.receiving(None);
-            }
             Notice::SpaceChanged => {
                 self.note(format!("space change notice{lag}"));
                 self.pace.stir(now);

@@ -579,11 +579,6 @@ impl AxElement {
         super::enhanced_ui::around(self, || self.write_position(p))
     }
 
-    /// Sets `AXSize`, with the app's enhanced UI off ([`super::enhanced_ui`]).
-    pub fn set_size(&self, s: Size) -> AxResult<()> {
-        super::enhanced_ui::around(self, || self.write_size(s))
-    }
-
     fn write_position(&self, p: Point) -> AxResult<()> {
         #[cfg(test)]
         if self.as_fake().is_some() {
@@ -817,11 +812,6 @@ impl AxObserver {
         // SAFETY: the default-mode constant is a valid static.
         run_loop.add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });
         Ok(Self { real: Some(RealObserver { observer, source, run_loop }), pid })
-    }
-
-    /// The observed process.
-    pub fn pid(&self) -> libc::pid_t {
-        self.pid
     }
 
     /// Registers `notification` on `element`; `refcon` (an opaque integer, never

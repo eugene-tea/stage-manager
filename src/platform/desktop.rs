@@ -24,7 +24,7 @@ use super::windows::CgWindow;
 use crate::engine::displays::{ScreenKey, number_duplicates};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{Display, DisplayId};
-use crate::engine::corner::park::{CornerChoice, choose_corner};
+use crate::engine::corner::park::choose_corner;
 use crate::engine::corner::sliver::DockBar;
 
 /// Converts an AppKit rectangle (bottom-left origin of the primary screen, `y` up) into
@@ -96,13 +96,6 @@ pub fn screen_key(id: u32) -> ScreenKey {
         return key;
     }
     ScreenKey::new(CGDisplayVendorNumber(id), CGDisplayModelNumber(id), CGDisplaySerialNumber(id))
-}
-
-/// The park corner for the main display (`frame`, `visible`) among the other active
-/// displays ([`choose_corner`]: no display beyond it, else the least overlap).
-pub fn park_corner(frame: Rect, visible: Rect) -> CornerChoice {
-    let others: Vec<Rect> = cg_display_bounds().into_iter().skip(1).collect();
-    choose_corner(frame, visible, &others)
 }
 
 /// The primary screen's height (for converting AppKit coordinates); 0 without a screen.

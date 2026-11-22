@@ -245,8 +245,6 @@ pub enum Notice {
     Launched(i32),
     /// NSWorkspace: an app quit.
     Terminated(i32),
-    /// NSWorkspace: an app hidden or unhidden.
-    Hidden(i32, bool),
     /// `activeSpaceDidChangeNotification`.
     SpaceChanged,
     /// Global input in another app.
@@ -508,12 +506,6 @@ pub fn with<T>(f: impl FnOnce(&mut Desk) -> T) -> Option<T> {
 /// True when this thread has a desk.
 pub fn active() -> bool {
     DESK.with(|d| d.try_borrow().is_ok_and(|d| d.is_some()))
-}
-
-/// A call that must never be reached on a thread with a desk (a real macOS call with no fake
-/// answer): panics there, naming it, so the bench never touches the real Mac silently.
-pub fn never(what: &str) {
-    assert!(!active(), "the bench reached a real platform call with no fake: {what}");
 }
 
 /// A snapshot handed to the strip: taken by this thread's desk (`None` back), or handed back
@@ -778,18 +770,6 @@ impl Desk {
     pub fn take_due(&mut self, by: Instant) -> Option<Queued> {
         let i = self.queue.iter().enumerate().filter(|(_, q)| q.due <= by).min_by_key(|(_, q)| (q.due, q.seq)).map(|(i, _)| i)?;
         Some(self.queue.remove(i))
-    }
-
-    /// How many notices wait.
-    pub fn queued(&self) -> usize {
-        self.queue.len()
-    }
-
-    /// Drops the queued notices `drop` names (a script taking one out: "the notice never came").
-    pub fn drop_queued(&mut self, drop: impl Fn(&Notice) -> bool) -> usize {
-        let before = self.queue.len();
-        self.queue.retain(|q| !drop(&q.notice));
-        before - self.queue.len()
     }
 
     fn call(&mut self, call: Call) {
@@ -1332,18 +1312,6 @@ impl Desk {
         }
     }
 
-    /// Window `id` closes: gone from the list, its app's destroyed notice.
-    pub fn close_window(&mut self, id: u32) {
-        let Some(w) = self.windows.remove(&id) else { return };
-        self.z.retain(|x| *x != id);
-        if let Some(a) = self.apps.get_mut(&w.pid)
-            && a.focused == Some(id)
-        {
-            a.focused = self.z.iter().copied().find(|x| self.windows.get(x).is_some_and(|o| o.pid == w.pid));
-        }
-        self.post(0.0, Notice::Ax { pid: w.pid, el: El::Window(id), name: n::ELEMENT_DESTROYED });
-    }
-
     /// App `pid` quits: its windows gone, NSWorkspace's notice; macOS then activates the app
     /// of the frontmost window left on the Desktop shown.
     pub fn quit(&mut self, pid: i32) {
@@ -1574,6 +1542,7 @@ impl Desk {
             .collect()
     }
 
+    #[cfg(feature = "probes")]
     /// `SLSCopySpaces`: the Desktops, and with the orphans' bit the Spaces the app made.
     pub fn sky_all_spaces(&self, mask: i32) -> Vec<u64> {
         let mut out: Vec<u64> = self.screens.iter().flat_map(|s| s.desktops.iter().copied()).collect();
@@ -1635,11 +1604,6 @@ impl Desk {
     }
 
     // ----- the Dock --------------------------------------------------------------------------
-
-    /// The Dock's application item at `p`.
-    pub fn dock_item_at(&self, p: Point) -> Option<(usize, String, Rect)> {
-        self.dock.items.iter().enumerate().find(|(_, (_, f))| f.contains(p)).map(|(i, (path, f))| (i, path.clone(), *f))
-    }
 
     /// The bundle id of the app at bundle path `path`.
     pub fn bundle_at(&self, path: &str) -> Option<String> {

@@ -521,7 +521,7 @@ pub fn registry_ids() -> BTreeSet<u32> {
     lock_registry().keys().copied().collect()
 }
 
-/// Drops the entries of windows seen back (quit's leftovers, [`leftovers_back`]), taken ones
+/// Drops the entries of windows seen back (quit's leftovers), taken ones
 /// too.
 fn registry_forget(ids: &[u32]) {
     if ids.is_empty() {

@@ -99,6 +99,7 @@ impl Pace {
         Some(self.not_before.map_or(Duration::ZERO, |t| t.saturating_duration_since(now)))
     }
 
+    #[cfg(test)]
     /// True while rounds back off.
     pub fn backing_off(&self) -> bool {
         self.backoff.is_some()

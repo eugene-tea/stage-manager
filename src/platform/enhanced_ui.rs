@@ -1,8 +1,8 @@
 //! Moves made with an app's `AXEnhancedUserInterface` off for a moment, so that they never
 //! animate (round enhanced-ui; the rules are [`crate::engine::enhanced_ui`]'s).
 //!
-//! Every frame write goes through here: [`AxElement::set_frame`], [`AxElement::set_position`]
-//! and [`AxElement::set_size`] call [`around`], so no writer can miss it (the switch's parks
+//! Every frame write goes through here: [`AxElement::set_frame`] and
+//! [`AxElement::set_position`] call [`around`], so no writer can miss it (the switch's parks
 //! and unparks, the restore, the fit, the guardian's and the safety paths' unparks, the
 //! arrival's arranging, the hide's moves, the probes). Alone, a write is its own batch (one
 //! off/on). A writer moving several windows opens a [`Batch`] around them: every app is
