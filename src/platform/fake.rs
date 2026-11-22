@@ -842,6 +842,13 @@ impl Desk {
         Some(self.queue.remove(i))
     }
 
+    /// Drops the queued notices `drop` names (a script taking one out: "the notice never came").
+    pub fn drop_queued(&mut self, drop: impl Fn(&Notice) -> bool) -> usize {
+        let before = self.queue.len();
+        self.queue.retain(|q| !drop(&q.notice));
+        before - self.queue.len()
+    }
+
     fn call(&mut self, call: Call) {
         let ms = clock::now().saturating_duration_since(self.started).as_millis() as u64;
         self.calls.push((ms, call));
