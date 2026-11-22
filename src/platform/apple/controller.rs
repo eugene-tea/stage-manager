@@ -54,6 +54,7 @@ use super::desk::Desk;
 use super::launch_hide::{self, HideOutcome, Hiding, Moment};
 use super::routes::drag::Drag;
 use super::routes::focus::Focus;
+#[cfg(feature = "probes")]
 use super::routes::rejected;
 use super::routes::shift_click::ShiftClick;
 use super::routes::{Route, RouteStats};
@@ -1197,6 +1198,7 @@ impl AppleController {
 
     /// A tripwire's Accessibility action on the strip item holding window `w` (one the mode
     /// follows: never an item of an app it does not manage).
+    #[cfg(feature = "probes")]
     fn ax_try(&self, manager: i32, w: u32, action: &str) -> Result<Value, String> {
         if self.mirror.where_is(w).map(|(p, _)| p) != Some(mirror::Where::Strip) {
             return Err(format!("window {w} is not in Apple's strip"));
@@ -1239,13 +1241,22 @@ impl AppleController {
                     })
                 }
             },
+            #[cfg(feature = "probes")]
             AppleTry::AxPress(w) => self.ax_try(manager, w, "AXPress"),
+            #[cfg(feature = "probes")]
             AppleTry::AxAddToStage(w) => self.ax_try(manager, w, "AXAddToStage"),
+            #[cfg(feature = "probes")]
             AppleTry::PidClick(w) => point(w).and_then(|at| rejected::pid_click(manager, at).map(|()| json!({ "at": at }))),
+            #[cfg(feature = "probes")]
             AppleTry::ShiftFocus(w) => match ob.window(w) {
                 Some(tw) => rejected::shift_focus(&tw.element, tw.pid).map(|()| json!({})),
                 None => Err(format!("window {w} is not observed")),
             },
+            // The rejected routes (the tripwires) are in a build with the `probes` feature only.
+            #[cfg(not(feature = "probes"))]
+            AppleTry::AxPress(_) | AppleTry::AxAddToStage(_) | AppleTry::PidClick(_) | AppleTry::ShiftFocus(_) => {
+                Err(format!("{} is not in this build (built without the probes feature)", t.name()))
+            }
         };
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         tracing::info!(route = t.name(), ok = ran.is_ok(), ms, "apple mode: a route tried by hand");

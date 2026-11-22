@@ -62,7 +62,7 @@ def fixture_window_count():
 
 def build():
     env = dict(os.environ, FIXTURE_ID=FIX_ID, FIXTURE_APP=FIX_APP, PATH=os.path.expanduser("~/.cargo/bin") + ":" + os.environ["PATH"])
-    subprocess.run(["nice", "-n", "18", "cargo", "build", "--release", "--manifest-path", os.path.join(ROOT, "Cargo.toml")], check=True, env=env)
+    subprocess.run(["nice", "-n", "18", "cargo", "build", "--release", "--features", "probes", "--manifest-path", os.path.join(ROOT, "Cargo.toml")], check=True, env=env)
     subprocess.run([os.path.join(ROOT, "scripts", "bundle.sh"), "fixture"], check=True, env=env, cwd=ROOT, stdout=subprocess.DEVNULL)
     subprocess.run([os.path.join(ROOT, "scripts", "sign.sh"), FIX_APP], check=True, env=env, cwd=ROOT, stdout=subprocess.DEVNULL)
 

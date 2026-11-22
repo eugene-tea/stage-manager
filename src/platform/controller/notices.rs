@@ -299,7 +299,7 @@ impl Controller {
 
     /// An app's activation notice, fired at `fired` and received at `at` (module docs).
     pub(super) fn on_activated(&mut self, ob: &mut Observer, pid: i32, fired: Instant, at: Instant, now: Instant) {
-        crate::platform::switcher_probe::note("activated", format!("pid={pid} notice_age_ms={}", fired.elapsed().as_millis()));
+        crate::platform::switcher_notes::note("activated", || format!("pid={pid} notice_age_ms={}", fired.elapsed().as_millis()));
         // A window put home for this app (a Dock press, ⌘Tab's switcher) has its activation:
         // kept for its switch.
         self.switcher_activated(pid, fired);

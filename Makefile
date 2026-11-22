@@ -8,14 +8,18 @@ SHELL := /bin/bash
 export PATH := $(HOME)/.cargo/bin:$(PATH)
 
 CARGO   := nice -n 18 cargo
+# Cargo features of `make build` and what depends on it. The dev copy (`make dev`, `make run`)
+# and the live scripts build with `probes` (the probe, demo and preview subcommands, the
+# test-only ctl probes); `make install` and `make dmg` build without (as `make release` does).
+FEATURES ?=
 APP     := target/Stage Manager.app
 FIXTURE := target/SM Fixture.app
 
 .PHONY: build bundle sign dev run install fixture check icon dmg-art social-art dmg release
 
-## build: cargo build --release
+## build: cargo build --release (FEATURES=probes for the probe subcommands)
 build:
-	$(CARGO) build --release
+	$(CARGO) build --release $(if $(FEATURES),--features $(FEATURES))
 
 ## bundle: assemble target/Stage Manager.app
 bundle: build
@@ -24,6 +28,8 @@ bundle: build
 ## sign: codesign the app with the local signing identity
 sign: bundle
 	scripts/sign.sh "$(APP)"
+
+dev run: FEATURES = probes
 
 ## dev: copy the signed app to the fixed dev location (one screen-access approval for every worktree)
 dev: sign
@@ -68,7 +74,8 @@ export DEVELOPER_ID NOTARY_PROFILE DRY_RUN
 release:
 	scripts/release.sh
 
-## check: cargo test + clippy -D warnings
+## check: cargo test + clippy -D warnings, with and without the probes
 check:
-	$(CARGO) test
+	$(CARGO) test --features probes
 	$(CARGO) clippy --all-targets -- -D warnings
+	$(CARGO) clippy --all-targets --features probes -- -D warnings

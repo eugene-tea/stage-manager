@@ -89,7 +89,7 @@ use crate::platform::observe::Observer;
 use crate::platform::ax::{AxElement, AxObserver};
 use crate::platform::window_engine::LendPark;
 use crate::platform::mission_key_tap::{self, HeardAt};
-use crate::platform::{apps, dock, switcher_ax, switcher_probe, windows};
+use crate::platform::{apps, dock, space_keys, switcher_ax, switcher_notes, windows};
 
 /// The Dock's notices about the switcher (observed on its application element, live 11-15):
 /// the list made (its selection already set), its selection changed, an element gone.
@@ -166,7 +166,7 @@ impl Controller {
         // the Corner engine nothing is read, observed or put home.
         if !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
             if matches!(key, Key::Command(false) | Key::Down { code: switcher::KEY_TAB, cmd: true, .. }) {
-                switcher_probe::note("heard", format!("{key:?} (nothing done: no model, or the Corner engine)"));
+                switcher_notes::note("heard", || format!("{key:?} (nothing done: no model, or the Corner engine)"));
             }
             return;
         }
@@ -178,7 +178,7 @@ impl Controller {
         }
         let heard = self.switcher.keys.hear_at(key, now);
         if heard != Heard::Nothing || self.switcher.keys.is_open() {
-            switcher_probe::note("heard", format!("{key:?} -> {heard:?}"));
+            switcher_notes::note("heard", || format!("{key:?} -> {heard:?}"));
         }
         self.switcher_heard(ob, heard, true, now);
         self.switcher_arm_tap();
@@ -207,7 +207,7 @@ impl Controller {
         };
         self.switcher.tap_heard = true;
         let heard = self.switcher.keys.hear_at(key, at);
-        switcher_probe::note("key tap", format!("{key:?} -> {heard:?}"));
+        switcher_notes::note("key tap", || format!("{key:?} -> {heard:?}"));
         tracing::info!(key = ?key, heard = ?heard, since_tab_ms = self.switcher.opened.map(|t| ms(t, at)), "cmd-tab: the key tap heard the switcher's end");
         self.switcher_heard(ob, heard, true, at);
         self.switcher_arm_tap();
@@ -223,7 +223,7 @@ impl Controller {
         if let Some(l) = self.lent.as_mut().filter(|l| l.switcher) {
             l.wait.begin(at, cap);
             tracing::info!(pid = l.pid, window = l.window.0, cap = cap.name, "cmd-tab: a click while the switcher shows (heard by the key tap): the window put home stays for its app's activation at the mouse's release");
-            switcher_probe::note("picked", format!("window={} cap={}", l.window.0, cap.name));
+            switcher_notes::note("picked", || format!("window={} cap={}", l.window.0, cap.name));
         }
     }
 
@@ -342,7 +342,7 @@ impl Controller {
             took_ms,
             "cmd-tab: the switcher selects an app"
         );
-        switcher_probe::note("selected", format!("{chosen:?} {} dock={} predicted={predicted:?} took_ms={took_ms}", choice.name(), read.name()));
+        switcher_notes::note("selected", || format!("{chosen:?} {} dock={} predicted={predicted:?} took_ms={took_ms}", choice.name(), read.name()));
         choice
     }
 
@@ -431,7 +431,7 @@ impl Controller {
                     if asked && !parked {
                         tracing::info!(pid, window = window.0, park_ms = lend.park_ms, "cmd-tab: the window put home could not be parked off the screen (its app did not move it): put home at its frame for the first Tab");
                     }
-                    switcher_probe::note("lent", format!("pid={pid} window={} parked={parked} park_ms={}", window.0, lend.park_ms));
+                    switcher_notes::note("lent", || format!("pid={pid} window={} parked={parked} park_ms={}", window.0, lend.park_ms));
                 } else if asked && lend.parked == Some(false) {
                     tracing::info!(
                         pid,
@@ -440,7 +440,7 @@ impl Controller {
                         park_ms = lend.park_ms,
                         "cmd-tab: the app's window here could not be parked off the screen (its app did not move it): nothing put home for this selection; macOS goes where it counts one"
                     );
-                    switcher_probe::note("not lent", format!("pid={pid} window={} parked=false park_ms={}", window.0, lend.park_ms));
+                    switcher_notes::note("not lent", || format!("pid={pid} window={} parked=false park_ms={}", window.0, lend.park_ms));
                 } else {
                     tracing::info!(pid, window = window.0, "cmd-tab: the app's window here could not be put home; macOS goes where it counts one");
                 }
@@ -475,7 +475,7 @@ impl Controller {
                         cap_ms = cap.limit.as_millis() as u64,
                         "cmd-tab: ⌘ let go on the app its window was put home for: kept for that app's activation and switch; another app's activation takes it back"
                     );
-                    switcher_probe::note("released", format!("window={} cap={} app_in_front={in_front}", window.0, cap.name));
+                    switcher_notes::note("released", || format!("window={} cap={} app_in_front={in_front}", window.0, cap.name));
                 }
             }
         }
@@ -520,7 +520,7 @@ impl Controller {
             return;
         }
         let now = clock::now();
-        switcher_probe::note("dock notice", name);
+        switcher_notes::note("dock notice", || name.to_string());
         // The Dock draws Mission Control too: its notice may come as it opens.
         self.upkeep_dock_notice(name, now);
         match name {
@@ -626,9 +626,10 @@ impl Controller {
             return;
         }
         let quiet = self.switcher.last_key.is_some_and(|t| now.saturating_duration_since(t) >= SWITCHER_MAX);
-        // A probe's posted ⌘ may not show in the session's state: its own release is posted.
-        // The probe (`ctl debug-cmd-tab`) runs only in a test run, so only a test run asks it.
-        let probe_posting = std::env::var_os("STAGE_MANAGER_TEST").is_some() && switcher_probe::posting();
+        // A ⌘ this process posted (the ⌘Tab probe's, `ctl debug-cmd-tab`) may not show in the
+        // session's state: its own release is posted. Only a test run posts one, so only a
+        // test run asks.
+        let probe_posting = std::env::var_os("STAGE_MANAGER_TEST").is_some() && space_keys::posted_command_down();
         if (!input::command_held() && !probe_posting) || quiet {
             let steps = self.switcher.keys.steps();
             self.switcher.keys.reset();
@@ -656,14 +657,22 @@ impl Controller {
         }
         let after = ms(at, now);
         tracing::info!(after_release_ms = after, lent, "cmd-tab: the Space changed after ⌘ was let go on the switcher");
-        switcher_probe::note("space changed", format!("after_release_ms={after} lent={lent}"));
+        switcher_notes::note("space changed", || format!("after_release_ms={after} lent={lent}"));
     }
 
-    /// `ctl debug-cmd-tab` (test only): a posted ⌘Tab ([`switcher_probe`]), or its report.
-    /// A release is refused unless the app the keys predict for that many Tabs is a
-    /// `STAGE_MANAGER_ONLY` app; the probe also cancels at the release when the Dock names
-    /// another.
+    /// `ctl debug-cmd-tab` in a build without the `probes` feature: refused.
+    #[cfg(not(feature = "probes"))]
+    pub(super) fn debug_cmd_tab(&mut self, _ob: &Observer, _probe: CmdTabProbe) -> Value {
+        json!({ "ok": false, "error": "debug-cmd-tab is not in this build (built without the probes feature)" })
+    }
+
+    /// `ctl debug-cmd-tab` (test only): a posted ⌘Tab ([`crate::platform::switcher_probe`]),
+    /// or its report. A release is refused unless the app the keys predict for that many Tabs
+    /// is a `STAGE_MANAGER_ONLY` app; the probe also cancels at the release when the Dock
+    /// names another.
+    #[cfg(feature = "probes")]
     pub(super) fn debug_cmd_tab(&mut self, ob: &Observer, probe: CmdTabProbe) -> Value {
+        use crate::platform::switcher_probe;
         let (release, tabs, hold_ms, gap_ms, lend) = match probe {
             CmdTabProbe::Result => return switcher_probe::result(),
             CmdTabProbe::Start { release, tabs, hold_ms, gap_ms, lend } => (release, tabs, hold_ms, gap_ms, lend),

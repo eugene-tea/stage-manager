@@ -63,9 +63,9 @@ fn main() -> ExitCode {
         Some("mark") => stage_manager::platform::ctl::run_mark(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("log") => stage_manager::platform::logging::command(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("strip-demo") => stage_manager::ui::strip_demo::run(),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("preview") => stage_manager::ui::preview::run(&args[2..]),
         Some("config") => {
             let (code, out) = stage_manager::config::command(&args[2..]);
@@ -80,18 +80,24 @@ fn main() -> ExitCode {
         Some("probe-windows") => app::probe_windows(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("probe-screen") => app::probe_screen(),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-patch") => stage_manager::ui::patch_probe::run(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-glass") => stage_manager::ui::card_glass::probe(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-park") => stage_manager::platform::park_probe::run(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-shadow") => stage_manager::platform::shadow_probe::run(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-spaces") => stage_manager::platform::spaces_probe::run(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-icons") => stage_manager::ui::app_icons::probe(&args[2..]),
+        // A build without the `probes` feature (`make install`, `make release`) has none of them.
+        #[cfg(not(feature = "probes"))]
+        Some(sub @ ("strip-demo" | "preview" | "probe-patch" | "probe-glass" | "probe-park" | "probe-shadow" | "probe-spaces" | "probe-icons")) => {
+            eprintln!("stage-manager: {sub} is not in this build (built without the probes feature; make dev builds with it)");
+            ExitCode::FAILURE
+        }
         #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
         Some("--version") => {

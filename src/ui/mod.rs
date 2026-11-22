@@ -21,7 +21,9 @@ pub mod mode_pick;
 pub mod motion_math;
 pub mod overlay;
 pub mod panels;
+#[cfg(feature = "probes")]
 pub mod patch_probe;
+#[cfg(feature = "probes")]
 pub mod preview;
 pub mod settings_window;
 pub mod shadow_look;
@@ -30,6 +32,7 @@ pub mod shell;
 pub mod status_menu;
 pub mod strip;
 pub mod strip_access;
+#[cfg(feature = "probes")]
 pub mod strip_demo;
 pub mod strip_layout;
 pub mod strip_model;

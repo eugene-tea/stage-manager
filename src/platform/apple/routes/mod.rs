@@ -5,6 +5,7 @@
 
 pub mod drag;
 pub mod focus;
+#[cfg(feature = "probes")]
 pub mod rejected;
 pub mod shift_click;
 

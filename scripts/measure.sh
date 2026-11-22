@@ -39,7 +39,7 @@ FIX_ID="${SM_FIXTURE_ID:-dev.eugene.stagemanager.fixture.stages}"
 SUFFIX="${FIX_ID##*.}"
 FIX_NAME="SM Fixture $(tr '[:lower:]' '[:upper:]' <<<"${SUFFIX:0:1}")${SUFFIX:1}"
 if [ -z "${SKIP_BUILD:-}" ]; then
-  make sign >/dev/null || { echo "build failed" >&2; exit 1; }
+  make sign FEATURES=probes >/dev/null || { echo "build failed" >&2; exit 1; }
 fi
 # The stage apps (the main fixture, A, B, C) and the call stand-in (<id>.clock, never on
 # STAGE_MANAGER_ONLY), rebuilt when missing or older than the fixture's source.

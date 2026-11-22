@@ -1722,7 +1722,7 @@ impl Controller {
         let back = self.engine.take_back(lent.window);
         tracing::info!(window = lent.window.0, pid = lent.pid, back = back.back, restored = ?back.restored, since_ms, cap, activated = lent.wait.is_activated(), "{who} goes back: {why}");
         if lent.switcher {
-            crate::platform::switcher_probe::note("taken back", format!("window={} why={why} restored={:?}", lent.window.0, back.restored));
+            crate::platform::switcher_notes::note("taken back", || format!("window={} why={why} restored={:?}", lent.window.0, back.restored));
         }
     }
 

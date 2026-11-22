@@ -34,14 +34,14 @@ terminal has its approvals checked against the terminal, not the app.
 
 | Target | What it does |
 |---|---|
-| `make build` | `cargo build --release` |
+| `make build` | `cargo build --release` (`FEATURES=probes` adds the probes) |
 | `make bundle` | assembles `target/Stage Manager.app` (version from `Cargo.toml`) |
 | `make sign` | signs the bundle with the local identity (hardened runtime) |
-| `make dev` | signs, then copies the app to `~/Library/Application Support/Stage Manager Dev/` |
+| `make dev` | builds with the probes, signs, then copies the app to `~/Library/Application Support/Stage Manager Dev/` |
 | `make run` | `dev`, then launches that copy and tails today's log |
 | `make install` | copies the signed app to `~/Applications` (refused while that copy runs: quit it first) |
 | `make fixture` | builds `target/SM Fixture.app`, the test window app |
-| `make check` | `cargo test` and `cargo clippy --all-targets -- -D warnings` |
+| `make check` | `cargo test --features probes` and `cargo clippy --all-targets -- -D warnings`, with and without the probes |
 | `make icon` | regenerates the app icon (needs Xcode 26; outputs are committed) |
 | `make dmg-art` | re-renders the DMG window from `art/dmg.py` and `art/dmg/text.json` |
 | `make social-art` | re-renders the info page's link-preview card from `art/social.py` |
@@ -277,6 +277,16 @@ handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` wi
 `src/platform/ctl.rs`.
 
 ## Other tools
+
+The probes, the strip demo and the previews below (`probe-spaces`, `probe-shadow`,
+`probe-park`, `probe-patch`, `probe-glass`, `probe-icons`, `strip-demo`, `preview`), and
+`ctl debug-cmd-tab` and the rejected routes of `ctl apple try`, are in a build with the
+`probes` feature only: the dev copy (`make dev`, `make run`) and every live script
+(`scripts/test-stages.sh`, `scripts/measure.sh`, `scripts/probe_park.py`) build with it;
+`make install`, `make dmg` and `make release` build without it, and such a build answers
+each of them with one line and a non-zero exit. The feature adds only the probes' own modules
+and their dispatch, so the live suite tests the product code a release ships.
+`probe-windows`, `probe-screen` and `debug-post-space` are in every build.
 
 - `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--pane PANE] [--mode MODE] [--png FILE]`
   opens one of the app's windows alone, or draws it to a PNG, without managing anything.

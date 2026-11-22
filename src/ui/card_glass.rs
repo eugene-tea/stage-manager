@@ -420,6 +420,7 @@ fn deliver(strip: u32, key: String, desktop: Option<u64>, result: Result<Shown, 
 /// from the picture's file; nothing captured, nothing shown, no app needs to run), and the
 /// under the default glass makes of it, 0–255 in the display's values, one JSON line.
 /// `scripts/measure-apple-card-glass.py` sets it beside Apple's cards.
+#[cfg(feature = "probes")]
 pub fn probe(args: &[String]) -> std::process::ExitCode {
     use serde_json::json;
     let usage = || {

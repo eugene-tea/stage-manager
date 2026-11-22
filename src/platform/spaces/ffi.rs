@@ -112,6 +112,8 @@ impl ScreenDesks {
 pub(crate) struct Sky {
     pub(crate) cid: i32,
     pub(crate) copy_managed: Option<FnCopyByCid>,
+    // Loaded in every run, as the rest (the names loaded stay the same); read by the probes only.
+    #[cfg_attr(not(feature = "probes"), allow(dead_code))]
     pub(crate) copy_spaces: Option<FnCopySpaces>,
     pub(crate) spaces_for_windows: Option<FnCopySpacesForWindows>,
     pub(crate) create: Option<FnSpaceCreate>,
@@ -121,9 +123,13 @@ pub(crate) struct Sky {
     pub(crate) show: Option<FnSpaceList>,
     pub(crate) hide: Option<FnSpaceList>,
     pub(crate) add_remove: Option<FnAddRemove>,
+    // Loaded in every run, as the rest (the names loaded stay the same); read by the probes only.
+    #[cfg_attr(not(feature = "probes"), allow(dead_code))]
     pub(crate) move_managed: Option<FnMoveManaged>,
     pub(crate) set_transform: Option<FnSetTransform>,
     pub(crate) get_transform: Option<FnGetTransform>,
+    // Loaded in every run, as the rest (the names loaded stay the same); read by the probes only.
+    #[cfg_attr(not(feature = "probes"), allow(dead_code))]
     pub(crate) space_type: Option<FnSpaceType>,
     pub(crate) active: Option<FnActiveSpace>,
     pub(crate) msg_send: *const c_void,
@@ -248,6 +254,7 @@ impl Sky {
         self.active.map(|f| unsafe { f(self.cid) }).filter(|s| *s != 0)
     }
 
+    #[cfg(feature = "probes")]
     /// Every Space the window server lists for this mask.
     pub(crate) fn all_spaces(&self, mask: i32) -> Vec<u64> {
         #[cfg(test)]
@@ -271,6 +278,7 @@ impl Sky {
         unsafe { take_array(f(self.cid, ALL_SPACES_MASK, Retained::as_ptr(&arr).cast())) }.map(|a| numbers(&a)).unwrap_or_default()
     }
 
+    #[cfg(feature = "probes")]
     pub(crate) fn space_type(&self, sid: u64) -> Option<i32> {
         #[cfg(test)]
         if let Some(out) = crate::platform::fake::with(|d| if d.is_desktop(sid) { 0 } else { 2 }) {
@@ -495,6 +503,7 @@ impl Sky {
         self.add_remove_from(route, sid, ids, ADD_REMOVE_OPTIONS)
     }
 
+    #[cfg(feature = "probes")]
     /// The windows onto the managed Space (a Desktop) `sid`.
     pub(crate) fn move_managed(&self, route: Route, ids: &[u32], sid: u64) -> Result<i32, String> {
         crate::platform::windows::note_write();
@@ -607,6 +616,7 @@ pub(crate) enum Route {
 }
 
 impl Route {
+    #[cfg(feature = "probes")]
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Classic => "classic",

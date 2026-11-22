@@ -13,6 +13,7 @@
 //! 33 and 36, Control-↑, Control-↓ and F11 by default), and Escape to leave.
 
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use objc2_core_foundation::{
@@ -237,7 +238,19 @@ pub(crate) fn post_key(keycode: u16, down: bool, flags: u64) -> Result<(), Strin
     let event = CGEvent::new_keyboard_event(None, keycode, down).ok_or("cannot create a key event")?;
     CGEvent::set_flags(Some(&event), CGEventFlags(flags));
     CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
+    if keycode == COMMAND_KEY {
+        POSTED_COMMAND.store(down, Ordering::Relaxed);
+    }
     Ok(())
+}
+
+/// A ⌘ this process posted ([`post_key`]) is down.
+static POSTED_COMMAND: AtomicBool = AtomicBool::new(false);
+
+/// True from a ⌘ this process posted going down to its posted release: a posted key may not
+/// show in the session's modifier state. Only test paths post ⌘.
+pub(crate) fn posted_command_down() -> bool {
+    POSTED_COMMAND.load(Ordering::Relaxed)
 }
 
 /// Posts the shortcut at the HID tap: Control down, the key down and up with the shortcut's

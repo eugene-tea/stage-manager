@@ -87,7 +87,7 @@ FIX_ID="${SM_FIXTURE_ID:-dev.eugene.stagemanager.fixture.stages}"
 SUFFIX="${FIX_ID##*.}"
 FIX_NAME="SM Fixture $(tr '[:lower:]' '[:upper:]' <<<"${SUFFIX:0:1}")${SUFFIX:1}"
 if [ -z "${SKIP_BUILD:-}" ]; then
-  make sign >/dev/null || { echo "build failed" >&2; exit 1; }
+  make sign FEATURES=probes >/dev/null || { echo "build failed" >&2; exit 1; }
 fi
 # The main fixture, plus three apps for the native phase (<id>.a, .b, .c). Built every run,
 # and with SKIP_BUILD whenever one is missing or older than its source: an old fixture
