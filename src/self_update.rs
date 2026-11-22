@@ -406,6 +406,7 @@ pub fn wait_reason(asked: bool, m: Moment) -> Option<Wait> {
     }
 }
 
+#[cfg(test)]
 /// Whether a ready install may quit the app now ([`wait_reason`] gives none).
 pub fn may_install_now(asked: bool, m: Moment) -> bool {
     wait_reason(asked, m).is_none()
@@ -593,6 +594,7 @@ pub enum Step {
     /// installed path satisfies the requirement and carries the new version.
     Confirm,
     /// The old app (now at the staged path) is removed.
+    #[cfg(test)]
     RemoveOld,
 }
 

@@ -677,11 +677,6 @@ impl Lends {
         self.mode = mode;
     }
 
-    /// The mode.
-    pub fn mode(&self) -> Mode {
-        self.mode
-    }
-
     /// A hint at `now`. True when it is taken (the looks come at the fast tick for its
     /// watch; false for a key's repeats and for anything while Mission Control shows); in
     /// [`Mode::Key`] one of the keys also wants a round at once.
@@ -882,6 +877,7 @@ impl Lends {
         self.round = Some(Round { by, started: now, asked: self.queue.len(), lent: 0, parked: 0, park_ms: 0, parks_ms: 0, move_ms: 0, apps: 0, calls: None, done: None });
     }
 
+    #[cfg(test)]
     /// The next window to put home.
     pub fn next_window(&mut self) -> Option<WindowId> {
         self.queue.pop_front()

@@ -506,6 +506,7 @@ pub const NEAR_CHANGE: &str = "the sun is near a frame change for the places and
 /// Why a solar frame is never known by the clock: no hypothesis fits what the screen showed.
 pub const CLOCK_MISFIT: &str = "the clock does not fit this screen; only a still of the desktop settles the frame";
 
+#[cfg(test)]
 /// The frame macOS shows of a picture with `schedule`, `count` frames and primary frame
 /// `primary`, under `style` (from macOS's settings), the appearance (`dark`) and `clock`, by
 /// the clock's unnarrowed model; [`NEAR_CHANGE`] when it is one of several
@@ -650,6 +651,7 @@ impl SunAt {
     }
 }
 
+#[cfg(test)]
 /// The sun's altitude and azimuth (degrees; azimuth from north, clockwise) at `unix` seen
 /// from `(lat, lon)`: the low-precision almanac formulas (about 0.01°, far below the
 /// frames' spacing).
@@ -671,6 +673,7 @@ pub enum SunRule {
 /// The rules, in a hypothesis's order.
 const RULES: [SunRule; 2] = [SunRule::Nearest, SunRule::Altitude];
 
+#[cfg(test)]
 /// One way the clock may say which solar frame shows: a rule, somewhere in one cell of the
 /// grid, its south-west corner `dlat` and `dlon` degrees off the time zone's place and
 /// [`SOLAR_STEP_DEG`] a side. Its frames at a moment are those of its four corners: a real
@@ -782,6 +785,7 @@ impl SolarModel {
         self.place
     }
 
+    #[cfg(test)]
     /// Every hypothesis, in the model's order.
     pub fn hypotheses() -> impl Iterator<Item = Hypothesis> {
         let c = cells_side();
@@ -798,6 +802,7 @@ impl SolarModel {
         self.alive.iter().any(|a| *a)
     }
 
+    #[cfg(test)]
     /// Whether `h` (a grid hypothesis) stands.
     pub fn holds(&self, h: Hypothesis) -> bool {
         Self::hypotheses().position(|g| g.rule == h.rule && (g.dlat - h.dlat).abs() < 1e-9 && (g.dlon - h.dlon).abs() < 1e-9).is_some_and(|i| self.alive[i])
@@ -879,6 +884,7 @@ pub fn sun_frames(suns: &[SunFrame]) -> Vec<usize> {
     v
 }
 
+#[cfg(test)]
 /// The solar frame at `unix` for the time zone's `place` by the clock's unnarrowed model:
 /// known only when every hypothesis agrees ([`solar_candidates`]); otherwise
 /// ([`NEAR_CHANGE`]) the frame cannot be known from the clock alone.
@@ -889,6 +895,7 @@ pub fn solar_frame(suns: &[SunFrame], unix: f64, place: (f64, f64)) -> Result<us
     }
 }
 
+#[cfg(test)]
 /// The distinct solar frames the clock's unnarrowed model ([`SolarModel`]) allows at `unix`
 /// around the time zone's `place`, the most named first. One frame: it is known exactly.
 pub fn solar_candidates(suns: &[SunFrame], unix: f64, place: (f64, f64)) -> Result<Vec<usize>, &'static str> {

@@ -36,6 +36,7 @@ pub const ESCAPE_KEY: u16 = 53;
 /// owner's unwanted activation came while it still showed (11-20 11:16:36).
 pub const KEY_COUNTS: Duration = Duration::from_millis(1000);
 
+#[cfg(test)]
 /// Apple's Stage Manager brings in front the stage of the app macOS activates at a close by
 /// key (the one under the pointer, `mission-close-key`, 11-20): such an activation is a pick
 /// unless `[windows] mission_control_key_keeps_stage` is on.

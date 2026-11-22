@@ -1255,11 +1255,6 @@ pub fn default_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
 }
 
-/// `state.json` in [`config_dir`].
-pub fn state_path() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("state.json"))
-}
-
 /// What [`load_or_create`] did to the file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileAction {

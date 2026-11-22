@@ -333,11 +333,6 @@ pub mod test {
         SEEN.with(|s| *s.borrow_mut() = Some(Vec::new()));
     }
 
-    /// What was noted since [`start`], in order; nothing is kept after.
-    pub fn take() -> Vec<Seen> {
-        SEEN.with(|s| s.borrow_mut().take().unwrap_or_default())
-    }
-
     /// What was noted since [`start`], in order, still kept.
     pub fn so_far() -> Vec<Seen> {
         SEEN.with(|s| s.borrow().clone().unwrap_or_default())

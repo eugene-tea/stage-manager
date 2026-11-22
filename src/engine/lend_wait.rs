@@ -91,11 +91,7 @@ impl LendWait {
         });
     }
 
-    /// The app the lend is for.
-    pub fn pid(&self) -> Pid {
-        self.pid
-    }
-
+    #[cfg(test)]
     /// True once the wait began.
     pub fn is_begun(&self) -> bool {
         self.from.is_some()

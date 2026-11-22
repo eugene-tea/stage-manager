@@ -303,11 +303,6 @@ impl Watch {
         classify(self.start.desktop_before, &self.changes, self.person)
     }
 
-    /// True when the switch's incoming side was already shown.
-    pub fn already_shown(&self) -> bool {
-        self.already_shown
-    }
-
     /// The outcome line's fields (after `slide-watch: outcome`): `key=value` words, `n/a` for
     /// what does not apply.
     pub fn line(&self) -> String {

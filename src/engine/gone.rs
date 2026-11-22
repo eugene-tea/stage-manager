@@ -33,6 +33,7 @@ impl GoneCheck {
         }
     }
 
+    #[cfg(test)]
     /// True when app `pid` waits for the next pass.
     pub fn is_suspect(&self, pid: i32) -> bool {
         self.suspects.contains(&pid)

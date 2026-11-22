@@ -43,20 +43,6 @@ impl PrefValue {
     }
 }
 
-/// The preference domain the keys live in.
-pub const DOMAIN: &str = "com.apple.WindowManager";
-
-/// Every key [`NativeSettings::from_values`] reads, so the platform knows what to fetch.
-pub const KEYS: &[&str] = &[
-    "AppWindowGroupingBehavior",
-    "AutoHide",
-    "HideDesktop",
-    "GloballyEnabled",
-    "EnableStandardClickToShowDesktop",
-    "StageManagerHideWidgets",
-    "StandardHideWidgets",
-];
-
 /// "Show windows from an application" in System Settings → Desktop & Dock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AppWindows {
