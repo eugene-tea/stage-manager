@@ -401,9 +401,21 @@ time (the vote among unbound Spaces, the saved Spaces, by their windows); that a
 under way before its end (`slide_hold`, from the window list, and the Mission Control
 watch: the flip comes at the slide's end); a full-screen animation (a window covering the
 display on a Desktop, `fullscreen::SETTLE_MAX`); Accessibility's silence at an arrival;
-windows moved between screens and off every display (frames, `SPACE_CHECKS`); the Desktop
-a hidden window goes back to (the engine's own record, design r3's next slice); and
-everything a screen coming or going does (`spill`, the adoption).
+windows moved between screens and off every display (frames, `SPACE_CHECKS`); and what a
+screen coming or going does to the model's Spaces (the adoption; `spill`'s watch for windows
+let out).
+
+**One record of a window's Desktop** (slice 4). The model owns it: a window's Space, through
+the binding (`Model::desk_of`). The Spaces engine takes it at every hide
+(`WindowEngine::hidden_at` notes the stage, the frame and that Desktop; `spill::home_for`:
+the model's Desktop while the window server lists it, else where the window is, else where it
+was hidden from, else the Desktop its own screen shows). The engine's own copy for each
+window it holds (`Held.home`) serves the threads with no model (the sweep, a quit, a panic)
+and is set to the model's wherever they differ (`SpacesEngine::rehome`, at the tick's check:
+a map edit). A held window found out of its stage's Space, on any Desktop, shown or not, is
+hidden again from the model's Desktop (`forget_escaped`, then the tick's hide). No clock
+decides any of it: the engine's second record of the last Desktop, the change's 10 s settle
+and the last press (`hide_home`, `MID_CHANGE`) are gone.
 
 The shadow stays as the check: at each arrival and each look for missed changes
 (`engine/desk_shadow.rs`) the Desktop the model says each screen shows is compared with the

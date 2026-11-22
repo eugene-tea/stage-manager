@@ -218,9 +218,10 @@ struct State {
     stages: BTreeMap<(u64, u64), u64>,
     /// The windows hidden, as last read back.
     held: BTreeMap<u32, Held>,
-    /// The stage the model last named for a window, and the frame it had then
-    /// ([`WindowEngine::hidden_at`]).
-    plans: BTreeMap<u32, (u64, Rect)>,
+    /// The stage the model last named for a window, the frame it had then, and the Desktop
+    /// the model has it on (the one bound to its Space; `None` when bound to none): the one
+    /// record of a window's Desktop, taken at each hide ([`WindowEngine::hidden_at`]).
+    plans: BTreeMap<u32, (u64, Rect, Option<u64>)>,
     /// Windows whose show left them in a stage Space.
     owed: BTreeSet<u32>,
     /// Windows a show brought out of their stage Space away from the frame it asked (parked
@@ -256,14 +257,9 @@ struct State {
     /// The screen each stage Space was made on (the window server's display identifier): a
     /// screen gone, its stage Spaces are made again ([`spill`]).
     screens: BTreeMap<u64, String>,
-    /// The Desktop each window was last hidden from, kept after the engine let it go: a
-    /// window the window server let out as its screen went goes back there ([`spill`]).
-    homes: BTreeMap<u32, u64>,
     /// Until when hidden windows are kept on their own Desktops after a screen went
-    /// ([`spill::WATCH`]), when that watch began (the change, or the unlock after it:
-    /// [`spill::mid_change`]), and when the tick last looked ([`spill::KEEP_EVERY`]).
+    /// ([`spill::WATCH`]), and when the tick last looked ([`spill::KEEP_EVERY`]).
     watch: Option<Instant>,
-    watch_from: Option<Instant>,
     kept_at: Option<Instant>,
     /// Stage Spaces made again that still hold a window that would not move out, or that a
     /// held window names (a lent one comes back there), with their Desktop: still this
@@ -287,7 +283,6 @@ impl State {
         self.owed.clear();
         self.companions.clear();
         self.screens.clear();
-        self.homes.clear();
         let retired = std::mem::take(&mut self.retired).into_keys();
         std::mem::take(&mut self.stages).into_values().chain(retired).collect()
     }
@@ -754,46 +749,20 @@ impl SpacesEngine {
     fn hide_window_only(&self, id: u32) -> bool {
         let (flying_guard, flying) = self.stop_stretch(id, true);
         let Some(sky) = self.sky() else { return false };
-        let stage = self.state().plans.get(&id).map_or(NO_STAGE, |(stage, _)| *stage);
+        let (stage, planned) = self.state().plans.get(&id).map_or((NO_STAGE, None), |(stage, _, desk)| (*stage, *desk));
         let was = self.state().held.get(&id).copied();
         let now = sky.spaces_of(&[id]);
         let displays = sky.displays();
         let (desktops, shown) = Self::desktops_of(&displays);
-        // Where it is now, else where it was when hidden before (a window flying its last
-        // stretch: the Desktop the stretch noted), else the Desktop shown; while a screen
-        // gone is watched, the Desktop it was hidden from first ([`spill::hide_home`]).
+        // The Desktop the model has the window on, while the window server lists that
+        // Desktop: the one record of where a window belongs ([`spill::home_for`]). Else where
+        // it is now, else where it was when hidden before (a window flying its last stretch:
+        // the Desktop the stretch noted), else the Desktop shown on its own screen.
         let flew_from = flying_guard.as_ref().and_then(|l| self.home_of(id, l.get(&id)));
-        let on = desktop_among(&now, &desktops, &shown);
-        let keep = self.watching(clock::now());
-        // Only within the change itself may a window in front be listed on another Desktop
-        // than its screen shows; past it, or once the user pressed, where it is listed holds.
-        let mid_change = keep && {
-            let from = self.state().watch_from;
-            let since = from.map(|t| clock::now().saturating_duration_since(t));
-            let mid = spill::mid_change(since, crate::platform::input::since_last_press());
-            if let Some(since) = since {
-                // Measured to the hide, which carries no notice's stamp.
-                crate::engine::margin::note("MID_CHANGE", since, spill::MID_CHANGE, mid);
-            }
-            mid
-        };
-        let hints = {
-            let st = self.state();
-            let listing: Vec<(u64, Vec<u64>)> = displays.iter().map(|d| (d.current, d.every().collect())).collect();
-            spill::HomeHints {
-                on,
-                held: was.map(|h| h.home).or(flew_from),
-                last: st.homes.get(&id).copied(),
-                stage: st.stages.keys().find(|(d, s)| *s == stage && stage != NO_STAGE && desktops.contains(d)).map(|(d, _)| *d),
-                shown: None,
-                showing: on.and_then(|d| spill::showing_on(&listing, d)),
-                mid_change,
-            }
-        };
-        // Last, the Desktop shown on its own screen (`HomeHints::shown`, weighed last).
-        let home = spill::hide_home(hints, &desktops, keep).or_else(|| self.shown_on_own_screen(sky, id, was.map(|h| h.space), None));
-        if keep {
-            tracing::debug!(id, stage, spaces = ?now, ?shown, ?hints, ?home, "display: a hide while a screen gone is watched");
+        let from = spill::HideFrom { plan: planned.filter(|d| desktops.contains(d)), on: desktop_among(&now, &desktops, &shown), was: was.map(|h| h.home).or(flew_from) };
+        let home = spill::home_for(from).or_else(|| self.shown_on_own_screen(sky, id, was.map(|h| h.space), None));
+        if self.watching(clock::now()) {
+            tracing::debug!(id, stage, spaces = ?now, ?shown, ?from, ?home, "display: a hide while a screen gone is watched");
         }
         let Some(home) = home else {
             tracing::warn!(id, spaces = ?now, "spaces engine: no Desktop known for a window to hide");
@@ -808,7 +777,6 @@ impl SpacesEngine {
         if hidden_in(&now, space) {
             let mut st = self.state();
             st.held.insert(id, Held { space, home });
-            st.homes.insert(id, home);
             st.lent.remove(&id);
             return true;
         }
@@ -842,7 +810,6 @@ impl SpacesEngine {
         if ok {
             let mut st = self.state();
             st.held.insert(id, Held { space, home });
-            st.homes.insert(id, home);
             st.owed.remove(&id);
             st.lent.remove(&id);
             if st.new.remove(&id) {
@@ -893,7 +860,6 @@ impl SpacesEngine {
         if out_of(&now, &ours) {
             let mut st = self.state();
             st.held.remove(&id);
-            st.homes.remove(&id);
             st.owed.remove(&id);
             st.lent.remove(&id);
             return true;
@@ -928,7 +894,6 @@ impl SpacesEngine {
         if ok {
             let mut st = self.state();
             st.held.remove(&id);
-            st.homes.remove(&id);
             st.owed.remove(&id);
             st.lent.remove(&id);
             if st.new.remove(&id) {
@@ -1198,7 +1163,6 @@ impl SpacesEngine {
             let young: BTreeSet<u32> = st.new.iter().copied().filter(|id| !unlisted.contains(id)).collect();
             let keep = |id: &u32| alive.contains(id) || listed.contains(id) || young.contains(id);
             st.held.retain(|id, _| keep(id));
-            st.homes.retain(|id, _| keep(id));
             st.plans.retain(|id, _| keep(id));
             st.owed.retain(|id| keep(id));
             st.frames.retain(|id, _| keep(id));
@@ -1378,11 +1342,11 @@ impl SpacesEngine {
         out
     }
 
-    /// The windows held on a Desktop shown that the window server no longer lists hidden in
-    /// their stage Space ([`escaped`]), forgotten as held, so that the tick, which compares
-    /// what the model counts hidden with what this engine holds, hides them again (review
-    /// A-7: `held` is only what the engine last read back). Windows lent, waiting as new or
-    /// flying their last stretch are where they are on purpose. A window let out of the same
+    /// The windows held that the window server no longer lists hidden in their stage Space
+    /// ([`escaped`]), on any Desktop, shown or not, forgotten as held, so that the tick, which
+    /// compares what the model counts hidden with what this engine holds, hides them again
+    /// (review A-7: `held` is only what the engine last read back). Windows lent, waiting as
+    /// new, with a show owed or flying their last stretch are where they are on purpose. A window let out of the same
     /// Space just before pulled them out ([`Companions::escaped`]). The windows forgotten.
     pub fn forget_escaped(&self) -> Vec<u32> {
         let held: Vec<(u32, Held)> = {
@@ -1393,11 +1357,11 @@ impl SpacesEngine {
             return Vec::new();
         }
         let Some(sky) = self.sky() else { return Vec::new() };
-        let (_, shown) = Self::desktops(sky);
         let flying = self.stretching();
+        let owed = self.state().owed.clone();
         let out: Vec<(u32, u64)> = held
             .into_iter()
-            .filter(|(id, h)| shown.contains(&h.home) && !flying.contains(id) && escaped(&sky.spaces_of(&[*id]), *h))
+            .filter(|(id, h)| !flying.contains(id) && !owed.contains(id) && escaped(&sky.spaces_of(&[*id]), *h))
             .map(|(id, h)| (id, h.space))
             .collect();
         let out_ids: Vec<u32> = out.iter().map(|(id, _)| *id).collect();
@@ -1425,7 +1389,6 @@ impl SpacesEngine {
         {
             let mut st = self.state();
             st.watch = Some(now + spill::WATCH);
-            st.watch_from = Some(now);
             st.kept_at = Some(now);
             st.unlisted = spill::Unlisted::default();
         }
@@ -1454,10 +1417,6 @@ impl SpacesEngine {
             let mut st = self.state();
             if !st.watch.is_some_and(|until| now < until) {
                 if st.watch.take().is_some() {
-                    st.watch_from = None;
-                    // Over: a window let go meanwhile is hidden from where it shows again.
-                    let held: BTreeSet<u32> = st.held.keys().copied().collect();
-                    st.homes.retain(|id, _| held.contains(id));
                     st.unlisted = spill::Unlisted::default();
                 }
                 return;
@@ -1476,8 +1435,8 @@ impl SpacesEngine {
     /// and its windows moved in, hidden, on their own Desktop while it exists, else where the
     /// ended Desktop's shown windows went (`peers`, [`spill::landed_on`]) ([`spill::plan`]);
     /// the old Space ends once empty. A window that would not go back is no longer held: the
-    /// tick hides it again by the model's word once its Desktop shows, at the Desktop it was
-    /// hidden from ([`spill::hide_home`]).
+    /// tick hides it again by the model's word, from the Desktop the model has it on
+    /// ([`spill::home_for`]).
     pub fn keep_through_display_change(&self, why: &str, peers: &dyn Fn(u32) -> Vec<u32>) {
         if !self.watching(clock::now()) || self.blocked() {
             return;
@@ -1567,6 +1526,33 @@ impl SpacesEngine {
         if !lost.is_empty() {
             tracing::warn!(why, windows = ?lost, "display: hidden windows that could not be kept in their stages (hidden again by the model's word once their Desktop shows)");
         }
+    }
+
+    /// The engine's copy of each held window's Desktop set to the model's (`desk`: the
+    /// Desktop bound to the window's Space) where they differ and the window server lists
+    /// the model's: a map edit, no window moves; the window is shown there when its stage
+    /// comes. The copy serves the threads with no model (the sweep, a quit, a panic). Windows
+    /// lent or flying keep theirs until they are back. The windows whose copy changed.
+    pub fn rehome(&self, desk: impl Fn(u32) -> Option<u64>) -> Vec<(u32, u64, u64)> {
+        let held: Vec<(u32, Held)> = {
+            let st = self.state();
+            st.held.iter().filter(|(id, _)| !st.lent.contains(id) && !st.new.contains(id)).map(|(id, h)| (*id, *h)).collect()
+        };
+        let wrong: Vec<(u32, u64, u64)> = held.into_iter().filter_map(|(id, h)| desk(id).filter(|d| *d != h.home).map(|d| (id, h.home, d))).collect();
+        if wrong.is_empty() {
+            return wrong;
+        }
+        let Some(sky) = self.sky() else { return Vec::new() };
+        let (desktops, _) = Self::desktops(sky);
+        let flying = self.stretching();
+        let wrong: Vec<(u32, u64, u64)> = wrong.into_iter().filter(|(id, _, to)| desktops.contains(to) && !flying.contains(id)).collect();
+        let mut st = self.state();
+        for (id, _, to) in &wrong {
+            if let Some(h) = st.held.get_mut(id) {
+                h.home = *to;
+            }
+        }
+        wrong
     }
 
     /// Windows `ids` no longer held (the window server let them out and they would not go
@@ -1661,7 +1647,6 @@ impl SpacesEngine {
             st.screens.insert(space, screen.clone());
             for id in &moved {
                 st.held.insert(*id, Held { space, home: r.to });
-                st.homes.insert(*id, r.to);
             }
             for id in &lost {
                 st.held.remove(id);
@@ -1961,7 +1946,7 @@ impl WindowEngine for SpacesEngine {
     fn hidden_at(&self, m: &Model, id: WindowId) -> Option<Rect> {
         let w = m.window(id)?;
         let stage = m.stage_of(id).or_else(|| m.group_of(id).first().and_then(|top| m.stage_of(WindowId(*top)))).map_or(NO_STAGE, |s| s.0);
-        self.state().plans.insert(id.0, (stage, w.meta.frame));
+        self.state().plans.insert(id.0, (stage, w.meta.frame, m.desk_of(id)));
         Some(w.meta.frame)
     }
 
@@ -1971,7 +1956,7 @@ impl WindowEngine for SpacesEngine {
     /// there first, through `window`: it is about to be brought out of the Space by macOS
     /// (an un-minimize shows the window on the Desktop) and must come out off the screen.
     fn hide(&self, id: WindowId, at: Rect, window: &AxElement) -> AxResult<()> {
-        let own = self.state().plans.get(&id.0).map(|(_, frame)| *frame);
+        let own = self.state().plans.get(&id.0).map(|(_, frame, _)| *frame);
         if own.is_some_and(|own| own != at)
             && let Err(e) = window.set_position(at.origin())
         {

@@ -27,11 +27,14 @@ pub(super) struct Run {
     /// The shadow's count since the launch: how often the model's Desktop shown and the
     /// window server's listing disagreed (`ctl state`'s `desks.disagree.shown_begun`).
     pub(super) disagreed: u64,
+    /// The shadow's open disagreements at the end on a hidden window's Desktop: the engine's
+    /// home against the model's Desktop for it (`desks.disagree.homes`).
+    pub(super) homes: u64,
 }
 
 impl Run {
     pub(super) fn of(b: &Bench, outcome: String) -> Self {
-        Self { outcome, margins: b.margins(), story: b.story(), trail: b.trail(), disagreed: b.disagreed().0 }
+        Self { outcome, margins: b.margins(), story: b.story(), trail: b.trail(), disagreed: b.disagreed().0, homes: b.c.desks_json()["disagree"]["homes"].as_u64().unwrap_or(0) }
     }
 }
 
@@ -47,6 +50,8 @@ pub(super) fn expect<S: AsRef<str>>(script: fn(f64) -> Run, want: [S; 3]) {
         // Design r3: while the listing decides, the model never shows another Desktop than
         // the window server lists (the shadow, kept as the check).
         assert_eq!(run.disagreed, 0, "at load {load}: the model and the window server's listing disagreed on the Desktop shown:\n{}", run.story);
+        // Slice 4: the engine hides each window from the Desktop the model has it on.
+        assert_eq!(run.homes, 0, "at load {load}: the engine and the model disagree on a hidden window's Desktop at the end:\n{}", run.story);
     }
 }
 
@@ -673,7 +678,7 @@ fn first_visit_to_a_desktop(load: f64) -> Run {
     Run::of(&b, out)
 }
 
-/// `spaces/engine.rs`, `spill::MID_CHANGE` (a log, 11-21: the external screen back, Dock
+/// `spaces/engine.rs`, `spill::home_for` (a log, 11-21: the external screen back, Dock
 /// clicks 36 s and 61 s after the change hid a Desktop's front window into a stage Space of
 /// the Desktop still shown; the live check `display-gone ahead`): Alpha and Bravo on
 /// Desktop 2 only, a stage each, Bravo's in front; on Desktop 1 a screen comes and goes;
@@ -818,7 +823,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("an activation that slides to another Desktop (Corner)", "controller/arrival.rs, 10-13", activation_that_slides),
     ("a Dock click that slides to another Desktop (Corner)", "controller/arrival.rs, DOCK_SWITCH_WAIT", dock_click_that_slides),
     ("a Dock click whose activation leads the slide (Spaces)", "live 11-21 Dock arrivals, r2-lends-fix", dock_click_whose_activation_leads_the_slide),
-    ("a screen comes and goes, a Dock click 36 s later (Spaces)", "spaces/engine.rs MID_CHANGE, 11-21", dock_click_after_a_screen_came_and_went),
+    ("a screen comes and goes, a Dock click 36 s later (Spaces)", "engine/spill.rs home_for, 11-21", dock_click_after_a_screen_came_and_went),
     ("a new app opened with Shift held", "controller.rs, Shift sugar", new_app_with_shift),
     ("a new app opened", "controller.rs, new-window intake", new_app_plain),
     ("the restore after a restart", "engine/restore.rs", restore_after_a_restart),

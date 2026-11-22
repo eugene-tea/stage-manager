@@ -1654,7 +1654,10 @@ impl Controller {
     /// model knows the window ([`WindowEngine::hidden_at`]), or this once a minimized
     /// window's dive frame ([`Self::dive`]). `None` for a window the model does not manage.
     fn hide_frame(&self, id: u32) -> Option<Rect> {
-        self.hide_place_once(id).or_else(|| self.model.as_ref().and_then(|m| self.engine.hidden_at(m, WindowId(id))))
+        // Asked for every hide, a dive's too: the engine notes the window's stage and the
+        // Desktop the model has it on with it ([`WindowEngine::hidden_at`]).
+        let own = self.model.as_ref().and_then(|m| self.engine.hidden_at(m, WindowId(id)));
+        self.hide_place_once(id).or(own)
     }
 
     /// Executes actions in order; returns how many AX calls failed. Once Quit is requested

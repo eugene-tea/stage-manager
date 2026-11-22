@@ -367,12 +367,13 @@ showing most of it (macOS's rule).
 - **One screen at a time** (a laptop closed on an external screen, used alone a day, the
   external screen back; a log, 11-20 to 11-21). macOS moves the Desktops whole to the screen
   that comes, under the same ids, each with its windows, shown or hidden; nothing is lost and
-  every stage stays on its Desktop. For the minute after the change (`spill::WATCH`) a hidden
-  window goes back to the Desktop it was hidden from. A window in front of a Desktop not shown,
-  sent to a card as the Dock or ⌘-Tab arranges that Desktop before macOS slides to it, stays on
-  its own Desktop: the Desktop its screen shows counts only within the change's 10 s settle
-  with nothing pressed since (`spill::mid_change`; before, two windows of the log ended up on
-  the other Desktop). Apple's Stage Manager here is not measured: with it on, two Desktops each
+  every stage stays on its Desktop. A hidden window belongs to the Desktop its stage is on,
+  at any time: one the window server lets out of hiding as the screen changes goes back
+  there, on a Desktop that shows or not, and a window in front of a Desktop not shown, sent
+  to a card as the Dock or ⌘-Tab arranges that Desktop before macOS slides to it, stays on its
+  own Desktop (`spill::home_for`: the Desktop the app's own record has the window on; before,
+  the engine kept a second record and weighed it by the 10 s since the change and the last
+  press, and two windows of the log ended up on the other Desktop). Apple's Stage Manager here is not measured: with it on, two Desktops each
   with a stage in front and one hidden, the lid closed on the external screen, the external
   unplugged and the lid opened, then back, and on each Desktop a Dock click to the other
   Desktop's hidden app within a minute; which Desktop each window is on after.

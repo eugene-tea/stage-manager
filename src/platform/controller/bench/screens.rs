@@ -150,7 +150,7 @@ fn back_desktop_ended(load: f64) -> Run {
     second_screen_goes_and_comes_back(load, false)
 }
 
-// ----- today's outcomes (the engine's own record of each window's Desktop, `spill::hide_home`) -----
+// ----- the outcomes: a hidden window's Desktop is the model's (design r3, slice 4) ------------------
 
 const STAGES: &str = "stages [[11], [12], [21], [22], [23]]";
 
@@ -167,42 +167,29 @@ fn a_screen_goes_and_its_desktop_ends() {
 
 #[test]
 fn a_screen_goes_and_its_desktop_moves_under_its_id() {
-    // Not right at any load, and TIME DECIDES which way (spill::WATCH's looks against the
-    // let-outs): the model takes the gone screen's Desktop into the one shown (the
-    // adoption) while macOS keeps it as a Desktop of its own; the windows let out stay out,
-    // or go back hidden from a Desktop the model does not have them on. Design r3, slice 5.
-    expect(
-        second_goes_ids_kept,
-        [
-            format!("{STAGES}; shows [21]; hidden but on a Desktop [22, 23]; homes [(11, Some(1)), (12, Some(1)), (22, None), (23, None)]; disagree 0 shown 0 homes"),
-            format!("{STAGES}; shows [21]; hidden but on a Desktop []; homes [(11, Some(1)), (12, Some(1)), (22, Some(50)), (23, Some(50))]; disagree 0 shown 2 homes"),
-            format!("{STAGES}; shows [21]; hidden but on a Desktop [23]; homes [(11, Some(1)), (12, Some(1)), (22, Some(50)), (23, None)]; disagree 0 shown 1 homes"),
-        ],
-    );
-    let out = format!("{STAGES}; shows [12]; hidden but on a Desktop [11]; homes [(11, None), (21, Some(50)), (22, Some(50)), (23, Some(50))]; disagree 0 shown 0 homes");
-    let back = format!("{STAGES}; shows [12]; hidden but on a Desktop []; homes [(11, Some(1)), (21, Some(50)), (22, Some(50)), (23, Some(50))]; disagree 0 shown 1 homes");
-    expect(main_goes_ids_kept, [&out, &out, &back]);
+    // The same at every load now, and the engine and the model agree: every hidden window
+    // is back in a stage's Space, homed on the Desktop the model has its stage on. (Before:
+    // TIME DECIDED: windows let out stayed out, or went back homed on a Desktop the model did
+    // not have them on.) Still to come, design r3 slice 5: the model takes the gone screen's
+    // Desktop into the one shown (the adoption) though macOS keeps it as a Desktop of its
+    // own, so its front window is raised there and macOS slides to it (shows [21]).
+    let second = format!("{STAGES}; shows [21]; hidden but on a Desktop []; homes [(11, Some(1)), (12, Some(1)), (22, Some(1)), (23, Some(1))]; disagree 0 shown 0 homes");
+    expect(second_goes_ids_kept, [&second, &second, &second]);
+    let main = format!("{STAGES}; shows [12]; hidden but on a Desktop []; homes [(11, Some(50)), (21, Some(50)), (22, Some(50)), (23, Some(50))]; disagree 0 shown 0 homes");
+    expect(main_goes_ids_kept, [&main, &main, &main]);
 }
 
 #[test]
 fn hides_after_a_screen_went_and_a_screen_back() {
-    // The Desktop ended: right at every load.
     let ended = format!("{STAGES}; shows [12]; hidden but on a Desktop []; homes [(11, Some(1)), (21, Some(1)), (22, Some(1)), (23, Some(1))]; disagree 0 shown 0 homes");
     expect(hides_after_desktop_ended, [&ended, &ended, &ended]);
     let back = format!("{STAGES}; shows [21]; hidden but on a Desktop []; homes [(11, Some(1)), (12, Some(1)), (22, Some(1)), (23, Some(1))]; disagree 0 shown 0 homes");
     expect(back_desktop_ended, [&back, &back, &back]);
-    // The Desktop kept under its id: as with no hide (TIME DECIDES), and after the screen is
-    // back two hidden windows go back to a Desktop the model does not have them on.
-    expect(
-        hides_after_ids_kept,
-        [
-            format!("{STAGES}; shows [21]; hidden but on a Desktop [22, 23]; homes [(11, Some(1)), (12, Some(1)), (22, None), (23, None)]; disagree 0 shown 0 homes"),
-            format!("{STAGES}; shows [21]; hidden but on a Desktop []; homes [(11, Some(1)), (12, Some(1)), (22, Some(50)), (23, Some(50))]; disagree 0 shown 2 homes"),
-            format!("{STAGES}; shows [21]; hidden but on a Desktop [23]; homes [(11, Some(1)), (12, Some(1)), (22, Some(50)), (23, None)]; disagree 0 shown 1 homes"),
-        ],
-    );
-    let apart = format!("{STAGES}; shows [21]; hidden but on a Desktop []; homes [(11, Some(1)), (12, Some(1)), (22, Some(50)), (23, Some(50))]; disagree 0 shown 2 homes");
-    expect(back_ids_kept, [&apart, &apart, &apart]);
+    // The Desktop kept under its id: a hide 2 s or 36 s after the change takes the model's
+    // Desktop, whatever the clock says, and with the screen back nothing disagrees (before:
+    // TIME DECIDED, and two windows homed on a Desktop the model did not have them on).
+    expect(hides_after_ids_kept, [&back, &back, &back]);
+    expect(back_ids_kept, [&back, &back, &back]);
 }
 
 /// Every scenario here, for the load table.

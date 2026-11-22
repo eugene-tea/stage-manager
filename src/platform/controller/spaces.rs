@@ -191,9 +191,20 @@ impl Controller {
         // What the engine holds checked against the window server first: a window taken out
         // of its stage Space by anything but the engine is hidden again below.
         let _ = spaces.forget_escaped();
+        // The engine's copy of each held window's Desktop follows the model's (design r3:
+        // one record): a map edit, said once a window.
+        for (id, from, to) in spaces.rehome(|id| m.desk_of(WindowId(id))) {
+            tracing::info!(id, from, to, "spaces engine: a hidden window's Desktop set to the one the model has it on");
+        }
         let held = spaces.held();
-        let hidden: Vec<u32> =
-            m.windows().filter(|w| w.parked && shown.contains(&w.space) && w.home != Home::Pinned).map(|w| w.meta.id.0).collect();
+        // On a Desktop shown; and, where the model names the window's Desktop (its Space is
+        // bound to one), on any Desktop: a window let out on a Desktop not shown goes back
+        // into its stage's Space there at once, not when that Desktop next shows.
+        let hidden: Vec<u32> = m
+            .windows()
+            .filter(|w| w.parked && w.home != Home::Pinned && (shown.contains(&w.space) || m.desk_of_space(w.space).is_some()))
+            .map(|w| w.meta.id.0)
+            .collect();
         self.spaces.strays.retain(|id, _| hidden.contains(id) && !held.contains(id));
         for id in hidden.iter().copied().filter(|id| !held.contains(id)) {
             let place = (m.stage_of(WindowId(id)), m.window(WindowId(id)).map_or(SpaceId(0), |w| w.space));
