@@ -224,9 +224,15 @@ impl Parking {
 /// zone nor at the park asked: a window parked already keeps the frame of the model), else
 /// the model's.
 pub fn park(mac: &mut impl Moves, ask: ParkAsk) -> Parking {
-    let before = mac.listed().filter(|r| !ask.kept && same_size(*r, ask.frame) && !ask.display.parks(*r) && !at_origin(*r, ask.at));
+    let listed = mac.listed();
+    let before = listed.filter(|r| !ask.kept && same_size(*r, ask.frame) && !ask.display.parks(*r) && !at_origin(*r, ask.at));
     let parked = Parked { at: ask.at, zone: ask.zone, frame: before.unwrap_or(ask.frame), display: ask.display };
-    let landed = mac.move_to(ask.at);
+    // Listed at its park already (an earlier park's move, listed since: a retry's look): its
+    // app is asked nothing.
+    let landed = match listed {
+        Some(r) if parked.holds(r) => Some(r),
+        _ => mac.move_to(ask.at),
+    };
     Parking { parked, took: landed.is_some_and(|r| parked.holds(r)), moved: landed.is_some_and(|r| !at_origin(r, parked.frame)), must: ask.must, landed }
 }
 

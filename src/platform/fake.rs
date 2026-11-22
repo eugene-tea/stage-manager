@@ -468,6 +468,14 @@ pub struct Desk {
     /// the AppKit event loop turning, 11-21). False: none come, as on a Mac where they do not
     /// (or before round r5-notices); every poll then decides alone.
     pub server_notices: bool,
+    /// How long after an app moved its window the window server lists it at its new place,
+    /// in ms before the load factor (`None`: at once). Live 11-22, Mission Control's key 1 s
+    /// after its close: six apps answered their parks in ~4 ms each and all six windows were
+    /// still listed at their frames 20 ms later (`engine/mission_control.rs`, the retries).
+    pub lists_moves_ms: Option<f64>,
+    /// Windows moved whose new place is not listed yet ([`Self::lists_moves_ms`]): until when,
+    /// and where they are listed until then.
+    late_moves: BTreeMap<u32, (Instant, Rect)>,
     /// The "Current Space" flips with the leaving Desktop's windows going from the list,
     /// before the notice is sent (never measured so; the order a slow main thread gives at
     /// any load). False, the desk's way: [`delays::FLIP_AFTER_NOTICE`] after the notice is
@@ -645,6 +653,8 @@ impl Desk {
             tap_switcher: false,
             activation_leads_slide: false,
             server_notices: false,
+            lists_moves_ms: None,
+            late_moves: BTreeMap::new(),
             flip_leads_notice: false,
             leaving_lingers_ms: 0.0,
             listing_unreadable: false,
@@ -984,7 +994,8 @@ impl Desk {
     }
 
     fn listed(&self, w: &Win) -> CgWindow {
-        CgWindow { id: w.id, pid: w.pid, owner: w.owner.clone(), name: None, layer: w.layer, bounds: w.frame, onscreen: self.on_screen(w), alpha: 1.0 }
+        let bounds = self.late_moves.get(&w.id).filter(|(until, _)| clock::now() < *until).map_or(w.frame, |(_, old)| *old);
+        CgWindow { id: w.id, pid: w.pid, owner: w.owner.clone(), name: None, layer: w.layer, bounds, onscreen: self.on_screen(w), alpha: 1.0 }
     }
 
     /// The window server's list: the on-screen windows front to back (macOS's own overlays
@@ -1187,10 +1198,15 @@ impl Desk {
     /// Window `id` asked to sit at `frame`: where macOS leaves it, with its move notice.
     fn place(&mut self, id: u32, frame: Rect) {
         let visible = self.screens[0].display.visible;
+        let late = self.lists_moves_ms.map(|ms| clock::now() + self.at_load(ms));
+        let listed = self.windows.get(&id).map(|w| self.listed(w).bounds);
         let Some(w) = self.windows.get_mut(&id) else { return };
         let to = Rect::new(frame.x, frame.y.min(visible.max_y() - crate::engine::corner::park::MACOS_KEEPS_TITLE), frame.w, frame.h);
         if to == w.frame {
             return;
+        }
+        if let (Some(until), Some(old)) = (late, listed) {
+            self.late_moves.insert(id, (until, old));
         }
         let (moved, resized) = (to.origin() != w.frame.origin(), to.size() != w.frame.size());
         w.frame = to;

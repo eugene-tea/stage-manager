@@ -448,6 +448,33 @@ fn mission_control_pick(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+/// `engine/mission_control.rs`, the retries (live 11-22, the owner's Mac): with
+/// `mission_control_stages = "key"` the hidden windows are parked and put home at the key,
+/// before Mission Control is seen. The window server lists the parks' moves `lag_ms` late
+/// (more than a park's read back waits): each window is looked at again until it is listed
+/// parked, and is in Mission Control all the same.
+fn mission_control_at_the_key_moves_listed_late(load: f64, lag_ms: f64) -> Run {
+    let mut b = Bench::new(EngineKind::Spaces, "[windows]\nmission_control_stages = \"key\"\n", load, 1, two_apps);
+    b.desk(|d| d.lists_moves_ms = Some(lag_ms));
+    b.mission_open();
+    b.advance(1500);
+    let out_while = b.on_a_desktop();
+    b.mission_close_by_key(None);
+    b.advance(8000);
+    let out = format!("in Mission Control {out_while:?}; after: {}", seen(&mut b));
+    Run::of(&b, out)
+}
+
+fn mission_control_at_the_key_moves_listed_40_ms_late(load: f64) -> Run {
+    mission_control_at_the_key_moves_listed_late(load, 40.0)
+}
+
+#[test]
+fn mission_control_at_the_key_with_late_listing() {
+    let all = "in Mission Control [11, 12]; after: front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(mission_control_at_the_key_moves_listed_40_ms_late, [all, all, all]);
+}
+
 #[test]
 fn mission_control() {
     // While it shows, the hidden stage's window is on its Desktop too (lent).
@@ -817,6 +844,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("Mission Control closed by its key over another app", "controller/mission_control.rs, mc-key", mission_control_key_close),
     ("the same with mission_control_key_keeps_stage", "controller/mission_control.rs, mc-key", mission_control_key_close_keeps_stage),
     ("Mission Control: a hidden stage's window picked", "engine/mission_control.rs, mc-pick 11-19", mission_control_pick),
+    ("Mission Control at the key, the parks' moves listed 40 ms late", "engine/mission_control.rs, the retries, live 11-22", mission_control_at_the_key_moves_listed_40_ms_late),
     ("a wallpaper click and Finder's echo", "engine/desktop_echo.rs, 11-09", wallpaper_click),
     ("Desktop keys between two known Desktops (Spaces)", "engine/slide_hold.rs, 10-23", desktop_keys_between_known_desktops),
     ("the first visit to a Desktop by its key (Spaces)", "engine/slide_hold.rs, 11-15", first_visit_to_a_desktop),

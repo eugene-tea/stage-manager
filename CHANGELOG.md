@@ -14,6 +14,8 @@
   stage at once, and a window set to show on all Desktops shows with every stage from the
   first Desktop change.
 - With `engine = "spaces"`, the app follows Mission Control and App Exposé closing at once.
+- With `engine = "spaces"` and `mission_control_stages = "key"`, Mission Control opened again
+  right after it closed shows every stage's windows; before, it could show the front stage only.
 - With `engine = "spaces"`, a hidden window that macOS brings on screen is hidden again at
   once; before, it came back up to two seconds later, or stayed on screen after three tries.
 - With `engine = "spaces"`, a window its app closes and opens again while its stage is hidden

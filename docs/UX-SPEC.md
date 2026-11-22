@@ -429,10 +429,18 @@ stage's windows, as Apple's Stage Manager does (a report, 11-18: under `engine =
 stage in front showed, a hidden stage's windows being on no Desktop).
 Under `engine = "spaces"` the hidden stages' windows of the Desktops shown are put on their
 Desktop while one of them shows, parked at their stages' cards first so that none shows at
-its frame; a window whose app does not move it within 50 ms stays hidden, and while Mission
-Control shows its park is asked again 60 ms later, up to three parks in all (10 of 51 opens,
-11-18 to 11-20, left one to five windows out; the log's `mission-control: a hidden window left
-hidden` lines say why and where each was listed after its park). They arrive all at
+its frame; a window not listed at its park (its app did not move it within 50 ms, or the
+window server lists the move later than the 20 ms a park's read back waits) stays hidden and
+is looked at again 60 ms later, then 120, 240 and 480 ms, five tries in all, until it is
+listed parked or Mission Control closes; a try that finds it parked asks its app nothing
+(10 of 51 opens, 11-18 to 11-20, left one to five windows out; the log's `mission-control: a
+hidden window left hidden` lines say why and where each was listed after its park, and the
+log summary's `PARK_RETRY` row how long a window listed late took). With
+`mission_control_stages = "key"` the round is made at the key, before Mission Control is
+seen, and its windows left hidden are tried the same way (11-22: Mission Control opened by
+its key 1 s after its close, six apps answered their parks in ~4 ms each, all six windows
+were still listed at their frames 20 ms later and none was tried again: Mission Control
+showed the front stage only). They arrive all at
 once, as Apple's do: every window is parked first, still hidden (the apps asked at once, one
 app's windows in turn, for up to 150 ms a round), then all of them go onto the Desktop in one
 window-server call per Desktop (one at a time they came one by one during the opening, 7
