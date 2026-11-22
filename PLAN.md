@@ -16,9 +16,9 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   - no `app activated … queued_ms` over 100 in the first two minutes, and if there is one, the
     `slow WM task` line names what held the thread
   - the `restore:` summary line
-- **A screen plugged in or out (one screen at a time too).** In that day's log, within the
-  minute after it: every `display: a hide while a screen gone is watched` line with
-  `mid_change: false` has `home` equal to `on` when `on` is set and nothing was kept, and no
+- **A screen plugged in or out (one screen at a time too), under the Spaces engine.** In
+  that day's log, within the minute after it: every `desktops: the model and the window
+  server disagree` line has its `... agree again` within about 10 s (`lasted_ms`), and no
   `window left this Space` follows a Dock click or ⌘Tab to another Desktop.
 - **Apple's, one screen at a time** (UX-SPEC, Screens): with the lid and the external screen,
   by hand.
@@ -26,6 +26,21 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   System Events (`osascript -e 'tell application "System Events" to count windows of every process'`). If
   any are listed, our quit fixed it: the menu line then says "Quit and reopen Stage Manager", and the bug
   is ours. If none are listed, lock and unlock the screen and count again.
+
+**By hand, with someone at the Mac:**
+
+- **The window server's notice for Mission Control opened without a key.** Notice 1508 was
+  measured for the shortcut only (UX-SPEC, "The window server's notices"). Open Mission
+  Control by a four-finger swipe, a hot corner and the Dock's item under the Spaces engine
+  and read `ctl state`'s `engine.notices` and the `mission-control:` lines: if 1508 comes for
+  each, the hidden stages' windows come at once whatever opened it, and MODES' "up to two
+  seconds later from a gesture, a hot corner or the Dock" goes.
+- **Which capture lights the screen-capture indicator** (`scripts/test-stages.sh
+  probe-system indicator`, a build with `--features probes`; it raises macOS's
+  screen-capture alert, so never unattended). Under the Spaces engine each window's look is
+  read from its shadow through ScreenCaptureKit about every 20 s per window in use and
+  after every switch; if the window server's own capture leaves the indicator off, read the
+  looks that way and keep ScreenCaptureKit for the windows it misses.
 
 ## 1.9: closer to Apple's feel
 
@@ -53,11 +68,8 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   scripts/test-stages.sh mission-probe` (it prints what each outcome means), then `mission`.
   Mission Control takes late windows: keep `"shown"`. Only windows there at the key: make
   `"key"` the default. Neither: `"off"`, and keep hidden windows on the Desktop another way.
-  Left after that: a faster sign for a gesture, a hot corner and the Dock's item (up to 2 s
-  at rest now, the shown line's `found_within_ms`; 11-20 07:49:14 no notice of the Dock's
-  came, observed since 07:48:20. To measure: whether the input monitor's global monitor gets
-  `NSEventType::Gesture`/`Swipe` events for a four-finger swipe up, and what one look at the
-  on-screen list costs at 4 Hz at rest, `measure_stages.py`); whether a window parked at
+  Left after that: whether a gesture, a hot corner and the Dock's item are found as fast as
+  the shortcut (the window server's notice 1508, below under "By hand"); whether a window parked at
   its card at the key (the real key, `"shown"`) and put home once Mission Control shows flies
   from its card (found at the listing it is laid out with no flight, 11-20; the key is heard
   now, by the HID tap: run `mission-probe` again); should the close show them at their cards, move them to the corner
@@ -99,6 +111,60 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
     and an app launch instead, if its auto-hide does not move it.
   - Measure on battery (Activity Monitor's Energy Impact, before and after) and write the
     numbers in UX-SPEC.
+
+## Under the hood: what the rework of 11-21 left
+
+Nothing here changes what a person asks for; each closes a way a slower Mac, or a rarer
+order of events, can still go wrong. The bench first, then the live suite
+(DEVELOPMENT, "The bench").
+
+- **A screen going with its Desktops kept (the rest of the Desktops design's slice 5).**
+  When a screen goes and macOS moves its Desktops to the screen left under the same ids, the
+  model still merges the gone screen's Desktop into the one shown there, and `spill`'s watch
+  and the clock sort out the rest. Left: `adopt_display` only reparents a screen's Desktops
+  while the listing decides (their Spaces, stages and bindings kept); `Model::desks_listed`
+  gives each bound Space the screen that lists its Desktop, the same call when the screen
+  comes back; a census once two looks read the same listing (every managed window the engine
+  does not hold asked for its Desktop, a stage whose windows all moved carried whole);
+  `spill::WATCH` only a cap on the brisk pace, ending when nothing names a gone screen; then
+  `handed_hidden`, `display_watch` and the model's two `EngineKind::Spaces` branches go.
+- **Desktops matched by uuid after a restart (slice 6).** The saved Desktops are matched
+  to the listing's by uuid instead of by their windows. Needs first: whether Space uuids last
+  over a logout and a reboot (each load logs how many saved uuids are listed now).
+- **The cover wait off the WM thread.** A switch still waits for the strip's answer with the
+  WM thread held (`COVER_TIMEOUT`, 150 ms), because five callers of `execute_animated` go on
+  as if its batch had run (an un-minimize's dive frame and un-minimize, a new window's
+  `let_new_out`, an activation's `lent_decided`, the tick's and the fast tick's later duties,
+  the next events of the same run). Each needs to become a continuation run at the cover's
+  end. On the bench at load 10 every animated switch lands with no pictures, and an app's
+  own activation inside the wait leaves its stage in front with the switch's app frontmost.
+- **A held focus against Accessibility's silence.** A focus held for its Desktop is dropped
+  after 6 s (`FOCUS_REPLAY_CAP`), but a silent Accessibility may hold the arrival for 10 s
+  (`AX_SILENT_MAX`), so the focus can be lost after an unlock. And an activation held while
+  a Desktop may slide is decided "here" after 500 ms with no Space change
+  (`SLIDE_ACTIVATION_HOLD`): the notice, measured 0.35-0.45 s after a Dock click, is past
+  that on a Mac three times slower.
+  Both want an end by the event, the time as a cap; the bench cannot yet make the observer
+  lose its windows as after an unlock.
+- **An app that reorders its windows late.** The raise-order check fixes the order and
+  watches it for 150 ms; an app whose answer lags 300 ms ends out of order at every load
+  (`CHECK_CAP` 400 ms; pinned on the bench, `an app reordering 300 ms late`).
+- **The launch watch's notice.** The window-created notice (811) never reached the app in a
+  normal run: it seems to come only for windows asked for one by one
+  (`SLSRequestNotificationsForWindows`), so the launch watch rests on its 4 ms read. Asking
+  for each new app's windows, or another sign, would let it rest.
+- **What still decides by time under the Accessibility engine.** The Desktop guess's settles
+  (`MIXED_WAIT`, `SPACE_SETTLE`, `FOREIGN_SETTLE`, `SPACE_CHECKS`, `BESIDE_ARRIVALS`,
+  `STICKY_HOPS`, `SLIDE_CARRY`) and the corner patch's 22 time values, mostly blind settles:
+  each to be ended by what it waits for where a read can say, its value a cap.
+- **The strip's switch machine.** `Running` carries a switch in 10 flags and 16 timers with
+  3 tests; one explicit state machine, tested on its own, in its place.
+- **One `wait_until` and one `Backoff`.** At least 16 hand-written "read until or deadline"
+  loops, 5 lock retries and 3 doubling backoffs, each its own; one helper each, on the
+  clock a test moves.
+- **The Apple mode's second screen and Reduce Motion, unmeasured.** Apple's answers and
+  motions were measured on one screen with Reduce Motion off (UX-SPEC, "Measured on
+  Apple's").
 
 ## 2.0: new features
 
