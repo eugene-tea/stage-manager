@@ -569,6 +569,22 @@ nothing.
   (`space_moves`), a second screen has Desktops of its own (`screen_comes_with`). Every
   scenario asserts that the shadow counted no disagreement on the Desktop shown.
 
+### A report from another Mac
+
+`ctl state` answers with window titles, so ask for four of its fields (and `log summary`)
+and read them together. `engine.notices` says whether the window server's notices reach the
+app there (`heard`, `silent`, `never_heard`): with none, every look waits for its poll.
+`margins` says which time values came near their limit and which waits ended by their cap,
+and `noticed` how often a notice beat the poll. `causes` says what the cause ledger still
+expects (`open`, `oldest_ms`): many or old expectations mean an app answers late or out of
+order, and its focus notices fall to the echo window. `desks` says whether the listing
+decides (`decides`) and whether the model and the window server agree on the Desktop shown
+and on each hidden window's Desktop (`disagree`: `open`, `longest_ms`, the counts begun).
+A value near its limit in the same minute as an open disagreement or an old expectation
+names the time value that decided wrong; capped waits with `silent` notices point at the
+poll, not the value; a disagreement with nothing near its limit is a fault of order, for the
+bench ("The bench", above).
+
 ## Configuration keys
 
 Every key is defined once, in `src/config/schema.rs`, with its type, range, default and a
