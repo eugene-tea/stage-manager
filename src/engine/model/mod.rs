@@ -33,7 +33,7 @@
 
 mod ahead;
 mod away;
-pub mod desks;
+pub(crate) mod desks;
 mod hidden;
 mod hiding;
 mod ops;

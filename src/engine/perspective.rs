@@ -3,7 +3,7 @@
 //! front of the screen at `eye`. Every far edge is shorter by `D / (D + u sin tilt)` and drawn
 //! toward the eye. Our strip draws with it (`ui::strip_layout`, measured on Apple's: the
 //! measurement record is `docs/UX-SPEC.md`, "Strip geometry"), and the Apple mode reads Apple's
-//! thumbnails with it ([`View::from_bounds`]: the window list lists a thumbnail at the bounding
+//! thumbnails with it ([`View::quad_of_bounds`]: the window list lists a thumbnail at the bounding
 //! box of its turned plane). Top-left coordinates, `y` grows down.
 
 use crate::engine::geometry::{Point, Rect};
@@ -91,7 +91,7 @@ impl View {
 
     /// The turned plane whose bounding box is `bounds` ([`View::plane_of`]), its corners as
     /// [`View::project`] gives them.
-    pub fn from_bounds(&self, bounds: Rect) -> Option<[Point; 4]> {
+    pub fn quad_of_bounds(&self, bounds: Rect) -> Option<[Point; 4]> {
         self.plane_of(bounds).map(|p| self.project(p.x, p.y, p.w, p.h))
     }
 }
@@ -166,7 +166,7 @@ mod tests {
         for (top, h) in [(266.0, 97.0), (660.0, 120.0), (900.0, 97.0)] {
             let q = v.project(16.0, top, 118.0, h);
             let b = quad_bounds(&q);
-            let back = v.from_bounds(b).expect("a plane fits");
+            let back = v.quad_of_bounds(b).expect("a plane fits");
             for (a, z) in q.iter().zip(back.iter()) {
                 assert!((a.x - z.x).abs() < 1e-6 && (a.y - z.y).abs() < 1e-6, "{q:?} vs {back:?}");
             }
@@ -202,7 +202,7 @@ mod tests {
     #[test]
     fn a_box_no_plane_fits_is_none() {
         let v = five_k();
-        assert_eq!(v.from_bounds(Rect::new(16.0, 266.0, 0.0, 110.0)), None);
-        assert_eq!(v.from_bounds(Rect::new(16.0, 266.0, 5000.0, 110.0)), None, "wider than any turned plane");
+        assert_eq!(v.quad_of_bounds(Rect::new(16.0, 266.0, 0.0, 110.0)), None);
+        assert_eq!(v.quad_of_bounds(Rect::new(16.0, 266.0, 5000.0, 110.0)), None, "wider than any turned plane");
     }
 }

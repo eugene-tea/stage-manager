@@ -493,7 +493,7 @@ pub fn judged(kind: Notice, id: i64, verdict: &'static str) {
 /// Test only: what the notices handled on this thread came to, in order (the bench reads it
 /// beside what a person would see).
 #[cfg(test)]
-pub mod trail {
+pub(crate) mod trail {
     use std::cell::RefCell;
 
     thread_local! {

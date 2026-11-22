@@ -22,16 +22,16 @@
 //! - **Where does a hide leave it?** This app never hides: the model's parked flag is what
 //!   Apple's strip holds, and the window's last frame is kept.
 
-pub mod cause;
-pub mod desk;
-pub mod follow;
-pub mod gate;
-pub mod job;
-pub mod mirror;
-pub mod plan;
-pub mod points;
-pub mod restore;
-pub mod screens;
+pub(crate) mod cause;
+pub(crate) mod desk;
+pub(crate) mod follow;
+pub(crate) mod gate;
+pub(crate) mod job;
+pub(crate) mod mirror;
+pub(crate) mod plan;
+pub(crate) mod points;
+pub(crate) mod restore;
+pub(crate) mod screens;
 #[cfg(test)]
 mod scenarios;
 

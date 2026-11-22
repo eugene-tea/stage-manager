@@ -18,7 +18,7 @@ use objc2_core_foundation::{
 use crate::engine::geometry::{Point, Rect, Size};
 
 /// Attribute, action and value names used by the app.
-pub mod names {
+pub(crate) mod names {
     pub const ROLE: &str = "AXRole";
     pub const SUBROLE: &str = "AXSubrole";
     pub const TITLE: &str = "AXTitle";
@@ -58,7 +58,7 @@ pub mod names {
 }
 
 /// AX notification names observed by the app.
-pub mod notifications {
+pub(crate) mod notifications {
     pub const WINDOW_CREATED: &str = "AXWindowCreated";
     pub const FOCUSED_WINDOW_CHANGED: &str = "AXFocusedWindowChanged";
     pub const APPLICATION_ACTIVATED: &str = "AXApplicationActivated";

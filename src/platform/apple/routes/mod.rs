@@ -3,11 +3,11 @@
 //! route ([`focus::Focus`]), the posted Shift-click ([`shift_click::ShiftClick`]) and drag
 //! ([`drag::Drag`]), and the routes tried and rejected, kept as tripwires ([`rejected`]).
 
-pub mod drag;
-pub mod focus;
+pub(crate) mod drag;
+pub(crate) mod focus;
 #[cfg(feature = "probes")]
-pub mod rejected;
-pub mod shift_click;
+pub(crate) mod rejected;
+pub(crate) mod shift_click;
 
 use serde::Serialize;
 

@@ -54,7 +54,7 @@ pub fn sleep(d: std::time::Duration) {
 
 /// The test clock: frozen per thread, moved by hand, restored when the guard drops.
 #[cfg(test)]
-pub mod test {
+pub(crate) mod test {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
 

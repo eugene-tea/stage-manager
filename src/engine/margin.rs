@@ -304,7 +304,7 @@ pub fn before(name: &'static str, since: Duration, ago: Duration) -> Duration {
 /// Test only: what this thread noted, kept apart from the process's table (tests run side by
 /// side): a scenario reads the time decisions its own run made, each with its verdict.
 #[cfg(test)]
-pub mod test {
+pub(crate) mod test {
     use super::End;
     use std::cell::RefCell;
     use std::time::Duration;

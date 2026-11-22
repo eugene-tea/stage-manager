@@ -7,6 +7,6 @@
 
 pub mod engine;
 pub(crate) mod ffi;
-pub mod launch_watch;
+pub(crate) mod launch_watch;
 pub mod notices;
-pub mod probe;
+pub(crate) mod probe;

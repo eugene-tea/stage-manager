@@ -11,13 +11,13 @@
 //! The level column also holds `COUNT` (the day's counters, [`counters`]) and `MARK` (a
 //! problem mark: a delimited block with a state dump and the last seconds of detailed lines).
 
-pub mod counters;
-pub mod retention;
-pub mod ring;
-pub mod summary;
-pub mod time;
-pub mod titles;
-pub mod writer;
+pub(crate) mod counters;
+pub(crate) mod retention;
+pub(crate) mod ring;
+pub(crate) mod summary;
+pub(crate) mod time;
+pub(crate) mod titles;
+pub(crate) mod writer;
 
 use time::Stamp;
 

@@ -351,7 +351,7 @@ impl AxNode {
 pub const MAX_ICONS: usize = 200;
 
 /// Accessibility roles in Finder's desktop tree.
-pub mod roles {
+pub(crate) mod roles {
     /// A display's desktop.
     pub const SCROLL_AREA: &str = "AXScrollArea";
     /// The desktop's icon view.

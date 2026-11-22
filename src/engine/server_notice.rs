@@ -236,6 +236,7 @@ impl Expected {
         self.asks.len()
     }
 
+    #[cfg(test)]
     /// True when none is.
     pub fn is_empty(&self) -> bool {
         self.asks.is_empty()

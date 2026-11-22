@@ -4,5 +4,5 @@
 //! what the controller keeps up around it on the WM thread is `controller/corner/`; bringing
 //! everything back is [`super::safety`].
 
-pub mod engine;
-pub mod sliver_tap;
+pub(crate) mod engine;
+pub(crate) mod sliver_tap;

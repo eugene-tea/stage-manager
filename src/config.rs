@@ -13,10 +13,10 @@
 //! the wrong type is an error, and a bad file keeps the previous config: at a reload the one
 //! in force, at launch the last good copy ([`last_good`]).
 
-pub mod edit;
-pub mod hotkey;
+pub(crate) mod edit;
+pub(crate) mod hotkey;
 pub mod last_good;
-pub mod schema;
+pub(crate) mod schema;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -1231,7 +1231,7 @@ pub fn config_dir() -> Option<PathBuf> {
 /// folder, never in the real one and never through the process's environment (tests run
 /// side by side).
 #[cfg(test)]
-pub mod test_home {
+pub(crate) mod test_home {
     use std::cell::RefCell;
     use std::path::PathBuf;
 

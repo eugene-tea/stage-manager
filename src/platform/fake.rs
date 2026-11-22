@@ -46,7 +46,7 @@ use crate::ui::strip_model::{Cover, StripEvent, StripSnapshot};
 
 /// The base delay of each notice kind, in milliseconds, as measured (each line names where);
 /// the desk multiplies them by its load factor.
-pub mod delays {
+pub(crate) mod delays {
     /// Our `AXMain` on a window to its app's `AXFocusedWindowChanged` (an idle app answers
     /// within a frame or two; `engine/causes.rs`).
     pub const FOCUS: f64 = 15.0;

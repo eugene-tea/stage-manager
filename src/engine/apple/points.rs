@@ -76,7 +76,7 @@ impl Over {
     /// when no plane fits it: all of it), an icon's drawn part, a window's bounds.
     fn drawn(&self, view: &View) -> [Point; 4] {
         match *self {
-            Over::Thumb(r) => view.from_bounds(r).map_or_else(|| perspective::rect_quad(r), |q| perspective::grown(&q, HOVER)),
+            Over::Thumb(r) => view.quad_of_bounds(r).map_or_else(|| perspective::rect_quad(r), |q| perspective::grown(&q, HOVER)),
             Over::Icon(r) => perspective::rect_quad(icon_drawn(r)),
             Over::Window(r) => perspective::rect_quad(r),
         }
@@ -93,7 +93,7 @@ const STEP: f64 = 1.0;
 /// fits the box.
 pub fn visible_point(thumb: Rect, over: &[Over], screen: &Display) -> Option<Point> {
     let view = View::apples(screen.visible, screen.frame.center().y);
-    let own = view.from_bounds(thumb)?;
+    let own = view.quad_of_bounds(thumb)?;
     let area = perspective::quad_bounds(&own).intersect(&screen.frame)?;
     let screen_q = perspective::rect_quad(screen.frame);
     let near = Rect::new(area.x - CLEAR, area.y - CLEAR, area.w + 2.0 * CLEAR, area.h + 2.0 * CLEAR);
@@ -212,7 +212,7 @@ mod tests {
 
     /// The thumbnail's drawn plane (the model's, turned back from its box).
     fn plane(thumb: Rect, d: &Display) -> [Point; 4] {
-        View::apples(d.visible, d.frame.center().y).from_bounds(thumb).expect("a plane fits")
+        View::apples(d.visible, d.frame.center().y).quad_of_bounds(thumb).expect("a plane fits")
     }
 
     /// `p` lies `INSIDE` deep in `thumb`'s plane and `CLEAR` off what `over` draws.
