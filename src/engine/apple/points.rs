@@ -71,12 +71,6 @@ pub enum Over {
 }
 
 impl Over {
-    /// Its listed bounds.
-    pub fn bounds(&self) -> Rect {
-        match *self {
-            Over::Thumb(r) | Over::Icon(r) | Over::Window(r) => r,
-        }
-    }
 
     /// What of it covers, as a quadrilateral: a thumbnail's plane grown by [`HOVER`] (its box
     /// when no plane fits it: all of it), an icon's drawn part, a window's bounds.

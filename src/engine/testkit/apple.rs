@@ -39,7 +39,6 @@ use std::time::{Duration, Instant};
 use crate::engine::apple::desk::{AppleDesk, InputNow, Landed, Posted, press_lands};
 use crate::engine::apple::mirror::{Item, Listed, ListedWindow, Reading};
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::model::Display;
 
 /// WindowManager's pid in the fake.
 pub const MANAGER: i32 = 99;
@@ -738,11 +737,14 @@ impl FakeWindowManager {
     }
 }
 
-impl AppleDesk for FakeWindowManager {
-    fn strip(&mut self, _display: &Display) -> Option<Reading> {
-        Some(self.reading())
+impl FakeWindowManager {
+    /// How the last gesture ended, once it has (taken: asked again, `None`).
+    pub fn landed(&mut self) -> Option<Landed> {
+        self.landed.take()
     }
+}
 
+impl AppleDesk for FakeWindowManager {
     fn listed(&mut self) -> Listed {
         FakeWindowManager::listed(self)
     }
@@ -771,10 +773,6 @@ impl AppleDesk for FakeWindowManager {
         let landed = self.answer(posted);
         self.landed = Some(landed);
         Ok(())
-    }
-
-    fn landed(&mut self) -> Option<Landed> {
-        self.landed.take()
     }
 
     fn unhide(&mut self, pid: i32) -> Result<(), String> {

@@ -434,11 +434,6 @@ impl Arrangement {
         self.away.iter().any(|(_, g)| g.windows.contains(&id)).then_some((Where::Away, None))
     }
 
-    /// True when window `id` is in a group of a Desktop not shown.
-    pub fn is_away(&self, id: u32) -> bool {
-        matches!(self.where_is(id), Some((Where::Away, _)))
-    }
-
     /// The Desktop shown is left (a Desktop change, a full-screen app's Space coming or
     /// going): every group known goes away with this change, and the arrangement counts in
     /// motion until the list shows a change ([`Arrangement::stirred`]). The next reads out of motion find the groups of the Desktop
@@ -538,11 +533,6 @@ impl Arrangement {
         Expect { effect, since, cap, step, based: step, marks: self.marks.clone(), front: self.front.clone(), seen: self.seen.clone() }
     }
 
-    /// When the next read is due after this one: soon while in motion or not yet settled,
-    /// at rest otherwise.
-    pub fn next_read(&self) -> Duration {
-        if self.in_motion || !self.settled { MOTION_READ } else { REST_READ }
-    }
 }
 
 /// True when `a` and `b` are the same bounds within [`SAME`] on every side.

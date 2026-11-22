@@ -722,7 +722,7 @@ impl AppleController {
             self.manager = super::strip_ax::manager_pid();
             self.manager_checked = Some(now);
         }
-        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame), displays: &self.displays };
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
         let listed = desk.listed();
         let spaces = if with_ax { desk.strips() } else { None };
         let managed: BTreeSet<u32> = managed(ob, &listed);
@@ -905,7 +905,7 @@ impl AppleController {
         let Some(job) = self.jobs.front_mut() else { return };
         let screen = job.screen.and_then(|id| self.displays.iter().find(|d| d.id == id).copied()).unwrap_or(main);
         let mirror = if screen.id == main.id { &self.mirror } else { self.others.get(&screen.id).unwrap_or(&self.mirror) };
-        let mut desk = Desk { ob, manager: self.manager, screen: Some(main.frame), displays: &self.displays };
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(main.frame) };
         let cx = Ctx { mirror, input: desk.input(), screen: &screen, pids: &self.pids, in_flight: post::in_flight() || self.posting.is_some() };
         let next = job.advance(&cx, now);
         // A press waiting on a thumbnail that shows no part of its own: what covers it, and
@@ -1025,7 +1025,7 @@ impl AppleController {
     /// Runs `step` through its route now; the mirror expects Apple's answer from here (a
     /// drag's once it landed, [`Self::gesture_landed`]).
     fn run_step(&mut self, ob: &Observer, screen: &Display, step: &Step, now: Instant) -> Result<(), String> {
-        let mut desk = Desk { ob, manager: self.manager, screen: self.screen().map(|d| d.frame), displays: &self.displays };
+        let mut desk = Desk { ob, manager: self.manager, screen: self.screen().map(|d| d.frame) };
         let route: &dyn Route = match step {
             Step::Focus(_) => &Focus,
             Step::Post(Posted::Clicks { .. }) => &ShiftClick,
@@ -1216,7 +1216,7 @@ impl AppleController {
         let Some(screen) = self.screen() else { return json!({ "ok": false, "error": "no screen yet" }) };
         let Some(manager) = self.manager else { return json!({ "ok": false, "error": "WindowManager is not running" }) };
         let now = clock::now();
-        let mut desk = Desk { ob, manager: Some(manager), screen: Some(screen.frame), displays: &self.displays };
+        let mut desk = Desk { ob, manager: Some(manager), screen: Some(screen.frame) };
         let input = desk.input();
         let point = |w: u32| self.mirror.click_at.get(&w).copied().ok_or(format!("window {w}'s thumbnail shows no part of its own"));
         let t0 = clock::now();

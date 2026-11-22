@@ -95,6 +95,7 @@ fn strip_of(space: &AxElement) -> AxResult<Reading> {
     Ok(Reading::default())
 }
 
+#[cfg(feature = "probes")]
 /// Performs Accessibility action `action` on the item of the main screen's strip of
 /// WindowManager `pid` whose `AXWindowsIDs` hold window `window` (the tripwires only:
 /// `AXPress`, `AXAddToStage` returned success and did nothing on 11-16).

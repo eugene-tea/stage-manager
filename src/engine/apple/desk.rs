@@ -6,9 +6,8 @@
 
 use serde::Serialize;
 
-use super::mirror::{Listed, ListedWindow, Reading};
+use super::mirror::{Listed, ListedWindow};
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::model::Display;
 
 /// The user's input as it stands, for the gate a posted step waits on
 /// ([`super::gate`]): a posted click never fights the user. The keys and the pointer are the
@@ -32,6 +31,7 @@ pub struct InputNow {
 }
 
 impl InputNow {
+    #[cfg(test)]
     /// The person idle: nothing held, the pointer and the keys still for a second.
     pub fn idle() -> Self {
         Self { pointer_still_ms: 1000, key_idle_ms: 1000, ..Self::default() }
@@ -146,9 +146,6 @@ pub enum Landed {
 
 /// The desk the Apple mode reads and acts on.
 pub trait AppleDesk {
-    /// Screen `display`'s strip as WindowManager's Accessibility shows it now; `None` when it
-    /// cannot be read (WindowManager not running, no answer).
-    fn strip(&mut self, display: &Display) -> Option<Reading>;
     /// The window server's list now.
     fn listed(&mut self) -> Listed;
     /// The user's input as it stands.
@@ -157,10 +154,8 @@ pub trait AppleDesk {
     /// switches to its stage.
     fn focus(&mut self, window: u32) -> Result<(), String>;
     /// Starts a gesture: `Ok` once it is under way (the real desk posts it on a thread of
-    /// its own; how it ended comes from [`AppleDesk::landed`]), `Err` when it cannot start.
+    /// its own; the platform takes how it ended), `Err` when it cannot start.
     fn post(&mut self, posted: &Posted) -> Result<(), String>;
-    /// How the last gesture ended, once it has (taken: asked again, `None`).
-    fn landed(&mut self) -> Option<Landed>;
     /// App `pid` shown again without activating it (hidden by us at its activation): Apple's
     /// puts the window it reopened meanwhile into the strip.
     fn unhide(&mut self, pid: i32) -> Result<(), String>;
