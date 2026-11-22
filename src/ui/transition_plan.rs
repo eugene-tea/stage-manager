@@ -33,6 +33,7 @@ use crate::ui::strip_model::{CardWindow, MovingWindow, Transition};
 /// The strip's cards as slots: (stage, its windows), top to bottom.
 pub type Slots = Vec<(u64, Vec<u32>)>;
 
+#[cfg(test)]
 /// The cards of the main display's strip, as [`Slots`].
 pub fn slots_of(m: &Model) -> Slots {
     slots_on(m, m.main_display().id)
@@ -225,6 +226,7 @@ pub struct Skipped {
 }
 
 impl Skipped {
+    #[cfg(test)]
     /// True when nothing was taken out (no incoming window was already shown).
     pub fn is_empty(&self) -> bool {
         self.shown.is_empty()
@@ -259,6 +261,7 @@ pub fn order(slots: &[(u64, Vec<u32>)]) -> Vec<u64> {
     slots.iter().map(|s| s.0).collect()
 }
 
+#[cfg(test)]
 /// The cards in both `before` and `after` whose slot changed: (stage, slot before, slot
 /// after). The strip glides them on its spring (`[motion] spring_*`).
 pub fn glides(before: &[(u64, Vec<u32>)], after: &[(u64, Vec<u32>)]) -> Vec<(u64, usize, usize)> {

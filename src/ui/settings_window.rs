@@ -875,6 +875,7 @@ pub fn show(mtm: MainThreadMarker, values: SettingsValues, pane: Pane, on_change
     form::bring_to_front(mtm, &window);
 }
 
+#[cfg(feature = "probes")]
 /// Creates the window (not shown) on `pane` with its change handler; the preview draws it.
 pub fn show_with_handler(mtm: MainThreadMarker, values: SettingsValues, pane: Pane, on_change: impl Fn(Change) + 'static) -> Retained<NSWindow> {
     HANDLER.with(|h| *h.borrow_mut() = Some(Rc::new(on_change)));

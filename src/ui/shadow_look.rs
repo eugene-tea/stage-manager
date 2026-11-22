@@ -340,6 +340,7 @@ impl LookCache {
         e.look.map(|l| (l, (now - e.at).max(0.0)))
     }
 
+    #[cfg(test)]
     /// Forgets window `id` (closed).
     pub fn forget(&mut self, id: u32) {
         self.entries.remove(&id);

@@ -8,7 +8,7 @@ use objc2::{AnyThread, Message};
 use objc2_app_kit::{
     NSAboutPanelOptionApplicationName, NSAboutPanelOptionApplicationVersion, NSAboutPanelOptionCredits,
     NSAboutPanelOptionVersion, NSApplication, NSColor, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSLinkAttributeName, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSTextAlignment, NSWindow,
+    NSLinkAttributeName, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSTextAlignment,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSBundle, NSDictionary, NSMutableAttributedString, NSString, NSURL,
@@ -94,9 +94,10 @@ pub fn show(mtm: MainThreadMarker) {
     unsafe { app.orderFrontStandardAboutPanelWithOptions(&options()) };
 }
 
+#[cfg(feature = "probes")]
 /// Shows the panel and returns its window (the window that was not there before), for the
 /// preview's render.
-pub fn show_and_find(mtm: MainThreadMarker) -> Option<Retained<NSWindow>> {
+pub fn show_and_find(mtm: MainThreadMarker) -> Option<Retained<objc2_app_kit::NSWindow>> {
     let app = NSApplication::sharedApplication(mtm);
     let before: Vec<usize> = app.windows().iter().map(|w| Retained::as_ptr(&w) as usize).collect();
     // SAFETY: as in `show`.

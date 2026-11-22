@@ -169,6 +169,7 @@ impl WindowShadow {
         rim: InnerRim { width: 1.0, white: 0.08 },
     };
 
+    #[cfg(test)]
     /// No shadow.
     pub const NONE: WindowShadow = WindowShadow { line: Hairline::NONE, parts: [ShadowPart::NONE; 2], rim: InnerRim::NONE };
 
@@ -199,6 +200,7 @@ impl WindowShadow {
         self.parts.iter().filter(|p| p.opacity > 0.0).map(|p| 3.5 * p.blur + p.offset_y.abs() + p.spread.max(0.0)).fold(self.line.reach(), f64::max).ceil() + 1.0
     }
 
+    #[cfg(test)]
     /// The same shadow with every part's opacity times `k`.
     pub fn scaled(&self, k: f64) -> WindowShadow {
         let mut s = *self;
@@ -283,6 +285,7 @@ pub fn window_inset(r: f64, dy: f64) -> f64 {
     base + a * r * (std::f64::consts::PI * (u - u0) / (u1 - u0)).sin().powi(2)
 }
 
+#[cfg(any(test, feature = "probes"))]
 /// How far in along the diagonal a continuous corner of radius 1 is (its arc's middle).
 pub const DIAGONAL_INSET: f64 = 0.291_5;
 
@@ -552,6 +555,7 @@ pub fn render_rim(shadow: &WindowShadow, corner: f64, scale: f64) -> NinePart {
     NinePart { bytes, w: n, h: n, scale, extent: 0.0, slice: [mid, mid, one, one] }
 }
 
+#[cfg(test)]
 /// The alpha (0-1) a nine-part image shows at `(x, y)` points from the window's top-left,
 /// stretched around a window of `size` points as Core Animation stretches it (the middle
 /// slice stretched, the rest at its size). For tests and the probe.
@@ -576,6 +580,7 @@ pub fn nine_part_at(img: &NinePart, size: (f64, f64), x: f64, y: f64) -> f64 {
     f64::from(img.bytes[(py as usize * img.w + px as usize) * 4 + 3]) / 255.0
 }
 
+#[cfg(any(test, feature = "probes"))]
 /// A window's corner radius from its picture: `inset` points along the diagonal from the
 /// corner to the first half-opaque pixel, a continuous corner's arc being [`DIAGONAL_INSET`]
 /// radii in there. Bounded to 0..=40 pt.
@@ -608,6 +613,7 @@ pub fn handover(at: f64, spread: f64) -> (f64, f64) {
     if begin >= 0.0 { (begin, spread.max(0.0)) } else { (0.0, (at + spread / 2.0).max(0.0)) }
 }
 
+#[cfg(test)]
 /// The snapshot's shadow (0-1 of full) at time `t` of a fade from 1 to 0 that begins at
 /// `begin` and lasts `duration`, linear.
 pub fn fade_out(t: f64, begin: f64, duration: f64) -> f64 {
@@ -620,6 +626,7 @@ pub fn fade_out(t: f64, begin: f64, duration: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
 /// How far the shadow on screen is from the window's own (alpha `a` at a point) at time `t`
 /// of an incoming handover, when the window's shadow shows from `shown` on and the snapshot's
 /// fades as [`fade_out`]: positive is darker. Before the window shows, the snapshot's `f a`
@@ -665,6 +672,7 @@ pub fn rim_scale(plane: (f64, f64), window: (f64, f64)) -> (f64, f64) {
     (ratio(plane.0, window.0), ratio(plane.1, window.1))
 }
 
+#[cfg(test)]
 /// The shadow's amount (0 at a card, 1 at the window) for a plane `progress` of the way from
 /// `from` to `to` on the switch's spring: the same curve as the plane's motion.
 pub fn amount_at(from: f64, to: f64, progress: f64) -> f64 {

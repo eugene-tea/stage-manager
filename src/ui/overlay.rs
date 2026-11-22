@@ -189,8 +189,6 @@ pub struct CardShadow {
 }
 
 impl CardShadow {
-    /// No shadow.
-    pub const NONE: CardShadow = CardShadow { color: (0.0, 0.0, 0.0, 1.0), opacity: 0.0, radius: 0.0, offset: (0.0, 0.0) };
 }
 
 /// How a snapshot's shadow looks: the window's at full size, the card's on a card, and how
@@ -935,11 +933,6 @@ impl Overlay {
         self.origin
     }
 
-    /// Shows the overlay (above every normal window, on the active Space).
-    pub fn show(&mut self) {
-        self.show_under(None);
-    }
-
     /// Shows the overlay just under window `under` (another app's, at the normal level), so
     /// snapshots pass behind a window already in place, as Apple's do behind a window just
     /// opened or activated; `None`: above every normal window.
@@ -1120,11 +1113,6 @@ impl Overlay {
             side.panel.orderOut(None);
             side.panel.close();
         }
-    }
-
-    /// True when a side panel is keyed `key`.
-    pub fn has_side(&self, key: u32) -> bool {
-        self.sides.iter().any(|s| s.key == key)
     }
 
     /// Orders each side panel where it goes ([`order_plan`]), front first: under its window

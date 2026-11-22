@@ -56,6 +56,7 @@ pub struct Glass {
 }
 
 impl Glass {
+    #[cfg(any(test, feature = "probes"))]
     /// Apple's, as fitted (module notes).
     pub const APPLE: Glass = Glass { opacity: 0.78, hover_opacity: 1.0, saturation: 0.95, brightness: 0.78 };
 
@@ -88,6 +89,7 @@ impl Glass {
         mean.map(|c| (self.brightness * (self.saturation * c + (1.0 - self.saturation) * y)).clamp(0.0, 1.0))
     }
 
+    #[cfg(test)]
     /// What a card shows where the picture is `page` (opaque) over `under`.
     pub fn card(&self, page: [f64; 3], under: [f64; 3]) -> [f64; 3] {
         let a = self.opacity.clamp(0.0, 1.0);
@@ -109,6 +111,7 @@ pub fn ghost_mix(amount: f64, card_opacity: f64) -> (f64, f64) {
     (1.0 - t * (1.0 - card_opacity.clamp(0.0, 1.0)), t)
 }
 
+#[cfg(test)]
 /// What a card of picture opacity `a` shows over a black page and a white one say about it:
 /// `(a, under)`, from the two colours read (0–1). `None` when the two are no blend (white not
 /// above black).
