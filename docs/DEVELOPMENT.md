@@ -216,22 +216,76 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 
 ## Environment variables
 
-| Variable | Effect |
-|---|---|
-| `RUST_LOG` | log filter; overrides `[log] level` |
-| `STAGE_MANAGER_HOME` | one directory for the config, saved state, the ctl socket and the log |
-| `STAGE_MANAGER_LOG_DIR` | the daily logs' directory alone |
-| `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: manage only these apps |
-| `STAGE_MANAGER_NO_PROMPT` | no welcome window, permission prompts or automatic update checks |
-| `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item or the launchd agent |
-| `STAGE_MANAGER_NO_CAPTURE` | window captures off, whatever the config says |
-| `STAGE_MANAGER_TEST` | enables the test-only `ctl debug-*` commands |
-| `STAGE_MANAGER_TEST_REOPEN_LIST` | with `STAGE_MANAGER_TEST` only: the copy joins the reopen list at a logout (turns regular) without a login item, as the live suite's restore phase checks |
-| `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | with `STAGE_MANAGER_ONLY` set only: activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
-| `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
-| `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
-| `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only: `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
-| `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` (the stand-down), `scripts/test_apple.py` (the Apple mode: `mirror`, `switch`) and `scripts/probe_apple.py` toggle Apple's Stage Manager (each restores the setting on exit) |
+Every `STAGE_MANAGER_*` and `SM_*` variable the app or the scripts read. Three different
+switches each mean "a test run", and a test switch is honoured only with its gate set:
+
+- **`TEST`**: `STAGE_MANAGER_TEST` is set (the `ctl debug-*` commands and the switches below
+  marked so);
+- **`ONLY`**: `STAGE_MANAGER_ONLY` is set (a run on fixture apps);
+- **`ONLY`/`HOME`**: `STAGE_MANAGER_ONLY` or `STAGE_MANAGER_HOME` is set.
+
+The installed app is never started with any of them, so none acts on a user's copy (but see
+`STAGE_MANAGER_LANDING`). The three stay apart for now.
+
+### The app
+
+| Variable | Test only | Effect |
+|---|---|---|
+| `RUST_LOG` | no | log filter; overrides `[log] level` |
+| `STAGE_MANAGER_HOME` | no | one directory for the config, saved state, the ctl socket and the log; also counts as a test run for `NO_CAPTURE` and for the activation policy (`ui/shell.rs`) |
+| `STAGE_MANAGER_LOG_DIR` | no | the daily logs' directory alone |
+| `STAGE_MANAGER_ONLY` | no | comma-separated bundle IDs: manage only these apps; the gate of the `ONLY` switches |
+| `STAGE_MANAGER_NO_PROMPT` | no | no welcome window, permission prompts or automatic update checks |
+| `STAGE_MANAGER_NO_LOGIN_ITEM` | no | never register or unregister the login item or the launchd agent |
+| `STAGE_MANAGER_TEST` | yes | enables the test-only `ctl debug-*` commands; the gate of the `TEST` switches |
+| `STAGE_MANAGER_NO_CAPTURE` | yes, `ONLY`/`HOME` | window captures off, whatever the config says |
+| `STAGE_MANAGER_ENGINE` | yes, `ONLY` | `spaces`: the Spaces window engine, whatever the config says (`SM_ENGINE` sets it) |
+| `STAGE_MANAGER_PROBE_FAIL` | yes, `ONLY` | `hide` or `show`: that step of the Spaces engine's launch probe is not sent, as on a Mac that refuses it |
+| `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | yes, `ONLY` | activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
+| `STAGE_MANAGER_CAPTURE_SCK` | yes, `ONLY` | every window picture through ScreenCaptureKit, the window server's own source off (as before 1.9) |
+| `STAGE_MANAGER_LANDING` | `ONLY`, or any run under `[windows] engine = "spaces"` | the landing variant: `pictures` (the default), `ordered`, `live`, `live-early`, `live-late` (`ui/landing_math.rs`; the only test switch a user's config can open) |
+| `STAGE_MANAGER_LANDING_LEVEL` | as `STAGE_MANAGER_LANDING` | `ranked`: the live landing's windows get levels by rank instead of as made |
+| `STAGE_MANAGER_TEST_REOPEN_LIST` | yes, `TEST` | the copy joins the reopen list at a logout (turns regular) without a login item, as the live suite's restore phase checks |
+| `STAGE_MANAGER_SESSION` | yes, `TEST` | the window server session the app takes itself to run in: a restart simulated without restarting the Mac |
+| `STAGE_MANAGER_LOGOUT_NOTE` | yes, `TEST` | the logout signals are this one distributed notification only (the live suite posts it) |
+| `STAGE_MANAGER_DROP_AX_DESTROYED` | yes, `TEST` | Accessibility's destroyed notifications ignored, as from an app that sends none: a closed window leaves through the sweep alone |
+| `STAGE_MANAGER_COVER` | yes, `TEST` | `desktop`: a switch's cover is always the desktop's still, kept fresh |
+| `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only | the update check offers this version instead of asking GitHub |
+| `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only | an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
+| `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only | `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
+| `STAGE_MANAGER_THUMBNAIL_MS` | `strip-demo` only | the demo's capture interval |
+| `STAGE_MANAGER_DEMO_LAYOUT` | `strip-demo` only | `chunks`: each app's windows in stages of 1, 2, 3 (default `native`, one stage per app) |
+| `STAGE_MANAGER_DEMO_NUMBERS` | `strip-demo` only | `1`: number badges on the cards |
+| `STAGE_MANAGER_DEMO_AUTOHIDE` | `strip-demo` only | `0` or `1`: overrides Apple's `AutoHide` |
+| `STAGE_MANAGER_DEMO_MOTION` | `strip-demo` only | `1`: a card click plays the switch animation over the real windows |
+| `STAGE_MANAGER_DEMO_FAKE` | `strip-demo` with `--features debug-render` | `<bundle id>:<w>x<h>;…` stands in for the window list |
+| `STAGE_MANAGER_DEMO_SCREEN` | `strip-demo` with `--features debug-render` | `<w>x<h>+<menu bar>`: the screen the render draws for |
+| `STAGE_MANAGER_DEMO_RENDER` | `strip-demo` with `--features debug-render` | draws the strip offscreen into this file (raw BGRA) and quits |
+
+### The scripts (all test only)
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `SM_APP`, `SM_BIN` | `scripts/bundle.sh` | the bundle to assemble and the binary to put in it (default `target/Stage Manager.app`, `target/release/stage-manager`) |
+| `SM_DEV_APP` | `scripts/dev-app.sh`, `test_stages.py` | where the dev copy goes and runs from (`make install` points it at `~/Applications`) |
+| `SM_FIXTURE_ID` | `test-stages.sh`, `measure.sh`, `test_stages.py` | the main fixture's bundle id |
+| `SM_ENGINE` | `test-stages.sh`, `test_stages.py`, `measure_stages.py` | `spaces` runs the suite under the Spaces engine (sets `STAGE_MANAGER_ENGINE`); default the Corner engine |
+| `SM_SCREENSHOTS` | `test_stages.py` | a folder: turns on the visible phase's strip screenshots |
+| `SM_SHOTS` | `test_stages.py`, `test_spaces.py` | a folder: turns on `spaces --auto`'s by-eye screenshots and the Mission Control pixel checks |
+| `SM_PIXELS` | `test_stages.py` | turns on the checks read back from the overlay's pixels |
+| `SM_OVERLAY_TRACE` | `test_stages.py` | prints each overlay read back's time and answer |
+| `SM_SKIP_LANDING` | `test_stages.py` | skips the landing blend check |
+| `SM_STILL_CLICK` | `test_stages.py` | `1`: runs the desktop still's icon click with "Click wallpaper to reveal desktop" on |
+| `SM_LAUNCHES` | `test_stages.py`, `measure_stages.py` | how many launches the launch phase makes (20; the measure's 10) |
+| `SM_LANDING_SWITCHES`, `SM_LANDING_MID_S`, `SM_LANDING_ORDER_SWITCHES`, `SM_LANDING_MERGE_ROUNDS` | `test_stages.py` | the landing phases' switches (12), the abort's moment (0.5 s), the order phase's and the merge phase's rounds (4 each) |
+| `SM_AUTO` | `test_spaces.py` | `1`: the Spaces check hands-free, as `--auto` |
+| `SM_DOCK_REPEATS` | `test_spaces.py` | how many Dock arrivals `spaces --auto` makes (3) |
+| `SM_CMDTAB_ONLY` | `test_spaces.py` | `N`: the ⌘Tab steps alone, N times |
+| `SM_DISPLAY_GONE_WATCH` | `test_display_gone.py` | how long the watch after a display goes lasts (65 s) |
+| `SM_TEST_TOGGLE_APPLE_SM` | `test-apple-stage-manager.sh`, `test_apple.py`, `probe_apple.py`, `probe_press_quad.py` | `1` lets the script toggle Apple's Stage Manager (each restores the setting on exit) |
+| `SM_PROBE_DOCK_CLICK` | `probe_apple.py` | `real`: a real click on the Dock item instead of `AXPress` |
+| `SM_STAGES`, `SM_SETTLE_S`, `SM_REST_S`, `SM_SWITCHES`, `SM_SWITCH_CPU_S`, `SM_SWITCH_WAYS`, `SM_HIDDEN_ROUNDS`, `SM_HIDDEN_S`, `SM_AFTER_S` | `measure_stages.py` | the measure's stages (4), settle (10 s), rest (60 s), switches (20), CPU window per switch (1.5 s), switch ways (`card dock`), hidden rounds (8) and length (5 s), and the watch after (1.5 s) |
+| `SM_CAPTURE` | `measure_stages.py` | `0`: the app runs with captures off (`STAGE_MANAGER_NO_CAPTURE`) |
 
 ## The ctl socket
 
