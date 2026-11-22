@@ -174,6 +174,22 @@ fn level_mode() -> LevelMode {
 }
 
 impl SpacesEngine {
+    /// True once a stretch was begun in this run (the live landing on): before, the
+    /// stretches are empty and the hides, shows, lends and rounds go on without their lock.
+    pub(super) fn any_stretch(&self) -> bool {
+        self.stretch_begun.load(Ordering::Acquire)
+    }
+
+    /// The stretches' window ids for a caller that is not a stretch's own thread (a round of
+    /// lends): none without asking the lock while no stretch was ever begun; `None` when the
+    /// lock stays busy ([`Self::stretches_within`]).
+    pub(super) fn stretch_ids_within(&self, what: &str) -> Option<Vec<u32>> {
+        if !self.any_stretch() {
+            return Some(Vec::new());
+        }
+        self.stretches_within(what).map(|l| l.keys().copied().collect())
+    }
+
     /// The stretches, behind their own lock (taken before the state's when both are, never
     /// the other way).
     pub(super) fn stretches(&self) -> MutexGuard<'_, BTreeMap<u32, Fly>> {
@@ -270,6 +286,9 @@ impl SpacesEngine {
         if s.steps.is_empty() || !self.holds(s.window) || self.lent(s.window) || self.state().parked.contains_key(&s.window) || self.sky().is_none() {
             return false;
         }
+        // Before the lock: a hide or show that reads it unset finds no stretch, as it would
+        // have under the lock before this insert.
+        self.stretch_begun.store(true, Ordering::Release);
         {
             let Some(mut l) = self.stretches_within("a stretch planned") else { return false };
             if l.contains_key(&s.window) {
@@ -521,6 +540,9 @@ impl SpacesEngine {
     /// stretches stuck ([`Self::stretches_within`]) nothing is held, and a hide is told
     /// [`UNKNOWN_SPACE`] so that it takes the window out of every Space all the same.
     pub(super) fn stop_stretch(&self, id: u32, flying_too: bool) -> (Option<MutexGuard<'_, BTreeMap<u32, Fly>>>, Option<u64>) {
+        if !self.any_stretch() {
+            return (None, None);
+        }
         let Some(mut l) = self.stretches_within(if flying_too { "a hide" } else { "a show" }) else {
             return (None, flying_too.then_some(UNKNOWN_SPACE));
         };
@@ -542,11 +564,14 @@ impl SpacesEngine {
     /// True while window `id` has a stretch planned or flying that has not stopped: until it
     /// lands it is in its stage Space or its landing Space, on no Desktop for macOS.
     pub(super) fn in_flight(&self, id: u32) -> bool {
-        self.stretches_within("a window's Desktop asked").is_some_and(|l| l.get(&id).is_some_and(|f| !f.stop && !f.ended))
+        self.any_stretch() && self.stretches_within("a window's Desktop asked").is_some_and(|l| l.get(&id).is_some_and(|f| !f.stop && !f.ended))
     }
 
     /// Window `id`'s stretch, when one not taken over yet is no longer wanted.
     pub(super) fn cancel(&self, id: u32) {
+        if !self.any_stretch() {
+            return;
+        }
         let Some(mut l) = self.stretches_within("a stretch cancelled") else { return };
         if let Some(f) = l.get_mut(&id).filter(|f| f.phase == Phase::Waiting) {
             f.stop = true;
@@ -558,6 +583,9 @@ impl SpacesEngine {
     /// stretches stay busy past [`END_WAIT`] (the Spaces are classic: a process that dies
     /// puts their windows back by itself).
     pub(super) fn end_stretches(&self, why: &str) {
+        if !self.any_stretch() {
+            return;
+        }
         let by = clock::now() + END_WAIT;
         let mut l = loop {
             match self.stretches.try_lock() {
@@ -611,6 +639,8 @@ mod tests {
             state: std::sync::Mutex::new(super::super::State::default()),
             stretches: std::sync::Mutex::new(BTreeMap::new()),
             stretches_busy: std::sync::atomic::AtomicBool::new(false),
+            // The tests below put their stretches in the map by hand.
+            stretch_begun: std::sync::atomic::AtomicBool::new(true),
         }
     }
 

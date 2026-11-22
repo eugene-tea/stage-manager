@@ -189,7 +189,7 @@ impl SpacesEngine {
         if self.blocked() {
             return parks;
         }
-        let Some(stretching) = self.stretches_within("a round of lends").map(|l| l.keys().copied().collect::<Vec<u32>>()) else { return parks };
+        let Some(stretching) = self.stretch_ids_within("a round of lends") else { return parks };
         let (desktops, _) = Self::desktops(sky);
         // A test's "park" failure: the apps do not move their windows (nothing is asked).
         let refused = self.failing(Call::Park);
@@ -276,7 +276,7 @@ impl SpacesEngine {
             homes.left = ids.iter().map(|w| (*w, Left::NotHome)).collect();
             return homes;
         }
-        let stretching: Vec<u32> = self.stretches_within("a round of lends").map(|l| l.keys().copied().collect()).unwrap_or_default();
+        let stretching: Vec<u32> = self.stretch_ids_within("a round of lends").unwrap_or_default();
         let (desktops, _) = Self::desktops(sky);
         let wanted: Vec<u32> = ids.iter().map(|w| w.0).collect();
         let listed: BTreeMap<u32, Rect> = windows::describe(&wanted).into_iter().map(|w| (w.id, w.bounds)).collect();

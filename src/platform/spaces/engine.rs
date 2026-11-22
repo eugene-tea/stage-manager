@@ -416,13 +416,17 @@ pub struct SpacesEngine {
     /// not a stretch's own thread ([`SpacesEngine::stretches_within`]): later callers do not
     /// wait again until it is free once more.
     stretches_busy: AtomicBool,
+    /// Set once a stretch is begun in this run ([`SpacesEngine::begin_stretch`], only with
+    /// the live landing on): until then the stretches are empty and no hide, show or lend
+    /// takes their lock ([`SpacesEngine::any_stretch`]).
+    stretch_begun: AtomicBool,
 }
 
 #[cfg(test)]
 impl SpacesEngine {
     /// A fresh engine with nothing held: a fake desk's own ([`crate::platform::fake`]).
     pub(crate) fn for_test() -> Self {
-        SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) }
+        SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false), stretch_begun: AtomicBool::new(false) }
     }
 }
 
@@ -435,7 +439,7 @@ pub fn shared() -> Arc<SpacesEngine> {
         return engine;
     }
     static ENGINE: OnceLock<Arc<SpacesEngine>> = OnceLock::new();
-    ENGINE.get_or_init(|| Arc::new(SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) })).clone()
+    ENGINE.get_or_init(|| Arc::new(SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false), stretch_begun: AtomicBool::new(false) })).clone()
 }
 
 /// The engine the environment asks for: `STAGE_MANAGER_ENGINE=spaces`, honoured only with
@@ -985,7 +989,7 @@ impl SpacesEngine {
     /// a hide puts it back as any hide (its frame set again); [`Self::take_back_window`] puts
     /// it back unshown. A window planned to fly its last stretch is not lent.
     pub(crate) fn lend_window(&self, id: u32, park: Option<LendPark>) -> Lend {
-        if self.stretches_within("a lend").is_none_or(|l| l.contains_key(&id)) {
+        if self.any_stretch() && self.stretches_within("a lend").is_none_or(|l| l.contains_key(&id)) {
             return Lend::default();
         }
         let Some(held) = self.state().held.get(&id).copied() else { return Lend::default() };
@@ -2151,6 +2155,9 @@ impl WindowEngine for SpacesEngine {
     }
 
     fn stretching(&self) -> HashSet<u32> {
+        if !self.any_stretch() {
+            return HashSet::new();
+        }
         self.stretches_within("the stretches asked").map(|l| l.iter().filter(|(_, f)| !f.stop).map(|(id, _)| *id).collect()).unwrap_or_default()
     }
 
@@ -2310,7 +2317,7 @@ mod tests {
 
     #[test]
     fn an_engine_that_hid_nothing_shows_and_sweeps_without_the_window_server() {
-        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) };
+        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false), stretch_begun: AtomicBool::new(false) };
         assert!(e.show_window(42), "never hidden: nothing to bring out");
         assert_eq!(e.sweep("test", true), Report::default());
         assert!(e.present_off_screen().is_empty());
@@ -2322,7 +2329,25 @@ mod tests {
     fn unloaded() -> SpacesEngine {
         let sky = OnceLock::new();
         let _ = sky.set(None);
-        SpacesEngine { sky, state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) }
+        SpacesEngine { sky, state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false), stretch_begun: AtomicBool::new(false) }
+    }
+
+    /// The live landing off (no stretch begun in this run): a hide, a show, a lend, the
+    /// Desktop asked of a window and the stretches asked never take the stretches' lock. Held
+    /// here by the test, any of them that asked would wait for it and mark it busy.
+    #[test]
+    fn with_no_stretch_begun_a_hide_takes_no_stretches_lock() {
+        use crate::platform::window_engine::WindowEngine;
+        let e = unloaded();
+        let held = e.stretches.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(!e.hide_window(7), "no window server: not hidden");
+        assert!(e.show_window(7), "never hidden: nothing to bring out");
+        assert!(!e.off_desktop(7));
+        assert_eq!(e.lend_window(7, None), Lend::default(), "not held: nothing lent");
+        assert!(e.stretching().is_empty());
+        e.end_stretches("a test");
+        assert!(!e.stretches_busy.load(std::sync::atomic::Ordering::Relaxed), "the lock was never asked");
+        drop(held);
     }
 
     /// Review A-3: two launch watches make the Space for new windows at once; the first noted
@@ -2358,7 +2383,7 @@ mod tests {
     /// paced, until nothing is left.
     #[test]
     fn a_failed_engine_holds_no_new_window_and_sweeps_what_it_left() {
-        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false) };
+        let e = SpacesEngine { sky: OnceLock::new(), state: Mutex::new(State::default()), stretches: Mutex::new(BTreeMap::new()), stretches_busy: AtomicBool::new(false), stretch_begun: AtomicBool::new(false) };
         e.state().health.fail("a test".into());
         assert!(!e.hold_new(NO_WINDOW) && e.prepare_new().is_none());
         assert!(e.sky.get().is_none(), "nothing asked of the window server");
