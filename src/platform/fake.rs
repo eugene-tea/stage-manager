@@ -810,6 +810,24 @@ impl Desk {
         self.post(delays::ACTIVATION, Notice::Displays(displays));
     }
 
+    /// The second screen comes back: the Desktops it had (those the main screen took under
+    /// their ids, [`Goes::keeps_ids`]) go back to it with their windows, the first shown;
+    /// with none, a Desktop of its own.
+    pub fn screen_comes_back(&mut self) {
+        let mine: Vec<u64> = self.screens[0].desktops.iter().copied().filter(|d| *d >= 50).collect();
+        self.screens[0].desktops.retain(|d| !mine.contains(d));
+        let first = self.screens[0].desktops[0];
+        if mine.contains(&self.screens[0].shown) {
+            let s = &mut self.screens[0];
+            (s.shown, s.current, s.sliding_in, s.sliding_to) = (first, first, None, None);
+        }
+        let n = self.windows.values().filter(|w| w.spaces.iter().any(|x| mine.contains(x))).count();
+        for (i, w) in self.windows.values_mut().filter(|w| w.spaces.iter().any(|x| mine.contains(x))).enumerate() {
+            w.frame = Rect::new(1600.0 + 40.0 * (i % n.max(1)) as f64, 120.0 + 30.0 * i as f64, w.frame.w, w.frame.h);
+        }
+        self.screen_comes_with(if mine.is_empty() { vec![60] } else { mine });
+    }
+
     /// The displays as the app is told them.
     pub fn displays(&self) -> Vec<Display> {
         self.screens.iter().map(|s| s.display).collect()
