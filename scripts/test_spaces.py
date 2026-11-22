@@ -60,7 +60,9 @@ Last, the first visit to a Desktop never shown since the launch, by its key, wit
 file (design r3, slice 2): the app is started afresh on one Desktop with the fixture app's
 window there hidden behind another app's stage, the fixture app in front on the other
 Desktop; the Desktop key must give one Space change and stay there, with no stage switched
-on the Desktop left for the activation macOS sends during the slide. What the listing
+on the Desktop left for the activation macOS sends during the slide. The Desktop left is
+the one that has another app's window by then (the guardian drill moves windows between the
+Desktops), found by what the app manages; a missing fixture window is opened. What the listing
 decided in that run is printed (`desks.keyed`).
 
 Every app run's log is kept (stage-manager.run-NN.log in the test home, renamed from the
@@ -671,7 +673,8 @@ planned steps (hands-free):
               `open -n <app> --args debug-post-space <toward>` (app down) to Desktop 2, else activate Bravo;
               checks: restored (held a second), the guardian alive until then and logged it, it ends
   full screen twice: ctl debug-fullscreen <a shown Fixture window> on, checks, off, checks
-  first visit the app started on the Desktop shown; debug-space to the other, ctl switch to the Fixture stage
+  first visit the app started on the Desktop shown; "here" is the Desktop with another app's window (the one
+              shown, else debug-space to the other); debug-space to "there", ctl switch to the Fixture stage
               there; debug-space back, ctl switch to the other app's stage (the Fixture window here hidden);
               quit; state.json removed; start; debug-space to the other Desktop (its first visit, its
               windows unknown, no saved file): one Space change, it stays 1.5 s, no stage switched on the
@@ -1265,6 +1268,33 @@ def keyed_counts(label):
     return k
 
 
+def is_fixture(title):
+    """A window of the fixture app with windows on both Desktops (the others are Alpha's and Bravo's)."""
+    return title.startswith("Fixture ")
+
+
+def stage_on_shown(s, fixture):
+    """The number of a stage of the Desktop shown holding a window of the fixture app
+    (`fixture`), else one holding none of its windows; None when there is none."""
+    titles = {w["id"]: w["title"] for w in s["windows"]}
+    for st in s["stages"]:
+        mine = [is_fixture(titles[i]) for i in st["windows"] if i in titles]
+        if st["space"] == s["space"] and mine and (any(mine) if fixture else not any(mine)):
+            return st["number"]
+    return None
+
+
+def stage_in_front(s, number):
+    """True when stage `number` of the Desktop shown is the active one with its windows shown."""
+    ids = next((st["windows"] for st in s["stages"] if st["space"] == s["space"] and st["number"] == number), [])
+    return s["active"] == number and bool(ids) and not any(w["parked"] for w in s["windows"] if w["id"] in ids)
+
+
+def fixture_hidden_here(s):
+    """True when a window of the fixture app on the Desktop shown is hidden."""
+    return any(is_fixture(w["title"]) and w["space"] == s["space"] and w["parked"] for w in s["windows"])
+
+
 def first_visit_by_key():
     """Design r3, slice 2 (the bench's "the first visit to a Desktop by its key"). The app is
     started with no state.json on the Desktop shown (call it here; the other one there), so
@@ -1276,44 +1306,87 @@ def first_visit_by_key():
     the bench). Now: one Space change, the Desktop stays, no stage switched for the
     activation; under the Spaces engine the log says the activation was held (the window
     server names the Desktop of the app's focused window). Under the Corner engine the two
-    checks are printed as known shortfalls of that engine's path, not failed."""
-    fixture = {"d1": "Fixture 1", "d2": "Fixture 3"}
-    other = {"d1": "Alpha 1", "d2": "Bravo 1"}
+    checks are printed as known shortfalls of that engine's path, not failed.
+
+    Which fixture windows are on which Desktop by now is not assumed: the guardian drill's
+    kill -9 leaves Desktop 2's hidden windows on Desktop 1 (the window server brings a
+    crashed app's stage-Space windows to the Desktop shown; live 11-21: Fixture 3 was on
+    Desktop 1 and this step waited for it hidden on Desktop 2). The stages are found by what
+    the app manages on the Desktop shown, and when the fixture app has no window here it
+    opens one (SIGUSR1)."""
     p = os.path.join(ts.HOME, "state.json")
+    if AUTO:
+        # Windows changed Desktops in the guardian drill: the watch's markers no longer hold.
+        WATCH.pause()
 
     # The setup run: there's fixture stage in front, here's fixture stage hidden.
     wins = [w for w in ts.fixture_windows()[0] if w["onscreen"]]
     s = ts.start_app(len(wins), extra_env=app_env())
     if not check(s is not None, f"first visit: the app is up with the {len(wins)} windows of the Desktop shown"):
         return
-    # Which Desktop shows, by the windows the app manages now (the Desktop shown's only).
-    titles = {w["title"] for w in s["windows"]}
-    here = "d2" if titles & {fixture["d2"], other["d2"]} else "d1"
-    there = "d1" if here == "d2" else "d2"
-    if AUTO:
-        WATCH.desk(here)
+    at = WATCH.where if AUTO and WATCH.where in ("d1", "d2") else (
+        "d2" if any(w["title"] in ("Bravo 1", "Fixture 3") for w in s["windows"]) else "d1")
+    flip = {"d1": "d2", "d2": "d1"}
+
+    def open_fixture_window(where):
+        pid = ts.pids_of(ts.FIX_EXE)
+        if pid:
+            os.kill(pid[0], signal.SIGUSR1)
+        say(f"    (the fixture app has no window on Desktop {where[1]}: it opens one)")
+        return ts.wait_state(lambda y: stage_on_shown(y, True) is not None, "a new Fixture window managed", timeout=10)
+
+    # Here is the Desktop with another app's window (its stage hides the fixture app's
+    # there): the one shown, else the other one.
+    if stage_on_shown(s, False) is None:
+        say(f"    (Desktop {at[1]} has no window of another app: the other Desktop is the one left)")
+        before = s["space"]
+        go(flip[at], f"Switch to Desktop {flip[at][1]}")
+        at = flip[at]
+        if AUTO:
+            WATCH.pause()
+        s = ts.wait_state(lambda y: y["space"] != before and stage_on_shown(y, False) is not None, "another app's stage managed", timeout=8)
+        if not check(s is not None, "first visit setup: a Desktop has a window of another app than the fixture"):
+            ts.stop_app()
+            return
+    here, there = at, flip[at]
+    if stage_on_shown(s, True) is None:
+        s = open_fixture_window(here)
+    if not check(s is not None and stage_on_shown(s, True) is not None and stage_on_shown(s, False) is not None,
+                 f"first visit setup: Desktop {here[1]} has a stage of the fixture app and one of another app "
+                 f"({sorted(w['title'] for w in (s or state())['windows'] if w['space'] == (s or state())['space'])})"):
+        ts.stop_app()
+        return
     go(there, f"Switch to Desktop {there[1]}")
     if AUTO:
         WATCH.pause()
-    x = ts.wait_state(lambda y: stage_holding(y, fixture[there]) is not None, f"{fixture[there]} managed", timeout=8)
-    if not check(x is not None, f"first visit setup: on Desktop {there[1]} with {fixture[there]}'s stage"):
+    x = ts.wait_state(lambda y: y["space"] != s["space"], f"Desktop {there[1]} recognized", timeout=8)
+    if x is not None and stage_on_shown(x, True) is None:
+        time.sleep(1.5)  # its windows may still be coming into their stages
+        x = state() if stage_on_shown(state(), True) is not None else open_fixture_window(there)
+    if not check(x is not None and stage_on_shown(x, True) is not None, f"first visit setup: on Desktop {there[1]} with a stage of the fixture app"):
         ts.stop_app()
         return
-    ctl("switch", stage_holding(x, fixture[there]))
-    ts.wait_state(lambda y: y["active"] == stage_holding(y, fixture[there]), f"{fixture[there]}'s stage in front", timeout=4)
+    front_there = stage_on_shown(x, True)
+    if x["active"] != front_there:
+        ctl("switch", front_there)
+    x = ts.wait_state(lambda y: stage_in_front(y, front_there), "the fixture app's stage in front there", timeout=4)
+    if not check(x is not None, f"first visit setup: the fixture app's stage in front on Desktop {there[1]}"):
+        ts.stop_app()
+        return
     time.sleep(1.0)
     go(here, f"Switch to Desktop {here[1]}")
     if AUTO:
         WATCH.pause()
-    x = ts.wait_state(lambda y: stage_holding(y, other[here]) is not None, f"{other[here]} managed", timeout=8)
-    if not check(x is not None, f"first visit setup: back on Desktop {here[1]} with {other[here]}'s stage"):
+    x = ts.wait_state(lambda y: y["space"] == s["space"] and stage_on_shown(y, False) is not None, "the other app's stage here", timeout=8)
+    if not check(x is not None, f"first visit setup: back on Desktop {here[1]} with another app's stage"):
         ts.stop_app()
         return
-    ctl("switch", stage_holding(x, other[here]))
-    x = ts.wait_state(lambda y: y["active"] == stage_holding(y, other[here]) and any(
-        w["title"] == fixture[here] and w["parked"] for w in y["windows"]), f"{other[here]}'s stage in front, {fixture[here]} hidden", timeout=4)
-    setup = check(x is not None, f"first visit setup: {other[here]}'s stage in front on Desktop {here[1]}, {fixture[here]} hidden; "
-                  f"{fixture[there]}'s stage in front on Desktop {there[1]}")
+    front_here = stage_on_shown(x, False)
+    if x["active"] != front_here:
+        ctl("switch", front_here)
+    x = ts.wait_state(lambda y: y["active"] == front_here and fixture_hidden_here(y), "the other app's stage in front, the fixture app's window hidden", timeout=4)
+    setup = check(x is not None, f"first visit setup: another app's stage in front on Desktop {here[1]}, the fixture app's window there hidden; "
+                  f"the fixture app's stage in front on Desktop {there[1]}")
     time.sleep(1.0)  # past the echo window of the switch's own activation
     ts.stop_app()
     if not setup:
@@ -1326,22 +1399,22 @@ def first_visit_by_key():
     s = ts.start_app(len(shown), extra_env=app_env())
     if not check(s is not None, "first visit: the app is up again with no saved file"):
         return
-    x = ts.wait_state(lambda y: any(w["title"] == fixture[here] and w["parked"] for w in y["windows"]),
-                      f"{fixture[here]} hidden at the launch", timeout=6)
-    d_here = current_space()
-    known = sorted(w["title"] for w in state()["windows"])
-    check(fixture[there] not in known and spaces().get("saved_spaces_not_visited", 0) == 0,
-          f"first visit: Desktop {there[1]}'s windows are not known and no saved Desktop waits (known: {known})")
+    x = ts.wait_state(fixture_hidden_here, "the fixture app's window hidden at the launch", timeout=6)
+    now = state()
+    d_here = now["space"]
+    here_titles = sorted(w["title"] for w in now["windows"])
+    check(all(w["space"] == d_here for w in now["windows"]) and spaces().get("saved_spaces_not_visited", 0) == 0,
+          f"first visit: only Desktop {here[1]}'s windows are known and no saved Desktop waits (known: {here_titles})")
     if x is None:
-        say(f"    ({fixture[here]} is not hidden at the launch: the activation during the slide has nothing to switch to; the checks still run)")
-    spaces_engine = (state().get("desks") or {}).get("listing") is not None
+        say("    (the fixture app's window is not hidden at the launch: the activation during the slide has nothing to switch to; the checks still run)")
+    spaces_engine = (now.get("desks") or {}).get("listing") is not None
     time.sleep(1.5)
     t0 = time.time()
     go(there, f"Switch to Desktop {there[1]} (its first visit)")
     if AUTO:
         # A slide back is told by the checks below, not by the watch stopping the run.
         WATCH.pause()
-    arrived = ts.wait_state(lambda y: y["space"] != d_here and stage_holding(y, fixture[there]) is not None,
+    arrived = ts.wait_state(lambda y: y["space"] != d_here and stage_on_shown(y, True) is not None,
                             f"Desktop {there[1]} recognized", timeout=8)
     stayed = arrived is not None and holds(lambda: current_space() == arrived["space"], 1.5)
     changes = space_changes_since(t0)
@@ -1360,8 +1433,10 @@ def first_visit_by_key():
         say(f"    first visit (Corner engine, the windows' vote): one Space change and it stays: {one}; "
             f"no stage switched on the Desktop left: {quiet} (the listing is not read under this engine)")
     if arrived is not None:
-        t = sorted(w["title"] for w in state()["windows"] if w["space"] == state()["space"])
-        check(fixture[there] in t and fixture[here] not in t, f"first visit: Desktop {there[1]}'s stages hold its own windows only ({t})")
+        now = state()
+        t = sorted(w["title"] for w in now["windows"] if w["space"] == now["space"])
+        check(any(is_fixture(x) for x in t) and not set(t) & set(here_titles),
+              f"first visit: Desktop {there[1]}'s stages hold its own windows only ({t}; Desktop {here[1]}'s: {here_titles})")
     ts.notice_report("spaces, the first visit")
     ts.stop_app()
 
