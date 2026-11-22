@@ -478,8 +478,8 @@ switch brings its stage in front, so it and, for 1.5 s, the windows of the app i
 left to that switch. `[windows] mission_control_stages`: `"shown"` (the default) lends once
 Mission Control is listed, found within about 30 ms of its keyboard shortcut (the user's
 own, read from Keyboard Shortcuts, or the keyboard's Mission Control key) and otherwise at
-the next tick (up to 0.25 s while something happens, 2 s at rest: a gesture, a hot corner
-and the Dock's item announce nothing); `"key"` lends at the shortcut itself and takes the
+the look the window server's notice of its open brings (below), or with no notice at the next
+tick (up to 0.25 s while something happens, 2 s at rest); `"key"` lends at the shortcut itself and takes the
 windows back when nothing shows within 1.5 s; `"off"` lends nothing. Until round mc-key no key
 of Mission Control's was ever heard: macOS takes its shortcuts and its key in the window
 server, before any app gets them, so the input monitor never saw one (no `trigger seen` line
@@ -488,6 +488,17 @@ late (11-20 11:16:34, `found_within_ms=2140`: its stages' windows came in late);
 HID level hears them now (the Accessibility permission, no other), and only them: Mission
 Control's shortcuts as Keyboard Shortcuts has them, its key, and while it shows Escape and
 presses; and while ⌘-Tab's switcher shows, its Escape, ⌘'s release and presses.
+What announces it (macOS 27.2, 11-21; `probe-system dock`, 18 opens and closes by its
+shortcut, then `probe-spaces cgs` and the live `mission` and `expose` checks): the window
+list shows Mission Control 22-47 ms after its shortcut; at its close macOS's window leaves
+the list ~320 ms and the Dock's cover ~610 ms after the key. The Dock registers its
+`AXExposeShowAllWindows`, `AXExposeShowFrontWindows`, `AXExposeShowDesktop` and
+`AXExposeExit` notices and posts none (0 of 18 opens, 0 of 18 closes; 0 of 9 again with the
+AppKit event loop running). A posted key code 160, the keyboard's Mission Control key, opens
+nothing. The window server's notice 1508 comes at the open and the close ("The window
+server's notices"); in the app the close's notice was looked at 88-104 ms after the closing
+key, against 613-618 ms for the window list to show the close. Whether 1508 comes for a
+gesture, a hot corner or the Dock's item is not measured.
 Closed by its key (its shortcut again, its key, Escape), Mission Control picks nothing, but
 macOS brings in front the app whose window is under the pointer, and Apple's Stage Manager
 brings its stage in front (`scripts/probe_apple.py mission-close-key`, 11-20: 108 ms after the
@@ -1250,7 +1261,9 @@ non-activating panel, as Apple's strip never takes it from the window in front),
 VoiceOver reaches the cards through the pointer: the pointer over the strip, or VoiceOver
 set to move its cursor with the mouse pointer.
 
-## Measured on Apple's, nothing to change (11-09 evening)
+## Measured on Apple's, nothing to change
+
+Measured 11-09 evening:
 
 - The card glass in Dark Mode: window opacity 0.78, backdrop saturation 0.93, brightness 0.82
   (`scripts/measure-apple-card-glass.py`); ours, fitted in Light Mode, 0.78 / 0.95 / 0.78, within the
@@ -1259,6 +1272,13 @@ set to move its cursor with the mouse pointer.
   Studio Display's, as reviewers counted; ours gives the same.
 - Reduce Motion on Apple's: a switch is a cross-fade of about 80 ms, a minimize a fade out in place of
   about 130 ms. Ours fades 200 ms, worked out from the accessibility guidance rather than copied.
+
+Measured 11-21 (macOS 27.2, the Apple mode's live check, `test_apple`, one screen, Reduce
+Motion off): Apple's Stage Manager answered each step of ours within 142 ms (24 answers,
+none ended by its cap) and its motions lasted up to 787 ms (15 motions, none ended by its
+cap). The Apple mode once waited a blind 700 ms for a motion, shorter than the
+longest; it now waits for what the window list shows (STRATEGIES, "Apple's answer is
+waited for by what the list shows"). Not measured: a second screen, Reduce Motion on.
 
 ## Window engines measured
 
@@ -1315,8 +1335,8 @@ looks, never as facts (ARCHITECTURE, "The window server's notices").
 
 In the app (the live suite, 11-21) 1325, 1326 and 1508 came in the dozens; 811, 815 and 816
 never did (the probe also asked `SLSRequestNotificationsForWindows` for its windows), so a new
-app's windows are still held by the launch watch's own read. The Dock's `AXExpose…` notices
-never came (0 of 9 opens). Not measured: Mission Control opened
+app's windows are still held by the launch watch's own read. The Dock posts none of its
+`AXExpose…` notices (above, "Mission Control, App Exposé and Show Desktop"). Not measured: Mission Control opened
 by a gesture, a hot corner or the Dock's item (`ctl state`'s `engine.notices` says whether
 1508 counts them), and other macOS versions.
 
@@ -1342,6 +1362,7 @@ server's Desktops").
 | The window server's own notice of the change's end (1401, 1329) | with the flip (551 ms after a Desktop key) |
 | A read | 37 µs (the listing), 22 µs (one window's Spaces) |
 | Space ids | small, stable through a login session (1, 4); the main screen's first Desktop has an empty uuid; a window on every Desktop lists every Desktop |
+| Screens | each named by its uuid, the main screen too (never "Main"), the main screen first; so a main screen that goes is seen going |
 
 What a person sees change under the Spaces engine:
 
