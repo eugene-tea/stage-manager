@@ -51,6 +51,7 @@ use crate::ui::strip_model::StripEvent;
 
 mod causes;
 mod desktops;
+mod screens;
 mod scenarios;
 mod switch;
 
@@ -697,6 +698,23 @@ impl Bench {
         let Some(space) = m.space_of(WindowId(of)) else { return Vec::new() };
         let mut out: Vec<Vec<u32>> = m
             .stages_in(space)
+            .map(|s| {
+                let mut ids: Vec<u32> = s.windows.iter().map(|w| w.0).collect();
+                ids.sort_unstable();
+                ids
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Every stage's windows on every Desktop, each sorted, the stages sorted.
+    pub(super) fn all_stages(&self) -> Vec<Vec<u32>> {
+        let Some(m) = self.c.model.as_ref() else { return Vec::new() };
+        let mut out: Vec<Vec<u32>> = m
+            .stages()
+            .iter()
             .map(|s| {
                 let mut ids: Vec<u32> = s.windows.iter().map(|w| w.0).collect();
                 ids.sort_unstable();

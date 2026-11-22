@@ -251,6 +251,23 @@ pub struct Screen {
     pub sliding_to: Option<u64>,
 }
 
+/// How a screen goes ([`Desk::screen_goes_how`]).
+#[derive(Debug, Clone, Default)]
+pub struct Goes {
+    /// The main screen goes (the other one is the main screen from then on); else the second.
+    pub main: bool,
+    /// macOS moves the gone screen's Desktops onto the screen left under the same ids, each
+    /// with its windows (`engine/spill.rs`: a real screen, logs 11-18 and 11-21). False: they
+    /// end, and their windows go onto the Desktop the screen left shows (a virtual screen,
+    /// live 11-18 and 11-21).
+    pub keeps_ids: bool,
+    /// The window server takes the windows hidden in stage Spaces of the gone screen's
+    /// Desktops out, onto the Desktop the screen left shows (not theirs), in waves: each
+    /// wave this many ms after the change, the machine's own time (`engine/spill.rs`: a
+    /// moment later, and as late as 20 s after, 11-18). Empty: none is let out.
+    pub lets_out_ms: Vec<f64>,
+}
+
 /// What macOS tells the app, queued until due.
 #[derive(Debug, Clone)]
 pub enum Notice {
@@ -297,6 +314,8 @@ pub enum Step {
     /// its frame there), which the window list shows from now on; `ended`: a full-screen
     /// Space left, gone from the listing.
     FullScreenSpace { screen: usize, id: u32, to: u64, frame: Rect, ended: Option<u64> },
+    /// The window server lets windows `ids` out of their stage Spaces onto Desktop `to`.
+    LetsOut { ids: Vec<u32>, to: u64 },
     /// A full-screen animation's end: the stand-in goes, window `id` says `full`.
     FullScreenEnds { id: u32, full: bool },
     /// A window the window server lists on screen from now on.
@@ -460,6 +479,8 @@ pub struct Desk {
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
     pub made_spaces: BTreeSet<u64>,
+    /// The Desktop each made Space's first window came from: the screen it serves.
+    made_for: BTreeMap<u64, u64>,
     /// Mission Control shows: the windows listed moved into its layout.
     pub mission: bool,
     /// The frames Mission Control's layout took the windows from.
@@ -624,6 +645,7 @@ impl Desk {
             listing_unreadable: false,
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
+            made_for: BTreeMap::new(),
             mission: false,
             mission_frames: BTreeMap::new(),
             calls: Vec::new(),
@@ -730,6 +752,58 @@ impl Desk {
                 w.spaces.retain(|s| !gone.desktops.contains(s));
                 w.spaces.push(shown);
                 w.frame = Rect::new(main.x + 60.0, main.y + 40.0, w.frame.w.min(main.w - 120.0), w.frame.h.min(main.h - 80.0));
+            }
+        }
+        let displays = self.displays();
+        self.post(delays::ACTIVATION, Notice::Displays(displays));
+    }
+
+    /// A screen goes as `how` says ([`Goes`]): its Desktops move to the screen left or end,
+    /// its windows come onto that screen, the window server lets hidden windows of its
+    /// Desktops out in waves; the app is told the screens ([`delays::ACTIVATION`] later).
+    pub fn screen_goes_how(&mut self, how: Goes) {
+        if self.screens.len() < 2 {
+            return;
+        }
+        let gone = self.screens.remove(if how.main { 0 } else { 1 });
+        if how.main {
+            // The screen left is the main one now: its origin is the desk's.
+            let s = &mut self.screens[0];
+            let (dx, dy) = (s.display.frame.x, s.display.frame.y);
+            s.display.frame = s.display.frame.translate(-dx, -dy);
+            s.display.visible = s.display.visible.translate(-dx, -dy);
+            for w in self.windows.values_mut() {
+                if !gone.display.frame.contains(w.frame.center()) {
+                    w.frame = w.frame.translate(-dx, -dy);
+                }
+            }
+        }
+        let (shown, main) = (self.screens[0].shown, self.screens[0].display);
+        if how.keeps_ids {
+            self.screens[0].desktops.extend(gone.desktops.iter().copied());
+        }
+        for w in self.windows.values_mut() {
+            let theirs = w.spaces.iter().any(|s| gone.desktops.contains(s)) || !main.frame.contains(w.frame.center());
+            if theirs {
+                w.frame = Rect::new(main.visible.x + 60.0, main.visible.y + 40.0, w.frame.w.min(main.visible.w - 120.0), w.frame.h.min(main.visible.h - 80.0));
+            }
+            if !how.keeps_ids && w.spaces.iter().any(|s| gone.desktops.contains(s)) {
+                w.spaces.retain(|s| !gone.desktops.contains(s));
+                w.spaces.push(shown);
+            }
+        }
+        // The hidden windows of the gone screen's Desktops, let out in waves.
+        let hidden: Vec<u32> = self
+            .windows
+            .values()
+            .filter(|w| w.spaces.iter().any(|s| self.made_for.get(s).is_some_and(|d| gone.desktops.contains(d))))
+            .map(|w| w.id)
+            .collect();
+        let waves = how.lets_out_ms.len().max(1);
+        for (i, at) in how.lets_out_ms.iter().enumerate() {
+            let ids: Vec<u32> = hidden.iter().copied().skip(i).step_by(waves).collect();
+            if !ids.is_empty() {
+                self.post_after(*at, 0.0, Notice::Step(Step::LetsOut { ids, to: shown }));
             }
         }
         let displays = self.displays();
@@ -1390,6 +1464,14 @@ impl Desk {
                 s.sliding_in = None;
                 s.sliding_to = None;
             }
+            Step::LetsOut { ids, to } => {
+                for id in ids {
+                    // Only one still in a stage Space (the app may have shown it since).
+                    if self.windows.get(&id).is_some_and(|w| w.spaces.iter().any(|s| self.made_spaces.contains(s))) {
+                        self.space_moves(id, to);
+                    }
+                }
+            }
             Step::FullScreenEnds { id, full } => {
                 self.overlays.retain(|w| w.id != STAND_IN);
                 if let Some(w) = self.windows.get_mut(&id) {
@@ -1757,6 +1839,12 @@ impl Desk {
         let desktops: HashSet<u64> = self.screens.iter().flat_map(|s| s.desktops.iter().copied()).collect();
         for id in ids {
             let Some(w) = self.windows.get_mut(id) else { continue };
+            if self.made_spaces.contains(&sid)
+                && !self.made_for.contains_key(&sid)
+                && let Some(from) = w.spaces.iter().copied().find(|s| desktops.contains(s))
+            {
+                self.made_for.insert(sid, from);
+            }
             w.spaces.retain(|s| *s != sid && !((options & 0x7 != 0 && desktops.contains(s)) || (options & 0x8 != 0 && !desktops.contains(s))));
             w.spaces.push(sid);
         }
