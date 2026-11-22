@@ -40,7 +40,8 @@ that the Desktop was arranged at the press. With no such stage the step is skipp
 so; `main` and `secondary` rounds leave every fixture on the Desktop shown, so the `ahead`
 kind sets it up: Alpha 1 and Bravo 1 opened on another Desktop of the main screen (slid to
 with `ctl debug-space`), a stage each, Bravo's in front, then back, a virtual screen added to
-the right and removed. A run whose Dock step ran in no round fails.
+the right and removed. A run with the `ahead` kind whose Dock step ran in no round fails (a
+run of `main` or `secondary` alone has no such stage to click for, and only says so).
 
 **Frames per screen setup** (`display-gone frames [main|secondary] [--rounds N]`, with
 `[displays] frames_per_setup = true` in the test home's config): the fixture stages are opened
@@ -347,7 +348,8 @@ def dock_ahead(what):
     return True
 
 
-# Rounds whose Dock step ran (pressed the Dock item): none in a whole run is a failure.
+# Rounds whose Dock step ran (pressed the Dock item): none in a whole run with the `ahead`
+# kind is a failure.
 DOCK_RAN = []
 
 
@@ -742,8 +744,10 @@ def main():
                     ahead_round(n)
                 else:
                     one_round(kind, n)
-        if not FRAMES:
+        if not FRAMES and "ahead" in KINDS:
             check(bool(DOCK_RAN), "the Dock step ran in at least one round" + (f": {DOCK_RAN}" if DOCK_RAN else ": skipped in every round"))
+        elif not FRAMES and not DOCK_RAN:
+            say("  the Dock step was skipped in every round (only the `ahead` kind sets up a stage to click for)")
     finally:
         ts.stop_app()
         ts.stop_all_fixtures()
