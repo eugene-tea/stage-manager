@@ -41,7 +41,6 @@ use crate::engine::landing_order;
 use crate::engine::lend_round::Left;
 use crate::engine::model::{Display, Model, WindowId};
 use crate::ui::landing_math::Affine;
-use crate::ui::strip_model::Transition;
 pub use crate::engine::recovery::EngineKind;
 use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
 
@@ -136,19 +135,6 @@ pub enum ShowHow {
     /// A busy app is tried again quickly, within the restore budget (quit, a stand-down:
     /// [`crate::engine::leftovers::RESTORE_RETRY`]).
     Retrying,
-}
-
-/// How a switch moves, as the engine describes it on the WM thread
-/// ([`WindowEngine::animate`]). The controller runs the choreography it names around the
-/// shared steps (the plan, the note to the strip, the wait for its answer and for its
-/// unveil); the strip plays it on the main thread. The engine never calls UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Motion {
-    /// Pictures of the windows, full size, move between the stage and the cards above every
-    /// window (the strip's snapshots), and the windows move behind them: the outgoing ones
-    /// hide once their pictures cover them, the incoming ones stay hidden until the strip
-    /// unveils them.
-    Pictures,
 }
 
 /// One incoming window's last stretch (round sm-landing): from the first step on, the real
@@ -378,10 +364,6 @@ pub trait WindowEngine: Send + Sync {
     /// its windows is taken as this process's own knowledge (the guardian never saw the
     /// app's screens or config).
     fn assume(&self, file: &ParkedFile);
-
-    /// How the switch planned as `t` moves ([`Motion`]): asked once a switch, on the WM
-    /// thread, after the plan and before anything is sent to the strip or moved.
-    fn animate(&self, t: &Transition) -> Motion;
 
     /// True when a window leaves the screen in one step as soon as it is told (no move an
     /// app carries out): a switch's outgoing windows can stay where they are until their

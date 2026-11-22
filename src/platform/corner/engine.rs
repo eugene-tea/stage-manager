@@ -6,8 +6,7 @@
 
 use crate::platform::ax::{AxElement, AxResult};
 use crate::platform::safety::{self, Ours, Report, ScanScope};
-use crate::platform::window_engine::{EngineKind, Motion, ShowHow, WindowEngine};
-use crate::ui::strip_model::Transition;
+use crate::platform::window_engine::{EngineKind, ShowHow, WindowEngine};
 use crate::engine::corner;
 use crate::engine::geometry::Rect;
 use crate::engine::leftovers;
@@ -66,12 +65,6 @@ impl WindowEngine for CornerEngine {
         // Windows may sit at any corner the app parked them in this run, on any of its screens.
         safety::assume_corners(&file.corners);
         safety::assume_zones(&file.zones);
-    }
-
-    /// Pictures: a window in the corner cannot be shown moving, so the strip's snapshots
-    /// play the motion and the windows park and unpark behind them.
-    fn animate(&self, _t: &Transition) -> Motion {
-        Motion::Pictures
     }
 
     /// The registry's unpark, else the recovery scan ([`safety::emergency_unpark`]).

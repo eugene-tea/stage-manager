@@ -18,8 +18,7 @@ use crate::engine::model::{Display, Model, WindowId};
 use crate::engine::recovery::{Known, ParkedFile, ScanDisplays};
 use crate::platform::ax::{AxElement, AxResult};
 use crate::platform::safety::{self, Ours, Report, ScanScope};
-use crate::platform::window_engine::{EngineKind, Motion, ShowHow, WindowEngine};
-use crate::ui::strip_model::Transition;
+use crate::platform::window_engine::{EngineKind, ShowHow, WindowEngine};
 
 /// The null-hide engine. It keeps no state: Apple's strip holds the windows.
 #[derive(Debug, Clone, Copy, Default)]
@@ -70,11 +69,6 @@ impl WindowEngine for AppleEngine {
         }
         safety::assume_corners(&file.corners);
         safety::assume_zones(&file.zones);
-    }
-
-    /// Pictures: never asked (no switch of ours plays).
-    fn animate(&self, _t: &Transition) -> Motion {
-        Motion::Pictures
     }
 
     /// True: no picture is kept fresh on a timer.

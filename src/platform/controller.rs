@@ -108,7 +108,7 @@ use super::minimize_tap::MinimizeAsk;
 use super::native_settings::RawSettings;
 use super::observe::{Observer, Stamped, WinEvent, WindowKind};
 use super::safety::{self, ParkedEntry};
-use super::window_engine::{self, Motion, ShowHow, WindowEngine};
+use super::window_engine::{self, ShowHow, WindowEngine};
 use super::{capture_pace, desktop, desktop_shot, enhanced_ui, hidden_tabs, logging, paths, session, windows};
 use crate::config::{Config, ConfigStore, FileAction, FitMode, HotkeyCommand, HotkeyConfig, StripStyle};
 use crate::engine::attribution::{self, Notice};
@@ -2056,7 +2056,7 @@ impl Controller {
     }
 
     /// The animated batch after its early windows (`first`): planned as a transition (shared,
-    /// [`Self::transition_for`]), then moved the way the engine says ([`WindowEngine::animate`]).
+    /// [`Self::transition_for`]), then played with pictures ([`Self::switch_behind_pictures`]).
     /// An activation's focus is `run`'s ([`ActivationRun::focus`]). `early_corner`: the
     /// corner's cover as the activation found it, and the window list it read (none read, or
     /// moved since: both read again). An incoming window already shown at its frame takes
@@ -2088,9 +2088,7 @@ impl Controller {
         if t.incoming.is_empty() && t.outgoing.is_empty() {
             return self.execute(ob, actions);
         }
-        match self.engine.animate(&t) {
-            Motion::Pictures => self.switch_behind_pictures(ob, actions, t, run, early_cover, list),
-        }
+        self.switch_behind_pictures(ob, actions, t, run, early_cover, list)
     }
 
     /// An incoming window of `t` already shown at its frame: in `list` (the on-screen
@@ -2129,7 +2127,9 @@ impl Controller {
         skipped.shown.iter().map(|s| s.0).collect()
     }
 
-    /// A switch played with pictures ([`Motion::Pictures`]), the Corner engine's choreography:
+    /// A switch played with pictures, every engine's: pictures of the windows, full size, move
+    /// between the stage and the cards above every window (the strip's snapshots), and the
+    /// windows move behind them. The Corner engine's choreography:
     /// the park corner covered where the arriving windows wait ([`Self::switch_corner`]), the
     /// transition sent to the strip and its pictures waited for (shared,
     /// [`Self::send_transition`]), then the hides behind the outgoing pictures and the

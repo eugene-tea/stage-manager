@@ -56,9 +56,8 @@ use crate::engine::spill;
 use crate::engine::stage_companions::{Companions, HeldWindow, Stay};
 use crate::platform::ax::{AxElement, AxError, AxResult};
 use crate::platform::safety::{self, Ours, Report, ScanScope};
-use crate::platform::window_engine::{Back, EngineKind, Homes, Lend, LendPark, Motion, Parks, RoundAsk, ShowHow, Stretch, StretchDone, WindowEngine};
+use crate::platform::window_engine::{Back, EngineKind, Homes, Lend, LendPark, Parks, RoundAsk, ShowHow, Stretch, StretchDone, WindowEngine};
 use crate::platform::windows;
-use crate::ui::strip_model::Transition;
 
 #[path = "landing.rs"]
 mod landing;
@@ -2135,11 +2134,6 @@ impl WindowEngine for SpacesEngine {
         if !file.spaces.is_empty() {
             tracing::info!(spaces = file.spaces.len(), "guardian: the app's stage Spaces ended with it; their windows are back on their Desktops");
         }
-    }
-
-    /// Pictures, as the Corner engine: the windows hide and show in one step behind them.
-    fn animate(&self, _t: &Transition) -> Motion {
-        Motion::Pictures
     }
 
     /// True when SkyLight has the calls a last stretch needs ([`landing`]): an incoming

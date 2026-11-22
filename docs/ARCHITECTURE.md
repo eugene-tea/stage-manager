@@ -276,16 +276,15 @@ park frame, and asks every question about where hidden windows are through one d
 (`ModelOptions::engine`; the Corner engine's is `engine::corner`, its geometry
 `engine::corner::park`). The questions are of two kinds: is this listed window hidden now,
 and may a window be brought back here. `platform::window_engine::WindowEngine` has
-`hidden_at`, `hide`, `show`, `is_hidden`, `animate`, and for safety `bring_all_back`,
+`hidden_at`, `hide`, `show`, `is_hidden`, and for safety `bring_all_back`,
 `bring_back_briefly` (an abort), `bring_back_rest` (the last look at the window server's
 list), `recover` (the recovery scan), `stranded` (is a window read at this frame still
 hidden away) and `assume` (the guardian takes the app's parked file as its own knowledge),
 with `platform::corner::engine::CornerEngine` behind it. A `SetFrame` is the
 engine's `show`: the model counts the window shown either way, and the engine knows what it
-has hidden. `animate` answers a `Motion` on the WM thread; the controller plans the
-transition, sends it to the strip and waits for its answer the same way for every motion,
-and runs the choreography the motion names (`Motion::Pictures`: hides behind the outgoing
-pictures, arrivals held until the unveil). The engine is one value for the process
+has hidden. Every engine's switch plays with pictures: the controller plans the transition,
+sends it to the strip, waits for its answer, hides behind the outgoing pictures and holds the
+arrivals until the unveil. The engine is one value for the process
 (`window_engine::current`), so the WM thread's batches and the safety paths on other threads
 ask the same one. The parked file names the engine (left out for Corner), and the guardian
 installs that engine before its first scan; its watch asks that engine whether a window is
@@ -340,7 +339,7 @@ beyond the Dock's edge first, as under the Corner engine, and hidden again once 
 bring-backs (quit, a stand-down, a panic, an abort) ask the window server which windows are
 in the engine's Spaces and move each onto its Desktop, from any thread, then end the Spaces;
 the registry still gives fitted windows their frames back. The motion is still the
-pictures (`Motion::Pictures`), but none is kept fresh on a timer: the trait's
+pictures, but none is kept fresh on a timer: the trait's
 `pictures_at_switch` answers true, so the strip captures full-size pictures only as the
 pointer nears a card, and the controller, before it sends a switch to the strip, captures
 every outgoing window whose picture is not fresh (`platform/controller/switch_pictures.rs`,
