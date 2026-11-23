@@ -242,7 +242,12 @@ stage sat there 145 ms before the other flew in; that window now waits out of si
 the switch). A Dock click on the app in front changes nothing, even with its other window in
 another stage: Apple's neither cycles nor brings the other window (measured 11-19,
 `scripts/probe_apple.py dock-front`, a press and a real click, under both "Show windows from
-an application" settings). Under `engine = "spaces"` a ⌘-Tab or Dock click to an app slow to
+an application" settings). With its other window on another Desktop, macOS goes to that
+Desktop (the logs of 10-13 and 11-22); under `engine = "spaces"` the window waits on no
+Desktop when its stage is hidden, so its Desktop is arranged at the press. A tab not selected
+is listed on no Space and does not count as a window whose Desktop is unknown (11-23:
+Terminal in front with three such tabs, ten clicks on its Dock item did nothing).
+Under `engine = "spaces"` a ⌘-Tab or Dock click to an app slow to
 come in front still switches here: the window put home for it waits out of sight for the
 app's activation (up to 3 s after ⌘'s release, 5 s after a Dock press) and goes back at once
 at Escape, at a press that was no click, or when another app comes in front. Under All at Once a Shift-click on a card brings in only the

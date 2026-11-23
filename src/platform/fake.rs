@@ -1361,6 +1361,34 @@ impl Desk {
         self.post(own, Notice::Step(Step::Activation { pid, raise_all }));
     }
 
+    /// A click on app `pid`'s Dock item, at its release: the app is activated, every window
+    /// of it forward ([`Self::activate`]). Unless it is in front already and another Desktop
+    /// holds a window of it: macOS goes there, decided now from where its windows are now
+    /// (the owner's logs of 10-13 and of 11-22 15:15: an active app with windows on two
+    /// Desktops, every click went to the other one), and that window is its key one at the
+    /// slide's end. A window in a stage Space, or a tab not selected, is on no Desktop (the
+    /// owner's log of 11-23: no slide for one).
+    pub fn dock_click(&mut self, pid: i32) {
+        if self.front != Some(pid) {
+            return self.activate(pid, true);
+        }
+        let shows = |s: u64| self.screens.iter().any(|sc| sc.sliding_to.unwrap_or(sc.shown) == s);
+        let there = self
+            .z
+            .iter()
+            .filter_map(|id| self.windows.get(id))
+            .filter(|w| w.pid == pid && !w.minimized && w.layer == 0)
+            .find_map(|w| self.desktop_of(w.id).filter(|d| !shows(*d)).map(|d| (w.id, d)));
+        let Some((id, desktop)) = there else { return self.activate(pid, true) };
+        let Some(screen) = self.screens.iter().position(|s| s.desktops.contains(&desktop)) else { return };
+        self.slide(screen, desktop);
+        self.raise(id);
+        if let Some(a) = self.apps.get_mut(&pid) {
+            a.focused = Some(id);
+        }
+        self.post_after(delays::SLIDE_ACTIVATES, delays::FOCUS_AFTER_ACTIVATION, Notice::Ax { pid, el: El::Window(id), name: n::FOCUSED_WINDOW_CHANGED });
+    }
+
     /// The Desktop of `screen` slides to `to`, as measured ([`delays`]): the arriving
     /// Desktop's windows listed, the leaving one's gone ([`Self::leaving_lingers_ms`]), the
     /// Space change's notice and the listing's flip ([`Self::space_changes`]).

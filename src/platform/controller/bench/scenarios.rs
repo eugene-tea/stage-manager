@@ -597,6 +597,68 @@ fn dock_click_whose_activation_leads_the_slide(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+/// Live 11-23 09:11 (the owner's Terminal): a Dock click on the app in front on Desktop 2,
+/// whose other window waits in a hidden stage of Desktop 1, with a tab not selected of the
+/// window here waiting with the windows not placed (`tab`: off screen, listed on no Space).
+/// The click's prediction was refused for the tab ("the active app has windows not placed"),
+/// Desktop 1 was not arranged at the press, macOS counted no window of the app there, and
+/// ten clicks did nothing. The tab is on no Desktop: Desktop 1 is arranged at the press and
+/// macOS goes there.
+fn dock_click_on_the_app_in_front(load: f64, tab: bool) -> Run {
+    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, 1.0, 2, |d| {
+        d.add_app(A, "com.example.alpha", "Alpha");
+        d.add_app(B, "com.example.bravo", "Bravo");
+        d.add_window(16, A, frame(5), D2);
+        d.add_window(15, A, frame(5), D2);
+        d.add_window(11, A, frame(1), D1);
+        d.add_window(12, B, frame(2), D1);
+        d.front = Some(B);
+        if tab {
+            // Found with its app's windows, never on screen: it waits.
+            d.windows.get_mut(&16).expect("the tab").ordered_in = false;
+        } else {
+            d.windows.remove(&16);
+            d.z.retain(|id| *id != 16);
+        }
+    });
+    b.go_to_desktop(D2, true);
+    b.advance(4000);
+    b.activate(A);
+    b.advance(4000);
+    if tab {
+        // A tab not selected is listed on no Space.
+        b.desk(|d| d.windows.get_mut(&16).expect("the tab").spaces.clear());
+        b.advance(1500);
+    }
+    let waiting = b.c.unplaced.contains(&16);
+    let start = (b.desktop_shown(), b.front_app(), b.desktop_of(11), b.desktop_of(12), waiting);
+    assert_eq!(start, (D2, Some(A), None, Some(D1), tab), "the start:\n{}", b.story());
+    b.log.clear();
+    b.desk(|d| {
+        d.calls.clear();
+        d.load = load;
+    });
+    b.dock_click(A, 90);
+    b.advance(8000);
+    let out = seen(&mut b);
+    Run::of(&b, out)
+}
+
+fn dock_click_on_the_app_in_front_with_a_tab_waiting(load: f64) -> Run {
+    dock_click_on_the_app_in_front(load, true)
+}
+
+fn dock_click_on_the_app_in_front_no_tab(load: f64) -> Run {
+    dock_click_on_the_app_in_front(load, false)
+}
+
+#[test]
+fn a_dock_click_on_the_app_in_front_goes_to_its_other_desktop() {
+    let arrived = "front [11] shows [11] desktop 1 app 101 switches 0 slides 1";
+    expect(dock_click_on_the_app_in_front_no_tab, [arrived, arrived, arrived]);
+    expect(dock_click_on_the_app_in_front_with_a_tab_waiting, [arrived, arrived, arrived]);
+}
+
 #[test]
 fn a_dock_click_whose_activation_leads_the_slide() {
     let want = "the stage left put back on Desktop 1 0 times; front [11] shows [11] desktop 1 app 101 switches 0 slides 1";
@@ -851,6 +913,8 @@ pub(super) const ALL: &[Scenario] = &[
     ("an activation that slides to another Desktop (Corner)", "controller/arrival.rs, 10-13", activation_that_slides),
     ("a Dock click that slides to another Desktop (Corner)", "controller/arrival.rs, DOCK_SWITCH_WAIT", dock_click_that_slides),
     ("a Dock click whose activation leads the slide (Spaces)", "live 11-21 Dock arrivals, r2-lends-fix", dock_click_whose_activation_leads_the_slide),
+    ("a Dock click on the app in front, its other window in a hidden stage of another Desktop (Spaces)", "controller/arrival.rs, arrange_at_press", dock_click_on_the_app_in_front_no_tab),
+    ("the same, a tab not selected of it waiting", "controller/arrival.rs, waits_elsewhere, live 11-23", dock_click_on_the_app_in_front_with_a_tab_waiting),
     ("a screen comes and goes, a Dock click 36 s later (Spaces)", "engine/spill.rs home_for, 11-21", dock_click_after_a_screen_came_and_went),
     ("a new app opened with Shift held", "controller.rs, Shift sugar", new_app_with_shift),
     ("a new app opened", "controller.rs, new-window intake", new_app_plain),

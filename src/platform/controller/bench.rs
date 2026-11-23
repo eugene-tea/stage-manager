@@ -510,10 +510,12 @@ impl Bench {
     }
 
     /// The button let go on the Dock item pressed: the click; macOS activates the app, every
-    /// window of it forward, and slides to its Desktop when its windows are all on another.
+    /// window of it forward, and slides to its Desktop when its windows are all on another;
+    /// for the app in front already it goes to another Desktop holding a window of it
+    /// ([`fake::Desk::dock_click`]).
     pub(super) fn dock_release(&mut self, pid: i32) {
         self.input(InputKind::MouseUp, None, |_| {});
-        self.desk(|d| d.activate(pid, true));
+        self.desk(|d| d.dock_click(pid));
     }
 
     /// A Dock click on app `pid`: the press, held `hold_ms`, the release.

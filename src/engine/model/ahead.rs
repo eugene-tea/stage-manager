@@ -33,8 +33,10 @@ use super::{Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, W
 pub struct AppFacts {
     /// The app is hidden (⌘H).
     pub hidden: bool,
-    /// The app has windows the model does not place (minimized, or on a Desktop not visited
-    /// since launch): where macOS goes then is not certain.
+    /// The app has windows the model does not place that may be on a Desktop not shown
+    /// (minimized there, or on a Desktop not visited since launch): where macOS goes then is
+    /// not certain. Under an engine that reads the window server's Spaces, one listed on no
+    /// Desktop but the one shown does not count (a tab not selected is listed on none).
     pub unplaced: bool,
     /// The app is the active (frontmost) one.
     pub active: bool,

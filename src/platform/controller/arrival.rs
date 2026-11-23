@@ -66,6 +66,7 @@ use crate::platform::dock::{self, DockItem, DockPress};
 use crate::platform::enhanced_ui;
 use crate::platform::observe::{Observer, WindowKind};
 use crate::platform::safety::{self, ParkedEntry};
+use crate::platform::spaces::ffi::ScreenDesks;
 use crate::platform::test_press::{DOCK_PRESS_HOLD, dock_edge};
 use crate::platform::window_engine::EngineKind;
 use crate::platform::windows::{self, CgWindow};
@@ -919,6 +920,24 @@ fn press_round(
     }
     a.main = main().ok();
     a
+}
+
+/// True when a window waiting with the windows not placed may be on a Desktop that does not
+/// show: where a click on its app's Dock item may take macOS, the model not knowing it
+/// ([`AppFacts::unplaced`]). `on`: the Spaces the window server lists it on
+/// (the engine's `spaces_of`); `screens`: the listing of every screen's Spaces (its
+/// `desktops`); either `None` (the Corner engine reads neither): it may be.
+/// Read, it is only when one of its Spaces is a Desktop or a full-screen Space of the
+/// listing that no screen shows. A window listed on no Space, or on the engine's own Spaces
+/// only, is on no Desktop: a tab not selected (the owner's log of 11-23: Terminal in front
+/// on Desktop 2, its other window in a hidden stage of Desktop 1, three tabs not selected
+/// waiting; every click on its Dock item was refused a prediction for them, Desktop 1 was
+/// not arranged at the press, macOS counted no window of it there, and nothing happened).
+fn waits_elsewhere(on: Option<&[u64]>, screens: Option<&[ScreenDesks]>) -> bool {
+    let (Some(on), Some(screens)) = (on, screens) else { return true };
+    let shown = |s: u64| screens.iter().any(|sc| sc.current == s);
+    let listed = |s: u64| screens.iter().any(|sc| sc.desks.iter().any(|d| d.id == s) || sc.others.iter().any(|(o, _)| *o == s));
+    on.iter().any(|s| listed(*s) && !shown(*s))
 }
 
 impl Controller {
@@ -1845,6 +1864,19 @@ impl Controller {
         None
     }
 
+    /// App `pid`'s windows waiting with the windows not placed: how many, and whether one may
+    /// be on a Desktop that does not show ([`waits_elsewhere`]; [`AppFacts::unplaced`]). The
+    /// screens' listing is read once, and only for an app with a window waiting.
+    pub(super) fn unplaced_elsewhere(&self, ob: &Observer, pid: i32) -> (usize, bool) {
+        let waiting: Vec<u32> = self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
+        if waiting.is_empty() {
+            return (0, false);
+        }
+        let screens = self.engine.desktops();
+        let elsewhere = waiting.iter().any(|id| waits_elsewhere(self.engine.spaces_of(WindowId(*id)).as_deref(), screens.as_deref()));
+        (waiting.len(), elsewhere)
+    }
+
     /// The app a Dock item is for and the window macOS will show for it on another
     /// Desktop, or why there is no prediction: the model's gates and the window list
     /// (`list`) first, the app asked (bounded) only when they pass.
@@ -1859,7 +1891,7 @@ impl Controller {
         m.dock_gates(pid)?;
         let displays = m.displays().to_vec();
         let visible_here = dock::visible_window_of(list, pid, |r| displays.iter().any(|d| self.engine.is_hidden(d, r)));
-        let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
+        let (waiting, unplaced) = self.unplaced_elsewhere(ob, pid);
         // One bounded round with the app (`press_round`): hidden, active, its focused (else
         // main) window; it stops at the first failure and within PRESS_ROUND_CAP.
         let app = AxElement::application(pid);
@@ -1903,6 +1935,7 @@ impl Controller {
             desktop_shown = m.current_space(m.main_display().id).0,
             visible_here,
             unplaced,
+            waiting,
             took_ms,
             "dock: the app at the press"
         );
@@ -2786,6 +2819,23 @@ mod tests {
         let before = |id: u32| (id == 1).then_some(back);
         assert_eq!(expects(&actions, |id| (id == 1).then_some(park), before, |_| None), vec![Expect::new(1, park, Some(back), true), Expect::new(2, back, None, false)], "moves only");
         assert_eq!(moved_ids(&actions), vec![1, 2], "the windows asked of the window server before the moves (R13 3)");
+    }
+
+    #[test]
+    fn a_window_waiting_counts_for_a_dock_click_only_on_a_desktop_not_shown() {
+        use crate::engine::model::desks::Desk;
+        let desk = |id: u64| Desk { id, uuid: String::new() };
+        // One screen: Desktops 1 and 4, Desktop 4 shown, a full-screen Space 30.
+        let screens = [ScreenDesks { screen: "Main".into(), current: 4, current_kind: 0, desks: vec![desk(1), desk(4)], others: vec![(30, 4)] }];
+        let waits = |on: &[u64]| waits_elsewhere(Some(on), Some(&screens));
+        assert!(!waits(&[]), "listed on no Space: a tab not selected (live 11-23)");
+        assert!(!waits(&[5732]), "in a Space of the engine's own: on no Desktop");
+        assert!(!waits(&[4]), "on the Desktop shown");
+        assert!(waits(&[1]), "on a Desktop not shown: minimized there, or never visited");
+        assert!(waits(&[30]), "in a full-screen Space not shown");
+        assert!(waits(&[5732, 1]), "listed on a Desktop too");
+        assert!(waits_elsewhere(None, Some(&screens)), "the engine reads no Spaces (Corner): it may be");
+        assert!(waits_elsewhere(Some(&[]), None), "the screens' listing not read: it may be");
     }
 
     #[test]

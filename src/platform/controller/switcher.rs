@@ -378,7 +378,7 @@ impl Controller {
         let list = windows::list_windows();
         let displays = m.displays().to_vec();
         let visible_here = dock::visible_window_of(&list, pid, |r| displays.iter().any(|d| self.engine.is_hidden(d, r)));
-        let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
+        let (_, unplaced) = self.unplaced_elsewhere(ob, pid);
         let facts = AppFacts {
             hidden: apps::is_hidden(pid).unwrap_or(false),
             unplaced,
