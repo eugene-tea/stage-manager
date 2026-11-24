@@ -24,7 +24,7 @@ use super::windows::CgWindow;
 use crate::engine::displays::{ScreenKey, number_duplicates};
 use crate::engine::geometry::{Point, Rect};
 use crate::engine::model::{Display, DisplayId};
-use crate::engine::corner::park::{CornerChoice, choose_corner};
+use crate::engine::corner::park::choose_corner;
 use crate::engine::corner::sliver::DockBar;
 
 /// Converts an AppKit rectangle (bottom-left origin of the primary screen, `y` up) into
@@ -91,14 +91,11 @@ pub(crate) fn screen_number(screen: &NSScreen) -> Option<u32> {
 /// from CoreGraphics ([`ScreenKey`]; the serial is 0 for many displays, and identical ones
 /// are told apart by their order, [`number_duplicates`]).
 pub fn screen_key(id: u32) -> ScreenKey {
+    #[cfg(test)]
+    if let Some(key) = super::fake::with(|d| d.screens.iter().find(|s| s.display.id.0 == id).map_or(ScreenKey::NONE, |s| s.display.key)) {
+        return key;
+    }
     ScreenKey::new(CGDisplayVendorNumber(id), CGDisplayModelNumber(id), CGDisplaySerialNumber(id))
-}
-
-/// The park corner for the main display (`frame`, `visible`) among the other active
-/// displays ([`choose_corner`]: no display beyond it, else the least overlap).
-pub fn park_corner(frame: Rect, visible: Rect) -> CornerChoice {
-    let others: Vec<Rect> = cg_display_bounds().into_iter().skip(1).collect();
-    choose_corner(frame, visible, &others)
 }
 
 /// The primary screen's height (for converting AppKit coordinates); 0 without a screen.
@@ -108,16 +105,26 @@ pub fn primary_height(mtm: MainThreadMarker) -> f64 {
 
 /// Every active display's bounds from CoreGraphics (global top-left coordinates), main first.
 pub fn cg_display_bounds() -> Vec<Rect> {
+    cg_displays().into_iter().map(|(_, r)| r).collect()
+}
+
+/// Every active display's id and bounds from CoreGraphics (global top-left coordinates), main
+/// first.
+pub fn cg_displays() -> Vec<(u32, Rect)> {
+    #[cfg(test)]
+    if let Some(screens) = super::fake::with(|d| d.screens.iter().map(|s| (s.display.id.0, s.display.frame)).collect()) {
+        return screens;
+    }
     let mut ids = [0u32; 16];
     let mut count = 0u32;
     // SAFETY: `ids` holds 16 entries and both pointers are valid for the call.
     let err = unsafe { CGGetActiveDisplayList(ids.len() as u32, ids.as_mut_ptr(), &mut count) };
     let main = CGMainDisplayID();
-    let mut out = vec![bounds_of(main)];
+    let mut out = vec![(main, bounds_of(main))];
     if err.0 == 0 {
         for &id in ids.iter().take(count as usize) {
             if id != main {
-                out.push(bounds_of(id));
+                out.push((id, bounds_of(id)));
             }
         }
     }
@@ -135,8 +142,16 @@ fn bounds_of(id: u32) -> Rect {
 /// spans its whole display, clear and click-through there ([`DockBar`]; the review's
 /// switching 3: no click on the Dock's screen was a wallpaper click).
 pub fn is_wallpaper_click(list: &[CgWindow], p: Point, dock: &DockBar) -> bool {
-    !list.iter().any(|w| {
+    window_clicked(list, p, dock, None).is_none()
+}
+
+/// The window a click at `p` lands on: the frontmost in `list` that takes it, counted as
+/// [`is_wallpaper_click`] counts them (`None`: the wallpaper). `not`: a process whose
+/// windows never take the click (our own: another app's click never lands on them).
+pub fn window_clicked<'a>(list: &'a [CgWindow], p: Point, dock: &DockBar, not: Option<i32>) -> Option<&'a CgWindow> {
+    list.iter().find(|w| {
         w.onscreen
+            && Some(w.pid) != not
             && w.layer >= 0
             && w.alpha > 0.0
             && w.bounds.contains(p)

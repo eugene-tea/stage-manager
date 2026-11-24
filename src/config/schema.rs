@@ -381,7 +381,7 @@ pub const KEYS: &[KeyDef] = &[
     k("windows", "minimize_to_strip", Kind::Bool, "true",
         "Cmd-M (minimize) sends the window to the strip as a card of its own, as Apple does, instead of the Dock."),
     k("windows", "focus_echo_ms", i(0, 10_000), "700",
-        "Focus changes this soon after we moved a window are taken as our own and never switch stages."),
+        "How long after an action of ours on a window or an app a further notice about it still counts as our own doing. The first answer to a focus or a move of ours is told by order, however late."),
     k("windows", "park_inside", f(-10_000.0, 32.0), "1.0",
         "Points of a parked window asked to stay inside the display's side (0: none; negative: asked beyond it). macOS keeps what it keeps; scripts/probe_park.py measures it."),
     k("windows", "park_drop", f(-32.0, 10_000.0), "-1.0",
@@ -401,12 +401,16 @@ pub const KEYS: &[KeyDef] = &[
         "What Stage Manager does while Apple's Stage Manager is on: \"pause\" brings every window back and arranges nothing until Apple's is off; \"integrate\" follows Apple's stages instead: the stage hotkeys and `ctl switch` switch between them, and Stage Manager shows no strip of its own. With Apple's off, Stage Manager runs its own stages either way."),
     k("windows", "mission_control_stages", Kind::Choice(&["off", "shown", "key"]), "\"shown\"",
         "With [windows] engine = \"spaces\": Mission Control and App Exposé show every stage's windows, as Apple's Stage Manager does and as they do with \"accessibility\". \"shown\" puts the hidden stages' windows on the Desktop, out of view at the screen's corner, once Mission Control shows, and back into their stages when it closes; \"key\" already at its keyboard shortcut; \"off\" leaves them hidden, so Mission Control shows only the stage in front."),
+    k("windows", "mission_control_key_keeps_stage", Kind::Bool, "false",
+        "With [windows] engine = \"spaces\": closing Mission Control with its key or Escape keeps the stage in front. Off is Apple's: macOS brings in front the app whose window is under the pointer, and its stage comes in front with it."),
     // [displays]
     KeyDef {
         applies: Applies::Restart,
         ..k("displays", "main_only", Kind::Bool, "false",
             "Manage the main screen only (the one with the menu bar): no strip on the other screens, and a window moved to one leaves its stage and is left alone there until it comes back. Off is Apple's: every screen has its own strip and stages. Read at launch: quit and open Stage Manager again after changing it.")
     },
+    k("displays", "frames_per_setup", Kind::Bool, if crate::engine::setup_frames::ON_BY_DEFAULT { "true" } else { "false" },
+        "Windows keep their size and place for each set of screens: a screen plugged in or out, or a resolution changed, puts each window back where it was the last time the same screens were connected, once the change settles (10 s). A window moved, resized or clicked since the change stays where it is; a set of screens not seen before keeps macOS's placement. Off leaves the windows where macOS puts them."),
     // [sugar]
     k("sugar", "shift_brings_here", Kind::Bool, "true",
         "Hold Shift while opening or activating an app (Dock, Finder, Spotlight Shift-Return, Launchpad) to bring it here; with [stages] new_apps_join_current on, Shift while opening an app gives it a stage of its own instead. A Shift-click on a card (Apple's) works either way."),
@@ -631,6 +635,8 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-48.toml"),
     include_str!("legacy/default-49.toml"),
     include_str!("legacy/default-50.toml"),
+    include_str!("legacy/default-51.toml"),
+    include_str!("legacy/default-52.toml"),
 ];
 
 #[cfg(test)]

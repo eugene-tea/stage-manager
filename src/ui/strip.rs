@@ -126,6 +126,7 @@ use objc2_quartz_core::{
 use crate::config::{Rgba, StripLevel, StripStyle};
 use crate::engine::geometry::{Point, Rect, Size};
 use crate::engine::stage_area::length_scale;
+use crate::engine::strip_cover;
 use crate::platform::capture::{Capturer, Picture, Target};
 use crate::platform::capture_frame::Extent;
 use crate::platform::capture_pixels;
@@ -489,6 +490,7 @@ pub fn stand_down(why: &str) {
         snapshot.transition = None;
         snapshot.parked = None;
         snapshot.arrived = None;
+        snapshot.landed = None;
         snapshot.window_drag = None;
         snapshot.active_windows = Default::default();
         snapshot.pinned_windows = Default::default();
@@ -2155,6 +2157,9 @@ struct Strip {
     /// The strip shows over windows ([`strip_visibility::over_windows`]): its cards are solid,
     /// no glass ([`Glass::picture`]), and no wallpaper is read for them meanwhile.
     over_windows: bool,
+    /// The cards wholly under windows as last told to the capturer ([`strip_cover`]): they
+    /// ask for no thumbnails. Kept to log each change once.
+    under_windows: Vec<u64>,
     poll_timer: Option<Retained<NSTimer>>,
     /// Hidden at the edge with no clock running ([`Visibility::wakes`]): a mouse move from the
     /// global monitor to the edge or the tab looks again.
@@ -2209,6 +2214,7 @@ impl Strip {
             visibility: Visibility::default(),
             flat: false,
             over_windows: false,
+            under_windows: Vec::new(),
             poll_timer: None,
             edge_waits: false,
             capturer,
@@ -2389,6 +2395,11 @@ impl Strip {
         }
         if let Some((id, window)) = self.snapshot.under_now {
             self.shown_in_place(id, window);
+        }
+        match self.snapshot.landed {
+            Some((id, crate::engine::switch_landing::Pictures::Go)) => self.cut_transition(id),
+            Some((id, crate::engine::switch_landing::Pictures::Finish)) => self.finish_now(id),
+            Some((_, crate::engine::switch_landing::Pictures::FlyOn)) | None => {}
         }
         self.after_snapshot();
         // Cards moved under a resting pointer: the pane catches clicks where they are now.
@@ -2892,6 +2903,8 @@ impl Strip {
             }),
             "merge_onto": self.merge_onto(),
             "shown": self.pane.shown,
+            // The cards wholly under windows, asking for no thumbnails ([`strip_cover`]).
+            "under_windows": self.under_windows,
             // The cards drawn flat: the strip brought back at the edge (`[reveal] flat`).
             "flat": self.flat,
             "overlay_top_down": self.motion_top_down(),
@@ -3433,7 +3446,10 @@ impl Strip {
         strip_model::publish_pictures(self.display, self.thumbs.keys().copied());
     }
 
-    /// Tells the capturer what to capture: every shown thumbnail while the strip shows.
+    /// Tells the capturer what to capture: the thumbnails of every card someone can see
+    /// ([`strip_cover::wants_pictures`]): none while the strip is off the screen, none of a
+    /// card wholly under windows while it is below them. A card coming into view is a window
+    /// newly asked for, taken at once.
     fn update_targets(&mut self) {
         // The active stage's empty slot shows no thumbnails.
         let drawn = || self.layouts.iter().filter(|l| l.stage != GAP_STAGE);
@@ -3449,19 +3465,32 @@ impl Strip {
             strip_model::publish_pictures(self.display, self.thumbs.keys().copied());
         }
         let resolution = self.style.thumbnail_resolution * self.style.cards.hover_scale;
-        let targets = if self.pane.shown {
-            drawn()
-                .flat_map(|l| l.thumbs.iter())
-                .map(|t| Target {
-                    id: t.id,
-                    width: (t.rect.w * resolution).round().max(1.0) as u32,
-                    height: (t.rect.h * resolution).round().max(1.0) as u32,
-                })
-                .collect()
-        } else {
-            Vec::new()
-        };
+        let view = self.cover_view();
+        let g = self.geometry.global;
+        let m = self.m();
+        let (seen, under): (Vec<&CardLayout>, Vec<&CardLayout>) =
+            drawn().partition(|l| strip_cover::wants_pictures(view, &l.bounds(m).translate(g.x, g.y), &self.snapshot.active_frames));
+        let targets = seen
+            .iter()
+            .flat_map(|l| l.thumbs.iter())
+            .map(|t| Target {
+                id: t.id,
+                width: (t.rect.w * resolution).round().max(1.0) as u32,
+                height: (t.rect.h * resolution).round().max(1.0) as u32,
+            })
+            .collect();
+        let under: Vec<u64> = if view.shown { under.iter().map(|l| l.stage).collect() } else { Vec::new() };
+        if under != self.under_windows {
+            tracing::debug!(cards = ?under, "strip: cards wholly under windows ask for no thumbnails");
+            self.under_windows = under;
+        }
         self.capturer.set_targets(targets);
+    }
+
+    /// Where the strip is for [`strip_cover`]: on the screen (a full-screen Space has none: the
+    /// pane left on the Desktop behind it is out of sight), and above windows or below.
+    fn cover_view(&self) -> strip_cover::View {
+        strip_cover::View { shown: self.pane.shown && !self.snapshot.fullscreen, above_windows: self.pane.lifted == Some(true) }
     }
 
     /// Takes card `stage`'s thumbnails again now (the pointer reached it): with no timer
@@ -4109,8 +4138,9 @@ impl Strip {
         if self.edge_waits && self.poll_timer.is_none() && self.visibility.wakes(p, &g) {
             self.update_visibility();
         }
-        // The whole panel: a card's part drawn right of the column hovers and clicks too.
-        if self.geometry.area().contains(p) {
+        // The whole panel: a card's part drawn right of the column hovers and clicks too; but
+        // not under a window over the strip (the pointer is on the window).
+        if self.geometry.area().contains(p) && strip_cover::on_card(self.cover_view(), p, &self.snapshot.active_frames) {
             self.hover_at(Some(Point::new(p.x - g.x, p.y - g.y)));
         } else if self.hovered.is_some() || self.pane.catches == Some(true) {
             self.hover_at(None);
@@ -4401,6 +4431,8 @@ impl Strip {
         }
         self.pane.lifted = Some(lift);
         self.pane.set_level(if lift { NSFloatingWindowLevel } else { BELOW_WINDOWS });
+        // Above windows every card shows; below them, those under windows ask for nothing.
+        self.update_targets();
         // Only a pane already on its Desktop: a first order-in decides the Desktop it lives on.
         if lift && self.pane.placed && !self.snapshot.fullscreen {
             self.pane.panel.orderFrontRegardless();

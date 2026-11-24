@@ -99,6 +99,16 @@ pub fn is_switcher(role: &str, subrole: &str) -> bool {
 
 /// The switcher's selection (`dock`: the Dock's pid), read now.
 pub fn read(dock: i32) -> Read {
+    #[cfg(test)]
+    if let Some(read) = super::fake::with(|d| match d.switcher.shown {
+        false => Read::NoSwitcher,
+        true => Read::Shown {
+            items: d.switcher.pids.len(),
+            selected: d.switcher.pids.get(d.switcher.selected).map(|pid| Item { index: Some(d.switcher.selected), pid: Some(*pid), matched: "url" }),
+        },
+    }) {
+        return read;
+    }
     let t = SWITCHER_AX_SECONDS;
     let app = AxElement::application(dock);
     let children = match app.bounded(t, AxElement::children) {
@@ -254,6 +264,7 @@ pub fn list(dock: i32) -> Value {
     })
 }
 
+#[cfg(feature = "probes")]
 /// What the Dock shows to Accessibility, two levels down (the probe's dump): each child's
 /// role, subrole, title and attribute names; for each, up to `items` of its own children
 /// with role, subrole, title, `AXSelected` and `AXURL`. Titles are app names; the dump is

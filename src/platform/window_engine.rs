@@ -38,9 +38,9 @@ use super::safety::{Ours, Report, ScanScope};
 use crate::engine::engine_choice::{self, Asked, Choice, ConfigEngine};
 use crate::engine::geometry::Rect;
 use crate::engine::landing_order;
+use crate::engine::lend_round::Left;
 use crate::engine::model::{Display, Model, WindowId};
 use crate::ui::landing_math::Affine;
-use crate::ui::strip_model::Transition;
 pub use crate::engine::recovery::EngineKind;
 use crate::engine::recovery::{Known, ParkedFile, ScanDisplays, StageSpace};
 
@@ -77,6 +77,56 @@ pub struct Back {
     pub restored: Option<bool>,
 }
 
+/// A window of a round of Mission Control's lends ([`WindowEngine::park_round`]).
+#[derive(Debug, Clone)]
+pub struct RoundAsk {
+    /// The window.
+    pub id: WindowId,
+    /// Its app: one app's windows are asked in turn, the apps at once.
+    pub pid: i32,
+    /// Its park.
+    pub park: LendPark,
+}
+
+/// What a round's parks did ([`WindowEngine::park_round`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Parks {
+    /// Parked out of sight, still hidden: ready to go home ([`WindowEngine::home_round`]).
+    pub took: Vec<WindowId>,
+    /// Asked, and the park did not take (the app did not move the window in time): still
+    /// hidden; judged again where it is listed when the round goes home.
+    pub missed: Vec<WindowId>,
+    /// Not asked: the round's deadline came before their turn (untouched, hidden).
+    pub late: Vec<WindowId>,
+    /// Not asked, and why ([`Left::NotHeld`], [`Left::Busy`]): left hidden.
+    pub skipped: Vec<(WindowId, Left)>,
+    /// Where each window asked was listed after its park's move (`None`: not listed, or the
+    /// move not taken).
+    pub landed: Vec<(WindowId, Option<Rect>)>,
+    /// The apps asked at once.
+    pub apps: usize,
+    /// From the first park to the last answer, in milliseconds.
+    pub ms: u64,
+    /// The windows' moves added up, in milliseconds (what one at a time would have taken).
+    pub sum_ms: u64,
+}
+
+/// What a round's second phase did ([`WindowEngine::home_round`]).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Homes {
+    /// On their Desktop now, still counted hidden, with where the window server lists each
+    /// and whether it was parked at its stage's card ([`crate::engine::lend_park::Zone::Card`]).
+    pub lent: Vec<(WindowId, Option<Rect>, bool)>,
+    /// Not put home, and why (the park did not take, the window did not go, or the engine
+    /// does not hold it): still hidden.
+    pub left: Vec<(WindowId, Left)>,
+    /// The calls and their read back, in milliseconds.
+    pub ms: u64,
+    /// When the first call putting windows home was made and the last one returned (`None`:
+    /// no call made): the gap between the first and the last window put home.
+    pub calls: Option<(Instant, Instant)>,
+}
+
 /// How a window is brought to its frame ([`WindowEngine::show`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShowHow {
@@ -85,19 +135,6 @@ pub enum ShowHow {
     /// A busy app is tried again quickly, within the restore budget (quit, a stand-down:
     /// [`crate::engine::leftovers::RESTORE_RETRY`]).
     Retrying,
-}
-
-/// How a switch moves, as the engine describes it on the WM thread
-/// ([`WindowEngine::animate`]). The controller runs the choreography it names around the
-/// shared steps (the plan, the note to the strip, the wait for its answer and for its
-/// unveil); the strip plays it on the main thread. The engine never calls UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Motion {
-    /// Pictures of the windows, full size, move between the stage and the cards above every
-    /// window (the strip's snapshots), and the windows move behind them: the outgoing ones
-    /// hide once their pictures cover them, the incoming ones stay hidden until the strip
-    /// unveils them.
-    Pictures,
 }
 
 /// One incoming window's last stretch (round sm-landing): from the first step on, the real
@@ -235,6 +272,87 @@ pub trait WindowEngine: Send + Sync {
         Back::default()
     }
 
+    /// True while window `id`, hidden by this engine, is on its Desktop for a while
+    /// ([`Self::lend_home`]): on a Desktop on purpose, not let out by something else.
+    fn lent(&self, _id: WindowId) -> bool {
+        false
+    }
+
+    /// The window server's listing of every screen's Desktops, read now
+    /// (`SLSCopyManagedDisplaySpaces`: each screen's Space shown and its kind, its Desktops
+    /// with their uuids). `None`: this engine does not read it (the Corner engine).
+    fn desktops(&self) -> Option<Vec<crate::platform::spaces::ffi::ScreenDesks>> {
+        None
+    }
+
+    /// The Spaces the window server lists window `id` on now (Desktops, stage Spaces, a
+    /// full-screen app's). `None`: this engine does not read them (the Corner engine).
+    fn spaces_of(&self, _id: WindowId) -> Option<Vec<u64>> {
+        None
+    }
+
+    /// The Desktops the window server shows now, one per screen (SkyLight's own word, read
+    /// now, [`Self::desktops`]): what Mission Control shows while a Space change made inside
+    /// it is not recognized yet. `None`: this engine does not know (the Corner engine).
+    fn shown_desktops(&self) -> Option<Vec<u64>> {
+        self.desktops().map(|list| list.iter().map(|d| d.current).filter(|c| *c != 0).collect())
+    }
+
+    /// The Desktop window `id`, hidden by this engine off every Desktop, was hidden from (and
+    /// goes back to): the window server's id, as [`Self::shown_desktops`] names them. `None`
+    /// for a window this engine does not hold.
+    fn home_of(&self, _id: WindowId) -> Option<u64> {
+        None
+    }
+
+    /// The first phase of a round of Mission Control's lends (round mc-lends,
+    /// [`crate::engine::lend_round`]): every window of `asks`, hidden by this engine off every
+    /// Desktop, moved to its park while still hidden, the apps at once, each app's windows in
+    /// turn while `deadline` lasts. Nothing shows; each park's restore is owed from now on
+    /// (a hide, a show, a sweep, [`Self::unpark_round`] or the take back sets the frame
+    /// again). The Corner engine: nothing.
+    fn park_round(&self, _asks: Vec<RoundAsk>, _deadline: Instant) -> Parks {
+        Parks::default()
+    }
+
+    /// The second phase: windows `ids`, parked by [`Self::park_round`] and still hidden,
+    /// onto their Desktops in one call per Desktop, those listed in the park zone only; each
+    /// counted put home as [`Self::lend_home`]'s are. The others stay hidden.
+    fn home_round(&self, _ids: &[WindowId]) -> Homes {
+        Homes::default()
+    }
+
+    /// Windows `ids` (with their apps), put home by [`Self::home_round`] or
+    /// [`Self::lend_home`], back into their stage Spaces in one call per Space, then their
+    /// frames set again, the apps at once ([`Self::take_back`] for many).
+    fn back_round(&self, ids: &[(WindowId, i32)]) -> Vec<(WindowId, Back)> {
+        ids.iter().map(|(id, _)| (*id, self.take_back(*id))).collect()
+    }
+
+    /// Windows `ids` (with their apps), parked by [`Self::park_round`] and never put home,
+    /// get their frames again where they are, hidden, the apps at once (Mission Control did
+    /// not show after its key). How many took it.
+    fn unpark_round(&self, _ids: &[(WindowId, i32)]) -> usize {
+        0
+    }
+
+    /// Windows `ids` (with their apps), put home and parked by [`Self::home_round`], get
+    /// their own frames again on their Desktop, still lent, the apps at once: picked in
+    /// Mission Control, whose close carries them there (round mc-pick). Each move is read
+    /// back through its element, as the window list gives Mission Control's layout while it
+    /// shows. Those that took it.
+    fn frames_back(&self, _ids: &[(WindowId, i32)]) -> Vec<WindowId> {
+        Vec::new()
+    }
+
+    /// Windows `ids` (with their apps and corner parks), lent and parked at their stages'
+    /// cards, moved to the park corner on their Desktop, still lent, the apps at once: their
+    /// app in front waits for a pick's switch after Mission Control's close
+    /// ([`crate::engine::mission_control::corner_while_waiting`]). Those that took it.
+    fn to_corner(&self, _ids: &[(WindowId, i32, Rect)]) -> Vec<WindowId> {
+        Vec::new()
+    }
+
     /// True while window `id` is parked for a lend ([`Self::lend_home`] with a park) and its
     /// frame not set again: where it is listed is not its frame, so its move notices are not
     /// the model's (the platform drops them). The Corner engine: never.
@@ -253,16 +371,23 @@ pub trait WindowEngine: Send + Sync {
     /// app's screens or config).
     fn assume(&self, file: &ParkedFile);
 
-    /// How the switch planned as `t` moves ([`Motion`]): asked once a switch, on the WM
-    /// thread, after the plan and before anything is sent to the strip or moved.
-    fn animate(&self, t: &Transition) -> Motion;
-
     /// True when a window leaves the screen in one step as soon as it is told (no move an
     /// app carries out): a switch's outgoing windows can stay where they are until their
     /// pictures are taken at the switch, so no full-size picture is kept fresh on a timer
     /// for a switch nobody announced (a Dock click, ⌘Tab). False: the strip keeps the shown
     /// windows' pictures fresh every `[animation] snapshot_interval_ms`. Any thread.
     fn pictures_at_switch(&self) -> bool {
+        false
+    }
+
+    /// True when this engine reads back each of its own hides and shows and tries again
+    /// what did not take (its owed retries): the arrival's check of a Desktop arranged ahead
+    /// ([`super::controller`]'s `Verify`, built for moves an app may apply late or not at
+    /// all) is not built. The Corner engine: false, its parks and restores go through
+    /// Accessibility. The Spaces engine: true (under it the check only re-read the engine's
+    /// own answer, held the engine's tick off while it lived, and answered a hide that did not
+    /// take with a move to the Corner engine's park frame).
+    fn verifies_own_moves(&self) -> bool {
         false
     }
 
@@ -381,6 +506,9 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     let asked = Asked { config, test: super::spaces::engine::from_env() };
     // `"spaces"` opens the landing variants as a test run does: the review build (11-14).
     crate::ui::landing_math::Landing::open_for_review(config == ConfigEngine::Spaces);
+    // The window server's notices, registered before the probe so its panel's are heard
+    // (round r5-notices); forwarded only if the Spaces engine is chosen, else removed.
+    let notices = asked.probes() && super::spaces::notices::register();
     let probe = asked.probes().then(|| super::spaces::probe::run(mtm));
     match &probe {
         Some(p) if p.ok => tracing::info!(ms = format!("{:.1}", p.ms), steps = p.steps, "window engine: launch probe passed: {}", p.reason),
@@ -394,6 +522,9 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
         tracing::info!(landing = landing.name(), "window engine: a test or review run lands switches this way");
     }
     install(of(choice.kind));
+    if notices {
+        super::spaces::notices::chosen(choice.kind == EngineKind::Spaces);
+    }
     *lock_choice() = Some(choice.clone());
     choice
 }
@@ -403,6 +534,7 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
 /// for `ctl state`; the parked file names the engine from its next write.
 pub fn fall_back(why: &str) {
     install(of(EngineKind::Corner));
+    super::spaces::notices::stop();
     let mut c = lock_choice();
     match c.as_mut() {
         Some(choice) => {

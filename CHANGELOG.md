@@ -1,5 +1,77 @@
 # Changelog
 
+## 1.9.2 — 2026-11-24
+
+- With `engine = "spaces"`, plugging a screen in or out leaves every hidden window on its own
+  Desktop, also when the Dock or ⌘Tab switches Desktops in the minute after. When macOS
+  removes a Desktop, its stages move to the Desktop its windows went to.
+- With `engine = "spaces"`, ⌘Tab or a Dock click to an app that is slow to come in front no
+  longer slides to another Desktop, and ⌘Tab cancelled with Escape takes its window back at once.
+- With `engine = "spaces"`, the first switch to a Desktop after the app starts stays there;
+  before, macOS could slide straight back to the Desktop left. A window that opens while a
+  Desktop slides in joins its own Desktop's stages.
+- With `engine = "spaces"`, a window moved to another Desktop in Mission Control leaves its
+  stage at once, and a window set to show on all Desktops shows with every stage from the
+  first Desktop change.
+- With `engine = "spaces"`, the app follows Mission Control and App Exposé closing at once.
+- With `engine = "spaces"` and `mission_control_stages = "key"`, Mission Control opened again
+  right after it closed shows every stage's windows; before, it could show the front stage only.
+- With `engine = "spaces"`, a click on the Dock item of the app in front goes to the app's
+  window on another Desktop also when one of its windows has tabs; before, nothing happened.
+- With `engine = "spaces"`, ⌘Tab to an app whose only window is in a hidden stage of another
+  Desktop goes to that Desktop also when the app is slow to answer; before, the app could
+  come in front with no window shown.
+- With `engine = "spaces"`, a hidden window that macOS brings on screen is hidden again at
+  once; before, it came back up to two seconds later, or stayed on screen after three tries.
+- With `engine = "spaces"`, a window its app closes and opens again while its stage is hidden
+  shows at once; before, it could stay invisible for up to ten seconds.
+- With `engine = "spaces"` and more than one screen, a window whose Desktop is gone comes back
+  on the Desktop shown on its own screen, not the first screen's.
+- A click on a hidden window's edge in the corner, or a drag of a window, right after a
+  stage switch works at once; before, either could be ignored for most of a second.
+- On a busy Mac, an app that reports its own focus late no longer brings back the stage just
+  left, and a click on the wallpaper no longer brings Finder's windows in front.
+- On a busy Mac, a switch no longer plays its pictures over windows already in their places.
+- With a wallpaper that follows the sun, a stage switch no longer shows a darker block in
+  the corner where hidden windows wait; before, it could show for the length of every switch
+  after the picture's light changed.
+- With `engine = "spaces"`, Mission Control shows the hidden stages' windows as soon as it
+  opens from its key or its keyboard shortcut; before, they could come up to two seconds late.
+- With `engine = "spaces"`, `[windows] mission_control_key_keeps_stage = true` keeps the stage
+  in front when Mission Control is closed with its key or Escape. Off by default, as Apple's
+  Stage Manager: the app whose window is under the pointer comes in front with its stage.
+- With `engine = "spaces"`, a link that opens in a browser window hidden in a stage on another
+  Desktop now goes to that Desktop with the window in front; before, nothing seemed to happen.
+  The Desktop left keeps the stage it had in front.
+- A link opened in a browser window on another Desktop stays there: macOS no longer jumps to
+  that Desktop and back, and the browser's window no longer pops up under a growing picture.
+- When macOS slides to another Desktop during a switch and straight back, the window is
+  there when the Desktop slides in, with no picture still growing over it.
+- A click or another app coming in front during a switch ends its animation at once, with no
+  picture still growing over a window already in its place.
+- With `engine = "spaces"`, Mission Control lays out the hidden stages' windows on the left,
+  as Apple's does; before, they came in from the bottom-right corner and were laid out at the
+  right.
+- With `engine = "spaces"`, a window picked in Mission Control comes to its place in one
+  motion.
+- With `engine = "spaces"`, Mission Control shows the hidden stages' windows at once instead
+  of one by one.
+- With `engine = "spaces"`, Mission Control leaves out fewer of the hidden stages' windows: one
+  that did not come in time is brought in a moment later.
+- With `engine = "spaces"`, Mission Control opened again right after picking another Desktop
+  in it shows that Desktop's hidden stages too.
+- With `engine = "spaces"`, a mouse pick in the ⌘Tab switcher no longer slides to another
+  Desktop and back.
+- A window no longer shows in place before its picture lands when its app also has a window on
+  another Desktop.
+- With `engine = "spaces"`, bringing in a stage whose app also has a window on another
+  Desktop no longer takes macOS to that Desktop.
+- With `engine = "spaces"`, unplugging a screen keeps every stage whole on its Desktop.
+- With `engine = "spaces"`, unplugging the main screen no longer loses the stage that was in
+  front on the other screen; its window turned up later as a stage of its own.
+- New setting `[displays] frames_per_setup` (off): windows go back to the size and place they
+  had the last time the same screens were connected, once a screen is plugged in or out.
+
 ## 1.9.1 — 2026-11-18
 
 - With `engine = "spaces"`, Mission Control and App Exposé show every stage's windows again,

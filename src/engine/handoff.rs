@@ -21,7 +21,7 @@
 //! A handed-over window never travels from copy to copy forever ([`TakenDrops`], the owner's
 //! word on 8N): the app drops it from its taken windows, logged once at info, when its app's
 //! process no longer runs, or when the window server's complete list no longer has it on two
-//! looks at least [`LOOK_APART`] apart (8M's rule, [`super::vanished`]). One that still exists
+//! looks at least [`super::vanished::LOOK_APART`] apart (8M's rule, [`super::vanished`]). One that still exists
 //! and cannot be reached at a quit is passed on to the app's guardian as before (a warning,
 //! never the error of a window the app parked itself).
 //!
@@ -43,7 +43,6 @@ use serde::{Deserialize, Serialize};
 use super::corner::park::Corner;
 use super::recovery::{Known, Listed, Registered, ScanDisplays, is_stranded};
 use super::vanished::Vanished;
-pub use super::vanished::LOOK_APART;
 
 /// The ctl command a guardian hands its watch over with: `take-watch <offer as JSON>`.
 pub const COMMAND: &str = "take-watch";
@@ -248,7 +247,7 @@ impl Offering {
 pub enum Dropped {
     /// Its app's process no longer runs.
     AppGone,
-    /// The window server's complete list no longer has it (two looks [`LOOK_APART`] apart).
+    /// The window server's complete list no longer has it (two looks [`super::vanished::LOOK_APART`] apart).
     Vanished,
 }
 

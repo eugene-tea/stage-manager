@@ -34,14 +34,14 @@ terminal has its approvals checked against the terminal, not the app.
 
 | Target | What it does |
 |---|---|
-| `make build` | `cargo build --release` |
+| `make build` | `cargo build --release` (`FEATURES=probes` adds the probes) |
 | `make bundle` | assembles `target/Stage Manager.app` (version from `Cargo.toml`) |
 | `make sign` | signs the bundle with the local identity (hardened runtime) |
-| `make dev` | signs, then copies the app to `~/Library/Application Support/Stage Manager Dev/` |
+| `make dev` | builds with the probes, signs, then copies the app to `~/Library/Application Support/Stage Manager Dev/` |
 | `make run` | `dev`, then launches that copy and tails today's log |
 | `make install` | copies the signed app to `~/Applications` (refused while that copy runs: quit it first) |
 | `make fixture` | builds `target/SM Fixture.app`, the test window app |
-| `make check` | `cargo test` and `cargo clippy --all-targets -- -D warnings` |
+| `make check` | `cargo test --features probes` and `cargo clippy --all-targets -- -D warnings`, with and without the probes |
 | `make icon` | regenerates the app icon (needs Xcode 26; outputs are committed) |
 | `make dmg-art` | re-renders the DMG window from `art/dmg.py` and `art/dmg/text.json` |
 | `make social-art` | re-renders the info page's link-preview card from `art/social.py` |
@@ -69,6 +69,56 @@ The model's tests run once per window engine: a test inside `both_engines! { .. 
 and the fake desk (`Desk`) hide windows the way that engine does. A test of the park
 corner's own geometry goes in `corner_nuance! { .. }` and runs on the Corner engine only;
 the Spaces engine's own tests are in `src/engine/spaces.rs`.
+
+### The bench
+
+The bench (`src/platform/controller/bench.rs`) runs the real controller, the real observer
+and the real window engine (Corner or Spaces) in a unit test, on a fake desk
+(`src/platform/fake.rs`) and a frozen clock. The desk stands in for macOS at the platform's
+leaves only (the window list, Accessibility, input state, the frontmost app, the Dock, the
+screens, the strip, SkyLight's Space calls): each leaf asks the desk first under
+`cfg(test)`, and the desk answers as macOS was measured to (an activation and its notices,
+a Desktop slide and its notice, a window in a stage Space on no Desktop). Notices are queued
+with their measured delays times a **load factor**, and every platform call costs time on
+the clock, so a scenario run at load 3 or 10 is the same script on a slower Mac. Files go
+to a scratch home.
+
+The incidents are in `src/platform/controller/bench/scenarios.rs`: each scripts what the
+person and macOS did, as its log tells it, and its test asserts what came of it at load 1,
+3 and 10. An assertion marked `// TIME DECIDES:` names the constant that changed the
+outcome under load.
+
+`src/platform/controller/bench/causes.rs` pins the focus and activation chains ("who caused
+this notice", `engine/attribution.rs`): one scenario for each gate, from the incident its doc
+comment tells. Their outcomes also read what each focus and activation notice came to, in
+the order handled (the trail: `attribution::judged` notes the verdict of every notice;
+`Bench::trail`), so a change that moves a notice from one gate to another shows even when a
+person would see the same. After such a change, print what to assert:
+`BENCH_PRINT=1 cargo test --lib causes::print_them -- --nocapture`.
+
+`src/platform/controller/bench/switch.rs` pins a switch's handshake with the strip and the
+raise-order check after it: the strip answering in time, late or never (`Strip::covers_ms`,
+`Strip::draws`), a second click, a click or an app's activation inside the cover wait or the
+check, an app reordering its windows late (`App::reorders_ms`). Each outcome reads what a
+person sees, how many switches played with their pictures (`Strip::covered`, `uncovered`)
+and the calls in order. What macOS does on its own clock, whatever the app's thread is
+doing, the desk plays with `Desk::at` (at a time) and `Desk::on_raise` (a while after the
+app's raise of a window). Print what to assert:
+`BENCH_PRINT=1 cargo test --lib switch::print_them -- --nocapture`.
+
+- One scenario with its story (the notices handled and the calls made, in order) and the
+  app's own log lines:
+  `BENCH_ONE="Dock click" BENCH_LOAD=3 BENCH_LOG=debug cargo test --lib bench_one -- --nocapture`.
+- Every scenario's outcome at each load, and the time limits crossed only under load:
+  `cargo test --lib load_table -- --nocapture`.
+
+To add a scenario: write a function of the load that builds a `Bench` (the engine, the
+config text, the desk's apps and windows), scripts the incident with the bench's verbs
+(`click`, `card_click`, `dock_click`, `cmd_tab`, `mission_open`, `go_to_desktop`,
+`activate`, `advance(ms)`, or the desk's own through `desk(|d| ..)`) and returns the outcome
+in a few words (with `Bench::trail` when the scenario is about who caused a notice); cite the doc comment or commit that tells the incident; add it to `ALL` and
+assert its three outcomes in a test. Something macOS does that the desk does not play yet
+goes in the desk, with where it was measured, never in the scenario.
 
 `scripts/test-stages.sh` runs the scripted checks against the real app, driving it through
 its ctl socket and reading the window server's view of the windows:
@@ -166,22 +216,76 @@ STAGE_MANAGER_ONLY=dev.eugene.stagemanager.fixture STAGE_MANAGER_NO_PROMPT=1 mak
 
 ## Environment variables
 
-| Variable | Effect |
-|---|---|
-| `RUST_LOG` | log filter; overrides `[log] level` |
-| `STAGE_MANAGER_HOME` | one directory for the config, saved state, the ctl socket and the log |
-| `STAGE_MANAGER_LOG_DIR` | the daily logs' directory alone |
-| `STAGE_MANAGER_ONLY` | comma-separated bundle IDs: manage only these apps |
-| `STAGE_MANAGER_NO_PROMPT` | no welcome window, permission prompts or automatic update checks |
-| `STAGE_MANAGER_NO_LOGIN_ITEM` | never register or unregister the login item or the launchd agent |
-| `STAGE_MANAGER_NO_CAPTURE` | window captures off, whatever the config says |
-| `STAGE_MANAGER_TEST` | enables the test-only `ctl debug-*` commands |
-| `STAGE_MANAGER_TEST_REOPEN_LIST` | with `STAGE_MANAGER_TEST` only: the copy joins the reopen list at a logout (turns regular) without a login item, as the live suite's restore phase checks |
-| `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | with `STAGE_MANAGER_ONLY` set only: activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
-| `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only: the update check offers this version instead of asking GitHub |
-| `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only: an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
-| `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only: `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
-| `SM_TEST_TOGGLE_APPLE_SM` | `1` lets `scripts/test-apple-stage-manager.sh` (the stand-down) and `scripts/test_apple.py` (the Apple mode: `mirror`, `switch`) toggle Apple's Stage Manager (each restores the setting on exit) |
+Every `STAGE_MANAGER_*` and `SM_*` variable the app or the scripts read. Three different
+switches each mean "a test run", and a test switch is honoured only with its gate set:
+
+- **`TEST`**: `STAGE_MANAGER_TEST` is set (the `ctl debug-*` commands and the switches below
+  marked so);
+- **`ONLY`**: `STAGE_MANAGER_ONLY` is set (a run on fixture apps);
+- **`ONLY`/`HOME`**: `STAGE_MANAGER_ONLY` or `STAGE_MANAGER_HOME` is set.
+
+The installed app is never started with any of them, so none acts on a user's copy (but see
+`STAGE_MANAGER_LANDING`). The three stay apart for now.
+
+### The app
+
+| Variable | Test only | Effect |
+|---|---|---|
+| `RUST_LOG` | no | log filter; overrides `[log] level` |
+| `STAGE_MANAGER_HOME` | no | one directory for the config, saved state, the ctl socket and the log; also counts as a test run for `NO_CAPTURE` and for the activation policy (`ui/shell.rs`) |
+| `STAGE_MANAGER_LOG_DIR` | no | the daily logs' directory alone |
+| `STAGE_MANAGER_ONLY` | no | comma-separated bundle IDs: manage only these apps; the gate of the `ONLY` switches |
+| `STAGE_MANAGER_NO_PROMPT` | no | no welcome window, permission prompts or automatic update checks |
+| `STAGE_MANAGER_NO_LOGIN_ITEM` | no | never register or unregister the login item or the launchd agent |
+| `STAGE_MANAGER_TEST` | yes | enables the test-only `ctl debug-*` commands; the gate of the `TEST` switches |
+| `STAGE_MANAGER_NO_CAPTURE` | yes, `ONLY`/`HOME` | window captures off, whatever the config says |
+| `STAGE_MANAGER_ENGINE` | yes, `ONLY` | `spaces`: the Spaces window engine, whatever the config says (`SM_ENGINE` sets it) |
+| `STAGE_MANAGER_PROBE_FAIL` | yes, `ONLY` | `hide` or `show`: that step of the Spaces engine's launch probe is not sent, as on a Mac that refuses it |
+| `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | yes, `ONLY` | activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
+| `STAGE_MANAGER_CAPTURE_SCK` | yes, `ONLY` | every window picture through ScreenCaptureKit, the window server's own source off (as before 1.9) |
+| `STAGE_MANAGER_LANDING` | `ONLY`, or any run under `[windows] engine = "spaces"` | the landing variant: `pictures` (the default), `ordered`, `live`, `live-early`, `live-late` (`ui/landing_math.rs`; the only test switch a user's config can open) |
+| `STAGE_MANAGER_LANDING_LEVEL` | as `STAGE_MANAGER_LANDING` | `ranked`: the live landing's windows get levels by rank instead of as made |
+| `STAGE_MANAGER_TEST_REOPEN_LIST` | yes, `TEST` | the copy joins the reopen list at a logout (turns regular) without a login item, as the live suite's restore phase checks |
+| `STAGE_MANAGER_SESSION` | yes, `TEST` | the window server session the app takes itself to run in: a restart simulated without restarting the Mac |
+| `STAGE_MANAGER_LOGOUT_NOTE` | yes, `TEST` | the logout signals are this one distributed notification only (the live suite posts it) |
+| `STAGE_MANAGER_DROP_AX_DESTROYED` | yes, `TEST` | Accessibility's destroyed notifications ignored, as from an app that sends none: a closed window leaves through the sweep alone |
+| `STAGE_MANAGER_COVER` | yes, `TEST` | `desktop`: a switch's cover is always the desktop's still, kept fresh |
+| `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only | the update check offers this version instead of asking GitHub |
+| `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only | an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
+| `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only | `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
+| `STAGE_MANAGER_THUMBNAIL_MS` | `strip-demo` only | the demo's capture interval |
+| `STAGE_MANAGER_DEMO_LAYOUT` | `strip-demo` only | `chunks`: each app's windows in stages of 1, 2, 3 (default `native`, one stage per app) |
+| `STAGE_MANAGER_DEMO_NUMBERS` | `strip-demo` only | `1`: number badges on the cards |
+| `STAGE_MANAGER_DEMO_AUTOHIDE` | `strip-demo` only | `0` or `1`: overrides Apple's `AutoHide` |
+| `STAGE_MANAGER_DEMO_MOTION` | `strip-demo` only | `1`: a card click plays the switch animation over the real windows |
+| `STAGE_MANAGER_DEMO_FAKE` | `strip-demo` with `--features debug-render` | `<bundle id>:<w>x<h>;…` stands in for the window list |
+| `STAGE_MANAGER_DEMO_SCREEN` | `strip-demo` with `--features debug-render` | `<w>x<h>+<menu bar>`: the screen the render draws for |
+| `STAGE_MANAGER_DEMO_RENDER` | `strip-demo` with `--features debug-render` | draws the strip offscreen into this file (raw BGRA) and quits |
+
+### The scripts (all test only)
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `SM_APP`, `SM_BIN` | `scripts/bundle.sh` | the bundle to assemble and the binary to put in it (default `target/Stage Manager.app`, `target/release/stage-manager`) |
+| `SM_DEV_APP` | `scripts/dev-app.sh`, `test_stages.py` | where the dev copy goes and runs from (`make install` points it at `~/Applications`) |
+| `SM_FIXTURE_ID` | `test-stages.sh`, `measure.sh`, `test_stages.py` | the main fixture's bundle id |
+| `SM_ENGINE` | `test-stages.sh`, `test_stages.py`, `measure_stages.py` | `spaces` runs the suite under the Spaces engine (sets `STAGE_MANAGER_ENGINE`); default the Corner engine |
+| `SM_SCREENSHOTS` | `test_stages.py` | a folder: turns on the visible phase's strip screenshots |
+| `SM_SHOTS` | `test_stages.py`, `test_spaces.py` | a folder: turns on `spaces --auto`'s by-eye screenshots and the Mission Control pixel checks |
+| `SM_PIXELS` | `test_stages.py` | turns on the checks read back from the overlay's pixels |
+| `SM_OVERLAY_TRACE` | `test_stages.py` | prints each overlay read back's time and answer |
+| `SM_SKIP_LANDING` | `test_stages.py` | skips the landing blend check |
+| `SM_STILL_CLICK` | `test_stages.py` | `1`: runs the desktop still's icon click with "Click wallpaper to reveal desktop" on |
+| `SM_LAUNCHES` | `test_stages.py`, `measure_stages.py` | how many launches the launch phase makes (20; the measure's 10) |
+| `SM_LANDING_SWITCHES`, `SM_LANDING_MID_S`, `SM_LANDING_ORDER_SWITCHES`, `SM_LANDING_MERGE_ROUNDS` | `test_stages.py` | the landing phases' switches (12), the abort's moment (0.5 s), the order phase's and the merge phase's rounds (4 each) |
+| `SM_AUTO` | `test_spaces.py` | `1`: the Spaces check hands-free, as `--auto` |
+| `SM_DOCK_REPEATS` | `test_spaces.py` | how many Dock arrivals `spaces --auto` makes (3) |
+| `SM_CMDTAB_ONLY` | `test_spaces.py` | `N`: the ⌘Tab steps alone, N times |
+| `SM_DISPLAY_GONE_WATCH` | `test_display_gone.py` | how long the watch after a display goes lasts (65 s) |
+| `SM_TEST_TOGGLE_APPLE_SM` | `test-apple-stage-manager.sh`, `test_apple.py`, `probe_apple.py`, `probe_press_quad.py` | `1` lets the script toggle Apple's Stage Manager (each restores the setting on exit) |
+| `SM_PROBE_DOCK_CLICK` | `probe_apple.py` | `real`: a real click on the Dock item instead of `AXPress` |
+| `SM_STAGES`, `SM_SETTLE_S`, `SM_REST_S`, `SM_SWITCHES`, `SM_SWITCH_CPU_S`, `SM_SWITCH_WAYS`, `SM_HIDDEN_ROUNDS`, `SM_HIDDEN_S`, `SM_AFTER_S` | `measure_stages.py` | the measure's stages (4), settle (10 s), rest (60 s), switches (20), CPU window per switch (1.5 s), switch ways (`card dock`), hidden rounds (8) and length (5 s), and the watch after (1.5 s) |
+| `SM_CAPTURE` | `measure_stages.py` | `0`: the app runs with captures off (`STAGE_MANAGER_NO_CAPTURE`) |
 
 ## The ctl socket
 
@@ -219,12 +323,24 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make
 Exit status is 0 on success, 1 on an error reply and 2 when the app is not running. With
 `STAGE_MANAGER_TEST=1` the `debug-*` commands post clicks, drags, Desktop and Mission
 Control shortcuts, ⌘M (`debug-cmd-m`), full-screen toggles and the strip shown or hidden for the scripted checks,
-`debug-minimize-button ID` gives a window's minimize button's frame (for `debug-click`), and `debug-stale-handle
+`debug-minimize-button ID` gives a window's minimize button's frame (for `debug-click`), `debug-dock-lend
+BUNDLE` feeds a Dock click without pressing the item (what the press put home waits for an
+activation that never comes), and `debug-stale-handle
 ID` takes our handle on a window for dead until it is looked up afresh (`test-stages.sh
 handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` windows. See
 `src/platform/ctl.rs`.
 
 ## Other tools
+
+The probes, the strip demo and the previews below (`probe-spaces`, `probe-shadow`,
+`probe-park`, `probe-patch`, `probe-glass`, `probe-icons`, `strip-demo`, `preview`), and
+`ctl debug-cmd-tab` and the rejected routes of `ctl apple try`, are in a build with the
+`probes` feature only: the dev copy (`make dev`, `make run`) and every live script
+(`scripts/test-stages.sh`, `scripts/measure.sh`, `scripts/probe_park.py`) build with it;
+`make install`, `make dmg` and `make release` build without it, and such a build answers
+each of them with one line and a non-zero exit. The feature adds only the probes' own modules
+and their dispatch, so the live suite tests the product code a release ships.
+`probe-windows`, `probe-screen` and `debug-post-space` are in every build.
 
 - `stage-manager preview settings|welcome|about|update|… [--dark|--light] [--pane PANE] [--mode MODE] [--png FILE]`
   opens one of the app's windows alone, or draws it to a PNG, without managing anything.
@@ -236,6 +352,20 @@ handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` wi
 - `stage-manager probe-windows <bundle-id>…` (or `--all`), `probe-screen` and `probe-patch` print the
   window server's view of apps, of the screen, and what the corner patch would draw.
 - `scripts/probe_park.py` measures where macOS leaves a parked window.
+- `scripts/probe_apple.py [dock-front|mission-pick|mission-open|mission-close-key|…-ours|frames-setup]`
+  measures Apple's Stage Manager on the fixtures (with `SM_TEST_TOGGLE_APPLE_SM=1`; it restores
+  `GloballyEnabled` and `AppWindowGroupingBehavior`): a Dock click on the app in front, a
+  pick in Mission Control, its opening, its close by key with the pointer over a hidden
+  window (each also under the Spaces engine), frames per screen setup.
+  `SM_PROBE_DOCK_CLICK=real` posts a real click on the Dock item instead of `AXPress`.
+- `scripts/test-stages.sh probe-system [dock|flip|names|indicator] [--rounds N] [--window ID]`
+  (`scripts/probe_system.py`, `src/platform/system_probe/`) runs four probes from the dev app
+  on fixture windows and prints tables and verdicts: whether the Dock announces Mission
+  Control, App Exposé and Show Desktop (`AXExpose…`) and how soon against the window list;
+  when the window server's current Desktop flips during a slide against its notice; what
+  `SLSCopyManagedDisplaySpaces` calls the screens and Spaces, what an "All Desktops" window
+  lists, and the call's cost; which capture lights the purple screen-recording indicator
+  (`indicator` by name only: it may raise the screen-capture alert).
 - `stage-manager probe-shadow` measures how far an inactive window's shadow reaches past
   each side of its frame, from windows of its own (the corner patch's reach). `--profile`
   prints the falloff of a key and an inactive window's shadow and the colour across each
@@ -270,6 +400,40 @@ title cannot be confirmed from a log alone) unless `[log] titles = true`;
 lines name windows by id, pid and bundle id. `ctl dump` and `ctl state` still answer with
 titles. Logs still name your apps and your stages: never commit one.
 
+### Time values that came close
+
+Every decision made by a time window ("this focus came within 700 ms of our own, so it is
+ours") and every wait's end is counted by its constant's name (`src/engine/margin.rs`):
+how far into its limit it was, as a share (0.93 is 93 % of the limit), and which way it was
+judged. Nothing in behaviour changes. A value that is often judged close to its limit, or a
+wait that often ends by its cap, is the one a slower or busier Mac may get wrong.
+
+- `log summary` ends with **Time values that came close**, one row per name: `limit`,
+  `inside` (the closest share still judged inside), `outside` (the closest judged outside),
+  `close` (judged inside at 0.5 to 1 of the limit), `near` (outside, at 1 to 2), `waits`
+  and `capped` (waits ended, and ended by their cap rather than by what they waited for),
+  `predated` (notices stamped before the action they were compared with: macOS delivered
+  them late, or out of order), `noticed` (waits met at a look a window-server notice brought
+  forward; the other met ones were met at the poll's look). Only names with a close call, a
+  near miss, a cap, a predated notice or a noticed wait are written.
+- The rows come from `margin summary:` info lines, one per name that came close, written
+  with the hourly and the quit counts; each covers the time since the one before.
+- At `debug`, `margin: name=… elapsed_ms=… limit_ms=… inside=…` says each run of close calls
+  as it happens (once as it comes close and once as it crosses, not at every check), and
+  every wait ended by its cap (`ended=cap`).
+- `ctl state`'s `margins` has the whole run's table.
+- The cause ledger (`engine/causes.rs`: what our own focus, raise and frame expect of macOS)
+  says when its count is off. `EXPECTED_FOCUS` and `EXPECTED_MOVE` are its waits: `capped`
+  counts the expectations that ended unanswered (by their 30 s cap, or passed over when a
+  later request to the same app was answered first); `FOCUS_ECHO_FALLBACK` counts the focus
+  notices judged by the echo window while something was still expected of their app. At
+  `debug` each is one line, `cause ledger: …`, with the app's bundle id, the window id and
+  the age. `ctl state`'s `causes` has what is expected now: `open` (`open_focus`,
+  `open_moves`, `open_activations`) and `oldest_ms`.
+
+Shares are measured to when macOS's notice reached the app, not to when the window thread
+got to it (docs/ARCHITECTURE.md, "Time"): a busy thread no longer shrinks a window.
+
 ### The slide watch
 
 Under the Spaces engine every Dock click on an app's item and every ⌘Tab release is watched
@@ -303,6 +467,123 @@ polled, and the Corner engine writes nothing. Read a day with
   `dock_clicks`, `dock_parked`, `dock_fell_back`, `dock_slid`, `dock_slid_back`,
   `dock_slowest_park_ms`, the same for `cmdtab_`, and `new` (outcomes since the last
   summary). `ctl state` has the same counts under `slide_watch`.
+- What ended each lend: `dock: the window put home at the press goes back: WHY` and
+  `cmd-tab: the window put home for the switcher goes back: WHY` (another app was activated,
+  the press was no click, the next press, the switcher was cancelled, or its cap), with
+  `since_ms`, `cap` and `activated`; a lend its switch took is a debug line. The margins
+  table's `LEND_WAIT`, `ACTIVATION_WAIT`, `UNREAD_WAIT`, `SILENT_ACTIVATION_WAIT`,
+  `SILENT_UNREAD_WAIT`, `DOCK_SWITCH_CAP` and `GONE_WAIT` rows count how each wait ended
+  (`capped`: by time). `cmd-tab: the key tap heard the switcher's end` says what the HID tap
+  fed the switcher; `ctl state` `mission_control.tap` has `switcher_armed`,
+  `switcher_escapes_heard` and `command_ups_heard`.
+
+### The window server's notices
+
+Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
+
+- At the launch: `window-server notices: registered` (`types`, `remove`), and 5 s after the
+  launch probe `window-server notices: heard` (`never_heard`: the types not heard by then) or
+  `... silent (none came) ...`. The first notice of each type logs one
+  line; `a membership notice's window and Space read by content` once the layout is learned.
+- `a window the model counts hidden was out of its stage's Space: hidden again` carries
+  `by_notice`; `window-server notice: windows nothing answered for let out ...` says the
+  notice let strangers out in place of the tidy; the launch watch's line has
+  `held_by_notice`.
+- `ctl state`'s `engine.notices`: `registered`, `notices` (`heard` once any type came,
+  `silent` when none came within 5 s, `waiting`), `never_heard` (the types never heard: 811
+  there means the launch watch's nudge never fires, as on 11-21), `probe` (the panel's own
+  notices, which teach the membership layout), `layout`, `expected`, `dropped`, `types` (per type `heard`, `last_ms_ago`, `sent`
+  bursts, `coalesced` notices folded into them, `ours`) and `uses` (what was brought forward:
+  `overview_looks`, `reconciles`, `held_back`, `strangers_out`, `space_checks`,
+  `workspace_first`). `margins` names the waits: `OVERVIEW_LOOK`, `OVERVIEW_SETTLE`,
+  `OVERVIEW_ARRIVAL_SETTLE`, `OVERVIEW_EXIT_CARRY`, `STRAY_LOOK`, `TIDY_EVERY`,
+  `SPACE_POLL`, `launch_watch::EVERY`.
+- `ctl space`'s `overview_ms_ago`: `found`, `closed`, `told` (the last notice while an
+  overview showed) and `settled_by_notice`.
+- The live phases `mission`, `expose`, `launch` (`SM_ENGINE=spaces`) and `spaces --auto`
+  print, per wait, how many ended at the notice's look, at the poll's and by the cap;
+  `mission` checks by order and cause, never by a time limit: Mission Control and App Exposé
+  opened by their shortcuts are found at their notice's look (`OVERVIEW_LOOK` ended by the
+  notice), the close's notice comes after the closing key and before the list shows the close,
+  and the look after it ends the freeze (`OVERVIEW_SETTLE` ended by the notice); the ms are
+  printed (skipped when no notice 1508 came).
+- On the bench the desk sends them only with `d.server_notices = true` (scenarios "a hidden
+  window taken out of its stage Space" and "Mission Control with no key", each with and
+  without).
+
+### The Desktops: what the listing decides, and the shadow
+
+Under the Spaces engine the window server's listing says which Desktop arrived and where
+each window is (`src/platform/controller/desktops.rs`, `src/engine/model/desks.rs`; design
+r3, slices 2 and 3; ARCHITECTURE, "The window server's Desktops"), and the model is compared
+with it at every arrival and look (`src/engine/desk_shadow.rs`). The Corner engine reads
+nothing.
+
+- `Space changed` (and `Space changed on another display`) carry `desk` (the window server's
+  Desktop on that screen, read at the arrival) and `agree`: `yes` (its Space was bound to it)
+  or `new` (bound now) when the listing decided; `no` only for an arrival guessed without the
+  listing's word (bound otherwise; the next look corrects it). When it decides, `beside`,
+  `held` and `kept_home` stay empty.
+- `desktops: the listing flipped after the Space change's notice` (debug, `waited_ms`);
+  `Space change settled by the window server's listing with no arrival on the main screen`
+  (a notice with no change after `FLIP_WAIT`, or another screen's change);
+  `desktops: the window server's listing shows another Space than the model, with no notice
+  yet: the change is taken now`; `Space change notified after a look had taken it ...`;
+  `desktops: windows listed on screen that the window server has on another Desktop are left
+  out of the arrival` (debug); `window left this Space (the window server has it on another
+  Desktop)` and `window moved to another Desktop that shows` (`from`, `to`: the window
+  server's ids); `the window server has the window on another Desktop than the one shown; the
+  window is placed on its arrival` (debug). The margins table has `FLIP_WAIT`; under the
+  Spaces engine `MIXED_WAIT` and `FOREIGN_SETTLE` no longer appear.
+- `ctl state`'s `desks.decides` (the listing decides now) and `desks.keyed`: `arrivals` (by
+  the listing), `flips_waited` and `flips_capped` (notices that came before the flip and
+  were waited for; those never followed by one), `unannounced` and `announced_late` (changes
+  taken at a look before their notice; notices that came after one), `left_out` (windows
+  left out of an arrival, on another Desktop), `moved` and `left` (windows found on another
+  Desktop at a look), `found_elsewhere` (new windows that waited for their Desktop),
+  `flip_wait_ms`.
+- `desktops: the model and the window server disagree` once when a disagreement begins and
+  `... agree again` once when it ends (with `lasted_ms`): `what=shown` (a screen, `id` its
+  display) or `what=home` (a hidden window, `id` the window), `space` (the model's),
+  `model_desk` (bound to it), `server_desk` (the listing's current one, or the engine's home),
+  `why=arrival|check`. Ids only.
+- At a load, `desktops: Desktops saved in state.json by uuid that the window server lists
+  now`: `saved`, `named` (with a uuid), `listed_now`, `empty_saved`, `empty_listed`.
+- `ctl state`'s `desks`: `listing` (per managed screen: `display`, `current`,
+  `current_kind`, `desks` with `id` and `uuid`, `others` with their types; `null` when not
+  read), `bindings` (`desk`, `space`, `uuid`), and `disagree`: `shown` and `homes` (open
+  now), `shown_begun` and `homes_begun` (since the launch), `longest_ms` (an open one
+  counted to now), `open` (each with `what`, `id`, `space`, `model`, `server`, `since_ms`).
+- `scripts/test-stages.sh spaces --auto` prints them before the first run's quit and at the
+  end, with `desks.keyed`, and fails when a disagreement on the Desktop shown is still open
+  5 s on; `display-gone` prints them and the log's disagreement lines at each round's end.
+  Its last step is the first visit to a Desktop never shown since the launch, by its key,
+  with no saved file: one Space change, the Desktop stays, no stage switched on the Desktop
+  left.
+- On the bench (`src/platform/controller/bench/desktops.rs`) the desk keeps the listing
+  apart from the window list: the "Current Space" flips 5 ms after the notice is sent
+  (`flip_leads_notice` for the other order; a load of 3 or 10 handles the notice after the
+  flip), the leaving Desktop's windows may stay listed past it (`leaving_lingers_ms`), the
+  listing may name no Space shown (`listing_unreadable`), a window goes into full screen and
+  out (`Bench::fullscreen`), is on every Desktop (`on_every_desktop`) or is moved to another
+  (`space_moves`), a second screen has Desktops of its own (`screen_comes_with`). Every
+  scenario asserts that the shadow counted no disagreement on the Desktop shown.
+
+### A report from another Mac
+
+`ctl state` answers with window titles, so ask for four of its fields (and `log summary`)
+and read them together. `engine.notices` says whether the window server's notices reach the
+app there (`heard`, `silent`, `never_heard`): with none, every look waits for its poll.
+`margins` says which time values came near their limit and which waits ended by their cap,
+and `noticed` how often a notice beat the poll. `causes` says what the cause ledger still
+expects (`open`, `oldest_ms`): many or old expectations mean an app answers late or out of
+order, and its focus notices fall to the echo window. `desks` says whether the listing
+decides (`decides`) and whether the model and the window server agree on the Desktop shown
+and on each hidden window's Desktop (`disagree`: `open`, `longest_ms`, the counts begun).
+A value near its limit in the same minute as an open disagreement or an old expectation
+names the time value that decided wrong; capped waits with `silent` notices point at the
+poll, not the value; a disagreement with nothing near its limit is a fault of order, for the
+bench ("The bench", above).
 
 ## Configuration keys
 
@@ -326,6 +607,7 @@ one-line explanation. That table drives parsing, the commented default file, `co
   hands the swap to `stage-manager --update-helper` at quit.
 - `src/platform` — macOS glue: Accessibility, the window server, ScreenCaptureKit, hotkeys,
   input, displays, the WM thread, safety (registry, signals, guardian), ctl, login item.
+  `src/platform/fake.rs` and `src/platform/controller/bench.rs` are test only (the bench).
 - `src/ui` — the menu bar item, the strip and its motion, Settings, the welcome window and
   the other windows.
 - `scripts/` — signing, bundling, the dev copy, the fixture, the scripted checks, release.

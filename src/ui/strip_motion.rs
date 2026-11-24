@@ -51,8 +51,8 @@
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
 //!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
 //!   under every snapshot ([`Transition::corner`], round 8L). The outgoing stage's card
-//!   stays hidden until its snapshots land, then everything goes in one frame, except a
-//!   cover of the patch's picture while the corner patch is not drawn yet: it stays until
+//!   stays hidden until its snapshots land, then everything goes in one frame, except the
+//!   corner's cover while the corner patch is not drawn yet: it stays until
 //!   the patch has been on screen a moment, a few hundred milliseconds at most
 //!   ([`cover_holds`], 10-23: the slivers flashed between the cover and the patch). A new
 //!   transition cuts a running one short, and takes over a cover still held.
@@ -181,8 +181,8 @@ struct Running {
     timers: Vec<Retained<NSTimer>>,
     /// The park corner's cover while the incoming windows wait there ([`Transition::corner`]).
     corner: Option<Ghost>,
-    /// Where that cover is, what it shows, and the screen it is on.
-    corner_at: Option<(Rect, CoverPicture, u32)>,
+    /// Where that cover is and the screen it is on.
+    corner_at: Option<(Rect, u32)>,
     /// The incoming windows' frames: aimed at, then read back once in place.
     arrived: Vec<(u32, Rect)>,
     /// The transition does not land before this (its incoming windows shown under their
@@ -191,6 +191,8 @@ struct Running {
     lands_after: Option<Instant>,
     /// When the strip unveils the incoming windows.
     unveil_at: Option<Instant>,
+    /// The unveil ran: on its timer, or at a landing before it ([`Strip::finish_now`]).
+    unveiled: bool,
     /// Incoming windows the window server does not show at their frames yet: their snapshots
     /// keep their shadows, and the landing waits ([`Strip::poll_shown`]).
     unshown: Vec<u32>,
@@ -706,7 +708,13 @@ impl Strip {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
         self.finish_transition(false);
-        if !draws_motion(self.style.animation.animates(), self.snapshot.fullscreen) {
+        // The WM thread stopped waiting for this one (a busy main thread presents it late): its
+        // windows are at their frames already; it lands at once, no picture over them.
+        let given_up = strip_model::given_up(t.id);
+        if given_up {
+            tracing::debug!(id = t.id, "transition: the switch moved its windows without the strip's answer; it lands at once");
+        }
+        if given_up || !draws_motion(self.style.animation.animates(), self.snapshot.fullscreen) {
             strip_model::cover(t.id, Cover::default());
             return;
         }
@@ -923,7 +931,7 @@ impl Strip {
         }
         // The park corner, under every snapshot, while the incoming windows wait there (8L).
         let corner = if cover.incoming { t.corner.clone().and_then(|c| self.corner_cover(t.id, c)) } else { None };
-        let corner_at = corner.as_ref().and(t.corner.as_ref()).map(|c| (c.rect, c.picture, c.screen));
+        let corner_at = corner.as_ref().and(t.corner.as_ref()).map(|c| (c.rect, c.screen));
         let arrived = t.incoming.iter().map(|w| (w.window.id, w.window.frame)).collect();
         // Gone at once, never an implicit fade (review R1-ui 11).
         objc2_quartz_core::CATransaction::begin();
@@ -940,7 +948,8 @@ impl Strip {
         self.motion.landing = None;
         // The cards' thumbnails are not captured while the snapshots move.
         self.capturer.hold_until(Some(Instant::now() + Duration::from_secs_f64(THUMBS_HOLD_MAX)));
-        strip_model::cover(t.id, cover);
+        // Answered after the WM thread stopped waiting: cut once set up, as at a landing.
+        let answered_late = !strip_model::cover(t.id, cover);
         let id = t.id;
         let mut timers = Vec::new();
         // The incoming windows take their place once their snapshots as shown are within a
@@ -1031,6 +1040,7 @@ impl Strip {
                 arrived,
                 lands_after: None,
                 unveil_at: None,
+                unveiled: false,
                 unshown,
                 late_key: t.key_in.filter(|k| late.contains(k)),
                 late: late.clone(),
@@ -1048,6 +1058,11 @@ impl Strip {
                 stretched: Vec::new(),
                 taken: Vec::new(),
             });
+        if answered_late {
+            tracing::debug!(id, "transition: the strip's answer came after the switch moved its windows; it lands at once");
+            self.cut_transition(id);
+            return;
+        }
         if rises_now {
             self.start_motion(id, false);
         }
@@ -1426,6 +1441,13 @@ impl Strip {
     /// the controller places the windows now. Where each snapshot is drawn is kept for
     /// `ctl state` ([`GhostReport::at_unveil`]).
     fn unveil(&mut self, id: u64) {
+        // Once: a landing before the unveil ran it already ([`Self::finish_now`]).
+        if self.motion.running.as_ref().is_some_and(|r| r.id == id && r.unveiled) {
+            return;
+        }
+        if let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) {
+            r.unveiled = true;
+        }
         if let Some(r) = self.motion.running.as_ref().filter(|r| r.id == id) {
             let drawn: Vec<(u32, Rect)> =
                 r.ghosts.iter().filter(|g| r.arrived.iter().any(|(w, _)| *w == g.window)).map(|g| (g.window, self.plane_rect(&g.drawn()))).collect();
@@ -1638,6 +1660,113 @@ impl Strip {
         self.motion.capturer.capture_now();
     }
 
+    /// Transition `id`'s incoming windows were landed by a Space change, on the Desktop left
+    /// ([`crate::engine::switch_landing`]): its pictures go now, the incoming and the outgoing
+    /// ones, with no fade, and the cards it held show. Played on, they would grow over windows
+    /// already in place if macOS slides back to that Desktop at once.
+    pub(super) fn cut_transition(&mut self, id: u64) {
+        let Some(r) = self.motion.running.as_ref().filter(|r| r.id == id) else { return };
+        // A stretch planned for a window not taken over yet is wanted no longer.
+        let stale: Vec<u32> = r.stretched.iter().copied().filter(|w| !r.taken.contains(w)).collect();
+        for w in stale {
+            crate::platform::window_engine::current().cancel_stretch(w);
+        }
+        let held = r.held.clone();
+        tracing::debug!(id, "transition: its windows landed at a Space change; its pictures go");
+        self.finish_transition(false);
+        self.motion.overlay.clear_sides();
+        if self.motion.overlay_idle() {
+            self.motion.overlay.hide();
+        }
+        // As at a landing: a card it held let go, the strip back to its level.
+        if self.pressed.is_none() && self.squeezed.is_some_and(|s| held.contains(&s)) {
+            self.squeeze(None);
+        }
+        if self.pane.lifted == Some(true) {
+            self.update_visibility();
+        }
+    }
+
+    /// Transition `id`'s incoming windows landed at their frames before its unveil (a click, an
+    /// activation, a focus, any other landing on the Desktop shown:
+    /// [`crate::engine::switch_landing`]): its motion ends now, where it was headed. Each
+    /// incoming picture is set on its window's frame, each outgoing one on its card, and from
+    /// there it lands as after an unveil: each picture hands its shadow over once the window
+    /// server shows its window ([`Self::poll_shown`]; cut away at once, a window not drawn yet
+    /// would leave a hole), and they fade together; the held cards show then. Flown on, the
+    /// pictures would grow over windows already in place, or the outgoing ones shrink over them.
+    pub(super) fn finish_now(&mut self, id: u64) {
+        let now = Instant::now();
+        let Some(r) = self.motion.running.as_mut().filter(|r| r.id == id) else { return };
+        // A stretch planned for a window not taken over yet is wanted no longer: the window is
+        // at its frame.
+        let stale: Vec<u32> = r.stretched.iter().copied().filter(|w| !r.taken.contains(w)).collect();
+        for w in stale {
+            crate::platform::window_engine::current().cancel_stretch(w);
+        }
+        objc2_quartz_core::CATransaction::begin();
+        objc2_quartz_core::CATransaction::setDisableActions(true);
+        // The motion not started yet (the outgoing windows' note still to come): every picture
+        // goes straight to its end.
+        let before_motion = r.rise.take();
+        if let Some(rise) = &before_motion {
+            for (i, end, glass) in &rise.ghosts {
+                if let Some(g) = r.ghosts.get_mut(*i) {
+                    g.set(*end);
+                    g.set_shadow_amount(1.0);
+                    g.set_glass(glass.as_ref(), 0.0);
+                }
+            }
+        }
+        for (i, end, glass, _) in std::mem::take(&mut r.waiting) {
+            if let Some(g) = r.ghosts.get_mut(i) {
+                g.set(end);
+                g.set_shadow_amount(0.0);
+                g.set_glass(glass.as_ref(), 1.0);
+            }
+        }
+        // Flying: each ends where its spring was taking it (an incoming one's target is its
+        // window's frame as read back, [`Self::incoming_arrived`]).
+        for g in r.ghosts.iter_mut().filter(|g| g.flown().is_some()) {
+            g.settle();
+        }
+        // Reduce Motion: the incoming pictures stand where the windows are, the outgoing ones
+        // are gone.
+        if r.crossfade.is_some() {
+            if let Some(g) = &r.incoming {
+                g.set_opacity(1.0);
+            }
+            if let Some(g) = &r.outgoing {
+                g.set_opacity(0.0);
+            }
+        }
+        objc2_quartz_core::CATransaction::commit();
+        let unveiled = r.unveiled;
+        if r.started.is_none() {
+            r.started = Some(now);
+        }
+        if !unveiled {
+            // The landing's clock from now: [`AFTER_UNVEIL`] at the least, and no later than
+            // the wait for the windows to show allows.
+            let wait = if r.late.is_empty() { SHOWN_MAX } else { LATE_MAX.max(SHOWN_MAX) };
+            r.unveil_at = Some(now);
+            r.lands_after = Some(now + Duration::from_secs_f64(wait + AFTER_UNVEIL));
+            if !r.late.is_empty() {
+                let display = self.display;
+                r.timers.push(after(LATE_MAX, move || {
+                    with_strip_of(display, |s| s.late_shown(id, None, None));
+                }));
+            }
+        }
+        // Nothing left to settle: it lands once its windows show.
+        r.settled = true;
+        tracing::debug!(id, unveiled, before_motion = before_motion.is_some(), "transition: its windows landed before its unveil; its pictures finish where they were headed and hand over");
+        if !unveiled {
+            self.unveil(id);
+        }
+        self.end_transition(id);
+    }
+
     /// Transition `id` has landed: the snapshots go and the held cards show, in one frame
     /// (the incoming snapshots fade out over their windows, [`LANDING_FADE`]); not before its
     /// incoming windows show under their snapshots (else it looks again then).
@@ -1700,13 +1829,12 @@ impl Strip {
         for t in &r.timers {
             t.invalidate();
         }
-        // Landed with the corner covered by the patch's picture: the cover stays until the
-        // patch shows (10-23), unless nothing is to wait for.
+        // Landed with the corner covered: the cover stays until the patch shows (10-23),
+        // unless nothing is to wait for.
         let facts = match (landed, &r.corner, r.corner_at) {
-            (true, Some(_), Some((cover, picture, screen))) => Some((
+            (true, Some(_), Some((cover, screen))) => Some((
                 HoldFacts {
                     cover,
-                    picture,
                     arrived: r.arrived.iter().map(|(_, f)| *f).collect(),
                     patch_shown_for: crate::ui::corner_patch::shown_for(screen, Instant::now()),
                     held_for: Duration::ZERO,

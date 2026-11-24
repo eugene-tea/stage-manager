@@ -491,14 +491,10 @@ impl AppQuiet {
         self.last.retain(|b, _| running(b));
     }
 
+    #[cfg(test)]
     /// How many apps have a clock.
     pub fn len(&self) -> usize {
         self.last.len()
-    }
-
-    /// True when no app has a clock.
-    pub fn is_empty(&self) -> bool {
-        self.last.is_empty()
     }
 
     /// The apps quiet for [`QUIET`] at `now`.

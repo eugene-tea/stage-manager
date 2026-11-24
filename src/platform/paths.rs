@@ -84,6 +84,13 @@ fn home() -> PathBuf {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from).or_else(account_home).unwrap_or_else(user_temp_dir)
 }
 
+/// The Dock's preferences file (`~/Library/Preferences/com.apple.dock.plist`), the real
+/// home's whatever `STAGE_MANAGER_HOME` says: only ever looked at (its modification time,
+/// [`super::dock::preferences_stamp`]), never read for values or written.
+pub fn dock_preferences() -> PathBuf {
+    home().join("Library/Preferences/com.apple.dock.plist")
+}
+
 /// The home folder of this process's account, from the user database.
 fn account_home() -> Option<PathBuf> {
     let mut buf = vec![0 as libc::c_char; 16 * 1024];

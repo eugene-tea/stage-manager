@@ -93,6 +93,10 @@ pub fn read_monitors() -> Vec<MonitorDesktops> {
 
 /// The UUID macOS keeps for display `id` (upper case, as the settings write it).
 pub fn display_uuid(id: u32) -> Option<String> {
+    #[cfg(test)]
+    if let Some(uuid) = crate::platform::fake::with(|d| d.screens.iter().find(|s| s.display.id.0 == id).map(|s| s.uuid.clone())) {
+        return uuid;
+    }
     // SAFETY: a plain C call with a display id; the result is a +1 CFUUID or null, owned by
     // the `CFRetained` made from it.
     let uuid = unsafe { CGDisplayCreateUUIDFromDisplayID(id) }.map(|p| unsafe { CFRetained::from_raw(p) })?;
@@ -102,6 +106,10 @@ pub fn display_uuid(id: u32) -> Option<String> {
 /// How many Desktops macOS keeps for each of `displays` it names (read only; see the module
 /// docs).
 pub fn desktop_counts(displays: &[Display]) -> Vec<(ScreenKey, u32)> {
+    #[cfg(test)]
+    if let Some(counts) = crate::platform::fake::with(|d| d.screens.iter().map(|s| (s.display.key, s.desktops.len() as u32)).collect()) {
+        return counts;
+    }
     let main = CGMainDisplayID();
     let screens: Vec<NamedScreen> =
         displays.iter().map(|d| NamedScreen { key: d.key, uuid: display_uuid(d.id.0), main: d.id.0 == main }).collect();

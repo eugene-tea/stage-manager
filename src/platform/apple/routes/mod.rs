@@ -3,10 +3,11 @@
 //! route ([`focus::Focus`]), the posted Shift-click ([`shift_click::ShiftClick`]) and drag
 //! ([`drag::Drag`]), and the routes tried and rejected, kept as tripwires ([`rejected`]).
 
-pub mod drag;
-pub mod focus;
-pub mod rejected;
-pub mod shift_click;
+pub(crate) mod drag;
+pub(crate) mod focus;
+#[cfg(feature = "probes")]
+pub(crate) mod rejected;
+pub(crate) mod shift_click;
 
 use serde::Serialize;
 
@@ -14,21 +15,10 @@ use crate::engine::apple::desk::{AppleDesk, InputNow};
 use crate::engine::apple::mirror::Arrangement;
 use crate::engine::apple::plan::{Refusal, Step};
 
-/// What a route costs, for `ctl state` and the catalog.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct Cost {
-    /// About how long it takes, in ms (Apple's motion after it not counted).
-    pub ms: u64,
-    /// It moves the pointer.
-    pub pointer: bool,
-}
-
 /// A way of getting Apple's to do a step.
 pub trait Route {
     /// Its name in logs and `ctl state`.
     fn name(&self) -> &'static str;
-    /// What it costs.
-    fn cost(&self) -> Cost;
     /// Whether it can run `step` now, against the mirror and the user's input.
     fn can(&self, step: &Step, mirror: &Arrangement, input: &InputNow) -> Result<(), Refusal>;
     /// Runs `step` on `desk`.

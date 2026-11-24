@@ -6,8 +6,7 @@
 
 use crate::platform::ax::{AxElement, AxResult};
 use crate::platform::safety::{self, Ours, Report, ScanScope};
-use crate::platform::window_engine::{EngineKind, Motion, ShowHow, WindowEngine};
-use crate::ui::strip_model::Transition;
+use crate::platform::window_engine::{EngineKind, ShowHow, WindowEngine};
 use crate::engine::corner;
 use crate::engine::geometry::Rect;
 use crate::engine::leftovers;
@@ -68,12 +67,6 @@ impl WindowEngine for CornerEngine {
         safety::assume_zones(&file.zones);
     }
 
-    /// Pictures: a window in the corner cannot be shown moving, so the strip's snapshots
-    /// play the motion and the windows park and unpark behind them.
-    fn animate(&self, _t: &Transition) -> Motion {
-        Motion::Pictures
-    }
-
     /// The registry's unpark, else the recovery scan ([`safety::emergency_unpark`]).
     fn bring_all_back(&self, why: &str) -> bool {
         safety::emergency_unpark(why)
@@ -86,7 +79,7 @@ impl WindowEngine for CornerEngine {
     }
 
     /// The leftovers check: the windows the window server still lists in a park zone
-    /// ([`safety::leftovers_back_knowing`], [`safety::leftovers_retry`]).
+    /// ([`safety::leftovers_retry`]).
     fn bring_back_rest(&self, why: &str, ours: Ours, moved: bool) -> Option<Ours> {
         safety::leftovers_retry(why, ours, moved)
     }
@@ -121,5 +114,13 @@ mod tests {
         assert!(e.is_hidden(&d, at), "where it hides is where it counts as hidden");
         assert!(!e.is_hidden(&d, m.window(w(1)).expect("managed").restore), "never at its restore frame");
         assert_eq!(e.hidden_at(&m, w(9)), None);
+    }
+
+    /// The arrival's check of a Desktop arranged ahead stays for the Corner engine's moves,
+    /// which go through Accessibility; the Spaces engine reads its own back.
+    #[test]
+    fn only_the_corner_engines_moves_get_the_arrival_check() {
+        assert!(!CornerEngine.verifies_own_moves());
+        assert!(crate::platform::spaces::engine::shared().verifies_own_moves());
     }
 }

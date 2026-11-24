@@ -12,6 +12,7 @@
 #   SM_CAPTURE=0 OUT=/tmp/sm-nocap scripts/measure.sh rest sample   # captures off: no capture work
 #   scripts/measure.sh --summary DIR           # the table again, from DIR/measure.jsonl
 #   scripts/measure.sh hidden                  # by name only: a drawing window hidden in its stage and shown
+#   RUNS=1 ENGINES=spaces SM_REST_S=300 scripts/measure.sh covered   # by name only: at rest, the strip clear, then slid away; a hover under a window
 #   SM_SWITCH_WAYS=ctl scripts/measure.sh switch   # switches by `ctl switch` (default "card dock")
 #
 # scripts/measure_engines.py runs this for the two engines alone, captures off, and writes the
@@ -38,7 +39,7 @@ FIX_ID="${SM_FIXTURE_ID:-dev.eugene.stagemanager.fixture.stages}"
 SUFFIX="${FIX_ID##*.}"
 FIX_NAME="SM Fixture $(tr '[:lower:]' '[:upper:]' <<<"${SUFFIX:0:1}")${SUFFIX:1}"
 if [ -z "${SKIP_BUILD:-}" ]; then
-  make sign >/dev/null || { echo "build failed" >&2; exit 1; }
+  make sign FEATURES=probes >/dev/null || { echo "build failed" >&2; exit 1; }
 fi
 # The stage apps (the main fixture, A, B, C) and the call stand-in (<id>.clock, never on
 # STAGE_MANAGER_ONLY), rebuilt when missing or older than the fixture's source.

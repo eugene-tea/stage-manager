@@ -63,9 +63,9 @@ fn main() -> ExitCode {
         Some("mark") => stage_manager::platform::ctl::run_mark(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("log") => stage_manager::platform::logging::command(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("strip-demo") => stage_manager::ui::strip_demo::run(),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("preview") => stage_manager::ui::preview::run(&args[2..]),
         Some("config") => {
             let (code, out) = stage_manager::config::command(&args[2..]);
@@ -80,18 +80,24 @@ fn main() -> ExitCode {
         Some("probe-windows") => app::probe_windows(&args[2..]),
         #[cfg(target_os = "macos")]
         Some("probe-screen") => app::probe_screen(),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-patch") => stage_manager::ui::patch_probe::run(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-glass") => stage_manager::ui::card_glass::probe(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-park") => stage_manager::platform::park_probe::run(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-shadow") => stage_manager::platform::shadow_probe::run(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-spaces") => stage_manager::platform::spaces_probe::run(&args[2..]),
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", feature = "probes"))]
         Some("probe-icons") => stage_manager::ui::app_icons::probe(&args[2..]),
+        // A build without the `probes` feature (`make install`, `make release`) has none of them.
+        #[cfg(not(feature = "probes"))]
+        Some(sub @ ("strip-demo" | "preview" | "probe-patch" | "probe-glass" | "probe-park" | "probe-shadow" | "probe-spaces" | "probe-icons")) => {
+            eprintln!("stage-manager: {sub} is not in this build (built without the probes feature; make dev builds with it)");
+            ExitCode::FAILURE
+        }
         #[cfg(target_os = "macos")]
         Some("debug-post-space") => app::post_space(&args[2..]),
         Some("--version") => {
@@ -603,6 +609,12 @@ mod app {
                 spaces_engine::shared().fail_calls(mode);
                 json!({ "ok": true, "engine": window_engine::current().kind().name(), "mode": word })
             }
+            Command::DebugMissionPick { id, hover } => {
+                if std::env::var_os(TEST_ENV).is_none() {
+                    return ctl::error_reply("debug-mission-pick needs STAGE_MANAGER_TEST=1");
+                }
+                stage_manager::platform::test_press::mission_pick(id, hover)
+            }
             Command::DebugClick { x, y, shift } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-click needs STAGE_MANAGER_TEST=1");
@@ -890,6 +902,11 @@ mod app {
             }
         };
         let _ = WM.set(wm.clone());
+        // The window server's notices (the Spaces engine; registered at the choice above).
+        let wm_notices = wm.clone();
+        stage_manager::platform::spaces::notices::set_sink(move |burst| {
+            wm_notices.send(WmCommand::ServerNotice(burst));
+        });
         guardian::spawn();
         let wm_signals = wm.clone();
         if let Err(e) = safety::watch_signals(move |sig| {
@@ -915,7 +932,7 @@ mod app {
             if matches!(event, apps::AppEvent::Terminated(_)) {
                 shell::app_quit(Instant::now());
             }
-            wm_events.send(WmCommand::App(event));
+            wm_events.send(WmCommand::App(event, Instant::now()));
         };
         // A live check's late notices (round stale-activations; the fixtures' runs only).
         let workspace = match apps::debug_activation_delay() {
@@ -936,7 +953,7 @@ mod app {
             if let Some(mtm) = MainThreadMarker::new() {
                 stage_manager::ui::corner_patch::space_changed(mtm);
             }
-            wm_spaces.send(WmCommand::SpaceChanged);
+            wm_spaces.send(WmCommand::SpaceChanged(Instant::now()));
         });
         // A display change heard as AppKit has it, not up to a second later at the poll: its
         // settle starts before macOS's activation that follows it (Mail, 0.4 s after the lid).

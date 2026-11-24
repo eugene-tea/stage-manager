@@ -100,6 +100,10 @@ pub fn is_click<T>(press: &DockPress<T>, up: Point, up_at: Instant, modifiers: b
 
 /// The Dock's pid, when it runs.
 pub fn dock_pid() -> Option<i32> {
+    #[cfg(test)]
+    if let Some(pid) = super::fake::with(|d| d.dock.pid) {
+        return Some(pid);
+    }
     NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(DOCK_BUNDLE))
         .iter()
         .next()
@@ -182,6 +186,10 @@ fn walk_up<E, I>(start: E, steps: usize, item: impl Fn(&E) -> AxResult<Option<I>
 /// children), top-left origin; `None` when Accessibility gives none. The window list cannot
 /// tell it: the Dock's window spans its whole display ([`crate::engine::corner::sliver::DockBar`]).
 pub fn bar_frame(dock: i32) -> Option<Rect> {
+    #[cfg(test)]
+    if let Some(bar) = super::fake::with(|d| d.dock.bar) {
+        return Some(bar);
+    }
     AxElement::application(dock).bounded(DOCK_AX_TIMEOUT_SECONDS, |app| {
         let t = DOCK_AX_TIMEOUT_SECONDS;
         let frames = app.children().ok()?.iter().filter_map(|list| list.bounded(t, AxElement::frame).ok()).collect::<Vec<_>>();
@@ -192,6 +200,14 @@ pub fn bar_frame(dock: i32) -> Option<Rect> {
 /// The Dock's application item for the app with bundle id `bundle` (any of the Dock's
 /// lists): where the test hook clicks.
 pub fn item_for_bundle(dock: i32, bundle: &str) -> Option<(AxElement, DockItem)> {
+    #[cfg(test)]
+    if let Some(item) = super::fake::with(|d| {
+        let i = d.dock.items.iter().position(|(path, _)| d.bundle_at(path).as_deref() == Some(bundle))?;
+        let (path, frame) = d.dock.items[i].clone();
+        Some((AxElement::fake(super::fake::El::DockItem(i)), DockItem { path, frame }))
+    }) {
+        return item;
+    }
     AxElement::application(dock).bounded(DOCK_AX_TIMEOUT_SECONDS, |app| {
         let lists = app.children().ok()?;
         let t = DOCK_AX_TIMEOUT_SECONDS;
@@ -208,6 +224,19 @@ fn application_item(element: &AxElement) -> AxResult<Option<DockItem>> {
         return Ok(None);
     }
     Ok(Some(DockItem { path: element.url_path()?, frame: element.frame()? }))
+}
+
+/// When the Dock's preferences file last changed, and its length: a new stamp says the
+/// Dock wrote its settings (an icon moved, kept or removed; the Dock's size or side), the
+/// sign "Follow the Dock" reads the order again on. One `stat`, no Accessibility call; the
+/// file is never opened. `None` while it cannot be looked at.
+pub fn preferences_stamp() -> Option<(std::time::SystemTime, u64)> {
+    #[cfg(test)]
+    if super::fake::active() {
+        return None;
+    }
+    let m = std::fs::metadata(super::paths::dock_preferences()).ok()?;
+    Some((m.modified().ok()?, m.len()))
 }
 
 /// The Dock's application items in its order (`dock`: its pid), left to right (top to bottom
@@ -312,6 +341,10 @@ fn tile_among<I>(items: impl IntoIterator<Item = I>, mut read: impl FnMut(&I, bo
 
 /// The path of app `pid`'s bundle (no trailing slash), when it runs.
 pub fn app_path(pid: i32) -> Option<String> {
+    #[cfg(test)]
+    if let Some(path) = super::fake::with(|d| d.apps.get(&pid).map(|a| format!("/Applications/{}.app", a.name))) {
+        return path;
+    }
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     Some(app.bundleURL()?.path()?.to_string().trim_end_matches('/').to_string())
 }
@@ -379,6 +412,10 @@ fn read_running_by_path() -> HashMap<String, i32> {
 
 /// The bundle id of the app bundle at `path`.
 pub fn bundle_id_at(path: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(bundle) = super::fake::with(|d| d.bundle_at(path)) {
+        return bundle;
+    }
     NSBundle::bundleWithPath(&NSString::from_str(path))?.bundleIdentifier().map(|s| s.to_string())
 }
 

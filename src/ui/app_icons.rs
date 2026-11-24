@@ -145,6 +145,7 @@ pub fn render(pid: i32, points: f64, scale: f64) -> Option<CFRetained<CGImage>> 
     CGBitmapContextCreateImage(Some(&ctx))
 }
 
+#[cfg(feature = "probes")]
 /// The apps [`probe`] reads, where running (Apple's own, each with dark, tinted and clear
 /// variants).
 const PROBED: [&str; 4] = ["com.apple.mail", "com.apple.finder", "com.apple.Safari", "com.apple.MobileSMS"];
@@ -158,6 +159,7 @@ const PROBED: [&str; 4] = ["com.apple.mail", "com.apple.finder", "com.apple.Safa
 /// icons, themes, appearance, tint or colour). `-Default value` pairs after it are AppKit's
 /// argument-domain defaults, e.g. `-AppleIconAppearanceTheme RegularDark` for a dark look to
 /// compare with.
+#[cfg(feature = "probes")]
 pub fn probe(args: &[String]) -> std::process::ExitCode {
     let mut seconds = 90;
     for pair in args.chunks(2) {
@@ -195,11 +197,13 @@ pub fn probe(args: &[String]) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+#[cfg(feature = "probes")]
 fn probe_usage() -> std::process::ExitCode {
     eprintln!("usage: stage-manager probe-icons [--for SECONDS] [-AppleIconAppearanceTheme THEME]");
     std::process::ExitCode::from(2)
 }
 
+#[cfg(feature = "probes")]
 /// Prints each distributed notification whose name holds one of `words` (any case): names
 /// only, never their contents. The observer lasts while the returned token is held (the
 /// probe's life; it exits without removing it).
@@ -220,6 +224,7 @@ fn observe_named_like(words: &'static [&'static str]) -> impl Sized {
     (center, token)
 }
 
+#[cfg(feature = "probes")]
 /// The mean red, green and blue (0–1, alpha-weighted) of `image`.
 fn mean_rgb(image: &CGImage) -> Option<(f64, f64, f64)> {
     let (bytes, _, _) = crate::platform::pixels::bgra(image, None)?;

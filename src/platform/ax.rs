@@ -18,7 +18,7 @@ use objc2_core_foundation::{
 use crate::engine::geometry::{Point, Rect, Size};
 
 /// Attribute, action and value names used by the app.
-pub mod names {
+pub(crate) mod names {
     pub const ROLE: &str = "AXRole";
     pub const SUBROLE: &str = "AXSubrole";
     pub const TITLE: &str = "AXTitle";
@@ -58,7 +58,7 @@ pub mod names {
 }
 
 /// AX notification names observed by the app.
-pub mod notifications {
+pub(crate) mod notifications {
     pub const WINDOW_CREATED: &str = "AXWindowCreated";
     pub const FOCUSED_WINDOW_CHANGED: &str = "AXFocusedWindowChanged";
     pub const APPLICATION_ACTIVATED: &str = "AXApplicationActivated";
@@ -151,9 +151,32 @@ unsafe extern "C" {
     fn _AXUIElementGetWindow(element: &AXUIElement, window_id: *mut u32) -> RawAxError;
 }
 
-/// An Accessibility element (application, window, or the system-wide element).
+/// An Accessibility element (application, window, or the system-wide element). Under
+/// `cfg(test)` it can also be an element of the fake desk ([`super::fake`]): made in place of
+/// a real one while a desk is installed on the thread, answered by the desk.
 #[derive(Clone, PartialEq, Eq, Hash)]
-pub struct AxElement(CFRetained<AXUIElement>);
+pub struct AxElement(Repr);
+
+/// What an [`AxElement`] holds.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum Repr {
+    /// macOS's element.
+    Real(CFRetained<AXUIElement>),
+    /// The fake desk's.
+    #[cfg(test)]
+    Fake(super::fake::El),
+}
+
+/// The fake desk's answer for element `$el` when `$self` is a fake one (`cfg(test)` only):
+/// returns it from the calling method. An element that outlived its desk is invalid.
+macro_rules! faked {
+    ($self:ident, |$d:ident, $el:ident| $body:expr) => {
+        #[cfg(test)]
+        if let Repr::Fake($el) = $self.0 {
+            return super::fake::with(|$d| $body).unwrap_or(Err(AxError::INVALID_ELEMENT));
+        }
+    };
+}
 
 // SAFETY: AXUIElementRef is an immutable CF handle that the AX API accepts from any thread;
 // the app still confines AX calls to the WM thread for blocking reasons, not safety.
@@ -163,21 +186,33 @@ unsafe impl Sync for AxElement {}
 
 impl fmt::Debug for AxElement {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "AxElement({:p})", CFRetained::as_ptr(&self.0))
+        match &self.0 {
+            Repr::Real(e) => write!(f, "AxElement({:p})", CFRetained::as_ptr(e)),
+            #[cfg(test)]
+            Repr::Fake(el) => write!(f, "AxElement({el:?})"),
+        }
     }
 }
 
 impl AxElement {
     /// The application element of `pid`.
     pub fn application(pid: libc::pid_t) -> Self {
+        #[cfg(test)]
+        if super::fake::active() {
+            return Self(Repr::Fake(super::fake::El::App(pid)));
+        }
         // SAFETY: creating an element for any pid is valid; a dead pid yields errors later.
-        Self(unsafe { AXUIElement::new_application(pid) })
+        Self(Repr::Real(unsafe { AXUIElement::new_application(pid) }))
     }
 
     /// The system-wide element.
     pub fn system_wide() -> Self {
+        #[cfg(test)]
+        if super::fake::active() {
+            return Self(Repr::Fake(super::fake::El::System));
+        }
         // SAFETY: no preconditions.
-        Self(unsafe { AXUIElement::new_system_wide() })
+        Self(Repr::Real(unsafe { AXUIElement::new_system_wide() }))
     }
 
     /// Wraps a borrowed element from a callback, retaining it.
@@ -186,18 +221,42 @@ impl AxElement {
     /// `ptr` must point at a live `AXUIElement`.
     pub unsafe fn from_borrowed(ptr: NonNull<AXUIElement>) -> Self {
         // SAFETY: the caller guarantees `ptr` is a live element; retain balances our drop.
-        Self(unsafe { CFRetained::retain(ptr) })
+        Self(Repr::Real(unsafe { CFRetained::retain(ptr) }))
     }
 
-    /// The raw element.
+    /// An element of the fake desk.
+    #[cfg(test)]
+    pub fn fake(el: super::fake::El) -> Self {
+        Self(Repr::Fake(el))
+    }
+
+    /// The fake desk's element behind this one, when it is one.
+    #[cfg(test)]
+    pub fn as_fake(&self) -> Option<super::fake::El> {
+        match &self.0 {
+            Repr::Fake(el) => Some(*el),
+            Repr::Real(_) => None,
+        }
+    }
+
+    /// The raw element. (A fake one has none: every call that needs it answers from the desk
+    /// before; reaching this with one is a test's bug.)
     pub fn raw(&self) -> &AXUIElement {
-        &self.0
+        match &self.0 {
+            Repr::Real(e) => e,
+            #[cfg(test)]
+            Repr::Fake(el) => panic!("a fake Accessibility element ({el:?}) reached a real Accessibility call"),
+        }
     }
 
     /// Sets the messaging timeout; on the system-wide element it becomes the global default.
     pub fn set_messaging_timeout(&self, seconds: f32) -> AxResult<()> {
+        faked!(self, |d, el| {
+            d.ax_timeout(el, seconds);
+            Ok(())
+        });
         // SAFETY: valid element; plain float argument.
-        AxError::check(unsafe { self.0.set_messaging_timeout(seconds) })
+        AxError::check(unsafe { self.raw().set_messaging_timeout(seconds) })
     }
 
     /// Runs `f` on this element with a messaging timeout of `seconds`, then puts the
@@ -212,18 +271,20 @@ impl AxElement {
 
     /// The process id owning this element.
     pub fn pid(&self) -> AxResult<libc::pid_t> {
+        faked!(self, |d, el| d.ax_pid(el));
         let mut pid: libc::pid_t = 0;
         // SAFETY: `pid` is a valid out pointer.
-        AxError::check(unsafe { self.0.pid(NonNull::from(&mut pid)) })?;
+        AxError::check(unsafe { self.raw().pid(NonNull::from(&mut pid)) })?;
         Ok(pid)
     }
 
     /// Copies an attribute value.
     pub fn attribute(&self, name: &str) -> AxResult<CFRetained<CFType>> {
+        faked!(self, |_d, _el| Err(AxError::ATTRIBUTE_UNSUPPORTED));
         let attr = CFString::from_str(name);
         let mut value: *const CFType = std::ptr::null();
         // SAFETY: `value` is a valid out pointer; on success it holds a +1 reference.
-        let code = unsafe { self.0.copy_attribute_value(&attr, NonNull::from(&mut value)) };
+        let code = unsafe { self.raw().copy_attribute_value(&attr, NonNull::from(&mut value)) };
         AxError::check(code)?;
         let ptr = NonNull::new(value.cast_mut()).ok_or(AxError::NO_VALUE)?;
         // SAFETY: the Copy rule hands us ownership of one reference.
@@ -234,36 +295,55 @@ impl AxElement {
     /// [`super::windows::note_write`]).
     pub fn set_attribute(&self, name: &str, value: &CFType) -> AxResult<()> {
         super::windows::note_write();
+        faked!(self, |_d, _el| Err(AxError::ATTRIBUTE_UNSUPPORTED));
         let attr = CFString::from_str(name);
         // SAFETY: valid element, attribute name and CF value.
-        AxError::check(unsafe { self.0.set_attribute_value(&attr, value) })
+        AxError::check(unsafe { self.raw().set_attribute_value(&attr, value) })
     }
 
     /// Performs an action such as `AXRaise` (a window write, as [`Self::set_attribute`]).
     pub fn perform_action(&self, name: &str) -> AxResult<()> {
         super::windows::note_write();
+        faked!(self, |d, el| d.ax_action(el, name));
         let action = CFString::from_str(name);
         // SAFETY: valid element and action name.
-        AxError::check(unsafe { self.0.perform_action(&action) })
+        AxError::check(unsafe { self.raw().perform_action(&action) })
     }
 
     fn string_attr(&self, name: &'static str) -> AxResult<String> {
+        faked!(self, |d, el| match d.ax_get(el, name)? {
+            super::fake::Val::Str(s) => Ok(s),
+            _ => Err(AxError::WrongType(name)),
+        });
         let v = self.attribute(name)?;
         v.downcast_ref::<CFString>().map(|s| s.to_string()).ok_or(AxError::WrongType(name))
     }
 
     fn bool_attr(&self, name: &'static str) -> AxResult<bool> {
+        faked!(self, |d, el| match d.ax_get(el, name)? {
+            super::fake::Val::Bool(b) => Ok(b),
+            _ => Err(AxError::WrongType(name)),
+        });
         let v = self.attribute(name)?;
         v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()).ok_or(AxError::WrongType(name))
     }
 
     fn set_bool_attr(&self, name: &'static str, value: bool) -> AxResult<()> {
+        #[cfg(test)]
+        if self.as_fake().is_some() {
+            super::windows::note_write();
+        }
+        faked!(self, |d, el| d.ax_set_bool(el, name, value));
         self.set_attribute(name, CFBoolean::new(value))
     }
 
     fn element_attr(&self, name: &'static str) -> AxResult<AxElement> {
+        faked!(self, |d, el| match d.ax_get(el, name)? {
+            super::fake::Val::El(e) => Ok(AxElement::fake(e)),
+            _ => Err(AxError::WrongType(name)),
+        });
         let v = self.attribute(name)?;
-        v.downcast::<AXUIElement>().map(AxElement).map_err(|_| AxError::WrongType(name))
+        v.downcast::<AXUIElement>().map(|e| AxElement(Repr::Real(e))).map_err(|_| AxError::WrongType(name))
     }
 
     fn value_attr<T: Default>(&self, name: &'static str, kind: AXValueType) -> AxResult<T> {
@@ -300,6 +380,7 @@ impl AxElement {
     /// `AXPosition` (top-left origin). A value that is not finite is an error
     /// ([`AxError::Value`]): a garbled answer never becomes a frame.
     pub fn position(&self) -> AxResult<Point> {
+        faked!(self, |d, el| d.ax_position(el));
         let p: CGPoint = self.value_attr(names::POSITION, AXValueType::CGPoint)?;
         if !(p.x.is_finite() && p.y.is_finite()) {
             return Err(AxError::Value);
@@ -309,6 +390,7 @@ impl AxElement {
 
     /// `AXSize`. A value that is not finite is an error, as for [`Self::position`].
     pub fn size(&self) -> AxResult<Size> {
+        faked!(self, |d, el| d.ax_size(el));
         let s: CGSize = self.value_attr(names::SIZE, AXValueType::CGSize)?;
         if !(s.width.is_finite() && s.height.is_finite()) {
             return Err(AxError::Value);
@@ -325,13 +407,17 @@ impl AxElement {
     /// (`AXUIElementCopyMultipleAttributeValues`): the role, and the frame when the element
     /// has one (an attribute it lacks comes back as an error value, read as no frame).
     pub fn role_and_frame(&self) -> AxResult<(String, Option<Rect>)> {
+        #[cfg(test)]
+        if self.as_fake().is_some() {
+            return Ok((self.role()?, self.frame().ok()));
+        }
         let attrs = [names::ROLE, names::POSITION, names::SIZE].map(CFString::from_static_str);
         let attrs = CFArray::from_retained_objects(&attrs);
         let mut out: *const CFArray = std::ptr::null();
         // SAFETY: an array of attribute-name strings and a valid out pointer; on success it
         // holds a +1 reference to an array of the values, in order.
         let code = unsafe {
-            self.0.copy_multiple_attribute_values(attrs.as_opaque(), AXCopyMultipleAttributeOptions::empty(), NonNull::from(&mut out))
+            self.raw().copy_multiple_attribute_values(attrs.as_opaque(), AXCopyMultipleAttributeOptions::empty(), NonNull::from(&mut out))
         };
         AxError::check(code)?;
         let ptr = NonNull::new(out.cast_mut()).ok_or(AxError::NO_VALUE)?;
@@ -352,7 +438,7 @@ impl AxElement {
         let values = self.multiple(&attrs)?;
         let subrole = values.get(0).and_then(|v| v.downcast_ref::<CFString>().map(|s| s.to_string()));
         let enabled = values.get(1).and_then(|v| v.downcast_ref::<CFBoolean>().map(|b| b.as_bool()));
-        let window = values.get(2).and_then(|v| v.downcast::<AXUIElement>().ok().map(AxElement));
+        let window = values.get(2).and_then(|v| v.downcast::<AXUIElement>().ok().map(|e| AxElement(Repr::Real(e))));
         let position: Option<CGPoint> = values.get(3).and_then(|v| ax_value(&v, AXValueType::CGPoint));
         let size: Option<CGSize> = values.get(4).and_then(|v| ax_value(&v, AXValueType::CGSize));
         let frame = position.zip(size).map(|(p, s)| Rect::new(p.x, p.y, s.width, s.height)).filter(Rect::is_finite);
@@ -362,12 +448,13 @@ impl AxElement {
     /// The values of `attrs` in one message, in order (an attribute the element lacks comes
     /// back as an error value).
     fn multiple(&self, attrs: &[CFRetained<CFString>]) -> AxResult<CFRetained<CFArray<CFType>>> {
+        faked!(self, |_d, _el| Err(AxError::ATTRIBUTE_UNSUPPORTED));
         let attrs = CFArray::from_retained_objects(attrs);
         let mut out: *const CFArray = std::ptr::null();
         // SAFETY: an array of attribute-name strings and a valid out pointer; on success it
         // holds a +1 reference to an array of the values, in order.
         let code = unsafe {
-            self.0.copy_multiple_attribute_values(attrs.as_opaque(), AXCopyMultipleAttributeOptions::empty(), NonNull::from(&mut out))
+            self.raw().copy_multiple_attribute_values(attrs.as_opaque(), AXCopyMultipleAttributeOptions::empty(), NonNull::from(&mut out))
         };
         AxError::check(code)?;
         let ptr = NonNull::new(out.cast_mut()).ok_or(AxError::NO_VALUE)?;
@@ -390,21 +477,23 @@ impl AxElement {
 
     /// Whether attribute `name` is settable (`AXUIElementIsAttributeSettable`).
     pub fn is_settable(&self, name: &str) -> AxResult<bool> {
+        faked!(self, |_d, _el| Ok(true));
         let attr = CFString::from_str(name);
         let mut settable: u8 = 0;
         // SAFETY: valid element and attribute name; `settable` is a valid out pointer.
-        AxError::check(unsafe { self.0.is_attribute_settable(&attr, NonNull::from(&mut settable)) })?;
+        AxError::check(unsafe { self.raw().is_attribute_settable(&attr, NonNull::from(&mut settable)) })?;
         Ok(settable != 0)
     }
 
     /// `AXWindows` of an application element.
     pub fn windows(&self) -> AxResult<Vec<AxElement>> {
+        faked!(self, |d, el| d.ax_windows(el).map(|ws| ws.into_iter().map(AxElement::fake).collect()));
         let v = self.attribute(names::WINDOWS)?;
         let array = v.downcast::<CFArray>().map_err(|_| AxError::WrongType(names::WINDOWS))?;
         // SAFETY: AXWindows is documented as an array of AXUIElements; each item is
         // type-checked again below.
         let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
-        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(AxElement)).collect())
+        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(|e| AxElement(Repr::Real(e)))).collect())
     }
 
     /// `AXFocusedWindow` of an application element.
@@ -490,16 +579,21 @@ impl AxElement {
         super::enhanced_ui::around(self, || self.write_position(p))
     }
 
-    /// Sets `AXSize`, with the app's enhanced UI off ([`super::enhanced_ui`]).
-    pub fn set_size(&self, s: Size) -> AxResult<()> {
-        super::enhanced_ui::around(self, || self.write_size(s))
-    }
-
     fn write_position(&self, p: Point) -> AxResult<()> {
+        #[cfg(test)]
+        if self.as_fake().is_some() {
+            super::windows::note_write();
+        }
+        faked!(self, |d, el| d.ax_set_position(el, p));
         self.set_value_attr(names::POSITION, AXValueType::CGPoint, &CGPoint { x: p.x, y: p.y })
     }
 
     fn write_size(&self, s: Size) -> AxResult<()> {
+        #[cfg(test)]
+        if self.as_fake().is_some() {
+            super::windows::note_write();
+        }
+        faked!(self, |d, el| d.ax_set_size(el, s));
         self.set_value_attr(names::SIZE, AXValueType::CGSize, &CGSize { width: s.w, height: s.h })
     }
 
@@ -543,13 +637,14 @@ impl AxElement {
     /// The element at a global point (top-left origin) within this application element (or
     /// any app's, from the system-wide element): `AXUIElementCopyElementAtPosition`.
     pub fn element_at(&self, p: Point) -> AxResult<AxElement> {
+        faked!(self, |d, el| d.ax_element_at(el, p).map(AxElement::fake));
         let mut out: *const AXUIElement = std::ptr::null();
         // SAFETY: valid element and out pointer; on success it holds a +1 reference.
-        let code = unsafe { self.0.copy_element_at_position(p.x as f32, p.y as f32, NonNull::from(&mut out)) };
+        let code = unsafe { self.raw().copy_element_at_position(p.x as f32, p.y as f32, NonNull::from(&mut out)) };
         AxError::check(code)?;
         let ptr = NonNull::new(out.cast_mut()).ok_or(AxError::NO_VALUE)?;
         // SAFETY: the Copy rule hands us ownership of one reference.
-        Ok(AxElement(unsafe { CFRetained::from_raw(ptr) }))
+        Ok(AxElement(Repr::Real(unsafe { CFRetained::from_raw(ptr) })))
     }
 
     /// `AXParent`.
@@ -563,7 +658,7 @@ impl AxElement {
         let array = v.downcast::<CFArray>().map_err(|_| AxError::WrongType(names::CHILDREN))?;
         // SAFETY: AXChildren is documented as an array of AXUIElement; items are type-checked.
         let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
-        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(AxElement)).collect())
+        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(|e| AxElement(Repr::Real(e)))).collect())
     }
 
     /// The array of elements attribute `name` holds (`AXSelectedChildren`, …); items of
@@ -573,7 +668,7 @@ impl AxElement {
         let array = v.downcast::<CFArray>().map_err(|_| AxError::WrongType(name))?;
         // SAFETY: a CF array holds CF objects; each item is type-checked below.
         let array: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(array) };
-        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(AxElement)).collect())
+        Ok(array.iter().filter_map(|item| item.downcast::<AXUIElement>().ok().map(|e| AxElement(Repr::Real(e)))).collect())
     }
 
     /// The boolean attribute `name` (`AXSelected`, …).
@@ -599,6 +694,7 @@ impl AxElement {
     /// The rectangle attribute `name` (`AXFrame`), top-left origin; a value that is not
     /// finite is an error.
     pub fn rect(&self, name: &'static str) -> AxResult<Rect> {
+        faked!(self, |_d, _el| Err(AxError::ATTRIBUTE_UNSUPPORTED));
         let r: CGRect = self.value_attr(name, AXValueType::CGRect)?;
         let out = Rect::new(r.origin.x, r.origin.y, r.size.width, r.size.height);
         if out.is_finite() { Ok(out) } else { Err(AxError::Value) }
@@ -607,9 +703,10 @@ impl AxElement {
     /// The names of the attributes this element has (`AXUIElementCopyAttributeNames`; the
     /// probes' dumps).
     pub fn attribute_names(&self) -> AxResult<Vec<String>> {
+        faked!(self, |_d, _el| Ok(Vec::new()));
         let mut names: *const CFArray = std::ptr::null();
         // SAFETY: valid element and out pointer; on success it holds a +1 reference.
-        AxError::check(unsafe { self.0.copy_attribute_names(NonNull::from(&mut names)) })?;
+        AxError::check(unsafe { self.raw().copy_attribute_names(NonNull::from(&mut names)) })?;
         let ptr = NonNull::new(names.cast_mut()).ok_or(AxError::NO_VALUE)?;
         // SAFETY: the Copy rule hands us ownership of one reference; the array holds strings,
         // each type-checked below.
@@ -619,6 +716,10 @@ impl AxElement {
 
     /// `AXURL` as a POSIX path (a Dock item's application bundle).
     pub fn url_path(&self) -> AxResult<String> {
+        #[cfg(test)]
+        if self.as_fake().is_some() {
+            return self.string_attr(names::URL);
+        }
         let v = self.attribute(names::URL)?;
         let url = v.downcast_ref::<CFURL>().ok_or(AxError::WrongType(names::URL))?;
         url.file_system_path(CFURLPathStyle::CFURLPOSIXPathStyle).map(|s| s.to_string()).ok_or(AxError::Value)
@@ -633,9 +734,10 @@ impl AxElement {
 
     /// The `CGWindowID` of a window element (via `_AXUIElementGetWindow`).
     pub fn window_id(&self) -> AxResult<u32> {
+        faked!(self, |d, el| d.ax_window_id(el));
         let mut id: u32 = 0;
         // SAFETY: valid element and out pointer; the function only writes `id`.
-        AxError::check(unsafe { _AXUIElementGetWindow(&self.0, &mut id) })?;
+        AxError::check(unsafe { _AXUIElementGetWindow(self.raw(), &mut id) })?;
         if id == 0 { Err(AxError::NO_VALUE) } else { Ok(id) }
     }
 }
@@ -670,10 +772,17 @@ pub type ObserverCallback =
 
 /// An `AXObserver` for one process, attached to the run loop it was created on.
 pub struct AxObserver {
+    /// macOS's observer on this thread's run loop; `None` only for an app of the fake desk
+    /// (`cfg(test)`), whose notices the bench delivers itself.
+    real: Option<RealObserver>,
+    pid: libc::pid_t,
+}
+
+/// macOS's observer and where it runs.
+struct RealObserver {
     observer: CFRetained<AXObserver>,
     source: CFRetained<CFRunLoopSource>,
     run_loop: CFRetained<CFRunLoop>,
-    pid: libc::pid_t,
 }
 
 impl fmt::Debug for AxObserver {
@@ -686,6 +795,10 @@ impl AxObserver {
     /// Creates an observer for `pid` and adds its source to the current thread's run loop
     /// (default mode).
     pub fn new(pid: libc::pid_t, callback: ObserverCallback) -> AxResult<Self> {
+        #[cfg(test)]
+        if super::fake::active() {
+            return Ok(Self { real: None, pid });
+        }
         let mut raw: *mut AXObserver = std::ptr::null_mut();
         // SAFETY: `raw` is a valid out pointer; the callback has the documented signature.
         let code = unsafe { AXObserver::create(pid, Some(callback), NonNull::from(&mut raw)) };
@@ -698,21 +811,17 @@ impl AxObserver {
         let run_loop = CFRunLoop::current().ok_or(AxError::Value)?;
         // SAFETY: the default-mode constant is a valid static.
         run_loop.add_source(Some(&source), unsafe { kCFRunLoopDefaultMode });
-        Ok(Self { observer, source, run_loop, pid })
-    }
-
-    /// The observed process.
-    pub fn pid(&self) -> libc::pid_t {
-        self.pid
+        Ok(Self { real: Some(RealObserver { observer, source, run_loop }), pid })
     }
 
     /// Registers `notification` on `element`; `refcon` (an opaque integer, never
     /// dereferenced) is handed back to the callback.
     pub fn add(&self, element: &AxElement, notification: &str, refcon: usize) -> AxResult<()> {
+        let Some(real) = &self.real else { return Ok(()) };
         let name = CFString::from_str(notification);
         let refcon = refcon as *mut c_void;
         // SAFETY: valid observer, element and name; refcon is an opaque integer for us.
-        let code = unsafe { self.observer.add_notification(element.raw(), &name, refcon) };
+        let code = unsafe { real.observer.add_notification(element.raw(), &name, refcon) };
         match AxError::check(code) {
             Err(e) if e == AxError::ALREADY_REGISTERED => Ok(()),
             other => other,
@@ -721,17 +830,19 @@ impl AxObserver {
 
     /// Unregisters `notification` on `element`.
     pub fn remove(&self, element: &AxElement, notification: &str) -> AxResult<()> {
+        let Some(real) = &self.real else { return Ok(()) };
         let name = CFString::from_str(notification);
         // SAFETY: valid observer, element and name.
-        AxError::check(unsafe { self.observer.remove_notification(element.raw(), &name) })
+        AxError::check(unsafe { real.observer.remove_notification(element.raw(), &name) })
     }
 }
 
 impl Drop for AxObserver {
     fn drop(&mut self) {
+        let Some(real) = &self.real else { return };
         // SAFETY: the default-mode constant is a valid static; removing an absent source is
         // a no-op.
-        self.run_loop.remove_source(Some(&self.source), unsafe { kCFRunLoopDefaultMode });
+        real.run_loop.remove_source(Some(&real.source), unsafe { kCFRunLoopDefaultMode });
     }
 }
 

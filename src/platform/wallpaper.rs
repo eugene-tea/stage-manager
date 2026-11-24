@@ -44,7 +44,7 @@ use objc2_core_graphics::{
 };
 use objc2_foundation::{MainThreadMarker, NSArray, NSNumber, NSString, NSTimeZone};
 use objc2_image_io::{
-    CGImageDestination, CGImageMetadataTag, CGImageSource, kCGImagePropertyDPIHeight, kCGImagePropertyDPIWidth,
+    CGImageMetadataTag, CGImageSource, kCGImagePropertyDPIHeight, kCGImagePropertyDPIWidth,
     kCGImagePropertyPixelHeight, kCGImagePropertyPixelWidth,
 };
 
@@ -525,12 +525,13 @@ pub fn space_name(image: &CGImage) -> String {
         .map_or_else(|| "unnamed".into(), |n| n.to_string())
 }
 
+#[cfg(feature = "probes")]
 /// Writes `image` to a PNG at `path` (its color space embedded).
 pub fn write_png(image: &CGImage, path: &Path) -> Result<(), String> {
     let url = CFURL::from_file_path(path).ok_or("a bad path")?;
     let png = CFString::from_static_str("public.png");
     // SAFETY: a file URL, a known type, one image, no options.
-    let dest = unsafe { CGImageDestination::with_url(&url, &png, 1, None) }.ok_or("cannot create the PNG")?;
+    let dest = unsafe { objc2_image_io::CGImageDestination::with_url(&url, &png, 1, None) }.ok_or("cannot create the PNG")?;
     // SAFETY: a live destination and image.
     let done = unsafe {
         dest.add_image(image, None);

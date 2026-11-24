@@ -39,6 +39,7 @@
 //! else every 2 s (less while a duty caps it: [`Controller::tick_rest`]). The tick's duties
 //! share one read of the window list ([`windows::wake`]).
 
+use crate::platform::clock;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -60,6 +61,7 @@ use super::handoff::TakenWatch;
 use super::ctl::Command;
 use super::input::InputEvent;
 use super::minimize_tap::{self, MinimizeAsk};
+use super::mission_key_tap;
 use super::launch_scan;
 use super::native_settings::{self, RawSettings};
 use super::observe::{self, Observer};
@@ -78,8 +80,10 @@ use crate::ui::strip_model::{StripDrop, StripEvent};
 pub const AX_TIMEOUT_SECONDS: f32 = 0.25;
 
 /// Housekeeping period of the WM run loop (saves, config polling, strip refresh) while
-/// something happens; at rest it is longer ([`tick_pace`]).
-const TICK_SECONDS: f64 = 0.25;
+/// something happens ([`tick_pace::BRISK`]); at rest it is longer ([`tick_pace`]).
+fn tick_seconds() -> f64 {
+    tick_pace::BRISK.as_secs_f64()
+}
 
 /// The fast tick: work that must land within a Desktop slide (~0.25–0.45 s), such as
 /// checking an arrangement made ahead against the window server
@@ -126,6 +130,8 @@ fn stirs(cmd: &WmCommand) -> bool {
         // ⌘ pressed or let go alone moves nothing; the Tab that opens ⌘Tab's switcher stirs.
         WmCommand::Input(e, _) if e.kind == input::InputKind::CommandKey => false,
         WmCommand::Input(e, _) => e.kind != input::InputKind::KeyDown || e.cmd || e.other_modifiers,
+        // A notice brings its own look forward; the tick's pace follows what that look finds.
+        WmCommand::ServerNotice(_) => false,
         _ => true,
     }
 }
@@ -135,7 +141,7 @@ fn stirs(cmd: &WmCommand) -> bool {
 /// rest's cap is asked after a tick only (the inert slivers' answer takes the lock their tap
 /// tries at every press).
 fn pace_tick(after_tick: bool) {
-    let now = Instant::now();
+    let now = clock::now();
     let pace = STATE.with(|s| {
         let mut st = s.try_borrow_mut().ok()?;
         let st = st.as_mut()?;
@@ -170,13 +176,15 @@ fn pace_tick(after_tick: bool) {
 /// Arms the fast tick while the controller wants it, else parks its timer far in the future
 /// (no wake-ups while nothing needs it).
 fn arm_fast_tick() {
-    let wanted = STATE.with(|s| s.borrow().as_ref().is_some_and(|s| s.conductor.wants_fast_tick()));
+    let (wanted, soon) = STATE.with(|s| s.borrow().as_ref().map_or((false, None), |s| (s.conductor.wants_fast_tick(), s.conductor.fast_tick_soon())));
+    // Sooner while the raise-order check reads (`Controller::fast_tick_soon`).
+    let period = soon.map_or(FAST_TICK_SECONDS, |d| d.as_secs_f64().min(FAST_TICK_SECONDS));
     FAST_TIMER.with(|t| {
         let Some(timer) = t.borrow().as_ref().cloned() else { return };
         let now = CFAbsoluteTimeGetCurrent();
         let next = timer.next_fire_date();
-        if wanted && next > now + FAST_TICK_SECONDS {
-            timer.set_next_fire_date(now + FAST_TICK_SECONDS);
+        if wanted && next > now + period {
+            timer.set_next_fire_date(now + period);
         } else if !wanted && next < now + 3600.0 {
             timer.set_next_fire_date(now + 1.0e9);
         }
@@ -192,8 +200,9 @@ const DISPLAY_SWEEP_AFTER: Duration = Duration::from_secs(3);
 pub enum WmCommand {
     /// The full list of running regular apps (sent once at launch).
     Apps(Vec<AppInfo>),
-    /// A workspace event.
-    App(AppEvent),
+    /// A workspace event, and when the main thread's NSWorkspace handler got it (an
+    /// activation also carries its own: [`AppEvent::Activated`]).
+    App(AppEvent, Instant),
     /// Accessibility trust changed: start or stop observation. The first grant starts the
     /// recovery scan: each app is observed once its windows are back ([`launch_scan`]).
     Accessibility(bool),
@@ -209,12 +218,16 @@ pub enum WmCommand {
     /// the window goes to the strip, or is minimized as macOS would when Stage Manager cannot
     /// take it now ([`super::minimize_tap`]).
     Minimize(MinimizeAsk),
+    /// One of Mission Control's keys, or a press while it may show, heard by its key tap
+    /// ([`super::mission_key_tap`]).
+    MissionInput(mission_key_tap::HeardAt),
     /// A hotkey was pressed.
     Hotkey(HotkeyCommand),
     /// Input from the strip.
     Strip(StripEvent),
-    /// The user went to another Space (`activeSpaceDidChangeNotification`).
-    SpaceChanged,
+    /// The user went to another Space (`activeSpaceDidChangeNotification`), and when the main
+    /// thread's handler got the notice.
+    SpaceChanged(Instant),
     /// Show or hide the strip.
     ToggleStrip,
     /// Re-read config.toml.
@@ -233,6 +246,9 @@ pub enum WmCommand {
     Probe(observe_probe::Note),
     /// The launch's recovery scan read an app after observation's start ([`launch_scan`]).
     LaunchScan(launch_scan::Done<launch_scan::Read>),
+    /// The window server's notices of one kind heard in one turn of the main run loop
+    /// ([`super::spaces::notices`], the Spaces engine only): a trigger for a look, never a fact.
+    ServerNotice(crate::engine::server_notice::Burst),
 }
 
 impl WmCommand {
@@ -240,15 +256,16 @@ impl WmCommand {
     fn name(&self) -> &'static str {
         match self {
             WmCommand::Apps(_) => "command Apps",
-            WmCommand::App(_) => "command App",
+            WmCommand::App(..) => "command App",
             WmCommand::Accessibility(_) => "command Accessibility",
             WmCommand::NativeSettings(_) => "command NativeSettings",
             WmCommand::Displays(..) => "command Displays",
             WmCommand::Input(..) => "command Input",
             WmCommand::Minimize(_) => "command Minimize",
+            WmCommand::MissionInput(_) => "command MissionInput",
             WmCommand::Hotkey(_) => "command Hotkey",
             WmCommand::Strip(_) => "command Strip",
-            WmCommand::SpaceChanged => "command SpaceChanged",
+            WmCommand::SpaceChanged(_) => "command SpaceChanged",
             WmCommand::ToggleStrip => "command ToggleStrip",
             WmCommand::ReloadConfig => "command ReloadConfig",
             WmCommand::Ctl(..) => "command Ctl",
@@ -256,6 +273,7 @@ impl WmCommand {
             WmCommand::LogoutSignal(..) => "command LogoutSignal",
             WmCommand::Probe(_) => "command Probe",
             WmCommand::LaunchScan(_) => "command LaunchScan",
+            WmCommand::ServerNotice(_) => "command ServerNotice",
         }
     }
 }
@@ -416,7 +434,7 @@ thread_local! {
 /// Runs one named step of a task (the tick's parts), keeping the slowest for the task's
 /// slow-task line ([`guarded_state`]).
 fn step<T>(name: &'static str, f: impl FnOnce() -> T) -> T {
-    let start = Instant::now();
+    let start = clock::now();
     let out = f();
     let took = start.elapsed();
     SLOWEST_STEP.with(|s| {
@@ -442,7 +460,7 @@ fn with_state(f: impl FnOnce(&mut WmState)) {
 /// resynced from the model. A run that held the thread [`slow_task::SLOW`] or longer is
 /// logged as task `task` (`detail`: what it handled, or empty), rate-limited.
 fn guarded_state(what: &str, task: &'static str, detail: &str, f: impl FnOnce(&mut WmState)) {
-    let start = Instant::now();
+    let start = clock::now();
     SLOWEST_STEP.with(|s| s.set(None));
     if safety::guarded(what, || with_state(f)).is_none() {
         let _ = safety::guarded("panic recovery", || with_state(WmState::after_panic));
@@ -451,7 +469,7 @@ fn guarded_state(what: &str, task: &'static str, detail: &str, f: impl FnOnce(&m
     if took < slow_task::SLOW {
         return;
     }
-    let Some(held) = SLOW.with(|s| s.borrow_mut().note(task, took, Instant::now())) else { return };
+    let Some(held) = SLOW.with(|s| s.borrow_mut().note(task, took, clock::now())) else { return };
     let ms = took.as_millis() as u64;
     let (slowest, slowest_ms) = SLOWEST_STEP.with(|s| s.take()).map_or(("", 0), |(n, t)| (n, t.as_millis() as u64));
     tracing::debug!(task, detail, ms, slowest, slowest_ms, held, "slow WM task");
@@ -483,7 +501,7 @@ fn drain() {
         guarded_state("a WM command", cmd.name(), "", |s| s.handle(cmd));
     }
     if stirred {
-        with_state(|s| s.pace.stir(Instant::now()));
+        with_state(|s| s.pace.stir(clock::now()));
     }
     arm_fast_tick();
     pace_tick(false);
@@ -510,6 +528,9 @@ unsafe extern "C-unwind" fn ax_callback(
     notification: NonNull<CFString>,
     refcon: *mut c_void,
 ) {
+    // When macOS's notice reached us: its events are judged by it, not by when the
+    // controller gets to them (the reads below and a batch's earlier events take time).
+    let received = clock::now();
     let pid = observe::pid_of_refcon(refcon);
     // SAFETY: AX passes a live element and notification name for the callback's duration.
     let element = unsafe { AxElement::from_borrowed(element) };
@@ -519,9 +540,11 @@ unsafe extern "C-unwind" fn ax_callback(
         // A title change moves no window: it does not stir the tick (the strip's label it
         // may change is presented on the next tick, brought in by the strip's wait).
         if name != super::ax::notifications::TITLE_CHANGED {
-            s.pace.stir(Instant::now());
+            s.pace.stir(clock::now());
         }
+        s.observer.receiving(Some(received));
         s.observer.on_notification(pid, element, &name);
+        s.observer.receiving(None);
         if !safety::quit_requested() {
             s.pump();
         }
@@ -556,7 +579,7 @@ impl WmState {
     /// not answer yet follows the restore window (fast while it is open).
     fn pump(&mut self) {
         loop {
-            let events = self.observer.take_events();
+            let events = self.observer.take_stamped();
             if events.is_empty() {
                 break;
             }
@@ -567,14 +590,17 @@ impl WmState {
 
     fn handle(&mut self, cmd: WmCommand) {
         match cmd {
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
+            WmCommand::Input(..) | WmCommand::MissionInput(_) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
                 if !self.logout.admits(Work::Input) =>
             {
                 tracing::debug!("a logout is coming: input ignored");
             }
             // Nothing is arranged during the hold, but a window the head start could not reach
             // may show on this Space now (as while standing down).
-            WmCommand::SpaceChanged if !self.logout.admits(Work::SpaceChange) => self.retry_held(),
+            WmCommand::SpaceChanged(_) if !self.logout.admits(Work::SpaceChange) => self.retry_held(),
+            // Nothing is looked at for a notice while nothing is arranged; the polls resume.
+            WmCommand::ServerNotice(_) if !self.logout.admits(Work::SpaceChange) || !self.stand_down.admits(Work::SpaceChange) => {}
+            WmCommand::ServerNotice(burst) => self.conductor.server_notice(&mut self.observer, burst),
             WmCommand::LogoutSignal(name, signal, at) => self.logout_signal(&name, signal, at),
             // The tap swallowed the person's minimize: never lost. While nothing is arranged
             // it is macOS's, genie and all.
@@ -608,10 +634,10 @@ impl WmState {
                 return;
             }
             WmCommand::Apps(list) => self.observer.set_apps(list, ax_callback),
-            WmCommand::App(event) => {
+            WmCommand::App(event, received) => {
                 // An app quitting during a logout's hold: the logout is still under way.
                 if matches!(event, AppEvent::Terminated(_)) {
-                    self.logout.app_quit(Instant::now());
+                    self.logout.app_quit(clock::now());
                 }
                 let launched = match &event {
                     AppEvent::Launched(app) => Some(app.pid),
@@ -626,13 +652,15 @@ impl WmState {
                 }
                 // An app activated: the Apple mode may hide a running app with no window at
                 // once, before the window it reopens shows.
-                if let AppEvent::Activated(app, _) = &event
+                if let AppEvent::Activated(app, fired) = &event
                     && self.arranging()
                     && self.observer.admits(app)
                 {
-                    self.conductor.app_activated(&self.observer, app);
+                    self.conductor.app_activated(&self.observer, app, *fired);
                 }
+                self.observer.receiving(Some(received));
                 self.observer.on_app_event(event, ax_callback);
+                self.observer.receiving(None);
                 // A just-opened app: the engine may hold its new windows until placed.
                 if let Some(pid) = launched
                     && self.arranging()
@@ -669,16 +697,16 @@ impl WmState {
                     self.carry_out(step);
                 }
             }
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
+            WmCommand::Input(..) | WmCommand::MissionInput(_) | WmCommand::Hotkey(_) | WmCommand::Strip(_) | WmCommand::ToggleStrip
                 if !self.stand_down.admits(Work::Input) =>
             {
                 tracing::debug!("Apple's Stage Manager is on: input ignored");
             }
-            WmCommand::SpaceChanged if !self.stand_down.admits(Work::SpaceChange) => self.retry_held(),
+            WmCommand::SpaceChanged(_) if !self.stand_down.admits(Work::SpaceChange) => self.retry_held(),
             WmCommand::Displays(displays, heard) => {
                 let moved = self.displays.as_ref().and_then(|d| d.first()).map(|d| d.frame) != displays.first().map(|d| d.frame);
                 if moved && self.displays.is_some() {
-                    self.display_sweep = Some(Instant::now() + DISPLAY_SWEEP_AFTER);
+                    self.display_sweep = Some(clock::now() + DISPLAY_SWEEP_AFTER);
                 }
                 self.displays = Some(displays.clone());
                 self.conductor.set_displays(&mut self.observer, displays, heard);
@@ -686,18 +714,19 @@ impl WmState {
             // Without Accessibility no window can move: a stage change now would leave the
             // model out of step with the screen (its parked windows unregistered), so the
             // user's input waits for observation (R1-platform 9).
-            WmCommand::Input(..) | WmCommand::Hotkey(_) | WmCommand::Strip(_)
+            WmCommand::Input(..) | WmCommand::MissionInput(_) | WmCommand::Hotkey(_) | WmCommand::Strip(_)
                 if self.conductor.managing() && !self.observer.observing() =>
             {
                 tracing::debug!("Accessibility is off: input ignored");
             }
             WmCommand::Input(event, drop) => self.conductor.input(&mut self.observer, event, drop),
+            WmCommand::MissionInput(heard) => self.conductor.mission_input(&mut self.observer, heard),
             WmCommand::Hotkey(command) => self.conductor.hotkey(&mut self.observer, command),
             WmCommand::Strip(event) => self.conductor.strip_event(&mut self.observer, event),
-            WmCommand::SpaceChanged => {
+            WmCommand::SpaceChanged(heard) => {
                 // A window a stand-down could not reach may show on this Space now.
                 self.retry_held();
-                self.conductor.on_space_changed(&mut self.observer);
+                self.conductor.on_space_changed(&mut self.observer, heard);
             }
             WmCommand::ToggleStrip => self.conductor.toggle_strip(),
             WmCommand::ReloadConfig => {
@@ -775,7 +804,7 @@ impl WmState {
         }
         // An app whose thread did not start is read here, as every app used to be.
         for (pid, bundle) in not_started {
-            let t0 = Instant::now();
+            let t0 = clock::now();
             let value = Some(launch_scan::read(pid, bundle.as_deref()));
             self.launch_scanned(launch_scan::Done { pid, bundle, value, took: t0.elapsed() });
         }
@@ -799,7 +828,7 @@ impl WmState {
         let answered = run.apply(done);
         let finished = run.finished();
         if !answered {
-            let now = Instant::now();
+            let now = clock::now();
             // Its episode starts here: the rescans log only its end (8M).
             self.rescan_unanswered.missed(pid, now);
             self.rescan.unanswered([pid], Why::Launch, now);
@@ -828,7 +857,7 @@ impl WmState {
         if self.launch_scan.is_none() {
             return;
         }
-        for pid in self.observer.scan_overdue(Instant::now(), launch_scan::HOLD_MAX) {
+        for pid in self.observer.scan_overdue(clock::now(), launch_scan::HOLD_MAX) {
             tracing::warn!(pid, "launch scan: the app's read takes long; it is observed without waiting for it");
             self.observer.scan_done(pid, false, ax_callback);
         }
@@ -849,7 +878,7 @@ impl WmState {
                 Task::NewController => self.replace_conductor(Conductor::ours()),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.conductor.set_displays(&mut self.observer, d, Instant::now());
+                        self.conductor.set_displays(&mut self.observer, d, clock::now());
                     }
                 }
                 Task::ReplaySettings => {
@@ -938,7 +967,7 @@ impl WmState {
         match task {
             Task::ReplayDisplays => {
                 if let Some(d) = self.displays.clone() {
-                    self.conductor.set_displays(&mut self.observer, d, Instant::now());
+                    self.conductor.set_displays(&mut self.observer, d, clock::now());
                 }
             }
             Task::ReplaySettings => {
@@ -1043,7 +1072,7 @@ impl WmState {
                 Task::NewController => self.replace_conductor(Conductor::ours()),
                 Task::ReplayDisplays => {
                     if let Some(d) = self.displays.clone() {
-                        self.conductor.set_displays(&mut self.observer, d, Instant::now());
+                        self.conductor.set_displays(&mut self.observer, d, clock::now());
                     }
                 }
                 Task::ReplaySettings => {
@@ -1129,7 +1158,7 @@ impl WmState {
         if self.stand_down.stranded() {
             let all_back = safety::retry_held();
             if self.stand_down_leftovers.is_some() {
-                self.leftovers_look = Some(Instant::now() + UNPARK_SETTLE);
+                self.leftovers_look = Some(clock::now() + UNPARK_SETTLE);
             }
             self.stand_down.released(all_back && self.stand_down_leftovers.is_none());
         }
@@ -1142,7 +1171,7 @@ impl WmState {
     /// an unpark). The app may arrange windows again by now (a resume, a cancelled logout):
     /// the windows its controller parks stay where they are ([`leftovers_now`]).
     fn look_for_leftovers(&mut self, at_once: bool) {
-        if !at_once && !look_due(self.leftovers_look, Instant::now()) {
+        if !at_once && !look_due(self.leftovers_look, clock::now()) {
             return;
         }
         self.leftovers_look = None;
@@ -1156,11 +1185,11 @@ impl WmState {
     }
 
     fn tick(&mut self) {
-        if self.logout.cancelled(Instant::now()) {
+        if self.logout.cancelled(clock::now()) {
             self.logout_cancelled("no quit came in time");
         }
         // About once a second by the clock: every fourth tick while brisk, every tick at rest.
-        let full = self.pace.full_pass(Instant::now());
+        let full = self.pace.full_pass(clock::now());
         // Apps gone without a termination notice (round missed-quit): the pids whose calls
         // failed each tick, the apps with tracked windows about once a second.
         step("reap gone apps", || self.observer.reap_gone(full));
@@ -1189,6 +1218,8 @@ impl WmState {
         // The minimize tap passes everything while nothing is arranged.
         minimize_tap::admit(self.arranging() && !self.conductor.is_apples());
         step("minimize tap", minimize_tap::refresh);
+        mission_key_tap::admit(self.arranging() && !self.conductor.is_apples());
+        step("mission key tap", mission_key_tap::refresh);
         // An app's enhanced UI a restore could not put back, or held off too long: on again.
         step("enhanced UI sweep", enhanced_ui::sweep);
     }
@@ -1210,7 +1241,7 @@ impl WmState {
             Some("a logout's hold")
         } else if safety::taken_len() > 0 {
             Some("windows taken from an old guardian")
-        } else if minimize_tap::off_for_secure_input() || super::corner::sliver_tap::off_for_secure_input() {
+        } else if minimize_tap::off_for_secure_input() || super::corner::sliver_tap::off_for_secure_input() || mission_key_tap::off_for_secure_input() {
             Some("an event tap off for secure input")
         } else if enhanced_ui::held_off() {
             Some("an app's enhanced UI held off")
@@ -1236,7 +1267,7 @@ impl WmState {
         if self.rescan.is_empty() {
             return;
         }
-        let now = Instant::now();
+        let now = clock::now();
         let observed: std::collections::HashSet<i32> = self.observer.windows().values().map(|w| w.pid).collect();
         let (pass, expired) = self.rescan.due(now, |p| observed.contains(&p));
         if !expired.is_empty() {
@@ -1262,7 +1293,7 @@ impl WmState {
             tracing::warn!(reason, restored = r.restored, "windows left in the park zone were brought back");
         }
         // Each app's episode of not answering, once at each end (8M: a line every ~3.5 s).
-        let now = Instant::now();
+        let now = clock::now();
         for &pid in &pids {
             if unanswered.contains(&pid) {
                 if self.rescan_unanswered.missed(pid, now) {
@@ -1273,7 +1304,7 @@ impl WmState {
             }
         }
         let missed: Vec<Queued> = pass.into_iter().filter(|q| unanswered.contains(&q.pid)).collect();
-        self.rescan.done(&missed, Instant::now());
+        self.rescan.done(&missed, clock::now());
     }
 
     /// After a main display change ([`DISPLAY_SWEEP_AFTER`]): every allowed app is queued
@@ -1281,7 +1312,7 @@ impl WmState {
     /// back, except those we park (the registry's).
     fn sweep_after_display_change(&mut self) {
         let Some(due) = self.display_sweep else { return };
-        if Instant::now() < due {
+        if clock::now() < due {
             return;
         }
         self.display_sweep = None;
@@ -1409,6 +1440,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
     }
     let mut observer = Observer::new(std::process::id() as i32, only);
     minimize_tap::set_handle(own.clone());
+    mission_key_tap::set_handle(own.clone());
     let probes = own.clone();
     observer.set_probe_notify(Arc::new(move |note| {
         probes.send(WmCommand::Probe(note));
@@ -1417,7 +1449,7 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
         observer,
         conductor: Conductor::ours(),
         scanned: false,
-        pace: TickPace::new(Instant::now()),
+        pace: TickPace::new(clock::now()),
         rest: tick_pace::REST,
         trusted: false,
         stand_down: StandDown::default(),
@@ -1439,9 +1471,9 @@ fn run(rx: Receiver<WmCommand>, run_loop: &CFRunLoop, own: WmHandle) {
     // The timer keeps the run loop alive (CFRunLoopRun returns at once with no sources)
     // and drives housekeeping.
     let tick_block = RcBlock::new(|_timer: *mut CFRunLoopTimer| tick());
-    let first_fire = CFAbsoluteTimeGetCurrent() + TICK_SECONDS;
+    let first_fire = CFAbsoluteTimeGetCurrent() + tick_seconds();
     // SAFETY: valid arguments; the block is copied by CoreFoundation.
-    let timer = unsafe { CFRunLoopTimer::with_handler(None, first_fire, TICK_SECONDS, 0, 0, Some(&tick_block)) };
+    let timer = unsafe { CFRunLoopTimer::with_handler(None, first_fire, tick_seconds(), 0, 0, Some(&tick_block)) };
     match &timer {
         Some(t) => {
             // SAFETY: the default-mode constant is a valid static.
@@ -1503,7 +1535,7 @@ mod tests {
         use input::{InputEvent, InputKind};
         let event = |kind, cmd, other_modifiers| {
             WmCommand::Input(
-                InputEvent { kind, at: Point::new(10.0, 10.0), shift: false, cmd, other_modifiers, control: false, option: false, clicks: 0, key: None, stamp: 0.0 },
+                InputEvent { kind, at: Point::new(10.0, 10.0), shift: false, cmd, other_modifiers, control: false, option: false, clicks: 0, key: None, stamp: 0.0, heard: Instant::now() },
                 None,
             )
         };
@@ -1515,7 +1547,7 @@ mod tests {
         assert!(stirs(&event(InputKind::MouseDown, false, false)));
         assert!(stirs(&event(InputKind::MouseUp, false, false)));
         assert!(stirs(&event(InputKind::OtherMouseDown, false, false)));
-        assert!(stirs(&WmCommand::SpaceChanged));
+        assert!(stirs(&WmCommand::SpaceChanged(Instant::now())));
         assert!(stirs(&WmCommand::ReloadConfig));
     }
 

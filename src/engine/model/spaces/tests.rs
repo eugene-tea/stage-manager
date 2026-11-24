@@ -1038,7 +1038,7 @@ mod slide_activation {
 
     use super::*;
     use crate::engine::focus_replay::{FocusReplay, Wanted};
-    use crate::engine::slide_hold::{SlideHold, Step, Wait, activation_waits, asks_focus, slide_listed};
+    use crate::engine::slide_hold::{SlideHold, Step, Wait, activation_waits, asks_focus, besides_out, slide_listed};
 
     /// The owner's case (10-23, 11:57:50): the editor (pid 10, the owner's browser that day) has a
     /// window on each Desktop. Desktop 1 shows the editor's stage (window 1); on Desktop 2 the
@@ -1295,6 +1295,10 @@ mod slide_activation {
         assert!(!slide_listed(&mac.m, &parked_only(0.0)), "in the zone: no slide");
         assert!(slide_listed(&mac.m, &parked_only(-700.0)), "moved sideways out of the zone");
         assert!(!slide_listed(&mac.m, &[]), "none listed (a hidden app's): no slide");
+        // Out for Mission Control, laid out by it: no slide.
+        let out = |id: WindowId| id == w(3);
+        assert!(!slide_listed(&mac.m, &besides_out(&parked_only(-700.0), out)), "out for Mission Control");
+        assert!(slide_listed(&mac.m, &besides_out(&parked_only(-700.0), |_| false)), "not out: a slide");
     }
     }
 
@@ -1857,11 +1861,10 @@ mod arranged_ahead {
                 assert!(mac.m.activation_stays_here(40, true), "window 5 home: macOS activates Mail here");
                 // The release order: ⌘ up, Mail's activation 10 ms later: kept for its switch.
                 let t0 = std::time::Instant::now();
-                let mut go = switcher::LetGo::default();
-                go.let_go(t0);
-                go.activated = true;
-                let wait = std::time::Duration::from_millis(1000);
-                assert_eq!(go.step(false, t0 + switcher::ACTIVATION_WAIT * 2, t0, wait), switcher::LetGoStep::Keep);
+                let mut go = crate::engine::lend_wait::LendWait::held(40);
+                go.begin(t0, switcher::activation_cap(false, true));
+                go.activation(40, t0, t0);
+                assert_eq!(go.step(t0 + switcher::ACTIVATION_WAIT / 2), None);
             }
             EngineKind::Apple => unreachable!("the engine matrix runs the Corner and Spaces engines"),
         }
@@ -1918,22 +1921,21 @@ mod arranged_ahead {
             assert!(acts.is_empty());
         }
         assert_eq!(keys.gone_due(t0 + switcher::GONE_WAIT * 2), switcher::Heard::Nothing, "nothing left for the wait");
-        // The rerun's order: Escape never heard; the list gone, then ⌘ up heard as a release on
-        // Mail; no activation of Mail: back after the activation wait.
+        // The rerun's order, the key tap not hearing: Escape never heard; the list gone, then ⌘
+        // up heard as a release on Mail; no activation of Mail: back after the silent wait.
         let mut keys = switcher::Switcher::default();
         cmd_tab(&mac, &mut keys, tab(false), None);
-        let mut go = switcher::LetGo::default();
+        let mut go = crate::engine::lend_wait::LendWait::held(40);
         keys.list_gone(t0);
-        go.let_go(t0);
+        go.begin(t0, switcher::activation_cap(false, false));
         let acts = cmd_tab(&mac, &mut keys, Key::Command(false), lent);
         if spaces {
             assert_eq!(acts, vec![Act::Release { window: w(5) }], "the keys take it for a release");
         }
         let up = t0 + std::time::Duration::from_millis(87);
-        go.let_go(up);
-        let wait = std::time::Duration::from_millis(1000);
-        assert_eq!(go.step(false, up + switcher::ACTIVATION_WAIT / 2, t0, wait), switcher::LetGoStep::Keep);
-        assert_eq!(go.step(false, up + switcher::ACTIVATION_WAIT, t0, wait), switcher::LetGoStep::NoActivation, "no activation came: back");
+        go.begin(up, switcher::activation_cap(false, false));
+        assert_eq!(go.step(up + switcher::SILENT_ACTIVATION_WAIT / 2), None);
+        assert_eq!(go.step(up + switcher::SILENT_ACTIVATION_WAIT), Some(crate::engine::lend_wait::Outcome::Cap), "no activation came (the key tap not hearing): back");
         assert!(mac.parked(5), "Mail's window stays hidden in its stage");
         // Mail selected, then a key the keys do not follow (H hides it): back.
         let mut keys = switcher::Switcher::default();
@@ -1960,7 +1962,7 @@ mod arranged_ahead {
     fn cmd_tab_parks_the_lent_window_and_the_model_keeps_its_frame() {
         use crate::engine::corner::park::ParkRequest;
         use crate::engine::corner::park_frame_of;
-        use crate::engine::lend_park::{self, LendSteps, ParkAsk};
+        use crate::engine::lend_park::{self, LendSteps, Moves, ParkAsk};
         use switcher::{Act, Key};
 
         /// Window 5 of the fake Mac as the lend's calls see it; every call in order.
@@ -1977,7 +1979,7 @@ mod arranged_ahead {
                 }
             }
         }
-        impl LendSteps for Steps<'_> {
+        impl Moves for Steps<'_> {
             fn listed(&mut self) -> Option<Rect> {
                 Some(self.mac.wins[&5].1)
             }
@@ -1989,6 +1991,8 @@ mod arranged_ahead {
                 self.look();
                 self.listed()
             }
+        }
+        impl LendSteps for Steps<'_> {
             fn put_home(&mut self) -> bool {
                 self.calls.push("home");
                 self.mac.stage_space.remove(&5);
@@ -2008,7 +2012,7 @@ mod arranged_ahead {
         let restore = mac.m.window(w(5)).expect("managed").restore;
         let d = *mac.m.display(MAIN);
         let at = park_frame_of(own, &d, ParkRequest::default());
-        let ask = ParkAsk { at, display: d, frame: own, must: true };
+        let ask = ParkAsk { at, zone: crate::engine::lend_park::Zone::Corner, display: d, frame: own, must: true, kept: false };
         let mut keys = switcher::Switcher::default();
         let acts = cmd_tab(&mac, &mut keys, tab(false), None);
         assert_eq!(acts.is_empty(), !spaces, "only the Spaces engine puts a window home: {acts:?}");
@@ -2231,6 +2235,113 @@ mod arranged_ahead {
         assert!(!mac.parked(3));
         mac.elsewhere.clear();
         (mac, editor)
+    }
+
+    both_engines! {
+    /// 11-20 07:53:39, in the order the events came. Desktop 1 shows Mail (window 1), Safari's
+    /// work window 2 waits in a stage there; Safari's home window 3 waits in a stage of
+    /// Desktop 2. A link clicked in Mail: Safari activates and its stage comes in front here
+    /// (the switch recorded before it), then Safari focuses window 3. Its Desktop is
+    /// arranged and macOS goes; once Desktop 1 is left, its switch is undone unseen: Mail in
+    /// front again, the strip as it was, nothing raised or focused there. Back on Desktop 1,
+    /// nothing moves.
+    #[test]
+    fn a_link_opened_in_a_window_hidden_on_another_desktop_leaves_this_one_as_it_was() {
+        use crate::engine::focus_elsewhere::{FocusFacts, HiddenFocus, SwitchBack, WENT_ELSEWHERE_MAX, hidden_focus};
+        const MAIL: Pid = 40;
+        const SAFARI: Pid = 20;
+        let mut mac = Mac::new();
+        mac.put(0, 1, MAIL, "com.example.mail", "Inbox");
+        mac.put(0, 2, SAFARI, "com.example.browser", "Work wiki");
+        mac.put(1, 3, SAFARI, "com.example.browser", "Home page");
+        mac.put(1, 4, 30, "com.example.chat", "Family");
+        mac.focused = Some(w(4));
+        mac.go(1);
+        let chat = mac.m.stage_of(w(4)).expect("chat stage");
+        mac.click(chat);
+        assert!(mac.parked(3), "the home window waits in its stage on Desktop 2");
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let mail = mac.m.stage_of(w(1)).expect("Mail's stage");
+        let work = mac.m.stage_of(w(2)).expect("the work window's stage");
+        mac.click(mail);
+        assert!(mac.parked(2));
+        let desktop_1 = mac.space();
+        let slots = mac.m.slots[&desktop_1].clone();
+        let keys = (mac.m.stage(mail).and_then(|s| s.key), mac.m.stage(work).and_then(|s| s.key));
+        mac.elsewhere.clear();
+
+        // 39.065: Safari activates; its work window's stage comes in front here.
+        let obs = Observation { focused: None, ..mac.obs() };
+        let before = mac.m.before_activation(&obs).expect("Desktop 1 as it stands");
+        let switch = mac.m.app_activated(SAFARI, &obs);
+        assert!(!switch.is_empty(), "the activation switches stages here");
+        mac.run(switch);
+        let undo = mac.m.switch_undo(before).expect("the switch, to undo");
+        assert_eq!((undo.space, undo.stage, undo.previous), (desktop_1, work, mail));
+        assert!(mac.m.undo_ahead(&undo).is_empty(), "Desktop 1 still shown: what shows stays");
+        // Kept from the activation (the click in Mail came before it) until a press or 3 s.
+        let t0 = std::time::Instant::now();
+        let record = SwitchBack { pid: SAFARI, undo: undo.clone(), at: t0 };
+        let ms = std::time::Duration::from_millis;
+        assert!(record.holds(ms(400), t0 + ms(196)), "the focus, 196 ms after the activation");
+        assert!(record.holds(ms(1000), t0 + ms(700)), "the arrival on Desktop 2");
+        assert!(!record.holds(ms(100), t0 + ms(700)), "a click or key since the activation");
+        assert!(!record.holds(ms(60_000), t0 + WENT_ELSEWHERE_MAX));
+
+        // 39.261: Safari's own focus of window 3, hidden in a stage of Desktop 2.
+        assert!(mac.m.waits_on_another_space(w(3)));
+        let facts = FocusFacts { elsewhere: true, off_every_desktop: true, frozen: false, activation_switched: true };
+        assert_eq!(hidden_focus(facts), HiddenFocus { arrive: true, switch_back: true });
+        let (ahead, actions) = mac.m.arrange_ahead(w(3), None).expect("Desktop 2 arranged for window 3");
+        mac.run(actions);
+
+        // macOS goes to Desktop 2 for the focused window 3.
+        mac.shown = 1;
+        mac.focused = Some(w(3));
+        let at = arrival(&mut mac, Some(&ahead), Some(Wanted::Window { id: w(3), pid: SAFARI }));
+        assert!(at.contains(&Action::Focus { id: w(3) }), "the link's window comes in front: {at:?}");
+        assert!(!mac.parked(3));
+
+        // Desktop 1 left: its switch undone, unseen.
+        mac.elsewhere.clear();
+        let back = mac.m.undo_ahead(&undo);
+        assert!(!raises_or_focus(&back), "nothing raised or focused on a Desktop not shown: {back:?}");
+        assert!(!moves(&back).is_empty());
+        mac.run(back);
+        assert!(mac.elsewhere.iter().all(|a| [1, 2].contains(&id_of(a))), "only Desktop 1's windows: {:?}", mac.elsewhere);
+        assert_eq!(mac.m.active_stage_in(desktop_1), Some(mail), "Mail in front on Desktop 1, as Apple's leaves it");
+        assert_eq!(mac.m.slots[&desktop_1], slots, "the strip as it was");
+        assert_eq!((mac.m.stage(mail).and_then(|s| s.key), mac.m.stage(work).and_then(|s| s.key)), keys);
+        assert!(mac.parked(2) && !mac.parked(1));
+        consistent(&mac);
+        assert!(mac.m.undo_ahead(&undo).is_empty(), "undone once");
+
+        // Back on Desktop 1 by hand: as it was, nothing to fix.
+        mac.focused = Some(w(1));
+        let at = mac.go(0);
+        assert!(moves(&at).is_empty(), "{at:?}");
+        assert_eq!(mac.m.main_active_stage(), Some(mail));
+        consistent(&mac);
+    }
+
+    /// No switch since the record (the app's stage was already in front), or a desktop
+    /// reveal there: nothing to undo.
+    #[test]
+    fn no_switch_and_a_reveal_leave_nothing_to_undo() {
+        let (mut mac, editor) = revealed_on_desktop_1();
+        mac.focused = Some(w(1));
+        mac.go(0);
+        let obs = Observation { focused: None, ..mac.obs() };
+        assert!(mac.m.before_activation(&obs).is_none(), "a reveal: never set up again unseen");
+        let a = mac.m.switch_to(editor, &obs);
+        mac.run(a);
+        let obs = Observation { focused: None, ..mac.obs() };
+        let before = mac.m.before_activation(&obs).expect("Desktop 1");
+        let a = mac.m.app_activated(10, &obs);
+        mac.run(a);
+        assert!(mac.m.switch_undo(before).is_none(), "the editor's stage was in front: no switch");
+    }
     }
 }
 

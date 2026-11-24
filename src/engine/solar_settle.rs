@@ -165,6 +165,7 @@ pub fn mask(cols: usize, rows: usize, region: Rect, icons: &[Rect]) -> Vec<bool>
     out
 }
 
+#[cfg(test)]
 /// A still matched one candidate ([`best_match`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Matched {
@@ -176,6 +177,7 @@ pub struct Matched {
     pub next: f64,
 }
 
+#[cfg(test)]
 /// The candidate (`(frame, render)`) a still of the same block matches, its cells kept by
 /// `mask`: the best clearly close ([`MATCH_LEVELS`]) and clearly better than the next
 /// ([`MATCH_RATIO`], [`MATCH_GAP`]); why not otherwise.

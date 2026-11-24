@@ -76,6 +76,9 @@
 //!   round sm-tick: which could stir the WM tick); reads only.
 //! - `cleanup [BUNDLE]`: every fixture window back to the Desktop shown, every recorded Space
 //!   shown and destroyed (both routes), the record emptied.
+//! - `dock-notices`, `space-flip`, `names`, `indicator` (round r0-probes), `cgs` (round
+//!   r2-probes2): the five live probes of [`system`], plain tables and verdicts, through
+//!   `scripts/probe_system.py`.
 
 
 use std::io::Write as _;
@@ -93,6 +96,8 @@ use super::windows::{self, CgWindow};
 
 #[path = "spaces_probe_capture.rs"]
 mod capture;
+#[path = "system_probe/mod.rs"]
+mod system;
 
 /// Where the probe keeps its record of the Spaces it made, and screenshots.
 pub const PROBE_DIR: &str = "/tmp/sm-spaces-probe";
@@ -201,7 +206,7 @@ fn fail(code: u8, error: &str) -> ExitCode {
 /// Runs the probe (see the module docs).
 pub fn run(args: &[String]) -> ExitCode {
     let Some((cmd, rest)) = args.split_first() else {
-        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle|pixels|notices …");
+        return fail(2, "usage: stage-manager probe-spaces read|cycle|hide|transform|affine|place-new|watch|engine|capture|launch-probe|key|dock-click|cleanup|sources|overlap|settle|pixels|notices|dock-notices|space-flip|names|indicator|cgs …");
     };
     // Read only (no window moves): any app, their own arguments.
     if cmd == "sources" {
@@ -218,6 +223,9 @@ pub fn run(args: &[String]) -> ExitCode {
     }
     if cmd == "notices" {
         return super::new_window_probe::notices(rest);
+    }
+    if let Some(code) = system::run(cmd, rest) {
+        return code;
     }
     let o = match parse(rest) {
         Ok(o) => o,
@@ -447,7 +455,7 @@ fn new_space(sky: &Sky, o: &Opts) -> Result<(u64, Value), String> {
         "create_ms": create_ms,
         "type": sky.space_type(sid),
         "listed_all": sky.all_spaces(0xf).contains(&sid),
-        "managed": sky.displays().iter().any(|d| d.2.iter().any(|s| s.0 == sid)),
+        "managed": sky.displays().iter().any(|d| d.every().any(|s| s == sid)),
         "level": level.map(|r| format!("{r:?}")),
     });
     Ok((sid, info))
@@ -517,7 +525,7 @@ fn read(sky: &Sky, bundle: Option<&str>) -> Value {
         "symbols": sky.names.iter().map(|(n, f)| json!({ "name": n, "found": f })).collect::<Vec<_>>(),
         "classes": classes.iter().map(|c| json!({ "name": c.to_str().unwrap_or("?"), "found": Sky::class(c).is_some() })).collect::<Vec<_>>(),
         "active": sky.active.map(|f| unsafe { f(sky.cid) }), // SAFETY: plain query.
-        "displays": sky.displays().iter().map(|(u, c, s)| json!({ "uuid": u, "current": c, "spaces": s })).collect::<Vec<_>>(),
+        "displays": sky.displays().iter().map(|d| json!({ "uuid": d.screen, "current": d.current, "spaces": d.spaces().collect::<Vec<_>>() })).collect::<Vec<_>>(),
         "recorded": recorded().iter().map(|&s| json!({ "space": s, "type": sky.space_type(s), "exists": sky.all_spaces(0xf).contains(&s) })).collect::<Vec<_>>(),
         "windows": windows,
     })
@@ -990,7 +998,7 @@ fn cleanup(sky: &Sky, bundle: Option<&str>) -> Value {
     }
     let mut spaces = Vec::new();
     // Never a Desktop, whatever the record says.
-    let desktops: std::collections::BTreeSet<u64> = sky.displays().iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
+    let desktops: std::collections::BTreeSet<u64> = sky.displays().iter().flat_map(|d| d.every().collect::<Vec<_>>()).collect();
     for sid in recorded().into_iter().filter(|sid| !desktops.contains(sid)) {
         let mut gone = !sky.all_spaces(0xf).contains(&sid);
         if !gone {

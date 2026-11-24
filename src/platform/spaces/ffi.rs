@@ -19,6 +19,8 @@ use objc2::sel;
 use objc2_core_foundation::CGAffineTransform;
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
+use crate::engine::model::desks::Desk;
+
 /// The SkyLight framework's binary.
 pub(crate) const SKYLIGHT: &CStr = c"/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight";
 
@@ -46,13 +48,72 @@ pub(crate) type FnGetTransform = unsafe extern "C" fn(i32, u64, *mut i32) -> CGA
 pub(crate) type FnSpaceType = unsafe extern "C" fn(i32, u64) -> i32;
 pub(crate) type FnActiveSpace = unsafe extern "C" fn(i32) -> u64;
 
-/// One display's Desktops: its uuid, the Space it shows, and each Space with its type.
-pub(crate) type DisplaySpaces = (String, u64, Vec<(u64, i64)>);
+/// One screen's entry of `SLSCopyManagedDisplaySpaces`: its identifier, the Space it shows
+/// and that Space's type, its Desktops (type 0) with their uuids, and its other Spaces (a
+/// full-screen app's, a tiled pair's) with their types.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScreenDesks {
+    /// The screen's "Display Identifier": its uuid, or `Main` (macOS names the main screen so
+    /// in some setups; [`crate::platform::controller`]'s listing matches either).
+    pub screen: String,
+    /// The Space it shows ("Current Space"); 0 when the entry names none.
+    pub current: u64,
+    /// The type of the Space it shows: 0 a Desktop, else a full-screen app's (or another
+    /// kind); -1 when the entry does not say.
+    pub current_kind: i64,
+    /// Its Desktops (type 0), in the window server's order.
+    pub desks: Vec<Desk>,
+    /// Its other Spaces, with their types (-1 when unsaid), in the window server's order.
+    pub others: Vec<(u64, i64)>,
+}
+
+impl ScreenDesks {
+    /// Every Space it lists, Desktops first, with its type.
+    pub fn spaces(&self) -> impl Iterator<Item = (u64, i64)> + '_ {
+        self.desks.iter().map(|d| (d.id, 0)).chain(self.others.iter().copied())
+    }
+
+    /// Every Space it lists (Desktops first).
+    pub fn every(&self) -> impl Iterator<Item = u64> + '_ {
+        self.spaces().map(|(id, _)| id)
+    }
+
+    /// The entry as one dictionary of `SLSCopyManagedDisplaySpaces` holds it.
+    pub fn parse(d: &NSDictionary) -> Self {
+        let screen = get(d, "Display Identifier").and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string()).unwrap_or_default();
+        let shown = get(d, "Current Space").and_then(|v| v.downcast::<NSDictionary>().ok());
+        let current = shown.as_ref().and_then(|c| number(c, "id64")).unwrap_or(0);
+        let kind = |s: &NSDictionary| number(s, "type").map_or(-1, |t| t as i64);
+        let mut out = Self { screen, current, current_kind: -1, ..Self::default() };
+        if let Some(list) = get(d, "Spaces").and_then(|v| v.downcast::<NSArray>().ok()) {
+            for s in list.iter() {
+                let Ok(s) = s.downcast::<NSDictionary>() else { continue };
+                let id = number(&s, "id64").unwrap_or(0);
+                match kind(&s) {
+                    0 => {
+                        let uuid = get(&s, "uuid").and_then(|v| v.downcast::<NSString>().ok()).map(|u| u.to_string()).unwrap_or_default();
+                        out.desks.push(Desk { id, uuid });
+                    }
+                    k => out.others.push((id, k)),
+                }
+            }
+        }
+        // The Current Space's own type, else the type of the Space listed under its id.
+        out.current_kind = shown
+            .as_ref()
+            .and_then(|c| number(c, "type").map(|t| t as i64))
+            .or_else(|| out.spaces().find(|(id, _)| *id == current).map(|(_, k)| k))
+            .unwrap_or(-1);
+        out
+    }
+}
 
 /// The C functions, each `None` when SkyLight does not export it.
 pub(crate) struct Sky {
     pub(crate) cid: i32,
     pub(crate) copy_managed: Option<FnCopyByCid>,
+    // Loaded in every run, as the rest (the names loaded stay the same); read by the probes only.
+    #[cfg_attr(not(feature = "probes"), allow(dead_code))]
     pub(crate) copy_spaces: Option<FnCopySpaces>,
     pub(crate) spaces_for_windows: Option<FnCopySpacesForWindows>,
     pub(crate) create: Option<FnSpaceCreate>,
@@ -62,9 +123,13 @@ pub(crate) struct Sky {
     pub(crate) show: Option<FnSpaceList>,
     pub(crate) hide: Option<FnSpaceList>,
     pub(crate) add_remove: Option<FnAddRemove>,
+    // Loaded in every run, as the rest (the names loaded stay the same); read by the probes only.
+    #[cfg_attr(not(feature = "probes"), allow(dead_code))]
     pub(crate) move_managed: Option<FnMoveManaged>,
     pub(crate) set_transform: Option<FnSetTransform>,
     pub(crate) get_transform: Option<FnGetTransform>,
+    // Loaded in every run, as the rest (the names loaded stay the same); read by the probes only.
+    #[cfg_attr(not(feature = "probes"), allow(dead_code))]
     pub(crate) space_type: Option<FnSpaceType>,
     pub(crate) active: Option<FnActiveSpace>,
     pub(crate) msg_send: *const c_void,
@@ -95,7 +160,37 @@ pub(crate) unsafe fn load<F: Copy>(handle: *mut c_void, name: &'static CStr, nam
 }
 
 impl Sky {
+    /// Test only: no SkyLight behind it. On a thread with a fake desk
+    /// ([`crate::platform::fake`]) each call is answered by the desk before it would need one.
+    #[cfg(test)]
+    pub(crate) fn hollow() -> Self {
+        Self {
+            cid: 0,
+            copy_managed: None,
+            copy_spaces: None,
+            spaces_for_windows: None,
+            create: None,
+            destroy: None,
+            level: None,
+            get_level: None,
+            show: None,
+            hide: None,
+            add_remove: None,
+            move_managed: None,
+            set_transform: None,
+            get_transform: None,
+            space_type: None,
+            active: None,
+            msg_send: std::ptr::null(),
+            names: Vec::new(),
+        }
+    }
+
     pub(crate) fn open() -> Result<Self, String> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Ok(Self::hollow());
+        }
         // SAFETY: a system framework path; RTLD_NOW resolves everything at load.
         let h = unsafe { libc::dlopen(SKYLIGHT.as_ptr(), libc::RTLD_NOW) };
         if h.is_null() {
@@ -132,45 +227,40 @@ impl Sky {
         })
     }
 
-    /// The Desktops per display: (display uuid, current Space, [(Space, type)]).
-    pub(crate) fn displays(&self) -> Vec<DisplaySpaces> {
+    /// Every screen's entry of `SLSCopyManagedDisplaySpaces` ([`ScreenDesks`]), in its order.
+    pub(crate) fn displays(&self) -> Vec<ScreenDesks> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.sky_displays()) {
+            return out;
+        }
         let Some(f) = self.copy_managed else { return Vec::new() };
         // SAFETY: returns a +1 CFArray of CFDictionary (or null).
         let Some(list) = (unsafe { take_array(f(self.cid)) }) else { return Vec::new() };
-        let mut out = Vec::new();
-        for d in list.iter() {
-            let Ok(d) = d.downcast::<NSDictionary>() else { continue };
-            let uuid = get(&d, "Display Identifier").and_then(|v| v.downcast::<NSString>().ok()).map(|s| s.to_string()).unwrap_or_default();
-            let current = get(&d, "Current Space")
-                .and_then(|v| v.downcast::<NSDictionary>().ok())
-                .and_then(|c| number(&c, "id64"))
-                .unwrap_or(0);
-            let mut spaces = Vec::new();
-            if let Some(list) = get(&d, "Spaces").and_then(|v| v.downcast::<NSArray>().ok()) {
-                for s in list.iter() {
-                    if let Ok(s) = s.downcast::<NSDictionary>() {
-                        spaces.push((number(&s, "id64").unwrap_or(0), number(&s, "type").map_or(-1, |t| t as i64)));
-                    }
-                }
-            }
-            out.push((uuid, current, spaces));
-        }
-        out
+        list.iter().filter_map(|d| d.downcast::<NSDictionary>().ok()).map(|d| ScreenDesks::parse(&d)).collect()
     }
 
     /// The main display's Desktop shown and its uuid.
     pub(crate) fn current(&self) -> (u64, String) {
-        self.displays().into_iter().next().map(|(u, c, _)| (c, u)).unwrap_or((0, String::new()))
+        self.displays().into_iter().next().map(|d| (d.current, d.screen)).unwrap_or((0, String::new()))
     }
 
     /// The Space of the screen with the keyboard (`SLSGetActiveSpace`), when exported.
     pub(crate) fn active_space(&self) -> Option<u64> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.screens[0].current) {
+            return Some(out);
+        }
         // SAFETY: plain query on this process's connection.
         self.active.map(|f| unsafe { f(self.cid) }).filter(|s| *s != 0)
     }
 
+    #[cfg(feature = "probes")]
     /// Every Space the window server lists for this mask.
     pub(crate) fn all_spaces(&self, mask: i32) -> Vec<u64> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.sky_all_spaces(mask)) {
+            return out;
+        }
         let Some(f) = self.copy_spaces else { return Vec::new() };
         // SAFETY: returns a +1 CFArray of CFNumber (or null).
         unsafe { take_array(f(self.cid, mask)) }.map(|a| numbers(&a)).unwrap_or_default()
@@ -178,18 +268,31 @@ impl Sky {
 
     /// The Spaces each window is on.
     pub(crate) fn spaces_of(&self, ids: &[u32]) -> Vec<u64> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.sky_spaces_of(ids)) {
+            return out;
+        }
         let Some(f) = self.spaces_for_windows else { return Vec::new() };
         let arr = wid_array(ids);
         // SAFETY: a CFArray of window numbers; returns a +1 CFArray of CFNumber (or null).
         unsafe { take_array(f(self.cid, ALL_SPACES_MASK, Retained::as_ptr(&arr).cast())) }.map(|a| numbers(&a)).unwrap_or_default()
     }
 
+    #[cfg(feature = "probes")]
     pub(crate) fn space_type(&self, sid: u64) -> Option<i32> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| if d.is_desktop(sid) { 0 } else { 2 }) {
+            return Some(out);
+        }
         // SAFETY: plain query.
         self.space_type.map(|f| unsafe { f(self.cid, sid) })
     }
 
     pub(crate) fn get_transform(&self, sid: u64) -> Option<[f64; 6]> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Some([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        }
         let f = self.get_transform?;
         let mut options = 0i32;
         // SAFETY: returns the transform by value (indirect result); `options` is writable.
@@ -236,6 +339,10 @@ impl Sky {
     }
 
     pub(crate) fn create(&self, route: Route, managed: bool) -> Result<u64, String> {
+        #[cfg(test)]
+        if let Some(out) = crate::platform::fake::with(|d| d.sky_create()) {
+            return Ok(out);
+        }
         match route {
             Route::Classic => {
                 let f = self.create.ok_or("SLSSpaceCreate is missing")?;
@@ -279,6 +386,10 @@ impl Sky {
     pub(crate) fn destroy(&self, route: Route, sid: u64) -> Result<i32, String> {
         // Ending a Space that holds windows puts them on the Desktop shown.
         crate::platform::windows::note_write();
+        #[cfg(test)]
+        if crate::platform::fake::with(|d| d.sky_destroy(sid)).is_some() {
+            return Ok(0);
+        }
         match route {
             Route::Classic => {
                 let f = self.destroy.ok_or("SLSSpaceDestroy is missing")?;
@@ -300,11 +411,19 @@ impl Sky {
 
     /// Space `sid`'s level ([`Self::set_level`]), when exported.
     pub(crate) fn get_level(&self, sid: u64) -> Option<i32> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Some(0);
+        }
         // SAFETY: plain query on this process's connection.
         self.get_level.map(|f| unsafe { f(self.cid, sid) })
     }
 
     pub(crate) fn set_level(&self, route: Route, sid: u64, level: i32) -> Result<i32, String> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Ok(0);
+        }
         match route {
             Route::Classic => {
                 let f = self.level.ok_or("SLSSpaceSetAbsoluteLevel is missing")?;
@@ -325,6 +444,10 @@ impl Sky {
     }
 
     pub(crate) fn show_hide(&self, route: Route, sids: &[u64], show: bool) -> Result<i32, String> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Ok(0);
+        }
         let arr = sid_array(sids);
         match route {
             Route::Classic => {
@@ -348,6 +471,12 @@ impl Sky {
     /// of Space, as [`ALL_SPACES_MASK`] is).
     pub(crate) fn add_remove_from(&self, route: Route, sid: u64, ids: &[u32], options: i32) -> Result<i32, String> {
         crate::platform::windows::note_write();
+        // Its notices are ours: they trigger nothing (round r5-notices).
+        super::notices::expect(sid, ids);
+        #[cfg(test)]
+        if crate::platform::fake::with(|d| d.sky_add_remove(route == Route::Bridged, sid, ids, options)).is_some() {
+            return Ok(0);
+        }
         let arr = wid_array(ids);
         match route {
             Route::Classic => {
@@ -374,9 +503,15 @@ impl Sky {
         self.add_remove_from(route, sid, ids, ADD_REMOVE_OPTIONS)
     }
 
+    #[cfg(feature = "probes")]
     /// The windows onto the managed Space (a Desktop) `sid`.
     pub(crate) fn move_managed(&self, route: Route, ids: &[u32], sid: u64) -> Result<i32, String> {
         crate::platform::windows::note_write();
+        super::notices::expect(sid, ids);
+        #[cfg(test)]
+        if crate::platform::fake::with(|d| d.sky_add_remove(route == Route::Bridged, sid, ids, 0xf)).is_some() {
+            return Ok(0);
+        }
         let arr = wid_array(ids);
         match route {
             Route::Classic => {
@@ -399,6 +534,10 @@ impl Sky {
     }
 
     pub(crate) fn set_transform(&self, route: Route, sid: u64, t: CGAffineTransform) -> Result<i32, String> {
+        #[cfg(test)]
+        if crate::platform::fake::active() {
+            return Ok(0);
+        }
         match route {
             Route::Classic => {
                 let f = self.set_transform.ok_or("SLSSpaceSetTransform is missing")?;
@@ -477,6 +616,7 @@ pub(crate) enum Route {
 }
 
 impl Route {
+    #[cfg(feature = "probes")]
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Classic => "classic",
@@ -488,6 +628,55 @@ impl Route {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A dictionary of `pairs`, as the window server's are read (`NSDictionary` of objects).
+    fn dict(pairs: &[(&str, &AnyObject)]) -> Retained<NSDictionary> {
+        let keys: Vec<Retained<NSString>> = pairs.iter().map(|(k, _)| NSString::from_str(k)).collect();
+        let keys: Vec<&NSString> = keys.iter().map(|k| &**k).collect();
+        let vals: Vec<&AnyObject> = pairs.iter().map(|(_, v)| *v).collect();
+        let d = NSDictionary::from_slices(&keys, &vals);
+        // SAFETY: an NSDictionary of NSString keys is an NSDictionary of objects.
+        unsafe { Retained::cast_unchecked(d) }
+    }
+
+    fn space(id: u64, kind: i64, uuid: Option<&str>) -> Retained<NSDictionary> {
+        let id = NSNumber::new_u64(id);
+        let kind = NSNumber::new_i64(kind);
+        let uuid = uuid.map(NSString::from_str);
+        let mut pairs: Vec<(&str, &AnyObject)> = vec![("id64", &id), ("type", &kind)];
+        if let Some(u) = &uuid {
+            pairs.push(("uuid", u));
+        }
+        dict(&pairs)
+    }
+
+    /// One screen's entry as `SLSCopyManagedDisplaySpaces` gives it (design r3 §1): the first
+    /// Desktop with an empty uuid, a full-screen app's Space (type 4) between two Desktops
+    /// and shown, a Desktop with no uuid key at all.
+    #[test]
+    fn a_screens_entry_parses_into_its_desktops_and_other_spaces() {
+        let spaces = [space(1, 0, Some("")), space(9, 4, None), space(4, 0, Some("6F1C-AB")), space(12, 0, None)];
+        let refs: Vec<&NSDictionary> = spaces.iter().map(|s| &**s).collect();
+        let list = NSArray::from_slice(&refs);
+        let current = space(9, 4, None);
+        let screen = NSString::from_str("37D8832A-2D66-02CA-B9F7-8F30A301B230");
+        let entry = dict(&[("Display Identifier", &screen), ("Current Space", &current), ("Spaces", &list)]);
+        let d = ScreenDesks::parse(&entry);
+        assert_eq!(d.screen, "37D8832A-2D66-02CA-B9F7-8F30A301B230");
+        assert_eq!((d.current, d.current_kind), (9, 4), "a full-screen app's Space shows");
+        let desk = |id, uuid: &str| Desk { id, uuid: uuid.into() };
+        assert_eq!(d.desks, vec![desk(1, ""), desk(4, "6F1C-AB"), desk(12, "")], "Desktops only, an empty uuid kept empty");
+        assert_eq!(d.others, vec![(9, 4)]);
+        assert_eq!(d.every().collect::<Vec<_>>(), vec![1, 4, 12, 9], "every Space, Desktops first");
+        // The Current Space without its type: the type of the Space listed under its id.
+        let current = dict(&[("id64", &*NSNumber::new_u64(4))]);
+        let entry = dict(&[("Display Identifier", &*NSString::from_str("Main")), ("Current Space", &current), ("Spaces", &list)]);
+        let d = ScreenDesks::parse(&entry);
+        assert_eq!((d.screen.as_str(), d.current, d.current_kind), ("Main", 4, 0));
+        // An entry with nothing in it.
+        let d = ScreenDesks::parse(&dict(&[]));
+        assert_eq!(d, ScreenDesks { current_kind: -1, ..ScreenDesks::default() });
+    }
 
     /// Review A-9: a class whose instances do not answer the operation's initializer, or the
     /// perform, is refused before anything is sent (the send would raise and abort).

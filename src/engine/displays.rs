@@ -154,6 +154,17 @@ pub fn returned_screens(kept: &[DisplayId], settling: bool, added: Vec<DisplayId
     }
 }
 
+/// True when a screen went between `before` and `now` (each connected screen's key): fewer
+/// screens of some kind (vendor, model and serial; those of no known identity counted as one
+/// kind) than before. A screen seen again under a new id is not gone; one of two identical
+/// screens with no serial number is, though the other takes its key (the place among its
+/// twins, [`ScreenKey::nth`], is numbered again by connection order).
+pub fn screen_gone(before: &[ScreenKey], now: &[ScreenKey]) -> bool {
+    let kind = |k: &ScreenKey| ScreenKey { nth: 0, ..*k };
+    let count = |keys: &[ScreenKey], of: ScreenKey| keys.iter().filter(|k| kind(k) == of).count();
+    before.iter().map(kind).any(|of| count(now, of) < count(before, of))
+}
+
 /// True when an activation or a focus heard now is macOS's after a display change, not the
 /// user's (module docs): the displays changed `since_change` ago, within `settle`, and the
 /// user's last click or key press (`since_press` ago) came before the change. `None`: no
@@ -341,6 +352,21 @@ mod tests {
         assert_eq!(display_of(Rect::new(2561.0, 1407.0, 800.0, 600.0), &both), None);
         assert_eq!(display_of(HEADLESS, &both), None);
         assert_eq!(display_of(Rect::new(100.0, 100.0, 800.0, 600.0), &[]), None);
+    }
+
+    #[test]
+    fn a_screen_gone_is_told_by_how_many_of_its_kind_are_left() {
+        let laptop = ScreenKey::new(0x610, 0xa050, 0);
+        let twin = |nth| ScreenKey { nth, ..ScreenKey::new(0x10ac, 0x4321, 0) };
+        // Two identical screens with no serial: the first unplugged, the second is numbered
+        // first and takes its key.
+        assert!(screen_gone(&[laptop, twin(0), twin(1)], &[laptop, twin(0)]));
+        assert!(screen_gone(&[laptop, twin(0)], &[laptop]));
+        assert!(!screen_gone(&[laptop, twin(0)], &[twin(0), laptop]), "the same screens, another order");
+        assert!(!screen_gone(&[laptop], &[laptop, twin(0)]), "a screen came");
+        // Screens of no known identity count too.
+        assert!(screen_gone(&[laptop, ScreenKey::NONE, ScreenKey::NONE], &[laptop, ScreenKey::NONE]));
+        assert!(!screen_gone(&[laptop, ScreenKey::NONE], &[laptop, ScreenKey::NONE]), "seen again under a new id");
     }
 
     #[test]

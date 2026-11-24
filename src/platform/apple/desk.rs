@@ -9,11 +9,9 @@ use std::time::Duration;
 
 use objc2_core_graphics::{CGEventFlags, CGEventSource, CGEventSourceStateID, CGEventType, CGMouseButton};
 
-use crate::engine::apple::desk::{AppleDesk, InputNow, Landed, Posted};
+use crate::engine::apple::desk::{AppleDesk, InputNow, Posted};
 use crate::engine::apple::mirror::{Listed, ListedWindow, Reading};
-use crate::engine::apple::screens;
 use crate::engine::geometry::Rect;
-use crate::engine::model::Display;
 use crate::engine::overview::{self, Sighting};
 use crate::platform::controller::ax_focus;
 use crate::platform::observe::Observer;
@@ -27,8 +25,6 @@ pub struct Desk<'a> {
     pub manager: Option<i32>,
     /// The main screen's frame (Mission Control is told over it).
     pub screen: Option<Rect>,
-    /// Every screen, the main one first (each `sm.space` is matched to one).
-    pub displays: &'a [Display],
 }
 
 impl Desk<'_> {
@@ -40,12 +36,6 @@ impl Desk<'_> {
 }
 
 impl AppleDesk for Desk<'_> {
-    /// Screen `display`'s `sm.space`'s strip ([`screens::reading_for`]).
-    fn strip(&mut self, display: &Display) -> Option<Reading> {
-        let spaces = self.strips()?;
-        screens::reading_for(&spaces, self.displays, display)
-    }
-
     fn listed(&mut self) -> Listed {
         let list = windows::wake_list();
         let screens = desktop::cg_display_bounds();
@@ -116,10 +106,6 @@ impl AppleDesk for Desk<'_> {
     /// Starts the gesture on a thread of its own ([`super::post::start`]).
     fn post(&mut self, posted: &Posted) -> Result<(), String> {
         super::post::start(posted.clone(), self.manager)
-    }
-
-    fn landed(&mut self) -> Option<Landed> {
-        super::post::take_landed()
     }
 
     /// `unhide()` with no activation ([`super::launch_hide::unhide`]): it answers false and

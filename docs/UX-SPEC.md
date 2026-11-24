@@ -46,6 +46,9 @@ dragged too, until the strip takes it in: Drag and drop) (recorded on a
 Studio Display: Apple's stayed up under a window dragged left over the cards to 52 pt, and
 slid away when it was dragged on to 15 pt, its cards starting at 16 pt; the point between
 was not measured; a laptop's windows nearly fill the screen, so there it goes more often).
+The pointer on a window over the cards is on the window: no card grows under it. A strip off
+the screen, on a full-screen Space or with its cards wholly under windows takes no picture
+of them; each card coming into view is taken again at once, as it shows.
 Each screen's strip follows its own front stage. Resting the pointer at the left edge brings
 it back: Apple's starts sliding in about 180 ms after the pointer gets there (measured), ours
 rests 130 ms and checks the pointer every 30 ms (`[reveal] delay_ms`, `poll_ms`). It has to
@@ -236,7 +239,24 @@ does the same for that window. A stage comes in whole: when one of its windows i
 screen at its place as the switch starts, none grows from the card and the rest shows at
 once with it (a recording, 11-18: under `engine = "spaces"` one window of a Dock-clicked
 stage sat there 145 ms before the other flew in; that window now waits out of sight until
-the switch).
+the switch). A Dock click on the app in front changes nothing, even with its other window in
+another stage: Apple's neither cycles nor brings the other window (measured 11-19,
+`scripts/probe_apple.py dock-front`, a press and a real click, under both "Show windows from
+an application" settings). With its other window on another Desktop, macOS goes to that
+Desktop (the logs of 10-13 and 11-22); under `engine = "spaces"` the window waits on no
+Desktop when its stage is hidden, so its Desktop is arranged at the press. A tab not selected
+is listed on no Space and does not count as a window whose Desktop is unknown (11-23:
+Terminal in front with three such tabs, ten clicks on its Dock item did nothing).
+Under `engine = "spaces"` a ⌘-Tab or Dock click to an app slow to
+come in front still switches here: the window put home for it waits out of sight for the
+app's activation (up to 3 s after ⌘'s release, 5 s after a Dock press) and goes back at once
+at Escape, at a press that was no click, or when another app comes in front. An app whose
+only window waits in a hidden stage of another Desktop is asked its focused window at its
+activation (within 50 ms), that window's Desktop is arranged and the window focused, and macOS
+goes there. An app that does not say in time is asked again 60, 180, 420 and 900 ms later
+(11-23: Messages took 55 to 79 ms at its activations; ⌘-Tab to it left it in front with no
+window, and no focus notice followed, its key window being the same). Under All at Once a Shift-click on a card brings in only the
+window clicked; that window dragged back to the strip takes the app's other windows along.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in
 a waiting stage brings that stage forward. A newly opened app gets a stage of its own (an
@@ -335,7 +355,9 @@ showing most of it (macOS's rule).
   windows on another of the remaining screen's Desktops, one not shown since the launch, and
   slide to it: the same rule holds there, that Desktop's own front a card, also when macOS
   announces the Desktop still shown before it slides; the Desktop left shows its own most
-  recent stage again when it comes back, never nothing in front.
+  recent stage again when it comes back, never nothing in front. Under `engine = "spaces"`
+  a Desktop counts as ended once macOS has left it unlisted for 2.5 s with the screens and
+  their Desktops unchanged; its hidden stages then join, whole, where its windows went.
 - **macOS's activations at a display change.** The app macOS activates after the change
   (Mail, 0.4 s after the screen goes) switches nothing: with no click or key press since, an
   activation or focus in the 10 s after a display change (counted from macOS's notice) is
@@ -352,6 +374,23 @@ showing most of it (macOS's rule).
   screen, from any of its Desktops; it is never hidden again at the remaining screen's
   corner. A card put back brings nothing forward; the remaining screen, its front gone back,
   brings its own most recent stage forward. None of it counts as the user's drag.
+- **One screen at a time** (a laptop closed on an external screen, used alone a day, the
+  external screen back; a log, 11-20 to 11-21). macOS moves the Desktops whole to the screen
+  that comes, under the same ids, each with its windows, shown or hidden; nothing is lost and
+  every stage stays on its Desktop. A hidden window belongs to the Desktop its stage is on,
+  at any time: one the window server lets out of hiding as the screen changes goes back
+  there, on a Desktop that shows or not, and a window in front of a Desktop not shown, sent
+  to a card as the Dock or ⌘-Tab arranges that Desktop before macOS slides to it, stays on its
+  own Desktop (`spill::home_for`: the Desktop the app's own record has the window on; before,
+  the engine kept a second record and weighed it by the 10 s since the change and the last
+  press, and two windows of the log ended up on the other Desktop). When macOS ends a Desktop
+  (a virtual main screen going: the screen left shows the Desktop moved in and its own is
+  listed no more, live 11-21), that Desktop's stages join the Desktop its windows landed on,
+  each with its windows, 2.5 s after it stopped being listed; before, its hidden windows
+  stayed counted on the ended Desktop for a minute and a half. Apple's Stage Manager here is not measured: with it on, two Desktops each
+  with a stage in front and one hidden, the lid closed on the external screen, the external
+  unplugged and the lid opened, then back, and on each Desktop a Dock click to the other
+  Desktop's hidden app within a minute; which Desktop each window is on after.
 - **The hidden corner.** Each screen's hidden stages wait in a corner of that screen with no
   screen beyond it (the laptop's bottom-left, its right edge touching the 5K). A window
   showing only a piece at its screen's hidden corner (what shows reaches past the corner's
@@ -373,25 +412,123 @@ showing most of it (macOS's rule).
 - **`[displays] main_only`** (off) manages the main screen only, a window moved off it left
   alone. It is read at launch: turned on mid-session it would have to bring back every hidden
   window of the other screens, on Desktops not shown too, which a quit does safely.
+- **`[displays] frames_per_setup`** (off: Apple's keeps no frame per setup. Measured 11-19,
+  `scripts/probe_apple.py frames-setup`: a window moved and resized on a screen that then
+  goes comes back to its earlier place on the screen left, at the size it had on the gone
+  screen; the screen back, macOS puts it there again at its frame. Sizes never go back)
+  keeps each window's frame per screen setup: the
+  connected screens by identity, each with its size in points (a resolution change is another
+  setup), the frame kept relative to the window's screen, at most 8 setups a window, saved in
+  `state.json` with its entry. Once a display change settles (10 s from macOS's notice) into a
+  setup seen before, each window goes back to its frame there, on the same screen: a shown one
+  moved (fitted and brought within reach as any restore), a hidden one given it as its restore
+  frame. The put-back waits while a full-screen app's Space shows or a switch or a drag goes
+  on. A window moved, resized or focused by a click since the change stays, and so does one
+  on another screen than its frame's or on a Desktop not shown: nothing moves a window between
+  screens, Desktops or stages for a frame. One left on another screen keeps its frame for that
+  setup until it is on that screen again or is moved, resized or clicked there. Stages are whole first (the screen gone adopted,
+  the Spaces engine's hidden windows kept in their stages), frames after. A setup not seen
+  before keeps macOS's placement and is remembered from the settle. Nothing is taken within a
+  settle, nor from a snapshot younger than 3 s when the change is heard (macOS squeezes the
+  windows as a screen goes). A window that leaves its Desktop (full screen, another Desktop)
+  leaves the model, its frames with it: back, it keeps frames afresh.
 
 **Mission Control, App Exposé and Show Desktop** hide the strip, as they hide Apple's. It
 is back on the same Desktop when they end. Mission Control and App Exposé show every
 stage's windows, as Apple's Stage Manager does (a report, 11-18: under `engine = "spaces"` only the
 stage in front showed, a hidden stage's windows being on no Desktop).
 Under `engine = "spaces"` the hidden stages' windows of the Desktops shown are put on their
-Desktop while one of them shows, parked at the screen's corner first so that none shows at
-its frame, most recent stage first, in batches of 40 ms; a window whose app does not move it
-within 50 ms stays hidden. When it closes they go back into their stage Spaces and their
-frames are set again; a window picked there is activated by macOS and the activation's
+Desktop while one of them shows, parked at their stages' cards first so that none shows at
+its frame; a window not listed at its park (its app did not move it within 50 ms, or the
+window server lists the move later than the 20 ms a park's read back waits) stays hidden and
+is looked at again 60 ms later, then 120, 240 and 480 ms, five tries in all, until it is
+listed parked or Mission Control closes; a try that finds it parked asks its app nothing
+(10 of 51 opens, 11-18 to 11-20, left one to five windows out; the log's `mission-control: a
+hidden window left hidden` lines say why and where each was listed after its park, and the
+log summary's `PARK_RETRY` row how long a window listed late took). With
+`mission_control_stages = "key"` the round is made at the key, before Mission Control is
+seen, and its windows left hidden are tried the same way (11-22: Mission Control opened by
+its key 1 s after its close, six apps answered their parks in ~4 ms each, all six windows
+were still listed at their frames 20 ms later and none was tried again: Mission Control
+showed the front stage only). They arrive all at
+once, as Apple's do: every window is parked first, still hidden (the apps asked at once, one
+app's windows in turn, for up to 150 ms a round), then all of them go onto the Desktop in one
+window-server call per Desktop (one at a time they came one by one during the opening, 7
+windows over 237 ms, and Mission Control laid them out again at each: a log, 11-19). In
+`"shown"` mode its keyboard shortcut already starts the parks; the windows go onto the
+Desktop once it is listed, and get their frames back unseen when nothing shows within 1.5 s.
+Apple's starts a hidden stage's window's flight at its strip thumbnail (Bravo at 16,280
+76x109), grows it over about 330 ms and settles it in a column on the left (28,90 188x153);
+the stage in front flies from its own frames (`scripts/probe_apple.py mission-open`, fixtures,
+11-20). Ours put a hidden window home at the screen's park corner: it first showed there at
+206 ms (2559,1408 520x424) and was laid out 25 ms later in a slot at the right (2357,945), since
+Mission Control flies a window from where it is put home and lays it out near there
+(`mission-open-ours`, 11-20). So a window that goes home while Mission Control shows (or
+parked at its key and put home once it shows) is parked at its stage's card at its own size,
+centered on the card and kept inside its screen's visible frame: its flight starts at the
+strip and it is laid out on the left, in the strip's order. A window larger than the screen,
+or with no card in sight (the strip out of sight), parks at the corner. A card park is in
+view on the Desktop, so `"key"` mode's lend at the shortcut (on the Desktop before anything
+shows), ⌘Tab's and the Dock's lends keep the corner; once Mission Control closes the windows
+at their cards are taken back at the next look, which comes every 30 ms while one is out, and
+one whose app is in front, which waits up to 1.5 s for a pick's switch, waits at the corner
+(at its card it showed 1.2 s on the left after the close: `mission`, 11-20). Measured with
+the card parks (`mission-open-ours`, 11-20): found as Mission Control was listed (204 ms), a
+hidden window showed at its card (0,464 520x424) and was laid out on the left 10 ms later
+(19,874 209x170), with no flight; whether one parked at the key and put home once it shows
+flies from its card is not measured (the probe's posted key is not heard). After
+a crash with windows out at their cards the guardian brings each back to its frame (its
+parked file names the card parks).
+A Desktop picked inside Mission Control is recognized only once it closes; opened again
+before that, the hidden windows of the Desktop the window server shows are put home all the
+same (11-19 07:56: it lent nothing, the model still on the old Desktop), each onto the
+Desktop it was hidden from, and nothing else moves until the change is recognized.
+A window picked in Apple's grows from its Mission Control place to its own frame in one
+motion, done within about 0.5 s, while the stage it leaves shrinks straight into the strip;
+nothing moves after Mission Control closes (`scripts/probe_apple.py mission-pick`, 11-19).
+Under `engine = "spaces"` the picked stage's windows take their frames back when macOS
+activates the app (with the release, about 150 ms after the press), so the close carries
+them there in one motion; its switch waits until Mission Control's own window is gone (1 s at
+most) and plays only the stage left's shrink into its card (`mission-pick-ours`, 11-19: the window at
+its frame at 561 ms, the stage left in the strip at 659 ms).
+When it closes they go back into their stage Spaces together and their frames are set again; a window picked there is activated by macOS and the activation's
 switch brings its stage in front, so it and, for 1.5 s, the windows of the app in front are
 left to that switch. `[windows] mission_control_stages`: `"shown"` (the default) lends once
 Mission Control is listed, found within about 30 ms of its keyboard shortcut (the user's
 own, read from Keyboard Shortcuts, or the keyboard's Mission Control key) and otherwise at
-the next tick (up to 0.25 s while something happens, 2 s at rest: a gesture, a hot corner
-and the Dock's item announce nothing); `"key"` lends at the shortcut itself and takes the
-windows back when nothing shows within 1.5 s; `"off"` lends nothing. Not measured yet:
-whether Mission Control lays out a window that arrives after it opened (`scripts/test-stages.sh
-mission-probe`; the log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
+the look the window server's notice of its open brings (below), or with no notice at the next
+tick (up to 0.25 s while something happens, 2 s at rest); `"key"` lends at the shortcut itself and takes the
+windows back when nothing shows within 1.5 s; `"off"` lends nothing. Until round mc-key no key
+of Mission Control's was ever heard: macOS takes its shortcuts and its key in the window
+server, before any app gets them, so the input monitor never saw one (no `trigger seen` line
+in any log to 11-20), and Mission Control opened by its key was found by the tick, up to 2 s
+late (11-20 11:16:34, `found_within_ms=2140`: its stages' windows came in late); `"key"` mode and the parks at the key never ran. A listen-only event tap at the
+HID level hears them now (the Accessibility permission, no other), and only them: Mission
+Control's shortcuts as Keyboard Shortcuts has them, its key, and while it shows Escape and
+presses; and while ⌘-Tab's switcher shows, its Escape, ⌘'s release and presses.
+What announces it (macOS 27.2, 11-21; `probe-system dock`, 18 opens and closes by its
+shortcut, then `probe-spaces cgs` and the live `mission` and `expose` checks): the window
+list shows Mission Control 22-47 ms after its shortcut; at its close macOS's window leaves
+the list ~320 ms and the Dock's cover ~610 ms after the key. The Dock registers its
+`AXExposeShowAllWindows`, `AXExposeShowFrontWindows`, `AXExposeShowDesktop` and
+`AXExposeExit` notices and posts none (0 of 18 opens, 0 of 18 closes; 0 of 9 again with the
+AppKit event loop running). A posted key code 160, the keyboard's Mission Control key, opens
+nothing. The window server's notice 1508 comes at the open and the close ("The window
+server's notices"); in the app the close's notice was looked at 88-104 ms after the closing
+key, against 613-618 ms for the window list to show the close. Whether 1508 comes for a
+gesture, a hot corner or the Dock's item is not measured.
+Closed by its key (its shortcut again, its key, Escape), Mission Control picks nothing, but
+macOS brings in front the app whose window is under the pointer, and Apple's Stage Manager
+brings its stage in front (`scripts/probe_apple.py mission-close-key`, 11-20: 108 ms after the
+key, the window under the pointer a hidden stage's; under ours 60 to 104 ms). Ours does the
+same by default (11-20 11:16:36, pressed again from the stage in front: Terminal, whose window
+was under the pointer, came in front with its stage). With `[windows]
+mission_control_key_keeps_stage` an activation or a focus within 1 s of that key, with no
+click since, switches nothing: the windows put home go back, and the stage in front's key
+window is focused again once Mission Control is gone (about 0.6 s after the key). A click
+while it shows is a pick either way. Mission Control lays
+out a window that arrives after it opened (`scripts/test-stages.sh mission-probe`, 11-18; the
+log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
 shows, expected from a wallpaper click, and for a second after it closes, as the windows
 slide back) is never taken as the window's frame: a switch then keeps each window's own. The strip never appears in ⌘-Tab or the ⌘\`
 window cycle.
@@ -700,9 +837,19 @@ switch's pictures move (a round of captures is the window server's work, and dro
 click, a click of yours anywhere, an activation, a focus) still brings its windows, but
 never focuses one or activates its app afterwards: its held focus is dropped, so the keyboard is the newer switch's or
 where you clicked (else two card clicks half a second apart hand the activation back and
-forth between the two apps). A window's focus brings its stage only in the active app (or with the button down
+forth between the two apps). Its motion ends at once where it was going: each arriving window's picture
+set on its window's place until the window server shows the window there, then gone as at a
+landing, and the stage left on its card. Apple's moves the windows themselves, so a window is
+never in two places; flown on, a picture grew over its window already in place (a log, 11-19:
+up to 0.4 s after an activation, 60 ms after a click). A new switch of ours takes the pictures
+over with its own instead; a Space change takes them away (the Desktop has slid out of sight). A window's focus brings its stage only in the active app (or with the button down
 on a sliver), never in a hidden app or an app behind: those are the app's own or a late echo
-of ours (with apps slow to answer, notices come up to a second late, past the echo window). A window on screen when Stage Manager started but found late (its
+of ours (with apps slow to answer, notices come up to a second late). A focus that answers
+a focus of ours is ours however late it is told: the first one of that window since we
+asked, in the order asked of its app (the bench at load 10: 12 s late). A window we only
+moved or hid expects none: a click on a parked window's sliver right after its stage left,
+or on a window just shown, is the user's. A move while a button is down that leaves a window
+elsewhere than we put it is a drag, also right after a switch showed it. A window on screen when Stage Manager started but found late (its
 app not answering then) goes to its stage as during the restore window, parked when that
 stage is inactive, never bringing it forward.
 Arriving windows
@@ -710,7 +857,7 @@ wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
 raises an activated app's windows there) and the patch itself shows again (it is drawn a
 moment before the cover goes, at most 300 ms after the motion; never where an arriving window
-landed over the corner), never over the menu bar, and
+landed over the corner; the same for a cover of the desktop's still), never over the menu bar, and
 never more than the corner itself (a 320-point square). It lies under the Dock, so a
 see-through Dock over the corner shows the cover there, not a waiting window's edge. Where
 desktop icons lie in that corner, the patch's picture would hide them: a still of the
@@ -719,7 +866,12 @@ even one that appears as it is taken; laid over the patch's picture when macOS l
 desktop picture out of it), kept fresh while card pictures are captured and the Mac is in
 use (none while the screen is locked or asleep, or after 2 minutes with no input and no
 switch; a fresh one at the first input), covers it instead; the parked windows' edges are
-under it too for the moment of the motion. A window that stays shown through the switch and
+under it too for the moment of the motion. The still covers it too for a picture that follows
+the sun while its frame is not known from the clock and the patch itself is drawn from a
+still: the file's render is used only at the frame known now (the clock's, or the one a
+still settled as the patch was last drawn from the file). Live 11-24 09:10: a frame settled
+at 08:34 was kept for the cover, macOS went to a brighter one at 09:04, and every switch
+showed a darker block of 61 x 112 pt in the corner for the motion's 0.8 s. A window that stays shown through the switch and
 reaches that corner (a pinned window, kept in pictures like the active stage's) is drawn on
 the cover from its own picture, so it looks as it is (that corner of it holds still for the
 motion's moment, as a ghost does; a video or a busy terminal there may show a seam until the
@@ -891,7 +1043,7 @@ in the place of its first stage, whichever of its windows is shown.
 top-to-bottom order is the Dock's left-to-right order (top to bottom for a Dock on the side).
 The Dock's application items are read through Accessibility (its lists' `AXDockItem`
 children and their `AXURL`), so running apps that are not kept in the Dock count where their
-icons show; its preferences are never read or written. A stage sits at the leftmost Dock
+icons show; its preferences are never read for values or written. A stage sits at the leftmost Dock
 position among its windows' apps (by bundle id, else by pid), the apps of `[strip]
 dock_ignore` (default `["com.apple.finder"]`) counting only when no other app of the stage
 has a Dock icon: the Finder's windows join stages of every kind and the Finder always sits
@@ -901,8 +1053,10 @@ a stage of listed apps alone at the leftmost of them; a changed list re-sorts at
 changed Dock does; `[]` lets every app count). Stages at the same position
 keep creation order, and stages whose apps have no Dock icon come after all others, in
 creation order. Hotkey numbers follow the strip. The Dock is read at launch, half a second
-after an app launches or quits, and every two seconds while this order is on (no
-Accessibility notification is known for a rearranged Dock); a changed order re-sorts the
+after an app launches or quits, at once when the Dock's preferences file changes (its date;
+the Dock writes it when an icon is moved, kept or removed, and no Accessibility notification
+is known for a rearranged Dock), and a minute after the last read with none of these; a
+changed order re-sorts the
 strip at the first moment no switch, drag or Desktop change is under way, and the cards glide
 to their new places on the strip's spring. `[strip] active`, the overflow rule and the
 animations are Keep stages in place's. A card dragged within the strip springs back and
@@ -1130,7 +1284,9 @@ non-activating panel, as Apple's strip never takes it from the window in front),
 VoiceOver reaches the cards through the pointer: the pointer over the strip, or VoiceOver
 set to move its cursor with the mouse pointer.
 
-## Measured on Apple's, nothing to change (11-09 evening)
+## Measured on Apple's, nothing to change
+
+Measured 11-09 evening:
 
 - The card glass in Dark Mode: window opacity 0.78, backdrop saturation 0.93, brightness 0.82
   (`scripts/measure-apple-card-glass.py`); ours, fitted in Light Mode, 0.78 / 0.95 / 0.78, within the
@@ -1139,6 +1295,13 @@ set to move its cursor with the mouse pointer.
   Studio Display's, as reviewers counted; ours gives the same.
 - Reduce Motion on Apple's: a switch is a cross-fade of about 80 ms, a minimize a fade out in place of
   about 130 ms. Ours fades 200 ms, worked out from the accessibility guidance rather than copied.
+
+Measured 11-21 (macOS 27.2, the Apple mode's live check, `test_apple`, one screen, Reduce
+Motion off): Apple's Stage Manager answered each step of ours within 142 ms (24 answers,
+none ended by its cap) and its motions lasted up to 787 ms (15 motions, none ended by its
+cap). The Apple mode once waited a blind 700 ms for a motion, shorter than the
+longest; it now waits for what the window list shows (STRATEGIES, "Apple's answer is
+waited for by what the list shows"). Not measured: a second screen, Reduce Motion on.
 
 ## Window engines measured
 
@@ -1179,6 +1342,73 @@ screen-capture service reads 0 and the window server, measured with other apps o
 | An animating window shown from a hidden stage: drawing again, ms | 161 | 153 |
 | Missed refreshes of a call window, at rest and switching | 0 | 0 |
 
+## The window server's notices
+
+Measured on macOS 27.2, 11-21 (`probe-spaces cgs`, a process running the AppKit event loop;
+no notice of these types in 52 rests of 3 s). The Spaces engine uses them as triggers for its
+looks, never as facts (ARCHITECTURE, "The window server's notices").
+
+| Type | Payload | Comes |
+|---|---|---|
+| 1508 | none | at Mission Control's open (40 ms after its shortcut) and close (32 ms; the window list shows its window gone ~320 ms after, the Dock's cover ~610 ms), App Exposé's open and close (13, 12 ms), a Desktop change's end (551 ms); not at Show Desktop |
+| 1325 / 1326 | a window and a Space (12 bytes) | a window added to / taken out of a Space (3 of 3 for a window put into a classic Space and back, 3 ms) |
+| 811 | the window | a window created, 3-11 ms after the cause |
+| 815 / 816 | the window | a window shown / hidden |
+| 1401, 1329 | | a Desktop change's end (551 ms) |
+
+In the app (the live suite, 11-21) 1325, 1326 and 1508 came in the dozens; 811, 815 and 816
+never did (the probe also asked `SLSRequestNotificationsForWindows` for its windows), so a new
+app's windows are still held by the launch watch's own read. The Dock posts none of its
+`AXExpose…` notices (above, "Mission Control, App Exposé and Show Desktop"). Not measured: Mission Control opened
+by a gesture, a hot corner or the Dock's item (`ctl state`'s `engine.notices` says whether
+1508 counts them), and other macOS versions.
+
+What they change under the Spaces engine: Mission Control and App Exposé are found at the look
+the notice brings (before: at the next tick, up to 2 s, without a key); after their close the
+look that finds macOS's own window and the Dock's cover gone ends the freeze on Space
+inference (before: 1 s more); a hidden window taken out of its stage's Space by macOS is
+hidden again at once (before: at the next tick, up to 2 s), a window in a stage Space nothing
+answers for let out at once (before: up to 10 s).
+
+## The window server's Desktops
+
+Measured on macOS 27.2, 11-21 (`probe-system flip`, `probe-system names`, a process running
+the AppKit event loop). Under the Spaces engine the listing of the Desktops
+(`SLSCopyManagedDisplaySpaces`) says which Desktop each screen shows and which Desktops each
+window is on, in place of guesses from the windows on screen (ARCHITECTURE, "The window
+server's Desktops").
+
+| What | Measured |
+|---|---|
+| "Current Space" at a Desktop change | flips once, never an in-between value, 11-24 ms after the arriving windows are listed at their frames: ~550 ms after a Desktop key, ~330 ms into an activation that slides, ~660 ms before the window list shows the Desktop when it is picked inside Mission Control; full screen: a new id each time |
+| `activeSpaceDidChangeNotification` against the flip | 1-9 ms **before** it, 24 of 24; never after |
+| The window server's own notice of the change's end (1401, 1329) | with the flip (551 ms after a Desktop key) |
+| A read | 37 µs (the listing), 22 µs (one window's Spaces) |
+| Space ids | small, stable through a login session (1, 4); the main screen's first Desktop has an empty uuid; a window on every Desktop lists every Desktop |
+| Screens | each named by its uuid, the main screen too (never "Main"), the main screen first; so a main screen that goes is seen going |
+
+What a person sees change under the Spaces engine:
+
+- The first visit to a Desktop since the app started stays there. Before, when that Desktop's
+  front app also had a window in a hidden stage on the Desktop left, its stage came in front
+  on the Desktop left and macOS slid back (on the bench at every load).
+- A window that opens or is found while a Desktop slides in is placed on its own Desktop,
+  never on the one being left.
+- A Desktop change with no notice is followed within a fast tick with the window server's
+  notices, within a second without (before: after two looks a second apart, and the
+  activation during the slide could pull macOS back).
+- A window moved to another Desktop in Mission Control leaves its stage at once with the
+  window server's notices, at the next look without (before: after two looks a second
+  apart); one set to show on all Desktops is shown with every stage from the first Desktop
+  change (before: from the third, in a stage of its own on each Desktop until then).
+- With several screens, a Desktop change on one screen leaves the others' stages alone.
+- After a Desktop arrives, a new window, a window moved here and a hidden window out of its
+  stage are dealt with at once; before, nothing was inferred for a second.
+
+Not measured: what a window's Spaces read while it is dragged between Desktops, the listing
+with "Displays have separate Spaces" off, and whether a Desktop's uuid lasts over a restart
+(logged at each load).
+
 ## Known gaps
 
 - A window coming in from the strip can show one frame of a darker shadow as it lands
@@ -1198,8 +1428,13 @@ screen-capture service reads 0 and the window server, measured with other apps o
 - In the Spaces mode, a hidden stage's window dragged to another Desktop inside Mission
   Control goes back into its stage when Mission Control closes; in the default mode it
   moves. Opened by a gesture, a hot corner or the Dock, Mission Control gets the hidden
-  stages' windows up to two seconds late, and an app's hidden dialogs and panels are not
-  shown there.
+  stages' windows up to two seconds late (found at the tick, 2 s at rest: they appear in its
+  layout with no motion, 11-20 07:49:14; the log's `found_within_ms` says how late it may have
+  been found), and an app's hidden dialogs and panels are not shown there. Found during its
+  opening, it flies them in from their cards at their own size, where Apple's grows each out
+  of its strip thumbnail (a lend moves a window, it never resizes it). In `"key"` mode the
+  windows put home at the shortcut fly in from the park corner. Once it closes, a window
+  out at its card may show there at its own size for a frame or two before it goes back.
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.

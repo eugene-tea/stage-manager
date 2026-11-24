@@ -4,7 +4,7 @@
 //! into the hidden strip). The gesture is `platform::apple::post`'s; the points are
 //! `engine::apple::points`'.
 
-use super::{Cost, Route};
+use super::Route;
 use crate::engine::apple::desk::{AppleDesk, InputNow, Posted};
 use crate::engine::apple::gate;
 use crate::engine::apple::mirror::{Arrangement, Where};
@@ -17,10 +17,6 @@ pub struct Drag;
 impl Route for Drag {
     fn name(&self) -> &'static str {
         "drag"
-    }
-
-    fn cost(&self) -> Cost {
-        Cost { ms: 600, pointer: true }
     }
 
     /// A drag of a window in front with another beside it, through the gate (the strip may

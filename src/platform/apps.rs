@@ -371,11 +371,19 @@ fn running(pid: i32) -> Option<Retained<NSRunningApplication>> {
 
 /// Whether app `pid` is hidden now; `None` when it is not running.
 pub fn is_hidden(pid: i32) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(hidden) = super::fake::with(|d| d.apps.get(&pid).filter(|a| !a.gone).map(|a| a.hidden)) {
+        return hidden;
+    }
     running(pid).map(|a| a.isHidden())
 }
 
 /// Whether app `pid` is the active (frontmost) app now; `None` when it is not running.
 pub fn is_active(pid: i32) -> Option<bool> {
+    #[cfg(test)]
+    if let Some(active) = super::fake::with(|d| d.apps.get(&pid).filter(|a| !a.gone).map(|_| d.front == Some(pid))) {
+        return active;
+    }
     running(pid).map(|a| a.isActive())
 }
 
@@ -383,6 +391,10 @@ pub fn is_active(pid: i32) -> Option<bool> {
 /// updated before the activation notice is posted, so never older than the latest notice it
 /// stamped. `None` when there is none.
 pub fn frontmost_pid() -> Option<i32> {
+    #[cfg(test)]
+    if let Some(front) = super::fake::with(|d| d.front) {
+        return front;
+    }
     NSWorkspace::sharedWorkspace().frontmostApplication().map(|a| a.processIdentifier())
 }
 
@@ -438,6 +450,10 @@ pub fn delayed_activations(
 
 /// The bundle id of running app `pid`, if any.
 pub fn bundle_of(pid: i32) -> Option<String> {
+    #[cfg(test)]
+    if let Some(bundle) = super::fake::with(|d| d.apps.get(&pid).filter(|a| !a.gone).map(|a| a.bundle.clone())) {
+        return bundle;
+    }
     running(pid).and_then(|a| a.bundleIdentifier()).map(|s| s.to_string())
 }
 
@@ -454,6 +470,10 @@ pub fn exe_path(pid: i32) -> Option<String> {
 /// at each login), as an instant on our clock. `None` when it cannot be read. The restore's
 /// settling waits at least a minute after it ([`crate::engine::restore::SETTLE_AFTER_LOGIN`]).
 pub fn login_started() -> Option<Instant> {
+    #[cfg(test)]
+    if let Some(login) = super::fake::with(|d| d.login_started) {
+        return login;
+    }
     let uid = my_uid();
     let list = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str("com.apple.loginwindow"));
     let start = list

@@ -68,6 +68,7 @@ pub fn app_window() -> B {
     B::MoveToActiveSpace
 }
 
+#[cfg(test)]
 /// The names of the flags set in `bits` (for `ctl state` and logs), in a fixed order.
 pub fn names(bits: usize) -> Vec<&'static str> {
     const ALL: [(B, &str); 9] = [

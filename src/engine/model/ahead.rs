@@ -33,8 +33,10 @@ use super::{Action, Home, Model, Observation, Pid, SpaceId, StageId, WindowId, W
 pub struct AppFacts {
     /// The app is hidden (⌘H).
     pub hidden: bool,
-    /// The app has windows the model does not place (minimized, or on a Desktop not visited
-    /// since launch): where macOS goes then is not certain.
+    /// The app has windows the model does not place that may be on a Desktop not shown
+    /// (minimized there, or on a Desktop not visited since launch): where macOS goes then is
+    /// not certain. Under an engine that reads the window server's Spaces, one listed on no
+    /// Desktop but the one shown does not count (a tab not selected is listed on none).
     pub unplaced: bool,
     /// The app is the active (frontmost) one.
     pub active: bool,
@@ -78,7 +80,62 @@ pub struct AheadMark {
     recency: u64,
 }
 
+/// The Desktop an activation acts on as it stood before the activation's switch
+/// ([`Model::before_activation`]): with the switch made, [`Model::switch_undo`] turns it into
+/// an [`Ahead`] that [`Model::undo_ahead`] takes back once macOS has left that Desktop (the
+/// app's own focus went to its window hidden on another one:
+/// [`crate::engine::focus_elsewhere::hidden_focus`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BeforeSwitch {
+    /// The Desktop.
+    space: SpaceId,
+    /// Its active stage.
+    active: StageId,
+    /// Its strip slots.
+    slots: Vec<StageId>,
+    /// Each of its stages' key window and recency.
+    stages: Vec<(StageId, Option<WindowId>, u64)>,
+}
+
 impl Model {
+    /// The Desktop [`Model::app_activated`] acts on for `obs`, as it stands: `None` with a
+    /// desktop reveal there (a switch ends it, and nothing sets it up again unseen) or no
+    /// active stage.
+    pub fn before_activation(&self, obs: &Observation) -> Option<BeforeSwitch> {
+        let space = self.current_space_for(obs);
+        if self.revealed.contains_key(&space) {
+            return None;
+        }
+        let active = self.active.get(&space).copied()?;
+        let stages = self.stages.iter().filter(|s| s.space == space).map(|s| (s.id, s.key, s.last_active)).collect();
+        Some(BeforeSwitch { space, active, slots: self.slots.get(&space).cloned().unwrap_or_default(), stages })
+    }
+
+    /// The switch made since `before` as an arrangement [`Model::undo_ahead`] takes back: its
+    /// Desktop gets its stage, key windows, recency and strip slots back, with moves only.
+    /// `None` when no switch was made there (or the stage left is gone or empty).
+    pub fn switch_undo(&self, before: BeforeSwitch) -> Option<Ahead> {
+        let space = before.space;
+        let stage = self.active.get(&space).copied()?;
+        if stage == before.active || self.stage(before.active).is_none_or(|s| s.space != space || s.windows.is_empty()) {
+            return None;
+        }
+        let was = |id: StageId| before.stages.iter().find(|(s, _, _)| *s == id).copied();
+        let (_, key, recency) = was(stage)?;
+        let (_, _, previous_recency) = was(before.active)?;
+        let window = self.stage(stage).and_then(|s| s.key.or(s.windows.first().copied()))?;
+        Some(Ahead {
+            window,
+            space,
+            stage,
+            previous: before.active,
+            slots: before.slots,
+            key,
+            recency: (previous_recency, recency),
+            reveal_from: None,
+        })
+    }
+
     /// The mark of `ahead` as the model stands now (right after it was arranged).
     pub fn ahead_mark(&self, ahead: &Ahead) -> AheadMark {
         AheadMark { space: ahead.space, stage: ahead.stage, recency: self.stage(ahead.stage).map_or(0, |s| s.last_active) }

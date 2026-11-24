@@ -21,8 +21,11 @@
 //!   Spaces engine the window waits off every Desktop, so its Desktop is arranged at the
 //!   press instead; that arrangement stands until its click's own end: the release (the
 //!   focus held then, nothing sent again), a press that is no click, or no Space change
-//!   within [`DOCK_SWITCH_WAIT`]. No tick, focus or activation in between undoes it
-//!   ([`awaits_release`]).
+//!   within [`DOCK_SWITCH_CAP`]. No tick, focus or activation in between undoes it
+//!   ([`awaits_release`]). The click's activation is no word on it: it may come at the
+//!   slide's start, before any window of the arriving Desktop is listed (round
+//!   r2-lends-fix); one whose switch the model makes on the Desktop shown undoes it
+//!   ([`Controller::forget_held`]).
 //! - **At the notice**: an arrangement made at the click whose window the window server
 //!   does not list on its screen now is undone (another Desktop slid in). With none,
 //!   when the held window, or with none held the activated (else frontmost) app's focused
@@ -44,6 +47,7 @@
 //! own switch, when nothing was arranged ahead, is part of the arrival's batch and never
 //! animated: the Desktop's slide is the motion (Apple's).
 
+use crate::platform::clock;
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
@@ -53,7 +57,8 @@ use crate::engine::corner::park_frame;
 use crate::engine::focus_replay::Wanted;
 use crate::engine::fullscreen;
 use crate::engine::lend_park;
-use crate::engine::switcher::{LetGo, LetGoStep};
+use crate::engine::margin::{self, End};
+use crate::engine::lend_wait::{Cap, LendWait, Outcome};
 use crate::engine::geometry::Rect;
 use crate::engine::model::{Action, Ahead, AheadMark, AppFacts, Display, DisplayId, Model, Observation, SpaceId, StageId, WindowId};
 use crate::platform::ax::{AxElement, AxError, AxResult, names};
@@ -61,6 +66,9 @@ use crate::platform::dock::{self, DockItem, DockPress};
 use crate::platform::enhanced_ui;
 use crate::platform::observe::{Observer, WindowKind};
 use crate::platform::safety::{self, ParkedEntry};
+use crate::platform::spaces::ffi::ScreenDesks;
+use crate::platform::test_press::{DOCK_PRESS_HOLD, dock_edge};
+use crate::platform::window_engine::EngineKind;
 use crate::platform::windows::{self, CgWindow};
 use crate::ui::strip_model::{self, StripSnapshot};
 
@@ -69,13 +77,28 @@ use crate::ui::strip_model::{self, StripSnapshot};
 /// app goes back to the global timeout right after ([`AxElement::bounded`]).
 const QUERY_AX_TIMEOUT_SECONDS: f32 = 0.05;
 
-/// How long `ctl debug-dock-click BUNDLE real` holds its press (the owner's clicks: ~100 ms
-/// from the press to the Dock's activation).
-const DOCK_PRESS_HOLD: Duration = Duration::from_millis(100);
 
 /// An arrangement made at a Dock click is undone when no Space change has come this long
-/// after it (the notice comes ~0.35–0.45 s after the click).
+/// after it (the notice comes ~0.35–0.45 s after the click). The Corner engine's, and any
+/// arrangement made for a focus the engine hid; the Spaces engine's Dock click has
+/// [`DOCK_SWITCH_CAP`].
 pub const DOCK_SWITCH_WAIT: Duration = Duration::from_millis(1000);
+
+/// The cap on an arrangement made at a Dock click under the Spaces engine (round r2-lends):
+/// the Space change notice confirms it; a press that is no click refutes it at the release,
+/// and the click's activation switching a stage on the Desktop shown, or the user acting
+/// there, undoes it ([`Controller::forget_held`]). The activation alone refutes nothing:
+/// round r2-lends took one with no Space change and none of the arriving Desktop's windows
+/// listed for a click that went nowhere, but a Dock item's activation may come at the slide's
+/// start (the live check of 11-21: handled ~30 ms before Desktop 1's windows were listed, the
+/// notice ~300 ms after), and the arrangement undone there and made again for the hidden
+/// focus a moment later showed the stage left as the Desktop slid in (round r2-lends-fix).
+/// Time is left for a click with no notice; the arrangement is on a Desktop not shown
+/// meanwhile. As long as the click's focus is held
+/// ([`crate::engine::focus_replay::FOCUS_REPLAY_MAX`]), past which nothing held says it any
+/// more. The 1 s it replaces undid the arrangement before a busy Mac's notice, and the
+/// arrival arranged the Desktop again in view.
+pub const DOCK_SWITCH_CAP: Duration = Duration::from_millis(3000);
 
 /// When a Desktop was arranged ahead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -577,43 +600,36 @@ pub(super) struct DockSeen {
 pub(super) struct Lent {
     pub(super) window: WindowId,
     pub(super) pid: i32,
-    /// When it was put home: a Dock press's [`LEND_WAIT`] counts from here.
+    /// When it was put home.
     pub(super) at: Instant,
-    /// Put home for ⌘Tab's switcher (round cmd-tab, [`super::switcher`]): kept while the
-    /// switcher is up, then only if its app is activated soon after the switcher closes
-    /// ([`LetGo`]). `None`: a Dock press's.
-    pub(super) switcher: Option<LetGo>,
+    /// Put home for ⌘Tab's switcher (round cmd-tab, [`super::switcher`]); else at a Dock press.
+    pub(super) switcher: bool,
+    /// What ends it ([`LendWait`]): its app's activation and switch confirm it; another app's
+    /// activation, a press that was no click, the next press, or the switcher's cancel refute
+    /// it; its cap ends the rest. A Dock press's begins at the lend ([`LEND_WAIT`]); the
+    /// switcher's is held while the switcher is up and begins at its end
+    /// ([`crate::engine::switcher::activation_cap`]).
+    pub(super) wait: LendWait,
 }
 
-/// A window put home at a Dock press goes back into its stage Space when its stage has not
-/// come in front this long after the press (no click, no activation): the click's
-/// activation comes ~100 ms after the press, its switch at once.
-pub const LEND_WAIT: Duration = Duration::from_millis(1000);
+/// The cap on a window put home at a Dock press: its stage not in front this long after the
+/// press with no word either way (no activation of its app, no other app's, no other press),
+/// it goes back into its stage Space. The click's activation comes ~100 ms after the press
+/// and its switch at once, later on a busy Mac; its activation and switch end the wait, as
+/// do another app's activation, a press that was no click and the next press, so this ends
+/// only a click whose activation never comes (the app hung). The window waits parked off the
+/// screen meanwhile (a sliver at its display's corner at most), so a long cap costs nothing
+/// seen, where the 1 s wait it replaces took the window back before a busy app's activation
+/// and macOS slid to the app's other Desktop, the slide the lend is for.
+pub const LEND_WAIT: Duration = Duration::from_millis(5000);
 
-/// What becomes of a window put home at a Dock press, at a look ([`lent_step`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum LentStep {
-    /// Still waiting for its stage to come in front.
-    Keep,
-    /// The model shows it, or its stage is in front (the switch shows it): nothing to do.
-    Forget,
-    /// No switch came for it: back into its stage Space.
-    TakeBack,
-    /// Put home for ⌘Tab's switcher, and no activation of its app came once the switcher
-    /// closed: the switcher was cancelled (Escape, a click outside it); back unshown.
-    NoActivation,
-}
+/// [`LEND_WAIT`] as a [`Cap`].
+pub(super) const LEND_CAP: Cap = Cap { name: "LEND_WAIT", limit: LEND_WAIT };
 
-/// The step for a window put home at a Dock press `waited` ago: `parked` while the model
-/// counts it hidden, `in_front` once its stage is the active one of its Desktop.
-pub(super) fn lent_step(parked: bool, in_front: bool, waited: Duration) -> LentStep {
-    if !parked || in_front {
-        LentStep::Forget
-    } else if waited >= LEND_WAIT {
-        LentStep::TakeBack
-    } else {
-        LentStep::Keep
-    }
+/// The look at a lend: `parked` while the model counts its window hidden, `in_front` once its
+/// stage is the active one of its Desktop (the switch shows it: met); else its cap.
+pub(super) fn lent_step(wait: &mut LendWait, parked: bool, in_front: bool, now: Instant) -> Option<Outcome> {
+    if !parked || in_front { wait.shown(now) } else { wait.step(now) }
 }
 
 /// True when a Dock press takes back the window put home now (`lent`): always one put home
@@ -784,12 +800,13 @@ fn notice_step(overview: bool, ahead_listed: Option<bool>) -> NoticeStep {
 }
 
 /// Why an arrangement is undone at a tick, if it is: never while a Space change settles; one
-/// made at a Dock click with no Space change [`DOCK_SWITCH_WAIT`] after it; any other whose
+/// made at a Dock click with no Space change `cap` after it ([`DOCK_SWITCH_WAIT`],
+/// [`DOCK_SWITCH_CAP`]); any other whose
 /// focus is no longer held (or what is held says otherwise).
-fn expire_step(trigger: Trigger, pending: bool, changed: bool, waited: Duration, contradicted: bool) -> Option<&'static str> {
+fn expire_step(trigger: Trigger, pending: bool, changed: bool, waited: Duration, cap: Duration, contradicted: bool) -> Option<&'static str> {
     if pending {
         None
-    } else if trigger.away() && !changed && waited >= DOCK_SWITCH_WAIT {
+    } else if trigger.away() && !changed && waited >= cap {
         Some("no Space change came after the Dock click (or the focus it was arranged for)")
     } else if contradicted {
         Some("its Desktop did not come")
@@ -905,10 +922,28 @@ fn press_round(
     a
 }
 
+/// True when a window waiting with the windows not placed may be on a Desktop that does not
+/// show: where a click on its app's Dock item may take macOS, the model not knowing it
+/// ([`AppFacts::unplaced`]). `on`: the Spaces the window server lists it on
+/// (the engine's `spaces_of`); `screens`: the listing of every screen's Spaces (its
+/// `desktops`); either `None` (the Corner engine reads neither): it may be.
+/// Read, it is only when one of its Spaces is a Desktop or a full-screen Space of the
+/// listing that no screen shows. A window listed on no Space, or on the engine's own Spaces
+/// only, is on no Desktop: a tab not selected (the owner's log of 11-23: Terminal in front
+/// on Desktop 2, its other window in a hidden stage of Desktop 1, three tabs not selected
+/// waiting; every click on its Dock item was refused a prediction for them, Desktop 1 was
+/// not arranged at the press, macOS counted no window of it there, and nothing happened).
+fn waits_elsewhere(on: Option<&[u64]>, screens: Option<&[ScreenDesks]>) -> bool {
+    let (Some(on), Some(screens)) = (on, screens) else { return true };
+    let shown = |s: u64| screens.iter().any(|sc| sc.current == s);
+    let listed = |s: u64| screens.iter().any(|sc| sc.desks.iter().any(|d| d.id == s) || sc.others.iter().any(|(o, _)| *o == s));
+    on.iter().any(|s| listed(*s) && !shown(*s))
+}
+
 impl Controller {
     /// Milliseconds since the user's latest input, when it is recent (a Dock click, a key).
     pub(super) fn since_input_ms(&self, now: Instant) -> Option<u64> {
-        self.triggers.last_at().filter(|t| now.saturating_duration_since(*t) < INPUT_RECENT).map(|t| ms(t, now))
+        self.triggers.last_at().filter(|t| margin::within("INPUT_RECENT", now.saturating_duration_since(*t), INPUT_RECENT)).map(|t| ms(t, now))
     }
 
     /// The Desktop arranged ahead, if any.
@@ -1095,12 +1130,67 @@ impl Controller {
         true
     }
 
+    /// App `pid`'s own focus on its window `id`, held off every Desktop elsewhere
+    /// ([`crate::engine::focus_elsewhere::hidden_focus`]): its Desktop arranged and the window
+    /// focused, as at an activation ([`Self::arrange_for_hidden_focus`]), so macOS goes. With
+    /// `switch_back`, the activation's switch on the Desktop shown is undone once macOS has
+    /// left it ([`Self::switch_back_after_arrival`]). 11-20 07:53:39: the focus came 200 ms
+    /// after the activation, mid-switch, and waited for a Space change that never came.
+    pub(super) fn arrive_for_hidden_focus(&mut self, ob: &Observer, id: WindowId, pid: i32, switch_back: bool, now: Instant) {
+        if !self.arrange_for_hidden_focus(ob, id, pid, now) {
+            tracing::debug!(window = id.0, pid, ahead = self.ahead.is_some(), "a focus on a window hidden on another Desktop: nothing arranged; held for its Desktop");
+            return;
+        }
+        let back = if switch_back { self.activation_switch.take() } else { None };
+        tracing::info!(
+            window = id.0,
+            pid,
+            switch_back = ?back.as_ref().map(|b| (b.undo.space.0, b.undo.stage.0, b.undo.previous.0)),
+            "a focus of the app's own on its window hidden on another Desktop: arranged there and focused, macOS goes; the activation's switch here is undone once it has"
+        );
+        self.switch_back = back;
+    }
+
+    /// The activation's switch kept by [`Self::arrive_for_hidden_focus`], undone now that its
+    /// Desktop is no longer shown (moves only, the windows brought back registered until
+    /// seen): that Desktop shows as it was before the activation, as Apple's leaves it. Kept
+    /// while its Desktop is still shown; dropped after a click or key press since the
+    /// activation, or [`crate::engine::focus_elsewhere::WENT_ELSEWHERE_MAX`]. The actions
+    /// are for the arrival's batch.
+    pub(super) fn switch_back_after_arrival(&mut self, ob: &Observer) -> Vec<Action> {
+        let Some(back) = self.switch_back.take() else { return Vec::new() };
+        let now = clock::now();
+        if !back.holds(crate::platform::input::since_last_press(), now) {
+            tracing::debug!(space = back.undo.space.0, "the activation's switch is no longer undone: a click or key since, or too late");
+            return Vec::new();
+        }
+        let Some(m) = self.model.as_mut() else { return Vec::new() };
+        if m.is_shown_space(back.undo.space) {
+            self.switch_back = Some(back);
+            return Vec::new();
+        }
+        let actions = m.undo_ahead(&back.undo);
+        tracing::info!(
+            space = back.undo.space.0,
+            stage = back.undo.previous.0,
+            left = back.undo.stage.0,
+            moves = actions.iter().filter(|a| !matches!(a, Action::StateChanged)).count(),
+            since_activation_ms = ms(back.at, now),
+            "arrival: macOS left the Desktop the activation switched; its switch undone unseen, the stage that was in front back"
+        );
+        self.keep_registered(ob, &actions);
+        self.present_away(back.undo.space);
+        actions
+    }
+
     /// Arranges window `id`'s Desktop for it ([`crate::engine::model::Model::arrange_ahead`]);
     /// on a Desktop not shown the windows it brings back stay registered until seen out of
     /// the park zone. True when arranged.
     fn arrange_ahead(&mut self, ob: &Observer, id: WindowId, trigger: Trigger, now: Instant, obs: Option<Observation>) -> bool {
         let focus_at = self.focus_replay.came(now).unwrap_or(now);
         let changes_at = self.space_changes;
+        // The check of the moves (`Verify`), unless the engine reads its own moves back.
+        let verify = trigger.away() && !self.engine.verifies_own_moves();
         let Some(m) = self.model.as_mut() else { return false };
         let pid = m.window(id).map(|w| w.meta.pid).unwrap_or_default();
         // Where the model left each window, read before it arranges them.
@@ -1114,8 +1204,8 @@ impl Controller {
         // Each moved window's frame before the moves, read before they go out: where a park
         // not taken leaves it, where a restore starts from (a parked window's park frame, or
         // where the window server lists it; R11 1). Only the windows moved are asked (R13 3).
-        let (expected, before_us) = if trigger.away() {
-            let asked = Instant::now();
+        let (expected, before_us) = if verify {
+            let asked = clock::now();
             let listed = windows::describe(&moved_ids(&actions));
             let before_us = asked.elapsed().as_micros() as u64;
             let before = frames_before(&left, &listed);
@@ -1130,7 +1220,7 @@ impl Controller {
         let deferred = std::mem::replace(&mut self.defer_present, true);
         self.execute(ob, actions);
         self.defer_present = deferred;
-        let sent = Instant::now();
+        let sent = clock::now();
         tracing::info!(
             window = id.0,
             predicted = ahead.space.0,
@@ -1167,12 +1257,14 @@ impl Controller {
     /// True while the WM thread's fast tick has work: an arrangement's moves to check, a held
     /// activation, the corner patch after a focus or through Show Desktop.
     pub fn wants_fast_tick(&self) -> bool {
-        let now = Instant::now();
+        let now = clock::now();
         self.verify.as_ref().is_some_and(|v| v.polling)
             || self.slide_held()
             || self.upkeep_wants_fast_tick(now)
             || self.fresh_waiting()
             || self.switcher_wants_fast_tick()
+            || self.flip_awaited()
+            || self.asks_again()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -1181,10 +1273,14 @@ impl Controller {
     /// ([`Self::slide_hold_step`]), and the corner patch planned while Show Desktop is up
     /// ([`Self::reveal_fast`]: its close seen within a fast tick).
     pub fn fast_tick(&mut self, ob: &mut Observer) {
+        // A Space change's notice that came before the listing's flip: looked at again.
+        self.flip_fast_tick(ob);
         self.slide_hold_step(ob);
-        let now = Instant::now();
+        // An activated app that did not say its focused window: asked again when due.
+        self.ask_again_step(ob);
+        let now = clock::now();
         // ⌘Tab's switcher list gone with no key for it yet: decided after its wait; a window
-        // put home for it taken back when no activation of its app came.
+        // put home for it taken back when its short cap (the key tap not hearing) ran out.
         self.switcher_fast_tick(ob, now);
         if self.lent_awaits_activation() {
             self.expire_lent(now);
@@ -1224,7 +1320,7 @@ impl Controller {
             rounds = v.rounds,
             slid = v.slid,
             resent,
-            after_ms = ms(v.sent, Instant::now()),
+            after_ms = ms(v.sent, clock::now()),
             "arrival: the check of the arrangement's moves ends"
         );
     }
@@ -1328,7 +1424,7 @@ impl Controller {
             tracing::info!(missing = ?bounds, round = v.rounds, after_ms = elapsed, "arrival: the window server does not show every move yet; sending them again");
         }
         let mut moves = std::mem::take(&mut v.moves);
-        let round = Instant::now();
+        let round = clock::now();
         let left = send_round(&due, |i| {
             let e = &mut moves[i];
             let bounds = listed(e.id).map(|w| w.bounds);
@@ -1339,7 +1435,7 @@ impl Controller {
             sent
         });
         if !left.is_empty() {
-            tracing::debug!(left = left.len(), took_ms = ms(round, Instant::now()), "arrival: the round's time is up; the rest go next round");
+            tracing::debug!(left = left.len(), took_ms = ms(round, clock::now()), "arrival: the round's time is up; the rest go next round");
         }
         if let Some(v) = self.verify.as_mut() {
             v.moves = moves;
@@ -1413,7 +1509,7 @@ impl Controller {
         let resent: Vec<String> = due.iter().map(|&i| listed_at(list, v.moves[i].id)).collect();
         let sliding = due.iter().filter(|&&i| seen[i] == Some(Seen::Sliding)).count();
         let mut moves = std::mem::take(&mut v.moves);
-        let round = Instant::now();
+        let round = clock::now();
         let out = tail_round(&mut moves, &due, &seen, over, ceiling, |e| self.resend(ob, e, now, round));
         let Some(v) = self.verify.as_mut() else { return };
         v.moves = moves;
@@ -1476,7 +1572,7 @@ impl Controller {
     /// with [`MOVE_NEEDS`] of it left ([`Resent::Deferred`]: nothing sent, not counted), each
     /// call's timeout what is left; an exact move the cap cut is [`Resent::Cut`] (R13 2).
     fn resend(&mut self, ob: &Observer, e: &mut Expect, now: Instant, round: Instant) -> Resent {
-        let Some(first) = round_timeout(RESEND_ROUND_CAP, round.elapsed()).filter(|_| move_fits(round.elapsed())) else {
+        let Some(first) = round_timeout(RESEND_ROUND_CAP, clock::since(round)).filter(|_| move_fits(clock::since(round))) else {
             return Resent::Deferred;
         };
         // A fresh handle found for a dead one (stale-handles) wins over the tracked one.
@@ -1487,7 +1583,7 @@ impl Controller {
             return Resent::Full;
         };
         e.tries += 1;
-        self.echoes.touch_window(e.id, now);
+        self.causes.expect_move(e.id, e.frame, None, now);
         let (frame, park) = (e.frame, e.park);
         let nudged = Rect::new(frame.x + 1.0, frame.y, frame.w, frame.h);
         let send = |el: &AxElement, r: Rect| if park { el.set_position(r.origin()) } else { el.set_frame(r) };
@@ -1498,7 +1594,7 @@ impl Controller {
                 return (Ok(()), send(el, frame), full(first));
             }
             let nudge = send(el, nudged);
-            match (&nudge, round_timeout(RESEND_ROUND_CAP, round.elapsed())) {
+            match (&nudge, round_timeout(RESEND_ROUND_CAP, clock::since(round))) {
                 (Err(_), _) => (nudge, Ok(()), true),
                 (Ok(()), Some(seconds)) => {
                     let _ = el.set_messaging_timeout(seconds);
@@ -1521,6 +1617,14 @@ impl Controller {
             // press goes (it would otherwise stand for this press too).
             tracing::debug!("dock: a press kept from before, its release never seen: no click");
             self.press_not_click(ob);
+        }
+        // The next press after a Dock press's lend, its app not activated yet: the click was
+        // the user's last word for it, and this one is elsewhere. (⌘Tab's lend is left to its
+        // activation: a press after ⌘'s release does not undo it, review B-6.)
+        let heard = self.received_at(now);
+        if self.lent.is_some_and(|l| !l.switcher && !l.wait.is_activated() && heard > l.at) {
+            let outcome = self.lent.as_mut().and_then(|l| l.wait.refute("the next press came before its app's activation", now));
+            self.lent_ended(outcome, now);
         }
         self.slide_watch_pressing();
         if self.model.is_none() || self.frozen() {
@@ -1557,7 +1661,7 @@ impl Controller {
             y = p.y,
             path = item.path,
             prediction = ?prediction.map(|(_, w)| w.0),
-            took_ms = ms(now, Instant::now()),
+            took_ms = ms(now, clock::now()),
             "dock: pressed"
         );
         if let Ok((_, window)) = prediction {
@@ -1592,7 +1696,7 @@ impl Controller {
         tracing::info!(
             path = item.path,
             window = window.0,
-            since_press_ms = ms(now, Instant::now()),
+            since_press_ms = ms(now, clock::now()),
             "dock: the Desktop the press goes to is arranged at the press (its window waited off every Desktop)"
         );
     }
@@ -1604,48 +1708,80 @@ impl Controller {
         if self.ahead.as_ref().is_some_and(|s| s.at_press) {
             self.undo_ahead(ob, "the Dock press was no click");
         }
-        if let Some(lent) = self.lent.take_if(|l| dock_takes_back(l.switcher.is_some(), false)) {
-            let back = self.engine.take_back(lent.window).back;
-            tracing::info!(window = lent.window.0, back, "dock: the window put home at the press goes back (the press was no click)");
+        if self.lent.is_some_and(|l| dock_takes_back(l.switcher, false)) {
+            let now = clock::now();
+            let outcome = self.lent.as_mut().and_then(|l| l.wait.refute("the press was no click", now));
+            self.lent_ended(outcome, now);
         }
     }
 
-    /// About every tick: a window put home at a Dock press (or for ⌘Tab's switcher, once ⌘
-    /// was let go) whose stage did not come in front ([`LEND_WAIT`]) goes back into its stage
-    /// Space; one the model shows, or whose stage is in front, is forgotten (the switch shows
-    /// it).
-    fn expire_lent(&mut self, now: Instant) {
-        let Some(lent) = self.lent else { return };
+    /// About every tick (and at once after its app's activation is decided): a window put
+    /// home at a Dock press or for ⌘Tab's switcher whose stage is in front, or that the model
+    /// shows, is the switch's now (met); one whose cap ran out goes back into its stage Space
+    /// ([`lent_step`]).
+    pub(super) fn expire_lent(&mut self, now: Instant) {
+        let Some(lent) = self.lent.as_mut() else { return };
         let (parked, in_front) = self.model.as_ref().map_or((false, false), |m| {
             (m.window(lent.window).is_some_and(|w| w.parked), m.stage_of(lent.window).is_some_and(|s| m.is_active(s)))
         });
-        let step = match lent.switcher {
-            // Put home for ⌘Tab's switcher: kept while it is up, then only for its app's
-            // activation (the 1 s wait is the Dock press's only).
-            Some(go) if parked && !in_front => match go.step(self.switcher_up(), now, lent.at, LEND_WAIT) {
-                LetGoStep::Keep => LentStep::Keep,
-                LetGoStep::NoActivation => LentStep::NoActivation,
-                LetGoStep::NoSwitch => LentStep::TakeBack,
-            },
-            _ => lent_step(parked, in_front, now.saturating_duration_since(lent.at)),
+        let outcome = lent_step(&mut lent.wait, parked, in_front, now);
+        self.lent_ended(outcome, now);
+    }
+
+    /// The lend's wait ended `outcome` (`None`: it goes on): met, forgotten (the switch shows
+    /// it); refuted or capped, taken back now, unshown.
+    pub(super) fn lent_ended(&mut self, outcome: Option<Outcome>, now: Instant) {
+        let (Some(outcome), Some(lent)) = (outcome, self.lent) else { return };
+        self.lent = None;
+        let who = if lent.switcher { "cmd-tab: the window put home for the switcher" } else { "dock: the window put home at the press" };
+        let since_ms = ms(lent.at, now);
+        let cap = lent.wait.cap().map(|c| c.name);
+        let why = match outcome {
+            Outcome::Met => {
+                tracing::debug!(window = lent.window.0, since_ms, "{who} is the switch's now");
+                return;
+            }
+            Outcome::Refuted(why) => why,
+            Outcome::Cap => "no activation and switch came for it within its cap",
         };
-        match step {
-            LentStep::Keep => {}
-            LentStep::NoActivation => {
-                self.lent = None;
-                let back = self.engine.take_back(lent.window);
-                tracing::info!(window = lent.window.0, back = back.back, restored = ?back.restored, "cmd-tab: the window put home for the switcher goes back: no activation came: the switcher was cancelled");
-                crate::platform::switcher_probe::note("taken back", format!("window={} why=no activation came restored={:?}", lent.window.0, back.restored));
-            }
-            LentStep::Forget => {
-                self.lent = None;
-                tracing::debug!(window = lent.window.0, parked, in_front, "dock: the window put home at the press is the switch's now");
-            }
-            LentStep::TakeBack => {
-                self.lent = None;
-                let back = self.engine.take_back(lent.window);
-                tracing::info!(window = lent.window.0, back = back.back, restored = ?back.restored, "dock: the window put home at the press goes back: its stage did not come in front");
-            }
+        let back = self.engine.take_back(lent.window);
+        tracing::info!(window = lent.window.0, pid = lent.pid, back = back.back, restored = ?back.restored, since_ms, cap, activated = lent.wait.is_activated(), "{who} goes back: {why}");
+        if lent.switcher {
+            crate::platform::switcher_notes::note("taken back", || format!("window={} why={why} restored={:?}", lent.window.0, back.restored));
+        }
+    }
+
+    /// App `pid` activated (its notice stamped `fired`), before anything else is judged of it:
+    /// a window put home for it has the first half of its confirmation (its switch shows it
+    /// next).
+    pub(super) fn lent_activated(&mut self, pid: i32, fired: Instant) {
+        let now = clock::now();
+        if let Some(lent) = self.lent.as_mut().filter(|l| l.pid == pid && !l.wait.is_activated()) {
+            lent.wait.activation(pid, fired, now);
+            let who = if lent.switcher { "cmd-tab: the app its window was put home for is activated" } else { "dock: the app its window was put home for at the press is activated" };
+            tracing::info!(pid, window = lent.window.0, since_lend_ms = ms(lent.at, now), "{who}: kept for its switch");
+        }
+    }
+
+    /// Another app than the one a window was put home for activated (its notice stamped
+    /// `fired`, not an echo of ours, not stale): the user went elsewhere, or the switcher was
+    /// let go on another app. The lend is refuted once its wait began, by an activation
+    /// stamped after it began; taken back now.
+    pub(super) fn lent_activation_elsewhere(&mut self, pid: i32, fired: Instant) {
+        let now = clock::now();
+        let Some(lent) = self.lent.as_mut().filter(|l| l.pid != pid) else { return };
+        let outcome = lent.wait.activation(pid, fired, now);
+        if outcome.is_some() {
+            tracing::info!(pid, lent_pid = lent.pid, window = lent.window.0, "lend: another app was activated");
+        }
+        self.lent_ended(outcome, now);
+    }
+
+    /// App `pid`'s activation decided (its switch made, or held): a window put home for it
+    /// whose stage is in front now is the switch's at once, not at the next tick.
+    pub(super) fn lent_decided(&mut self, pid: i32) {
+        if self.lent.is_some_and(|l| l.pid == pid) {
+            self.expire_lent(clock::now());
         }
     }
 
@@ -1674,7 +1810,7 @@ impl Controller {
     /// to another Desktop for it (the prediction made at the press), that Desktop is
     /// arranged now. Returns the window predicted.
     fn dock_clicked(&mut self, ob: &Observer, press: &DockPress<Prediction>, released: Instant) -> Option<WindowId> {
-        let started = Instant::now();
+        let started = clock::now();
         let why = match press.prediction {
             Ok((pid, window)) => {
                 let regated = self.model.as_ref().map_or(Err("not managing"), |m| m.dock_gates(pid));
@@ -1692,7 +1828,7 @@ impl Controller {
                             tracing::info!(
                                 path = press.item.path,
                                 window = window.0,
-                                since_click_ms = ms(press.when, Instant::now()),
+                                since_click_ms = ms(press.when, clock::now()),
                                 "dock: the Desktop the click goes to was arranged at the press"
                             );
                             return Some(window);
@@ -1704,7 +1840,7 @@ impl Controller {
                             if let Some(space) = self.ahead_space() {
                                 self.present_away(space);
                             }
-                            let done = Instant::now();
+                            let done = clock::now();
                             tracing::info!(
                                 path = press.item.path,
                                 window = window.0,
@@ -1720,7 +1856,7 @@ impl Controller {
             }
             Err(why) => why,
         };
-        let done = Instant::now();
+        let done = clock::now();
         tracing::info!(
             path = press.item.path,
             why,
@@ -1729,6 +1865,19 @@ impl Controller {
             "dock: no prediction"
         );
         None
+    }
+
+    /// App `pid`'s windows waiting with the windows not placed: how many, and whether one may
+    /// be on a Desktop that does not show ([`waits_elsewhere`]; [`AppFacts::unplaced`]). The
+    /// screens' listing is read once, and only for an app with a window waiting.
+    pub(super) fn unplaced_elsewhere(&self, ob: &Observer, pid: i32) -> (usize, bool) {
+        let waiting: Vec<u32> = self.unplaced.iter().copied().filter(|id| ob.window(*id).is_some_and(|w| w.pid == pid)).collect();
+        if waiting.is_empty() {
+            return (0, false);
+        }
+        let screens = self.engine.desktops();
+        let elsewhere = waiting.iter().any(|id| waits_elsewhere(self.engine.spaces_of(WindowId(*id)).as_deref(), screens.as_deref()));
+        (waiting.len(), elsewhere)
     }
 
     /// The app a Dock item is for and the window macOS will show for it on another
@@ -1745,19 +1894,19 @@ impl Controller {
         m.dock_gates(pid)?;
         let displays = m.displays().to_vec();
         let visible_here = dock::visible_window_of(list, pid, |r| displays.iter().any(|d| self.engine.is_hidden(d, r)));
-        let unplaced = self.unplaced.iter().any(|id| ob.window(*id).is_some_and(|w| w.pid == pid));
+        let (waiting, unplaced) = self.unplaced_elsewhere(ob, pid);
         // One bounded round with the app (`press_round`): hidden, active, its focused (else
         // main) window; it stops at the first failure and within PRESS_ROUND_CAP.
         let app = AxElement::application(pid);
-        let started = Instant::now();
+        let started = clock::now();
         let answer = app.bounded(QUERY_AX_TIMEOUT_SECONDS, |a| {
             press_round(
                 || a.is_hidden(),
                 || a.is_frontmost(),
                 // The window element is on the global timeout: bounded too (R11 4).
-                || a.focused_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, started.elapsed()))),
-                || a.main_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, started.elapsed()))),
-                || match round_timeout(PRESS_ROUND_CAP, started.elapsed()) {
+                || a.focused_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, clock::since(started)))),
+                || a.main_window().and_then(|w| window_id_within(&w, round_timeout(PRESS_ROUND_CAP, clock::since(started)))),
+                || match round_timeout(PRESS_ROUND_CAP, clock::since(started)) {
                     Some(seconds) => {
                         let _ = a.set_messaging_timeout(seconds);
                         false
@@ -1766,7 +1915,7 @@ impl Controller {
                 },
             )
         });
-        let took_ms = ms(started, Instant::now());
+        let took_ms = ms(started, clock::now());
         let PressAnswer { hidden, active, focused, main: main_window } = answer;
         let Some(hidden) = hidden else {
             tracing::info!(bundle, pid, took_ms, "dock: the app did not say whether it is hidden");
@@ -1789,16 +1938,19 @@ impl Controller {
             desktop_shown = m.current_space(m.main_display().id).0,
             visible_here,
             unplaced,
+            waiting,
             took_ms,
             "dock: the app at the press"
         );
         let ax_window = focused.or(main_window).map(WindowId);
         let facts = AppFacts { hidden, unplaced, active, visible_here };
         let home = m.dock_home(pid, facts);
-        if let Some(prev) = self.lent.take_if(|l| dock_takes_back(l.switcher.is_some(), home.is_some())) {
+        if let Some(mut prev) = self.lent.take_if(|l| dock_takes_back(l.switcher, home.is_some())) {
             // A press after a press: the window put home for the first goes back (one put
             // home for ⌘Tab's switcher only when this press puts another home).
-            let _ = self.engine.take_back(prev.window);
+            prev.wait.refute("another press puts another window home", clock::now());
+            let back = self.engine.take_back(prev.window).back;
+            tracing::info!(window = prev.window.0, back, "lend: the window put home before goes back (another press puts another window home)");
         }
         let mut noted = None;
         if let Some(home) = home {
@@ -1809,20 +1961,21 @@ impl Controller {
             let lend = self.engine.lend_home(home, park);
             noted = Some(LendNote { home: lend.home, parked: lend.parked, asked, park_ms: lend.park_ms });
             if lend.home {
-                self.lent = Some(Lent { window: home, pid, at: Instant::now(), switcher: None });
+                let at = clock::now();
+                self.lent = Some(Lent { window: home, pid, at, switcher: false, wait: LendWait::begun(pid, at, LEND_CAP) });
                 tracing::info!(
                     bundle,
                     pid,
                     window = home.0,
                     parked = lend.parked.unwrap_or(false),
                     park_ms = lend.park_ms,
-                    took_ms = ms(started, Instant::now()),
+                    took_ms = ms(started, clock::now()),
                     "dock: the app's windows here wait off every Desktop and macOS counts one elsewhere: its stage's window is put home before the release"
                 );
                 if !lend.parked.unwrap_or(false) {
                     tracing::info!(bundle, pid, window = home.0, asked, park_ms = lend.park_ms, "dock: the window put home could not be parked off the screen first (its app did not move it in time): it shows at its frame until its stage's switch");
                 }
-                self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted: None });
+                self.dock_seen = Some(DockSeen { at: self.received_at(clock::now()), pid, active, predicted: None });
                 self.slide_watch_press(&bundle, pid, noted, None);
                 return Err("the app's window here was put home at the press: macOS activates it here");
             }
@@ -1830,7 +1983,7 @@ impl Controller {
         }
         let result = m.dock_arrival(pid, facts, ax_window);
         let predicted = result.ok().and_then(|w| m.space_of(w)).map(|s| s.0);
-        self.dock_seen = Some(DockSeen { at: Instant::now(), pid, active, predicted });
+        self.dock_seen = Some(DockSeen { at: self.received_at(clock::now()), pid, active, predicted });
         self.slide_watch_press(&bundle, pid, noted, predicted);
         let window = result?;
         tracing::debug!(bundle, pid, window = window.0, "dock: the window macOS will show");
@@ -1841,7 +1994,9 @@ impl Controller {
     /// day's log tells whether the rule holds).
     pub(super) fn note_dock_arrival(&mut self, arrived: SpaceId, from: SpaceId) {
         let Some(seen) = self.dock_seen.take() else { return };
-        if seen.at.elapsed() > DOCK_SEEN_FOR {
+        // Measured to the Space change's notice when this arrival is its own.
+        let heard = self.received_at(clock::now());
+        if !margin::note("DOCK_SEEN_FOR", margin::age("DOCK_SEEN_FOR", heard, seen.at), DOCK_SEEN_FOR, heard.saturating_duration_since(seen.at) <= DOCK_SEEN_FOR) {
             return;
         }
         tracing::info!(
@@ -1851,7 +2006,7 @@ impl Controller {
             from = from.0,
             arrived = arrived.0,
             right = seen.predicted == Some(arrived.0),
-            since_press_ms = ms(seen.at, Instant::now()),
+            since_press_ms = ms(seen.at, heard),
             "dock: the Desktop a Dock click went to"
         );
     }
@@ -1947,7 +2102,7 @@ impl Controller {
             predicted = sent.ahead.space.0,
             window = sent.ahead.window.0,
             trigger = sent.trigger.name(),
-            since_sent_ms = ms(sent.sent_at, Instant::now()),
+            since_sent_ms = ms(sent.sent_at, clock::now()),
             moves = actions.iter().filter(|a| !matches!(a, Action::StateChanged)).count(),
             "arrival: the arrangement made ahead is undone ({why})"
         );
@@ -1955,7 +2110,7 @@ impl Controller {
         self.execute(ob, actions);
         if sent.trigger.away() {
             // The focus held for the click was the prediction's: it goes with it.
-            if matches!(self.focus_replay.peek(Instant::now()), Some(Wanted::Window { id, .. }) if id == sent.ahead.window) {
+            if matches!(self.focus_replay.peek(clock::now()), Some(Wanted::Window { id, .. }) if id == sent.ahead.window) {
                 self.focus_replay.clear();
             }
             self.present_away(sent.ahead.space);
@@ -1980,8 +2135,25 @@ impl Controller {
         let Some(sent) = &self.ahead else { return };
         let changed = self.space_changes != sent.changes_at;
         let waited = now.saturating_duration_since(sent.sent_at);
-        if let Some(why) = expire_step(sent.trigger, self.phase.changing(), changed, waited, self.ahead_contradicted(now)) {
+        let away = sent.trigger.away() && !changed;
+        let (name, cap) = self.dock_switch_cap(sent.trigger);
+        if let Some(why) = expire_step(sent.trigger, self.phase.changing(), changed, waited, cap, self.ahead_contradicted(now)) {
+            // Undone for want of a Space change: the wait ended by its cap.
+            if away && waited >= cap {
+                margin::wait(name, waited, cap, End::Cap);
+            }
             self.undo_ahead(ob, why);
+        }
+    }
+
+    /// The cap on an arrangement made ahead (`trigger`) with no Space change, and its name:
+    /// [`DOCK_SWITCH_CAP`] for a Dock click under the Spaces engine, else
+    /// [`DOCK_SWITCH_WAIT`].
+    fn dock_switch_cap(&self, trigger: Trigger) -> (&'static str, Duration) {
+        if trigger == Trigger::DockClick && self.engine.kind() == EngineKind::Spaces {
+            ("DOCK_SWITCH_CAP", DOCK_SWITCH_CAP)
+        } else {
+            ("DOCK_SWITCH_WAIT", DOCK_SWITCH_WAIT)
         }
     }
 
@@ -2009,6 +2181,24 @@ impl Controller {
     /// on the release as for a person's click (the fed path above arranges before `AXPress`,
     /// which hid the race of the owner's log of 11-15 06:32:34).
     pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str, real: bool) -> serde_json::Value {
+        self.debug_dock(ob, bundle, real, true)
+    }
+
+    /// `debug-dock-lend BUNDLE` (test only, round r2-lends): [`Self::debug_dock_click`]'s fed
+    /// click (the hit-test, the press, the release) with no press of the item: what the press
+    /// put home waits for an activation that does not come, as for a busy app, so a live check
+    /// can tell what ends it (another app's activation, the next press, the cap). The reply's
+    /// `lent` names the window put home, if any.
+    pub(super) fn debug_dock_lend(&mut self, ob: &Observer, bundle: &str) -> serde_json::Value {
+        let mut r = self.debug_dock(ob, bundle, false, false);
+        if let Some(obj) = r.as_object_mut() {
+            obj.insert("lent".into(), serde_json::json!(self.lent.filter(|l| !l.switcher).map(|l| l.window.0)));
+        }
+        r
+    }
+
+    /// [`Self::debug_dock_click`] (`activate`: the fed click presses the item after it).
+    fn debug_dock(&mut self, ob: &Observer, bundle: &str, real: bool, activate: bool) -> serde_json::Value {
         use serde_json::json;
         let only = std::env::var("STAGE_MANAGER_ONLY").unwrap_or_default();
         if !only.split(',').any(|b| b.trim() == bundle) {
@@ -2049,7 +2239,7 @@ impl Controller {
                 Err(miss) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
             }
         } else {
-            self.debug_dock_press(ob, &list, bundle, &listed, at, hit)
+            self.debug_dock_press(ob, &list, bundle, &listed, at, hit, activate)
         };
         if revealed {
             crate::platform::input::pointer_back();
@@ -2061,7 +2251,8 @@ impl Controller {
     }
 
     /// The rest of [`Self::debug_dock_click`]: the hit-test's answer `hit` at `at` goes
-    /// through the press and release path, then the item is pressed.
+    /// through the press and release path, then the item is pressed (unless not `activate`).
+    #[allow(clippy::too_many_arguments)]
     fn debug_dock_press(
         &mut self,
         ob: &Observer,
@@ -2070,6 +2261,7 @@ impl Controller {
         listed: &DockItem,
         at: crate::engine::geometry::Point,
         hit: Result<(AxElement, DockItem), dock::Miss>,
+        activate: bool,
     ) -> serde_json::Value {
         use serde_json::json;
         let (element, item) = match hit {
@@ -2077,30 +2269,16 @@ impl Controller {
             Ok((_, other)) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found another item ({})", other.path) }),
             Err(miss) => return json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
         };
-        let pressed_at = Instant::now();
+        let pressed_at = clock::now();
         self.press_item(ob, list, item, at, pressed_at);
-        let predicted = self.dock_released(ob, at, false, Instant::now());
+        let predicted = self.dock_released(ob, at, false, clock::now());
+        if !activate {
+            tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), "debug-dock-lend: the click fed, the item not pressed");
+            return json!({ "ok": true, "predicted": predicted.map(|w| w.0) });
+        }
         let pressed = element.bounded(QUERY_AX_TIMEOUT_SECONDS * 4.0, |e| e.perform_action(names::PRESS));
         tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), pressed = pressed.is_ok(), "debug-dock-click");
         json!({ "ok": pressed.is_ok(), "predicted": predicted.map(|w| w.0), "error": pressed.err().map(|e| e.to_string()) })
-    }
-}
-
-/// Where the pointer shows an auto-hidden Dock whose item sits at `item` (off the display
-/// `display`): the middle of the display's edge the item is beyond, a point inside it.
-fn dock_edge(item: Rect, display: Rect) -> Option<crate::engine::geometry::Point> {
-    use crate::engine::geometry::Point;
-    let (cx, cy) = (item.x + item.w / 2.0, item.y + item.h / 2.0);
-    let x = cx.clamp(display.x + 1.0, display.x + display.w - 1.0);
-    let y = cy.clamp(display.y + 1.0, display.y + display.h - 1.0);
-    if cy >= display.y + display.h - 1.0 {
-        Some(Point::new(x, display.y + display.h - 1.0))
-    } else if cx <= display.x + 1.0 {
-        Some(Point::new(display.x, y))
-    } else if cx >= display.x + display.w - 1.0 {
-        Some(Point::new(display.x + display.w - 1.0, y))
-    } else {
-        None
     }
 }
 
@@ -2223,7 +2401,7 @@ mod tests {
         fn tick(&mut self, t: Duration) {
             let Some(_) = self.ahead else { return };
             let waited = t.saturating_sub(self.sent_at);
-            if let Some(why) = expire_step(Trigger::DockClick, false, self.changed, waited, self.contradicted()) {
+            if let Some(why) = expire_step(Trigger::DockClick, false, self.changed, waited, DOCK_SWITCH_WAIT, self.contradicted()) {
                 self.undo(why);
             }
         }
@@ -2294,7 +2472,7 @@ mod tests {
         // The cause: nothing is held between the press and the release, and nothing held
         // contradicts any arrangement.
         assert!(contradicts(None, WINDOW, PID, PressRun::resolve));
-        assert_eq!(expire_step(Trigger::DockClick, false, false, ms(1), true), Some("its Desktop did not come"));
+        assert_eq!(expire_step(Trigger::DockClick, false, false, ms(1), DOCK_SWITCH_WAIT, true), Some("its Desktop did not come"));
         // Replayed with the press not counted (the old reading): undone at +31 ms, sent again
         // at the release, too late for macOS.
         let mut run = PressRun::press(true, ms(30));
@@ -2396,25 +2574,33 @@ mod tests {
     fn a_dock_click_with_no_space_change_after_it_is_undone() {
         let ms = Duration::from_millis;
         let dock = Trigger::DockClick;
-        assert_eq!(expire_step(dock, false, false, ms(400), false), None, "the slide is under way");
-        assert!(expire_step(dock, false, false, DOCK_SWITCH_WAIT, false).is_some(), "no Space change in a second");
-        assert_eq!(expire_step(dock, false, true, ms(1500), false), None, "the change came: the arrival decides");
-        assert_eq!(expire_step(dock, true, false, ms(1500), true), None, "never while a change settles");
-        assert!(expire_step(Trigger::Notice, false, true, ms(10), true).is_some(), "the hold is gone");
-        assert_eq!(expire_step(Trigger::Notice, false, false, ms(5000), false), None);
+        assert_eq!(expire_step(dock, false, false, ms(400), DOCK_SWITCH_WAIT, false), None, "the slide is under way");
+        assert!(expire_step(dock, false, false, DOCK_SWITCH_WAIT, DOCK_SWITCH_WAIT, false).is_some(), "no Space change in a second");
+        assert_eq!(expire_step(dock, false, false, ms(1500), DOCK_SWITCH_CAP, false), None, "the Spaces engine's Dock click: a busy Mac's notice still to come");
+        assert!(expire_step(dock, false, false, DOCK_SWITCH_CAP, DOCK_SWITCH_CAP, false).is_some(), "the cap");
+        assert_eq!(expire_step(dock, false, true, ms(1500), DOCK_SWITCH_WAIT, false), None, "the change came: the arrival decides");
+        assert_eq!(expire_step(dock, true, false, ms(1500), DOCK_SWITCH_WAIT, true), None, "never while a change settles");
+        assert!(expire_step(Trigger::Notice, false, true, ms(10), DOCK_SWITCH_WAIT, true).is_some(), "the hold is gone");
+        assert_eq!(expire_step(Trigger::Notice, false, false, ms(5000), DOCK_SWITCH_WAIT, false), None);
         // Arranged for a focus the engine hid off its Desktop: away as a Dock click's is.
         assert!(Trigger::Hidden.away());
-        assert!(expire_step(Trigger::Hidden, false, false, DOCK_SWITCH_WAIT, false).is_some(), "no Space change came for the focus");
+        assert!(expire_step(Trigger::Hidden, false, false, DOCK_SWITCH_WAIT, DOCK_SWITCH_WAIT, false).is_some(), "no Space change came for the focus");
     }
 
     #[test]
     fn a_window_put_home_at_a_dock_press_goes_back_unless_its_stage_comes_in_front() {
-        let ms = Duration::from_millis;
-        assert_eq!(lent_step(true, false, ms(100)), LentStep::Keep, "the activation not here yet");
-        assert_eq!(lent_step(true, true, ms(100)), LentStep::Forget, "its stage in front: the switch shows it");
-        assert_eq!(lent_step(false, false, ms(100)), LentStep::Forget, "the model shows it");
-        assert_eq!(lent_step(true, true, LEND_WAIT * 2), LentStep::Forget, "the switch's show at the unveil may come late");
-        assert_eq!(lent_step(true, false, LEND_WAIT), LentStep::TakeBack, "no click, no activation: back unshown");
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let wait = || LendWait::begun(40, t0, LEND_CAP);
+        assert_eq!(lent_step(&mut wait(), true, false, ms(100)), None, "the activation not here yet");
+        assert_eq!(lent_step(&mut wait(), true, true, ms(100)), Some(Outcome::Met), "its stage in front: the switch shows it");
+        assert_eq!(lent_step(&mut wait(), false, false, ms(100)), Some(Outcome::Met), "the model shows it");
+        assert_eq!(lent_step(&mut wait(), true, true, ms(0) + LEND_WAIT * 2), Some(Outcome::Met), "the switch's show at the unveil may come late");
+        assert_eq!(lent_step(&mut wait(), true, false, ms(1500)), None, "a busy Mac: the old 1 s gone, still waiting");
+        assert_eq!(lent_step(&mut wait(), true, false, ms(0) + LEND_WAIT), Some(Outcome::Cap), "no word either way: back unshown");
+        // Another app activated after the press: back at once.
+        let mut w = wait();
+        assert!(matches!(w.activation(77, ms(120), ms(120)), Some(Outcome::Refuted(_))));
     }
 
     /// Review B-6: a Dock press that was no click, or one kept from a missed release, leaves
@@ -2441,18 +2627,6 @@ mod tests {
         assert_eq!(echo_verdict(b, x, 10, Some(10), Some(b), Some(x)), EchoVerdict::Echo, "B's own focus");
         assert_eq!(echo_verdict(b, x, 10, Some(20), Some(WindowId(5)), Some(y)), EchoVerdict::Echo, "another app's window");
         assert_eq!(echo_verdict(b, x, 10, Some(10), None, None), EchoVerdict::Echo, "an unknown window of the app");
-    }
-
-    #[test]
-    fn an_auto_hidden_docks_edge_is_where_its_item_is_beyond_the_display() {
-        use crate::engine::geometry::Point;
-        let below = Rect::new(800.0, 1175.0, 60.0, 60.0);
-        assert_eq!(dock_edge(below, MAIN), Some(Point::new(830.0, 1168.0)), "the bottom edge");
-        let left = Rect::new(-70.0, 500.0, 60.0, 60.0);
-        assert_eq!(dock_edge(left, MAIN), Some(Point::new(0.0, 530.0)), "the left edge");
-        let right = Rect::new(1810.0, 500.0, 60.0, 60.0);
-        assert_eq!(dock_edge(right, MAIN), Some(Point::new(1799.0, 530.0)), "the right edge");
-        assert_eq!(dock_edge(Rect::new(800.0, 1100.0, 60.0, 60.0), MAIN), None, "on screen: nothing to reveal");
     }
 
     /// The park zone of the tests: the bottom-right corner of [`MAIN`].
@@ -2648,6 +2822,23 @@ mod tests {
         let before = |id: u32| (id == 1).then_some(back);
         assert_eq!(expects(&actions, |id| (id == 1).then_some(park), before, |_| None), vec![Expect::new(1, park, Some(back), true), Expect::new(2, back, None, false)], "moves only");
         assert_eq!(moved_ids(&actions), vec![1, 2], "the windows asked of the window server before the moves (R13 3)");
+    }
+
+    #[test]
+    fn a_window_waiting_counts_for_a_dock_click_only_on_a_desktop_not_shown() {
+        use crate::engine::model::desks::Desk;
+        let desk = |id: u64| Desk { id, uuid: String::new() };
+        // One screen: Desktops 1 and 4, Desktop 4 shown, a full-screen Space 30.
+        let screens = [ScreenDesks { screen: "Main".into(), current: 4, current_kind: 0, desks: vec![desk(1), desk(4)], others: vec![(30, 4)] }];
+        let waits = |on: &[u64]| waits_elsewhere(Some(on), Some(&screens));
+        assert!(!waits(&[]), "listed on no Space: a tab not selected (live 11-23)");
+        assert!(!waits(&[5732]), "in a Space of the engine's own: on no Desktop");
+        assert!(!waits(&[4]), "on the Desktop shown");
+        assert!(waits(&[1]), "on a Desktop not shown: minimized there, or never visited");
+        assert!(waits(&[30]), "in a full-screen Space not shown");
+        assert!(waits(&[5732, 1]), "listed on a Desktop too");
+        assert!(waits_elsewhere(None, Some(&screens)), "the engine reads no Spaces (Corner): it may be");
+        assert!(waits_elsewhere(Some(&[]), None), "the screens' listing not read: it may be");
     }
 
     #[test]

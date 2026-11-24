@@ -2,7 +2,10 @@
 //! a Space's stages the first time it is visited.
 //!
 //! macOS has no public id for a Space, so the model gives each one a synthetic [`SpaceId`]
-//! and recognizes it by its windows. The platform reports what the window server lists on
+//! and recognizes it by its windows. (Under the Spaces engine the window server's own
+//! listing names the Desktop and each window's Desktops: an arrival given them is keyed, and
+//! the listing decides in place of the guesses told below: `desks.rs`, [`Model::arrive_on`].
+//! What follows is the arrival with no listing.) The platform reports what the window server lists on
 //! screen: a Space's own windows (parked ones included, since a parked window keeps a
 //! sliver on screen), never another Space's. From that:
 //!
@@ -61,9 +64,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::desks::{Desk, Listed};
 use super::pool::Scope;
 use super::{Action, DisplayId, Home, Model, NativeTarget, Observation, Stage, StageId, WindowId, WindowMeta, WindowRole};
 use crate::engine::displays::ScreenKey;
+use crate::engine::recovery::EngineKind;
 use crate::engine::persist::{LaunchFrames, LaunchHints, SavedSpace, bundle_matches, confident_matches, exact_matches, rematch_on};
 use crate::engine::rules::Decision;
 use crate::engine::window_match::LowRule;
@@ -105,9 +110,17 @@ pub struct ArrivalNote {
     /// Windows the platform's own switch had just shown ([`Model::set_slide_carried`]),
     /// listed here while their own Desktop is another: they stay in their stage there.
     pub kept_home: Vec<WindowId>,
+    /// Windows of a hidden stage of a gone screen's Desktop, listed here while the Spaces
+    /// engine watches the screen gone (macOS's doing as the screen went,
+    /// [`Model::set_display_watch`]): they stay in their stage on their own Desktop and are
+    /// hidden again.
+    pub kept_hidden: Vec<WindowId>,
     /// Windows taken for windows on every Desktop at this arrival ([`STICKY_HOPS`]): pinned,
     /// out of their stage.
     pub sticky: Vec<WindowId>,
+    /// The Desktop the window server listed on the screen at this arrival, and whether the
+    /// model's guess was the Space bound to it ([`Model::arrive_on`]); `None` with no listing.
+    pub desk: Option<(u64, super::desks::Agree)>,
 }
 
 /// A Space's synthetic id: given by the model, stable while the app runs and kept in
@@ -158,6 +171,21 @@ impl Model {
     /// The Space a managed window lives on.
     pub fn space_of(&self, id: WindowId) -> Option<SpaceId> {
         self.windows.get(&id).map(|w| w.space)
+    }
+
+    /// The windows shown on the Desktop of window `id` (its Space's standard windows not
+    /// hidden, not pinned, not on every Desktop), in id order: where a Desktop's windows went
+    /// once macOS ended it ([`crate::engine::spill::landed_on`]). None for a window unknown.
+    pub fn shown_with(&self, id: WindowId) -> Vec<WindowId> {
+        let Some(space) = self.space_of(id) else { return Vec::new() };
+        let mut out: Vec<WindowId> = self
+            .windows
+            .values()
+            .filter(|w| w.space == space && w.meta.id != id && !w.parked && !w.sticky && w.home != Home::Pinned && w.meta.role == WindowRole::Standard)
+            .map(|w| w.meta.id)
+            .collect();
+        out.sort();
+        out
     }
 
     /// True for a window seen on every Space.
@@ -300,7 +328,7 @@ impl Model {
     /// entries of its apps that quit with them). One with no pending stage but entries of
     /// apps that quit is kept until those are pruned, so the file still writes them (review
     /// E5: an app alone on a Desktop the user left lost its quit grace).
-    fn prune_space(&mut self, space: SpaceId) {
+    pub(crate) fn prune_space(&mut self, space: SpaceId) {
         if self.is_shown_space(space) || self.windows.values().any(|w| w.space == space) {
             return;
         }
@@ -318,10 +346,12 @@ impl Model {
         self.spaces.retain(|s| s.id != space);
         self.front_owed.remove(&space);
         self.moved_from.retain(|_, from| *from != space);
+        self.unbind_space(space);
     }
 
     /// Renames a Space everywhere it is referenced.
     pub(crate) fn relabel_space(&mut self, old: SpaceId, new: SpaceId) {
+        self.relabel_desks(old, new);
         for s in &mut self.spaces {
             if s.id == old {
                 s.id = new;
@@ -569,6 +599,18 @@ impl Model {
         self.hold_arrivals = on;
     }
 
+    /// Whether the Spaces engine watches a screen gone (its display watch, [`crate::engine::spill::WATCH`]):
+    /// while it does, a window of a hidden stage of the gone screen's Desktops listed on
+    /// another Desktop stays in its stage, hidden again ([`ArrivalNote::kept_hidden`]),
+    /// whatever the user clicked or typed since. The watch over, those windows are taken as
+    /// ever and no longer kept ([`Model::handed_hidden`] cleared).
+    pub fn set_display_watch(&mut self, on: bool) {
+        self.display_watch = on;
+        if !on {
+            self.handed_hidden.clear();
+        }
+    }
+
     /// Names, for the next [`Model::arrive`] only, the windows the platform's own switch
     /// showed just before or during this Space change (round stage-lost). macOS may slide to
     /// another Desktop for the switch's activation and back (an app activated while its
@@ -596,7 +638,23 @@ impl Model {
         absent: &[WindowId],
         hints: &LaunchHints,
     ) -> Vec<Action> {
+        self.arrive_keyed(display, None, live, absent, hints)
+    }
+
+    /// [`Model::arrive`]; with `key` (the Desktop the window server lists on `display` and
+    /// what it says of `live`'s windows, [`Model::arrive_on`]) the listing decides in place
+    /// of the guesses: which Space arrived, which windows moved, which are on every Desktop
+    /// (`desks.rs`, module docs). The caller binds the Desktop after.
+    pub(crate) fn arrive_keyed(
+        &mut self,
+        display: DisplayId,
+        key: Option<(&Desk, &Listed)>,
+        live: &[WindowMeta],
+        absent: &[WindowId],
+        hints: &LaunchHints,
+    ) -> Vec<Action> {
         let mut actions = Vec::new();
+        let listed = key.map(|(_, listed)| listed);
         let display = self.known_display(display);
         // Windows the launch's first arrival sent here, to their saved stage's screen
         // (`pool.rs`): this screen's windows, at their saved frames.
@@ -611,7 +669,10 @@ impl Model {
             live
         };
         let prev = self.current_space(display);
+        // Keyed, a window shown by our own switch that is listed here is on this Desktop by
+        // the window server's word: none is kept home by a guess.
         let carried = std::mem::take(&mut self.slide_carried);
+        let carried = if key.is_some() { HashSet::new() } else { carried };
         let mut known: Vec<WindowId> = live
             .iter()
             .map(|m| m.id)
@@ -644,16 +705,25 @@ impl Model {
         // At launch with no exact match (titles change), the Space shown when saved, when
         // the apps on screen say so too (V3: quit on Desktop 2, relaunched on Desktop 1).
         let launch = self.spaces.iter().all(|s| s.last_seen == 0);
+        // Keyed: the Space bound to the Desktop listed is the one that arrived (a Space of
+        // this screen: one counted on another is not this arrival's). A Desktop bound to none
+        // yet is voted for as ever, among the Spaces bound to no Desktop.
+        let bound = key.and_then(|(desk, _)| self.space_of_desk(desk.id)).filter(|s| self.spaces.iter().any(|sp| sp.id == *s && sp.display == display));
+        if key.is_some() {
+            scores.retain(|id, _| self.desk_of_space(*id).is_none());
+        }
         // With nothing that scores, a screen with one Desktop is the one Desktop saved on it,
         // whatever it lists (the 11-06 08:27 restart: the laptop listed no window at the
         // launch and stayed the model's first Space, renumbered 19; saved 17's windows came
         // in as strays from another Desktop).
-        let winner = scores
-            .iter()
-            .max_by_key(|(id, (n, known, seen))| (*n, *known, *seen, std::cmp::Reverse(**id)))
-            .map(|(id, _)| *id)
-            .or_else(|| self.only_desktop_saved_on(display))
-            .or_else(|| launch.then(|| self.launch_fallback(display, &arrivals)).flatten());
+        let winner = bound.or_else(|| {
+            scores
+                .iter()
+                .max_by_key(|(id, (n, known, seen))| (*n, *known, *seen, std::cmp::Reverse(**id)))
+                .map(|(id, _)| *id)
+                .or_else(|| self.only_desktop_saved_on(display))
+                .or_else(|| launch.then(|| self.launch_fallback(display, &arrivals)).flatten())
+        });
         let target = match winner {
             Some(id) if self.has_space(id) => id,
             Some(id) => {
@@ -664,7 +734,9 @@ impl Model {
                 });
                 id
             }
-            None if self.space_is_empty(prev) => prev,
+            // The empty Space shown stands in for a Desktop never seen; keyed, only while it
+            // is bound to no Desktop (one bound is that Desktop's, empty or not).
+            None if self.space_is_empty(prev) && (key.is_none() || self.desk_of_space(prev).is_none()) => prev,
             None => self.new_space(display),
         };
         // A display change under way, no click or key since (`hold_arrivals`): a window first
@@ -672,19 +744,34 @@ impl Model {
         // lid closed: a window of the 5K's other Desktop, listed here for a moment, became a
         // stage and a card until it left 2 s later), not placed. A Desktop that changed takes
         // its windows as ever (the lid closed onto another Desktop: its own are rebuilt).
-        let held: Vec<WindowId> = if self.hold_arrivals && target == prev { arrivals.iter().map(|m| m.id).collect() } else { Vec::new() };
+        // Keyed, a window listed here is on this Desktop by the window server's word: placed.
+        let held: Vec<WindowId> =
+            if key.is_none() && self.hold_arrivals && target == prev { arrivals.iter().map(|m| m.id).collect() } else { Vec::new() };
         // A carried window listed on a Desktop not its own stays in its stage there: left out
         // of this arrival (not moved here, no hop counted, nothing matched on screen for it).
         let kept_home: Vec<WindowId> =
             carried_known.iter().copied().filter(|id| self.windows.get(id).is_some_and(|w| w.space != target)).collect();
         known.retain(|id| !kept_home.contains(id));
+        // A window of a hidden stage of a gone screen's Desktop, listed here while the display
+        // change settles with no click or key since: the window server let it out of its stage
+        // Space as the screen went (a log, 11-18), not the user's move. It stays in its stage
+        // on its own Desktop, hidden again (`handed_hidden`, while the engine watches).
+        // Keyed: any window the model counts hidden in a stage of another Desktop that is on
+        // this one and that nothing lent was let out by something else: hidden again, at any
+        // time, never a move.
+        let kept_hidden = match listed {
+            Some(listed) => self.hidden_elsewhere(target, &known, listed),
+            None => self.kept_hidden(target, &known),
+        };
+        known.retain(|id| !kept_hidden.contains(id));
         let unkept: Vec<WindowMeta>;
-        let live = if kept_home.is_empty() {
+        let live = if kept_home.is_empty() && kept_hidden.is_empty() {
             live
         } else {
-            unkept = live.iter().filter(|m| !kept_home.contains(&m.id)).cloned().collect();
+            unkept = live.iter().filter(|m| !kept_home.contains(&m.id) && !kept_hidden.contains(&m.id)).cloned().collect();
             &unkept[..]
         };
+        actions.extend(kept_hidden.iter().map(|id| Action::Hide { id: *id }));
         let arrivals: Vec<WindowMeta> = arrivals.into_iter().filter(|m| !held.contains(&m.id)).collect();
         let saved = self
             .leftovers
@@ -704,7 +791,9 @@ impl Model {
         // a new Desktop), whose stages that moved here whole are carried over before the
         // windows seen here for the first time are placed.
         let bare = self.space_is_empty(target) && saved.is_none();
-        let beside = self.hold_beside(target, &all);
+        // Keyed, no Desktop is "still on screen beside this one": its windows are not listed
+        // on this Desktop, and were left out.
+        let beside = if key.is_some() { BTreeSet::new() } else { self.hold_beside(target, &all) };
         // A Desktop whose front left it while not shown: an empty front for now (never one
         // of its cards made front with its windows still parked), its card forward below.
         let owed = self.front_owed.remove(&target);
@@ -715,7 +804,10 @@ impl Model {
         self.match_screen(target, live, &mut actions);
 
         let mut sticky = Vec::new();
-        let mut moving = self.collect_moves(target, &known, &beside, &mut sticky, &mut actions);
+        let mut moving = match listed {
+            Some(listed) => self.listed_moves(target, &known, listed),
+            None => self.collect_moves(target, &known, &beside, &mut sticky, &mut actions),
+        };
         let carried = if bare { self.carry_stages(target, &mut moving, &mut actions) } else { 0 };
         let mut arrivals = arrivals;
         let mut restored = 0;
@@ -824,9 +916,24 @@ impl Model {
         // Windows carried with their stages are not counted as moved one by one.
         let moved = moving.len();
         self.move_in(target, &moving, live, hints, &mut actions);
+        if key.is_some() && prev != target {
+            // The Space left gave its last windows to this one (a guess made without the
+            // listing, corrected now): forgotten, empty.
+            self.prune_space(prev);
+        }
         if owed {
             // Its most recent card comes forward, as when its front left it while shown.
             self.forward_after_emptied(target, &mut actions);
+        }
+        if let Some(listed) = listed {
+            // Listed on two Desktops or more: on every Desktop, from the first arrival that
+            // sees it so (known before, or placed just now).
+            for &id in &listed.every {
+                if self.windows.get(&id).is_some_and(|w| !w.sticky && w.meta.role == WindowRole::Standard) {
+                    self.make_sticky(id, target, &mut actions);
+                    sticky.push(id);
+                }
+            }
         }
         self.moved_from
             .retain(|id, from| *from != target || known.contains(id));
@@ -852,10 +959,53 @@ impl Model {
             beside: beside.iter().map(|s| s.0).collect(),
             held,
             kept_home,
+            kept_hidden,
             sticky,
+            desk: None,
         };
         actions.push(Action::StateChanged);
         actions
+    }
+
+    /// Keyed ([`Model::arrive_on`]): of `known` (windows on the arriving Desktop by the window
+    /// server's word), those the model counts hidden in a stage of another Space that the
+    /// window engine did not lend there and that are not on every Desktop.
+    fn hidden_elsewhere(&self, target: SpaceId, known: &[WindowId], listed: &Listed) -> Vec<WindowId> {
+        known
+            .iter()
+            .copied()
+            .filter(|id| !listed.lent.contains(id) && !listed.every.contains(id))
+            .filter(|id| self.windows.get(id).is_some_and(|w| w.parked && !w.sticky && w.space != target))
+            .collect()
+    }
+
+    /// Keyed ([`Model::arrive_on`]): the known standard windows among `known` (on the
+    /// arriving Desktop by the window server's word) whose Space is another one were moved
+    /// here, at once; those on every Desktop ([`Listed::every`]) are left for the arrival's
+    /// end, where they are made so.
+    fn listed_moves(&self, target: SpaceId, known: &[WindowId], listed: &Listed) -> Vec<WindowId> {
+        known
+            .iter()
+            .copied()
+            .filter(|id| !listed.every.contains(id))
+            .filter(|id| self.windows.get(id).is_some_and(|w| !w.sticky && w.meta.role == WindowRole::Standard && w.space != target))
+            .collect()
+    }
+
+    /// Of `known` (windows listed at an arrival on `target`), those of a hidden stage of a gone
+    /// screen's Desktop (`handed_hidden`) still counted hidden there, while the Spaces engine
+    /// watches the screen gone ([`Model::set_display_watch`]: a key press before the first
+    /// visit to a moved Desktop does not end it). After the watch, a window listed elsewhere
+    /// is taken as ever.
+    fn kept_hidden(&self, target: SpaceId, known: &[WindowId]) -> Vec<WindowId> {
+        if !self.display_watch || self.options.engine != EngineKind::Spaces {
+            return Vec::new();
+        }
+        known
+            .iter()
+            .copied()
+            .filter(|id| self.handed_hidden.contains(id) && self.windows.get(id).is_some_and(|w| w.parked && !w.sticky && w.space != target))
+            .collect()
     }
 
     /// Stages of the Desktop a removed display showed (`adopted`, [`Model::adopt_display`])
@@ -1270,7 +1420,7 @@ impl Model {
     /// frames its windows have on screen now (`live`, read fresh at the arrival), as any
     /// switch keeps them (E3: an app that posts no move notice came back where it was
     /// before the user last moved it).
-    fn move_in(&mut self, target: SpaceId, ids: &[WindowId], live: &[WindowMeta], hints: &LaunchHints, actions: &mut Vec<Action>) {
+    pub(crate) fn move_in(&mut self, target: SpaceId, ids: &[WindowId], live: &[WindowMeta], hints: &LaunchHints, actions: &mut Vec<Action>) {
         if ids.is_empty() {
             return;
         }

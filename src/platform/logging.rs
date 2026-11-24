@@ -416,8 +416,13 @@ impl<S: Subscriber> tracing_subscriber::Layer<S> for BookLayer {
     }
 }
 
-/// Writes the app's counts (`kind`: `hour`, `quit`, `panic`) as one `COUNT` line.
+/// Writes the app's counts (`kind`: `hour`, `quit`, `panic`) as one `COUNT` line, after one
+/// info line per time value that came close since the last ([`crate::engine::margin`]:
+/// `log summary`'s "Time values that came close").
 pub fn write_counts(kind: &str) {
+    for line in crate::engine::margin::take_period() {
+        tracing::info!("{} {line} kind={kind}", crate::engine::margin::SUMMARY_PREFIX);
+    }
     let Some(b) = BOOK.get().filter(|b| b.counting) else { return };
     let stamp = now();
     // A rollover inside `write` resets the counters: take the snapshot after it.

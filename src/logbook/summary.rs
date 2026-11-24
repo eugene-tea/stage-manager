@@ -3,7 +3,8 @@
 //! The summary is short enough to paste into a chat: the day's counts (the last `COUNT`
 //! line of every app run, added up), the runs and unclean exits, every problem mark with its
 //! line number, every warning and error, deduplicated (numbers folded) with how often and
-//! when, and the day's last restore after a restart (its one line, no titles).
+//! when, the day's last restore after a restart (its one line, no titles), and the time
+//! values that came close to their limit ([`crate::engine::margin`]).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -12,6 +13,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 
 use super::counters::{ALL, Count, Counts};
+use crate::engine::margin::{self, Row};
 use super::time::Date;
 use super::{CAP_NOTICE, COUNT_MESSAGE, MARK_BEGIN, UNCLEAN_EXIT};
 
@@ -89,7 +91,7 @@ pub struct MarkRef {
 }
 
 /// A day's log, summed up.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Summary {
     /// The day.
     pub date: Option<Date>,
@@ -117,6 +119,9 @@ pub struct Summary {
     pub capped: bool,
     /// The last restore line of the day (`HH:MM:SS`, the line from "restore: " on).
     pub last_restore: Option<(String, String)>,
+    /// The time values that came close, by name: every period's line of the day added up
+    /// ([`margin::take_period`]).
+    pub margins: std::collections::BTreeMap<String, Row>,
 }
 
 /// Folds numbers to `#` and lists of them to `[#…]`, so repeats of one problem with other
@@ -157,6 +162,11 @@ pub fn summarize(date: Option<Date>, text: &str) -> Summary {
             "INFO" => {
                 if let Some(m) = restore_regex().find(line.text) {
                     s.last_restore = Some((line.time[..8].to_string(), m.as_str().to_string()));
+                }
+                if let Some((_, fields)) = line.text.split_once(margin::SUMMARY_PREFIX)
+                    && let Some((name, row)) = margin::parse_line(fields)
+                {
+                    s.margins.entry(name).or_default().add(&row);
                 }
             }
             "MARK" => {
@@ -265,6 +275,27 @@ impl fmt::Display for Summary {
         if self.problems.len() > MAX_PROBLEMS {
             writeln!(f, "  … and {} more kinds", self.problems.len() - MAX_PROBLEMS)?;
         }
+        if !self.margins.is_empty() {
+            writeln!(f, "Time values that came close (share of the limit; close: 0.5-1 inside, near: 1-2 outside):")?;
+            writeln!(f, "  {:<28} {:>8} {:>7} {:>7} {:>6} {:>5} {:>5} {:>6} {:>8} {:>8}", "name", "limit", "inside", "outside", "close", "near", "waits", "capped", "predated", "noticed")?;
+            let share = |s: Option<f64>| s.map_or_else(|| "-".to_string(), |s| format!("{s:.2}"));
+            for (name, r) in &self.margins {
+                writeln!(
+                    f,
+                    "  {:<28} {:>6}ms {:>7} {:>7} {:>6} {:>5} {:>5} {:>6} {:>8} {:>8}",
+                    name,
+                    r.limit_ms,
+                    share(r.closest_inside),
+                    share(r.closest_outside),
+                    r.close_inside,
+                    r.just_outside,
+                    r.waits,
+                    r.capped,
+                    r.predated,
+                    r.noticed
+                )?;
+            }
+        }
         Ok(())
     }
 }
@@ -359,6 +390,23 @@ mod tests {
         assert!(s.to_string().contains("last restore after a restart: 08:02:11 restore: 9 windows into 4 stages on 2 Desktops in 41 s; 2 pending; 1 by Apple's rule"));
         assert!(s.to_string().contains("; 1 window back to their screen; the first 6 s after the login"), "the whole line, its endings too");
         assert!(!summarize(None, DAY).to_string().contains("last restore"), "a day without one says nothing");
+    }
+
+    #[test]
+    fn the_time_values_that_came_close_are_added_up_and_printed() {
+        let day = "\
+2026-10-12 10:00:00.000 +02:00 app[100] INFO  stage_manager::platform::logging: margin summary: name=ECHO_WINDOW limit_ms=700 decisions=40 closest_inside=0.81 closest_outside=- close_inside=2 just_outside=0 waits=0 capped=0 longest_wait_ms=0 predated=1 kind=hour
+2026-10-12 11:00:00.000 +02:00 app[100] INFO  stage_manager::platform::logging: margin summary: name=ECHO_WINDOW limit_ms=700 decisions=10 closest_inside=0.93 closest_outside=1.20 close_inside=1 just_outside=1 waits=0 capped=0 longest_wait_ms=0 predated=0 kind=quit
+2026-10-12 11:00:00.001 +02:00 app[100] INFO  stage_manager::platform::logging: margin summary: name=COVER_TIMEOUT limit_ms=150 decisions=0 closest_inside=- closest_outside=- close_inside=0 just_outside=0 waits=12 capped=3 longest_wait_ms=152 predated=0 kind=quit
+";
+        let s = summarize(None, day);
+        let echo = s.margins.get("ECHO_WINDOW").expect("echo");
+        assert_eq!((echo.decisions, echo.close_inside, echo.just_outside, echo.predated), (50, 3, 1, 1));
+        assert_eq!((echo.closest_inside, echo.closest_outside), (Some(0.93), Some(1.2)));
+        assert_eq!(s.margins.get("COVER_TIMEOUT").map(|r| (r.waits, r.capped)), Some((12, 3)));
+        let text = s.to_string();
+        assert!(text.contains("Time values that came close"));
+        assert!(text.lines().any(|l| l.trim_start().starts_with("COVER_TIMEOUT") && l.contains("150ms")));
     }
 
     #[test]

@@ -42,6 +42,18 @@ Scenarios (all by default, in this order):
   missed and its longest gap in the SM_AFTER_S (1.5) seconds after it was back. Its own
   display-link callbacks only: frames the window server composites are not seen. Not with
   `off`.
+- covered (by name only; round cpu-rest): the strip following the Dock (`[strip] order =
+  "dock"`) and thumbnails on a 1.5 s timer (`thumbnail_interval_ms = 1500`; the default takes
+  them at events only, none at rest), written live. SM_REST_S seconds untouched with the
+  windows clear of the strip, then SM_REST_S more with the front stage's windows flush with
+  the screen's left edge (the strip slides away): our CPU and, from `ctl state`'s `costs`, the
+  windows captured and the Dock reads a minute in each. Then, thumbnails at events again, the
+  front windows 100 pt in, over the cards (the strip stays shown, below them), and the pointer
+  resting on a window over a card for 2 s: `ctl debug-strip`'s `under_windows` and the windows
+  captured meanwhile. Pass: no Dock read on a timer (2 a minute at most, against 30 before
+  1.9.1), no capture at that hover (a card under a window hovered before, and its windows
+  were taken), and, with the Spaces engine, no capture a minute with the strip slid away (the
+  park corner keeps the front windows' full-size pictures on its own 2 s timer). Not with `off`.
 
 The app runs from the dev copy with captures on (as installed; SM_CAPTURE=0 turns them off), STAGE_MANAGER_ONLY the
 fixtures, in a scratch home; fixture windows only, at frames clear of the strip.
@@ -59,7 +71,7 @@ import time
 
 SCENARIOS = ["rest", "sample", "switch", "call", "launch"]
 # Run only when named (the default list above is what scripts/measure.sh has always run).
-BY_NAME = ["hidden"]
+BY_NAME = ["hidden", "covered"]
 
 
 def parse_args(argv):
@@ -373,6 +385,102 @@ def scenario_rest():
     time.sleep(REST_S)
     m = sp.end()
     return record("rest", m)
+
+
+# ----- covered ---------------------------------------------------------------------------
+
+# The strip following the Dock, and thumbnails on a timer: what the Dock's event reads and the
+# capture gates save shows at rest. `HOVER_CONFIG` takes thumbnails at events again, so a
+# capture at the hover is the hover's.
+COVERED_CONFIG = '[strip]\nthumbnail_interval_ms = 1500\norder = "dock"\n'
+HOVER_CONFIG = '[strip]\norder = "dock"\n'
+COST_KEYS = ("captures", "dock_reads", "window_lists", "launch_services")
+
+
+def costs_now():
+    return dict(T.state().get("costs") or {})
+
+
+def rest_with_costs(label):
+    """SM_REST_S seconds untouched: the span's CPU and each of COST_KEYS a minute."""
+    say(f"  {label}: {REST_S:.0f} s untouched")
+    c0 = costs_now()
+    sp = Span(with_top_secs=REST_S)
+    time.sleep(REST_S)
+    m = sp.end()
+    c1 = costs_now()
+    for k in COST_KEYS:
+        if k in c0 and k in c1:
+            m[f"{k}_per_min"] = round((c1[k] - c0[k]) * 60.0 / m["wall_s"], 1)
+    say(f"    app CPU {m.get('app_cpu_pct')} %, " + ", ".join(f"{k} {m.get(k + '_per_min')}/min" for k in COST_KEYS))
+    return m
+
+
+def move_front(s, x, top=None, height=None):
+    """The front stage's shown windows to left edge `x` (global), optionally `top` and at
+    least `height` tall; each window's own frame otherwise."""
+    for w in s["windows"]:
+        if w["home"] == s["active"] and w["role"] == "standard" and not w["parked"]:
+            r = w["restore"]
+            T.ctl("debug-frame", w["id"], x, r["y"] if top is None else top, r["w"], r["h"] if height is None else max(r["h"], height))
+
+
+def put_back(s):
+    for w in s["windows"]:
+        if w["home"] == s["active"] and w["role"] == "standard" and not w["parked"]:
+            r = w["restore"]
+            T.ctl("debug-frame", w["id"], r["x"], r["y"], r["w"], r["h"])
+
+
+def scenario_covered():
+    if ENGINE == "off":
+        return None
+    say(f"\n== covered ({ENGINE}, run {RUN}): {STAGES} stages, the strip following the Dock ==")
+    stages_up()
+    if not T.set_config_live(COVERED_CONFIG):
+        raise RuntimeError("the config was not reloaded")
+    time.sleep(SETTLE_S)
+    clear = rest_with_costs("windows clear of the strip, thumbnails every 1.5 s")
+    s = T.state()
+    vis = s["display"]["visible"]
+    move_front(s, vis["x"])
+    slid = T.wait_until(lambda: (T.state().get("strip_panel") or {}).get("shown") is False, 3, "the strip to slide away")
+    edge = rest_with_costs("the front windows flush left, the strip slid away")
+    put_back(s)
+    # The pointer on a window over a card, thumbnails at events only.
+    if not T.set_config_live(HOVER_CONFIG):
+        raise RuntimeError("the config was not reloaded")
+    time.sleep(1.5)
+    s = T.state()
+    cards = [c["frame"] for c in s.get("strip_cards") or []]
+    if not cards:
+        raise RuntimeError("no card to hover")
+    top = min(c["y"] for c in cards) - 20
+    bottom = max(c["y"] + c["h"] for c in cards) + 20
+    move_front(s, vis["x"] + 100, max(vis["y"], top), bottom - top)
+    time.sleep(2.0)
+    shown = (T.state().get("strip_panel") or {}).get("shown")
+    under = (T.ctl("debug-strip").get("strip") or {}).get("under_windows")
+    c0 = costs_now().get("captures") or 0
+    card = cards[0]
+    # On the window, over the card: between the window's left edge and the card's right one.
+    over_x = (vis["x"] + 100 + card["x"] + card["w"]) / 2
+    if over_x <= vis["x"] + 100 or over_x >= card["x"] + card["w"]:
+        raise RuntimeError("the window covers no part of the card to hover")
+    T.ctl("debug-hover", over_x, card["y"] + card["h"] / 2, 2000)
+    time.sleep(2.5)
+    hover_captures = (costs_now().get("captures") or 0) - c0
+    T.ctl("debug-pointer-back")
+    put_back(s)
+    edge_ok = ENGINE != "spaces" or edge.get("captures_per_min") == 0
+    dock_ok = all((m.get("dock_reads_per_min") or 0) <= 2 for m in (clear, edge))
+    ok = bool(slid) and shown is True and hover_captures == 0 and edge_ok and dock_ok
+    say(f"  {'pass' if ok else 'FAIL'}: captures a minute clear {clear.get('captures_per_min')}, slid away "
+        f"{edge.get('captures_per_min')}, at the hover over a card under a window {hover_captures} (strip shown "
+        f"{shown}, cards under windows {under}); Dock reads a minute {clear.get('dock_reads_per_min')} and "
+        f"{edge.get('dock_reads_per_min')}")
+    return record("covered", {"ok": ok, "clear": clear, "slid_away": edge, "strip_slid": bool(slid), "strip_shown_under": shown,
+                              "under_windows": under, "cards": len(cards), "hover_captures": hover_captures})
 
 
 # ----- sample ----------------------------------------------------------------------------
@@ -949,6 +1057,12 @@ def summary(out):
     add("hidden: drawing again after the show ms", "hidden", g("back_ms_median"))
     add("hidden: drawing smoothly again ms", "hidden", g("smooth_ms_median"))
     add("hidden: missed refreshes after the show", "hidden", g("after_missed_median"))
+    add("covered: app CPU % clear", "covered", g("clear", "app_cpu_pct"))
+    add("covered: app CPU % slid away", "covered", g("slid_away", "app_cpu_pct"))
+    add("covered: captures/min clear", "covered", g("clear", "captures_per_min"))
+    add("covered: captures/min slid away", "covered", g("slid_away", "captures_per_min"))
+    add("covered: Dock reads/min", "covered", g("clear", "dock_reads_per_min"))
+    add("covered: captures at a hover under a window", "covered", g("hover_captures"))
     widths = [max(len(str(l[i])) for l in lines) for i in range(len(lines[0]))]
     for i, l in enumerate(lines):
         print("| " + " | ".join(str(c).ljust(w) for c, w in zip(l, widths)) + " |")
@@ -983,7 +1097,7 @@ def main():
     say(f"home: {T.HOME}; engine {ENGINE}; run {RUN}; out {OUT}")
     front = T.frontmost_bundle()
     fns = {"rest": scenario_rest, "sample": scenario_sample, "switch": scenario_switch, "call": scenario_call, "launch": scenario_launch,
-           "hidden": scenario_hidden}
+           "hidden": scenario_hidden, "covered": scenario_covered}
     code = 0
     try:
         for sc in ARGS["scenarios"]:

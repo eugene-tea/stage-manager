@@ -25,12 +25,14 @@
 //!   window's frame back.
 //!
 //! **Guards.** Each gesture checks the window list itself just before it posts: a click goes
-//! only where the topmost window is WindowManager's (a strip item's stand-in), a drag only
-//! where the topmost window is the window dragged. Nothing is posted while a mouse button is
+//! only where the topmost window is the twin of the window meant, at the bounds the read had
+//! ([`press_lands`]: Apple's may lay the strip out again between two clicks of a press, live
+//! 11-17), a drag only where the topmost window is the window dragged. Nothing is posted while a mouse button is
 //! down. A [`Gesture`] guard ends whatever is held if its thread unwinds, and
 //! [`end_in_flight`] (the engine's bring-all-back: quit, a signal, the panic hook) ends a
 //! gesture still in flight from outside: Shift up, the button up, the pointer back.
 
+use crate::platform::clock;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -41,7 +43,8 @@ use objc2_core_graphics::{
     CGWarpMouseCursorPosition,
 };
 
-use crate::engine::apple::desk::{CLICK_GAP, Landed, Posted, Press};
+use crate::engine::apple::desk::{CLICK_GAP, Landed, Posted, Press, press_lands};
+use crate::engine::apple::mirror::ListedWindow;
 use crate::engine::geometry::Point;
 use crate::platform::{desktop, dock as dock_app, input, windows};
 
@@ -70,7 +73,8 @@ const MOVED: f64 = 4.0;
 pub const POINTER_WAIT: Duration = Duration::from_millis(20);
 
 /// Input events heard this soon after a gesture of ours ended are its own echoes (the global
-/// monitor hears posted events), never the person's.
+/// monitor hears posted events), never the person's. A plain time: the monitor hears our Shift
+/// and the person's alike; telling them apart by a tag on the posted events is not probed.
 pub const ECHO: Duration = Duration::from_millis(300);
 
 /// Shift's virtual key code.
@@ -108,7 +112,11 @@ pub fn take_landed() -> Option<Landed> {
 /// True when an input event heard at `now` may be a gesture of ours: one is in flight, or
 /// ended less than [`ECHO`] ago.
 pub fn echo(now: Instant) -> bool {
-    in_flight() || ENDED.lock().ok().and_then(|e| *e).is_some_and(|t| now.saturating_duration_since(t) < ECHO)
+    in_flight()
+        || ENDED.lock().ok().and_then(|e| *e).is_some_and(|t| {
+            let age = crate::engine::margin::age("apple::post::ECHO", now, t);
+            crate::engine::margin::within("apple::post::ECHO", age, ECHO)
+        })
 }
 
 /// Starts `posted` on a thread of its own (`manager`: WindowManager's pid, whose window a
@@ -142,7 +150,7 @@ pub fn start(posted: Posted, manager: Option<i32>) -> Result<(), String> {
             *l = Some(landed);
         }
         if let Ok(mut e) = ENDED.lock() {
-            *e = Some(Instant::now());
+            *e = Some(clock::now());
         }
         IN_FLIGHT.store(false, Ordering::SeqCst);
     });
@@ -248,9 +256,9 @@ fn release(held: Held) {
 /// The Shift press (module docs): every click of `presses` within one Shift press.
 fn shift_press(g: &mut Gesture, presses: &[Press], own_shift: bool, manager: Option<i32>) -> Landed {
     let Some(manager) = manager else { return Landed::Refused("WindowManager is not running".into()) };
-    let manager_at = |at: Point| top_is(at, |w| w.pid == manager && w.layer == 0);
+    let lands = |p: &Press| press_lands(&drawn_at(p.at), manager, p);
     let Some(first) = presses.first() else { return Landed::Refused("no click to post".into()) };
-    if let Err(why) = manager_at(first.at) {
+    if let Err(why) = lands(first) {
         return Landed::Refused(why);
     }
     if any_button_down() {
@@ -280,12 +288,13 @@ fn shift_press(g: &mut Gesture, presses: &[Press], own_shift: bool, manager: Opt
                 ended = Some("the pointer moved");
                 break;
             }
-            if manager_at(p.at).is_err() {
+            if let Err(why) = lands(p) {
+                tracing::debug!(window = p.window, why, "apple mode: a click of the press left for the next read");
                 skipped += 1;
                 continue;
             }
         }
-        let t0 = Instant::now();
+        let t0 = clock::now();
         if let Err(e) = mouse(CGEventType::LeftMouseDown, p.at, CGEventFlags::MaskShift) {
             failed = Some(e);
             break;
@@ -355,7 +364,7 @@ fn drag(g: &mut Gesture, window: u32, from: Point, to: Point) -> Landed {
         last = *p;
         std::thread::sleep(pause);
     }
-    let held = Instant::now();
+    let held = clock::now();
     while held.elapsed() < DRAG_HOLD {
         std::thread::sleep(Duration::from_millis(30));
         if let Some(why) = person(last) {
@@ -384,24 +393,37 @@ fn interrupted(g: &mut Gesture, why: &'static str) -> Landed {
     Landed::Interrupted(why.to_string())
 }
 
+/// The window list now, front to back, each window counted on screen only where it draws
+/// something at `p` (not clear, not one of macOS's own that lets clicks through there): what a
+/// click at `p` meets ([`press_lands`]).
+fn drawn_at(p: Point) -> Vec<ListedWindow> {
+    let list = windows::on_screen();
+    let screens = desktop::cg_display_bounds();
+    let mut dock = None;
+    list.iter()
+        .map(|w| ListedWindow { id: w.id, pid: w.pid, layer: w.layer, bounds: w.bounds, onscreen: w.onscreen && w.alpha > 0.0 && !through(w, p, &mut dock, &screens) })
+        .collect()
+}
+
+/// macOS's own full-screen windows that let clicks through (the mirror's
+/// [`super::desk::lets_clicks_through`]) are passed over where they draw nothing at `p`:
+/// Notification Center's off its banners and panel, the Dock's off its bar.
+fn through(w: &windows::CgWindow, p: Point, dock: &mut Option<Option<i32>>, screens: &[crate::engine::geometry::Rect]) -> bool {
+    super::desk::lets_clicks_through(w, dock, screens)
+        && if w.layer == dock_app::DOCK_LAYER && dock.flatten() == Some(w.pid) {
+            dock_app::bar_frame(w.pid).is_some_and(|bar| !bar.contains(p))
+        } else {
+            desktop::seen_through(w, p)
+        }
+}
+
 /// `Ok` when the topmost window at `p` (on screen, at or above the windows' layer, not
 /// clear) passes `ok`.
 fn top_is(p: Point, ok: impl Fn(&windows::CgWindow) -> bool) -> Result<(), String> {
     let list = windows::on_screen();
     let screens = desktop::cg_display_bounds();
     let mut dock = None;
-    // macOS's own full-screen windows that let clicks through (the mirror's
-    // [`super::desk::lets_clicks_through`]) are passed over where they draw nothing at `p`:
-    // Notification Center's off its banners and panel, the Dock's off its bar.
-    let through = |w: &windows::CgWindow, dock: &mut Option<Option<i32>>| {
-        super::desk::lets_clicks_through(w, dock, &screens)
-            && if w.layer == dock_app::DOCK_LAYER && dock.flatten() == Some(w.pid) {
-                dock_app::bar_frame(w.pid).is_some_and(|bar| !bar.contains(p))
-            } else {
-                desktop::seen_through(w, p)
-            }
-    };
-    match list.iter().find(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !through(w, &mut dock)) {
+    match list.iter().find(|w| w.onscreen && w.layer >= 0 && w.alpha > 0.0 && w.bounds.contains(p) && !through(w, p, &mut dock, &screens)) {
         Some(w) if ok(w) => Ok(()),
         Some(w) => Err(format!("the topmost window at {:.0},{:.0} is not the one meant (pid {}, layer {})", p.x, p.y, w.pid, w.layer)),
         None => Err(format!("no window at {:.0},{:.0}", p.x, p.y)),
@@ -426,7 +448,7 @@ fn pointer_now() -> Option<CGPoint> {
 
 /// Waits up to `limit` for the pointer to read at `p` (within a point): true when it does.
 fn pointer_at(p: Point, limit: Duration) -> bool {
-    let t0 = Instant::now();
+    let t0 = clock::now();
     loop {
         if pointer_now().is_some_and(|q| (q.x - p.x).abs() <= 1.0 && (q.y - p.y).abs() <= 1.0) {
             return true;

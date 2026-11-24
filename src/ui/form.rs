@@ -12,19 +12,17 @@
 //! in-process (`cacheDisplayInRect`), never from the screen, for the preview mode.
 
 use std::cell::RefCell;
-use std::path::Path;
 use std::rc::Rc;
 
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{ClassType, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSBitmapImageFileType,
     NSBox, NSBoxType, NSButton, NSColor, NSControl, NSControlSize, NSControlStateValueOff, NSControlStateValueOn, NSFont,
     NSFontWeightRegular, NSFontWeightSemibold, NSImage, NSImageSymbolConfiguration, NSImageView, NSLineBreakMode,
     NSAccessibility, NSPopUpButton, NSSwitch, NSTextAlignment, NSTextField, NSTitlePosition, NSView, NSWindow,
 };
-use objc2_foundation::{MainThreadMarker, NSDictionary, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{MainThreadMarker, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 define_class!(
     // SAFETY: NSView has no subclassing requirements; FlippedView does not implement Drop.
@@ -397,15 +395,6 @@ impl Form {
         self.trailing_gap = 0.0;
     }
 
-    /// A section title above a group.
-    pub fn header(&mut self, text: &str) {
-        let l = label(self.mtm, text, 13.0, true);
-        l.sizeToFit();
-        let h = l.frame().size.height;
-        self.place(&l, self.margin + self.metrics.note_inset, h);
-        self.y += 6.0;
-    }
-
     /// Grey text under a group.
     pub fn footnote(&mut self, text: &str) {
         self.y += 6.0;
@@ -522,9 +511,11 @@ pub fn describe_control(control: &NSView, title: &str, detail: Option<&str>) {
     }
 }
 
+#[cfg(feature = "probes")]
 /// Sets the whole app's appearance: `Some(true)` dark, `Some(false)` light, `None` the
 /// system's (preview renders).
 pub fn set_app_appearance(mtm: MainThreadMarker, dark: Option<bool>) {
+    use objc2_app_kit::{NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua};
     let app = objc2_app_kit::NSApplication::sharedApplication(mtm);
     let appearance = dark.and_then(|d| {
         // SAFETY: AppKit's own appearance name constants.
@@ -534,9 +525,12 @@ pub fn set_app_appearance(mtm: MainThreadMarker, dark: Option<bool>) {
     app.setAppearance(appearance.as_deref());
 }
 
+#[cfg(feature = "probes")]
 /// Draws `window` (title bar included) into a PNG at `path`, in-process: the view hierarchy
 /// renders itself into a bitmap (`cacheDisplayInRect`); the screen is never read.
-pub fn render_png(window: &NSWindow, path: &Path) -> Result<(), String> {
+pub fn render_png(window: &NSWindow, path: &std::path::Path) -> Result<(), String> {
+    use objc2_app_kit::NSBitmapImageFileType;
+    use objc2_foundation::NSDictionary;
     let content = window.contentView().ok_or("no content view")?;
     // The frame view (the content view's superview) holds the title bar too.
     // SAFETY: plain getter.

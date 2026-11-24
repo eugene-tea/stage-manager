@@ -30,7 +30,8 @@ itself), then reads the hovered card white and black the same way: its opacity t
 
 Usage: scripts/measure-apple-card-glass.py [--yes] [--keep] [--hover] [--bin PATH]
 Needs: python3, macOS's screencapture and sips, swiftc (the fixture is built here), and the
-app's binary (`make` first; target/debug/stage-manager, or --bin).
+app's binary with the probes (`cargo build --features probes` first; target/debug/stage-manager,
+or --bin).
 """
 
 import json

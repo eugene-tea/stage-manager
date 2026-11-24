@@ -9,12 +9,17 @@
 //! the echo made every reveal bring Finder's stage forward ("Finder comes back and leaves,
 //! back and leaves, on each desktop click").
 //!
-//! [`DesktopEcho`] tells the echo from a deliberate act. From a press on the desktop (the
-//! wallpaper or a desktop icon), an activation of the desktop's owner ([`DESKTOP_OWNER`]) or
-//! a focus of one of its windows is the press's echo while the button is down and until
-//! [`WALLPAPER_ECHO`] after its release, however the press ends (a click, a long press, a
-//! drag, a rubber band), unless the user does something else first (a mouse-down anywhere
-//! but the desktop, a key press). Since the reveal waits for the release, macOS's Finder
+//! [`DesktopEcho`] tells the echo from a deliberate act, by the order of events (round
+//! r4-causes; before, by the second after the release, and a Mac three times slower took
+//! the echo for a deliberate activation). A press on the desktop (the wallpaper or a desktop
+//! icon) expects two things of the desktop's owner ([`DESKTOP_OWNER`]): its activation, and
+//! a focus of one of its windows. While the press is down whatever the owner tells is the
+//! press's (the user holds the desktop: a long press, a drag, a rubber band); after its
+//! release the first of each is its echo ([`DesktopEcho::heard`]), unless the user does
+//! something else first (a mouse-down anywhere but the desktop, a key press:
+//! [`DesktopEcho::user_acted`]). A second activation, or a second focus, after the release
+//! is not. Time is only the cap of an echo that never comes ([`WALLPAPER_ECHO`] after the
+//! release, [`PRESS_HELD_MAX`] while the button is down). Since the reveal waits for the release, macOS's Finder
 //! activation can come while the press is still down, about a second after it (11-09
 //! 16:33:26.9 press, 16:33:27.92 Finder activated, right at the release of a 1 s press).
 //! A click on one of our strip's cards is not "something else": the global input monitor
@@ -26,9 +31,21 @@ use std::time::{Duration, Instant};
 /// The app that owns the desktop (its window is the wallpaper's click target).
 pub const DESKTOP_OWNER: &str = "com.apple.finder";
 
-/// How long after a desktop press (and again after its release) the desktop owner's
-/// activation and focus count as its echo (unless the user did something else first).
-pub const WALLPAPER_ECHO: Duration = Duration::from_millis(1000);
+/// The cap of a desktop press's echo: how long after the press (and again after its
+/// release) the desktop owner's first activation and first focus still count as its echo
+/// when nothing else ended it. Generous: the echo is macOS's own, about a second after the
+/// press as measured (11-09), later only as late as this thread gets to it, and what ends
+/// the wait is the user's next act, never this.
+pub const WALLPAPER_ECHO: Duration = Duration::from_secs(15);
+
+/// What the desktop's owner told ([`DesktopEcho::heard`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Told {
+    /// It was activated.
+    Activation,
+    /// One of its windows was focused.
+    Focus,
+}
 
 /// How long a desktop press may stay down and still count as down: a release the input
 /// monitor missed never leaves Finder's activations echoes for good.
@@ -50,21 +67,24 @@ pub struct DesktopEcho {
     since: Option<Instant>,
     /// The press is still down (its release not seen yet).
     down: bool,
+    /// The owner's activation after the release has come.
+    activated: bool,
+    /// A focus of one of the owner's windows after the release has come.
+    focused: bool,
 }
 
 impl DesktopEcho {
     /// The user pressed the desktop: the wallpaper or a desktop icon (whether or not anything
     /// will be revealed: Finder becomes frontmost either way).
     pub fn desktop_pressed(&mut self, now: Instant) {
-        self.since = Some(now);
-        self.down = true;
+        *self = Self { since: Some(now), down: true, activated: false, focused: false };
     }
 
     /// A left mouse-up: a desktop press still pending is released now, and its echo runs
     /// [`WALLPAPER_ECHO`] from here. Nothing for any other release.
     pub fn released(&mut self, now: Instant) {
         if std::mem::take(&mut self.down) && self.since.is_some() {
-            self.since = Some(now);
+            *self = Self { since: Some(now), ..Self::default() };
         }
     }
 
@@ -75,8 +95,8 @@ impl DesktopEcho {
         self.since.take().is_some()
     }
 
-    /// True while a desktop press's echo is expected: the press is down, or it was pressed or
-    /// released less than [`WALLPAPER_ECHO`] ago.
+    /// True while a desktop press's echo may still come: the press is down, or it was
+    /// pressed or released less than [`WALLPAPER_ECHO`] ago (the cap).
     pub fn pending(&self, now: Instant) -> bool {
         self.since.is_some_and(|t| {
             let age = now.saturating_duration_since(t);
@@ -84,13 +104,31 @@ impl DesktopEcho {
         })
     }
 
-    /// Classifies an activation of the app `bundle_id`, or a focus of one of its windows.
-    pub fn classify(&self, bundle_id: Option<&str>, now: Instant) -> Cause {
-        if bundle_id == Some(DESKTOP_OWNER) && self.pending(now) {
-            Cause::WallpaperEcho
-        } else {
-            Cause::Other
+    /// The app `bundle_id` told `told` (its activation, or a focus of one of its windows),
+    /// received at `now`: the echo of the last desktop press when it is the desktop owner's
+    /// and the press is down, or it is the owner's first such notice since the release and
+    /// the echo is still pending. Call it once per notice of the owner: it counts the notice.
+    pub fn heard(&mut self, bundle_id: Option<&str>, told: Told, now: Instant) -> Cause {
+        let (Some(t), true) = (self.since, bundle_id == Some(DESKTOP_OWNER)) else { return Cause::Other };
+        if self.down {
+            // The user holds the desktop: the owner's, however many.
+            let pending = self.pending(now);
+            let age = crate::engine::margin::age("PRESS_HELD_MAX", now, t);
+            crate::engine::margin::note("PRESS_HELD_MAX", age, PRESS_HELD_MAX, pending);
+            return if pending { Cause::WallpaperEcho } else { Cause::Other };
         }
+        let came = match told {
+            Told::Activation => &mut self.activated,
+            Told::Focus => &mut self.focused,
+        };
+        if std::mem::replace(came, true) {
+            // A second one since the press: no echo, whenever it comes.
+            return Cause::Other;
+        }
+        let pending = self.pending(now);
+        let age = crate::engine::margin::age("WALLPAPER_ECHO", now, t);
+        crate::engine::margin::wait("WALLPAPER_ECHO", age, WALLPAPER_ECHO, if pending { crate::engine::margin::End::Met } else { crate::engine::margin::End::Cap });
+        if pending { Cause::WallpaperEcho } else { Cause::Other }
     }
 }
 
@@ -109,17 +147,25 @@ mod tests {
     const MS: fn(u64) -> Duration = Duration::from_millis;
 
     #[test]
-    fn only_the_desktop_owner_echoes_and_only_for_a_while() {
+    fn only_the_desktop_owners_first_notices_after_a_press_echo() {
         let t0 = Instant::now();
         let mut e = DesktopEcho::default();
-        assert_eq!(e.classify(Some(DESKTOP_OWNER), t0), Cause::Other, "no click yet");
+        assert_eq!(e.heard(Some(DESKTOP_OWNER), Told::Activation, t0), Cause::Other, "no click yet");
         e.desktop_pressed(t0);
         e.released(t0 + MS(100));
-        assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(150)), Cause::WallpaperEcho);
-        assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(450)), Cause::WallpaperEcho);
-        assert_eq!(e.classify(Some("com.example.a"), t0 + MS(150)), Cause::Other);
-        assert_eq!(e.classify(None, t0 + MS(150)), Cause::Other);
-        assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(100) + WALLPAPER_ECHO), Cause::Other, "expired");
+        assert_eq!(e.heard(Some("com.example.a"), Told::Activation, t0 + MS(150)), Cause::Other);
+        assert_eq!(e.heard(None, Told::Focus, t0 + MS(150)), Cause::Other);
+        // By order: the first activation and the first focus, however late (11-09: 1025 ms
+        // after the press; three times slower, 3 s).
+        assert_eq!(e.heard(Some(DESKTOP_OWNER), Told::Activation, t0 + MS(3075)), Cause::WallpaperEcho);
+        assert_eq!(e.heard(Some(DESKTOP_OWNER), Told::Focus, t0 + MS(3100)), Cause::WallpaperEcho);
+        // A second of either is not the press's echo.
+        assert_eq!(e.heard(Some(DESKTOP_OWNER), Told::Activation, t0 + MS(3200)), Cause::Other);
+        assert_eq!(e.heard(Some(DESKTOP_OWNER), Told::Focus, t0 + MS(3200)), Cause::Other);
+        // The cap: an echo that never came is not waited for for good.
+        e.desktop_pressed(t0 + MS(10_000));
+        e.released(t0 + MS(10_100));
+        assert_eq!(e.heard(Some(DESKTOP_OWNER), Told::Activation, t0 + MS(10_100) + WALLPAPER_ECHO), Cause::Other, "expired");
     }
 
     #[test]
@@ -129,10 +175,10 @@ mod tests {
         e.desktop_pressed(t0);
         assert!(e.user_acted());
         assert!(!e.user_acted(), "nothing pending any more");
-        assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(100)), Cause::Other);
+        assert_eq!(e.heard(Some(DESKTOP_OWNER), Told::Activation, t0 + MS(100)), Cause::Other);
         e.desktop_pressed(t0 + MS(200));
         e.released(t0 + MS(250));
-        assert_eq!(e.classify(Some(DESKTOP_OWNER), t0 + MS(300)), Cause::WallpaperEcho, "a new click arms it again");
+        assert_eq!(e.heard(Some(DESKTOP_OWNER), Told::Activation, t0 + MS(300)), Cause::WallpaperEcho, "a new click arms it again");
     }
 
     // ----- the sequence with the model --------------------------------------------------
@@ -208,7 +254,7 @@ mod tests {
 
         /// Finder activated at `ms`, as the controller handles it.
         fn finder_activated(&mut self, ms: u64) -> (Cause, Vec<Action>) {
-            let cause = self.echo.classify(Some(DESKTOP_OWNER), self.at(ms));
+            let cause = self.echo.heard(Some(DESKTOP_OWNER), Told::Activation, self.at(ms));
             if cause == Cause::WallpaperEcho {
                 return (cause, Vec::new());
             }
@@ -220,7 +266,7 @@ mod tests {
 
         /// Finder's window 1 reported focused at `ms`, as the controller handles it.
         fn finder_focused(&mut self, ms: u64) -> (Cause, Vec<Action>) {
-            let cause = self.echo.classify(Some(DESKTOP_OWNER), self.at(ms));
+            let cause = self.echo.heard(Some(DESKTOP_OWNER), Told::Focus, self.at(ms));
             if cause == Cause::WallpaperEcho {
                 return (cause, Vec::new());
             }

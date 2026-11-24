@@ -482,9 +482,69 @@ def phase_launch():
             f"{e.get('new_unplaced')}, on screen before they could be held {e.get('new_missed')}")
         watched = log_text().count("launch watch: a just-opened app")
         check(watched >= len(ok), f"Spaces: a launch watch for each launch ({watched})")
+        # Round r5-notices: which look held each new window, the creation notice's or the
+        # 4 ms poll's (printed: if the notice always wins, the poll can lengthen later).
+        notice_report("launch", ("launch_watch::EVERY",))
+        r = (ctl("state").get("margins") or {}).get("launch_watch::EVERY") or {}
+        if r.get("waits"):
+            say(f"  launch: the creation notice held {r.get('noticed', 0)} of {r['waits']} new windows first"
+                + (" (every one: the poll can lengthen)" if r.get("noticed", 0) == r["waits"] else ""))
     else:
         skip("no launch overlaps", f"the Corner engine places a window once it shows ({len(over)} of {len(ok)} overlapped)")
     consistent("launch")
+
+
+# ----- the window server's notices (round r5-notices) ------------------------------------
+
+# The waits a window-server notice can end (`ctl state`'s margins, by the constant's name).
+NOTICE_WAITS = ("OVERVIEW_LOOK", "OVERVIEW_SETTLE", "OVERVIEW_ARRIVAL_SETTLE", "OVERVIEW_EXIT_CARRY",
+                "STRAY_LOOK", "TIDY_EVERY", "SPACE_POLL", "launch_watch::EVERY")
+
+
+def notice_report(label, names=NOTICE_WAITS):
+    """Round r5-notices: what the window server's notices brought in this app run (`ctl
+    state`'s `engine.notices`: the launch probe's health, the types heard) and how each wait a
+    notice can end ended so far (its `margins`: by the notice's look, by the poll, by the
+    cap). Printed, not checked; the notices dict, or None when none are registered."""
+    s = ctl("state")
+    if not s.get("ok"):
+        say(f"  {label}: ctl state did not answer ({s.get('error')})")
+        return None
+    n = (s.get("engine") or {}).get("notices")
+    if not n or not n.get("registered"):
+        say(f"  {label}: no window-server notices registered ({(s.get('engine') or {}).get('kind')} engine)")
+        return None
+    types = n.get("types") or {}
+    heard = ", ".join(f"{k}: {v.get('heard')} ({v.get('sent')} sent, {v.get('coalesced')} folded, {v.get('ours')} ours)"
+                      for k, v in sorted(types.items()) if v.get("heard"))
+    say(f"  {label}: notices {n.get('notices')} (never heard: {n.get('never_heard')}; the probe's panel: {n.get('probe')}), layout {n.get('layout')}, "
+        f"heard {heard or 'none'}; brought forward: {n.get('uses')}")
+    m = s.get("margins") or {}
+    for name in names:
+        r = m.get(name)
+        if not r:
+            say(f"    {name}: no wait ended")
+            continue
+        waits, noticed, capped = r.get("waits", 0), r.get("noticed", 0), r.get("capped", 0)
+        say(f"    {name}: {waits} waits ended: {noticed} by the notice's look, {waits - noticed - capped} by the poll, "
+            f"{capped} by the cap (longest {r.get('longest_wait_ms')} ms)")
+    return n
+
+
+def overview_ages():
+    """`ctl space`'s `overview_ms_ago` as wall-clock times (s since the epoch): when the
+    overview shown was found, the last one closed, a window-server notice came while one
+    showed; and whether the last close's settle ended at a look after its notice."""
+    now = time.time()
+    a = ctl("space").get("overview_ms_ago") or {}
+    at = lambda k: None if a.get(k) is None else now - a[k] / 1000.0
+    return at("found"), at("closed"), at("told"), bool(a.get("settled_by_notice"))
+
+
+def notices_heard(kind):
+    """How many window-server notices of type `kind` this app run heard (0: none registered)."""
+    n = ((ctl("state").get("engine") or {}).get("notices") or {})
+    return ((n.get("types") or {}).get(str(kind)) or {}).get("heard") or 0
 
 
 def z_titles(titles):
@@ -6505,6 +6565,8 @@ def phase_expose():
         if not expose_round(which, label):
             break
     consistent("after Mission Control and App Exposé")
+    if SPACES:
+        notice_report("expose")
     show_desktop_round()
     show_desktop_close("expose", still=False)
     stop_app()
@@ -9529,7 +9591,14 @@ def phase_cmdtab_probe():
     Tab, Escape, ⌘'s release) and decided, and what an event tap made for the probe sees.
     Run it with SM_ENGINE=spaces (under the Corner engine the app follows no switcher: only
     the Dock's samples and the tap mean anything). Not in the default phases (it posts ⌘Tab:
-    run it while nobody types)."""
+    run it while nobody types).
+
+    Round r2-lends (Spaces): the app's HID key tap is on while the switcher is up and hears
+    its Escape (`ctl state` `mission_control.tap.switcher_escapes_heard` one more per probe;
+    the report's `key tap` lines say what it fed the switcher), and is no longer armed for
+    the switcher after it (`switcher_armed` false). No release here: one Tab from the fixture
+    selects an app that is no fixture's (`ctl debug-cmd-tab` refuses it); test_spaces.py's
+    cmd-tab cases release onto the fixture."""
     say("\n== cmd-tab probe: what the Dock and the input monitor show of ⌘Tab's switcher (Escape before ⌘'s release) ==")
     stop_app()
     stop_fixture()
@@ -9542,10 +9611,19 @@ def phase_cmdtab_probe():
     subprocess.run(["open", FIX_APP], capture_output=True)
     time.sleep(1.0)
     before = state()
+    tap = lambda: ((state().get("mission_control") or {}).get("tap") or {})  # noqa: E731
     for words in (("cancel", "1", "400"), ("cancel", "3", "400")):
+        escapes = tap().get("switcher_escapes_heard", 0)
         r = cmd_tab_probe(*words)
         check(r.get("ok") and r.get("done"), f"cmd-tab probe {' '.join(words)}: the probe ran ({r.get('error') or r.get('outcome')})")
         say_cmd_tab_report(r, f"debug-cmd-tab {' '.join(words)}")
+        if SPACES:
+            t = tap()
+            fed = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "key tap"]
+            say(f"     key tap: {t}; fed the switcher: {fed}")
+            check(t.get("switcher_escapes_heard", 0) == escapes + 1 and any("Cancelled" in f for f in fed),
+                  f"cmd-tab probe {' '.join(words)}: the key tap heard the switcher's Escape and cancelled it ({fed})")
+            check(t.get("switcher_armed") is False, f"cmd-tab probe {' '.join(words)}: the key tap no longer armed for the switcher after it")
         heard = [ev["what"] for ev in r.get("events", []) if ev["kind"] == "heard"]
         if not any("Selected" in h for h in heard):
             skip(f"cmd-tab probe {' '.join(words)}: the input monitor heard the switcher's Tab",
@@ -9941,6 +10019,28 @@ def mission_back(ids, titles, frames, label):
     return bool(ok)
 
 
+MISSION_FIRST_TO_LAST_MS = 20.0
+
+
+def mission_timings(text, n, label):
+    """Round mc-lends: the round line's timings read back from the log `text`; passes when
+    the first and the last window put home are under MISSION_FIRST_TO_LAST_MS apart."""
+    lines = [ln for ln in text.splitlines() if f"mission-control: lent {n} windows" in ln]
+    line = lines[-1] if lines else ""
+    def num(key):
+        m = re.search(rf"\b{key}=([0-9.]+)", line)
+        return float(m.group(1)) if m else None
+    gap, parks, moves, apps = num("first_to_last_ms"), num("parks_ms"), num("move_ms"), num("apps")
+    say(f"    timings: first_to_last_ms={gap} parks_ms={parks} park_sum_ms={num('park_sum_ms')} move_ms={moves} apps={apps} ms={num('ms')}")
+    check(gap is not None and gap < MISSION_FIRST_TO_LAST_MS,
+          f"mission {label}: every hidden window put home at once (first to last {gap} ms, under {MISSION_FIRST_TO_LAST_MS:g})")
+    keyed = [ln.split("mission-control:", 1)[1].strip() for ln in text.splitlines() if "mission-control: parked" in ln and "at its key" in ln]
+    if keyed:
+        say(f"    parked at the key first: {keyed[-1][:160]}")
+    elif "trigger seen" not in text:
+        say("    the app's input monitor did not hear the posted key (no \"trigger seen\" line): the parks at the key are not measured here; press the real key and read the log")
+
+
 def mission_shot(name):
     """A by-eye screenshot while Mission Control shows, only with $SM_SHOTS (never the repo)."""
     d = os.environ.get("SM_SHOTS")
@@ -10102,14 +10202,29 @@ def phase_mission():
        out of their stage Spaces, on the Desktop, still counted hidden by the model; the log
        says shown, the lend and its time, and how many Mission Control laid out. After
        Escape: both back in their stage Spaces at their frames, the same stage in front, no
-       Space change, nothing lent or parked.
+       Space change, nothing lent or parked. All at once (round mc-lends): the log's round
+       line has `first_to_last_ms` (the first window put home to the last) under
+       MISSION_FIRST_TO_LAST_MS, with its parks' and moves' times; in "shown" mode the key
+       parks first (a "parked ... at its key" line when the input monitor hears the posted
+       key, said either way).
     2. The same with App Exposé.
-    3. A pick: while Mission Control shows, Alpha (another app, its one window hidden in a
+    3. A close by its key (round mc-key): Mission Control open, the pointer over Fixture 2's
+       laid-out window (`debug-mission-pick ID hover`, no click), its shortcut posted again:
+       the same stage in front after (Fixture 1's), Fixture 2 and 3 and Alpha 1 back in their
+       stage Spaces at their frames, no Space change, the keyboard the stage in front's. The
+       app's key tap heard both posted shortcuts (`mission_control.tap.keys_heard`; the log's
+       "trigger seen" line); what macOS brought in front is said (the log's "closed by its
+       key" line when it was found no pick).
+    4. A pick: while Mission Control shows, Alpha (another app, its one window hidden in a
        stage) is activated, as a click on its window there or on its Dock item activates it;
        its stage comes in front with Alpha 1 at its frame, with no Space change, and Fixture
        2 and 3 are back in their stage Spaces.
-    4. kill -9 while the windows are out (lent for the test, no Mission Control): the guardian
-       brings both back out of the park corner."""
+       At their cards (round mc-card-park): the hidden windows go home parked at their stages'
+       cards (`at_card`, centered on the card, on the display's left half), so Mission Control
+       flies them from the strip; after Escape none is listed on the Desktop at its card for
+       longer than MISSION_CARD_SEEN_S once Mission Control's own windows are gone.
+    5. kill -9 while the windows are out at their cards (lent for the test, `lend card`, no
+       Mission Control): the guardian brings both back to their frames."""
     say("\n== mission: Mission Control shows every stage's windows (Spaces engine) ==")
     if not SPACES:
         skip("mission", "the Spaces engine's own: with the park corner Mission Control shows every window already; run with SM_ENGINE=spaces")
@@ -10127,9 +10242,11 @@ def phase_mission():
         say(f"  -- {label} --")
         mark = len(log_text())
         changes = ctl("space").get("changes")
+        look_before = margin_row("OVERVIEW_LOOK")
         opened = mission_open(which, f"mission {label}")
         if not opened:
             break
+        mission_found_at_notice(opened[0], label, look_before)
         out = wait_until(lambda: len(mission_status().get("out") or []) == n and mission_status(), 3, "every hidden window put home")
         ws = mission_listed()
         check(bool(out) and not any(ws.get(i, {}).get("staged") for i in hidden),
@@ -10145,16 +10262,27 @@ def phase_mission():
             check(sorted(laid) == sorted(hidden), f"mission {label}: it lays out every hidden window (moved from their park: {laid} of {hidden})")
         else:
             say(f"    App Exposé shows the front app's windows; laid out here: {laid} of {hidden} (the fixture's two are expected, Alpha's is another app's)")
+        if which == "mission-control":
+            mission_at_cards(out, hidden, label)
         mission_shot(which)
-        mission_close(opened[1], f"mission {label}")
+        settle_before = margin_row("OVERVIEW_SETTLE")
+        mission_close_seen(opened[1], hidden, parked, f"mission {label}")
+        mission_closed_at_notice(label, settle_before)
         mission_back(ids, titles, frames, f"mission {label}")
         text = log_text()[mark:]
         for what in ("mission-control: shown", f"mission-control: lent {n} windows", "mission-control: Mission Control lays out", "mission-control: closed", f"mission-control: put back {n} windows"):
             check(what in text, f"mission {label}: the log says \"{what}\"")
+        mission_timings(text, n, label)
         x = state()
         check(x.get("space") == space and x.get("active") == active and ctl("space").get("changes") == changes,
               f"mission {label}: the same stage in front, no Space change")
         consistent(f"after {label}")
+
+    notice_report("mission")
+    say("  by hand (the owner): open Mission Control by a trackpad gesture, then by a hot corner, and read "
+        "`\"$B\" ctl state | jq '.engine.notices.types[\"1508\"]'` before and after each (B: docs/DEVELOPMENT.md, "
+        "\"The ctl socket\"): `heard` grows by 2 per open and close when the notice comes for them")
+    mission_close_key(ids, titles, frames, space, active, n)
 
     say("  -- a pick --")
     mark = len(log_text())
@@ -10182,23 +10310,265 @@ def phase_mission():
         check(ctl("space").get("changes") == changes, "mission pick: no Space change")
         consistent("after the pick")
 
-    say("  -- kill -9 with the windows out --")
+    say("  -- kill -9 with the windows out at their cards --")
     ctl("debug-mission-control", "mode", "off")
-    r = ctl("debug-mission-control", "lend")
+    r = ctl("debug-mission-control", "lend", "card")
     lent = r.get("lent") or []
+    out = {o["id"]: dict(zip("xywh", o["parked"])) for o in (mission_status().get("out") or []) if o.get("parked")}
     wins, d = fixture_windows([FIX_ID, EXTRA["a"][0]])
-    at_park = [w["id"] for w in wins if w["id"] in lent and is_parked(w["bounds"], d)]
-    if check(bool(lent) and sorted(at_park) == sorted(lent), f"mission kill: the hidden windows are out, parked in the corner ({lent}, in the corner {at_park}; {r.get('error') or 'ok'})"):
+    at_card = [w["id"] for w in wins if w["id"] in lent and w["id"] in (r.get("at_card") or []) and not w.get("staged")
+               and w["id"] in out and close(w["bounds"], out[w["id"]], 2.0) and not is_parked(w["bounds"], d)]
+    if check(bool(lent) and sorted(at_card) == sorted(lent),
+             f"mission kill: the hidden windows are out at their cards, on the Desktop ({lent}, at their cards {at_card}; {r.get('error') or 'ok'})"):
         pid = app_pid()
         os.kill(pid, signal.SIGKILL)
         wait_gone(pid)
-        back = wait_until(lambda: (lambda ws: ws if ws[0] and not any(is_parked(w["bounds"], ws[1]) or w.get("staged") for w in ws[0]) else None)(fixture_windows([FIX_ID, EXTRA["a"][0]])), 20,
-                          "every fixture window out of the park corner")
-        check(bool(back), "mission kill: the guardian brought every window out of the park corner")
+
+        def home():
+            ws = {w["id"]: w for w in fixture_windows([FIX_ID, EXTRA["a"][0]])[0]}
+            ok = all(i in ws and not ws[i].get("staged") and i in frames and close(ws[i]["bounds"], frames[i], 2.0) for i in lent)
+            return ws if ok else None
+        back = wait_until(home, 20, "every fixture window back at its frame")
+        ws = {w["id"]: w for w in fixture_windows([FIX_ID, EXTRA["a"][0]])[0]}
+        check(bool(back), "mission kill: the guardian brought every window from its card back to its frame ("
+              + ", ".join(f"{i}: {fmt(ws[i]['bounds']) if i in ws else 'gone'}, was {fmt(frames[i]) if i in frames else '?'}" for i in lent) + ")")
         for g in guardian_pids(pid):
             wait_gone(g, 20)
     stop_app()
     all_onscreen("mission quit")
+
+
+# A window out at its card is on the Desktop in view once Mission Control has closed, until it
+# goes back: its close is looked for at the fast tick (engine::mission_control::WATCH_EVERY,
+# 30 ms), and the take back is one call per stage Space.
+MISSION_CARD_SEEN_S = 0.15
+
+
+def mission_at_cards(out, hidden, label):
+    """Round mc-card-park: every hidden window went home parked at its stage's card (`at_card`),
+    listed then on the display's left half (centered on its card, inside the visible frame)."""
+    outs = {o["id"]: o for o in (out or {}).get("out", [])}
+    d = fixture_windows([FIX_ID])[1] or {}
+    half = d.get("x", 0) + d.get("w", 0) / 2
+    left = [i for i in hidden if outs.get(i, {}).get("at_card") and outs[i].get("parked") and outs[i]["parked"][0] + outs[i]["parked"][2] / 2 < half]
+    check(sorted(left) == sorted(hidden),
+          f"mission {label}: the hidden windows went home at their cards, on the left ({left} of {hidden}; "
+          + ", ".join(f"{i}: {outs[i].get('parked')} card={outs[i].get('at_card')}" for i in hidden if i in outs) + ")")
+
+
+def mission_close_seen(before, hidden, parked, label):
+    """Escape, the list sampled until Mission Control's windows are gone and the hidden
+    windows back in their stage Spaces: how long any was listed on the Desktop at its card
+    park after Mission Control's own windows went (round mc-card-park; under
+    MISSION_CARD_SEEN_S)."""
+    MISSION_ESCAPE[0] = time.time()
+    ctl("debug-expose", "escape")
+    end, gone_at, seen = time.time() + 5, None, []
+    while time.time() < end:
+        now = time.time()
+        up = [o for o in screen_overlays() if o["id"] not in before]
+        ws = mission_listed()
+        if not up and gone_at is None:
+            gone_at = now
+        at = [i for i in hidden if i in parked and i in ws and not ws[i].get("staged") and close(ws[i]["bounds"], parked[i], 2.0)]
+        if gone_at is not None and at:
+            seen.append(now)
+        if gone_at is not None and all(ws.get(i, {}).get("staged") for i in hidden):
+            break
+    span = (seen[-1] - gone_at) if seen and gone_at else 0.0
+    check(gone_at is not None, f"{label}: Mission Control ended")
+    check(span <= MISSION_CARD_SEEN_S, f"{label}: after the close no hidden window stayed on the Desktop at its card longer than "
+          f"{MISSION_CARD_SEEN_S * 1000:.0f} ms ({span * 1000:.0f} ms, {len(seen)} looks)")
+    time.sleep(EXPOSE_SETTLE)
+    return gone_at is not None
+
+
+# When `mission_close_seen` asked for the closing key (round r5-notices).
+MISSION_ESCAPE = [None]
+def margin_row(name):
+    """`ctl state`'s margins row `name` now: (waits, noticed, capped)."""
+    r = (ctl("state").get("margins") or {}).get(name) or {}
+    return r.get("waits", 0), r.get("noticed", 0), r.get("capped", 0)
+
+
+def ended_by(before, after):
+    """How the waits between two `margin_row`s ended: (by the notice's look, by the poll, by the cap)."""
+    waits, noticed, capped = (a - b for a, b in zip(after, before))
+    return noticed, waits - noticed - capped, capped
+
+
+def mission_found_at_notice(t0, label, before):
+    """Round r5-notices: Mission Control (or App Exposé) opened by its shortcut is found at the
+    look its window-server notice brought (`OVERVIEW_LOOK` ended by the notice's look, not by
+    the poll); the ms from the key are printed, not judged (a slower Mac takes longer). Skipped
+    when no notice 1508 came in this run: the polls decide alone."""
+    if not SPACES:
+        return
+    if not notices_heard(1508):
+        skip(f"mission {label}: found at its notice", "no window-server notice 1508 heard in this run (engine.notices): the polls decide alone")
+        return
+    found, _, _, _ = overview_ages()
+    ms = None if found is None else round((found - t0) * 1000.0)
+    by = ended_by(before, margin_row("OVERVIEW_LOOK"))
+    check(by == (1, 0, 0), f"mission {label}: found at its notice's look (OVERVIEW_LOOK ended by notice, poll, cap: {by}; {ms} ms after its key was asked)")
+
+
+def mission_closed_at_notice(label, before):
+    """Round r5-notices: the close's notice came after the closing key and was looked at before
+    the window list showed macOS's own window and the Dock's cover gone, and the look that then
+    found them gone ended the Space-inference freeze (`OVERVIEW_SETTLE` ended by the notice's
+    look, not by its cap; `settled_by_notice`). The ms are printed, not judged."""
+    if not SPACES or MISSION_ESCAPE[0] is None:
+        return
+    if not notices_heard(1508):
+        skip(f"mission {label}: its close at its notice", "no window-server notice 1508 heard in this run: the polls decide alone")
+        return
+    _, closed, told, quick = overview_ages()
+    esc = MISSION_ESCAPE[0]
+    ms = lambda t: None if t is None else round((t - esc) * 1000.0)
+    check(told is not None and told >= esc and closed is not None and told <= closed,
+          f"mission {label}: its close's notice came after the closing key and before the list showed it closed "
+          f"(notice {ms(told)} ms, listed closed {ms(closed)} ms after the key)")
+    by = ended_by(before, margin_row("OVERVIEW_SETTLE"))
+    check(quick and by == (1, 0, 0), f"mission {label}: the look after it that found macOS's windows gone ended the freeze "
+          f"(OVERVIEW_SETTLE ended by notice, poll, cap: {by}; before the notices: 1 s by its cap)")
+
+
+def mission_close_key(ids, titles, frames, space, active, n):
+    """Round mc-key: Mission Control closed by its own shortcut with the pointer over a hidden
+    fixture window (Fixture 2's, where it is laid out), with `[windows]
+    mission_control_key_keeps_stage` on (off, Apple's, is a pick: `probe_apple.py
+    mission-close-key-ours` checks both): no pick. The same stage in front after,
+    the hidden windows back, the keyboard the stage in front's; the key tap heard the keys."""
+    say("  -- a close by its key, the pointer over Fixture 2's window ([windows] mission_control_key_keeps_stage = true) --")
+    path = os.path.join(HOME, "config.toml")
+    try:
+        with open(path) as f:
+            config_was = f.read()
+    except FileNotFoundError:
+        config_was = ""
+    if not check(set_config_live(config_was + "\n[windows]\nmission_control_key_keeps_stage = true\n"
+                                 if "[windows]" not in config_was else
+                                 config_was.replace("[windows]\n", "[windows]\nmission_control_key_keeps_stage = true\n", 1)),
+                 "mission close key: the setting turned on"):
+        return
+    try:
+        mission_close_key_kept(ids, titles, frames, space, active, n)
+    finally:
+        set_config_live(config_was)
+
+
+def mission_close_key_kept(ids, titles, frames, space, active, n):
+    """`mission_close_key`'s round with the setting on."""
+    mark = len(log_text())
+    changes = ctl("space").get("changes")
+    heard_before = (mission_status().get("tap") or {}).get("keys_heard") or 0
+    opened = mission_open("mission-control", "mission close key")
+    if not opened:
+        return
+    wait_until(lambda: len(mission_status().get("out") or []) == n, 3, "every hidden window put home")
+    time.sleep(1.2)
+    r = ctl("debug-mission-pick", ids["Fixture 2"], "hover")
+    if not check(r.get("ok"), f"mission close key: the pointer over Fixture 2 where Mission Control lays it out ({r.get('at')}; {r.get('error') or 'ok'})"):
+        mission_close(opened[1], "mission close key")
+        return
+    time.sleep(0.4)
+    r = ctl("debug-expose", "mission-control")
+    check(r.get("ok"), f"mission close key: Mission Control's shortcut posted again ({r.get('key', r.get('error'))})")
+    gone = wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in opened[1]], 5, "mission close key: Mission Control to end")
+    ctl("debug-pointer-back")
+    if not check(bool(gone), "mission close key: Mission Control closed by its shortcut"):
+        mission_close(opened[1], "mission close key")
+    time.sleep(EXPOSE_SETTLE)
+    x = wait_state(lambda v: active_titles(v) == {"Fixture 1"}, "Fixture 1's stage still in front", 3)
+    check(x is not None and state().get("active") == active,
+          f"mission close key: the same stage in front after, nothing picked ({stage_titles(state()).get(state()['active'])})")
+    mission_back(ids, titles, frames, "mission close key")
+    check(ctl("space").get("changes") == changes and state().get("space") == space, "mission close key: no Space change")
+    front = wait_until(lambda: frontmost_bundle() == FIX_ID, 2, "the stage in front's app frontmost")
+    check(bool(front), f"mission close key: the keyboard is the stage in front's (frontmost {frontmost_bundle()})")
+    text = log_text()[mark:]
+    tap = mission_status().get("tap") or {}
+    heard = (tap.get("keys_heard") or 0) - heard_before
+    if not check(heard >= 2 and "trigger seen" in text,
+                 f"mission close key: the app's key tap heard the posted shortcut both times ({heard} keys heard; tap {tap})"):
+        say("    the posted key did not reach the HID tap: press the real ⌃↑ or F3 and look for \"mission-control: trigger seen\" with by=\"the key tap\" in the log")
+    closer = [ln.split("mission-control:", 1)[1].strip()[:160] for ln in text.splitlines() if "a key that closes it" in ln]
+    refused = [ln.split("mission-control:", 1)[1].strip()[:200] for ln in text.splitlines() if "closed by its key, no click" in ln]
+    check(bool(closer), "mission close key: the log says the key that closed it was heard")
+    say(f"    what macOS brought in front: {refused[-1] if refused else 'nothing taken for a pick (no activation of a hidden stage came)'}")
+    consistent("after the close by key")
+
+
+def mission_desktop_key(direction):
+    """Types the Desktop switch shortcut (`ctl debug-space`, which answers only once the
+    change is handled: after Mission Control closes) on a thread of its own."""
+    import threading
+    t = threading.Thread(target=lambda: ctl("debug-space", direction), daemon=True)
+    t.start()
+    return t
+
+
+def phase_mission_desktop():
+    """A Desktop picked inside Mission Control, then Mission Control opened again before the
+    change is recognized (Spaces engine, `SM_ENGINE=spaces`; needs a second Desktop to the
+    right of the one shown, else skipped; not a default phase). Live 11-19 07:56: the next
+    Mission Control lent nothing, the model's shown Space still the old Desktop's.
+
+    Fixture 1 in front, Fixture 2 and 3 hidden on Desktop A. Mission Control; ⌃→ inside it
+    (Desktop B); Escape. Mission Control on B; ⌃← inside it (back to A); Escape and Mission
+    Control again at once (within 0.3 s of the close): Fixture 2 and 3 are put home, the log
+    says the window server's Desktop was taken; then everything goes back."""
+    say("\n== mission-desktop: a Desktop picked inside Mission Control, opened again at once (Spaces engine) ==")
+    if not SPACES:
+        skip("mission-desktop", "the Spaces engine's own; run with SM_ENGINE=spaces")
+        return
+    s, ids, titles = mission_setup("mission-desktop")
+    if not s:
+        stop_app()
+        return
+    hidden = [ids[k] for k in titles]
+    frames = {i: w["bounds"] for i, w in mission_listed().items()}
+    space = s.get("space")
+    opened = mission_open("mission-control", "mission-desktop on A")
+    if not opened:
+        stop_app()
+        return
+    mission_desktop_key("right")
+    time.sleep(0.8)
+    mission_close(opened[1], "mission-desktop on A")
+    moved = wait_until(lambda: (lambda v: v if v.get("space") != space and not v.get("settling") else None)(ctl("space")), 6, "Desktop B recognized")
+    if not moved:
+        skip("mission-desktop", "no Desktop to the right of the one shown (or ⌃→ inside Mission Control did not change it): add a Desktop and run again")
+        stop_app()
+        return
+    mark = len(log_text())
+    opened = mission_open("mission-control", "mission-desktop on B")
+    if not opened:
+        mission_desktop_key("left").join(8)
+        stop_app()
+        return
+    back = mission_desktop_key("left")
+    time.sleep(0.8)
+    ctl("debug-expose", "escape")
+    t_close = time.time()
+    wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in opened[1]], 3, "Mission Control to end")
+    closed_at = time.time()
+    again = mission_open("mission-control", "mission-desktop again on A")
+    say(f"    opened again {closed_at - t_close:.2f} s after Escape, {time.time() - closed_at:.2f} s after its cover went")
+    if again:
+        out = wait_until(lambda: (lambda st: st if len(st.get("out") or []) == len(hidden) else None)(mission_status()), 3, "Desktop A's hidden windows put home")
+        check(bool(out), f"mission-desktop: the hidden windows of the Desktop shown are put home before the change is recognized (out {mission_status().get('out')}, want {hidden})")
+        text = log_text()[mark:]
+        said = "the hidden windows of the Desktop the window server shows are put home" in text
+        say(f"    the window server's Desktop taken: {said} (False with the change recognized already: then the model's, as ever)")
+        mission_close(again[1], "mission-desktop again on A")
+    back.join(8)
+    mission_back(ids, titles, frames, "mission-desktop")
+    check(ctl("space").get("space") == space, "mission-desktop: back on Desktop A")
+    consistent("after mission-desktop")
+    stop_app()
+    all_onscreen("mission-desktop quit")
 
 
 def main():
@@ -10224,7 +10594,7 @@ def main():
              "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel,
-             "mission": phase_mission, "mission-probe": phase_mission_probe}[p]()
+             "mission": phase_mission, "mission-probe": phase_mission_probe, "mission-desktop": phase_mission_desktop}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

@@ -6,10 +6,10 @@
 //! ([`routes`]). [`controller::AppleController`] is the conductor of this mode, beside the
 //! app's own [`super::controller::Controller`] (`platform::conductor`).
 
-pub mod controller;
-pub mod desk;
-pub mod engine;
-pub mod launch_hide;
-pub mod post;
-pub mod routes;
-pub mod strip_ax;
+pub(crate) mod controller;
+pub(crate) mod desk;
+pub(crate) mod engine;
+pub(crate) mod launch_hide;
+pub(crate) mod post;
+pub(crate) mod routes;
+pub(crate) mod strip_ax;

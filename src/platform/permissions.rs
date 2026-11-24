@@ -177,17 +177,6 @@ pub fn request_screen_recording() -> bool {
     CGRequestScreenCaptureAccess()
 }
 
-/// Launch-time check: prompts for whatever is missing unless prompts are suppressed.
-pub fn check_at_launch() -> PermissionState {
-    let prompt = prompts_allowed();
-    let accessibility = check_accessibility(prompt);
-    let mut screen_recording = screen_recording_granted();
-    if !screen_recording && prompt {
-        screen_recording = request_screen_recording();
-    }
-    PermissionState { accessibility, screen_recording }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

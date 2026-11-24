@@ -92,7 +92,10 @@ impl Companions {
     /// let out of the same Space within [`PULL_WINDOW`] before pulled them out. The pulls
     /// noted for the first time, as (let out, pulled), for the log.
     pub fn escaped(&mut self, out: &[(u32, u64)], now: Instant) -> Vec<(u32, u32)> {
-        self.let_out.retain(|_, (t, _)| now.saturating_duration_since(*t) <= PULL_WINDOW);
+        self.let_out.retain(|_, (t, _)| {
+            let since = now.saturating_duration_since(*t);
+            crate::engine::margin::note("PULL_WINDOW", since, PULL_WINDOW, since <= PULL_WINDOW)
+        });
         let mut noted = Vec::new();
         for (held, space) in out.iter().copied() {
             for (id, (_, from)) in &self.let_out {

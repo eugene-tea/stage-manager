@@ -43,6 +43,7 @@
 //! window's windows have shown, and the save waits for it (the saved stages are not written
 //! over by Apple's fresh arrangement meanwhile).
 
+use crate::platform::clock;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
@@ -53,16 +54,18 @@ use super::desk::Desk;
 use super::launch_hide::{self, HideOutcome, Hiding, Moment};
 use super::routes::drag::Drag;
 use super::routes::focus::Focus;
+#[cfg(feature = "probes")]
 use super::routes::rejected;
 use super::routes::shift_click::ShiftClick;
 use super::routes::{Route, RouteStats};
 use super::post;
 use crate::config::{ConfigStore, HotkeyCommand};
+use crate::engine::apple::cause::{Cause, Causes};
 use crate::engine::apple::desk::{AppleDesk, Landed, Posted};
 use crate::engine::apple::follow;
 use crate::engine::apple::gate;
 use crate::engine::apple::job::{self, Ctx, Job, Next, Report};
-use crate::engine::apple::mirror::{self, Arrangement};
+use crate::engine::apple::mirror::{self, Arrangement, Effect};
 use crate::engine::apple::plan::{self, Intent, Refusal, Step};
 use crate::engine::apple::points;
 use crate::engine::apple::restore::{self, AutoRestore, Wanted};
@@ -79,7 +82,7 @@ use crate::platform::apps::AppInfo;
 use crate::platform::ctl::{AppleTry, Command};
 use crate::platform::input::{self, InputEvent, InputKind, Modifiers, Triggers};
 use crate::platform::native_settings::RawSettings;
-use crate::platform::observe::{Observer, WinEvent, WindowKind};
+use crate::platform::observe::{Observer, Stamped, WinEvent, WindowKind};
 use crate::platform::ax::AxElement;
 use crate::platform::{apps, logging, paths, session};
 
@@ -106,16 +109,10 @@ const WATCH: Duration = Duration::from_millis(1200);
 const JOB_READ: Duration = Duration::from_millis(25);
 
 /// A launch's own activation comes within this of its launch notice: the launch's route
-/// decides for it ([`AppleController::app_activated`] leaves it).
+/// decides for it ([`AppleController::app_activated`] leaves it). A plain time: an app may
+/// activate more than once as it starts, and nothing heard ties those to the launch but time
+/// (a job or hiding for the pid refuses a second "open here" anyway).
 const LAUNCH_ACTIVATION: Duration = Duration::from_secs(3);
-
-/// How long after our own activation of an app, or our hide of another taking, an app's
-/// did-activate notice is taken as ours, not the person's ([`AppleController::app_activated`]).
-const OWN_ACTIVATION: Duration = Duration::from_millis(1500);
-
-/// How long after our hide of an app took another app's activation is taken as macOS handing
-/// it the focus (live 11-17: Finder, 13 ms after Contacts was hidden).
-const HANDED_OVER: Duration = Duration::from_millis(500);
 
 /// The Apple mode's conductor. WM thread only.
 pub struct AppleController {
@@ -148,9 +145,9 @@ pub struct AppleController {
     posting: Option<Posted>,
     /// Newly opened apps being hidden at their launch, by pid.
     hidings: BTreeMap<i32, Hiding>,
-    /// Apps we activated ourselves (a give-up's activation given back), and when: their
-    /// did-activate notice starts nothing ([`AppleController::app_activated`]).
-    activated_by_us: BTreeMap<i32, Instant>,
+    /// Our activations and hides waiting for the activation that answers them, and the
+    /// person's latest input: told apart by order ([`Causes`]).
+    causes: Causes,
     /// Each managed window's app, at the last read.
     pids: BTreeMap<u32, i32>,
     /// Each route's counts.
@@ -216,20 +213,20 @@ impl AppleController {
         let saved = file.map(|f| f.for_session(current).0);
         let windows = saved.as_ref().map_or(0, restore::saved_windows);
         let on = store.config().stages.restore_apple_stages;
-        let auto = (after_restart && on && windows > 0).then(|| AutoRestore::new(Instant::now(), apps::login_started()));
+        let auto = (after_restart && on && windows > 0).then(|| AutoRestore::new(clock::now(), apps::login_started()));
         tracing::info!(saved_windows = windows, after_restart, restore_apple_stages = on, waits = auto.is_some(), "apple mode: the stages saved before");
         Self {
             store,
             config_error,
             config_mtime: std::fs::metadata(path).and_then(|m| m.modified()).ok(),
-            config_checked: Instant::now(),
+            config_checked: clock::now(),
             displays: Vec::new(),
             settings: NativeSettings::default(),
             model: None,
             mirror: Arrangement::default(),
             followed: None,
             followed_ids: BTreeSet::new(),
-            read_due: Some(Instant::now()),
+            read_due: Some(clock::now()),
             watch_until: None,
             job_wait: None,
             ax_read: None,
@@ -239,7 +236,7 @@ impl AppleController {
             jobs: VecDeque::new(),
             posting: None,
             hidings: BTreeMap::new(),
-            activated_by_us: BTreeMap::new(),
+            causes: Causes::default(),
             pids: BTreeMap::new(),
             stats: BTreeMap::new(),
             last_refusal: None,
@@ -301,15 +298,15 @@ impl AppleController {
     // ── What the WM thread tells it ─────────────────────────────────────────────────────
 
     /// The observer's events: each one that may change Apple's arrangement asks a read now.
-    pub fn on_events(&mut self, ob: &mut Observer, events: Vec<WinEvent>) {
-        let stirs = events.iter().any(|e| !matches!(e, WinEvent::Retitled(_) | WinEvent::Moved(_)));
-        let moved = events.iter().any(|e| matches!(e, WinEvent::Moved(_)));
+    pub fn on_events(&mut self, ob: &mut Observer, events: Vec<Stamped>) {
+        let stirs = events.iter().any(|(e, _)| !matches!(e, WinEvent::Retitled(_) | WinEvent::Moved(_)));
+        let moved = events.iter().any(|(e, _)| matches!(e, WinEvent::Moved(_)));
         if stirs {
             self.watch();
             self.read(ob, false);
         } else if moved {
             // Apple's motion moves the windows: the fast tick reads on.
-            self.read_due.get_or_insert(Instant::now());
+            self.read_due.get_or_insert(clock::now());
         }
     }
 
@@ -317,8 +314,14 @@ impl AppleController {
     /// gesture of ours and its echoes never count), and a mouse-up near the strip may have
     /// changed it.
     pub fn input(&mut self, ob: &mut Observer, event: InputEvent) {
-        let now = Instant::now();
-        if event.kind != InputKind::CommandKey && !post::echo(now) {
+        let now = clock::now();
+        // Our posted gesture's echo is measured to when the monitor heard the event.
+        let echo = post::echo(event.heard.min(now));
+        if !echo {
+            // The person's own input, as heard: an activation after it is not ours.
+            self.causes.person(event.heard.min(now));
+        }
+        if event.kind != InputKind::CommandKey && !echo {
             let mods = Modifiers { shift: event.shift, cmd: event.cmd };
             if event.kind == InputKind::MouseUp {
                 self.triggers.record_release(now, mods);
@@ -354,7 +357,7 @@ impl AppleController {
     /// A Desktop change (or a full-screen app's Space coming or going): every screen's groups
     /// go away with it ([`Arrangement::desktop_left`]), and the arrangement is read afresh.
     pub fn on_space_changed(&mut self, ob: &mut Observer) {
-        let now = Instant::now();
+        let now = clock::now();
         self.mirror.desktop_left(now);
         for m in self.others.values_mut() {
             m.desktop_left(now);
@@ -369,19 +372,19 @@ impl AppleController {
     pub fn app_launched(&mut self, ob: &Observer, pid: i32) {
         if ob.admits_pid(pid) {
             let bundle = ob.bundle_id(pid).unwrap_or_default().to_string();
-            self.arrival(pid, &bundle, Moment::Launch, Instant::now());
+            self.arrival(pid, &bundle, Moment::Launch, clock::now());
         }
         if let Some(a) = self.auto.as_mut() {
-            a.busy(Instant::now());
+            a.busy(clock::now());
         }
         self.watch();
-        self.read_due = Some(Instant::now());
+        self.read_due = Some(clock::now());
     }
 
     /// An app about to launch: a newly opened app the rules want here is hidden at once.
     pub fn app_will_launch(&mut self, _ob: &Observer, app: &AppInfo) {
-        self.arrival(app.pid, app.bundle_or_unknown(), Moment::Launch, Instant::now());
-        self.read_due = Some(Instant::now());
+        self.arrival(app.pid, app.bundle_or_unknown(), Moment::Launch, clock::now());
+        self.read_due = Some(clock::now());
     }
 
     /// An app activated (its did-activate notice, before the observer hears it): a running
@@ -390,8 +393,13 @@ impl AppleController {
     /// own in front (the sixth probe of 11-16). Never for an app that has a window (in a stage,
     /// on another Desktop, minimized, or any window the observer knows: Apple's switches to its
     /// stage, as it should), nor for one launched just now (the launch's own route).
-    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
-        let (pid, now) = (app.pid, Instant::now());
+    ///
+    /// `fired`: when the main thread got the notice; whether we caused it is told by its
+    /// order against our activations, hides and the person's input ([`Causes`]), each
+    /// stamped at its receipt.
+    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo, fired: Instant) {
+        let (pid, now) = (app.pid, clock::now());
+        let fired = fired.min(now);
         // The app opened here activated again while its job runs (live 11-17: Activity
         // Monitor, 1.3 s after its window landed in the strip, no step of ours between):
         // whether the person had just clicked tells their click from the app's own.
@@ -427,24 +435,30 @@ impl AppleController {
         // Not the person's activation (live 11-17, Contacts opened here: its hide handed the
         // focus to Finder, which has a `current` rule and no window; the job waited 3 s for a
         // window, gave up by activating Finder, whose activation started the job again, six
-        // times over until the person clicked another app): an app we activated ourselves, or
-        // one macOS made active as our hide of another app took.
-        self.activated_by_us.retain(|_, t| now.saturating_duration_since(*t) < OWN_ACTIVATION);
-        if self.activated_by_us.contains_key(&pid) {
-            tracing::debug!(pid, "apple mode: an app activated by us: nothing started");
-            return;
+        // times over until the person clicked another app): the first activation of an app we
+        // activated ourselves, or of another app once our hide of one took, with no input of
+        // the person's between ([`Causes`]).
+        self.causes.keep_hides(|p| self.hidings.contains_key(&p));
+        for h in self.hidings.values() {
+            if let Some(launch_hide::HideOutcome::Hidden { ms, .. }) = h.outcome() {
+                self.causes.hide_took(h.pid, h.since + Duration::from_millis(ms));
+            }
+        }
+        self.causes.prune(now);
+        match self.causes.activation(pid, fired) {
+            Cause::Ours => {
+                tracing::debug!(pid, "apple mode: an app activated by us: nothing started");
+                return;
+            }
+            Cause::HandedOver => {
+                tracing::debug!(pid, "apple mode: an app made active as our hide of another took: nothing started");
+                return;
+            }
+            Cause::Other => {}
         }
         // A hide under way counts too: its notice may come before the hide's thread says so.
-        let handed_over = self.hidings.values().any(|h| {
-            h.pid != pid
-                && match h.outcome() {
-                    None => true,
-                    Some(launch_hide::HideOutcome::Hidden { ms, .. }) => now.saturating_duration_since(h.since + Duration::from_millis(ms)) < HANDED_OVER,
-                    Some(_) => false,
-                }
-        });
-        if handed_over {
-            tracing::debug!(pid, "apple mode: an app made active as our hide of another took: nothing started");
+        if self.hidings.values().any(|h| h.pid != pid && h.outcome().is_none()) {
+            tracing::debug!(pid, "apple mode: an app made active as our hide of another is under way: nothing started");
             return;
         }
         self.arrival(pid, app.bundle_or_unknown(), Moment::Activation, now);
@@ -525,15 +539,15 @@ impl AppleController {
     }
 
     /// Reads at the motion's pace for [`WATCH`] from now: Apple's motion follows its cause.
-    /// The arrangement counts in motion from now ([`Arrangement::step_began`]): a read in
-    /// the moment before Apple's motion starts shows the stage coming in beside the one
-    /// leaving (live 11-16: an activation followed that way put both in one stage).
+    /// The arrangement counts in motion until the list shows a change ([`Arrangement::stirred`]):
+    /// a read in the moment before Apple's motion starts shows the stage coming in beside the
+    /// one leaving (live 11-16: an activation followed that way put both in one stage).
     fn watch(&mut self) {
-        let now = Instant::now();
+        let now = clock::now();
         self.watch_until = Some(now + WATCH);
-        self.mirror.step_began(now);
+        self.mirror.stirred(now);
         for m in self.others.values_mut() {
-            m.step_began(now);
+            m.stirred(now);
         }
     }
 
@@ -553,7 +567,7 @@ impl AppleController {
         }
         tracing::info!(screens = displays.len(), frames = ?displays.iter().map(|d| (d.id.0, d.frame.x, d.frame.y, d.frame.w, d.frame.h)).collect::<Vec<_>>(), "apple mode: the screens, one mirror each");
         self.displays = displays;
-        self.read_due = Some(Instant::now());
+        self.read_due = Some(clock::now());
     }
 
     /// Fresh `com.apple.WindowManager` values.
@@ -592,7 +606,7 @@ impl AppleController {
 
     /// Housekeeping: config polling, the read at rest (Accessibility with it), the save.
     pub fn tick(&mut self, ob: &mut Observer) {
-        let now = Instant::now();
+        let now = clock::now();
         if now.duration_since(self.config_checked) >= CONFIG_POLL {
             self.config_checked = now;
             let current = std::fs::metadata(self.store.path()).and_then(|m| m.modified()).ok();
@@ -663,7 +677,7 @@ impl AppleController {
     /// The fast tick: the list read every [`mirror::MOTION_READ`] while anything moves or a
     /// job runs.
     pub fn fast_tick(&mut self, ob: &mut Observer) {
-        let now = Instant::now();
+        let now = clock::now();
         if self.read_due.is_some_and(|t| now >= t) || (self.read_due.is_none() && !self.jobs.is_empty()) {
             self.read(ob, false);
         }
@@ -698,17 +712,17 @@ impl AppleController {
     /// split by screen ([`screens::split`]) and folded into each screen's mirror with its own
     /// `sm.space`; the main screen's, settled, followed by the model; the jobs moved on.
     fn read(&mut self, ob: &mut Observer, with_ax: bool) {
-        let now = Instant::now();
+        let now = clock::now();
         let Some(screen) = self.screen() else { return };
         if !ob.observing() {
             return;
         }
-        let t0 = Instant::now();
+        let t0 = clock::now();
         if self.manager_checked.is_none_or(|t| now.duration_since(t) >= MANAGER_CHECK) || self.manager.is_none() {
             self.manager = super::strip_ax::manager_pid();
             self.manager_checked = Some(now);
         }
-        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame), displays: &self.displays };
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(screen.frame) };
         let listed = desk.listed();
         let spaces = if with_ax { desk.strips() } else { None };
         let managed: BTreeSet<u32> = managed(ob, &listed);
@@ -848,11 +862,11 @@ impl AppleController {
         if done.added > 0
             && let Some(a) = self.auto.as_mut()
         {
-            a.busy(Instant::now());
+            a.busy(clock::now());
         }
         if !done.is_empty() {
             tracing::debug!(added = done.added, removed = done.removed, moved = done.moved, switched = done.switched, "apple mode: the model follows Apple's stages");
-            self.save.mark(Instant::now());
+            self.save.mark(clock::now());
         }
         self.followed = Some(grouping);
         self.followed_ids = managed.clone();
@@ -891,7 +905,7 @@ impl AppleController {
         let Some(job) = self.jobs.front_mut() else { return };
         let screen = job.screen.and_then(|id| self.displays.iter().find(|d| d.id == id).copied()).unwrap_or(main);
         let mirror = if screen.id == main.id { &self.mirror } else { self.others.get(&screen.id).unwrap_or(&self.mirror) };
-        let mut desk = Desk { ob, manager: self.manager, screen: Some(main.frame), displays: &self.displays };
+        let mut desk = Desk { ob, manager: self.manager, screen: Some(main.frame) };
         let cx = Ctx { mirror, input: desk.input(), screen: &screen, pids: &self.pids, in_flight: post::in_flight() || self.posting.is_some() };
         let next = job.advance(&cx, now);
         // A press waiting on a thumbnail that shows no part of its own: what covers it, and
@@ -908,7 +922,7 @@ impl AppleController {
             Next::Run(step) => {
                 let ran = self.run_step(ob, screen, &step, now);
                 if let Some(job) = self.jobs.front_mut() {
-                    job.ran(&step, ran.is_ok());
+                    job.ran(&step, ran.is_ok(), now);
                 }
                 if let Err(e) = ran {
                     tracing::info!(step = job::step_name(&step), error = e, "apple mode: a step did not run; tried again at the next settle");
@@ -942,7 +956,7 @@ impl AppleController {
                     && self.hidings.contains_key(&pid)
                 {
                     tracing::info!(pid, "apple mode: given up: the app hidden at its activation shown again and activated, as asked");
-                    self.activated_by_us.insert(pid, now);
+                    self.causes.activated_by_us(pid, now);
                     launch_hide::activate(pid);
                 }
                 if let Some((w, frame)) = report.set_back
@@ -1008,9 +1022,10 @@ impl AppleController {
         self.read_due = Some(now + mirror::MOTION_READ);
     }
 
-    /// Runs `step` through its route now; the mirror counts in motion from here.
+    /// Runs `step` through its route now; the mirror expects Apple's answer from here (a
+    /// drag's once it landed, [`Self::gesture_landed`]).
     fn run_step(&mut self, ob: &Observer, screen: &Display, step: &Step, now: Instant) -> Result<(), String> {
-        let mut desk = Desk { ob, manager: self.manager, screen: self.screen().map(|d| d.frame), displays: &self.displays };
+        let mut desk = Desk { ob, manager: self.manager, screen: self.screen().map(|d| d.frame) };
         let route: &dyn Route = match step {
             Step::Focus(_) => &Focus,
             Step::Post(Posted::Clicks { .. }) => &ShiftClick,
@@ -1020,14 +1035,14 @@ impl AppleController {
                 // strip from here.
                 let ran = desk.unhide(*pid);
                 tracing::debug!(pid, "apple mode: the app hidden at its activation shown again, not activated");
-                self.mirror_on_mut(Some(screen.id)).step_began(now);
+                self.mirror_on_mut(Some(screen.id)).expect(Effect::App(*pid), now);
                 self.watch();
                 self.read_due = Some(now + mirror::MOTION_READ);
                 return ran;
             }
-            Step::AwaitSettle | Step::AwaitStrip(_) => return Ok(()),
+            Step::AwaitSettle => return Ok(()),
         };
-        let t0 = Instant::now();
+        let t0 = clock::now();
         let ran = route.run(step, &mut desk);
         let stats = self.stats.entry(route.name()).or_default();
         stats.last_ms = t0.elapsed().as_millis() as u64;
@@ -1039,7 +1054,12 @@ impl AppleController {
             if let Step::Post(p) = step {
                 self.posting = Some(p.clone());
             }
-            self.mirror_on_mut(Some(screen.id)).step_began(now);
+            // A drag moves its window as it goes: its answer is expected once it landed.
+            if !matches!(step, Step::Post(Posted::Drag { .. }))
+                && let Some(effect) = job::answer(step, self.mirror_on(Some(screen.id)))
+            {
+                self.mirror_on_mut(Some(screen.id)).expect(effect, now);
+            }
             self.watch();
             self.read_due = Some(now + mirror::MOTION_READ);
         }
@@ -1074,14 +1094,21 @@ impl AppleController {
             }
         }
         let screen = self.jobs.front().and_then(|j| j.screen);
-        self.mirror_on_mut(screen).step_began(now);
+        match (landed, posted) {
+            // A drag's answer: its window taken out (or only moved).
+            (Landed::Posted, Some(Posted::Drag { window, .. })) => self.mirror_on_mut(screen).expect(Effect::Moved(window), now),
+            // A press's answer was expected as it began.
+            (Landed::Posted, _) => {}
+            // Nothing (more) posted: no answer to wait for.
+            (Landed::Refused(_) | Landed::Interrupted(_), _) => self.mirror_on_mut(screen).refuted(now),
+        }
         self.watch();
     }
 
     /// Asks for `ask`: planned against the mirror into a job, queued, and run at once when
     /// it can (the first and settled).
     fn ask(&mut self, ob: &mut Observer, ask: Ask) -> Result<Value, Refusal> {
-        let now = Instant::now();
+        let now = clock::now();
         let refused = |this: &mut Self, r: Refusal| {
             tracing::info!(?ask, why = r.0, "apple mode: refused");
             this.stats.entry("plan").or_default().refused += 1;
@@ -1171,6 +1198,7 @@ impl AppleController {
 
     /// A tripwire's Accessibility action on the strip item holding window `w` (one the mode
     /// follows: never an item of an app it does not manage).
+    #[cfg(feature = "probes")]
     fn ax_try(&self, manager: i32, w: u32, action: &str) -> Result<Value, String> {
         if self.mirror.where_is(w).map(|(p, _)| p) != Some(mirror::Where::Strip) {
             return Err(format!("window {w} is not in Apple's strip"));
@@ -1187,11 +1215,11 @@ impl AppleController {
         }
         let Some(screen) = self.screen() else { return json!({ "ok": false, "error": "no screen yet" }) };
         let Some(manager) = self.manager else { return json!({ "ok": false, "error": "WindowManager is not running" }) };
-        let now = Instant::now();
-        let mut desk = Desk { ob, manager: Some(manager), screen: Some(screen.frame), displays: &self.displays };
+        let now = clock::now();
+        let mut desk = Desk { ob, manager: Some(manager), screen: Some(screen.frame) };
         let input = desk.input();
         let point = |w: u32| self.mirror.click_at.get(&w).copied().ok_or(format!("window {w}'s thumbnail shows no part of its own"));
-        let t0 = Instant::now();
+        let t0 = clock::now();
         let ran: Result<Value, String> = match t {
             AppleTry::Focus(w) => Focus.can(&Step::Focus(w), &self.mirror, &input).map_err(|r| r.0).and_then(|()| Focus.run(&Step::Focus(w), &mut desk)).map(|()| json!({})),
             AppleTry::ShiftClick(w) => point(w).and_then(|at| {
@@ -1213,17 +1241,25 @@ impl AppleController {
                     })
                 }
             },
+            #[cfg(feature = "probes")]
             AppleTry::AxPress(w) => self.ax_try(manager, w, "AXPress"),
+            #[cfg(feature = "probes")]
             AppleTry::AxAddToStage(w) => self.ax_try(manager, w, "AXAddToStage"),
+            #[cfg(feature = "probes")]
             AppleTry::PidClick(w) => point(w).and_then(|at| rejected::pid_click(manager, at).map(|()| json!({ "at": at }))),
+            #[cfg(feature = "probes")]
             AppleTry::ShiftFocus(w) => match ob.window(w) {
                 Some(tw) => rejected::shift_focus(&tw.element, tw.pid).map(|()| json!({})),
                 None => Err(format!("window {w} is not observed")),
             },
+            // The rejected routes (the tripwires) are in a build with the `probes` feature only.
+            #[cfg(not(feature = "probes"))]
+            AppleTry::AxPress(_) | AppleTry::AxAddToStage(_) | AppleTry::PidClick(_) | AppleTry::ShiftFocus(_) => {
+                Err(format!("{} is not in this build (built without the probes feature)", t.name()))
+            }
         };
         let ms = t0.elapsed().as_secs_f64() * 1000.0;
         tracing::info!(route = t.name(), ok = ran.is_ok(), ms, "apple mode: a route tried by hand");
-        self.mirror.step_began(now);
         self.watch();
         self.read_due = Some(now + mirror::MOTION_READ);
         match ran {
@@ -1239,20 +1275,48 @@ impl AppleController {
         }
     }
 
+    /// `debug-frame ID X Y W H` in this mode (test only): a `STAGE_MANAGER_ONLY` app's window
+    /// set to the frame through Accessibility, as a person's move and resize would leave it,
+    /// on any screen; nothing else (Apple's arranges what follows). The probes of Apple's own
+    /// frames per screen setup.
+    fn debug_frame(&self, ob: &Observer, id: u32, frame: crate::engine::geometry::Rect) -> Value {
+        if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+            return json!({ "ok": false, "error": "debug-frame needs STAGE_MANAGER_TEST=1" });
+        }
+        let Some(w) = ob.window(id).filter(|w| crate::platform::input::test_pids().contains(&w.pid)) else {
+            return json!({ "ok": false, "error": format!("window {id} is not a STAGE_MANAGER_ONLY app's window") });
+        };
+        match w.element.set_frame(frame) {
+            Ok(()) => {
+                tracing::info!(id, ?frame, "apple mode: debug-frame");
+                json!({ "ok": true })
+            }
+            Err(e) => json!({ "ok": false, "error": e.to_string() }),
+        }
+    }
+
     // ── ctl ─────────────────────────────────────────────────────────────────────────────
 
     /// A ctl command in this mode: `state`, `switch`, `merge`, `send`, `new`, `apple try` and
-    /// `reload`; the rest answer that they do nothing here.
+    /// `reload`, and for the probes of Apple's own behaviour (test only) `debug-dock-click`
+    /// and `debug-frame`; the rest answer that they do nothing here.
     pub fn ctl(&mut self, ob: &mut Observer, cmd: Command) -> Value {
         let asked = |r: Result<Value, Refusal>| r.unwrap_or_else(|Refusal(e)| json!({ "ok": false, "error": e }));
         match cmd {
-            Command::State => self.state_json(),
+            Command::State => crate::engine::margin::with_table(self.state_json()),
             Command::Switch(n) => asked(self.ask(ob, Ask::Switch(n))),
             Command::Merge(n) => asked(self.ask(ob, Ask::Merge(n))),
             Command::Send(n, id) => asked(self.ask(ob, Ask::Send(n, id))),
             Command::New(id) => asked(self.ask(ob, Ask::New(id))),
             Command::AppleTry(t) => self.try_route(ob, t),
             Command::AppleRestore => asked(self.ask(ob, Ask::Restore)),
+            Command::DebugDockClick { bundle, real } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-dock-click needs STAGE_MANAGER_TEST=1" });
+                }
+                crate::platform::test_press::dock_press(&bundle, real, self.screen().map(|d| d.frame))
+            }
+            Command::DebugFrame { id, frame, .. } => self.debug_frame(ob, id, frame),
             Command::Reload => {
                 self.reload_config();
                 json!({ "ok": true })
@@ -1273,12 +1337,13 @@ impl AppleController {
             "why": "Apple's Stage Manager is on and [windows] apple_stage_manager_on = \"integrate\"",
             "apple_stage_manager_on": self.with_apple().name(),
         });
-        let now = Instant::now();
+        let now = clock::now();
         let apple = json!({
             "settled": self.mirror.settled,
             "age_ms": self.mirror.read_at.map(|t| now.duration_since(t).as_millis() as u64),
             "read_ms": (self.read_ms * 10.0).round() / 10.0,
             "in_motion": self.mirror.in_motion,
+            "expects": self.mirror.expecting().map(|e| json!({ "effect": format!("{:?}", e.effect), "step": e.step, "ms": now.saturating_duration_since(e.since).as_millis() as u64 })),
             "ax_corrections": self.mirror.corrections,
             "ax_age_ms": self.mirror.ax_at.map(|t| now.duration_since(t).as_millis() as u64),
             "strip_shown": self.mirror.strip_shown,
@@ -1400,7 +1465,7 @@ impl AppleController {
         let text = match file.to_json() {
             Ok(t) => t,
             Err(e) => {
-                let wait = self.save.failed(Instant::now());
+                let wait = self.save.failed(clock::now());
                 tracing::error!(retry_s = wait.as_secs(), "{e}; state-apple.json on disk is kept");
                 return;
             }
@@ -1413,7 +1478,7 @@ impl AppleController {
                 tracing::debug!(bytes = text.len(), "apple mode: stages saved to {}", path.display());
             }
             Err(e) => {
-                let wait = self.save.failed(Instant::now());
+                let wait = self.save.failed(clock::now());
                 tracing::warn!(retry_s = wait.as_secs(), "cannot save {}: {e}; tried again later", path.display());
             }
         }

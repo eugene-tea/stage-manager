@@ -205,6 +205,10 @@ pub fn every_window() -> Vec<CgWindow> {
 /// launch's watch for a new window reads it every few ms,
 /// [`super::spaces::launch_watch`]).
 pub fn every_window_id() -> Vec<u32> {
+    #[cfg(test)]
+    if let Some(ids) = super::fake::with(|d| d.windows.keys().copied().collect()) {
+        return ids;
+    }
     let Some(array) = CGWindowListCreate(CGWindowListOption::OptionAll | CGWindowListOption::ExcludeDesktopElements, kCGNullWindowID) else {
         return Vec::new();
     };
@@ -239,6 +243,10 @@ pub fn describe(ids: &[u32]) -> Vec<CgWindow> {
     if ids.is_empty() {
         return Vec::new();
     }
+    #[cfg(test)]
+    if let Some(described) = super::fake::with(|d| d.describe(ids)) {
+        return described.into_iter().map(|w| CgWindow { bounds: reported(w.id, w.bounds), ..w }).collect();
+    }
     // The array holds the CGWindowIDs themselves as its values (no callbacks), as the call
     // expects.
     let mut values: Vec<*const c_void> = ids.iter().map(|&id| id as usize as *const c_void).collect();
@@ -261,6 +269,10 @@ pub fn describe(ids: &[u32]) -> Vec<CgWindow> {
 
 fn query(options: CGWindowListOption) -> Vec<CgWindow> {
     super::costs::bump(super::costs::Cost::WindowList);
+    #[cfg(test)]
+    if let Some(list) = super::fake::with(|d| d.list(!options.contains(CGWindowListOption::OptionOnScreenOnly))) {
+        return list;
+    }
     let Some(array) = CGWindowListCopyWindowInfo(options, kCGNullWindowID) else {
         tracing::warn!("CGWindowListCopyWindowInfo returned nothing");
         return Vec::new();
@@ -418,6 +430,8 @@ mod tests {
     /// every read is fresh.
     #[test]
     fn a_wake_reads_each_list_once_until_a_write_of_ours() {
+        // The count of window writes is the process's: no bench writes meanwhile.
+        let _alone = crate::platform::fake::exclusive();
         let a = wake_on_screen();
         assert!(!Rc::ptr_eq(&a, &wake_on_screen()), "outside a wake: read afresh");
         let wake = wake();

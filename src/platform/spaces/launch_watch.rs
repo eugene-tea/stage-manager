@@ -25,11 +25,20 @@
 //! created and ordered in within one read (Stickies' second note, once) shows unheld: counted
 //! (`new_missed`), placed as before.
 //!
+//! The window server's notice of a window's creation (type 811, 3-11 ms after the cause in
+//! `probe-spaces cgs`, 11-21: [`super::notices`]) would wake the watch for a look at once
+//! ([`nudge`]), but the app has never heard it: in the live `launch` phase (11-21, 20
+//! launches) no 811, 815 or 816 came and every one of the 100 windows held was found by the
+//! read every [`EVERY`] (the probe also asked `SLSRequestNotificationsForWindows` for its
+//! fixtures' windows; the app does not). So the watch rests on its read; each window held is
+//! noted by which look found it (`margin` `launch_watch::EVERY`: `noticed`, else the read's).
+//!
 //! [`WindowEngine::about_to_show`]: crate::platform::window_engine::WindowEngine::about_to_show
 //! [`WindowEngine::let_new_out`]: crate::platform::window_engine::WindowEngine::let_new_out
 
+use crate::platform::clock;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use super::engine::SpacesEngine;
@@ -75,7 +84,10 @@ pub fn first_look(layer: i64, onscreen: bool, on_a_space: bool) -> FirstLook {
 /// watch is over (`watching` false).
 pub fn let_out_unplaced(ordered: Option<Instant>, watching: bool, now: Instant) -> Option<&'static str> {
     match ordered {
-        Some(t) if now.saturating_duration_since(t) >= NOT_PLACED_AFTER => Some("not placed in time"),
+        Some(t) if now.saturating_duration_since(t) >= NOT_PLACED_AFTER => {
+            crate::engine::margin::wait("NOT_PLACED_AFTER", now.saturating_duration_since(t), NOT_PLACED_AFTER, crate::engine::margin::End::Cap);
+            Some("not placed in time")
+        }
         None if !watching => Some("never shown by its app"),
         _ => None,
     }
@@ -84,8 +96,41 @@ pub fn let_out_unplaced(ordered: Option<Instant>, watching: bool, now: Instant) 
 /// The apps being watched now (a second launch notice for one starts no second watch).
 static WATCHED: Mutex<BTreeSet<i32>> = Mutex::new(BTreeSet::new());
 
+/// How many window-creation notices came ([`nudge`]), and the watches' wake-up.
+static NUDGES: Mutex<u64> = Mutex::new(0);
+static NUDGED: Condvar = Condvar::new();
+
+/// True while an app's launch is watched.
+pub fn watching() -> bool {
+    WATCHED.lock().is_ok_and(|w| !w.is_empty())
+}
+
+/// A window was created (the window server's notice): every watch looks now.
+pub fn nudge() {
+    if let Ok(mut n) = NUDGES.lock() {
+        *n += 1;
+        NUDGED.notify_all();
+    }
+}
+
+/// Waits [`EVERY`] or until a [`nudge`] after the one `seen` counts; true when a nudge ended it.
+fn pause(seen: &mut u64) -> bool {
+    let Ok(n) = NUDGES.lock() else {
+        std::thread::sleep(EVERY);
+        return false;
+    };
+    let (n, _) = NUDGED.wait_timeout_while(n, EVERY, |n| *n == *seen).unwrap_or_else(std::sync::PoisonError::into_inner);
+    let woke = *n != *seen;
+    *seen = *n;
+    woke
+}
+
 /// Starts watching app `pid`'s new windows on a thread of its own.
 pub fn start(engine: Arc<SpacesEngine>, pid: i32) {
+    // On a fake desk no thread watches: a new app's windows show as their app orders them in.
+    if cfg!(test) && crate::platform::fake_active() {
+        return;
+    }
     let fresh = WATCHED.lock().map(|mut w| w.insert(pid)).unwrap_or(false);
     if !fresh {
         return;
@@ -111,7 +156,7 @@ fn alive(pid: i32) -> bool {
 
 /// The watch itself (see the module docs).
 fn watch(engine: &SpacesEngine, pid: i32) {
-    let began = Instant::now();
+    let began = clock::now();
     // Made ahead of the app's first window (a Space is made in a few ms).
     let _ = engine.prepare_new();
     let mut others: HashSet<u32> = HashSet::new();
@@ -119,8 +164,11 @@ fn watch(engine: &SpacesEngine, pid: i32) {
     let mut waiting: BTreeMap<u32, Option<Instant>> = BTreeMap::new();
     let (mut held, mut missed, mut left_alone, mut placed, mut unplaced) = (0u32, 0u32, 0u32, 0u32, 0u32);
     let mut first_held_ms: Option<u64> = None;
+    let mut nudges = NUDGES.lock().map(|n| *n).unwrap_or(0);
+    // Whether the look now was brought by a creation notice, and when the last look was.
+    let (mut by_notice, mut held_by_notice, mut last_look) = (false, 0u32, began);
     loop {
-        let now = Instant::now();
+        let now = clock::now();
         let watching = now.duration_since(began) < WATCH_FOR && alive(pid);
         if !watching && waiting.is_empty() {
             break;
@@ -138,6 +186,13 @@ fn watch(engine: &SpacesEngine, pid: i32) {
                     FirstLook::Hold => {
                         if engine.hold_new(w.id) {
                             held += 1;
+                            let since = now.saturating_duration_since(last_look);
+                            if by_notice {
+                                held_by_notice += 1;
+                                crate::engine::margin::wait_noticed("launch_watch::EVERY", since, EVERY);
+                            } else {
+                                crate::engine::margin::wait("launch_watch::EVERY", since, EVERY, crate::engine::margin::End::Met);
+                            }
                             first_held_ms.get_or_insert(began.elapsed().as_millis() as u64);
                             waiting.insert(w.id, None);
                         }
@@ -154,7 +209,7 @@ fn watch(engine: &SpacesEngine, pid: i32) {
         if !waiting.is_empty() {
             let ids: Vec<u32> = waiting.keys().copied().collect();
             let listed = windows::describe(&ids);
-            let now = Instant::now();
+            let now = clock::now();
             for id in ids {
                 if !engine.waits_new(id) {
                     // Placed by the controller (let out, or into its stage's Space).
@@ -178,11 +233,13 @@ fn watch(engine: &SpacesEngine, pid: i32) {
                 }
             }
         }
-        std::thread::sleep(EVERY);
+        last_look = now;
+        by_notice = pause(&mut nudges);
     }
     tracing::info!(
         pid,
         held,
+        held_by_notice,
         placed,
         unplaced,
         missed,

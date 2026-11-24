@@ -36,6 +36,7 @@
 //! first and read back once; if the read-back differs, the bridged call is used for the rest
 //! of the run.
 
+use crate::platform::clock;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::MutexGuard;
@@ -120,7 +121,7 @@ pub(super) struct StretchCounts {
 /// Sleeps until `at` (a millisecond short by sleeping, the rest in short naps).
 fn sleep_until(at: Instant) {
     loop {
-        let now = Instant::now();
+        let now = clock::now();
         if now >= at {
             return;
         }
@@ -173,6 +174,22 @@ fn level_mode() -> LevelMode {
 }
 
 impl SpacesEngine {
+    /// True once a stretch was begun in this run (the live landing on): before, the
+    /// stretches are empty and the hides, shows, lends and rounds go on without their lock.
+    pub(super) fn any_stretch(&self) -> bool {
+        self.stretch_begun.load(Ordering::Acquire)
+    }
+
+    /// The stretches' window ids for a caller that is not a stretch's own thread (a round of
+    /// lends): none without asking the lock while no stretch was ever begun; `None` when the
+    /// lock stays busy ([`Self::stretches_within`]).
+    pub(super) fn stretch_ids_within(&self, what: &str) -> Option<Vec<u32>> {
+        if !self.any_stretch() {
+            return Some(Vec::new());
+        }
+        self.stretches_within(what).map(|l| l.keys().copied().collect())
+    }
+
     /// The stretches, behind their own lock (taken before the state's when both are, never
     /// the other way).
     pub(super) fn stretches(&self) -> MutexGuard<'_, BTreeMap<u32, Fly>> {
@@ -185,7 +202,7 @@ impl SpacesEngine {
     /// more. The caller goes on as when there is no stretch.
     pub(super) fn stretches_within(&self, what: &str) -> Option<MutexGuard<'_, BTreeMap<u32, Fly>>> {
         let wait = if self.stretches_busy.load(Ordering::Relaxed) { Duration::ZERO } else { LOCK_WAIT };
-        let by = Instant::now() + wait;
+        let by = clock::now() + wait;
         loop {
             match self.stretches.try_lock() {
                 Ok(l) => {
@@ -195,7 +212,7 @@ impl SpacesEngine {
                     return Some(l);
                 }
                 Err(std::sync::TryLockError::Poisoned(p)) => return Some(p.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < by => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::TryLockError::WouldBlock) if clock::now() < by => std::thread::sleep(Duration::from_millis(1)),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     if !self.stretches_busy.swap(true, Ordering::Relaxed) {
                         tracing::warn!(what, wait_ms = LOCK_WAIT.as_millis() as u64, "spaces engine: the stretches stayed busy (a stretch's thread is stuck); gone on without them");
@@ -269,6 +286,9 @@ impl SpacesEngine {
         if s.steps.is_empty() || !self.holds(s.window) || self.lent(s.window) || self.state().parked.contains_key(&s.window) || self.sky().is_none() {
             return false;
         }
+        // Before the lock: a hide or show that reads it unset finds no stretch, as it would
+        // have under the lock before this insert.
+        self.stretch_begun.store(true, Ordering::Release);
         {
             let Some(mut l) = self.stretches_within("a stretch planned") else { return false };
             if l.contains_key(&s.window) {
@@ -321,7 +341,7 @@ impl SpacesEngine {
         Self::set_landing_level(sky, id, space, s.rank, count);
         // Shown back to front: the Spaces behind it first (round landing-order).
         if let Some(c) = &s.convoy {
-            let waited = c.wait_behind(s.rank, Leg::Shown, Instant::now() + landing_order::SHOW_WAIT, || false);
+            let waited = c.wait_behind(s.rank, Leg::Shown, clock::now() + landing_order::SHOW_WAIT, || false);
             if !matches!(waited, Waited::Ready(d) if d < Duration::from_millis(1)) {
                 tracing::debug!(id, space, rank = s.rank, ?waited, "spaces engine: a landing Space waited for those behind it to show");
             }
@@ -353,7 +373,7 @@ impl SpacesEngine {
                     windows::set_transformed(id, Some(s.frame));
                     let late = first_at.elapsed();
                     // The pose for now, not the handover's, when the thread woke late.
-                    let now_m = s.steps.iter().rev().find(|(at, _)| *at <= Instant::now()).map_or(first, |(_, m)| *m);
+                    let now_m = s.steps.iter().rev().find(|(at, _)| *at <= clock::now()).map_or(first, |(_, m)| *m);
                     self.set_landing_transform(sky, space, now_m);
                     if let Err(e) = sky.add_remove_from(Route::Bridged, space, &[id], ALL_SPACES_MASK) {
                         tracing::debug!(id, space, "spaces engine: a stretch's window could not be sent into its Space: {e}");
@@ -381,8 +401,8 @@ impl SpacesEngine {
             return self.skip(id, Some(space), why);
         }
         // On screen at its first pose: the picture goes.
-        let shown_by = Instant::now() + SHOWN_WAIT;
-        while Instant::now() < shown_by && !windows::describe(&[id]).first().is_some_and(|w| w.onscreen) {
+        let shown_by = clock::now() + SHOWN_WAIT;
+        while clock::now() < shown_by && !windows::describe(&[id]).first().is_some_and(|w| w.onscreen) {
             std::thread::sleep(Duration::from_micros(500));
         }
         self.state().stretch.shown += 1;
@@ -405,7 +425,7 @@ impl SpacesEngine {
         // Landed back to front: a window goes onto its Desktop (listed on top there) only
         // once the windows behind it have; it waits at its frame, at the identity.
         if let Some(c) = &s.convoy {
-            let waited = c.wait_behind(s.rank, Leg::Gone, Instant::now() + landing_order::LAND_WAIT, || self.stretches().get(&id).is_none_or(|f| f.stop));
+            let waited = c.wait_behind(s.rank, Leg::Gone, clock::now() + landing_order::LAND_WAIT, || self.stretches().get(&id).is_none_or(|f| f.stop));
             match waited {
                 Waited::Ready(d) if d < Duration::from_millis(1) => {}
                 Waited::Ready(d) => tracing::debug!(id, rank = s.rank, waited_ms = d.as_millis() as u64, "spaces engine: a window waited at its frame for the windows behind it to land"),
@@ -423,8 +443,8 @@ impl SpacesEngine {
         }
         self.set_landing_transform(sky, space, IDENTITY);
         let home = self.home_of(id, l.get(&id));
-        let (desktops, shown) = Self::desktops(sky);
-        let home = home.filter(|h| desktops.contains(h)).or(shown.first().copied());
+        let (desktops, _) = Self::desktops(sky);
+        let home = home.filter(|h| desktops.contains(h)).or_else(|| self.shown_on_own_screen(sky, id, None, None));
         if let Some(home) = home {
             let _ = sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK);
         }
@@ -486,16 +506,15 @@ impl SpacesEngine {
             (l.get(&id).is_some_and(|f| f.ended), l.get(&id).copied())
         };
         if !ended {
-            let by = Instant::now() + STOP_WAIT;
-            while Instant::now() < by && sky.spaces_of(&[id]).contains(&space) {
+            let by = clock::now() + STOP_WAIT;
+            while clock::now() < by && sky.spaces_of(&[id]).contains(&space) {
                 std::thread::sleep(Duration::from_millis(2));
             }
             if sky.spaces_of(&[id]).contains(&space) {
                 // Nothing took it: home, as a show would.
                 let _ = sky.set_transform(Route::Classic, space, affine(IDENTITY));
                 let home = self.home_of(id, fly.as_ref());
-                let (_, shown) = Self::desktops(sky);
-                if let Some(home) = home.or(shown.first().copied()) {
+                if let Some(home) = home.or_else(|| self.shown_on_own_screen(sky, id, None, None)) {
                     let _ = sky.add_remove_from(Route::Bridged, home, &[id], ALL_SPACES_MASK);
                 }
             }
@@ -521,6 +540,9 @@ impl SpacesEngine {
     /// stretches stuck ([`Self::stretches_within`]) nothing is held, and a hide is told
     /// [`UNKNOWN_SPACE`] so that it takes the window out of every Space all the same.
     pub(super) fn stop_stretch(&self, id: u32, flying_too: bool) -> (Option<MutexGuard<'_, BTreeMap<u32, Fly>>>, Option<u64>) {
+        if !self.any_stretch() {
+            return (None, None);
+        }
         let Some(mut l) = self.stretches_within(if flying_too { "a hide" } else { "a show" }) else {
             return (None, flying_too.then_some(UNKNOWN_SPACE));
         };
@@ -542,11 +564,14 @@ impl SpacesEngine {
     /// True while window `id` has a stretch planned or flying that has not stopped: until it
     /// lands it is in its stage Space or its landing Space, on no Desktop for macOS.
     pub(super) fn in_flight(&self, id: u32) -> bool {
-        self.stretches_within("a window's Desktop asked").is_some_and(|l| l.get(&id).is_some_and(|f| !f.stop && !f.ended))
+        self.any_stretch() && self.stretches_within("a window's Desktop asked").is_some_and(|l| l.get(&id).is_some_and(|f| !f.stop && !f.ended))
     }
 
     /// Window `id`'s stretch, when one not taken over yet is no longer wanted.
     pub(super) fn cancel(&self, id: u32) {
+        if !self.any_stretch() {
+            return;
+        }
         let Some(mut l) = self.stretches_within("a stretch cancelled") else { return };
         if let Some(f) = l.get_mut(&id).filter(|f| f.phase == Phase::Waiting) {
             f.stop = true;
@@ -558,12 +583,15 @@ impl SpacesEngine {
     /// stretches stay busy past [`END_WAIT`] (the Spaces are classic: a process that dies
     /// puts their windows back by itself).
     pub(super) fn end_stretches(&self, why: &str) {
-        let by = Instant::now() + END_WAIT;
+        if !self.any_stretch() {
+            return;
+        }
+        let by = clock::now() + END_WAIT;
         let mut l = loop {
             match self.stretches.try_lock() {
                 Ok(l) => break l,
                 Err(std::sync::TryLockError::Poisoned(p)) => break p.into_inner(),
-                Err(std::sync::TryLockError::WouldBlock) if Instant::now() < by => std::thread::sleep(Duration::from_millis(1)),
+                Err(std::sync::TryLockError::WouldBlock) if clock::now() < by => std::thread::sleep(Duration::from_millis(1)),
                 Err(std::sync::TryLockError::WouldBlock) => {
                     tracing::warn!(why, "spaces engine: the stretches stayed busy; their windows were not taken home");
                     return;
@@ -574,14 +602,13 @@ impl SpacesEngine {
             return;
         }
         let Some(sky) = self.sky() else { return };
-        let (_, shown) = Self::desktops(sky);
         for (id, f) in l.iter_mut() {
             f.stop = true;
             if f.phase != Phase::Flying || f.ended {
                 continue;
             }
             let _ = sky.set_transform(Route::Classic, f.space, affine(IDENTITY));
-            let home = self.home_of(*id, Some(&*f)).or(shown.first().copied());
+            let home = self.home_of(*id, Some(&*f)).or_else(|| self.shown_on_own_screen(sky, *id, None, None));
             if let Some(home) = home {
                 let _ = sky.add_remove_from(Route::Bridged, home, &[*id], ALL_SPACES_MASK);
             }
@@ -612,6 +639,8 @@ mod tests {
             state: std::sync::Mutex::new(super::super::State::default()),
             stretches: std::sync::Mutex::new(BTreeMap::new()),
             stretches_busy: std::sync::atomic::AtomicBool::new(false),
+            // The tests below put their stretches in the map by hand.
+            stretch_begun: std::sync::atomic::AtomicBool::new(true),
         }
     }
 

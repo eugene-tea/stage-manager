@@ -30,6 +30,8 @@ jobs:
         # Installs the pinned version; an older rustup installs it on `rustup show` instead.
         run: rustup toolchain install || rustup show
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked --features probes
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Clippy (with the probes)
+        run: cargo clippy --locked --all-targets --features probes -- -D warnings

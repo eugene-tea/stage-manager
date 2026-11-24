@@ -37,7 +37,7 @@ use crate::ui::card_spread::{self, Spread};
 use crate::engine::perspective::{View, in_quad, quad_bounds};
 use crate::ui::strip_model::CardSnapshot;
 
-pub use crate::engine::perspective::{MEASURED_PERSPECTIVE, auto_perspective};
+pub use crate::engine::perspective::auto_perspective;
 
 /// The style resolved for one display: every length scaled by `k`, auto values computed.
 #[derive(Clone, Debug, PartialEq)]
@@ -206,6 +206,7 @@ impl Metrics {
         Point::new(self.eye.x + (x + across * self.tilt.cos() - self.eye.x) * f, self.eye.y + (y - self.eye.y) * f)
     }
 
+    #[cfg(test)]
     /// The depth (toward the eye) of the turned plane whose left edge is at `x`, at the point
     /// it covers `px` across before the projection: `-(px - x) tan tilt`. Of two planes over
     /// the same point the one with the greater depth is nearer the eye, and the turn is the
@@ -397,6 +398,7 @@ impl CardLayout {
         self.grown_bounds(m, 1.0)
     }
 
+    #[cfg(test)]
     /// The thumbnail under `p` (panel coordinates, the card as laid out, unscaled), as its
     /// index in [`CardLayout::thumbs`]: the frontmost drawn whose turned plane holds `p`
     /// (the card draws the list back to front, so the first that holds it is on top).
@@ -788,6 +790,7 @@ pub fn appear_offset(hold: (f64, f64)) -> (f64, f64) {
     (hold.0 + APPEAR_DX, APPEAR_DROP)
 }
 
+#[cfg(test)]
 /// How far the appearing window has slid sideways from [`appear_offset`] to under the pointer,
 /// at `t` (0 to 1) of `[drag] appear_ms`: a smoothstep, `3t² − 2t³` (the Bézier curve
 /// (⅓, 0), (⅔, 1) the strip animates with). Apple's measured 11-09 (60 fps, its window's left

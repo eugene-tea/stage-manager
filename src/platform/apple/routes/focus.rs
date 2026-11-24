@@ -2,7 +2,7 @@
 //! Apple's Stage Manager brings its stage in front (a probe of 11-16: 5-7 ms, no pointer, the
 //! strip hidden or not, any stage whose window is known, one no longer listed too).
 
-use super::{Cost, Route};
+use super::Route;
 use crate::engine::apple::desk::{AppleDesk, InputNow};
 use crate::engine::apple::mirror::Arrangement;
 use crate::engine::apple::plan::{Refusal, Step};
@@ -14,10 +14,6 @@ pub struct Focus;
 impl Route for Focus {
     fn name(&self) -> &'static str {
         "focus"
-    }
-
-    fn cost(&self) -> Cost {
-        Cost { ms: 7, pointer: false }
     }
 
     /// A focus of a window the mirror knows; while the button is down it waits (a focus then
@@ -54,7 +50,7 @@ mod tests {
         for _ in 0..60 {
             f.advance(50);
             a = fold(&a, Some(&f.reading()), &f.listed(), &f.window_ids(), &display(), f.now());
-            if a.settled {
+            if a.settled && !f.busy() {
                 return a;
             }
         }
@@ -72,7 +68,6 @@ mod tests {
         Focus.run(&step, &mut f).expect("focused");
         assert_eq!(f.focused, vec![1]);
         assert!(f.posted.is_empty(), "no gesture posted");
-        assert!(!Focus.cost().pointer);
         let b = settled(&mut f, &a);
         assert_eq!(b.current, vec![1, 2], "Apple's brought its stage in front");
     }
@@ -103,7 +98,7 @@ mod tests {
             let [Step::Focus(window)] = steps.as_slice() else { panic!("one focus at rest: {steps:?}") };
             Focus.can(&steps[0], a, &InputNow::default()).expect("the route can");
             Focus.run(&steps[0], f).expect("focused");
-            a.step_began(f.now());
+            a.expect(crate::engine::apple::job::answer(&steps[0], a).expect("a focus is answered"), f.now());
             *a = settled(f, a);
             follow::follow(m, a, &metas(f), Some(*window));
             *window

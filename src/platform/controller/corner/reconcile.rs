@@ -2,6 +2,7 @@
 //! that the window server lists out of the park zone, or whose park failed, is parked again
 //! or adopted as shown, every tick.
 
+use crate::platform::clock;
 use std::collections::HashSet;
 use std::time::Instant;
 
@@ -25,7 +26,7 @@ impl Controller {
     /// ([`crate::engine::corner::park_reconcile`]; the review's L1, K2, S5: until now only a
     /// Space arrival's `match_screen` reconciled the two, and such a window sat mid-screen,
     /// counted parked, with no card, until the next Desktop change). A window the user
-    /// focused since its park ([`Self::user_focus`]), or moved while parked, joins the active
+    /// focused since its park ([`crate::engine::causes::Causes::focused_since_hidden`]), or moved while parked, joins the active
     /// stage where it is ([`Model::adopt_shown`]); any other is parked again once it rests
     /// (nothing is judged while our own park, raise or un-minimize may still be landing, nor
     /// while its listed frame changes: live 10-29, ⌘M's un-minimize focused the window and
@@ -42,7 +43,7 @@ impl Controller {
     pub(in crate::platform::controller) fn reconcile_parked(&mut self, ob: &mut Observer, list: Option<&[windows::CgWindow]>) {
         use crate::engine::corner::corner_patch::desktop_slides;
         use crate::engine::corner::park_reconcile::{Facts, Seen, Verdict, step};
-        let now = Instant::now();
+        let now = clock::now();
         let Some(m) = self.model.as_ref() else {
             self.corner.strays.clear();
             return;
@@ -146,14 +147,14 @@ impl Controller {
             // The user's choice only: focused now, and by a focus of theirs since our park
             // (macOS's focus at an un-minimize, or our own, counts for nothing).
             let is_focused = *focused.get_or_insert_with(focused_window) == Some(id);
-            let user_focused = is_focused && self.user_focus.contains_key(&id);
+            let user_focused = is_focused && self.causes.focused_since_hidden(id);
             let facts = Facts {
                 seen,
                 bounds,
                 focused: user_focused,
                 user_moved: false,
                 busy: self.busy_apps.borrow().busy(pid, now),
-                echo: self.echoes.is_window_echo(id, now),
+                echo: self.causes.wrote_recently(id, now),
             };
             let s = self.corner.strays.entry(id).or_default();
             let verdict = step(s, facts, now);

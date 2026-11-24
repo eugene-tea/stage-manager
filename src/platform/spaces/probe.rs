@@ -132,7 +132,7 @@ fn trial(mtm: MainThreadMarker, fail: Option<&str>, clock: &mut Clock) -> Result
         return Err(why);
     }
     clock.lap("calls");
-    let desktops: Vec<u64> = sky.displays().iter().flat_map(|(_, _, spaces)| spaces.iter().map(|(id, _)| *id)).collect();
+    let desktops: Vec<u64> = sky.displays().iter().flat_map(|d| d.every().collect::<Vec<_>>()).collect();
     if desktops.is_empty() {
         return Err("the window server listed no Desktop".into());
     }
@@ -161,6 +161,9 @@ fn steps(sky: &Sky, id: u32, desktops: &[u64], fail: Option<&str>, clock: &mut C
         Err(now) => return Err(format!("the trial window is on no Desktop (listed on {now:?})")),
     };
     clock.lap("listed");
+    // The window server's notices for this panel are the launch's health check of them
+    // (round r5-notices): its creation, its take-out of `home`, its add back.
+    super::notices::probe_window(id, home);
     let space = match sky.create(Route::Classic, false) {
         Ok(0) => return Err("the window server made no trial Space".into()),
         Ok(space) => space,

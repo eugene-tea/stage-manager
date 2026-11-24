@@ -33,7 +33,7 @@ use objc2_core_graphics::{
 use objc2_foundation::{MainThreadMarker, NSString};
 
 use super::desktop::{point_to_top_left, primary_height};
-use super::windows;
+use super::{clock, windows};
 use crate::ui::strip_model;
 use crate::engine::geometry::{Point, Rect};
 
@@ -83,6 +83,10 @@ pub struct InputEvent {
     /// When it happened: macOS's timestamp, seconds since the Mac started (a press's hold is
     /// measured on these, not on when the main thread got to each event).
     pub stamp: f64,
+    /// When the monitor's handler got it on the main thread ([`crate::platform::clock`]):
+    /// what it is compared with ("a focus within X of this press") is measured to this, not
+    /// to when the WM thread got to it.
+    pub heard: Instant,
 }
 
 /// The Tab key's virtual key code.
@@ -137,6 +141,7 @@ impl Drop for InputMonitor {
 /// only while a strip may show (round idle-subsystems: each move wakes the main thread).
 pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Option<InputMonitor> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| {
+        let heard = clock::now();
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event = unsafe { event.as_ref() };
         if event.r#type() == NSEventType::FlagsChanged {
@@ -168,6 +173,7 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Op
             clicks,
             key,
             stamp: event.timestamp(),
+            heard,
         });
     });
     let mask = NSEventMask::LeftMouseDown
@@ -222,6 +228,10 @@ pub struct Modifiers {
 
 /// The modifiers held now (any thread).
 pub fn live_modifiers() -> Modifiers {
+    #[cfg(test)]
+    if let Some(m) = super::fake::with(|d| Modifiers { shift: d.shift, cmd: d.cmd }) {
+        return m;
+    }
     let flags = CGEventSource::flags_state(CGEventSourceStateID::HIDSystemState);
     Modifiers { shift: flags.contains(CGEventFlags::MaskShift), cmd: flags.contains(CGEventFlags::MaskCommand) }
 }
@@ -229,16 +239,28 @@ pub fn live_modifiers() -> Modifiers {
 /// True when ⌘ is held now, by a person's keyboard or a posted event (the session's combined
 /// state; any thread): ⌘Tab's switcher closed with its release unheard is found so.
 pub fn command_held() -> bool {
+    #[cfg(test)]
+    if let Some(held) = super::fake::with(|d| d.cmd) {
+        return held;
+    }
     CGEventSource::flags_state(CGEventSourceStateID::CombinedSessionState).contains(CGEventFlags::MaskCommand)
 }
 
 /// Where the pointer is now, global top-left coordinates (any thread).
 pub fn pointer() -> Option<Point> {
+    #[cfg(test)]
+    if let Some(p) = super::fake::with(|d| d.pointer) {
+        return Some(p);
+    }
     pointer_now().map(|p| Point::new(p.x, p.y))
 }
 
 /// Since the last keyboard, mouse or trackpad event in this login session (any thread).
 pub fn since_last_input() -> Duration {
+    #[cfg(test)]
+    if let Some(d) = super::fake::with(|d| d.since_press(false)) {
+        return d;
+    }
     // kCGAnyInputEventType is all ones.
     let secs = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType(u32::MAX));
     Duration::try_from_secs_f64(secs).unwrap_or(Duration::ZERO)
@@ -247,6 +269,10 @@ pub fn since_last_input() -> Duration {
 /// Since the user last pressed a mouse button in this login session (any thread): unlike
 /// [`since_last_input`], a pointer move, a scroll or a key does not count.
 pub fn since_last_click() -> Duration {
+    #[cfg(test)]
+    if let Some(d) = super::fake::with(|d| d.since_press(true)) {
+        return d;
+    }
     [CGEventType::LeftMouseDown, CGEventType::RightMouseDown, CGEventType::OtherMouseDown]
         .into_iter()
         .map(|kind| CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, kind))
@@ -258,9 +284,26 @@ pub fn since_last_click() -> Duration {
 /// Since the user last pressed a mouse button or a key in this login session (any thread):
 /// a pointer move or a scroll does not count.
 pub fn since_last_press() -> Duration {
+    #[cfg(test)]
+    if let Some(d) = super::fake::with(|d| d.since_press(false)) {
+        return d;
+    }
     let key = CGEventSource::seconds_since_last_event_type(CGEventSourceStateID::CombinedSessionState, CGEventType::KeyDown);
     let key = Duration::try_from_secs_f64(key).unwrap_or(Duration::MAX);
     since_last_click().min(key)
+}
+
+/// [`since_last_press`] as of `at` (a notice's receipt, [`crate::platform::clock`]): how long
+/// before `at` the last press came. Zero when it came after `at`: a press between the notice
+/// and its handling counts as at the notice, and is counted for time window `name`
+/// ([`crate::engine::margin::predated`]).
+pub fn since_last_press_at(at: Instant, name: &'static str) -> Duration {
+    let since = since_last_press();
+    let ago = clock::now().saturating_duration_since(at);
+    if since < ago {
+        crate::engine::margin::predated(name);
+    }
+    since.saturating_sub(ago)
 }
 
 /// Left mouse-ups the monitor has seen (another app's, any source): a synthetic drag posts
@@ -275,13 +318,12 @@ pub fn left_ups() -> u64 {
 
 /// True while the left mouse button is down (any thread).
 pub fn left_button_down() -> bool {
+    #[cfg(test)]
+    if let Some(down) = super::fake::with(|d| d.left_down) {
+        return down;
+    }
     CGEventSource::button_state(CGEventSourceStateID::CombinedSessionState, CGMouseButton::Left)
 }
-
-/// How long after a Shift-held trigger a newly opened app's first window still counts.
-pub const LAUNCH_WINDOW: Duration = Duration::from_secs(10);
-/// How long after a Shift-held trigger an activation or another app's new window counts.
-pub const ACTIVATION_WINDOW: Duration = Duration::from_millis(2000);
 
 /// The latest user action, for the Shift sugar.
 #[derive(Clone, Copy, Debug, Default)]
@@ -583,6 +625,35 @@ pub fn dock_item_click(p: Point, hold: Duration) -> Result<(), String> {
         .map_err(|e| format!("no thread for the click: {e}"))
 }
 
+/// A synthetic click at `p` on Mission Control's cover (test only), where it lays out a
+/// `STAGE_MANAGER_ONLY` app's window: only for a point the caller checked
+/// ([`super::test_press::mission_pick`]; the cover is macOS's own window, so [`path_is_safe`]
+/// would refuse it). The pointer goes back where it was.
+pub fn cover_click(p: Point) -> Result<(), String> {
+    let back = pointer_home();
+    move_first(p, false)?;
+    for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
+        post_mouse(kind, p, false)?;
+        std::thread::sleep(Duration::from_millis(60));
+    }
+    if let Some(back) = back {
+        let _ = CGWarpMouseCursorPosition(back);
+    }
+    Ok(())
+}
+
+/// A synthetic pointer move to `p` on Mission Control's cover (test only), no button: only
+/// for a point the caller checked as for [`cover_click`]. The pointer stays; [`pointer_back`]
+/// puts it where it was.
+pub fn cover_hover(p: Point) -> Result<(), String> {
+    if let Ok(mut home) = HOVER_HOME.lock()
+        && home.is_none()
+    {
+        *home = pointer_now().map(|c| (c.x, c.y));
+    }
+    post_mouse(CGEventType::MouseMoved, p, false)
+}
+
 /// A synthetic left-button drag along `waypoints` (straight segments), only when every point
 /// it passes is over our own windows or a fixture's (checked before anything is posted). The
 /// button is held `hold` at the end before release; the pointer goes back where it was.
@@ -854,34 +925,44 @@ mod tests {
         assert!(!monitor_again(false, false));
     }
 
+    /// `[sugar] launch_window_ms` as the config has it by default.
+    fn launch_window() -> Duration {
+        Duration::from_millis(crate::config::Config::default().sugar.launch_window_ms)
+    }
+
+    /// `[sugar] activation_window_ms` as the config has it by default.
+    fn activation_window() -> Duration {
+        Duration::from_millis(crate::config::Config::default().sugar.activation_window_ms)
+    }
+
     #[test]
     fn the_release_of_a_used_shift_click_does_not_re_arm_it() {
         let t0 = Instant::now();
         let mut t = Triggers::default();
         t.record(t0, SHIFT); // Shift-click in the Dock: down
-        assert!(t.shift_here(t0 + Duration::from_millis(50), ACTIVATION_WINDOW, NONE));
+        assert!(t.shift_here(t0 + Duration::from_millis(50), activation_window(), NONE));
         t.consume(); // the app's windows came here
         t.record_release(t0 + Duration::from_millis(100), SHIFT); // and up
         assert!(
-            !t.shift_here(t0 + Duration::from_millis(900), ACTIVATION_WINDOW, NONE),
+            !t.shift_here(t0 + Duration::from_millis(900), activation_window(), NONE),
             "another app activating on its own is not pulled here"
         );
         // A new press counts again.
         t.record(t0 + Duration::from_millis(1000), SHIFT);
-        assert!(t.shift_here(t0 + Duration::from_millis(1050), ACTIVATION_WINDOW, NONE));
+        assert!(t.shift_here(t0 + Duration::from_millis(1050), activation_window(), NONE));
     }
 
     #[test]
     fn a_recent_shift_trigger_counts_once() {
         let t0 = Instant::now();
         let mut t = Triggers::default();
-        assert!(!t.shift_here(t0, LAUNCH_WINDOW, NONE));
+        assert!(!t.shift_here(t0, launch_window(), NONE));
         t.record(t0, SHIFT);
-        assert!(t.shift_here(t0 + Duration::from_secs(3), LAUNCH_WINDOW, NONE));
-        assert!(!t.shift_here(t0 + Duration::from_secs(3), ACTIVATION_WINDOW, NONE), "too late for an activation");
-        assert!(!t.shift_here(t0 + Duration::from_secs(11), LAUNCH_WINDOW, NONE), "too late for a launch");
+        assert!(t.shift_here(t0 + Duration::from_secs(3), launch_window(), NONE));
+        assert!(!t.shift_here(t0 + Duration::from_secs(3), activation_window(), NONE), "too late for an activation");
+        assert!(!t.shift_here(t0 + Duration::from_secs(11), launch_window(), NONE), "too late for a launch");
         t.consume();
-        assert!(!t.shift_here(t0 + Duration::from_secs(1), LAUNCH_WINDOW, NONE), "used");
+        assert!(!t.shift_here(t0 + Duration::from_secs(1), launch_window(), NONE), "used");
     }
 
     #[test]
@@ -890,8 +971,8 @@ mod tests {
         let mut t = Triggers::default();
         t.record(t0, SHIFT);
         t.record(t0 + Duration::from_millis(500), NONE);
-        assert!(!t.shift_here(t0 + Duration::from_secs(1), LAUNCH_WINDOW, NONE));
-        assert!(t.shift_here(t0 + Duration::from_secs(1), LAUNCH_WINDOW, SHIFT), "held now");
+        assert!(!t.shift_here(t0 + Duration::from_secs(1), launch_window(), NONE));
+        assert!(t.shift_here(t0 + Duration::from_secs(1), launch_window(), SHIFT), "held now");
     }
 
     #[test]
@@ -900,17 +981,17 @@ mod tests {
         let mut t = Triggers::default();
         // ⌘⇧Tab: the Tab key-down carries Command and Shift.
         t.record(t0, CMD_SHIFT);
-        assert!(!t.shift_here(t0 + Duration::from_millis(300), ACTIVATION_WINDOW, SHIFT));
+        assert!(!t.shift_here(t0 + Duration::from_millis(300), activation_window(), SHIFT));
         // ⌘Tab released while Shift is still down.
         t.record(t0, CMD);
-        assert!(!t.shift_here(t0 + Duration::from_millis(300), ACTIVATION_WINDOW, SHIFT));
+        assert!(!t.shift_here(t0 + Duration::from_millis(300), activation_window(), SHIFT));
         // Long after, the live state decides alone.
-        assert!(t.shift_here(t0 + Duration::from_secs(30), ACTIVATION_WINDOW, SHIFT));
-        assert!(!t.shift_here(t0 + Duration::from_secs(30), ACTIVATION_WINDOW, CMD_SHIFT));
+        assert!(t.shift_here(t0 + Duration::from_secs(30), activation_window(), SHIFT));
+        assert!(!t.shift_here(t0 + Duration::from_secs(30), activation_window(), CMD_SHIFT));
     }
 
     fn event(kind: InputKind, cmd: bool, clicks: i64, key: Option<u16>) -> InputEvent {
-        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, control: false, option: false, clicks, key, stamp: 0.0 }
+        InputEvent { kind, at: Point::new(0.0, 0.0), shift: false, cmd, other_modifiers: false, control: false, option: false, clicks, key, stamp: 0.0, heard: Instant::now() }
     }
 
     #[test]

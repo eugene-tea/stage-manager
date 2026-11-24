@@ -34,7 +34,7 @@ use super::fingerprint::{named_within, same_fingerprint};
 use crate::engine::geometry::Rect;
 
 /// Points per signal.
-pub mod points {
+pub(crate) mod points {
     /// The same app (bundle id): required for any match.
     pub const BUNDLE: u32 = 10;
     /// The same `CGWindowID` (saved in this window server session).

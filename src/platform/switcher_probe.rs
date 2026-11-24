@@ -8,8 +8,8 @@
 //!    down, and with the switcher up.
 //! 2. What reaches the input monitor while the switcher shows (⌘, each Tab, Escape, ⌘'s
 //!    release), and how long macOS takes from ⌘'s release to a Space change: the controller
-//!    notes what it heard and did into the report ([`note`]) with the time since the probe
-//!    began. For comparison, an event tap at the session level made for the probe's length
+//!    notes what it heard and did ([`super::switcher_notes`], the probe its listener) into
+//!    the report ([`note`]) with the time since the probe began. For comparison, an event tap at the session level made for the probe's length
 //!    only (active, so Accessibility suffices; every event passed on unchanged, nothing
 //!    swallowed) notes the key events it sees (`tap`): if the global monitor misses the
 //!    switcher's keys, the report tells whether a tap would see them.
@@ -20,7 +20,9 @@
 //! activated. A release goes out only when the app selected is a `STAGE_MANAGER_ONLY` app:
 //! the Dock's answer at the last sample, else the controller's prediction made before the
 //! keys went out (`expected_test`); otherwise Escape goes first. The report stays readable
-//! (`ctl debug-cmd-tab result`) until the next probe.
+//! (`ctl debug-cmd-tab result`) until the next probe. The controller's ⌘Tab tick reads no
+//! state of the probe: a posted ⌘ shows to it through [`super::space_keys::posted_command_down`].
+//! Built only with the `probes` feature.
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
@@ -87,7 +89,7 @@ fn ms_since(t: Instant) -> u64 {
 }
 
 /// True while a probe's keys are going out (its ⌘ is posted, not a person's).
-pub fn posting() -> bool {
+fn posting() -> bool {
     REPORT.lock().ok().is_some_and(|r| r.as_ref().is_some_and(|r| !r.done))
 }
 
@@ -136,6 +138,8 @@ pub fn start(req: Request, dock: i32, allowed: impl Fn(i32) -> bool + Send + 'st
         return Err("a probe is still running".into());
     }
     let req = Request { hold: req.hold.min(HOLD_MAX), gap: req.gap.min(HOLD_MAX), tabs: req.tabs.clamp(1, 9), ..req };
+    // What the controller hears and does comes to the report from here on.
+    super::switcher_notes::listen(note);
     std::thread::Builder::new()
         .name("test-cmd-tab".into())
         .spawn(move || run(req, dock, allowed))

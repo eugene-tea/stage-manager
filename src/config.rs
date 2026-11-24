@@ -13,10 +13,10 @@
 //! the wrong type is an error, and a bad file keeps the previous config: at a reload the one
 //! in force, at launch the last good copy ([`last_good`]).
 
-pub mod edit;
-pub mod hotkey;
+pub(crate) mod edit;
+pub(crate) mod hotkey;
 pub mod last_good;
-pub mod schema;
+pub(crate) mod schema;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -443,6 +443,10 @@ pub struct WindowsConfig {
     /// put on their Desktop for Mission Control under the Spaces engine
     /// ([`crate::engine::mission_control::Mode`]). Read on every reload.
     pub mission_control: crate::engine::mission_control::Mode,
+    /// `[windows] mission_control_key_keeps_stage`: a close of Mission Control by its key keeps
+    /// the stage in front ([`crate::engine::mission_close::verdict`]); off is Apple's, the
+    /// stage of the app macOS brings in front comes with it. Read on every reload.
+    pub mission_key_keeps_stage: bool,
     /// How far past a sliver the patch reaches (its shadow): `auto`, an inactive window's
     /// shadow side by side ([`crate::engine::corner::corner_patch::DEFAULT_REACH`]), or one number for
     /// every side ([`WindowsConfig::patch_reach`]).
@@ -467,6 +471,9 @@ pub struct DisplaysConfig {
     /// Only the main screen is managed (the first version's behaviour; off by default: every
     /// screen has its own strip and stages, as Apple's).
     pub main_only: bool,
+    /// Windows keep their frame per screen setup and go back to it when the same screens
+    /// are connected again ([`crate::engine::setup_frames`]).
+    pub frames_per_setup: bool,
 }
 
 /// The `[sugar]` section: shortcuts that ride on gestures people already make.
@@ -1152,8 +1159,9 @@ impl Config {
                 engine: crate::engine::engine_choice::ConfigEngine::parse(v.text("windows.engine")),
                 with_apple: crate::engine::stand_down::WithApple::parse(v.text("windows.apple_stage_manager_on")),
                 mission_control: crate::engine::mission_control::Mode::parse(v.text("windows.mission_control_stages")),
+                mission_key_keeps_stage: v.flag("windows.mission_control_key_keeps_stage"),
             },
-            displays: DisplaysConfig { main_only: v.flag("displays.main_only") },
+            displays: DisplaysConfig { main_only: v.flag("displays.main_only"), frames_per_setup: v.flag("displays.frames_per_setup") },
             rules: RuleSet::new(rules, defaults),
             hotkeys,
             stages: StagesConfig {
@@ -1208,20 +1216,43 @@ pub const HOME_ENV: &str = "STAGE_MANAGER_HOME";
 
 /// `$STAGE_MANAGER_HOME` when set (and not empty), else `~/.config/stage-manager`.
 pub fn config_dir() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(dir) = test_home::get() {
+        return Some(dir);
+    }
     if let Some(dir) = std::env::var_os(HOME_ENV).filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config").join("stage-manager"))
 }
 
+/// Test only: a home of this thread's own ([`config_dir`] answers it while set), so a test
+/// that builds the real controller writes its `state.json` and parked file in a scratch
+/// folder, never in the real one and never through the process's environment (tests run
+/// side by side).
+#[cfg(test)]
+pub(crate) mod test_home {
+    use std::cell::RefCell;
+    use std::path::PathBuf;
+
+    thread_local! {
+        static HOME: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    }
+
+    /// This thread's home from now on (`None`: the environment's again).
+    pub fn set(dir: Option<PathBuf>) {
+        HOME.with(|h| *h.borrow_mut() = dir);
+    }
+
+    /// This thread's home, when a test set one.
+    pub fn get() -> Option<PathBuf> {
+        HOME.with(|h| h.borrow().clone())
+    }
+}
+
 /// `config.toml` in [`config_dir`].
 pub fn default_path() -> Option<PathBuf> {
     config_dir().map(|d| d.join("config.toml"))
-}
-
-/// `state.json` in [`config_dir`].
-pub fn state_path() -> Option<PathBuf> {
-    config_dir().map(|d| d.join("state.json"))
 }
 
 /// What [`load_or_create`] did to the file.

@@ -189,8 +189,6 @@ pub struct CardShadow {
 }
 
 impl CardShadow {
-    /// No shadow.
-    pub const NONE: CardShadow = CardShadow { color: (0.0, 0.0, 0.0, 1.0), opacity: 0.0, radius: 0.0, offset: (0.0, 0.0) };
 }
 
 /// How a snapshot's shadow looks: the window's at full size, the card's on a card, and how
@@ -440,6 +438,25 @@ impl Ghost {
         }
         CATransaction::commit();
         self.target = p;
+    }
+
+    /// Ends its flight at once where it was headed: the plane at its target, the picture's
+    /// glass and the shadows at the values their springs were going to (each spring sets its
+    /// end first: [`Self::spring_to`], [`Self::spring_glass`], [`Self::spring_shadow`]).
+    pub fn settle(&mut self) {
+        let target = self.target;
+        self.set(target);
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        let opacity = NSString::from_str("opacity");
+        for layer in [&self.image, &self.glass] {
+            layer.removeAnimationForKey(&opacity);
+        }
+        self.body.removeAnimationForKey(&NSString::from_str("shadowOpacity"));
+        if let Some(s) = &self.shadow {
+            s.settle_amount();
+        }
+        CATransaction::commit();
     }
 
     /// Shows `amount` of the window's shadow (0: the card's shadow alone, 1: the window's
@@ -916,11 +933,6 @@ impl Overlay {
         self.origin
     }
 
-    /// Shows the overlay (above every normal window, on the active Space).
-    pub fn show(&mut self) {
-        self.show_under(None);
-    }
-
     /// Shows the overlay just under window `under` (another app's, at the normal level), so
     /// snapshots pass behind a window already in place, as Apple's do behind a window just
     /// opened or activated; `None`: above every normal window.
@@ -1101,11 +1113,6 @@ impl Overlay {
             side.panel.orderOut(None);
             side.panel.close();
         }
-    }
-
-    /// True when a side panel is keyed `key`.
-    pub fn has_side(&self, key: u32) -> bool {
-        self.sides.iter().any(|s| s.key == key)
     }
 
     /// Orders each side panel where it goes ([`order_plan`]), front first: under its window

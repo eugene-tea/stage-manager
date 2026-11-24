@@ -59,6 +59,7 @@ fn key() -> &'static Key {
     })
 }
 
+#[cfg(test)]
 /// The key kept in `dir` ([`KEY_FILE`]); made with `random` and written owner-only (`0600`)
 /// when there is none or it is malformed. Two processes making it at once agree (review R8):
 /// a key is written whole to a file of its own and then linked to [`KEY_FILE`], which fails

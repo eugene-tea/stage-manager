@@ -16,6 +16,8 @@ mod arrivals;
 mod corner_frame;
 mod lid_open;
 mod origins;
+mod setup_frames;
+mod spill;
 mod switching;
 
 const STUDIO: DisplayId = DisplayId(1);

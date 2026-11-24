@@ -70,6 +70,7 @@ pub fn space_matrix(d: &Drawn, frame: Rect) -> Affine {
     [a, b, c, dd, -(a * cx + c * cy), -(b * cx + dd * cy)]
 }
 
+#[cfg(test)]
 /// Where transform `m` draws the window at `frame`: its top-left, top-right, bottom-left and
 /// bottom-right corners (`o + M⁻¹(q − t)`, the mapping S4 pinned).
 pub fn drawn_by(m: Affine, frame: Rect) -> [Point; 4] {

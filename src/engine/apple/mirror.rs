@@ -14,8 +14,8 @@
 //!    apps has an icon for each, and was read as two stages (live 11-16).
 //! 2. **WindowManager's Accessibility** ([`Reading`]: `sm.strip`'s items with `AXWindowsIDs`
 //!    and `AXFrame`), the word on membership. It catches up about 785 ms after a change and
-//!    reads empty for about 650 ms of it: an empty reading is no reading. A reading taken a
-//!    second after the settle, with no change since, decides which strip windows make one
+//!    reads empty for about 650 ms of it: an empty reading is no reading. A reading taken
+//!    settled and [`SETTLE`] + [`AX_TRUST`] after the last cause, with no change since, decides which strip windows make one
 //!    stage until the next change ([`Arrangement::ax_groups`]); the list still gives the
 //!    places, the twins, the motion and the stage in front. A list that groups otherwise is
 //!    corrected, and the correction counted.
@@ -33,14 +33,24 @@
 //!   and on is listed off screen, thumbnail-sized, within the item (live 11-17: a stage of
 //!   four, its fourth at 69x63 inside the item's thumbnails). It belongs to that item, at its
 //!   back, with no point of its own ([`undrawn`]), never a stage of its own.
-//! - **In motion**: any managed window's bounds differ from the read before, or a step of
-//!   ours or an event that may change the arrangement (an activation, a window found or
-//!   gone) came less than [`SETTLE`] ago ([`Arrangement::step_began`]): Apple's motion starts
-//!   about 100 ms after its cause, and a read before it shows the stage coming in beside the
-//!   one leaving. Groups are taken from reads out of motion only; in motion the groups read
+//! - **A change expected** ([`Expect`]): a step of ours ([`Arrangement::expect`]) or an
+//!   event that may change the arrangement (an activation, a window found or gone:
+//!   [`Arrangement::stirred`]) is answered by Apple's about 100 ms on (a recording of
+//!   11-16), later on a busy Mac. Until the list shows the first change the cause makes
+//!   ([`Effect`]: a window of the stage in front moving, a thumbnail pressed going, the
+//!   window raised on top, the app's window showing) the arrangement counts in motion, its
+//!   groups read before standing; [`ANSWER_WAIT`] caps a step's wait, [`SETTLE`] an event's
+//!   (an event may change nothing), each logged with how it ended (`engine::margin`). The
+//!   moment between an activation and Apple's motion, when the stage coming in is listed at
+//!   full size beside the one leaving (live 11-16: the model followed such a read and put
+//!   both in one stage), is no change: a window that came in front counts only once the
+//!   stage that was in front moves too.
+//! - **In motion**: any managed window's bounds differ from the read before (or a managed
+//!   window is listed or gone since), or a change is expected. Groups are taken from reads out of motion only; in motion the groups read
 //!   before stand.
-//! - **Settled**: no motion for [`STILL_READS`] reads and at least [`SETTLE`] since the last
-//!   change: what a posted step waits for (A3), and when the model follows.
+//! - **Settled**: out of motion for [`STILL_READS`] reads in a row: what a posted step and a
+//!   focus that switches stages wait for (A3), and when the model follows. Nothing is counted
+//!   after the last frame: a thumbnail still in Apple's motion has no twin, so no point.
 //! - **Stages Apple no longer lists** (past the strip's room) stay as remembered groups with
 //!   their last membership; a window gone from the list leaves its group, a window seen again
 //!   leaves it for what is seen.
@@ -71,10 +81,17 @@ use crate::engine::model::Display;
 use super::points::{self, Over};
 use super::thumbnail_sized;
 
-/// How long a change keeps the arrangement unsettled: Apple's motion, about 700 ms
-/// (a recording of 11-16: a focus at .305, motion from .404 to about .900; clicks before
-/// ~700 ms are ignored or switch back).
+/// Apple's answer to a cause, about 700 ms from it to the last frame (a recording of 11-16: a
+/// focus at .305, motion from .404 to about .900; clicks before ~700 ms are ignored or switch
+/// back). Used as a cap, never waited out: how long an event's change is expected before the
+/// event is taken to have changed nothing ([`Arrangement::stirred`]), and with [`AX_TRUST`]
+/// how long after a change Accessibility's reading is trusted.
 pub const SETTLE: Duration = Duration::from_millis(700);
+
+/// How long a step of ours expects Apple's answer to show before it is taken as unanswered
+/// ([`Arrangement::expect`]): its motion starts about 100 ms after the step (a recording of
+/// 11-16), so this is twenty times that, for a busy Mac.
+pub const ANSWER_WAIT: Duration = Duration::from_secs(2);
 
 /// Reads in a row with no bounds changed before the arrangement counts settled.
 pub const STILL_READS: u32 = 2;
@@ -219,6 +236,109 @@ pub struct Seen {
     pub click_at: Option<Point>,
 }
 
+/// The first change a cause is expected to make in the list ([`Expect`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Effect {
+    /// Any change but a window coming in front while the stage in front stays (an event, a
+    /// focus that switches stages: the stage in front moving, a strip window moving, a window
+    /// shown or gone).
+    Change,
+    /// Window `0` listed on top of the stage in front (a focus of a window there), or any
+    /// [`Effect::Change`].
+    Raise(u32),
+    /// These windows' thumbnails going: moved, or their twin gone (a Shift press), or any
+    /// [`Effect::Change`].
+    Thumbs(Vec<u32>),
+    /// Window `0` moved or shown otherwise than at the cause (a drag landed), or any
+    /// [`Effect::Change`].
+    Moved(u32),
+    /// A window of app `0` shown, or one of its shown otherwise (an unhide), or any
+    /// [`Effect::Change`].
+    App(i32),
+}
+
+/// A managed window as one read lists it, for [`Expect`]'s comparison.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Mark {
+    /// Its bounds.
+    pub bounds: Rect,
+    /// On screen.
+    pub on: bool,
+    /// A thumbnail (its twin over it, or off the left edge).
+    pub thumb: bool,
+}
+
+/// A change expected of a cause and not seen yet (module docs).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expect {
+    /// What would show it.
+    pub effect: Effect,
+    /// When the cause came.
+    pub since: Instant,
+    /// How long it is expected at most.
+    pub cap: Duration,
+    /// A step of ours ([`Arrangement::expect`]), not an event.
+    pub step: bool,
+    /// The list at the cause is known: a step runs right after the read it was judged on;
+    /// an event's notice comes between reads, so the read after it is its list (a change
+    /// between the read before and the notice is not its answer).
+    based: bool,
+    /// The managed windows as listed at the cause.
+    marks: BTreeMap<u32, Mark>,
+    /// The stage in front as listed at the cause, front to back.
+    front: Vec<u32>,
+    /// Every app window as seen at the cause.
+    seen: Vec<(u32, Seen)>,
+}
+
+impl Expect {
+    /// The margin's name of this wait.
+    fn name(&self) -> &'static str {
+        if self.step { "apple::ANSWER_WAIT" } else { "apple::SETTLE" }
+    }
+
+    /// True when this read (its managed windows `marks`, the stage in front as listed `front`,
+    /// every app window `seen`) shows the change expected.
+    fn shown(&self, marks: &BTreeMap<u32, Mark>, front: &[u32], seen: &[(u32, Seen)]) -> bool {
+        let changed = |a: Option<&Mark>, b: Option<&Mark>| match (a, b) {
+            (Some(a), Some(b)) => a.on != b.on || a.thumb != b.thumb || !same(a.bounds, b.bounds),
+            (None, None) => false,
+            _ => true,
+        };
+        let ids: BTreeSet<u32> = self.marks.keys().chain(marks.keys()).copied().collect();
+        // A window that came in front counts once the stage that was in front moves (module
+        // docs); with none in front at the cause, any change.
+        let came_in_front = |id: &u32| !self.front.is_empty() && front.contains(id) && !self.front.contains(id);
+        let seen_changed = |w: &u32| {
+            let was = self.seen.iter().find(|(id, _)| id == w).map(|(_, s)| (s.bounds, s.thumb));
+            let is = seen.iter().find(|(id, _)| id == w).map(|(_, s)| (s.bounds, s.thumb));
+            match (was, is) {
+                (Some(a), Some(b)) => a.1 != b.1 || !same(a.0, b.0),
+                (None, None) => false,
+                _ => true,
+            }
+        };
+        let change = ids.iter().any(|id| changed(self.marks.get(id), marks.get(id)) && !came_in_front(id));
+        // An app window the app does not manage (a reopened window read as a dialog, live
+        // 11-16): a change of a thumbnail of it, or any with none in front at the cause.
+        let thumb_of = |l: &[(u32, Seen)], w: u32| l.iter().any(|(id, s)| *id == w && s.thumb);
+        let unmanaged: BTreeSet<u32> = self.seen.iter().chain(seen).map(|(id, _)| *id).filter(|id| !ids.contains(id)).collect();
+        let loose = unmanaged.iter().any(|w| seen_changed(w) && (self.front.is_empty() || thumb_of(&self.seen, *w) || thumb_of(seen, *w)));
+        change
+            || loose
+            || match &self.effect {
+                Effect::Change => false,
+                Effect::Raise(w) => front.first() == Some(w),
+                Effect::Thumbs(ws) => ws.iter().any(seen_changed),
+                Effect::Moved(w) => changed(self.marks.get(w), marks.get(w)) || seen_changed(w),
+                Effect::App(pid) => {
+                    let of = |l: &[(u32, Seen)]| l.iter().filter(|(_, s)| s.pid == *pid).map(|(id, _)| *id).collect::<BTreeSet<u32>>();
+                    of(seen).union(&of(&self.seen)).any(seen_changed)
+                }
+            }
+    }
+}
+
 /// Apple's arrangement on one screen as last read ([`fold`]).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Arrangement {
@@ -231,11 +351,21 @@ pub struct Arrangement {
     /// Whether the strip shows: `Some(false)` with its windows off the left edge (a window
     /// over it, or Apple's recent apps hidden), `None` with nothing in it.
     pub strip_shown: Option<bool>,
-    /// A managed window's bounds changed since the read before, or a step of ours began less
-    /// than [`SETTLE`] ago.
+    /// A managed window's bounds changed since the read before, or a change is expected
+    /// ([`Arrangement::expecting`]).
     pub in_motion: bool,
-    /// Still for [`STILL_READS`] reads and [`SETTLE`] since the last change.
+    /// Out of motion for [`STILL_READS`] reads in a row.
     pub settled: bool,
+    /// The change a cause is expected to make, not seen yet.
+    pub expect: Option<Expect>,
+    /// The stage in front as this read lists it, front to back, in motion too (what a cause's
+    /// expected change is told by).
+    pub front: Vec<u32>,
+    /// Every managed window as this read lists it.
+    pub marks: BTreeMap<u32, Mark>,
+    /// Every app window the list has, on screen or off, any screen, by its pid: what an app
+    /// hidden by us has ordered in ([`super::job::Job`]'s unhide).
+    pub listed_of: BTreeMap<i32, BTreeSet<u32>>,
     /// Every managed window's listed bounds at this read.
     pub frames: BTreeMap<u32, Rect>,
     /// Where each strip window's thumbnail shows a part of its own, on screen, at this read
@@ -254,7 +384,7 @@ pub struct Arrangement {
     pub still_reads: u32,
     /// This read.
     pub read_at: Option<Instant>,
-    /// When a step of ours last began ([`Arrangement::step_began`]).
+    /// When the last cause came ([`Arrangement::expect`], [`Arrangement::stirred`]).
     pub step_at: Option<Instant>,
     /// The last Accessibility reading that was not blank.
     pub ax_at: Option<Instant>,
@@ -304,14 +434,9 @@ impl Arrangement {
         self.away.iter().any(|(_, g)| g.windows.contains(&id)).then_some((Where::Away, None))
     }
 
-    /// True when window `id` is in a group of a Desktop not shown.
-    pub fn is_away(&self, id: u32) -> bool {
-        matches!(self.where_is(id), Some((Where::Away, _)))
-    }
-
     /// The Desktop shown is left (a Desktop change, a full-screen app's Space coming or
     /// going): every group known goes away with this change, and the arrangement counts in
-    /// motion for [`SETTLE`]. The next reads out of motion find the groups of the Desktop
+    /// motion until the list shows a change ([`Arrangement::stirred`]). The next reads out of motion find the groups of the Desktop
     /// shown afresh; see the module docs.
     pub fn desktop_left(&mut self, now: Instant) {
         self.desktop_changes += 1;
@@ -324,7 +449,13 @@ impl Arrangement {
         self.ax_groups.clear();
         self.ax_groups_at = None;
         self.strip_shown = None;
-        self.step_began(now);
+        // Any change since the read before counts: the stage in front went with the Desktop.
+        self.front.clear();
+        self.stirred(now);
+        if let Some(e) = self.expect.as_mut() {
+            e.front.clear();
+            e.based = true;
+        }
     }
 
     /// Every group: the current stage (when it holds a window), the strip's items top to
@@ -360,27 +491,48 @@ impl Arrangement {
         (sorted(&self.current), rest)
     }
 
-    /// A step of ours began at `now` (a focus, a posted click), or an event came that may
-    /// change the arrangement (an activation, a window found or gone): the arrangement counts
-    /// in motion for [`SETTLE`], whatever the list shows meanwhile.
-    pub fn step_began(&mut self, now: Instant) {
+    /// A step of ours ran at `now` (a focus, a posted gesture, an unhide): the arrangement
+    /// counts in motion until the list shows `effect`, or [`ANSWER_WAIT`] (module docs). It
+    /// takes the place of any change expected before.
+    pub fn expect(&mut self, effect: Effect, now: Instant) {
+        self.expect = Some(self.expecting_from(effect, now, ANSWER_WAIT, true));
         self.step_at = Some(now);
+        self.still_reads = 0;
         self.settled = false;
     }
 
-    /// At rest: out of motion (nothing begun less than [`SETTLE`] ago, no bounds changed since
-    /// the read before) for [`STILL_READS`] reads, the [`SETTLE`] after the last frame of
-    /// motion not waited (that is for a click's point to be final; a focus aims at nothing on
-    /// screen).
-    pub fn at_rest(&self) -> bool {
-        !self.in_motion && self.still_reads >= STILL_READS
+    /// An event came at `now` that may change the arrangement (an activation, a window found
+    /// or gone, a mouse-up near the strip): the arrangement counts in motion until the list
+    /// shows a change, or [`SETTLE`]. A step's change expected stands; an event's is counted
+    /// from this event, compared with the list at the first.
+    pub fn stirred(&mut self, now: Instant) {
+        match self.expect.as_mut() {
+            Some(e) if e.step => {}
+            Some(e) => e.since = now,
+            None => self.expect = Some(self.expecting_from(Effect::Change, now, SETTLE, false)),
+        }
+        self.step_at = Some(now);
+        self.still_reads = 0;
+        self.settled = false;
     }
 
-    /// When the next read is due after this one: soon while in motion or not yet settled,
-    /// at rest otherwise.
-    pub fn next_read(&self) -> Duration {
-        if self.in_motion || !self.settled { MOTION_READ } else { REST_READ }
+    /// The step's change expected will not come (its gesture was not posted): no longer
+    /// waited for, logged as refuted.
+    pub fn refuted(&mut self, now: Instant) {
+        if let Some(e) = self.expect.take_if(|e| e.step) {
+            crate::engine::margin::wait(e.name(), now.saturating_duration_since(e.since), e.cap, crate::engine::margin::End::Refuted);
+        }
     }
+
+    /// The change a cause is expected to make, while not seen.
+    pub fn expecting(&self) -> Option<&Expect> {
+        self.expect.as_ref()
+    }
+
+    fn expecting_from(&self, effect: Effect, since: Instant, cap: Duration, step: bool) -> Expect {
+        Expect { effect, since, cap, step, based: step, marks: self.marks.clone(), front: self.front.clone(), seen: self.seen.clone() }
+    }
+
 }
 
 /// True when `a` and `b` are the same bounds within [`SAME`] on every side.
@@ -388,8 +540,13 @@ fn same(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() <= SAME && (a.y - b.y).abs() <= SAME && (a.w - b.w).abs() <= SAME && (a.h - b.h).abs() <= SAME
 }
 
+/// [`same`], for the gestures' guard: the window server rounds bounds to whole points.
+pub fn same_bounds(a: Rect, b: Rect) -> bool {
+    same(a, b)
+}
+
 /// True when `r` is an app icon window's size.
-fn icon_sized(r: Rect) -> bool {
+pub fn icon_sized(r: Rect) -> bool {
     (r.w - ICON.0).abs() <= 2.0 && (r.h - ICON.1).abs() <= 2.0
 }
 
@@ -414,6 +571,11 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
     let icons: Vec<Rect> = listed.manager_windows().map(|w| w.bounds).filter(|b| icon_sized(*b)).collect();
 
     let mut frames = BTreeMap::new();
+    let mut marks = BTreeMap::new();
+    let mut listed_of: BTreeMap<i32, BTreeSet<u32>> = BTreeMap::new();
+    for w in listed.windows.iter().filter(|w| w.layer == 0 && Some(w.pid) != listed.manager && !w.bounds.is_degenerate()) {
+        listed_of.entry(w.pid).or_default().insert(w.id);
+    }
     let mut current = Vec::new();
     let mut thumbs: Vec<(u32, Rect)> = Vec::new();
     let mut thumb_at: Vec<(u32, usize)> = Vec::new();
@@ -424,7 +586,9 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
             continue;
         }
         let on_screen = w.bounds.intersect(&screen.frame).is_some_and(|r| r.w > 0.0 && r.h > 0.0);
-        if has_twin(listed, i) || off_left(screen, w.bounds) {
+        let thumb = has_twin(listed, i) || off_left(screen, w.bounds);
+        marks.insert(w.id, Mark { bounds: w.bounds, on: w.onscreen && on_screen, thumb });
+        if thumb {
             thumbs.push((w.id, w.bounds));
             thumb_at.push((w.id, i));
         } else if w.onscreen && !w.bounds.is_degenerate() && on_screen {
@@ -460,13 +624,33 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         })
         .collect();
 
-    let step_moving = prev.step_at.is_some_and(|t| now.saturating_duration_since(t) < SETTLE);
-    let moved = prev.read_at.is_some() && frames.iter().any(|(id, b)| prev.frames.get(id).is_some_and(|p| !same(*p, *b)));
-    let in_motion = moved || step_moving;
+    // The change a cause is expected to make: seen, or its cap run out (module docs).
+    let mut expect = prev.expect.clone();
+    if let Some(e) = expect.as_mut().filter(|e| !e.based) {
+        // An event's list: this read's.
+        e.marks = marks.clone();
+        e.front = current.clone();
+        e.seen = seen.clone();
+        e.based = true;
+    }
+    let expect = expect.filter(|e| {
+        let elapsed = now.saturating_duration_since(e.since);
+        let how = if e.shown(&marks, &current, &seen) {
+            crate::engine::margin::End::Met
+        } else if elapsed >= e.cap {
+            crate::engine::margin::End::Cap
+        } else {
+            return true;
+        };
+        crate::engine::margin::wait(e.name(), elapsed, e.cap, how);
+        false
+    });
+    // A managed window moved, shown or gone since the read before.
+    let moved = prev.read_at.is_some() && (frames.len() != prev.frames.len() || frames.iter().any(|(id, b)| prev.frames.get(id).is_none_or(|p| !same(*p, *b))));
+    let in_motion = moved || expect.is_some();
     let changed_at = if moved { Some(now) } else { prev.changed_at };
-    let still_reads = if moved { 0 } else { prev.still_reads.saturating_add(1) };
-    let since_change = changed_at.is_none_or(|t| now.saturating_duration_since(t) >= SETTLE);
-    let settled = !in_motion && still_reads >= STILL_READS && since_change;
+    let still_reads = if in_motion { 0 } else { prev.still_reads.saturating_add(1) };
+    let settled = still_reads >= STILL_READS;
 
     let mut next = Arrangement {
         frames,
@@ -474,6 +658,10 @@ pub fn fold(prev: &Arrangement, reading: Option<&Reading>, listed: &Listed, mana
         still_reads,
         in_motion,
         settled,
+        expect,
+        front: current.clone(),
+        marks,
+        listed_of,
         read_at: Some(now),
         step_at: prev.step_at,
         ax_at: prev.ax_at,
@@ -778,7 +966,7 @@ mod tests {
         for _ in 0..60 {
             f.advance(50);
             a = fold(&a, Some(&f.reading()), &f.listed(), &managed(f), &display(), f.now());
-            if a.settled {
+            if a.settled && !f.busy() {
                 return a;
             }
         }
@@ -812,29 +1000,84 @@ mod tests {
     }
 
     #[test]
-    fn a_change_is_in_motion_until_the_list_is_still_for_two_reads_and_700_ms() {
+    fn a_change_is_in_motion_until_the_list_is_still_for_two_reads() {
         let (mut f, a) = start();
         f.focus_window(3);
-        f.advance(50);
+        f.advance(f.lag.as_millis() as u64 + 50);
         let b = fold(&a, None, &f.listed(), &managed(&f), &display(), f.now());
         assert!(b.in_motion && !b.settled, "the windows move every frame");
         assert_eq!(b.current, a.current, "mid-motion bounds say nothing of the groups");
         let c = settle(&mut f, b);
-        assert!(c.changed_at.is_some_and(|t| f.now().saturating_duration_since(t) >= SETTLE));
+        assert!(c.changed_at.is_some_and(|t| f.now().saturating_duration_since(t) <= MOTION_READ * STILL_READS), "settled two reads after the last frame");
         assert_eq!(c.current, vec![3]);
         assert!(c.strip.iter().any(|g| g.windows == vec![4]), "the stage left goes to the strip");
     }
 
+    /// A step of ours is in motion until the list shows its answer: on a slow Mac its answer
+    /// starts late (here a second on), and the groups read before stand until it shows; the
+    /// stage in front at rest after it, two reads on.
     #[test]
-    fn a_step_of_ours_counts_as_motion_for_700_ms() {
-        let (mut f, mut a) = start();
-        a.step_began(f.now());
+    fn a_step_of_ours_is_in_motion_until_the_list_shows_its_answer() {
+        let (f, mut a) = start();
+        let mut f = f.slower(10, 1);
+        a.expect(Effect::Change, f.now());
+        f.focus_window(3);
+        let mut reads = 0;
+        while f.now().saturating_duration_since(a.step_at.expect("a cause")) < f.lag {
+            f.advance(50);
+            a = fold(&a, None, &f.listed(), &managed(&f), &display(), f.now());
+            assert!(a.in_motion && !a.settled && a.expecting().is_some(), "the answer not shown yet");
+            assert_eq!(a.current, vec![4], "the groups read before stand");
+            reads += 1;
+        }
+        assert!(reads >= 19);
+        f.advance(50);
+        a = fold(&a, None, &f.listed(), &managed(&f), &display(), f.now());
+        assert!(a.expecting().is_none() && a.in_motion, "the stage in front moves: the answer shown");
+        let a = settle(&mut f, a);
+        assert_eq!(a.current, vec![3]);
+    }
+
+    /// A step Apple's never answers is in motion for [`ANSWER_WAIT`], then taken as unanswered;
+    /// an event that changes nothing for [`SETTLE`].
+    #[test]
+    fn a_change_never_shown_ends_at_its_cap() {
+        for (step, cap) in [(true, ANSWER_WAIT), (false, SETTLE)] {
+            let (mut f, mut a) = start();
+            if step { a.expect(Effect::Thumbs(vec![3]), f.now()) } else { a.stirred(f.now()) }
+            let t0 = f.now();
+            while f.now().saturating_duration_since(t0) < cap {
+                assert!(a.expecting().is_some(), "{step}");
+                f.advance(50);
+                a = fold(&a, None, &f.listed(), &managed(&f), &display(), f.now());
+            }
+            assert!(a.expecting().is_none() && !a.in_motion, "{step}: capped");
+            f.advance(50);
+            a = fold(&a, None, &f.listed(), &managed(&f), &display(), f.now());
+            assert!(a.settled, "{step}");
+        }
+    }
+
+    /// A raise of a window in front is answered by the list's order alone, no motion.
+    #[test]
+    fn a_raise_is_answered_by_the_window_listed_on_top() {
+        let mut f = FakeWindowManager::new();
+        f.open_app(10, &[1, 2]);
+        f.advance(1000);
+        let a0 = fold(&Arrangement::default(), None, &f.listed(), &managed(&f), &display(), f.now());
+        let a = settle(&mut f, a0);
+        assert_eq!(a.front, vec![1, 2]);
+        let mut a = a;
+        a.expect(Effect::Raise(2), f.now());
+        f.focus_window(2);
         f.advance(50);
         let b = fold(&a, None, &f.listed(), &managed(&f), &display(), f.now());
-        assert!(b.in_motion && !b.settled, "nothing moved yet, but a step began");
-        f.advance(700);
+        assert!(b.expecting().is_none() && !b.settled, "answered; at rest two reads on");
+        f.advance(50);
         let c = fold(&b, None, &f.listed(), &managed(&f), &display(), f.now());
-        assert!(!c.in_motion);
+        f.advance(50);
+        let c = fold(&c, None, &f.listed(), &managed(&f), &display(), f.now());
+        assert!(c.settled && c.current == vec![2, 1]);
     }
 
     #[test]
@@ -846,10 +1089,10 @@ mod tests {
         let b = fold(&a, Some(&f.reading()), &f.listed(), &managed(&f), &display(), f.now());
         assert_eq!(b.corrections, 0);
         let b = settle(&mut f, b);
-        f.advance(1100);
+        f.advance((SETTLE + AX_TRUST).as_millis() as u64);
         let b = fold(&b, Some(&f.reading()), &f.listed(), &managed(&f), &display(), f.now());
         assert_eq!(b.corrections, 0, "they agree");
-        assert!(b.ax_at == Some(f.now()) && b.ax_groups_at == Some(f.now()), "trusted a second after the settle");
+        assert!(b.ax_at == Some(f.now()) && b.ax_groups_at == Some(f.now()), "trusted once settled and 1.7 s after the change");
         // Accessibility groups the strip otherwise: its groups taken, one correction for the
         // spell, kept on the reads without Accessibility until the next change.
         let mut wrong = f.reading();
@@ -873,7 +1116,7 @@ mod tests {
         assert_eq!(d.strip, b.strip);
         // A change: the trusted reading no longer decides.
         let mut e = d.clone();
-        e.step_began(f.now());
+        e.stirred(f.now());
         e.ax_groups = vec![all_ids(&d)];
         f.advance(800);
         let e = fold(&e, None, &f.listed(), &managed(&f), &display(), f.now());
@@ -1044,7 +1287,7 @@ mod tests {
         assert!(a.settled);
         // Bravo's activation: bravo listed full size, alpha not moved yet.
         let at = t0 + Duration::from_secs(2);
-        a.step_began(at);
+        a.stirred(at);
         let mixed = Listed {
             windows: [ListedWindow { id: 80, pid: 2, layer: 0, bounds: Rect::new(221.0, 87.0, 520.0, 392.0), onscreen: true }]
                 .into_iter()

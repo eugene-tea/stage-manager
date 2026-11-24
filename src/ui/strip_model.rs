@@ -89,6 +89,11 @@ pub struct StripSnapshot {
     /// left behind hid): the snapshots pass under it from here on, as under
     /// [`Transition::under`], which could not name it while it waited off screen.
     pub under_now: Option<(u64, u32)>,
+    /// A transition whose incoming windows landed before its unveil, and what its pictures do
+    /// now ([`crate::engine::switch_landing::pictures_on_landing`]): they finish where they
+    /// were headed and hand over (a click, an activation, any other landing on the Desktop
+    /// shown), or go now with the cards it held shown (a Space change: the Desktop left).
+    pub landed: Option<(u64, crate::engine::switch_landing::Pictures)>,
     /// These are the cards of a Desktop not shown, arranged ahead of its arrival (a Dock
     /// click): only its own pane, if it has one, is redrawn with them, at once, so it slides
     /// in arranged; the strip shown is untouched.
@@ -420,6 +425,8 @@ pub fn set_event_sink(f: impl Fn(StripEvent) + Send + Sync + 'static) {
 
 /// Hands a snapshot to the strip (called by the controller on any thread).
 pub fn present(snapshot: StripSnapshot) {
+    #[cfg(test)]
+    let Some(snapshot) = crate::platform::fake::present(snapshot) else { return };
     match presenter().lock() {
         Ok(p) => match p.as_ref() {
             Some(f) => f(snapshot),
@@ -478,6 +485,10 @@ pub fn every_published_card() -> Vec<(u64, Rect)> {
 
 /// The cards' frames a display's strip last published (any thread; [`publish_cards`]).
 pub fn published_cards_of(display: u32) -> Vec<(u64, Rect)> {
+    #[cfg(test)]
+    if let Some(cards) = crate::platform::fake::with(|d| d.strip.cards.get(&display).cloned().unwrap_or_default()) {
+        return cards;
+    }
     card_frames().lock().ok().and_then(|f| f.get(&display).cloned()).unwrap_or_default()
 }
 
@@ -784,38 +795,63 @@ pub fn last_transition() -> Option<TransitionReport> {
 // ---------------------------------------------------------------------------------------
 // Transition handshake
 
-/// The latest answer (transition id, what was covered) and its wake-up.
-type CoverSlot = (Mutex<Option<(u64, Cover)>>, Condvar);
+/// The latest answer (transition id, what was covered), the latest transition the WM thread
+/// stopped waiting for ([`wait_cover`]'s timeout), and the answer's wake-up.
+#[derive(Default)]
+struct Covers {
+    answer: Option<(u64, Cover)>,
+    given_up: Option<u64>,
+}
+
+type CoverSlot = (Mutex<Covers>, Condvar);
 
 fn covers() -> &'static CoverSlot {
     static C: OnceLock<CoverSlot> = OnceLock::new();
-    C.get_or_init(|| (Mutex::new(None), Condvar::new()))
+    C.get_or_init(|| (Mutex::new(Covers::default()), Condvar::new()))
 }
 
 /// The strip has drawn (or decided not to draw) snapshots for transition `id` (main thread).
-pub fn cover(id: u64, answer: Cover) {
+/// False when the WM thread stopped waiting for it ([`wait_cover`] timed out): its windows
+/// moved at once, and pictures drawn now would fly over windows already in place; the
+/// strip lands the transition at once instead.
+pub fn cover(id: u64, answer: Cover) -> bool {
     let (lock, cv) = covers();
-    if let Ok(mut c) = lock.lock() {
-        *c = Some((id, answer));
-        cv.notify_all();
+    let Ok(mut c) = lock.lock() else { return true };
+    if c.given_up == Some(id) {
+        return false;
     }
+    c.answer = Some((id, answer));
+    cv.notify_all();
+    true
+}
+
+/// True when the WM thread stopped waiting for transition `id`'s answer ([`wait_cover`]'s
+/// timeout): the strip, presenting it late (a busy main thread), draws no pictures for it.
+pub fn given_up(id: u64) -> bool {
+    covers().0.lock().is_ok_and(|c| c.given_up == Some(id))
 }
 
 /// Waits up to `timeout` for the strip's answer to transition `id` (WM thread). No answer
 /// (no strip, or a busy main thread) counts as nothing covered, so windows move at once.
 pub fn wait_cover(id: u64, timeout: Duration) -> Cover {
+    #[cfg(test)]
+    if let Some(cover) = crate::platform::fake::with(|d| d.wait_cover(id, timeout)) {
+        return cover;
+    }
     let (lock, cv) = covers();
     let deadline = Instant::now() + timeout;
     let Ok(mut c) = lock.lock() else { return Cover::default() };
     loop {
-        if let Some((got, answer)) = *c
+        if let Some((got, answer)) = c.answer
             && got == id
         {
             return answer;
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            tracing::debug!(id, "no answer from the strip for a transition; windows move at once");
+            // Under the lock the strip answers by: an answer after this is told it came late.
+            c.given_up = Some(id);
+            tracing::debug!(id, "no answer from the strip for a transition; windows move at once, the strip told to land it at once");
             return Cover::default();
         }
         c = match cv.wait_timeout(c, left) {
@@ -932,7 +968,22 @@ mod tests {
         assert!(t0.elapsed() >= Duration::from_millis(30));
         let waiter = std::thread::spawn(|| wait_cover(9, Duration::from_secs(5)));
         std::thread::sleep(Duration::from_millis(20));
-        cover(9, Cover { outgoing: false, incoming: true });
+        assert!(cover(9, Cover { outgoing: false, incoming: true }), "in time");
         assert_eq!(waiter.join().ok(), Some(Cover { outgoing: false, incoming: true }));
+    }
+
+    /// The handshake's timeout (review 11-21): the WM thread stops waiting for transition 21
+    /// and moves its windows; the strip, presenting it late, is told so and draws no pictures
+    /// over windows already moved. The next transition is waited for as ever.
+    #[test]
+    fn a_cover_after_the_wait_gave_up_is_told_it_came_late() {
+        assert!(!given_up(21));
+        assert_eq!(wait_cover(21, Duration::ZERO), Cover::default(), "no answer: windows move at once");
+        assert!(given_up(21), "the strip draws nothing for it");
+        assert!(!cover(21, Cover { outgoing: true, incoming: true }), "a late answer is refused");
+        assert_eq!(wait_cover(21, Duration::ZERO), Cover::default(), "and never counts");
+        assert!(!given_up(22));
+        assert!(cover(22, Cover { outgoing: true, incoming: false }), "the next one in time");
+        assert_eq!(wait_cover(22, Duration::from_millis(10)), Cover { outgoing: true, incoming: false });
     }
 }

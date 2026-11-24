@@ -19,7 +19,7 @@ use super::ctl::Command;
 use super::input::InputEvent;
 use super::minimize_tap::MinimizeAsk;
 use super::native_settings::RawSettings;
-use super::observe::{Observer, WinEvent};
+use super::observe::{Observer, Stamped};
 use super::safety;
 use crate::config::HotkeyCommand;
 use crate::engine::model::Display;
@@ -58,8 +58,8 @@ impl Conductor {
         }
     }
 
-    /// The observer's events.
-    pub fn on_events(&mut self, ob: &mut Observer, events: Vec<WinEvent>) {
+    /// The observer's events, each with when it was received ([`Stamped`]).
+    pub fn on_events(&mut self, ob: &mut Observer, events: Vec<Stamped>) {
         match self {
             Self::Ours(c) => c.on_events(ob, events),
             Self::Apples(a) => a.on_events(ob, events),
@@ -71,6 +71,14 @@ impl Conductor {
         match self {
             Self::Ours(c) => c.input(ob, event, drop),
             Self::Apples(a) => a.input(ob, event),
+        }
+    }
+
+    /// One of Mission Control's keys, or a press while it may show, from its key tap: ours
+    /// only (the Apple mode's Mission Control shows every stage already).
+    pub fn mission_input(&mut self, ob: &mut Observer, heard: super::mission_key_tap::HeardAt) {
+        if let Self::Ours(c) = self {
+            c.mission_input(ob, heard);
         }
     }
 
@@ -107,10 +115,19 @@ impl Conductor {
     }
 
     /// A Desktop change.
-    pub fn on_space_changed(&mut self, ob: &mut Observer) {
+    pub fn on_space_changed(&mut self, ob: &mut Observer, heard: Instant) {
         match self {
-            Self::Ours(c) => c.on_space_changed(ob),
+            Self::Ours(c) => c.on_space_changed(ob, heard),
             Self::Apples(a) => a.on_space_changed(ob),
+        }
+    }
+
+    /// The window server's notices of one kind ([`crate::engine::server_notice::Burst`]): the
+    /// Spaces engine's looks brought forward. Nothing in the Apple mode.
+    pub fn server_notice(&mut self, ob: &mut Observer, burst: crate::engine::server_notice::Burst) {
+        match self {
+            Self::Ours(c) => c.server_notice(ob, burst),
+            Self::Apples(_) => {}
         }
     }
 
@@ -133,10 +150,10 @@ impl Conductor {
 
     /// An app activated (the Apple mode hides a running app with no window that the rules
     /// want here, before the window it reopens shows; ours places that window when it comes).
-    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo) {
+    pub fn app_activated(&mut self, ob: &Observer, app: &AppInfo, fired: Instant) {
         match self {
             Self::Ours(_) => {}
-            Self::Apples(a) => a.app_activated(ob, app),
+            Self::Apples(a) => a.app_activated(ob, app, fired),
         }
     }
 
@@ -183,7 +200,7 @@ impl Conductor {
     /// The fast tick.
     pub fn fast_tick(&mut self, ob: &mut Observer) {
         match self {
-            Self::Ours(c) => c.fast_tick(ob),
+            Self::Ours(c) => c.run_fast_tick(ob),
             Self::Apples(a) => a.fast_tick(ob),
         }
     }
@@ -191,8 +208,17 @@ impl Conductor {
     /// True while the fast tick has work.
     pub fn wants_fast_tick(&self) -> bool {
         match self {
-            Self::Ours(c) => c.wants_fast_tick(),
+            Self::Ours(c) => c.fast_tick_wanted(),
             Self::Apples(a) => a.wants_fast_tick(),
+        }
+    }
+
+    /// How soon the fast tick should come when sooner than its period (the raise-order
+    /// check's next read).
+    pub fn fast_tick_soon(&self) -> Option<Duration> {
+        match self {
+            Self::Ours(c) => c.fast_tick_soon(),
+            Self::Apples(_) => None,
         }
     }
 

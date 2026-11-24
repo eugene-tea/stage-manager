@@ -23,7 +23,7 @@
 //! Quit counts as clean only when, after unparking, the window server lists no window of an
 //! allowed app in the park zone on any Space ([`stranded_allowed`]). Every unpark path at
 //! quit (the WM thread's, the registry's fallback, the signal watcher's) and a stand-down
-//! ends with [`leftovers_back`]: each window still listed there is brought back, known to
+//! ends with the leftovers check ([`leftovers_retry`]): each window still listed there is brought back, known to
 //! this run or not (its registry frame, its `state.json` frame, else centered); one that
 //! cannot be reached leaves the exit unclean, so the guardian waits for it (6X). The unpark
 //! saves the stages and hands the check the frames it restored, so a window its app moved
@@ -123,8 +123,7 @@ pub fn take_watch(windows: &[Registered], corners: &[Corner]) -> (Vec<u32>, usiz
     if let Ok(mut c) = CORNERS.lock() {
         c.extend(corners.iter().copied());
     }
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
+    write_parked_file();
     taken
 }
 
@@ -192,8 +191,7 @@ fn set_ordered_out(ids: BTreeSet<u32>) {
         }
         *now = ids;
     }
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
+    write_parked_file();
 }
 
 /// Set by a quit whose only windows not back are children their apps ordered out while
@@ -249,8 +247,7 @@ pub fn taken_forget(ids: &[u32]) {
         taken.len() != before
     };
     if changed {
-        let listed = registered(&lock_registry());
-        write_parked_file(&listed);
+        write_parked_file();
     }
 }
 
@@ -276,6 +273,40 @@ pub(crate) fn zones_used() -> Vec<ParkZone> {
     ZONES.lock().map(|z| z.clone()).unwrap_or_default()
 }
 
+/// The frames the Spaces engine parks windows at for Mission Control's lends, at their
+/// stages' cards (round mc-card-park; the guardian's: those the app's parked file names), so
+/// a window the app registered is stranded there in every scan
+/// ([`crate::engine::recovery::ScanDisplays::lends`]).
+static LENDS: Mutex<Vec<Rect>> = Mutex::new(Vec::new());
+
+/// The card parks of Mission Control's lends now (or named by the parked files read).
+pub(crate) fn lends_used() -> Vec<Rect> {
+    LENDS.lock().map(|l| l.clone()).unwrap_or_default()
+}
+
+/// The Spaces engine's card parks now (every window parked at its card for Mission
+/// Control's lend): true when they changed, and the parked file is then written again
+/// ([`rewrite_parked_file`]).
+pub fn set_lends(lends: Vec<Rect>) -> bool {
+    LENDS.lock().is_ok_and(|mut l| {
+        let changed = *l != lends;
+        *l = lends;
+        changed
+    })
+}
+
+/// Takes the card parks a parked file names (the guardian's, and the launch's for an earlier
+/// copy's file) without writing one.
+pub fn assume_lends(lends: &[Rect]) {
+    if let Ok(mut l) = LENDS.lock() {
+        for r in lends {
+            if !l.contains(r) {
+                l.push(*r);
+            }
+        }
+    }
+}
+
 /// Every park corner used this run (the guardian's: those the app's parked file names), so a
 /// window parked at a corner the arrangement no longer picks still counts as parked.
 static CORNERS: Mutex<BTreeSet<Corner>> = Mutex::new(BTreeSet::new());
@@ -296,18 +327,14 @@ fn lock_registry() -> MutexGuard<'static, BTreeMap<u32, ParkedEntry>> {
 
 /// Adds entries (before a batch: windows about to be parked are covered at once).
 pub fn registry_add(entries: impl IntoIterator<Item = (u32, ParkedEntry)>) {
-    let listed = {
-        let mut guard = lock_registry();
-        guard.extend(entries);
-        registered(&guard)
-    };
-    write_parked_file(&listed);
+    lock_registry().extend(entries);
+    write_parked_file();
 }
 
 /// Replaces the registry with `entries` (after a batch), plus the held windows (a
 /// stand-down's) that `entries` does not take over.
 pub fn registry_replace(entries: BTreeMap<u32, ParkedEntry>) {
-    let listed = {
+    {
         let mut held = lock_held();
         // A held window the controller parks itself is its own again.
         held.retain(|id, _| !entries.contains_key(id));
@@ -315,9 +342,8 @@ pub fn registry_replace(entries: BTreeMap<u32, ParkedEntry>) {
         drop(held);
         let mut guard = lock_registry();
         *guard = merged;
-        registered(&guard)
-    };
-    write_parked_file(&listed);
+    }
+    write_parked_file();
 }
 
 /// A stand-down's leftovers: every window still in the registry is held until it is back.
@@ -363,12 +389,8 @@ pub fn retry_held() -> bool {
         counters::bump(Count::Recovery);
         tracing::info!(back = back.len(), left = held.len() - back.len(), "safety: held windows brought back");
         lock_held().retain(|id, _| !back.contains(id));
-        let listed = {
-            let mut guard = lock_registry();
-            guard.retain(|id, _| !back.contains(id));
-            registered(&guard)
-        };
-        write_parked_file(&listed);
+        lock_registry().retain(|id, _| !back.contains(id));
+        write_parked_file();
     }
     lock_held().is_empty()
 }
@@ -412,23 +434,35 @@ static LOGOUT_QUIT: AtomicBool = AtomicBool::new(false);
 /// logout's cancel through its recovery watch and opens the app again at one.
 pub fn mark_logout_quit() {
     LOGOUT_QUIT.store(true, Ordering::SeqCst);
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
+    write_parked_file();
 }
 
 /// Keeps this process's parked file ([`paths::parked_file`]) equal to the registry, with the
 /// main display's visible frame, written atomically and flushed to disk before the rename
 /// ([`super::durable`]); removed when the registry is empty (unless it marks a logout's quit,
-/// [`mark_logout_quit`]).
-fn write_parked_file(listed: &[Registered]) {
+/// [`mark_logout_quit`]). The registry is read under the lock that orders the writes: each
+/// write takes the list as it is then, so of two threads changing the registry the last
+/// write on disk is never the older list (before, each took its list before that lock and
+/// could write it after the other's newer one).
+fn write_parked_file() {
+    let mut written = lock_written();
+    let listed = registered(&lock_registry());
     let logout = LOGOUT_QUIT.load(Ordering::SeqCst);
     let empty = listed.is_empty() && !logout;
     let file =
         {
             let engine = window_engine::current();
-            ParkedFile { engine: engine.kind(), visible: visible_frame(), windows: listed.to_vec(), corners: corners_used(), zones: zones_used(), logout, spaces: engine.parked_spaces() }
+            ParkedFile {
+                engine: engine.kind(),
+                visible: visible_frame(),
+                windows: listed,
+                corners: corners_used(),
+                zones: zones_used(),
+                logout,
+                spaces: engine.parked_spaces(),
+                lends: lends_used(),
+            }
         };
-    let mut written = lock_written();
     if written.as_ref() == Some(&file) {
         return;
     }
@@ -452,8 +486,7 @@ fn write_parked_file(listed: &[Registered]) {
 /// Writes the parked file again from the registry as it is: the engine that runs changed
 /// (a fallback mid-run), so the guardian brings the windows back that engine's way.
 pub fn rewrite_parked_file() {
-    let listed = registered(&lock_registry());
-    write_parked_file(&listed);
+    write_parked_file();
 }
 
 /// What the app process `pid` left in its parked file: its registered windows and the main
@@ -488,7 +521,7 @@ pub fn registry_ids() -> BTreeSet<u32> {
     lock_registry().keys().copied().collect()
 }
 
-/// Drops the entries of windows seen back (quit's leftovers, [`leftovers_back`]), taken ones
+/// Drops the entries of windows seen back (quit's leftovers), taken ones
 /// too.
 fn registry_forget(ids: &[u32]) {
     if ids.is_empty() {
@@ -496,12 +529,8 @@ fn registry_forget(ids: &[u32]) {
     }
     lock_held().retain(|id, _| !ids.contains(id));
     lock_taken().retain(|id, _| !ids.contains(id));
-    let listed = {
-        let mut guard = lock_registry();
-        guard.retain(|id, _| !ids.contains(id));
-        registered(&guard)
-    };
-    write_parked_file(&listed);
+    lock_registry().retain(|id, _| !ids.contains(id));
+    write_parked_file();
 }
 
 /// Remembers every managed display's park zone (the main one first: its visible frame and
@@ -518,8 +547,7 @@ pub fn set_displays(displays: &[Display]) {
     });
     set_main_display(main.visible, main.corner);
     if changed {
-        let listed = registered(&lock_registry());
-        write_parked_file(&listed);
+        write_parked_file();
     }
 }
 
@@ -565,8 +593,7 @@ pub fn set_main_display(visible: Rect, corner: Corner) {
     };
     let new_corner = CORNERS.lock().is_ok_and(|mut c| c.insert(corner));
     if changed || new_corner {
-        let listed = registered(&lock_registry());
-        write_parked_file(&listed);
+        write_parked_file();
     }
 }
 
@@ -1115,7 +1142,7 @@ pub(crate) fn scan_displays() -> ScanDisplays {
     let visible = visible_frame()
         .filter(|v| main.contains_rect(v))
         .unwrap_or_else(|| Rect::new(main.x, main.y + MENU_BAR_GUESS, main.w, main.h - MENU_BAR_GUESS));
-    ScanDisplays::new(main, visible, bounds, corners_used()).with_zones(zones_used())
+    ScanDisplays::new(main, visible, bounds, corners_used()).with_zones(zones_used()).with_lends(lends_used())
 }
 
 /// Which windows a recovery scan looks at.
@@ -1277,7 +1304,10 @@ pub fn crashed_registered() -> BTreeMap<u32, Registered> {
     for entry in dir.flatten() {
         let name = entry.file_name();
         let Some(pid) = name.to_str().and_then(parked_file_pid).filter(|&p| p != own) else { continue };
-        for r in read_parked_file(pid).windows {
+        let file = read_parked_file(pid);
+        // Its windows out at their cards for Mission Control are stranded there too.
+        assume_lends(&file.lends);
+        for r in file.windows {
             found.insert(r.id, r);
         }
     }
@@ -1352,26 +1382,15 @@ pub fn set_frame_retrying(element: &AxElement, id: u32, frame: Rect, left: Durat
     r.result
 }
 
-/// Every unpark path's last look (6X): reads the window server's list until no window of an
-/// allowed app is left in the park zone, or [`UNPARK_SETTLE`] has passed; brings back each
-/// one still there ([`bring_back_leftovers`]) and reads again. True when none is left; else
-/// each one is logged and the exit must not count as clean (the guardian waits for them).
-/// `managed`: the model's windows, when the caller has them ([`Ours`]). Never takes more
-/// than [`leftovers::LEFTOVERS_MAX`]: the second read gets what is left.
-pub fn leftovers_back(reason: &str, managed: BTreeSet<u32>) -> bool {
-    leftovers_back_knowing(reason, Ours::now(managed)).is_none()
-}
-
-/// [`leftovers_back`] with what is known of the windows given (`ours`: an earlier check's,
-/// [`Ours::merged`] with now). `None` when no window is left in the park zone; else what this
-/// check knew, the windows left judged ours ([`Ours::kept_for_retry`]), for the next try:
-/// a stand-down's retries pass it until each window is back (the review of 6X2, 2).
-pub fn leftovers_back_knowing(reason: &str, ours: Ours) -> Option<Ours> {
-    leftovers_check(reason, ours, true)
-}
-
-/// A later look for the windows an earlier check left ([`leftovers_back_knowing`]'s answer,
-/// merged with what is known now), with no unpark before it (a Desktop showed while a
+/// Every unpark path's last look (6X), and a later look for the windows an earlier one left
+/// (its answer, merged with what is known now): reads the window server's list until no
+/// window of an allowed app is left in the park zone, or [`UNPARK_SETTLE`] has passed;
+/// brings back each one still there ([`bring_back`]) and reads again. `None` when none is
+/// left; else each one is logged and the exit must not count as clean (the guardian waits
+/// for them), and what this check knew, the windows left judged ours
+/// ([`Ours::kept_for_retry`]), is given back for the next try: a stand-down's retries pass it
+/// until each window is back (the review of 6X2, 2). Never takes more than
+/// [`leftovers::LEFTOVERS_MAX`]: the second read gets what is left. With no unpark before it (a Desktop showed while a
 /// stand-down's window is still away). `moved`: the list may still be changing (windows
 /// moved a moment ago), and gets its settle as after an unpark. Else the caller has let it
 /// settle already: it is read as it stands, and read again without a wait when no window
@@ -1382,7 +1401,7 @@ pub fn leftovers_retry(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     leftovers_check(reason, ours, moved)
 }
 
-/// The leftovers check ([`leftovers_back_knowing`], [`leftovers_retry`]); `moved`: windows
+/// The leftovers check ([`leftovers_retry`]); `moved`: windows
 /// were moved a moment before it (the list needs its settle).
 fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
     let start = Instant::now();
@@ -1440,13 +1459,8 @@ fn leftovers_check(reason: &str, ours: Ours, moved: bool) -> Option<Ours> {
 /// registry's element or the app's own list.
 /// A window is tried only when its try fits in the time left ([`leftovers::leftover_fits`]),
 /// and its quick retries stop at the deadline. Returns the ids it could not move (another
-/// Desktop's, an app that does not answer, no time left).
-pub fn bring_back_leftovers(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> Vec<u32> {
-    bring_back(reason, left, deadline, ours).0
-}
-
-/// [`bring_back_leftovers`], with how many windows it asked to move (reached, whether the
-/// move went through or not).
+/// Desktop's, an app that does not answer, no time left), with how many windows it asked
+/// to move (reached, whether the move went through or not).
 fn bring_back(reason: &str, left: &[windows::CgWindow], deadline: Instant, ours: &Ours) -> (Vec<u32>, usize) {
     // Each app's enhanced UI off once for all its windows here, not once per window.
     let _quiet = enhanced_ui::Batch::open();
@@ -1689,6 +1703,8 @@ mod tests {
 
     #[test]
     fn empty_registry_unparks_nothing() {
+        // The registry is the process's: no bench fills it meanwhile.
+        let _alone = crate::platform::fake::exclusive();
         let r = unpark_registry(Duration::from_millis(10), Duration::ZERO).unwrap_or_default();
         assert_eq!(r.failed, 0);
     }

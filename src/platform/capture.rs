@@ -239,9 +239,20 @@ fn log_pace(change: capture_pace::Change) {
     }
 }
 
-/// True when `STAGE_MANAGER_NO_CAPTURE` is set.
+/// True when `STAGE_MANAGER_NO_CAPTURE` is set in a test run (with `STAGE_MANAGER_ONLY` or
+/// `STAGE_MANAGER_HOME`, as every scripted run sets): never for the installed app, which a
+/// test script's reopen (or the updater's relaunch after it) may hand the variable to (11-18:
+/// cards without pictures after an update until the app was opened again by hand).
 pub fn env_disabled() -> bool {
-    std::env::var_os(NO_CAPTURE_ENV).is_some()
+    no_capture_applies(
+        std::env::var_os(NO_CAPTURE_ENV).is_some(),
+        std::env::var_os("STAGE_MANAGER_ONLY").is_some() || std::env::var_os("STAGE_MANAGER_HOME").is_some(),
+    )
+}
+
+/// [`env_disabled`]'s rule: the variable counts only in a test run.
+fn no_capture_applies(set: bool, test_run: bool) -> bool {
+    set && test_run
 }
 
 /// Switches captures on or off (`[strip] capture`); `STAGE_MANAGER_NO_CAPTURE` keeps them
@@ -1415,6 +1426,11 @@ pub type DesktopDone = Box<dyn FnOnce(DesktopStill) + Send>;
 /// quitting, Screen Recording granted (never asked for here), and the gate open: window
 /// captures already work, so this one goes with them and is never the process's probe.
 pub fn desktop_may_capture() -> Result<(), &'static str> {
+    // A fake desk has no screen to take a picture of.
+    #[cfg(test)]
+    if super::fake::active() {
+        return Err("window captures are off");
+    }
     if MODE.load(Ordering::SeqCst) != ON {
         return Err("window captures are off");
     }
@@ -1762,5 +1778,17 @@ mod tests {
             assert_eq!(desktop_level(layer, pid, own), want, "layer {layer}, pid {pid:?}");
         }
         assert!(!listed.iter().filter(|(l, p, _)| desktop_level(*l, *p, own)).any(|(l, _, _)| *l >= 0));
+    }
+}
+
+#[cfg(test)]
+mod no_capture_tests {
+    use super::no_capture_applies;
+
+    #[test]
+    fn the_no_capture_switch_counts_only_in_a_test_run() {
+        assert!(no_capture_applies(true, true), "a scripted run keeps captures off");
+        assert!(!no_capture_applies(true, false), "the installed app handed the variable keeps its pictures");
+        assert!(!no_capture_applies(false, true));
     }
 }

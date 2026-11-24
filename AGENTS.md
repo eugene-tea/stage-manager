@@ -6,7 +6,8 @@ their settings is a different job: [docs/AGENTS.md](docs/AGENTS.md).)
 ## Where things are
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the app is built and the rules the code
-  keeps (threads, safety layers, no private APIs beyond `_AXUIElementGetWindow`).
+  keeps (threads, safety layers, no private APIs beyond `_AXUIElementGetWindow` under the
+  Corner engine; the Spaces engine adds SkyLight's Space calls).
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): build, the fixture app, the live tests, the
   ctl socket, logs, the source layout.
 - [docs/UX-SPEC.md](docs/UX-SPEC.md): how Apple's Stage Manager behaves and where we differ.

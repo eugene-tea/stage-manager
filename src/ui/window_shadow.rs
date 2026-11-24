@@ -378,6 +378,14 @@ impl ShadowLayers {
         }
     }
 
+    /// Ends the amount's spring at once, at the amount it was going to
+    /// ([`Self::spring_amount`] sets it first).
+    pub fn settle_amount(&self) {
+        for layer in self.amount_layers() {
+            layer.removeAnimationForKey(&NSString::from_str("opacity"));
+        }
+    }
+
     /// The amount shown now (Core Animation's presentation of it).
     pub fn amount(&self) -> f64 {
         // SAFETY: presentationLayer returns a copy of the drawn state or nil.

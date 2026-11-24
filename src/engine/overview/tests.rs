@@ -248,6 +248,22 @@ fn the_watch_freezes_while_it_shows_and_a_settle_after() {
     assert!(w.freezes(ms(t0, 3100)));
 }
 
+/// The look before the one that found an overview bounds how late it was found.
+#[test]
+fn an_overview_is_found_within_the_gap_since_the_last_look() {
+    let t0 = Instant::now();
+    let mut w = OverviewWatch::default();
+    assert_eq!(w.see(None, t0), Change::None);
+    assert_eq!(w.found_within(), None);
+    w.see(None, ms(t0, 250));
+    assert_eq!(w.see(Some(Overview::MissionControl), ms(t0, 2250)), Change::Began(Overview::MissionControl));
+    assert_eq!(w.found_within(), Some(Duration::from_millis(2000)), "a look at rest: up to 2 s late");
+    w.see(Some(Overview::MissionControl), ms(t0, 2270));
+    assert_eq!(w.found_within(), Some(Duration::from_millis(2000)), "the gap of the look that found it, kept while it shows");
+    w.see(None, ms(t0, 3000));
+    assert_eq!(w.found_within(), None, "closed");
+}
+
 #[test]
 fn an_overview_listed_for_ever_stops_freezing() {
     let t0 = Instant::now();
@@ -516,4 +532,44 @@ fn mission_control_moves_windows_while_shown_and_a_settle_after_it_closed() {
     let late = t0 + OVERVIEW_STUCK;
     assert_eq!(stuck.see(Some(Overview::MissionControl), late), Change::Stuck(Overview::MissionControl));
     assert!(!stuck.moves_windows(late), "listed too long: no longer trusted, the frames are taken again");
+}
+
+/// Round r5-notices: the window server's notice (1508) at the close, ~32 ms after Escape (the
+/// recorded Mission Control's at 1518, so 1550): a look at every 20 ms fast tick after it finds
+/// macOS's own window and the Dock's cover both gone at 2132, and no settle follows; without
+/// the notice the freeze lasts OVERVIEW_SETTLE more, as before. The open's notice, heard at the
+/// look that finds it, is not a close's.
+#[test]
+fn a_close_found_after_its_notice_ends_the_freeze_at_once() {
+    let frames = mission_control();
+    let t0 = Instant::now();
+    let run = |notice: Option<u64>| {
+        let mut w = OverviewWatch::default();
+        let mut ended = None;
+        for t in (0..=4000).step_by(20) {
+            if t == 40 {
+                // The open's own notice, the look at it finding Mission Control.
+                w.told(ms(t0, 40));
+            }
+            if Some(t) == notice {
+                w.told(ms(t0, t));
+            }
+            if let Change::Ended(_) = w.see(seen(at(&frames, t)), ms(t0, t)) {
+                ended = Some(t);
+            }
+            if ended.is_some() && !w.freezes(ms(t0, t)) {
+                return (ended, Some(t), w.settled_by_notice());
+            }
+        }
+        (ended, None, w.settled_by_notice())
+    };
+    assert_eq!(run(Some(1560)), (Some(2140), Some(2140), true), "free at the look that finds both gone");
+    assert_eq!(run(None), (Some(2140), Some(3140), false), "a settle after, as before");
+    // The Dock's cover still listed at the look after the notice: no early end there.
+    let mut w = OverviewWatch::default();
+    w.see(seen(&[DOCK, WM19]), t0);
+    w.told(ms(t0, 100));
+    assert!(w.closing_told(ms(t0, 120)));
+    assert_eq!(w.see(seen(&[DOCK]), ms(t0, 1700)), Change::Ended(Overview::MissionControl), "past the carry, the cover still up");
+    assert!(!w.settled_by_notice() && w.freezes(ms(t0, 1700)));
 }

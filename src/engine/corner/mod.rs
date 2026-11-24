@@ -9,11 +9,11 @@
 //! may a restore frame be here, where is it within reach. The geometry itself (zones,
 //! corners, how macOS clamps a request) is [`self::park`].
 
-pub mod corner_patch;
+pub(crate) mod corner_patch;
 pub mod park;
-pub mod park_reconcile;
-pub mod patch_still;
-pub mod sliver;
+pub(crate) mod park_reconcile;
+pub(crate) mod patch_still;
+pub(crate) mod sliver;
 
 use super::geometry::Rect;
 use super::model::{Display, Model, WindowId};

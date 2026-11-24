@@ -16,6 +16,7 @@
 //! Stage Manager arranges the windows (`platform::apple::controller` does, behind
 //! `platform::conductor`).
 
+use crate::platform::clock;
 use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
@@ -25,6 +26,8 @@ use super::{Controller, spaces};
 use super::corner::unrestored::LetGo;
 use crate::engine::corner::corner_patch::{Refused, SwitchCover};
 use crate::engine::geometry::{Point, Rect};
+use crate::engine::mission_control::PickBy;
+use crate::engine::model::{Action, Model};
 use crate::platform::corner::sliver_tap;
 use crate::platform::observe::Observer;
 use crate::platform::safety::ParkedEntry;
@@ -97,7 +100,7 @@ impl Controller {
     pub(super) fn upkeep_wants_fast_tick(&self, now: Instant) -> bool {
         match self.engine.kind() {
             EngineKind::Corner => self.patch_replans(now) || self.reveal_fast(now),
-            EngineKind::Spaces => self.mission_wants_fast(now),
+            EngineKind::Spaces => self.mission_wants_fast(now) || self.server_wants_fast(now),
             EngineKind::Apple => false,
         }
     }
@@ -120,10 +123,12 @@ impl Controller {
                 }
             }
             EngineKind::Spaces => {
-                if self.spaces.strays.values().any(|tries| *tries < spaces::HIDE_TRIES) {
+                if self.spaces.strays.values().any(|s| s.tries < spaces::HIDE_TRIES) {
                     Some("hidden windows out of their Space")
                 } else if !crate::platform::spaces::engine::shared().owed().is_empty() {
                     Some("shows owed")
+                } else if crate::platform::spaces::engine::shared().watching_now() {
+                    Some("a screen gone: hidden windows kept in their stages")
                 } else {
                     None
                 }
@@ -149,10 +154,13 @@ impl Controller {
     /// ([`Self::corner_fast_tick`]). The Spaces engine: Mission Control looked for after one
     /// of its keys, the hidden stages' windows put home for it and taken back
     /// ([`Self::mission_fast_tick`]).
-    pub(super) fn upkeep_fast_tick(&mut self, ob: &Observer, now: Instant) {
+    pub(super) fn upkeep_fast_tick(&mut self, ob: &mut Observer, now: Instant) {
         match self.engine.kind() {
             EngineKind::Corner => self.corner_fast_tick(now),
-            EngineKind::Spaces => self.mission_fast_tick(ob, now),
+            EngineKind::Spaces => {
+                self.mission_fast_tick(ob, now);
+                self.server_fast_tick(ob, now);
+            }
             EngineKind::Apple => {}
         }
     }
@@ -164,6 +172,50 @@ impl Controller {
         match self.engine.kind() {
             EngineKind::Spaces => self.mission_key(ob, event, now),
             EngineKind::Corner | EngineKind::Apple => {}
+        }
+    }
+
+    /// One of Mission Control's keys, or a press while it may show, heard by its key tap
+    /// ([`crate::platform::mission_key_tap`]). The Spaces engine: Escape, ⌘'s release or a
+    /// press while ⌘Tab's switcher is up first ([`Self::switcher_tap`]), then a hint, or the
+    /// key that closed Mission Control ([`Self::mission_heard`]); the Corner engine's hidden
+    /// windows are on their Desktop, where Mission Control shows them.
+    pub fn mission_input(&mut self, ob: &mut Observer, heard: crate::platform::mission_key_tap::HeardAt) {
+        match self.engine.kind() {
+            EngineKind::Spaces => {
+                self.switcher_tap(ob, heard);
+                self.mission_heard(ob, heard);
+            }
+            EngineKind::Corner | EngineKind::Apple => {}
+        }
+    }
+
+    /// A left mouse-down in another app at `now`. The Spaces engine: while Mission Control
+    /// shows, its close is a pick ([`Self::mission_click`]).
+    pub(super) fn upkeep_press(&mut self, now: Instant) {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_click(now),
+            EngineKind::Corner | EngineKind::Apple => {}
+        }
+    }
+
+    /// A switch for app `by` is about to be made (an activation's or a focus's), `predict`
+    /// its model change on a copy of the model. The Spaces engine: a window picked in Mission
+    /// Control, its stage's windows put home set at their frames as it closes, the switch
+    /// waiting for the close ([`Self::mission_pick`]). True when the switch waits.
+    pub(super) fn upkeep_pick(&mut self, by: PickBy, predict: impl FnOnce(&mut Model) -> Vec<Action>, now: Instant) -> bool {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_pick(by, predict, now),
+            EngineKind::Corner | EngineKind::Apple => false,
+        }
+    }
+
+    /// True when window `id` was set at its frame ahead of its switch. The Spaces engine:
+    /// picked in Mission Control ([`Self::mission_placed`]).
+    pub(super) fn upkeep_placed(&self, id: u32) -> bool {
+        match self.engine.kind() {
+            EngineKind::Spaces => self.mission_placed(id),
+            EngineKind::Corner | EngineKind::Apple => false,
         }
     }
 
@@ -192,10 +244,14 @@ impl Controller {
     /// window list, and the park reconcile ([`Self::corner_tick`]).
     pub(super) fn upkeep_tick(&mut self, ob: &mut Observer) {
         match self.engine.kind() {
-            EngineKind::Corner => self.corner_tick(ob),
+            EngineKind::Corner => {
+                // Mission Control shows the Corner engine's hidden windows already.
+                crate::platform::mission_key_tap::publish(false, None, false);
+                self.corner_tick(ob)
+            }
             EngineKind::Spaces => {
                 // Mission Control first: what it has put home is the engine's to count.
-                self.mission_tick(ob, Instant::now());
+                self.mission_tick(ob, clock::now());
                 self.spaces_tick();
             }
             EngineKind::Apple => {}
@@ -415,6 +471,11 @@ impl Controller {
             EngineKind::Spaces => {
                 let mut status = crate::platform::spaces::engine::shared().status();
                 status["kind"] = json!(EngineKind::Spaces.name());
+                // The window server's notices (round r5-notices): what was heard, and what it
+                // brought forward.
+                let mut notices = crate::platform::spaces::notices::status();
+                notices["uses"] = self.server_status();
+                status["notices"] = notices;
                 status
             }
             EngineKind::Apple => json!({ "kind": EngineKind::Apple.name() }),

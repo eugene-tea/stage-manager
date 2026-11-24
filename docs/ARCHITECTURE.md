@@ -32,20 +32,28 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   stages are parked in their screen's corner. A switch saves the active stage's frames and
   z-order, parks it, restores the target's, raises, focuses the remembered key window last.
   Nothing acts on another Space's windows except the safety paths.
-- **Spaces by their windows.** No public API names a Space: each gets a synthetic id,
-  recognized on `activeSpaceDidChangeNotification` from the window server's on-screen list.
-  A window reaches the engine only once it shows on a display. A once-a-second check
-  catches Space moves and missed notices. No SkyLight/CGS calls.
+- **Spaces: the model's own ids.** No public API names a Space: each gets a synthetic id in
+  the model. Under the Corner engine (and the Apple mode, or wherever the window server's
+  listing cannot be read) a Desktop is recognized at `activeSpaceDidChangeNotification` from
+  the window server's on-screen list; under the Spaces engine the listing names the Desktop
+  each screen shows and each window's Desktops, bound to the model's ids ("The window
+  server's Desktops", below). A window reaches the engine only once it shows on a display. A
+  check on the tick (every 250 ms while something happens, every 2 s at rest) catches Space
+  moves and missed notices. The Corner engine makes no SkyLight/CGS calls; the Spaces engine
+  does (below).
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`), unit tested: observations
   in, `Action`s out (`Hide`, `SetFrame`, `Raise`, `Focus`).
 - **Platform layer** (`src/platform`): AX, CGWindowList, ScreenCaptureKit, Carbon hotkeys,
-  NSWorkspace events, safety. Public APIs only, plus `_AXUIElementGetWindow`.
+  NSWorkspace events, safety. Public APIs only, plus `_AXUIElementGetWindow`, under the
+  Corner engine; the Spaces engine adds SkyLight's Space calls, loaded at run time.
 - **UI** (`src/ui`): status item and menu, Settings, a strip panel per screen (CALayer
   cards), the motion overlay (just below floating windows; above everything only while a
   dragged window's card shows).
 - **Threads:** every AX call runs on the WM thread with a 0.25 s timeout; the main thread
   never calls AX. Apps that do not answer yet (a login, the launch's recovery scan) are
-  asked on threads of their own, so one busy app holds up no other. The minimize tap
+  asked on threads of their own, so one busy app holds up no other; so are the parks of
+  Mission Control's lends under the Spaces engine (a thread per app, the WM thread waiting
+  for all within one deadline, then making the window-server calls itself). The minimize tap
   (`platform::minimize_tap`) asks on its own thread too, at 0.1 s a call and only for a press
   near a managed window's title-bar buttons or ⌘M: a minimize caught there goes to the WM
   thread as a command. Frame writes run with
@@ -55,6 +63,41 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   afresh by id; one unlisted and off screen on two looks a second apart is let go as closed
   (`engine::stale_handle`). Commands go main → WM by channel plus `CFRunLoopPerformBlock`;
   snapshots WM → main via GCD.
+- **A switch's states** (round r6-waits): planned; under the Spaces engine the outgoing
+  windows' pictures taken (`switch_pictures`, 160 ms at most); the transition sent to the
+  strip and the activation's keyboard routed at once; the strip's answer waited for on the
+  WM thread (`strip_model::wait_cover`, a condvar, `COVER_TIMEOUT` 150 ms; no answer: the
+  windows move at once and the strip, told so, draws nothing), then `[animation] cover_ms`
+  (20 ms) for the pictures to reach the screen; the hides run and the arrivals are held
+  (`pending`, the phase's `Switching`) until the strip's `Unveil`, the backstop at the tick,
+  or an event that lands or supersedes them (`flush_pending_as`); the landing's batch; then
+  the raise-order check (`controller::raise_order`): a state, read on the fast tick 4 ms
+  apart until the order holds for 60 ms (150 ms after a fix) or 400 ms pass, the WM thread
+  handling its notices between reads; the user's click, another window in front, or a
+  later batch that stacks or moves its windows ends it. The cover wait still blocks: the
+  handlers that start a switch go on after it as if its batch had run (an un-minimize's
+  dive frame, a new window's release from the engine, an activation's lend decided, the
+  tick's and the fast tick's later duties, the next events of the same run), so making it a
+  state means making each of those a continuation run at the cover's end.
+- **Time:** one clock, every event stamped at receipt, and five rules for what time may
+  decide (below, "How time is used").
+- **Who caused a notice** (review 11-21, R1): macOS never says. Order decides where it can,
+  time only expires what never came. Each action of ours registers what it expects in the
+  cause ledger (`engine::causes`): a focus or raise a focus of that window, kept per app in
+  the order asked (an app tells its focus changes in order); a frame set a move to that
+  frame (the window where our set put it, or the first answer to a set, clamped); an
+  `AXFrontmost` the app's activation. The user's presses are kept there too, with the
+  window pressed (a hit-test in the window list read for the press): a press on a window
+  makes its next focus theirs at once. A press on the desktop expects Finder's first
+  activation and first focus (`engine::desktop_echo`). A focus or activation notice is then
+  judged by one pure function over the facts gathered for it (`engine::attribution`: the
+  gates in one written order, a table of where the two notices differ;
+  `controller/notices.rs` gathers and does what the verdict says). What still goes by
+  time, each named in `engine::causes`' module doc: a focus after a key press
+  (`USER_FOCUS`), macOS's own activation after a display change (`DISPLAY_SETTLE`), a
+  window just shown counted as carried by our switch at a Space change (`SLIDE_CARRY`),
+  the echo window (`[windows] focus_echo_ms`) for a notice beyond those expected and for
+  "the window list may not show our write yet", and the caps.
 - **The WM tick** (`engine::tick_pace`): the duties no event announces (a window closed or
   an app gone with no notice, the Space check, the engine's upkeep, the debounced save, the
   config poll, the controller's own deadlines) run on one timer, every 0.25 s for 3 s after
@@ -71,9 +114,10 @@ NSWorkspace notifications     persists state.json               ctl socket (test
 - **Idle subsystems** (1.9): what a mode has no use for does not run. The Apple mode and the
   stand-down run no controller of ours (no Dock order, corner upkeep, lock poll or park
   checks); the Apple mode's closed-window sweep runs only on the list its mirror read in
-  that tick. Both event taps (`platform::tap_switch`) are on only while they have something
+  that tick. The event taps (`platform::tap_switch`) are on only while they have something
   to catch: the inert slivers' while windows are parked with the shield on, the minimize
-  tap's while the WM thread arranges and `minimize_to_strip` holds. With no strip showing
+  tap's while the WM thread arranges and `minimize_to_strip` holds, Mission Control's key tap
+  while the Spaces engine arranges with `mission_control_stages` not `"off"`. With no strip showing
   cards (hidden, or standing down) the strip lets go of the mouse moves' monitor and the
   card glass reads no wallpaper; capture workers with no targets sleep until given work.
   The Dock order's running-app paths are asked of LaunchServices after a launch or a quit
@@ -81,12 +125,67 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   LaunchServices calls, Dock reads, captures, wallpaper reads, lock polls, tap events and
   mouse moves since the launch.
 
+## How time is used
+
+macOS says neither who caused a notice nor when most state changes, so time stays in the
+app; what the code keeps is how it is used (review 11-21). Five rules, the same in every
+flow:
+
+1. **Order decides cause.** "The first X after Y with nothing between", never "within X of
+   Y". Each action of ours registers what it expects in the cause ledger (`engine::causes`;
+   "Who caused a notice", above); a wallpaper press expects Finder's first activation and
+   focus after it (`engine::desktop_echo`); the Apple mode tells its own activations the
+   same way (`engine::apple::cause`). Time is only each expectation's expiry.
+2. **Notices are stamped at receipt.** One clock, `platform::clock::now()`; under
+   `cfg(test)` a per-thread clock a test freezes and moves (`clock::test::freeze`,
+   `advance`), and since a wait on the WM thread goes through `clock::sleep` and a deciding
+   age through `clock::since`, a wait under a frozen clock moves the clock on and ends.
+   Every event carries when it came from macOS: the AX callback's entry, the NSWorkspace or
+   input monitor's handler, an event tap's callback, the window server's notice callback
+   (`observe::Stamped`, `InputEvent::heard`, `WmCommand::SpaceChanged`'s instant; the
+   controller keeps the one being handled, `received`). An age is counted from that stamp,
+   never from when the busy WM thread got to it; a stamp older than the action counts as at
+   it and is counted (`predated`). A deadline keeps the clock's now.
+3. **A wait names what ends it, and its cap.** The read that confirms, the events that
+   refute, and a cap that ends only what never came: `engine::lend_wait` for the Dock's and
+   ⌘Tab's lends (the app's activation and its switch confirm; another app's activation, a
+   press that was no click, Escape at the key tap refute), the Apple mode's wait for Apple's
+   answer (`engine/apple/mirror.rs`, `Expect`), the raise-order check, `FLIP_WAIT`. A wait
+   ended by its cap says so.
+4. **Quiet is read, not assumed.** Where something settles, the thing itself is read until
+   it holds, in place of a fixed time after a notice: the Apple mode's motion at rest (two
+   still reads), the Desktop shown read from the window server's listing in place of the
+   windows on screen, Mission Control's freeze ended by the look that finds macOS's window
+   and the Dock's cover gone. A window-server notice only brings such a read forward ("The
+   window server's notices", below).
+5. **Every time decision logs its margin.** `engine::margin` notes each decision by a time
+   window and each wait's end by its constant's name: how far into its limit, which way it
+   was judged, whether its cap or a notice ended it. `log summary` and `ctl state`'s
+   `margins` then say, per Mac, which values come near their limit (DEVELOPMENT, "Time
+   values that came close").
+
+**The bench** (`platform/controller/bench.rs`; DEVELOPMENT, "The bench") runs the real
+controller, observer and engine on a fake desk and a frozen clock, each dated incident a
+scenario at load 1, 3 and 10: the load multiplies every notice's delay and every platform
+call's cost, while macOS's own animations keep their length. **The load table**
+(`cargo test --lib load_table -- --nocapture`) gives each scenario's outcome at each load
+and the time limits crossed only under load. A row the same at every load is decided by
+order; a row that changes names the time value that decides it, where a slower Mac may see
+something else. A limit crossed with the outcome unchanged is a margin, not a fault.
+
+Rightly a plain time: Apple's own timings that are copied (the click hold, motion lengths,
+the Apple mode's gesture choreography), the person's stillness in the Apple mode's gate,
+paces, backoffs and keep-for-days policies. What still decides by time where order could
+is in PLAN, "Under the hood".
+
 ## Window engines (1.9, in progress)
 
 How a stage's windows are hidden, shown and animated is one strategy with two
 implementations. The **Corner engine** is today's: Accessibility moves to the park corner,
 pictures for the motion. The **Spaces engine** puts each inactive stage in a hidden Space of
-the window server's own. Everything else is written once and never asks which engine runs.
+the window server's own. Everything else is written once and reaches the engine through
+the trait and two doors, the model's and the upkeep's (below); a few places outside them
+still ask which engine runs.
 The Corner engine is the default. `[windows] engine` (read at launch,
 `engine::engine_choice`) has two values: `"accessibility"`, the default, runs the Corner
 engine and never probes; `"spaces"` runs the launch probe and the Spaces engine when it
@@ -100,11 +199,11 @@ The live suite's test switch (`STAGE_MANAGER_ENGINE=spaces|corner`, honoured wit
 flowchart TD
     M["engine::Model (pure)<br/>which stage, which windows hide or show"]
     C["Controller (shared)<br/>observer · rules · strip · thumbnails · state.json · guardian protocol"]
-    T{{"trait WindowEngine<br/>hide · show · place_new · is_hidden · animate · bring_all_back · health"}}
+    T{{"trait WindowEngine<br/>hidden_at · hide · show · is_hidden · lends · desktops · bring_all_back · health"}}
     K["Corner engine<br/>AX moves to the park corner, slivers, corner patch,<br/>full-size pictures for the motion"]
     S["Spaces engine<br/>a hidden Space per stage per Desktop,<br/>the Space transform for the motion"]
     M -- "Actions: Hide, Show, SetFrame, Raise, Focus" --> C
-    C -- "asks, never which one runs" --> T
+    C -- "asks" --> T
     T --> K
     T --> S
     S -. "falls back" .-> K
@@ -207,7 +306,9 @@ the log: the guardian starts once the app has ended, and they ended with it. Its
 the app's screens from the file as the Corner engine's does (`assume`: the visible frame, the
 corners, the other screens' zones), since a window parked at the corner for ⌘Tab's lend stays
 there when the app ends; a registered window there is stranded by the park-zone rule under
-either engine. A Spaces run's recovery scan also runs the Corner scan when an earlier copy
+either engine. Mission Control's lends park at the stages' cards instead (round
+mc-card-park), on screen: the file names those frames (`ParkedFile::lends`), and a
+registered window listed at one is stranded there (`ScanDisplays::at_lend`). A Spaces run's recovery scan also runs the Corner scan when an earlier copy
 left registered windows, and in the guardian, so a Corner run that crashed with windows in
 the park corner, or a lend's park, is brought back the Corner way under Spaces (the launch
 scan is the Corner one under either engine). So are the windows the model first meets in the park corner later (a Desktop shown for
@@ -217,22 +318,22 @@ is asked the park corner's questions under either engine (`Model::found_parked`,
 guardian judges them by the park corner (`Watch::taken`): the copy that hid them is gone, and
 its stage Spaces with it.
 
-In the code so far (the seam, Corner only): the model emits `Action::Hide { id }` and never a
-park frame, and asks every question about where hidden windows are through one door
+The seam: the model emits `Action::Hide { id }` and never a park frame, and asks every question about where hidden windows are through one door
 (`engine/model/hiding.rs`), which asks the pure half of the engine that runs
 (`ModelOptions::engine`; the Corner engine's is `engine::corner`, its geometry
 `engine::corner::park`). The questions are of two kinds: is this listed window hidden now,
 and may a window be brought back here. `platform::window_engine::WindowEngine` has
-`hidden_at`, `hide`, `show`, `is_hidden`, `animate`, and for safety `bring_all_back`,
+`hidden_at`, `hide`, `show`, `is_hidden`, and for safety `bring_all_back`,
 `bring_back_briefly` (an abort), `bring_back_rest` (the last look at the window server's
 list), `recover` (the recovery scan), `stranded` (is a window read at this frame still
 hidden away) and `assume` (the guardian takes the app's parked file as its own knowledge),
-with `platform::corner::engine::CornerEngine` behind it. A `SetFrame` is the
+with `platform::corner::engine::CornerEngine` and `platform::spaces::engine::SpacesEngine`
+behind it; the rest of its methods have defaults the Corner engine keeps (the lends, the
+window server's Desktops, the launch watch, the landing). A `SetFrame` is the
 engine's `show`: the model counts the window shown either way, and the engine knows what it
-has hidden. `animate` answers a `Motion` on the WM thread; the controller plans the
-transition, sends it to the strip and waits for its answer the same way for every motion,
-and runs the choreography the motion names (`Motion::Pictures`: hides behind the outgoing
-pictures, arrivals held until the unveil). The engine is one value for the process
+has hidden. Every engine's switch plays with pictures: the controller plans the transition,
+sends it to the strip, waits for its answer, hides behind the outgoing pictures and holds the
+arrivals until the unveil. The engine is one value for the process
 (`window_engine::current`), so the WM thread's batches and the safety paths on other threads
 ask the same one. The parked file names the engine (left out for Corner), and the guardian
 installs that engine before its first scan; its watch asks that engine whether a window is
@@ -273,10 +374,13 @@ of a Desktop's windows adds to the on-screen list (a window gone from the screen
 Desktop; a hidden one did not). No return code is trusted: after every hide and show the
 window's Spaces are read back, a miss is logged and counted (`ctl state`, `engine`), a show
 that left a window hidden is owed and tried again by the tick (so is the frame a show asked
-of a window parked for ⌘Tab's lend that it did not take), and about once a second the
-upkeep checks, by the window server's word, that the windows the model counts hidden are the
-ones in stage Spaces, and
-every few seconds lets out any window found in a stage Space that the engine does not hold.
+of a window parked for ⌘Tab's lend that it did not take), and on each tick (every 250 ms
+while something happens, every 2 s at rest) the upkeep checks, by the window server's word,
+that the windows the model counts hidden are the ones in stage Spaces (one that does not go
+in is tried again, ever more slowly, up to 30 s apart), and every 10 s, or at the window
+server's notice of a Space's change, lets out any window found in a stage Space that the
+engine does not hold (at once for a window of an observed
+app found there, one its app ordered out while hidden and in again).
 Two things the window server does not say for a window in a stage Space, so the shared code
 asks otherwise: a window its app closed without a notice is listed exactly as before, so the
 dead-handle look takes in the hidden windows too; and macOS shows a window it un-minimizes
@@ -285,7 +389,7 @@ beyond the Dock's edge first, as under the Corner engine, and hidden again once 
 bring-backs (quit, a stand-down, a panic, an abort) ask the window server which windows are
 in the engine's Spaces and move each onto its Desktop, from any thread, then end the Spaces;
 the registry still gives fitted windows their frames back. The motion is still the
-pictures (`Motion::Pictures`), but none is kept fresh on a timer: the trait's
+pictures, but none is kept fresh on a timer: the trait's
 `pictures_at_switch` answers true, so the strip captures full-size pictures only as the
 pointer nears a card, and the controller, before it sends a switch to the strip, captures
 every outgoing window whose picture is not fresh (`platform/controller/switch_pictures.rs`,
@@ -294,6 +398,115 @@ window it misses through ScreenCaptureKit) and waits for them, 160 ms at most. T
 windows stay on screen meanwhile and hide behind their pictures in one step each. A window
 in a stage Space still draws and is captured with its current content, so an incoming
 window's picture taken while it is hidden (the pointer on its card) is current too.
+
+The window server's Desktops (design r3). The model names its Spaces by ids of its own; the
+Spaces engine reads the window server's listing (`SLSCopyManagedDisplaySpaces`, through
+`WindowEngine::desktops`: each screen's Space shown and its kind, its Desktops with their ids
+and uuids; `spaces_of` for a window's Spaces; the Corner engine answers `None` to both). The
+controller's one read is `Controller::listing()` (`platform/controller/desktops.rs`): `None`
+when the engine reads none, a managed screen has no entry, or one names no Space shown or not
+its kind. Each arrival is given its screen's Desktop, read again at the arrival, and the
+Desktop and the model's Space are bound to each other (`engine/model/desks.rs`,
+`Model::arrive_on`; one id, one Space). The bindings follow a relabel, go with a pruned or
+merged Space and at a fallback, and are saved with their uuids (`state.json`'s `desks`; a
+load logs how many the listing still has).
+
+**The listing decides** while it can be read and a Desktop is bound
+(`Controller::keyed_listing`; slices 2 and 3). The paths part on what could be read, never on
+the engine's kind; with no listing each of these runs as before, by the windows on screen.
+
+- *Which Desktop arrived, and on which screen.* Per screen, the listing's Space shown against
+  the Desktop the model's Space there is bound to, and its kind (a Desktop, a full-screen
+  app's Space) against what the controller counts (`desk_differences`). A difference is that
+  screen's Space change; only the screens that differ arrive. The Space change's notice comes
+  1-9 ms before the listing flips, so a notice that finds no difference waits for one on the
+  fast tick (`Hold::Flip`, `flip_step`), `FLIP_WAIT` (300 ms, a cap; its margin is noted) at
+  most, and is then a notice with no change: nothing arrives. Every look for missed changes
+  and the window server's own notice of a change's end compare too (`sync_desktops`): a
+  difference found there is taken at once, and NSWorkspace's notice, when it comes after,
+  does nothing more (`announced_late`). The Space that arrives is the one bound to the
+  Desktop; the model's vote over the windows on screen stands in only for a Desktop bound to
+  none yet, among the Spaces bound to none.
+- *Which windows are on it.* Each window of an arrival is asked for its Spaces
+  (`keyed_live`, 22 µs each): one on another Desktop still listed (a Desktop sliding away, a
+  window just shown elsewhere) is left out; one on two Desktops or more is on every Desktop;
+  a known one of another Space was moved here; one the model counts hidden in another
+  Desktop's stage that nothing lent is hidden again. So the arrival never waits for a list
+  that shows one Desktop only, and nothing settles after it (`phase::Event::ArrivedRead`).
+- *Where a window went.* At the tick, a window of a Desktop shown that is not on screen, or
+  one of another Desktop that is, is asked for its Desktop once (`desk_membership`): on one
+  other, it moved there (`Model::window_on_desk`); on its own or on none, nothing.
+- *A window found, an activation.* A new window is placed only when it is on the Desktop the
+  model shows (`found_on_desk_shown`); an activation whose app's focused window, unknown to
+  the model, is on a Desktop not shown belongs to that Desktop's slide
+  (`focus_on_another_desk`).
+
+**What is still guessed, and where.** With no listing (the Corner engine, the Apple
+mode, a listing that cannot be read): everything, as before (`MIXED_WAIT`, `SPACE_SETTLE`,
+`FOREIGN_SETTLE`, `SPACE_CHECKS`, `BESIDE_ARRIVALS`, `STICKY_HOPS`, `SLIDE_CARRY`, the
+display change's hold of new windows at an arrival); a guess made so is corrected at the
+next good read, where the model's Space is bound to no Desktop or to another. With the
+listing: the launch's first arrival (nothing is bound yet); a Desktop seen for the first
+time (the vote among unbound Spaces, the saved Spaces, by their windows); that a slide is
+under way before its end (`slide_hold`, from the window list, and the Mission Control
+watch: the flip comes at the slide's end); a full-screen animation (a window covering the
+display on a Desktop, `fullscreen::SETTLE_MAX`); Accessibility's silence at an arrival;
+windows moved between screens and off every display (frames, `SPACE_CHECKS`); and what a
+screen coming or going does to the model's Spaces (the adoption; `spill`'s watch for windows
+let out).
+
+**One record of a window's Desktop** (slice 4). The model owns it: a window's Space, through
+the binding (`Model::desk_of`). The Spaces engine takes it at every hide
+(`WindowEngine::hidden_at` notes the stage, the frame and that Desktop; `spill::home_for`:
+the model's Desktop while the window server lists it, else where the window is, else where it
+was hidden from, else the Desktop its own screen shows). The engine's own copy for each
+window it holds (`Held.home`) serves the threads with no model (the sweep, a quit, a panic)
+and is set to the model's wherever they differ (`SpacesEngine::rehome`, at the tick's check:
+a map edit). A held window found out of its stage's Space, on any Desktop, shown or not, is
+hidden again from the model's Desktop (`forget_escaped`, then the tick's hide). No clock
+decides any of it: the engine's second record of the last Desktop, the change's 10 s settle
+and the last press (`hide_home`, `MID_CHANGE`) are gone.
+
+**A Desktop macOS ended** (the first step of slice 5). At the tick, while the listing
+decides, a Desktop bound to a Space that no screen lists any more, for `spill::ENDED_AFTER`
+with the display list still, has ended (`Controller::ended_desktops`): its Space joins the
+Space of the Desktop its shown windows are on now (`spill::landed_on`), else of the Desktop
+its screen shows, whole (`Model::desk_ended`, `Model::merge_space`: the half of the gone
+screen's adoption that takes one Space into another), and the engine's homes follow. Still
+the old way, by the windows and the clock: the adoption of a gone screen's Desktop into the
+main screen's whether macOS kept that Desktop or not (`adopt_display`), `spill`'s watch and
+its own choice of where an ended Desktop's stage Spaces are made again, the model's
+`handed_hidden` and `display_watch`.
+
+The shadow stays as the check: at each arrival and each look for missed changes
+(`engine/desk_shadow.rs`) the Desktop the model says each screen shows is compared with the
+listing's, and each held window's home with the model's Desktop for it; each disagreement is
+logged once when it begins and once when it ends (`ctl state`'s `desks`). On the bench it
+reads 0 on the Desktop shown in every scenario.
+
+The window server's notices (round r5-notices, the Spaces engine only). The window server
+tells a process that runs the AppKit event loop of some of its changes: a window created,
+shown or hidden, added to or taken out of a Space, Mission Control's or App Exposé's open and
+close, a Desktop change's end (UX-SPEC, "The window server's notices"). The launch registers
+them before its probe when it may run the Spaces engine (`platform/spaces/notices.rs`,
+`SLSRegisterNotifyProc`), forwards them once that engine is chosen and removes them
+otherwise; under the Corner engine nothing is registered. The callback only stamps the notice
+and copies its payload; the main run loop's next pass folds a turn's notices into one burst
+per kind (`engine/server_notice.rs`), drops those of the engine's own adds (by the window
+and the Space it asked, never by a time window) and sends the rest to the WM thread
+(`WmCommand::ServerNotice`). **A notice is a trigger for a read, never a fact**: each brings
+forward a look that a poll makes today (`platform/controller/server_notices.rs`): the look
+for an overview, the check of the model against the window server, the check for a missed
+Desktop change (and the launch watch's read at a window's creation, but that notice, 811, has
+never reached the app: the launch watch rests on its own read, live 11-21). What the look finds decides; every poll stays as the
+cap behind it, so a Mac whose window server sends none behaves as before. Which word of a
+membership notice is the window and which the Space is read by content (the launch probe's
+own panel, or a window the engine just showed); until then such a notice names nothing and
+its look covers every window. `ctl state`'s `engine.notices` says `heard` once any registered
+type came, `silent` when none came within 5 s of the launch probe (silent is no failure),
+`never_heard` (the types that never came) and each type's counts,
+and `margins` says per wait how often it ended at a notice's look (`noticed`), at the poll's,
+or by its cap.
 
 Window pictures (`platform/capture.rs`, `platform/capture_fast.rs`, 1.9): every capture asks
 the window server first, one call a window and no listing (`SLSHWCaptureWindowList` for a
@@ -364,8 +577,15 @@ press on a Dock item (the Dock activates the app on the release, ~100 ms later) 
 macOS should go to is put on its Desktop first: an arrangement ahead for another Desktop is
 made at the press, and for an app whose stage on the Desktop shown is hidden while it shows
 a window elsewhere, that stage's window is put home for a while, still counted hidden
-(`WindowEngine::lend_home`, `Model::dock_home`), and taken back when no switch to its stage
-follows. It is moved to its park frame at the screen's corner first, while still in its
+(`WindowEngine::lend_home`, `Model::dock_home`). Events end that lend, time only caps it
+(`engine::lend_wait`): the app's activation and its switch confirm it; another app's
+activation, a press that was no click and the next press take it back at once; with
+neither it goes back after 5 s (`LEND_WAIT`; it was 1 s, and a busy app's activation after
+it let macOS slide away). The arrangement made at the press for another Desktop is confirmed by
+the Space change's arrival and undone by a press that was no click or a switch the
+activation makes on the Desktop shown; the activation alone says nothing (a Dock item's may
+come at the slide's start, before the arriving Desktop's windows are listed), and with no
+notice it goes after 3 s (`DOCK_SWITCH_CAP`; the Corner engine keeps 1 s). It is moved to its park frame at the screen's corner first, while still in its
 stage Space (`engine::lend_park`, as for ⌘Tab): macOS counts a window on a Desktop wherever
 it is, and at its own frame it showed before its stage's switch (under the front windows
 from the press, in front of them from the release). The park's move waits 30 ms for the app
@@ -379,17 +599,33 @@ once (macOS picks the Desktop 3-12 ms after ⌘'s release; the Dock lists the sw
 ~180 ms after the Tab); the Dock's own selection (`AXProcessSwitcherList`, observed through
 its `AXCreated` and `AXSelectedChildrenChanged` notices) corrects it while the switcher
 shows (`platform/controller/switcher.rs`, `platform/switcher_ax.rs`). It is taken back when
-the selection moves on, at Escape, or when ⌘ is let go on another app.
+the selection moves on, at Escape, or when ⌘ is let go on another app. The input monitor
+never hears Escape while the switcher shows, nor always ⌘'s release, so the HID key tap
+(`platform::mission_key_tap`, below) is on from the Tab heard to the switcher's end, whatever
+Mission Control's mode, and feeds the switcher Escape, ⌘'s release and a mouse-down (a pick).
+Escape takes the window back at once. After ⌘'s release the window waits for its app's
+activation, which with the switch confirms it, while another app's activation refutes it;
+the 3 s cap (`ACTIVATION_WAIT`, `UNREAD_WAIT` after a pick) ends only an activation that
+never comes. A tap that does not hear (macOS refused it, secure input) leaves the guess of
+before: no activation within 200 ms of the release is a cancel (`SILENT_ACTIVATION_WAIT`).
 
 Mission Control and App Exposé lay out only the windows of the Desktop, so under the Spaces
 engine the same lend is made for every hidden window of the Desktops shown while one of them
 shows (`engine::mission_control` decides when, `platform/controller/mission_control.rs`
-carries it out on the fast tick, 40 ms of lends at a time, each window parked first). It is
+carries it out on the fast tick, a round of parks up to 150 ms each, `ROUND_WAIT`, the apps
+asked at once and each app's windows in turn, each window parked first). It is
 found from macOS's own window over the display (`engine::overview`); one of its shortcuts
-heard by the input monitor, or a notice of the Dock's, only brings that look to the fast
-tick (`[windows] mission_control_stages = "key"` lends at the shortcut itself). At the close
-the windows go back into their stage Spaces, but a picked window's stage, which the
-activation's switch shows. The engine counts each as lent and parked, so a hide, a show, a
+(heard by the key tap, below), the Dock's `AXCreated`, or the window server's notice of its
+open (1508, whatever opened it) only brings that look forward (the Dock posts none of its
+`AXExpose…` notices, a probe, 11-21; UX-SPEC) (`[windows] mission_control_stages = "key"` lends at the shortcut
+itself). The window server takes its
+shortcuts before any app gets the key, so the global input monitor never hears them: a
+listen-only event tap at the HID level does (`platform::mission_key_tap`, the Accessibility
+permission; it forwards Mission Control's shortcuts and key, while it shows Escape and
+presses, and while ⌘Tab's switcher is up its Escape, ⌘'s release and presses, nothing else). At the close the windows go back into their stage Spaces, but a
+picked window's stage, which the activation's switch shows. An activation just after the
+key that closed it, with no click, is no pick (`engine::mission_close`): nothing switches
+and the stage in front's key window is focused again. The engine counts each as lent and parked, so a hide, a show, a
 quit's sweep and the guardian's scan of the park corner bring it back like ⌘Tab's.
 
 ```mermaid

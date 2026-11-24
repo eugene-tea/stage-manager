@@ -10,8 +10,6 @@
 
 use std::cmp::Ordering;
 
-/// The repository's GitHub path.
-pub const REPO: &str = "eugene-tea/stage-manager";
 /// The app's info page (GitHub Pages).
 pub const PAGES_URL: &str = "https://eugene-tea.github.io/stage-manager/";
 /// The repository's web page.

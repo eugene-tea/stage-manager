@@ -33,6 +33,17 @@
 //! or an app's stale focus), it is decided as any activation once [`SLIDE_ACTIVATION_HOLD`]
 //! has passed and the list shows no slide, never later than [`SLIDE_ACTIVATION_CAP`]
 //! ([`SlideHold::step`]). An activation with no such sign is decided at once, as before.
+//!
+//! **The question not answered** ([`AskAgain`]): the app is asked within 50 ms, on the WM
+//! thread, and one waking for its activation may not say in time (the owner's Messages, live
+//! 11-23 17:43:29: ⌘Tab to it from another Desktop, its one window hidden on Desktop 2; the
+//! same day it took 55 to 79 ms at its activations). With nothing of the app on the Desktop
+//! shown the activation was then held for a Space change that never came: a window the engine
+//! keeps off every Desktop takes macOS nowhere, and no focus notice follows when the app's
+//! key window is the same as before. The app was in front with no window. So the question is
+//! asked again, [`ASK_AGAIN_AFTER`] later and then after twice as long each time
+//! ([`ASK_TRIES`] in all), while the activation is still what is held and no Space change
+//! was notified; answered, the activation is decided again with it.
 
 use std::time::{Duration, Instant};
 
@@ -46,6 +57,75 @@ pub const SLIDE_ACTIVATION_HOLD: Duration = Duration::from_millis(500);
 
 /// Never held longer than this, whatever the list shows (a swipe held half-way).
 pub const SLIDE_ACTIVATION_CAP: Duration = Duration::from_millis(1500);
+
+/// An activated app that did not say its focused window is asked again this long after its
+/// activation was decided (the first question's 50 ms are over by then); each later pause is
+/// twice the one before ([`AskAgain::missed`]).
+pub const ASK_AGAIN_AFTER: Duration = Duration::from_millis(60);
+
+/// How often it is asked again: 60, 180, 420 and 900 ms after the activation, a bounded call
+/// each (four short calls in a second for an app that never answers).
+pub const ASK_TRIES: u8 = 4;
+
+/// From the activation to its last question ([`ASK_TRIES`]): the cap its margin is told
+/// against (`FOCUS_ASK_AGAIN`).
+pub const ASK_AGAIN_SPAN: Duration = Duration::from_millis(900);
+
+/// An activation whose app did not say its focused window, asked again (module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AskAgain {
+    /// The app.
+    pub pid: Pid,
+    /// When its activation was decided.
+    pub came: Instant,
+    /// The Space changes notified then.
+    pub changes: u64,
+    /// The questions asked again so far.
+    pub asked: u8,
+    /// When the next one is due.
+    pub next: Instant,
+}
+
+/// What an [`AskAgain`] does at a look.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    /// Not due yet.
+    Wait,
+    /// Ask the app now.
+    Now,
+    /// No longer asked, and why.
+    Over(&'static str),
+}
+
+impl AskAgain {
+    /// For app `pid`'s activation decided at `came`, with `changes` Space changes notified.
+    pub fn new(pid: Pid, came: Instant, changes: u64) -> Self {
+        Self { pid, came, changes, asked: 0, next: came + ASK_AGAIN_AFTER }
+    }
+
+    /// At `now` with `changes` Space changes notified; `held`: the focus replay still holds
+    /// this app's activation (nothing else came since: no other activation, focus or act of
+    /// the user's).
+    pub fn step(&self, now: Instant, changes: u64, held: bool) -> Ask {
+        if changes != self.changes {
+            Ask::Over("a Space change was notified: its arrival asks")
+        } else if !held {
+            Ask::Over("its activation is no longer what is held")
+        } else if now >= self.next {
+            Ask::Now
+        } else {
+            Ask::Wait
+        }
+    }
+
+    /// The app did not say again, at `now`: true when it is asked once more (twice the pause
+    /// before), false after [`ASK_TRIES`].
+    pub fn missed(&mut self, now: Instant) -> bool {
+        self.asked += 1;
+        self.next = now.max(self.next) + ASK_AGAIN_AFTER * (1u32 << u32::from(self.asked.min(ASK_TRIES)));
+        self.asked < ASK_TRIES
+    }
+}
 
 /// Why an activation that would switch stages waits for the Space to be recognized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +172,15 @@ pub fn slide_listed(m: &Model, listed: &[(u32, Rect)]) -> bool {
         .map(|(_, b)| *b)
         .collect();
     super::corner::corner_patch::desktop_slides(0, &parked_here, false, main.frame, main.visible, main.corner)
+}
+
+/// The listed windows `listed` without those out for Mission Control (`out`): Mission
+/// Control lays them out on screen, near an edge too, and they are no Desktop's slide.
+/// Live 11-19 (mission-pick-ours): a hidden stage's window picked in Mission Control, laid out
+/// at the bottom right, read as this Desktop's parked windows slid aside; its app's activation
+/// was held 0.5 s and Mission Control's close carried the window to its park first.
+pub fn besides_out(listed: &[(u32, Rect)], out: impl Fn(WindowId) -> bool) -> Vec<(u32, Rect)> {
+    listed.iter().filter(|(id, _)| !out(WindowId(*id))).copied().collect()
 }
 
 /// Whether an activation of app `pid` asks the app for its focused window: only when the
@@ -146,10 +235,16 @@ impl SlideHold {
     /// [`Step::Decide`] after [`SLIDE_ACTIVATION_HOLD`] when the list shows no slide
     /// (`sliding`, asked only then), or after [`SLIDE_ACTIVATION_CAP`] whatever it shows.
     pub fn step(&self, now: Instant, changes: u64, sliding: impl FnOnce() -> bool) -> Step {
+        use crate::engine::margin::{End, wait};
         let age = now.saturating_duration_since(self.came);
         if changes != self.changes {
+            wait("SLIDE_ACTIVATION_HOLD", age, SLIDE_ACTIVATION_HOLD, End::Met);
             Step::Arrived
-        } else if age >= SLIDE_ACTIVATION_CAP || (age >= SLIDE_ACTIVATION_HOLD && !sliding()) {
+        } else if age >= SLIDE_ACTIVATION_CAP {
+            wait("SLIDE_ACTIVATION_CAP", age, SLIDE_ACTIVATION_CAP, End::Cap);
+            Step::Decide
+        } else if age >= SLIDE_ACTIVATION_HOLD && !sliding() {
+            wait("SLIDE_ACTIVATION_HOLD", age, SLIDE_ACTIVATION_HOLD, End::Cap);
             Step::Decide
         } else {
             Step::Wait
@@ -174,5 +269,30 @@ mod tests {
         assert_eq!(h.step(ms(t0, 500), 3, || false), Step::Decide, "no change, no slide: decided");
         assert_eq!(h.step(ms(t0, 600), 3, || true), Step::Wait, "still sliding (a swipe held)");
         assert_eq!(h.step(t0 + SLIDE_ACTIVATION_CAP, 3, || true), Step::Decide, "never past the cap");
+    }
+
+    #[test]
+    fn an_unanswered_focus_question_is_asked_again_four_times_within_its_span() {
+        let t0 = Instant::now();
+        let mut a = AskAgain::new(7, t0, 3);
+        assert_eq!(a.step(ms(t0, 59), 3, true), Ask::Wait);
+        let mut asked = Vec::new();
+        // Asked the moment each is due (the tick may be later; the pause counts from then).
+        loop {
+            assert_eq!(a.step(a.next, 3, true), Ask::Now);
+            asked.push(a.next.duration_since(t0).as_millis() as u64);
+            let at = a.next;
+            if !a.missed(at) {
+                break;
+            }
+            assert_eq!(a.step(at, 3, true), Ask::Wait, "not before its pause");
+        }
+        assert_eq!(asked, [60, 180, 420, 900]);
+        assert_eq!(Duration::from_millis(*asked.last().expect("asked")), ASK_AGAIN_SPAN);
+        assert_eq!(usize::from(ASK_TRIES), asked.len());
+        // A Space change, or anything else held since, ends it.
+        let a = AskAgain::new(7, t0, 3);
+        assert!(matches!(a.step(ms(t0, 100), 4, true), Ask::Over(_)));
+        assert!(matches!(a.step(ms(t0, 100), 3, false), Ask::Over(_)));
     }
 }

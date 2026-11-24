@@ -134,6 +134,7 @@ impl ReopenSwitch {
         })
     }
 
+    #[cfg(test)]
     /// True while the app is regular for a logout.
     pub fn regular(&self) -> bool {
         self.regular_since.is_some()

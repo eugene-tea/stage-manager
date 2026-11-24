@@ -41,6 +41,7 @@ pub struct Spread {
 }
 
 impl Spread {
+    #[cfg(test)]
     /// Apple's, as measured 11-16 (the `[cards]` defaults).
     pub const APPLE: Spread =
         Spread { step: 0.25, narrow: 0.65, third: 0.165, line: 0.85, raise: 13.0, raise_third: 19.0, height: 102.0, min_scale: 0.124 };

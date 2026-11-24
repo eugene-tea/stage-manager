@@ -71,6 +71,10 @@
 //!   overlay, stays past the switch until the patch has been on screen a moment
 //!   ([`crate::engine::corner::corner_patch::cover_holds`]), so the corner is never bare between the
 //!   two.
+//! - **A switch's cover** ([`cover_image`], [`Patch::publish_cover`]): the file's render
+//!   stands for it only at the frame known now: the clock's when it names one exactly, near
+//!   a solar frame change the one the pass just run settled. A pass that draws a still of
+//!   the desktop settles none, so the cover is the desktop's still then (11-24).
 //! - **Ordering**: just above the topmost parked window under it
 //!   (`orderWindow:relativeTo:` with that window's number); the WM thread checks the order
 //!   in the window server's list at every plan (the panel's number: [`window_number`]) and
@@ -419,7 +423,9 @@ struct Patch {
     said: Option<String>,
     /// Near a solar frame change: the candidates' renders, verdicts and still.
     settler: Settler,
-    /// The key of the job at the frame settled near a solar frame change (`None` while not).
+    /// The key of the job at the frame the last pass settled near a solar frame change
+    /// ([`Patch::settle_frame`]); `None` when that pass settled none: not near one, off, or
+    /// a still of the desktop drew the patch (nothing checks the frame then, 11-24).
     settled: Option<String>,
     /// A Desktop arrived (or the patch is new): one still checks a solar frame the clock
     /// names exactly ([`Settler::check`]).
@@ -687,6 +693,14 @@ thread_local! {
     static COVER_PICTURE: std::cell::RefCell<BTreeMap<u32, CFRetained<CGImage>>> = const { std::cell::RefCell::new(BTreeMap::new()) };
 }
 
+/// The key the patch's rendered picture must have to stand for a switch's cover: the job's
+/// (`job`) where the clock names its frame exactly (`exact`); near a solar frame change the
+/// frame the pass just run settled (`settled`), and none when it settled none (a still of the
+/// desktop drew the patch, or it is off): the cover is then the desktop's still, or none.
+fn cover_key(exact: bool, job: impl FnOnce() -> String, settled: Option<&str>) -> Option<String> {
+    if exact { Some(job()) } else { settled.map(str::to_owned) }
+}
+
 /// Why `rect` (global, top-left) could not be covered with the patch's picture now.
 fn cover_from(source: Option<CoverSource>, settle_until: Option<Instant>, rect: Rect, now: Instant) -> Result<CoverSource, &'static str> {
     if settle_until.is_some_and(|t| now < t) {
@@ -915,12 +929,11 @@ impl Patch {
     }
 
     /// The picture the patch would show now, for a switch's cover ([`CoverSource`]): near a
-    /// solar frame change, only the frame settled.
+    /// solar frame change, only the frame the pass just run settled ([`cover_key`]).
     fn publish_cover(&self) {
         let wall = self.wall.as_ref().and_then(|(_, w)| {
             let (d, job) = w.outcome.as_ref().ok()?;
-            let key = if d.candidates.is_empty() { Some(job.key()) } else { self.settled.clone() };
-            key.map(|k| (w.screen, k))
+            cover_key(d.candidates.is_empty(), || job.key(), self.settled.as_deref()).map(|k| (w.screen, k))
         });
         let picture = wall.and_then(|(screen, key)| self.active.picture.as_ref().filter(|p| p.key == key).map(|p| (screen, p)));
         let source = picture.map(|(screen, p)| CoverSource { region: p.region, scale: p.scale, screen });
@@ -944,6 +957,11 @@ impl Patch {
             return;
         }
         self.arrival = None;
+        // A frame settled near a solar frame change stands for this pass only: a pass that
+        // draws a still of the desktop asks the settler nothing, so the frame an earlier one
+        // settled is checked by no one while the sun moves on (11-24: a cover of the frame
+        // settled 36 minutes before, darker than the desktop, at every switch).
+        self.settled = None;
         let Some(rect) = self.plan.show else {
             self.hide();
             self.prepare(mtm);
@@ -1291,6 +1309,19 @@ mod tests {
         let settling = Some(now + Duration::from_millis(200));
         assert_eq!(cover_from(Some(source), settling, corner, now), Err("a Space or appearance change settles"));
         assert_eq!(cover_from(Some(source), Some(now), corner, now), Ok(source), "settled");
+    }
+
+    #[test]
+    fn a_switch_cover_takes_the_files_render_only_at_the_frame_known_now() {
+        // 11-24: a picture by the sun, the patch drawn from a still of the desktop; the frame
+        // a still settled at 08:34 (4 of 4, 0, 3) was kept for the cover while no pass asked
+        // the settler again, macOS went to a brighter frame at 09:04, and every switch
+        // covered the corner with frame 4, darker than the desktop around it.
+        let job = || "picture@2x#0".to_owned();
+        assert_eq!(cover_key(true, job, None), Some("picture@2x#0".into()), "the clock names the frame");
+        assert_eq!(cover_key(true, job, Some("picture@2x#4")), Some("picture@2x#0".into()), "never an older pass's frame");
+        assert_eq!(cover_key(false, job, Some("picture@2x#4")), Some("picture@2x#4".into()), "near a change: the frame this pass settled");
+        assert_eq!(cover_key(false, job, None), None, "near a change with none settled (a still drew the patch): the desktop's still covers");
     }
 
     #[test]

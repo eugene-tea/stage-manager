@@ -135,6 +135,10 @@ pub struct Taken {
 /// window cross-fades to it).
 pub fn take(targets: Vec<Target>, max: Duration) -> Taken {
     let asked = targets.len();
+    #[cfg(test)]
+    if let Some(ms) = super::fake::with(|d| d.take_shots(asked, max)) {
+        return Taken { asked, got: asked, answered: asked, ms, skipped: None };
+    }
     let Some(&deliver) = DELIVER.get() else { return Taken { asked, skipped: Some("no strip"), ..Taken::default() } };
     if asked == 0 {
         return Taken::default();

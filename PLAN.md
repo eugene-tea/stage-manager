@@ -4,11 +4,10 @@ What's still to do. What shipped is in [CHANGELOG.md](CHANGELOG.md), how the app
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), how it should behave is in [docs/UX-SPEC.md](docs/UX-SPEC.md),
 and what users asked for is in [docs/FEATURE-REQUESTS.md](docs/FEATURE-REQUESTS.md).
 
-## 1.8.x: everything known broken or unchecked
+## 1.x: everything known broken or unchecked
 
 Version 1 is Apple's Stage Manager, copied with nothing left: fixes and checks only; new features
-wait for 2.0. Nothing is open (1.8.3, 11-09). Known gaps that can't be closed from our side are in
-UX-SPEC, "Known gaps".
+wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Known gaps".
 
 **When it happens, no session needed:**
 
@@ -17,53 +16,43 @@ UX-SPEC, "Known gaps".
   - no `app activated … queued_ms` over 100 in the first two minutes, and if there is one, the
     `slow WM task` line names what held the thread
   - the `restore:` summary line
+- **A screen plugged in or out (one screen at a time too), under the Spaces engine.** In
+  that day's log, within the minute after it: every `desktops: the model and the window
+  server disagree` line has its `... agree again` within about 10 s (`lasted_ms`), and no
+  `window left this Space` follows a Dock click or ⌘Tab to another Desktop.
+- **Apple's, one screen at a time** (UX-SPEC, Screens): with the lid and the external screen,
+  by hand.
 - **"macOS isn't reporting windows" shows in the menu again.** Quit Stage Manager, then count windows with
   System Events (`osascript -e 'tell application "System Events" to count windows of every process'`). If
   any are listed, our quit fixed it: the menu line then says "Quit and reopen Stage Manager", and the bug
   is ours. If none are listed, lock and unlock the screen and count again.
 
+**By hand, with someone at the Mac:**
+
+- **The window server's notice for Mission Control opened without a key.** Notice 1508 was
+  measured for the shortcut only (UX-SPEC, "The window server's notices"). Open Mission
+  Control by a four-finger swipe, a hot corner and the Dock's item under the Spaces engine
+  and read `ctl state`'s `engine.notices` and the `mission-control:` lines: if 1508 comes for
+  each, the hidden stages' windows come at once whatever opened it, and MODES' "up to two
+  seconds later from a gesture, a hot corner or the Dock" goes.
+- **Which capture lights the screen-capture indicator** (`scripts/test-stages.sh
+  probe-system indicator`, a build with `--features probes`; it raises macOS's
+  screen-capture alert, so never unattended). Under the Spaces engine each window's look is
+  read from its shadow through ScreenCaptureKit about every 20 s per window in use and
+  after every switch; if the window server's own capture leaves the indicator off, read the
+  looks that way and keep ScreenCaptureKit for the windows it misses.
+
 ## 1.9: closer to Apple's feel
 
-- **First: two window engines behind one seam.** Internal: users see the same app. A stage
-  switch goes through the window server's own Spaces where they work (the Spaces engine) and
-  through today's Accessibility corner park where they don't (the Corner engine). Emcee
-  (1.1.1) loads SkyLight and WindowManagement and calls their bridged Space operations
-  (create, destroy, hide, show, add windows, transform, absolute level:
-  `SLSBridgedSpace…Operation`), plus `SLSCopySpacesForWindows` and
-  `SLSRegisterConnectionNotifyProc`, with no SIP change. A stage as a hidden Space swaps in
-  one window-server step (Apple's clean swap), places a new window in its stage in one call,
-  and, if the transform scales live windows, animates without full-size pictures. About a
-  quarter of the source (27k of 113k lines: the corner patch, picture motion, park and
-  slivers, the park side of safety) moves into the Corner engine and stops running under
-  Spaces.
-  - **The seam (S1, Corner only, no behaviour change; can ride along in 1.8.x):** one
-    `WindowEngine` trait (hide, show, place a new window, is it hidden, animate, bring
-    everything back, health) with exactly two implementations. `Action::Park { frame }`
-    becomes `Hide`, unparks `Show`; the model's park-zone tests go through `is_hidden`.
-    The model, controller, strip, rules, thumbnails, `state.json` and the guardian protocol
-    are shared and never ask which engine runs. Done when `make check`, the scenario runner
-    and the live suite give today's results and logs.
-  - **Spike (S0, a branch, beside S1):** `stage-manager probe-spaces`, fixture windows only.
-    Another app's window into our Space, hidden and shown, no SIP change (no: Corner only);
-    hidden windows after a kill -9; the transform on a live window at 120 Hz; a new window
-    placed before it first shows; Mission Control, Desktops, full screen, ⌘Tab, a Dock click
-    on a hidden window; Apple's Stage Manager turned on meanwhile; switch time and CPU
-    against Corner. Go or no-go from the numbers.
-  - **Then:** tests on both (a fake of each engine in `testkit`, the scenario runner over
-    both, `test-stages.sh --engine`; nuance cases per engine: the park zone, slivers,
-    patch and pictures; Space cleanup, a kill -9, the probe, a fallback mid-run); the Spaces
-    engine (calls loaded at run time, a Space per stage per screen and Desktop, the
-    guardian's bring-back); live motion through the transform if the spike holds, else the
-    pictures through the same `animate`; probe and fallback; measure (CPU at rest, switch
-    time, a new app's overlap, Energy Impact, a call's dropped frames) into UX-SPEC.
-  - **Which engine runs:** a probe at every launch (symbols resolve, a trial Space with our
-    own window works), the reason logged and in `ctl state`. A check that fails while running
-    (a window not where the Space call put it) brings every window back and runs Corner for
-    the rest of the run; the next launch probes again. No list of checked macOS versions,
-    so nobody has to check each macOS update before users get it. `[windows] engine =
-    "spaces"` runs the probe and the Spaces engine; `"accessibility"`, the default, is the
-    way out, listed under troubleshooting.
-  - Quit, a crash, a logout and a stand-down use the same bring-back, whichever engine runs.
+- **The park corner gets a little lighter for the length of a switch** (Corner engine; seen
+  11-24 on a smooth dark-red wallpaper). The patch at rest reaches 22 pt left of the slivers,
+  one parked window's shadow; with five windows parked at the same spot their shadows add up
+  past it (about 2 % darker beside the patch, 3 of 255, fading out by 60 pt). A switch's
+  cover reaches 60 pt (`ACTIVE_REACH`: macOS activates the windows waiting there) and shows
+  the desktop with no shadow, so the corner lightens for the motion and darkens again. One
+  way: the patch at rest as wide as the cover, so nothing changes at a switch; its cost is a
+  larger patch where it is drawn from the file (no Screen Recording), off more often for a
+  desktop icon under it. Compare before and after from captures of the corner.
 - **A newly opened app's stage comes as its window shows** (Corner engine; worth doing only
   if the Spaces engine does not ship or S6 shows it still matters). After 1.8.5's fixes (the AX ask
   of a just-opened app every 40 ms, a new window looked at every fast tick), the old stage
@@ -88,56 +77,105 @@ UX-SPEC, "Known gaps".
   scripts/test-stages.sh mission-probe` (it prints what each outcome means), then `mission`.
   Mission Control takes late windows: keep `"shown"`. Only windows there at the key: make
   `"key"` the default. Neither: `"off"`, and keep hidden windows on the Desktop another way.
-  Left after that: a faster sign for a gesture, a hot corner and the Dock's item (up to 2 s
-  at rest now; the log says whether a notice of the Dock's comes first, and the Dock's
-  notices are observed only after the first ⌘ press); a hidden window dragged to another
-  Desktop inside Mission Control (it goes back to its stage); hidden dialogs and panels
+  Left after that: whether a gesture, a hot corner and the Dock's item are found as fast as
+  the shortcut (the window server's notice 1508, below under "By hand"); whether a window parked at
+  its card at the key (the real key, `"shown"`) and put home once Mission Control shows flies
+  from its card (found at the listing it is laid out with no flight, 11-20; the key is heard
+  now, by the HID tap: run `mission-probe` again); should the close show them at their cards, move them to the corner
+  at the close's key (Escape, the shortcut again), as a pick's frames are set at its
+  activation, and measure whether a move while Mission Control shows lays it out again; why
+  parks miss (the `a hidden window left hidden` lines: listed at
+  its frame after the park is a late listing or a refusal, away from it out of the zone a
+  clamp, perhaps above the Dock Mission Control shows; whether the retry takes); a hidden
+  window dragged to another Desktop inside Mission Control (it goes back to its stage); hidden dialogs and panels
   (standard windows only are lent); App Exposé lends every hidden window, not only the app
   in front's.
+- **Mission Control's keys: the real F3.** The posted ⌃↑ reaches the key tap (11-20); press
+  the real F3 and ⌃↑ and look for the log's `mission-control: trigger seen ... by="the key
+  tap"`; with F3 not heard, `ctl state`'s `mission_control.tap.system_defined_seen` says
+  whether it comes as a media key.
 - **Video calls in a hidden stage (Spaces engine).** A stage's windows off every Desktop
   count as hidden to their apps: Google Meet in Safari stops drawing other people's video and
   its card shows grey tiles (11-16); Apple's keeps them playing. Option, the owner's call: a
   hidden call window (or the apps the config names) stays on its Desktop, parked in the
   corner as the Corner engine does.
-- **The strip revealed at the edge, flat (Apple's, 11-16).** With the strip hidden (a window
-  over its column), a pointer at the left edge brings Apple's strip in with its cards flat,
-  facing the viewer, and larger than in the tilted strip; ours slides the tilted strip back.
-  Record Apple's (a capture of the reveal: the cards' pose, size, spacing, shadow, the slide
-  in and out and its timing, and what a card does when the pointer leaves), then match it,
-  pose as well as speed (track the cards' corners frame by frame, not only the timing).
-- **Card pictures: spread like Apple's, as switchable variants.** Ours follow the windows'
-  real layout, so a window mostly behind another hardly shows (VS Code over Terminal, 11-16);
-  Apple's spreads them. Variants for the owner to compare from the menu: the real layout,
-  Apple's spread, spread only when a window is mostly covered.
-- **Less work while nobody looks: CPU and battery.** At rest the app takes 4 to 5 % CPU (11-13:
-  1 min 51 s of CPU in 37 min, 4.5 % over 30 s), about half of it macOS's screen capture on
-  short-lived threads (card thumbnails every 1.5 s, full-size switch pictures every 2 s),
-  a third the WM thread (notices, the once-a-second checks, the Dock's order read again).
-  On a laptop screen windows cover the strip most of the time. Aim: 1 to 2 %, with no card
-  shown stale and no switch slower.
-  - No thumbnail captures for a screen whose strip is hidden or covered; one round as it
-    starts to show (the edge reveal, a window moved off it, a switch), so its cards are
-    fresh by the time they are seen.
-  - The Dock's order read when an app opens or quits, or the Dock's file changes, not on a
-    timer.
-  - Full-size switch pictures: keep them (a Dock click or ⌘Tab switch has no pointer near
-    the strip to warn), but skip a window that has not changed since its last picture if
+- **Less work while nobody looks: CPU and battery.** 4 to 5 % CPU at rest on 11-13; since
+  1.9 the thumbnails come at events only (none at rest: a day's log of 11-19 counts no capture
+  in hours with no switch), the Spaces engine takes no full-size picture on a timer, and the
+  Dock's order is read at events. Aim: 1 to 2 %, with no card shown stale and no switch slower.
+  - Run `RUNS=1 ENGINES=spaces SM_REST_S=300 scripts/measure.sh covered` (and `rest`) and write
+    the numbers in UX-SPEC.
+  - Full-size switch pictures, the park corner only (every 2 s of the front stage's windows,
+    whether the strip shows or not): keep them (a Dock click or ⌘Tab switch has no pointer
+    near the strip to warn), but skip a window that has not changed since its last picture if
     that can be told cheaply; measure before deciding.
   - Video calls: check whether our captures make a call's video stutter (it lags at times
-    with ours where Apple's is smooth). Record a call with and without captures, count
-    dropped frames at each capture round; if they show, capture a window that plays video
-    or a call less often, or never at full size.
+    with ours where Apple's is smooth). The call stand-in missed no refresh at rest or
+    switching (11-14, 11-18), and at rest only the park corner's 2 s pictures touch a call
+    window in front; so a real call, recorded with and without captures, dropped frames
+    counted at each capture round; if they show, capture a window that plays video or a call
+    less often, or never at full size.
+  - The Dock's bar is still read every 2 s for the inert slivers (its lists' frames, a few
+    Accessibility calls): read it at a display change, the Dock's preferences file changing
+    and an app launch instead, if its auto-hide does not move it.
   - Measure on battery (Activity Monitor's Energy Impact, before and after) and write the
     numbers in UX-SPEC.
 
-## 2.0: new features
+## Under the hood: what the rework of 11-21 left
 
-- **R&D: an engine mode that augments Apple's Stage Manager** (after 1.9 settles). Apple's
-  arranges and draws; the app adds what it lacks: per-app rules for where a new app opens
-  (its own stage or the current one), Shift while opening to bring it here, keyboard
-  shortcuts, maybe the Dock's order. First a read-only look at what WindowManager exposes
-  through Accessibility while Apple's is on (its strip, stages, actions); the whole idea rests
-  on adding a window to Apple's current stage without a visible round trip.
+Nothing here changes what a person asks for; each closes a way a slower Mac, or a rarer
+order of events, can still go wrong. The bench first, then the live suite
+(DEVELOPMENT, "The bench").
+
+- **A screen going with its Desktops kept (the rest of the Desktops design's slice 5).**
+  When a screen goes and macOS moves its Desktops to the screen left under the same ids, the
+  model still merges the gone screen's Desktop into the one shown there, and `spill`'s watch
+  and the clock sort out the rest. Left: `adopt_display` only reparents a screen's Desktops
+  while the listing decides (their Spaces, stages and bindings kept); `Model::desks_listed`
+  gives each bound Space the screen that lists its Desktop, the same call when the screen
+  comes back; a census once two looks read the same listing (every managed window the engine
+  does not hold asked for its Desktop, a stage whose windows all moved carried whole);
+  `spill::WATCH` only a cap on the brisk pace, ending when nothing names a gone screen; then
+  `handed_hidden`, `display_watch` and the model's two `EngineKind::Spaces` branches go.
+- **Desktops matched by uuid after a restart (slice 6).** The saved Desktops are matched
+  to the listing's by uuid instead of by their windows. Needs first: whether Space uuids last
+  over a logout and a reboot (each load logs how many saved uuids are listed now).
+- **The cover wait off the WM thread.** A switch still waits for the strip's answer with the
+  WM thread held (`COVER_TIMEOUT`, 150 ms), because five callers of `execute_animated` go on
+  as if its batch had run (an un-minimize's dive frame and un-minimize, a new window's
+  `let_new_out`, an activation's `lent_decided`, the tick's and the fast tick's later duties,
+  the next events of the same run). Each needs to become a continuation run at the cover's
+  end. On the bench at load 10 every animated switch lands with no pictures, and an app's
+  own activation inside the wait leaves its stage in front with the switch's app frontmost.
+- **A held focus against Accessibility's silence.** A focus held for its Desktop is dropped
+  after 6 s (`FOCUS_REPLAY_CAP`), but a silent Accessibility may hold the arrival for 10 s
+  (`AX_SILENT_MAX`), so the focus can be lost after an unlock. And an activation held while
+  a Desktop may slide is decided "here" after 500 ms with no Space change
+  (`SLIDE_ACTIVATION_HOLD`): the notice, measured 0.35-0.45 s after a Dock click, is past
+  that on a Mac three times slower.
+  Both want an end by the event, the time as a cap; the bench cannot yet make the observer
+  lose its windows as after an unlock.
+- **An app that reorders its windows late.** The raise-order check fixes the order and
+  watches it for 150 ms; an app whose answer lags 300 ms ends out of order at every load
+  (`CHECK_CAP` 400 ms; pinned on the bench, `an app reordering 300 ms late`).
+- **The launch watch's notice.** The window-created notice (811) never reached the app in a
+  normal run: it seems to come only for windows asked for one by one
+  (`SLSRequestNotificationsForWindows`), so the launch watch rests on its 4 ms read. Asking
+  for each new app's windows, or another sign, would let it rest.
+- **What still decides by time under the Accessibility engine.** The Desktop guess's settles
+  (`MIXED_WAIT`, `SPACE_SETTLE`, `FOREIGN_SETTLE`, `SPACE_CHECKS`, `BESIDE_ARRIVALS`,
+  `STICKY_HOPS`, `SLIDE_CARRY`) and the corner patch's 22 time values, mostly blind settles:
+  each to be ended by what it waits for where a read can say, its value a cap.
+- **The strip's switch machine.** `Running` carries a switch in 10 flags and 16 timers with
+  3 tests; one explicit state machine, tested on its own, in its place.
+- **One `wait_until` and one `Backoff`.** At least 16 hand-written "read until or deadline"
+  loops, 5 lock retries and 3 doubling backoffs, each its own; one helper each, on the
+  clock a test moves.
+- **The Apple mode's second screen and Reduce Motion, unmeasured.** Apple's answers and
+  motions were measured on one screen with Reduce Motion off (UX-SPEC, "Measured on
+  Apple's").
+
+## 2.0: new features
 
 - **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close
   Window, Quit App. A named stage shows its name on hover (R7).

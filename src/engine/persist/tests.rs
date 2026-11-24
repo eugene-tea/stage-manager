@@ -1114,3 +1114,65 @@ fn quit_at_round_trips_and_1_2_0_reads_it_as_a_saved_window() {
     assert_eq!(old.spaces[0].stages[0].windows.len(), 1);
 }
 }
+
+// ----- frames per screen setup (`[displays] frames_per_setup`) ------------------------------
+
+both_engines! {
+#[test]
+fn frames_per_screen_setup_round_trip_and_an_older_file_or_build_does_without() {
+    use crate::engine::setup_frames::SetupFrame;
+    let setups = vec![
+        SetupFrame { setup: "610:a050:0:0@1800x1169".into(), screen: "610:a050:0:0".into(), frame: Rect::new(50.0, 80.0, 1200.0, 900.0) },
+        SetupFrame {
+            setup: "610:a050:0:0@1800x1169 610:ae2f:4d6:0@2560x1440".into(),
+            screen: "610:ae2f:4d6:0".into(),
+            frame: Rect::new(200.0, 125.0, 800.0, 600.0),
+        },
+    ];
+    let w = SavedWindow { setups: setups.clone(), ..saved_id("com.example.ed", "Plan.txt", 0, 42) };
+    let file = StateFile { session: Some("A".into()), ..StateFile::single(state(vec![(None, vec![w])], Some(0))) };
+    let json = file.to_json().expect("encodes");
+    assert!(json.contains("\"setups\"") && json.contains("\"screen\": \"610:ae2f:4d6:0\""), "{json}");
+    assert_eq!(StateFile::from_json(&json).expect("parses"), file);
+    let plain = StateFile::single(state(vec![(None, vec![saved("com.example.ed", "Plan", 0)])], Some(0))).to_json().expect("encodes");
+    assert!(!plain.contains("setups"), "absent when none is kept");
+    // An older build reads this file, the field dropped; an older file loads with none.
+    let read: v1_2_0::StateFile = serde_json::from_str(&json).expect("1.2.0 reads it");
+    assert_eq!(read.spaces[0].stages[0].windows.len(), 1);
+    let old = StateFile::from_json(FILE_1_2_0).expect("a 1.2.0 file loads");
+    assert!(old.spaces[0].stages[0].windows[0].setups.is_empty());
+
+    // A restart of the app in the same session: the window matched by its id brings its frames.
+    let (file, _) = file.for_session(Some("A"));
+    let back = [live(42, "com.example.ed", "Plan.txt")];
+    let mut m = model_on(vec![display()], ModelOptions::default());
+    let a = rematch(&file.spaces[0], &back);
+    m.apply_assignment(&back, &a, true);
+    assert_eq!(m.setup_frames_of(WindowId(42)), setups.as_slice());
+    assert_eq!(m.to_state().spaces[0].stages[0].windows[0].setups, setups, "and saves them again");
+    // A doubtful match (the app's only window, another title) does not.
+    let other = [live(43, "com.example.ed", "Another")];
+    let mut m = model_on(vec![display()], ModelOptions::default());
+    let a = rematch(&file.spaces[0], &other);
+    m.apply_assignment(&other, &a, true);
+    assert!(m.setup_frames_of(WindowId(43)).is_empty());
+}
+}
+
+#[test]
+fn a_mangled_setup_frame_drops_that_entry_only() {
+    use crate::engine::setup_frames::SetupFrame;
+    let good = SetupFrame { setup: "610:a050:0:0@1800x1169".into(), screen: "610:a050:0:0".into(), frame: Rect::new(50.0, 80.0, 1200.0, 900.0) };
+    let w = SavedWindow { setups: vec![good.clone()], ..saved_id("com.example.ed", "Plan.txt", 0, 42) };
+    let file = StateFile::single(state(vec![(None, vec![w, saved("com.example.notes", "List", 1)])], Some(0)));
+    let json = file.to_json().expect("encodes");
+    let mut value: serde_json::Value = serde_json::from_str(&json).expect("json");
+    let windows = &mut value["spaces"][0]["stages"][0]["windows"];
+    windows[0]["setups"].as_array_mut().expect("a list").push(serde_json::json!({ "setup": 5, "frame": "wide" }));
+    windows[1]["setups"] = serde_json::json!("not a list");
+    let read = StateFile::from_json(&value.to_string()).expect("the file still loads");
+    let windows = &read.spaces[0].stages[0].windows;
+    assert_eq!(windows.len(), 2, "every window kept");
+    assert_eq!(windows[0].setups, vec![good], "the good entry kept, the mangled one dropped");
+    assert!(windows[1].setups.is_empty());
+}

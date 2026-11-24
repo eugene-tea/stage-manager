@@ -4,6 +4,7 @@
 //! Show Desktop; the plan goes to the main thread, which draws it
 //! ([`crate::ui::corner_patch`]).
 
+use crate::platform::clock;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -167,7 +168,7 @@ impl Controller {
         // Only Mission Control and App Exposé: Show Desktop pushes every window to the screen's
         // edges, the patch then over a pushed window's edge (10-13: a lighter block in the
         // corner each time), so it is planned through it ([`show_desktop::gate`]).
-        let now = Instant::now();
+        let now = clock::now();
         // While Show Desktop is up the window list read for the plan is looked at for it too:
         // its close is seen at this plan (on the fast tick, within 20 ms; round
         // show-desktop-patch), not at the next once-a-second check.

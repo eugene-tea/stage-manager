@@ -56,6 +56,7 @@ pub fn ensure_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 /// The mode bits of `path` (tests and checks).
 pub fn mode(path: &Path) -> io::Result<u32> {
     Ok(std::fs::metadata(path)?.permissions().mode() & 0o777)

@@ -62,8 +62,6 @@ pub enum Step {
     Focus(u32),
     /// A gesture posted (the Shift-click and drag routes).
     Post(Posted),
-    /// Wait until the strip shows item `slot`.
-    AwaitStrip(usize),
     /// Wait until the arrangement is settled.
     AwaitSettle,
     /// App `0`, hidden by us at its activation, shown again without activating it once its
@@ -201,12 +199,15 @@ pub fn away(w: u32) -> Refusal {
 /// Newly opened app `pid`'s windows into the stage in front of `a` (asked at its launch,
 /// before its first window): the stage in front's windows kept there and every window of the
 /// app gathered in as it shows, the app's front window focused at the end. `None` with no
-/// stage in front (Apple's own then puts the app in front, as asked).
+/// stage in front (Apple's own then puts the app in front, as asked). The app's windows the
+/// list has now are kept: one it orders in later, hidden, is told from them.
 pub fn open_here(a: &Arrangement, pid: i32, now: std::time::Instant) -> Option<Job> {
     if a.current.is_empty() {
         return None;
     }
-    Some(Job::new(Intent::OpenHere(pid), vec![Goal::Gather { windows: a.current.clone(), app: Some(pid), focus_app: true }], now))
+    let mut job = Job::new(Intent::OpenHere(pid), vec![Goal::Gather { windows: a.current.clone(), app: Some(pid), focus_app: true }], now);
+    job.listed_before = a.listed_of.get(&pid).cloned().unwrap_or_default();
+    Some(job)
 }
 
 /// Apps never hidden for "open here" (they go by the round trip): Finder owns the Desktop, and

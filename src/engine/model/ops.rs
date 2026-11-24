@@ -8,6 +8,7 @@ use super::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::engine::geometry::{Point, Rect};
+use crate::engine::recovery::EngineKind;
 use crate::engine::corner::park::TITLE_BAR_HEIGHT;
 use crate::engine::placement::{CASCADE_OFFSET, cascade, center};
 use crate::engine::rules::{Decision, Placement, RuleAction};
@@ -280,6 +281,9 @@ impl Model {
         self.windows.remove(&id);
         self.restored.remove(&id);
         self.pooled.remove(&id);
+        self.setup_frames.remove(&id);
+        self.setup_owed.remove(&id);
+        self.handed_hidden.remove(&id);
         self.away.retain(|(w, _)| *w != id);
         // A window gone no longer vouches for a saved Desktop.
         for votes in self.adopt_votes.values_mut() {
@@ -1895,6 +1899,20 @@ impl Model {
         // slide to another Desktop with the closed screen's windows may still come.
         if removed || displays.iter().any(|d| !before.iter().any(|o| o.id == d.id)) {
             self.adopted.clear();
+            self.handed_hidden.clear();
+        }
+        // The windows hidden on the Desktops of a screen going (Spaces engine): the window
+        // server may let them out onto another Desktop as it goes; they stay in their stages.
+        if self.options.engine == EngineKind::Spaces {
+            let gone_ids: Vec<DisplayId> = gone.iter().map(|g| g.id).collect();
+            let spaces = &self.spaces;
+            self.handed_hidden = self
+                .windows
+                .values()
+                .filter(|w| w.parked && spaces.iter().any(|s| s.id == w.space && gone_ids.contains(&s.display)))
+                .map(|w| w.meta.id)
+                .chain(self.handed_hidden.iter().copied())
+                .collect();
         }
         self.displays = displays;
         let live: Vec<DisplayId> = self.displays.iter().map(|d| d.id).collect();
@@ -1907,6 +1925,10 @@ impl Model {
         for g in gone {
             self.adopt_display(g, &mut actions);
         }
+        // Those of the Desktop it showed go with their stages wherever macOS shows them
+        // ([`Model::carry_adopted`]).
+        let adopted = &self.adopted;
+        self.handed_hidden.retain(|id| !adopted.contains(id));
         for d in live {
             if !self.current.contains_key(&d) {
                 let s = self.new_space(d);
@@ -2000,49 +2022,61 @@ impl Model {
             .filter(|w| w.space == shown && w.meta.role == WindowRole::Standard)
             .map(|w| w.meta.id)
             .collect();
-        let front = self.active.remove(&shown);
-        let mut order = self.slots.remove(&shown).unwrap_or_default();
-        self.revealed.remove(&shown);
-        self.slot_order.remove(&shown);
-        self.provisional.remove(&shown);
-        self.adopt_votes.remove(&shown);
-        self.beside.remove(&shown);
-        self.spaces.retain(|s| s.id != shown);
-        self.front_owed.remove(&shown);
-        self.moved_from.retain(|_, from| *from != shown);
+        self.merge_space(shown, main_space, actions);
+    }
+
+    /// Space `from` joins Space `into` whole and is forgotten (a gone screen's Desktop taken
+    /// into the main screen's, [`Self::adopt_display`]; a Desktop macOS ended, taken into the
+    /// one its windows landed on, [`Model::desk_ended`]): its front stage comes in front
+    /// there (its windows are where macOS put them: no frame of theirs is set), the front
+    /// stage of `into` goes to a card, and its other stages become stages there too, hidden,
+    /// after the cards `into` has (past the capacity they are hidden). An empty front stage
+    /// gives way instead of taking a card. The Desktop bound to `from` is bound to nothing.
+    pub(crate) fn merge_space(&mut self, from: SpaceId, into: SpaceId, actions: &mut Vec<Action>) {
+        let front = self.active.remove(&from);
+        let mut order = self.slots.remove(&from).unwrap_or_default();
+        self.revealed.remove(&from);
+        self.slot_order.remove(&from);
+        self.provisional.remove(&from);
+        self.adopt_votes.remove(&from);
+        self.beside.remove(&from);
+        self.spaces.retain(|s| s.id != from);
+        self.unbind_space(from);
+        self.front_owed.remove(&from);
+        self.moved_from.retain(|_, was| *was != from);
         for q in &mut self.quit {
-            if q.space == shown {
-                q.space = main_space;
+            if q.space == from {
+                q.space = into;
             }
         }
-        let stages_gone: Vec<StageId> = self.stages.iter().filter(|s| s.space == shown).map(|s| s.id).collect();
+        let stages_gone: Vec<StageId> = self.stages.iter().filter(|s| s.space == from).map(|s| s.id).collect();
         for s in &stages_gone {
             if let Some(st) = self.stage_mut(*s) {
-                st.space = main_space;
+                st.space = into;
             }
         }
         for w in self.windows.values_mut() {
-            if w.space == shown {
-                w.space = main_space;
+            if w.space == from {
+                w.space = into;
             }
         }
         let rest: Vec<StageId> = stages_gone.iter().copied().filter(|s| !order.contains(s)).collect();
         order.extend(rest);
         let front = front.filter(|f| self.stage(*f).is_some_and(|s| !s.windows.is_empty()));
         if let Some(f) = front {
-            // Its windows are on the main display already, where macOS put them: no frame
+            // Its windows are where macOS put them: no frame
             // of theirs is set here (the next observation records them).
             let members: Vec<WindowId> = self.stage(f).map(|s| s.windows.clone()).unwrap_or_default();
-            let shown_ids: Vec<WindowId> = members
+            let visible: Vec<WindowId> = members
                 .into_iter()
                 .flat_map(|id| std::iter::once(id).chain(self.children_of(id)))
                 .filter(|id| self.windows.get(id).is_some_and(|w| !w.parked))
                 .collect();
             let mut more = Vec::new();
-            self.bring_front(main_space, f, &mut more);
-            actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if shown_ids.contains(id))));
+            self.bring_front(into, f, &mut more);
+            actions.extend(more.into_iter().filter(|a| !matches!(a, Action::SetFrame { id, .. } if visible.contains(id))));
         }
-        let capacity = self.capacity_of(main_space);
+        let capacity = self.capacity_of(into);
         for s in order {
             if Some(s) == front || self.stage(s).is_none() {
                 continue;
@@ -2054,7 +2088,7 @@ impl Model {
             self.park_stage(s, actions);
             self.drop_if_dead(s, actions);
             if self.stage(s).is_some()
-                && let Some(slots) = self.slots.get_mut(&main_space)
+                && let Some(slots) = self.slots.get_mut(&into)
                 && slots.len() < capacity
                 && !slots.contains(&s)
             {

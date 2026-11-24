@@ -30,7 +30,7 @@
 //! not shown) never counts.
 //!
 //! A **hidden tab** ([`super::hidden_tab`], 8J) is never waited for: the platform judges the
-//! windows found in the park zone each pass ([`Watch::hidden_tabs`]); one judged a hidden tab
+//! windows found in the park zone each pass ([`Watch::leave_alone`]); one judged a hidden tab
 //! never joins, and one already waiting is let go. Nothing can move a hidden tab, and it
 //! takes its group's frame once selected. A window the app registered is never let go as one.
 //!
@@ -358,14 +358,6 @@ impl Watch {
     /// True when the app registered window `id` (its parked file).
     pub fn is_registered(&self, id: u32) -> bool {
         self.registered.iter().any(|r| r.id == id)
-    }
-
-    /// The windows the platform judged hidden tabs this pass (8J; [`super::hidden_tab`],
-    /// only ever among windows the app never registered): none of them joins the watch at
-    /// [`Self::observe`], and a waiting one is let go. A registered window is never let go
-    /// as one. Replaces the latest pass's set.
-    pub fn hidden_tabs(&mut self, tabs: &BTreeSet<u32>) -> Vec<Event> {
-        self.leave_alone(&tabs.iter().map(|id| (*id, Release::HiddenTab)).collect())
     }
 
     /// The windows the platform judged left alone this pass, with why: hidden tabs (8J) and
@@ -1159,6 +1151,12 @@ mod tests {
         assert_eq!(looks(w.observe(t0 + Duration::from_millis(1000), &on_desktop_2(parked()), &displays())), 1);
     }
 
+    /// The windows the platform judged hidden tabs this pass (8J; [`super::hidden_tab`]), as
+    /// the guardian hands them to [`Watch::leave_alone`].
+    fn hidden_tabs(tabs: &BTreeSet<u32>) -> BTreeMap<u32, Release> {
+        tabs.iter().map(|id| (*id, Release::HiddenTab)).collect()
+    }
+
     /// 8J, the 10-16 quit: Terminal's hidden tabs 83 and 84 at the park spot, off screen,
     /// beside the selected tab 86 on another Desktop. Judged hidden tabs by the platform,
     /// they never join; a hidden tab already waiting (found before it was judged) is let go;
@@ -1170,7 +1168,7 @@ mod tests {
         let terminal = |id, bounds, onscreen| Listed { id, pid: 501, bounds, onscreen, allowed: true };
         let listing = [terminal(83, spot, false), terminal(84, spot, false), terminal(86, Rect::new(532.0, 213.0, 1497.0, 1045.0), false), at(9, RESTORE, true)];
         let mut w = Watch::new(&[]);
-        assert!(w.hidden_tabs(&[83, 84].into()).is_empty(), "nothing waits yet");
+        assert!(w.leave_alone(&hidden_tabs(&[83, 84].into())).is_empty(), "nothing waits yet");
         let ev = w.observe(t0, &listing, &displays());
         assert!(!ev.iter().any(|e| matches!(e, Event::Joined { .. })), "{ev:?}");
         assert!(w.is_empty(), "the guardian has nothing to wait for");
@@ -1178,7 +1176,7 @@ mod tests {
         let mut w = Watch::new(&[]);
         w.observe(t0, &listing, &displays());
         assert_eq!(w.waiting().count(), 2, "found in the park zone");
-        let ev = w.hidden_tabs(&[83, 84].into());
+        let ev = w.leave_alone(&hidden_tabs(&[83, 84].into()));
         assert_eq!(ev.len(), 2);
         assert!(ev.iter().all(|e| matches!(e, Event::LetGo { why: Release::HiddenTab, .. })));
         assert!(w.is_empty());
@@ -1202,7 +1200,7 @@ mod tests {
         let judged: BTreeSet<u32> = tabs.iter().filter(|t| is_hidden_tab(t, &tabs, Candidate::Unknown, Some(&[]), |_| true)).map(|t| t.id).collect();
         assert!(judged.is_empty(), "{judged:?}");
         let mut w = Watch::new(&[]);
-        assert!(w.hidden_tabs(&judged).is_empty());
+        assert!(w.leave_alone(&hidden_tabs(&judged)).is_empty());
         w.observe(t0, &listing, &displays());
         assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![21, 22], "both wait");
     }
@@ -1218,7 +1216,7 @@ mod tests {
         assert!(crate::engine::hidden_tab::same_size(listing[0].bounds, listing[2].bounds), "9 is 1's same-size sibling");
         let mut w = Watch::new(&reg());
         for ms in [0, 500, 1000, 5000] {
-            assert!(w.hidden_tabs(&[1].into()).is_empty());
+            assert!(w.leave_alone(&hidden_tabs(&[1].into())).is_empty());
             w.observe(t0 + Duration::from_millis(ms), &listing, &displays());
             assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![1], "still waits");
         }
@@ -1267,10 +1265,10 @@ mod tests {
     fn a_registered_window_is_never_let_go_as_a_hidden_tab() {
         let t0 = Instant::now();
         let mut w = Watch::new(&reg());
-        assert!(w.hidden_tabs(&[1].into()).is_empty());
+        assert!(w.leave_alone(&hidden_tabs(&[1].into())).is_empty());
         w.observe(t0, &on_desktop_1(), &displays());
         assert_eq!(w.waiting().map(|x| x.id).collect::<Vec<_>>(), vec![1], "still waits");
-        assert!(w.hidden_tabs(&[1].into()).is_empty());
+        assert!(w.leave_alone(&hidden_tabs(&[1].into())).is_empty());
         assert!(!w.is_empty());
     }
 }

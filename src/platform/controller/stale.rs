@@ -11,8 +11,9 @@
 //! ([`Controller::check_stale_handles`]): a card cannot wait for a move to find its window
 //! closed.
 
+use crate::platform::clock;
 use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::Controller;
 use crate::engine::hidden_tab::{self, Candidate, TabListed};
@@ -124,7 +125,7 @@ impl Controller {
     /// on two looks apart is let go ([`Observer::note_closed`]). `list`: the window server's
     /// complete list when the caller has one.
     fn look_up_dead(&mut self, ob: &Observer, id: u32, pid: i32, list: Option<&[CgWindow]>) -> Option<AxElement> {
-        let now = Instant::now();
+        let now = clock::now();
         if !self.stale.looks.may_look(id, now) {
             return None;
         }
@@ -200,7 +201,7 @@ impl Controller {
     /// (asked nothing: its windows are off screen for that reason).
     pub(super) fn check_stale_handles(&mut self, ob: &Observer, list: &[CgWindow]) {
         let Some(m) = &self.model else { return };
-        let now = Instant::now();
+        let now = clock::now();
         let onscreen: HashSet<u32> = list.iter().filter(|w| w.onscreen).map(|w| w.id).collect();
         // The windows the engine hides off the list (the Spaces engine's) are looked at too:
         // the window server lists one its app closed exactly as before, off screen in its
@@ -212,7 +213,7 @@ impl Controller {
             .windows()
             .filter(|w| (w.sticky || m.is_shown_space(w.space)) && !onscreen.contains(&w.meta.id.0))
             .filter_map(|w| ob.window(w.meta.id.0).map(|t| (t.id, t.pid)))
-            .filter(|&(id, _)| !self.echoes.is_window_echo(id, now))
+            .filter(|&(id, _)| !self.causes.wrote_recently(id, now))
             .collect();
         let ids: HashSet<u32> = candidates.iter().map(|&(id, _)| id).collect();
         self.stale.sightings.retain(|id| ids.contains(&id));
@@ -227,7 +228,7 @@ impl Controller {
             if of_hidden && slow.contains(&pid) {
                 continue;
             }
-            let began = Instant::now();
+            let began = clock::now();
             let dead = ob.handle_dead(id);
             if of_hidden && began.elapsed() >= SLOW_ANSWER {
                 slow.insert(pid);

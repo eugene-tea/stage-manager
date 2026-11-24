@@ -33,6 +33,7 @@
 
 mod ahead;
 mod away;
+pub(crate) mod desks;
 mod hidden;
 mod hiding;
 mod ops;
@@ -40,6 +41,7 @@ mod pending;
 mod pool;
 mod quit;
 mod saved_size;
+mod setup_frames;
 mod spaces;
 mod strip;
 mod tabs;
@@ -59,7 +61,7 @@ use super::recovery::EngineKind;
 use super::settings::NativeSettings;
 use super::stage_area::{FitOptions, fit_frame, same_frame, same_size, stage_area};
 
-pub use ahead::{Ahead, AheadMark, AppFacts};
+pub use ahead::{Ahead, AheadMark, AppFacts, BeforeSwitch};
 pub use pending::{PendingNote, Restored};
 pub use pool::NumberRef;
 pub(crate) use pool::Kin;
@@ -437,6 +439,12 @@ pub struct Model {
     /// changed, keep them): macOS may put them on another Desktop of the main display
     /// and show that one, where their stages come whole ([`Model::carry_adopted`]).
     pub(crate) adopted: BTreeSet<WindowId>,
+    /// Windows hidden in a stage of a Desktop of a screen that went, at that change (but those
+    /// [`Self::adopted`], whose stages [`Model::carry_adopted`] takes whole): one listed on
+    /// another Desktop while the Spaces engine watches the screen gone stays in its stage,
+    /// hidden again ([`ArrivalNote::kept_hidden`]). Set again at each change of the screens;
+    /// cleared when the watch ends ([`Model::set_display_watch`]); a window gone leaves it.
+    pub(crate) handed_hidden: HashSet<WindowId>,
     /// Desktops not shown whose front stage left them (the lid closed: the laptop's front,
     /// brought in front on the 5K's first Desktop, carried whole to the second one macOS
     /// slid to, [`Model::carry_adopted`]): their most recent card comes forward when they
@@ -445,6 +453,9 @@ pub struct Model {
     /// An arrival leaves out windows first seen on the Desktop still shown
     /// ([`Model::set_hold_arrivals`]).
     pub(crate) hold_arrivals: bool,
+    /// The Spaces engine watches a screen gone: [`Self::handed_hidden`] windows listed on
+    /// another Desktop stay in their stages ([`Model::set_display_watch`]).
+    pub(crate) display_watch: bool,
     /// Windows the platform's own switch just showed while macOS slid to another Desktop,
     /// for the next arrival only ([`Model::set_slide_carried`]).
     pub(crate) slide_carried: HashSet<WindowId>,
@@ -478,6 +489,13 @@ pub struct Model {
     pub(crate) restore: super::restore::Restore,
     /// Windows owed their saved frame when first shown (`saved_size.rs`).
     pub(crate) owed: HashMap<WindowId, saved_size::Owed>,
+    /// Each standard window's frame per screen setup, the most recent setup first
+    /// (`[displays] frames_per_setup`, `setup_frames.rs`).
+    pub(crate) setup_frames: HashMap<WindowId, Vec<super::setup_frames::SetupFrame>>,
+    /// Windows a settle found on another screen than their frame's for the setup now, with
+    /// that frame: kept as it is until the window is on that screen again or the person
+    /// moves, resizes or clicks it (`setup_frames.rs`).
+    pub(crate) setup_owed: HashMap<WindowId, super::setup_frames::SetupFrame>,
     /// What the last placement from a pending entry did, for the log.
     pub(crate) last_pending: Option<PendingNote>,
     /// The Dock's application items in order, as the platform last read them ("Follow the
@@ -493,6 +511,12 @@ pub struct Model {
     pub(crate) clock: u64,
     /// Next stage ID.
     pub(crate) next_stage: u64,
+    /// The window server's Desktops bound to the model's Spaces, by the window server's id
+    /// (`desks.rs`): one id, one Space. Empty under an engine with no listing.
+    pub(crate) desks: BTreeMap<u64, desks::Bound>,
+    /// The bindings `state.json` saved, kept to be written again for the saved Spaces not
+    /// visited yet (`desks.rs`).
+    pub(crate) saved_desks: Vec<desks::SavedDesk>,
     /// Options.
     pub(crate) options: ModelOptions,
 }
@@ -540,8 +564,10 @@ impl Model {
             merged: HashMap::new(),
             launch_listed: HashSet::new(),
             adopted: BTreeSet::new(),
+            handed_hidden: HashSet::new(),
             front_owed: BTreeSet::new(),
             hold_arrivals: false,
+            display_watch: false,
             slide_carried: HashSet::new(),
             travellers: Vec::new(),
             desktop_counts: HashMap::new(),
@@ -552,12 +578,16 @@ impl Model {
             quit_frames: Vec::new(),
             restore: super::restore::Restore::default(),
             owed: HashMap::new(),
+            setup_frames: HashMap::new(),
+            setup_owed: HashMap::new(),
             last_pending: None,
             dock: Vec::new(),
             hidden_apps: HashSet::new(),
             hidden_slots: HashMap::new(),
             clock: 0,
             next_stage: 1,
+            desks: BTreeMap::new(),
+            saved_desks: Vec::new(),
             options,
         };
         let ids: Vec<DisplayId> = model.displays.iter().map(|d| d.id).collect();
@@ -728,6 +758,10 @@ impl Model {
     /// the controller's fallback mid-run to the Corner engine. Windows hidden stay counted
     /// hidden; the controller hides them again the new engine's way.
     pub fn set_engine(&mut self, engine: crate::engine::recovery::EngineKind) {
+        if engine != self.options.engine {
+            // The window server's Desktops are the Spaces engine's to read (`desks.rs`).
+            self.unbind_all();
+        }
         self.options.engine = engine;
     }
 

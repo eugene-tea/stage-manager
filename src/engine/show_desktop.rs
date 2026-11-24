@@ -368,6 +368,7 @@ impl CloseWatch {
         Closing::No
     }
 
+    #[cfg(test)]
     /// True while closing (as of the last look).
     pub fn closing(&self) -> bool {
         self.closing.is_some()

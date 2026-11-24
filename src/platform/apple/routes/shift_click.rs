@@ -4,7 +4,7 @@
 //! for the settle; the clicks of one press 50 ms apart all land). The gesture itself is
 //! `platform::apple::post`'s; the points are the mirror's ([`Arrangement::click_at`]).
 
-use super::{Cost, Route};
+use super::Route;
 use crate::engine::apple::desk::{AppleDesk, InputNow, Posted};
 use crate::engine::apple::gate;
 use crate::engine::apple::mirror::Arrangement;
@@ -17,10 +17,6 @@ pub struct ShiftClick;
 impl Route for ShiftClick {
     fn name(&self) -> &'static str {
         "shift_click"
-    }
-
-    fn cost(&self) -> Cost {
-        Cost { ms: 30, pointer: true }
     }
 
     /// Shift-clicks on thumbnails the mirror shows a part of, the strip shown, through the

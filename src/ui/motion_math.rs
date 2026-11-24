@@ -80,9 +80,11 @@ pub struct Spring {
 }
 
 impl Spring {
+    #[cfg(test)]
     /// Apple's windows growing out of their card, measured 11-09 with the path
     /// (`[animation] spring_*`).
     pub const APPLE: Spring = Spring { stiffness: 289.0, damping: 34.0, mass: 1.0 };
+    #[cfg(test)]
     /// Apple's windows shrinking into their card (`[animation] shrink_*`): the same spring,
     /// measured the same way.
     pub const APPLE_SHRINK: Spring = Spring { stiffness: 289.0, damping: 34.0, mass: 1.0 };
@@ -137,8 +139,6 @@ pub const UNVEIL_TOLERANCE: f64 = 1.0;
 /// and too long a lag only leaves the snapshot over its window a moment longer, still within
 /// the tolerance.
 pub const PRESENTATION_LAG: f64 = 0.05;
-/// One display frame at 60 Hz (seconds).
-pub const FRAME: f64 = 1.0 / 60.0;
 /// Whether the window server shows a window at `frame`: listed on screen (`onscreen`; a
 /// hidden app's window is not) with its `bounds` within [`UNVEIL_TOLERANCE`] of the frame on
 /// every edge (a parked one sits in the corner).
@@ -340,11 +340,13 @@ pub struct Drawn {
 }
 
 impl Drawn {
+    #[cfg(test)]
     /// The six numbers in their order.
     pub fn array(&self) -> [f64; 6] {
         [self.left, self.left_top, self.left_bottom, self.right, self.right_top, self.right_bottom]
     }
 
+    #[cfg(test)]
     /// The bounding box.
     pub fn bounds(&self) -> Rect {
         let (x0, x1) = (self.left.min(self.right), self.left.max(self.right));
@@ -670,11 +672,13 @@ impl<T> SnapshotCache<T> {
         self.kept.values().map(|k| k.bytes).sum()
     }
 
+    #[cfg(test)]
     /// How many snapshots are held.
     pub fn len(&self) -> usize {
         self.kept.len()
     }
 
+    #[cfg(test)]
     /// True when nothing is held.
     pub fn is_empty(&self) -> bool {
         self.kept.is_empty()
