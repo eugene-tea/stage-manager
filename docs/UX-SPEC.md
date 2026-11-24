@@ -857,7 +857,7 @@ wait in the corner behind their pictures, and
 that corner is covered with the wallpaper patch's picture until they are in place (macOS
 raises an activated app's windows there) and the patch itself shows again (it is drawn a
 moment before the cover goes, at most 300 ms after the motion; never where an arriving window
-landed over the corner), never over the menu bar, and
+landed over the corner; the same for a cover of the desktop's still), never over the menu bar, and
 never more than the corner itself (a 320-point square). It lies under the Dock, so a
 see-through Dock over the corner shows the cover there, not a waiting window's edge. Where
 desktop icons lie in that corner, the patch's picture would hide them: a still of the
@@ -866,7 +866,12 @@ even one that appears as it is taken; laid over the patch's picture when macOS l
 desktop picture out of it), kept fresh while card pictures are captured and the Mac is in
 use (none while the screen is locked or asleep, or after 2 minutes with no input and no
 switch; a fresh one at the first input), covers it instead; the parked windows' edges are
-under it too for the moment of the motion. A window that stays shown through the switch and
+under it too for the moment of the motion. The still covers it too for a picture that follows
+the sun while its frame is not known from the clock and the patch itself is drawn from a
+still: the file's render is used only at the frame known now (the clock's, or the one a
+still settled as the patch was last drawn from the file). Live 11-24 09:10: a frame settled
+at 08:34 was kept for the cover, macOS went to a brighter one at 09:04, and every switch
+showed a darker block of 61 x 112 pt in the corner for the motion's 0.8 s. A window that stays shown through the switch and
 reaches that corner (a pinned window, kept in pictures like the active stage's) is drawn on
 the cover from its own picture, so it looks as it is (that corner of it holds still for the
 motion's moment, as a ghost does; a video or a busy terminal there may show a seam until the

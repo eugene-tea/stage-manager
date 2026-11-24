@@ -51,8 +51,8 @@
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
 //!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
 //!   under every snapshot ([`Transition::corner`], round 8L). The outgoing stage's card
-//!   stays hidden until its snapshots land, then everything goes in one frame, except a
-//!   cover of the patch's picture while the corner patch is not drawn yet: it stays until
+//!   stays hidden until its snapshots land, then everything goes in one frame, except the
+//!   corner's cover while the corner patch is not drawn yet: it stays until
 //!   the patch has been on screen a moment, a few hundred milliseconds at most
 //!   ([`cover_holds`], 10-23: the slivers flashed between the cover and the patch). A new
 //!   transition cuts a running one short, and takes over a cover still held.
@@ -181,8 +181,8 @@ struct Running {
     timers: Vec<Retained<NSTimer>>,
     /// The park corner's cover while the incoming windows wait there ([`Transition::corner`]).
     corner: Option<Ghost>,
-    /// Where that cover is, what it shows, and the screen it is on.
-    corner_at: Option<(Rect, CoverPicture, u32)>,
+    /// Where that cover is and the screen it is on.
+    corner_at: Option<(Rect, u32)>,
     /// The incoming windows' frames: aimed at, then read back once in place.
     arrived: Vec<(u32, Rect)>,
     /// The transition does not land before this (its incoming windows shown under their
@@ -931,7 +931,7 @@ impl Strip {
         }
         // The park corner, under every snapshot, while the incoming windows wait there (8L).
         let corner = if cover.incoming { t.corner.clone().and_then(|c| self.corner_cover(t.id, c)) } else { None };
-        let corner_at = corner.as_ref().and(t.corner.as_ref()).map(|c| (c.rect, c.picture, c.screen));
+        let corner_at = corner.as_ref().and(t.corner.as_ref()).map(|c| (c.rect, c.screen));
         let arrived = t.incoming.iter().map(|w| (w.window.id, w.window.frame)).collect();
         // Gone at once, never an implicit fade (review R1-ui 11).
         objc2_quartz_core::CATransaction::begin();
@@ -1829,13 +1829,12 @@ impl Strip {
         for t in &r.timers {
             t.invalidate();
         }
-        // Landed with the corner covered by the patch's picture: the cover stays until the
-        // patch shows (10-23), unless nothing is to wait for.
+        // Landed with the corner covered: the cover stays until the patch shows (10-23),
+        // unless nothing is to wait for.
         let facts = match (landed, &r.corner, r.corner_at) {
-            (true, Some(_), Some((cover, picture, screen))) => Some((
+            (true, Some(_), Some((cover, screen))) => Some((
                 HoldFacts {
                     cover,
-                    picture,
                     arrived: r.arrived.iter().map(|(_, f)| *f).collect(),
                     patch_shown_for: crate::ui::corner_patch::shown_for(screen, Instant::now()),
                     held_for: Duration::ZERO,

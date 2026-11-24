@@ -45,7 +45,8 @@
 //!   (the incoming windows wait in the corner, so no order of the patch is right) and shown
 //!   again only once a plan sees them gone from the corner, which may come after the switch
 //!   has landed and its cover gone (10-23: a frame or more of bare slivers at a switch's
-//!   end). A cover of the patch's picture therefore stays past the landing until the patch
+//!   end). The cover (of the patch's picture or of the desktop's still: the patch draws
+//!   either) therefore stays past the landing until the patch
 //!   has been on screen for [`PATCH_DRAWN`] (its first frames drawn), at most
 //!   [`COVER_HOLD_MAX`], and never where an arriving window landed over the corner (the cover
 //!   would paint over it).
@@ -723,8 +724,6 @@ pub const PATCH_DRAWN: Duration = Duration::from_millis(50);
 pub struct HoldFacts {
     /// Where the cover is (global, top-left).
     pub cover: Rect,
-    /// What it shows.
-    pub picture: CoverPicture,
     /// Where the switch's incoming windows are now (their frames, read back once in place).
     pub arrived: Vec<Rect>,
     /// How long the patch has been on screen at its rectangle now; `None` while hidden.
@@ -733,15 +732,14 @@ pub struct HoldFacts {
     pub held_for: Duration,
 }
 
-/// Whether a landed switch's cover stays over the corner a moment more: only a cover of the
-/// patch's picture (a still of the desktop means icons lie there, so the patch stays off),
-/// only while no incoming window lies under it, until the patch has been on screen for
-/// [`PATCH_DRAWN`], and never past [`COVER_HOLD_MAX`].
+/// Whether a landed switch's cover stays over the corner a moment more: only while no
+/// incoming window lies under it, until the patch has been on screen for [`PATCH_DRAWN`],
+/// and never past [`COVER_HOLD_MAX`]. Whatever the cover shows: the patch draws a still of
+/// the desktop too (round desktop-still-patch), so a cover of the still waits for it as one
+/// of the patch's picture does (until 11-24 it left at the landing, from when a still meant
+/// icons there and the patch off).
 pub fn cover_holds(f: &HoldFacts) -> bool {
-    f.picture == CoverPicture::Wallpaper
-        && !f.arrived.iter().any(|w| w.intersect(&f.cover).is_some())
-        && f.patch_shown_for.is_none_or(|t| t < PATCH_DRAWN)
-        && f.held_for < COVER_HOLD_MAX
+    !f.arrived.iter().any(|w| w.intersect(&f.cover).is_some()) && f.patch_shown_for.is_none_or(|t| t < PATCH_DRAWN) && f.held_for < COVER_HOLD_MAX
 }
 
 /// How long the plan may stay as it was while the parked windows are listed slid aside
@@ -859,7 +857,6 @@ mod tests {
         let ms = Duration::from_millis;
         let f = HoldFacts {
             cover: corner,
-            picture: CoverPicture::Wallpaper,
             arrived: vec![Rect::new(1265.0, 606.0, 1051.0, 734.0), Rect::new(376.0, 49.0, 1973.0, 1291.0)],
             patch_shown_for: None,
             held_for: ms(0),
@@ -870,7 +867,6 @@ mod tests {
         assert!(!cover_holds(&HoldFacts { patch_shown_for: Some(ms(5000)), ..f.clone() }), "shown all along: no hold at all");
         assert!(cover_holds(&HoldFacts { held_for: COVER_HOLD_MAX - ms(1), ..f.clone() }));
         assert!(!cover_holds(&HoldFacts { held_for: COVER_HOLD_MAX, ..f.clone() }), "never longer: the patch may stay off");
-        assert!(!cover_holds(&HoldFacts { picture: CoverPicture::Desktop, ..f.clone() }), "icons there: the patch stays off");
         let over = Rect::new(1800.0, 900.0, 760.0, 540.0);
         assert!(!cover_holds(&HoldFacts { arrived: vec![over], ..f }), "an arriving window landed over the corner");
     }

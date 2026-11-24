@@ -32,6 +32,9 @@
 - On a busy Mac, an app that reports its own focus late no longer brings back the stage just
   left, and a click on the wallpaper no longer brings Finder's windows in front.
 - On a busy Mac, a switch no longer plays its pictures over windows already in their places.
+- With a wallpaper that follows the sun, a stage switch no longer shows a darker block in
+  the corner where hidden windows wait; before, it could show for the length of every switch
+  after the picture's light changed.
 - With `engine = "spaces"`, Mission Control shows the hidden stages' windows as soon as it
   opens from its key or its keyboard shortcut; before, they could come up to two seconds late.
 - With `engine = "spaces"`, `[windows] mission_control_key_keeps_stage = true` keeps the stage
