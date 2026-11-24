@@ -44,6 +44,15 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
 
 ## 1.9: closer to Apple's feel
 
+- **The park corner gets a little lighter for the length of a switch** (Corner engine; seen
+  11-24 on a smooth dark-red wallpaper). The patch at rest reaches 22 pt left of the slivers,
+  one parked window's shadow; with five windows parked at the same spot their shadows add up
+  past it (about 2 % darker beside the patch, 3 of 255, fading out by 60 pt). A switch's
+  cover reaches 60 pt (`ACTIVE_REACH`: macOS activates the windows waiting there) and shows
+  the desktop with no shadow, so the corner lightens for the motion and darkens again. One
+  way: the patch at rest as wide as the cover, so nothing changes at a switch; its cost is a
+  larger patch where it is drawn from the file (no Screen Recording), off more often for a
+  desktop icon under it. Compare before and after from captures of the corner.
 - **A newly opened app's stage comes as its window shows** (Corner engine; worth doing only
   if the Spaces engine does not ship or S6 shows it still matters). After 1.8.5's fixes (the AX ask
   of a just-opened app every 40 ms, a new window looked at every fast tick), the old stage

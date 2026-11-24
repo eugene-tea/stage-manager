@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.9.2 — 2026-11-24
 
 - With `engine = "spaces"`, plugging a screen in or out leaves every hidden window on its own
   Desktop, also when the Dock or ⌘Tab switches Desktops in the minute after. When macOS
@@ -40,7 +40,6 @@
 - With `engine = "spaces"`, `[windows] mission_control_key_keeps_stage = true` keeps the stage
   in front when Mission Control is closed with its key or Escape. Off by default, as Apple's
   Stage Manager: the app whose window is under the pointer comes in front with its stage.
-
 - With `engine = "spaces"`, a link that opens in a browser window hidden in a stage on another
   Desktop now goes to that Desktop with the window in front; before, nothing seemed to happen.
   The Desktop left keeps the stage it had in front.
