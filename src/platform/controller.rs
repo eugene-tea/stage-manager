@@ -982,6 +982,9 @@ pub struct Controller {
     /// ([`slide_hold`]): the arrival replays it, or it is decided once the hold is over
     /// ([`Self::slide_hold_step`]).
     slide_hold: Option<SlideHold>,
+    /// An activation whose app did not say its focused window, with nothing of it on the
+    /// Desktop shown: asked again on the fast tick ([`Self::ask_again_step`]).
+    ask_again: Option<slide_hold::AskAgain>,
     /// The held window's Desktop, arranged before it was recognized ([`arrival`]).
     ahead: Option<arrival::AheadSent>,
     /// A left mouse-down on an application item of the Dock, until its mouse-up.
@@ -1240,6 +1243,7 @@ impl Controller {
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
             slide_hold: None,
+            ask_again: None,
             ahead: None,
             dock_press: None,
             dock_pid: None,
@@ -2993,7 +2997,16 @@ impl Controller {
     /// a Desktop not shown, the app's focused window) and is held for the Space change
     /// instead ([`Self::hold_for_slide`]); one held so is decided again without it.
     fn decide_activation(&mut self, ob: &mut Observer, pid: i32, now: Instant, watch_slide: bool) {
+        self.decide_activation_with(ob, pid, now, watch_slide, None);
+    }
+
+    /// [`Self::decide_activation`] with the app's focused window already known (`given`: its
+    /// answer to the question asked again, [`Self::ask_again_step`]); with none the app is
+    /// asked here, and when it does not say while nothing of it shows on the Desktop shown,
+    /// asked again shortly ([`slide_hold::AskAgain`]).
+    fn decide_activation_with(&mut self, ob: &mut Observer, pid: i32, now: Instant, watch_slide: bool, given: Option<WindowId>) {
         self.activation_switch = None;
+        self.ask_again = None;
         let list = windows::list_windows();
         let present = self.app_present(pid);
         let needs_focus = self.model.as_ref().is_none_or(|m| m.activation_needs_focus(pid));
@@ -3002,7 +3015,9 @@ impl Controller {
         // may follow: a window the model does not know may be on a Desktop never visited.
         let keyed = watch && self.keyed_listing().is_some();
         let asks = watch && (keyed || self.model.as_ref().is_some_and(|m| slide_hold::asks_focus(m, pid)));
-        let focused = if needs_focus || asks { arrival::focused_window_of(pid) } else { None };
+        let focused = given.or_else(|| if needs_focus || asks { arrival::focused_window_of(pid) } else { None });
+        // Asked for where macOS may take the user, and not said.
+        let unanswered = asks && focused.is_none();
         let wait = if watch {
             self.model
                 .as_ref()
@@ -3065,6 +3080,17 @@ impl Controller {
                 // on another Desktop (its focus may have come first and be held).
                 self.focus_replay.hold(Wanted::App(pid), now);
                 self.after_hold(ob, now);
+                if unanswered {
+                    // Its window may wait hidden off every Desktop, where macOS goes nowhere
+                    // by itself and no focus notice follows: only the app can say.
+                    let decided = clock::now();
+                    tracing::info!(
+                        pid,
+                        decide_ms = decided.saturating_duration_since(now).as_millis() as u64,
+                        "activation: nothing of the app shows here, a window of it is on a Desktop not shown, and it did not say its focused window in time: asked again shortly"
+                    );
+                    self.ask_again = Some(slide_hold::AskAgain::new(pid, decided, self.space_changes));
+                }
                 attribution::judged(Notice::Activation, i64::from(pid), "held: nothing of it here");
             } else if actions.is_empty() && self.held_is_of(pid, now) {
                 attribution::judged(Notice::Activation, i64::from(pid), "its window's focus stays held");
@@ -3113,6 +3139,63 @@ impl Controller {
         self.focus_replay.hold(wanted, now);
         self.slide_hold = Some(SlideHold { wanted, activation, came: now, changes: self.space_changes });
         self.after_hold(ob, now);
+    }
+
+    /// True while an activated app is asked its focused window again
+    /// ([`Self::ask_again_step`] on the fast tick).
+    pub(super) fn asks_again(&self) -> bool {
+        self.ask_again.is_some()
+    }
+
+    /// An activation whose app did not say its focused window ([`slide_hold::AskAgain`]),
+    /// looked at on the fast tick: when due the app is asked once more (bounded); its answer
+    /// decides the activation again ([`Self::decide_activation_with`]: a window hidden off
+    /// every Desktop elsewhere has its Desktop arranged and is focused, and macOS goes). A
+    /// Space change, or anything else held since, ends it; so do its tries.
+    pub(super) fn ask_again_step(&mut self, ob: &mut Observer) {
+        use crate::engine::margin::{End, wait};
+        let Some(mut ask) = self.ask_again else { return };
+        let now = clock::now();
+        let held = matches!(self.focus_replay.peek(now), Some(Wanted::App(pid)) if pid == ask.pid);
+        match ask.step(now, self.space_changes, held) {
+            slide_hold::Ask::Wait => {}
+            slide_hold::Ask::Over(why) => {
+                self.ask_again = None;
+                tracing::debug!(pid = ask.pid, why, "activation: its app's focused window is asked no more");
+            }
+            slide_hold::Ask::Now => {
+                let answer = arrival::focused_window_of(ask.pid);
+                let done = clock::now();
+                let after = done.saturating_duration_since(ask.came);
+                match answer {
+                    Some(id) => {
+                        self.ask_again = None;
+                        wait("FOCUS_ASK_AGAIN", after, slide_hold::ASK_AGAIN_SPAN, End::Met);
+                        tracing::info!(
+                            pid = ask.pid,
+                            focused = id.0,
+                            asked_again = ask.asked + 1,
+                            after_ms = after.as_millis() as u64,
+                            "activation: the app said its focused window when asked again; decided again with it"
+                        );
+                        self.focus_replay.clear();
+                        self.decide_activation_with(ob, ask.pid, done, true, Some(id));
+                        self.lent_decided(ask.pid);
+                    }
+                    None if ask.missed(done) => self.ask_again = Some(ask),
+                    None => {
+                        self.ask_again = None;
+                        wait("FOCUS_ASK_AGAIN", after, slide_hold::ASK_AGAIN_SPAN, End::Cap);
+                        tracing::info!(
+                            pid = ask.pid,
+                            asked_again = ask.asked,
+                            after_ms = after.as_millis() as u64,
+                            "activation: the app did not say its focused window when asked again; nothing of it shows on this Desktop and macOS was taken nowhere"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// True while a slide hold waits ([`Self::slide_hold_step`] on the fast tick).

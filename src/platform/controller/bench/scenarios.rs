@@ -403,6 +403,63 @@ fn cmd_tab_cancelled_with_and_without_the_key_tap() {
     expect(cmd_tab_onto_a_slow_app_tap_refused, [slid, slid, slid]);
 }
 
+/// Live 11-23 17:43 (the owner's Messages): ⌘Tab from Desktop 1 to Alpha, whose only window
+/// waits in a hidden stage of Desktop 2 (in a stage Space, on no Desktop: macOS goes nowhere
+/// for it). The activation asks the app its focused window, arranges that window's Desktop
+/// and focuses it, and macOS goes (`arrange_for_hidden_focus`). `wakes_ms`: how long after
+/// its activation the app answers nothing; asked within its first 50 ms it did not say, the
+/// activation was held for nothing, no focus notice followed (its key window had not
+/// changed), and the app was in front with no window: "clicking on Messages from the app
+/// switcher wasn't working".
+fn cmd_tab_to_an_app_hidden_on_another_desktop(load: f64, wakes_ms: Option<f64>) -> Run {
+    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, 1.0, 2, |d| {
+        d.add_app(A, "com.example.alpha", "Alpha");
+        d.add_app(B, "com.example.bravo", "Bravo");
+        d.add_window(13, A, frame(3), D2);
+        d.add_window(15, B, frame(5), D2);
+        d.add_window(12, B, frame(2), D1);
+        d.front = Some(B);
+    });
+    b.go_to_desktop(D2, true);
+    b.advance(4000);
+    b.go_to_desktop(D1, true);
+    b.advance(6000);
+    let start = (b.front(), b.desktop_shown(), b.front_app(), b.desktop_of(13), b.desktop_of(15));
+    assert_eq!(start, (Some(vec![12]), D1, Some(B), None, Some(D2)), "the start:\n{}", b.story());
+    b.log.clear();
+    crate::engine::attribution::trail::clear();
+    b.desk(|d| {
+        d.strip.transitions = 0;
+        d.calls.clear();
+        d.load = load;
+        let alpha = d.apps.get_mut(&A).expect("Alpha");
+        alpha.wakes_ms = wakes_ms;
+        // Its key window the same before and after: it says nothing of it.
+        alpha.quiet_key = true;
+    });
+    b.cmd_tab(vec![B, A]);
+    b.advance(400);
+    b.cmd_tab_release();
+    b.advance(8000);
+    let out = seen(&mut b);
+    Run::of(&b, out)
+}
+
+fn cmd_tab_to_an_app_hidden_elsewhere(load: f64) -> Run {
+    cmd_tab_to_an_app_hidden_on_another_desktop(load, None)
+}
+
+fn cmd_tab_to_an_app_hidden_elsewhere_waking(load: f64) -> Run {
+    cmd_tab_to_an_app_hidden_on_another_desktop(load, Some(70.0))
+}
+
+#[test]
+fn cmd_tab_to_an_app_whose_only_window_is_hidden_on_another_desktop() {
+    let there = "front [13] shows [13] desktop 2 app 101 switches 0 slides 1";
+    expect(cmd_tab_to_an_app_hidden_elsewhere, [there, there, there]);
+    expect(cmd_tab_to_an_app_hidden_elsewhere_waking, [there, there, there]);
+}
+
 #[test]
 fn cmd_tab_to_an_app_whose_stage_is_hidden_here() {
     let here = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
@@ -903,6 +960,8 @@ pub(super) const ALL: &[Scenario] = &[
     ("Cmd-Tab, Escape with the key tap refused (Spaces)", "engine/switcher.rs SILENT_* waits", cmd_tab_escape_tap_refused),
     ("Cmd-Tab let go onto an app 0.4 s slow, the tap hears (Spaces)", "engine/switcher.rs ACTIVATION_WAIT", cmd_tab_onto_a_slow_app_heard),
     ("Cmd-Tab let go onto an app 0.4 s slow, the tap refused (Spaces)", "engine/switcher.rs SILENT_ACTIVATION_WAIT", cmd_tab_onto_a_slow_app_tap_refused),
+    ("Cmd-Tab to an app whose only window is hidden on another Desktop (Spaces)", "controller/arrival.rs, arrange_for_hidden_focus", cmd_tab_to_an_app_hidden_elsewhere),
+    ("the same, the app answering nothing for 70 ms after its activation", "engine/slide_hold.rs, AskAgain, live 11-23", cmd_tab_to_an_app_hidden_elsewhere_waking),
     ("Mission Control closed by its key over another app", "controller/mission_control.rs, mc-key", mission_control_key_close),
     ("the same with mission_control_key_keeps_stage", "controller/mission_control.rs, mc-key", mission_control_key_close_keeps_stage),
     ("Mission Control: a hidden stage's window picked", "engine/mission_control.rs, mc-pick 11-19", mission_control_pick),

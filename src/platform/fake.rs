@@ -188,6 +188,17 @@ pub struct App {
     /// What one of its Accessibility answers costs, in ms before the load factor (`None`:
     /// [`Costs::ax`]); beyond the messaging timeout the call fails as `CannotComplete`.
     pub answers_ms: Option<f64>,
+    /// It says nothing of its key window at an activation that leaves it the same (the
+    /// owner's Messages, live 11-23 17:43:29 and 08:21:20: no `AXFocusedWindowChanged` after
+    /// its activation, its one window the key one before and after).
+    pub quiet_key: bool,
+    /// For this long after it takes an activation it answers no Accessibility question, in
+    /// ms before the load factor: a call made meanwhile waits for it, and fails at its timeout
+    /// (the owner's Messages, live 11-23: its focused window asked right at its activation
+    /// was not said within 50 ms; 55 to 79 ms on the same day).
+    pub wakes_ms: Option<f64>,
+    /// Until when it answers nothing ([`Self::wakes_ms`]).
+    pub busy_until: Option<Instant>,
     /// The messaging timeout set on it, in seconds (0: the global 0.25 s).
     pub timeout: f32,
     /// `AXEnhancedUserInterface`.
@@ -691,7 +702,7 @@ impl Desk {
     pub fn add_app(&mut self, pid: i32, bundle: &str, name: &str) {
         self.apps.insert(
             pid,
-            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None },
+            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, quiet_key: false, wakes_ms: None, busy_until: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None },
         );
         let n = self.dock.items.len() as f64;
         self.dock.items.push((format!("/Applications/{name}.app/"), Rect::new(self.dock.bar.x + 8.0 + 58.0 * n, self.dock.bar.y + 8.0, 50.0, 50.0)));
@@ -1050,7 +1061,9 @@ impl Desk {
         if app.gone {
             return Err(AxError::INVALID_ELEMENT);
         }
-        let ms = app.answers_ms.unwrap_or(self.costs.ax) * self.load;
+        // An app waking for its activation answers once awake.
+        let wakes = app.busy_until.map_or(0.0, |t| t.saturating_duration_since(clock::now()).as_secs_f64() * 1000.0);
+        let ms = wakes + app.answers_ms.unwrap_or(self.costs.ax) * self.load;
         let timeout = if app.timeout > 0.0 { f64::from(app.timeout) * 1000.0 } else { 250.0 };
         if ms > timeout {
             clock::test::advance(Duration::from_secs_f64(timeout / 1000.0));
@@ -1478,6 +1491,12 @@ impl Desk {
                 // notices of an activation that slides come at the slide's end.
                 let slide = self.desktop_for(pid).filter(|(screen, to)| self.screens[*screen].shown != *to && self.screens[*screen].sliding_to != Some(*to));
                 self.front = Some(pid);
+                if let Some(ms) = self.apps.get(&pid).and_then(|a| a.wakes_ms) {
+                    let until = clock::now() + self.at_load(ms);
+                    if let Some(a) = self.apps.get_mut(&pid) {
+                        a.busy_until = Some(until);
+                    }
+                }
                 // (The activation itself was `ACTIVATION` late already.)
                 let after = match slide {
                     Some((screen, to)) => {
@@ -1488,6 +1507,7 @@ impl Desk {
                 };
                 let there = |d: &Self, w: &Win| w.spaces.iter().any(|s| d.space_listed(*s) || d.screens.iter().any(|sc| sc.sliding_to == Some(*s)));
                 let mut key = self.apps.get(&pid).and_then(|a| a.focused).filter(|w| self.windows.contains_key(w));
+                let key_before = key;
                 // A key window on no Desktop that shows: the app's frontmost window there is.
                 if !key.and_then(|k| self.windows.get(&k)).is_some_and(|w| there(self, w))
                     && let Some(other) = self.z.iter().copied().find(|id| self.windows.get(id).is_some_and(|w| w.pid == pid && !w.minimized && there(self, w)))
@@ -1513,7 +1533,8 @@ impl Desk {
                 let (activated, focused) = if focus_first { (focus_after, 0.0) } else { (0.0, focus_after) };
                 self.post_after(after, activated, Notice::Activated(pid));
                 self.post_after(after, activated + delays::TOOK_ACTIVATION, Notice::Ax { pid, el: El::App(pid), name: n::APPLICATION_ACTIVATED });
-                if let Some(key) = key {
+                let quiet = key == key_before && self.apps.get(&pid).is_some_and(|a| a.quiet_key);
+                if let Some(key) = key.filter(|_| !quiet) {
                     self.post_after(after, focused, Notice::Ax { pid, el: El::Window(key), name: n::FOCUSED_WINDOW_CHANGED });
                 }
             }

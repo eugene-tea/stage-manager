@@ -250,7 +250,12 @@ Terminal in front with three such tabs, ten clicks on its Dock item did nothing)
 Under `engine = "spaces"` a ⌘-Tab or Dock click to an app slow to
 come in front still switches here: the window put home for it waits out of sight for the
 app's activation (up to 3 s after ⌘'s release, 5 s after a Dock press) and goes back at once
-at Escape, at a press that was no click, or when another app comes in front. Under All at Once a Shift-click on a card brings in only the
+at Escape, at a press that was no click, or when another app comes in front. An app whose
+only window waits in a hidden stage of another Desktop is asked its focused window at its
+activation (within 50 ms), that window's Desktop is arranged and the window focused, and macOS
+goes there. An app that does not say in time is asked again 60, 180, 420 and 900 ms later
+(11-23: Messages took 55 to 79 ms at its activations; ⌘-Tab to it left it in front with no
+window, and no focus notice followed, its key window being the same). Under All at Once a Shift-click on a card brings in only the
 window clicked; that window dragged back to the strip takes the app's other windows along.
 
 **New windows.** A window of an app already on screen joins its stage. A window of an app in

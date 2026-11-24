@@ -1264,6 +1264,7 @@ impl Controller {
             || self.fresh_waiting()
             || self.switcher_wants_fast_tick()
             || self.flip_awaited()
+            || self.asks_again()
     }
 
     /// The WM thread's fast tick: the moves of an arrangement made at a Dock click checked
@@ -1275,6 +1276,8 @@ impl Controller {
         // A Space change's notice that came before the listing's flip: looked at again.
         self.flip_fast_tick(ob);
         self.slide_hold_step(ob);
+        // An activated app that did not say its focused window: asked again when due.
+        self.ask_again_step(ob);
         let now = clock::now();
         // ⌘Tab's switcher list gone with no key for it yet: decided after its wait; a window
         // put home for it taken back when its short cap (the key tap not hearing) ran out.
