@@ -73,7 +73,9 @@ them.
 9. Percent of one CPU core at rest, test windows only, the median of three runs (Apple
    silicon, macOS 27, 11-14; details in [UX-SPEC.md](UX-SPEC.md), "Window engines measured").
    Most of Accessibility's cost is in macOS's screen-capture service and window server, so
-   Activity Monitor's line for Stage Manager shows only about a fifth of it.
+   Activity Monitor's line for Stage Manager shows only about a fifth of it. Measured while
+   Accessibility took pictures of the front windows every two seconds; they are now taken
+   when a switch starts, as with Spaces, and these numbers are to be measured again.
 10. Activity Monitor's figure for Stage Manager in everyday use (11-18), without the system's
    share. Accessibility: about 1.9 % over a minute of work (0.9 to 3.6 %), rising with every
    click and switch. Integrated with Apple's: the average over 13 hours, overnight included.

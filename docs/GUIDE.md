@@ -534,8 +534,10 @@ Some limits to know about:
 
 - Windows an app keeps wholly off every screen, as headless browsers and test tools do, are
   left alone: they get no stage and no card, and are never moved onto the screen.
-- Moving windows are pictures taken a moment earlier, so content that changed meanwhile can
-  jump when the motion ends. Their shadow is drawn like macOS's own and hands over to the
+- Moving windows are pictures: one of a window leaving is taken as the switch starts, one of
+  a window arriving is the last taken before it left, so content that changed meanwhile can
+  jump when the motion ends (`[animation] snapshot_interval_ms` adds a timer for the windows
+  in front). Their shadow is drawn like macOS's own and hands over to the
   window's as it takes its place, which can still show as a faint flicker at the shadow's
   edge. Card pictures are taken when a stage leaves for its card, when the strip comes into
   view and when the pointer reaches a card, not live (`[strip] thumbnail_interval_ms` adds a
