@@ -2235,6 +2235,20 @@ impl Controller {
         } else {
             Some((t, wanted))
         };
+        // The park corner's cover first, where it needs none of the pictures being taken:
+        // macOS has raised an activated app's windows there already (`switch_pictures`,
+        // "The corner's cover first").
+        if let Some((t, wanted)) = &waiting {
+            match switch_pictures::corner_ahead(t, wanted) {
+                Ok(cover) => {
+                    let display = self.transition_display(Some(t)).0;
+                    tracing::debug!(id, rect = %cover.rect, "transition: the corner's cover goes to the strip ahead of the pictures");
+                    strip_model::cover_corner_ahead(strip_model::CornerAhead { id, display, cover, under: t.under });
+                }
+                Err(why) if t.corner.is_some() => tracing::debug!(id, why, "transition: the corner's cover comes with the pictures"),
+                Err(_) => {}
+            }
+        }
         // An activation's keyboard goes at once, while the strip draws: macOS has activated
         // the app and raised its windows in the corner already, and typing right after ⌘Tab
         // must reach the window the switch focuses (8L). One bounded step (8L2); the whole

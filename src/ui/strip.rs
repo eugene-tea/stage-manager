@@ -464,6 +464,13 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     strip_model::set_presenter(|snapshot| {
         DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
+    // A switch's cover of the park corner, ahead of its transition (the main queue keeps
+    // their order). A strip busy just then draws none: the transition brings the cover.
+    strip_model::set_corner_presenter(|ahead| {
+        DispatchQueue::main().exec_async(move || {
+            with_strip_of(ahead.display, |s| s.cover_corner_ahead(ahead));
+        });
+    });
     tracing::info!(thumbnail_interval_ms, "strip installed");
 }
 

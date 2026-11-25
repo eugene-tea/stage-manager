@@ -378,6 +378,9 @@ pub enum Call {
     Present(Option<u64>),
     /// Full-size pictures of these windows taken at a switch, waited for.
     Shots(Vec<u32>),
+    /// A switch's cover of the park corner sent to the strip ahead of its transition (the
+    /// transition's id).
+    Corner(u64),
 }
 
 /// The strip as the desk plays it.
@@ -1901,6 +1904,12 @@ impl Desk {
         clock::test::advance(took);
         self.pictured(ids);
         took.as_millis() as u64
+    }
+
+    /// A switch's cover of the park corner handed to the strip ahead of transition `id`
+    /// (`strip_model::cover_corner_ahead`).
+    pub fn corner_ahead(&mut self, id: u64) {
+        self.call(Call::Corner(id));
     }
 
     /// Full-size pictures of windows `ids` reached the strip now: a switch's own, or the

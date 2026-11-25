@@ -28,7 +28,8 @@
 //! one of its window cross-fades to it, the window having hidden behind the older picture (or
 //! none: the window just goes, as before).
 //!
-//! **The order.** An activation's early focus (`Controller::focus_now`, the app already
+//! **The order.** The corner's cover where it can go ahead (below), an activation's early
+//! focus (`Controller::focus_now`, the app already
 //! active: macOS decided any Desktop change at the activation), then these pictures, then the
 //! transition to the strip; with no picture to take (every one fresh, nothing leaving, or
 //! captures off or not allowed: `switch_shots::may_take`) the strip is told first and draws
@@ -39,14 +40,23 @@
 //! them changes no picture, and the wait for them only delays the strip's start, never a
 //! focus.
 //!
-//! **Under the Corner engine** macOS has raised an activated app's windows in the park corner
-//! before the app hears of the activation, and the strip's cover of the corner comes with the
-//! transition: after a Dock click (nothing announced it) they show there for the pictures'
-//! time longer than before, 19 to 61 ms as above. ⌘Tab's pictures are taken at the switcher's
-//! key and a card's at its press, so those wait for none while they are fresh.
+//! **The corner's cover first** (round picture-wait). Where a hidden window waits in the park
+//! corner (the Corner engine), macOS has raised an activated app's windows there before the
+//! app hears of the activation, and the strip covers the corner for the switch
+//! ([`Transition::corner`]). That cover is the wallpaper's render or the desktop's still: it
+//! needs no picture of a window leaving. So it goes to the strip before the early focus and
+//! the pictures ([`corner_ahead`], `strip_model::cover_corner_ahead`), and the transition
+//! takes it over when it comes. Two cases keep it with the transition, as before: a window
+//! leaving that reaches the cover's rectangle (its picture is drawn over the cover, and is
+//! one of those being taken; the cover alone would paint the desktop over that window's
+//! corner), and a window that stays shown into the corner (a pinned one, 8L5) whose picture
+//! is being taken (the cover draws it from that picture; one fresh already is drawn at once).
+//! Until the pictures come the corner then shows what it did before the round: the raised
+//! windows' edge, for the pictures' time (19 to 61 ms as above).
 
 use std::time::Duration;
 
+use crate::engine::corner::corner_patch::SwitchCover;
 use crate::engine::geometry::Rect;
 use crate::platform::capture::Target;
 use crate::platform::switch_shots::{self, Taken};
@@ -108,6 +118,23 @@ impl Wanted {
     pub(super) fn none(&self) -> bool {
         self.targets.is_empty() || self.skipped.is_some()
     }
+}
+
+/// The park corner's cover of transition `t`, to send to the strip ahead of the pictures
+/// `wanted` (module docs, "The corner's cover first"), or why it waits for the transition:
+/// no cover, a window leaving that reaches the cover's rectangle (its picture goes over the
+/// cover, and is one of those being taken), or a window that stays shown into the corner
+/// whose picture is being taken (the cover draws it from that picture).
+pub(super) fn corner_ahead(t: &Transition, wanted: &Wanted) -> Result<SwitchCover, &'static str> {
+    let cover = t.corner.as_ref().ok_or("no cover of the corner")?;
+    let leaving = |w: &&crate::ui::strip_model::MovingWindow| t.minimized.is_none_or(|m| m.window != w.window.id);
+    if t.outgoing.iter().filter(leaving).any(|w| w.window.frame.intersect(&cover.rect).is_some()) {
+        return Err("a window leaving reaches the corner: its picture goes over the cover");
+    }
+    if cover.over.iter().any(|(id, _)| wanted.targets.iter().any(|t| t.id == *id)) {
+        return Err("a window that stays shown into the corner waits for its picture");
+    }
+    Ok(cover.clone())
 }
 
 /// Takes the pictures `wanted` of transition `id` now and waits for them ([`WAIT_MAX`] at
@@ -193,6 +220,39 @@ mod tests {
         // No cover of the corner (nothing arrives there, the Spaces engine): the outgoing ones only.
         let (none, _) = targets(&Transition { corner: None, ..t }, old);
         assert_eq!(none.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1]);
+    }
+
+    /// Round picture-wait: the corner's cover goes to the strip ahead of the pictures only
+    /// while it needs none of them: no window leaving under it, no window staying shown into
+    /// it whose picture is being taken.
+    #[test]
+    fn the_corners_cover_goes_ahead_only_while_it_needs_no_picture_being_taken() {
+        let rect = Rect::new(2499.0, 1348.0, 61.0, 92.0);
+        let cap = Rect::new(2240.0, 1120.0, 320.0, 320.0);
+        let cover = |over| Some(SwitchCover { screen: 1, rect, cap, picture: CoverPicture::Wallpaper, over });
+        let old = |_| Some(Duration::from_secs(40));
+        let wanted = |t: &Transition, age: &dyn Fn(u32) -> Option<Duration>| {
+            let (targets, fresh) = targets(t, age);
+            Wanted { targets, fresh, skipped: None }
+        };
+        // A window leaving in the middle of the screen: the cover goes ahead.
+        let t = Transition { outgoing: vec![moving(1)], incoming: vec![moving(9)], corner: cover(Vec::new()), ..Transition::default() };
+        assert_eq!(corner_ahead(&t, &wanted(&t, &old)).map(|c| c.rect), Ok(rect));
+        // One that reaches the cover's rectangle (a window filling the screen): with the transition.
+        let wide = MovingWindow { window: CardWindow { id: 2, pid: 1, frame: Rect::new(0.0, 25.0, 2560.0, 1385.0) }, ..MovingWindow::default() };
+        let filled = Transition { outgoing: vec![wide], ..t.clone() };
+        assert!(corner_ahead(&filled, &wanted(&filled, &old)).is_err());
+        // Minimized already (in the Dock): it covers nothing.
+        let minimized = Transition { minimized: Some(Minimized { window: 2, tile: None }), ..filled.clone() };
+        assert!(corner_ahead(&minimized, &wanted(&minimized, &old)).is_ok());
+        // A pinned window reaching the corner: ahead with its picture fresh, else with the transition.
+        let pinned = Transition { corner: cover(vec![(7, Rect::new(1800.0, 900.0, 740.0, 520.0))]), ..t.clone() };
+        assert!(corner_ahead(&pinned, &wanted(&pinned, &old)).is_err(), "its picture is being taken");
+        let fresh = |id| if id == 7 { Some(Duration::from_millis(80)) } else { old(id) };
+        assert!(corner_ahead(&pinned, &wanted(&pinned, &fresh)).is_ok(), "drawn from the picture just taken");
+        // No cover (nothing arrives in the corner, the Spaces engine).
+        let none = Transition { corner: None, ..t };
+        assert!(corner_ahead(&none, &wanted(&none, &old)).is_err());
     }
 
     /// With every picture fresh, or nothing leaving, nothing is waited for: the strip is told

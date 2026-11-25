@@ -18,7 +18,8 @@ use super::*;
 use crate::platform::fake::{Call, Desk};
 
 /// The calls made of the platform so far, in short words, in order: `shots` (full-size
-/// pictures of windows taken at the switch and waited for), `strip` (a transition presented),
+/// pictures of windows taken at the switch and waited for), `corner` (the park corner's cover
+/// sent to the strip ahead of the transition), `strip` (a transition presented),
 /// `park` and `show` (a frame set into or out of the park zone), `space` (windows put into a
 /// Space), `raise`, `main`, `front` (an app made frontmost).
 fn calls(b: &mut Bench) -> String {
@@ -30,6 +31,7 @@ fn calls(b: &mut Bench) -> String {
             Call::Present(Some(_)) => Some("strip".to_string()),
             Call::Present(None) => None,
             Call::Shots(ids) => Some(format!("shots {ids:?}")),
+            Call::Corner(_) => Some("corner".to_string()),
             Call::Frame(id, r) if parks.parks(r) => Some(format!("park {id}")),
             Call::Frame(id, _) => Some(format!("show {id}")),
             Call::IntoSpace(_, ids) => Some(format!("space {ids:?}")),
@@ -162,6 +164,28 @@ fn dock_click_pictures(engine: EngineKind, load: f64) -> Run {
 
 fn dock_click_pictures_corner(load: f64) -> Run {
     dock_click_pictures(EngineKind::Corner, load)
+}
+
+/// Round picture-wait, the corner's cover first: the same Dock click with Bravo's window, the
+/// one leaving, filling the screen down into the park corner. Its picture goes over the
+/// cover and is the one being taken, so the cover is not sent ahead (no `corner` call): it
+/// comes with the transition, as before the round.
+fn dock_click_window_in_the_corner(load: f64) -> Run {
+    let mut b = Bench::new(EngineKind::Corner, DEFAULTS, 1.0, 1, |d| {
+        d.add_app(A, "com.example.alpha", "Alpha");
+        d.add_app(B, "com.example.bravo", "Bravo");
+        d.add_window(11, A, frame(1), D1);
+        let screen = d.screens[0].display.frame;
+        d.add_window(12, B, screen, D1);
+        d.front = Some(B);
+    });
+    b.advance(3000);
+    b.desk(|d| d.corner_covers = true);
+    start(&mut b, load);
+    b.dock_click(A, 90);
+    b.advance(3000);
+    let out = played(&mut b);
+    Run::of(&b, out)
 }
 
 /// The same Dock click with window captures off or not allowed (no Screen Recording, the
@@ -393,9 +417,19 @@ fn pinned_strip_never() {
 /// a Dock click, its pictures (Corner).
 #[test]
 fn pinned_dock_click_pictures_corner() {
+    // Round picture-wait: the corner's cover goes to the strip first, before the early focus
+    // and the pictures ('main 11, front 101, shots [12], strip' until then).
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; corner, main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(dock_click_pictures_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; corner, main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
+/// a Dock click, a window leaving in the corner (Corner).
+#[test]
+fn pinned_dock_click_window_in_the_corner() {
     let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
     // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
-    expect(dock_click_pictures_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+    expect(dock_click_window_in_the_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
 }
 
 /// a Dock click, captures off (Corner).
@@ -435,9 +469,9 @@ fn pinned_cmd_tab_quick_spaces() {
 /// ⌘Tab held 0.7 s, its pictures.
 #[test]
 fn pinned_cmd_tab_held() {
-    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; corner, main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
     // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
-    expect(cmd_tab_held, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+    expect(cmd_tab_held, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; corner, main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
 }
 
 /// a card click, its pictures fresh from the press.
@@ -546,6 +580,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("a card click, the strip 200 ms late", "strip_model::wait_cover, COVER_TIMEOUT", strip_late),
     ("a Dock click, its pictures (Corner)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_corner),
     ("a Dock click, its pictures (Spaces)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_spaces),
+    ("a Dock click, a window leaving in the corner (Corner)", "controller/switch_pictures.rs corner_ahead", dock_click_window_in_the_corner),
     ("a Dock click, captures off (Corner)", "platform/switch_shots.rs may_take", dock_click_captures_off),
     ("⌘Tab let go at once, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_quick),
     ("⌘Tab let go at once, its pictures (Spaces)", "controller/switch_pictures.rs FRESH", cmd_tab_quick_spaces),

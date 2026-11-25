@@ -7,7 +7,9 @@
 //! and the whole file at the merge with round switch-pictures, whose pictures taken at the
 //! switch show in the calls of 11 scenarios as `shots [ids]` and nowhere else, move one cause
 //! chain at load 3 to its reading at load 10 with the same outcome ("an app focuses its other
-//! window after our focus"), and add five scenarios of their own).
+//! window after our focus"), and add five scenarios of their own; and the lines of round
+//! picture-wait as each step changed them: `corner` among the calls where the park corner's
+//! cover goes to the strip ahead of the pictures, and one scenario where it does not).
 //! A Mac where the reads do not work behaves as before. Beside each
 //! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!
