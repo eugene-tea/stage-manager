@@ -24,6 +24,8 @@ pub(super) struct Run {
     pub(super) story: String,
     /// What each focus and activation notice came to, in order.
     pub(super) trail: Vec<String>,
+    /// The window engine the scenario ran.
+    pub(super) engine: EngineKind,
     /// The shadow's count since the launch: how often the model's Desktop shown and the
     /// window server's listing disagreed (`ctl state`'s `desks.disagree.shown_begun`).
     pub(super) disagreed: u64,
@@ -34,7 +36,7 @@ pub(super) struct Run {
 
 impl Run {
     pub(super) fn of(b: &Bench, outcome: String) -> Self {
-        Self { outcome, margins: b.margins(), story: b.story(), trail: b.trail(), disagreed: b.disagreed().0, homes: b.c.desks_json()["disagree"]["homes"].as_u64().unwrap_or(0) }
+        Self { outcome, engine: b.c.engine.kind(), margins: b.margins(), story: b.story(), trail: b.trail(), disagreed: b.disagreed().0, homes: b.c.desks_json()["disagree"]["homes"].as_u64().unwrap_or(0) }
     }
 }
 

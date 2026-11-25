@@ -499,6 +499,11 @@ pub struct Desk {
     /// The window server's listing names no Space shown (`SLSCopyManagedDisplaySpaces` with
     /// no "Current Space"): the controller's listing is not readable.
     pub listing_unreadable: bool,
+    /// The window server's Desktop reads answer on this desk (`platform/desk_reads.rs`: the
+    /// listing and a window's Spaces, under every engine). False: a macOS where they do not
+    /// (the calls gone, or the test switch that forces the fallback): Desktops are told apart
+    /// by the windows on screen, as before the reads.
+    pub desk_reads: bool,
     /// macOS's own windows listed above the apps' (Mission Control's covers, Show Desktop's).
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
@@ -669,6 +674,7 @@ impl Desk {
             flip_leads_notice: false,
             leaving_lingers_ms: 0.0,
             listing_unreadable: false,
+            desk_reads: true,
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
             made_for: BTreeMap::new(),

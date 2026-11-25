@@ -51,6 +51,7 @@ use crate::ui::strip_model::StripEvent;
 
 mod causes;
 mod desktops;
+mod guessed;
 mod screens;
 mod scenarios;
 mod switch;
@@ -111,6 +112,10 @@ impl Bench {
         crate::engine::attribution::trail::start();
         let mut desk = Desk::new(desktops, load);
         setup(&mut desk);
+        if engine == EngineKind::Corner && guessed::forced() {
+            // The fallback, pinned ([`guessed`]): the window server's Desktops are not read.
+            desk.desk_reads = false;
+        }
         let home = desk.home.clone();
         let displays = desk.displays();
         let apps = desk.running();

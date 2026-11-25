@@ -55,8 +55,8 @@ fn order(b: &Bench, base: (u64, u64, u64)) -> String {
 /// Space" flips, as measured 11-21 (24 of 24); else the flip comes first, with the leaving
 /// Desktop's windows going from the list.
 /// `server`: the window server tells its own notice of the change's end (1401), with the flip.
-fn desktop_keys(load: f64, notice_first: bool, server: bool) -> Run {
-    let mut b = both_desktops_known(EngineKind::Spaces, load, |d| d.server_notices = server);
+fn desktop_keys(engine: EngineKind, load: f64, notice_first: bool, server: bool) -> Run {
+    let mut b = both_desktops_known(engine, load, |d| d.server_notices = server);
     let (base, read) = (b.disagreed(), b.keyed());
     b.desk(|d| d.flip_leads_notice = !notice_first);
     b.go_to_desktop(D2, true);
@@ -70,22 +70,30 @@ fn desktop_keys(load: f64, notice_first: bool, server: bool) -> Run {
 }
 
 fn desktop_keys_notice_first(load: f64) -> Run {
-    desktop_keys(load, true, false)
+    desktop_keys(EngineKind::Spaces, load, true, false)
+}
+
+fn desktop_keys_notice_first_corner(load: f64) -> Run {
+    desktop_keys(EngineKind::Corner, load, true, false)
 }
 
 fn desktop_keys_flip_first(load: f64) -> Run {
-    desktop_keys(load, false, false)
+    desktop_keys(EngineKind::Spaces, load, false, false)
+}
+
+fn desktop_keys_flip_first_corner(load: f64) -> Run {
+    desktop_keys(EngineKind::Corner, load, false, false)
 }
 
 fn desktop_keys_server_tells(load: f64) -> Run {
-    desktop_keys(load, true, true)
+    desktop_keys(EngineKind::Spaces, load, true, true)
 }
 
 /// A Desktop change whose notice never comes (`controller.rs`, `check_spaces`: "a Space
 /// change went unseen"): ⌃→ to Desktop 2, `activeSpaceDidChangeNotification` lost.
 /// `server`: the window server tells its own notice of the change's end (1401).
-fn flip_with_no_notice(load: f64, server: bool) -> Run {
-    let mut b = both_desktops_known(EngineKind::Spaces, load, |d| d.server_notices = server);
+fn flip_with_no_notice(engine: EngineKind, load: f64, server: bool) -> Run {
+    let mut b = both_desktops_known(engine, load, |d| d.server_notices = server);
     let base = b.disagreed();
     b.go_to_desktop(D2, true);
     b.desk(|d| d.drop_queued(|n| matches!(n, Notice::SpaceChanged)));
@@ -96,17 +104,21 @@ fn flip_with_no_notice(load: f64, server: bool) -> Run {
 }
 
 fn flip_with_no_notice_server_tells(load: f64) -> Run {
-    flip_with_no_notice(load, true)
+    flip_with_no_notice(EngineKind::Spaces, load, true)
 }
 
 fn flip_with_no_notice_nothing_tells(load: f64) -> Run {
-    flip_with_no_notice(load, false)
+    flip_with_no_notice(EngineKind::Spaces, load, false)
+}
+
+fn flip_with_no_notice_corner(load: f64) -> Run {
+    flip_with_no_notice(EngineKind::Corner, load, false)
 }
 
 /// A Space change's notice with no change (another screen's Desktop that is not managed, a
 /// slide given up): nothing moves, and the stages are not held for long.
-fn notice_with_no_flip(load: f64) -> Run {
-    let mut b = both_desktops_known(EngineKind::Spaces, load, |_| {});
+fn notice_with_no_flip_on(engine: EngineKind, load: f64) -> Run {
+    let mut b = both_desktops_known(engine, load, |_| {});
     let base = b.disagreed();
     b.desk(|d| d.post(0.0, Notice::SpaceChanged));
     b.advance(1);
@@ -121,11 +133,19 @@ fn notice_with_no_flip(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+fn notice_with_no_flip(load: f64) -> Run {
+    notice_with_no_flip_on(EngineKind::Spaces, load)
+}
+
+fn notice_with_no_flip_corner(load: f64) -> Run {
+    notice_with_no_flip_on(EngineKind::Corner, load)
+}
+
 /// The window list read at the arrival shows both Desktops: the leaving Desktop's windows
 /// stay listed 250 ms past the flip (`controller.rs`, `arrival_waits`: "the list shows two
 /// Desktops at once (one still sliding)").
-fn both_desktops_listed_at_the_arrival(load: f64) -> Run {
-    let mut b = both_desktops_known(EngineKind::Spaces, load, |_| {});
+fn both_desktops_listed_at_the_arrival_on(engine: EngineKind, load: f64) -> Run {
+    let mut b = both_desktops_known(engine, load, |_| {});
     let base = b.disagreed();
     b.desk(|d| d.leaving_lingers_ms = 250.0);
     b.go_to_desktop(D2, true);
@@ -138,10 +158,18 @@ fn both_desktops_listed_at_the_arrival(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+fn both_desktops_listed_at_the_arrival(load: f64) -> Run {
+    both_desktops_listed_at_the_arrival_on(EngineKind::Spaces, load)
+}
+
+fn both_desktops_listed_at_the_arrival_corner(load: f64) -> Run {
+    both_desktops_listed_at_the_arrival_on(EngineKind::Corner, load)
+}
+
 /// The listing is not readable while Desktop 2 arrives (no "Current Space" in it), and is
 /// again after: the arrival goes by the windows, and the next good read agrees or corrects.
-fn listing_unreadable_for_one_arrival(load: f64) -> Run {
-    let mut b = both_desktops_known(EngineKind::Spaces, load, |_| {});
+fn listing_unreadable_for_one_arrival_on(engine: EngineKind, load: f64) -> Run {
+    let mut b = both_desktops_known(engine, load, |_| {});
     let base = b.disagreed();
     b.desk(|d| d.listing_unreadable = true);
     b.go_to_desktop(D2, true);
@@ -155,14 +183,22 @@ fn listing_unreadable_for_one_arrival(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+fn listing_unreadable_for_one_arrival(load: f64) -> Run {
+    listing_unreadable_for_one_arrival_on(EngineKind::Spaces, load)
+}
+
+fn listing_unreadable_for_one_arrival_corner(load: f64) -> Run {
+    listing_unreadable_for_one_arrival_on(EngineKind::Corner, load)
+}
+
 // ----- a Desktop never seen ------------------------------------------------------------------------
 
 /// The harsher shape of "the first visit to a Desktop by its key" (the bench's author,
 /// 11-21): the Desktop never visited has Charlie in front, an app the model knows no window
 /// of. macOS activates Charlie as the Desktop slides in; its window, found then, must not be
 /// placed on the Desktop being left.
-fn first_visit_to_an_unknown_apps_desktop(load: f64) -> Run {
-    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, load, 2, |d| {
+fn first_visit_to_an_unknown_apps_desktop_on(engine: EngineKind, load: f64) -> Run {
+    let mut b = Bench::new(engine, DEFAULTS, load, 2, |d| {
         d.add_app(C, "com.example.charlie", "Charlie");
         d.add_window(14, C, frame(4), D2);
         two_apps(d);
@@ -178,14 +214,22 @@ fn first_visit_to_an_unknown_apps_desktop(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+fn first_visit_to_an_unknown_apps_desktop(load: f64) -> Run {
+    first_visit_to_an_unknown_apps_desktop_on(EngineKind::Spaces, load)
+}
+
+fn first_visit_to_an_unknown_apps_desktop_corner(load: f64) -> Run {
+    first_visit_to_an_unknown_apps_desktop_on(EngineKind::Corner, load)
+}
+
 // ----- membership ------------------------------------------------------------------------------------
 
 /// A window moved to another Desktop by hand (Mission Control's drag; `controller.rs`,
 /// `check_spaces`: "the windows were moved to another Desktop by hand"): Bravo's window, in
 /// front on Desktop 1, is put on Desktop 2. It leaves its stage here; on Desktop 2 it joins
 /// Bravo's stage there.
-fn window_moved_to_another_desktop(load: f64, server: bool) -> Run {
-    let mut b = both_desktops_known(EngineKind::Spaces, load, |d| d.server_notices = server);
+fn window_moved_to_another_desktop(engine: EngineKind, load: f64, server: bool) -> Run {
+    let mut b = both_desktops_known(engine, load, |d| d.server_notices = server);
     let base = b.disagreed();
     let home = b.space_of(12);
     b.desk(|d| d.space_moves(12, D2));
@@ -205,19 +249,23 @@ fn window_moved_to_another_desktop(load: f64, server: bool) -> Run {
 }
 
 fn window_moved_server_tells(load: f64) -> Run {
-    window_moved_to_another_desktop(load, true)
+    window_moved_to_another_desktop(EngineKind::Spaces, load, true)
 }
 
 fn window_moved_nothing_tells(load: f64) -> Run {
-    window_moved_to_another_desktop(load, false)
+    window_moved_to_another_desktop(EngineKind::Spaces, load, false)
+}
+
+fn window_moved_corner(load: f64) -> Run {
+    window_moved_to_another_desktop(EngineKind::Corner, load, false)
 }
 
 /// A window on every Desktop ("Assign To: All Desktops"; `engine/model/spaces.rs`,
 /// `STICKY_HOPS`): Charlie's window, in front on Desktop 1, is listed on both Desktops. Each
 /// Desktop key: whether the model counts it on every Desktop, and the stages of the Desktop
 /// shown.
-fn window_on_every_desktop(load: f64) -> Run {
-    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, load, 2, |d| {
+fn window_on_every_desktop_on(engine: EngineKind, load: f64) -> Run {
+    let mut b = Bench::new(engine, DEFAULTS, load, 2, |d| {
         d.add_app(A, "com.example.alpha", "Alpha");
         d.add_app(B, "com.example.bravo", "Bravo");
         d.add_app(C, "com.example.charlie", "Charlie");
@@ -239,14 +287,22 @@ fn window_on_every_desktop(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+fn window_on_every_desktop(load: f64) -> Run {
+    window_on_every_desktop_on(EngineKind::Spaces, load)
+}
+
+fn window_on_every_desktop_corner(load: f64) -> Run {
+    window_on_every_desktop_on(EngineKind::Corner, load)
+}
+
 // ----- full screen -----------------------------------------------------------------------------------
 
 /// A window into full screen and out (`engine/fullscreen.rs`, measured 10-12: "new synthetic
 /// Space ids minted on every toggle, the Desktop's id lost, its stages merged"): Bravo's
 /// window, in front, takes its green button twice. Inside: a full-screen app's Space (no
 /// strip). After: the Desktop it left, its stages as they were.
-fn full_screen_in_and_out(load: f64) -> Run {
-    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, load, 1, two_apps);
+fn full_screen_in_and_out_on(engine: EngineKind, load: f64) -> Run {
+    let mut b = Bench::new(engine, DEFAULTS, load, 1, two_apps);
     b.advance(3000);
     let (space, stages) = (b.space_shown(), b.stages());
     b.fullscreen(12, true);
@@ -269,14 +325,22 @@ fn full_screen_in_and_out(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+fn full_screen_in_and_out(load: f64) -> Run {
+    full_screen_in_and_out_on(EngineKind::Spaces, load)
+}
+
+fn full_screen_in_and_out_corner(load: f64) -> Run {
+    full_screen_in_and_out_on(EngineKind::Corner, load)
+}
+
 // ----- two screens -----------------------------------------------------------------------------------
 
 /// A second screen with two Desktops of its own; its Desktop changes (no notice names the
 /// screen whose Desktop changed: `controller.rs`, `arrive_others`). Only that screen
 /// arrives; the main screen's Desktop, its stages and its front stay as they are.
-fn another_screens_desktop_changes(load: f64) -> Run {
+fn another_screens_desktop_changes_on(engine: EngineKind, load: f64) -> Run {
     let far = |n: u32| Rect::new(1600.0 + 40.0 * f64::from(n), 120.0 + 30.0 * f64::from(n), 700.0, 450.0);
-    let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, 1.0, 1, |d| {
+    let mut b = Bench::new(engine, DEFAULTS, 1.0, 1, |d| {
         d.screen_comes_with(vec![50, 51]);
         d.add_app(C, "com.example.charlie", "Charlie");
         d.add_window(14, C, far(1), 50);
@@ -311,6 +375,14 @@ fn another_screens_desktop_changes(load: f64) -> Run {
         shadow(&b, (0, 0, 0))
     );
     Run::of(&b, out)
+}
+
+fn another_screens_desktop_changes(load: f64) -> Run {
+    another_screens_desktop_changes_on(EngineKind::Spaces, load)
+}
+
+fn another_screens_desktop_changes_corner(load: f64) -> Run {
+    another_screens_desktop_changes_on(EngineKind::Corner, load)
 }
 
 #[test]
@@ -419,4 +491,17 @@ pub(super) const ALL: &[Scenario] = &[
     ("a window on every Desktop (Spaces)", "engine/model/desks.rs Listed::every (before: STICKY_HOPS)", window_on_every_desktop),
     ("a window into full screen and out (Spaces)", "engine/fullscreen.rs, 10-12", full_screen_in_and_out),
     ("another screen's Desktop changes (Spaces)", "design r3 decision 9 (before: every screen arrived)", another_screens_desktop_changes),
+    // The same under the Corner engine (round corner-desktops): what each read with the
+    // Desktops guessed from the windows on screen is pinned in `guessed.txt`.
+    ("Desktop keys, the listing flips before the notice (Corner)", "the Spaces scenario's twin", desktop_keys_flip_first_corner),
+    ("Desktop keys, the notice 5 ms before the flip (Corner)", "the Spaces scenario's twin", desktop_keys_notice_first_corner),
+    ("a Desktop change whose notice never comes (Corner)", "the Spaces scenario's twin (before: FOREIGN_SETTLE)", flip_with_no_notice_corner),
+    ("a Space change's notice with no change (Corner)", "the Spaces scenario's twin", notice_with_no_flip_corner),
+    ("both Desktops listed at the arrival (Corner)", "the Spaces scenario's twin (before: MIXED_WAIT)", both_desktops_listed_at_the_arrival_corner),
+    ("the listing not readable for one arrival (Corner)", "the Spaces scenario's twin", listing_unreadable_for_one_arrival_corner),
+    ("the first visit to a Desktop with an unknown app in front (Corner)", "the Spaces scenario's twin", first_visit_to_an_unknown_apps_desktop_corner),
+    ("a window moved to another Desktop by hand (Corner)", "the Spaces scenario's twin (before: SPACE_CHECKS)", window_moved_corner),
+    ("a window on every Desktop (Corner)", "the Spaces scenario's twin (before: STICKY_HOPS)", window_on_every_desktop_corner),
+    ("a window into full screen and out (Corner)", "the Spaces scenario's twin", full_screen_in_and_out_corner),
+    ("another screen's Desktop changes (Corner)", "the Spaces scenario's twin (before: every screen arrived)", another_screens_desktop_changes_corner),
 ];
