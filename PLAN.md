@@ -175,6 +175,40 @@ order of events, can still go wrong. The bench first, then the live suite
   motions were measured on one screen with Reduce Motion off (UX-SPEC, "Measured on
   Apple's").
 
+## One way for every mode: what the audit of 11-25 found
+
+The rule: how windows are hidden is the mode's choice (Accessibility the default while the
+Spaces mode is proven; Spaces is to become the default). What the app captures is the same in
+every mode: the window server's own call first, wherever a check finds it working, and the
+public way as the fallback. Pictures follow the rule since 1.9. The items below are where the
+Accessibility mode was left behind for no reason of the mode.
+
+- **The window server's list of Desktops is read under the Spaces engine only.** Under the
+  Accessibility engine Desktops are still told apart by the windows on screen. Read there too
+  (with its own check that the call answers, and the guess as the fallback), it brings the
+  Desktop behaviours UX-SPEC lists for the Spaces engine and ends most of "What still decides
+  by time under the Accessibility engine", above. To be agreed first: the rule above is
+  stated for pictures, and this is a read.
+- **Mission Control's opening and a Desktop change's end are found by a 1 s poll** under the
+  Accessibility engine; the triggers that bring the look forward run under Spaces only (one,
+  the Dock's notice, is public). `mission_control_key_keeps_stage` is honoured under Spaces
+  only for the same reason.
+- **The housekeeping rests 0.75 s at most under the Accessibility engine**, 2 s under the
+  others, to keep the list the inert slivers' tap trusts fresh; each wake is a full pass.
+  Measure what the cap costs at rest, then keep that list fresh by something lighter. A show
+  still owed for a window that only waits for its Desktop also keeps the pace brisk there.
+- **⌘Tab to another Desktop arranges the stage on arrival**, in both modes, though the chosen
+  app is known before ⌘ is released (the Spaces engine's lend already follows it). Arranged
+  ahead, as a Dock click's is; UX-SPEC's "known gap" sentence then goes.
+- **A Dock click's arrangement is undone after 1 s** under the Accessibility engine, 3 s under
+  Spaces; the reason for 3 s (a busy Mac's late notice) is not the mode's. One cap; and
+  whether the Accessibility engine can arrange at the press as Spaces does.
+- **A hidden window found shown is given up after four tries** under the Accessibility engine
+  and then stays in view, counted hidden, with no card; the Spaces engine never gives up.
+- **Smaller.** The wait for a switch's pictures (160 ms) is sized for ScreenCaptureKit, not for
+  the window server's capture; the landing variants can be tried only with `engine = "spaces"`;
+  MODES.md's cost at rest quotes 11-14 and is to be measured again after the picture change.
+
 ## 2.0: new features
 
 - **A right-click menu on cards** (R4): Bring Here, New Stage, Keep on Every Stage, Name Stage…, Close

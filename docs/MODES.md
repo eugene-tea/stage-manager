@@ -36,7 +36,8 @@ them.
 | Works with apps that refuse or limit a window move | — | ✓ | ✓ |
 | Mission Control shows every stage's windows | ✓ | ◐ ⁵ | ✓ |
 | Pointer never moved by the app | ✓ | ✓ | — ⁶ |
-| Documented macOS interfaces only | ✓ | — ⁷ | ◐ ⁸ |
+| Windows moved and hidden through documented macOS interfaces only | ✓ | — ⁷ | ◐ ⁸ |
+| Window pictures: macOS's faster undocumented capture first, the documented one wherever it fails | ✓ | ✓ | — |
 | ***Cost at rest*** (test windows, nobody at the Mac) ⁹ | | | |
 | **Total, with the system's share** | **about 4.9 %** | **about 1.2 %** | — |
 | Stage Manager itself (what Activity Monitor shows) | 1.07 % | 0.35 % | — |

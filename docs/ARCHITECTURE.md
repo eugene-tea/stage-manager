@@ -39,13 +39,19 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   each screen shows and each window's Desktops, bound to the model's ids ("The window
   server's Desktops", below). A window reaches the engine only once it shows on a display. A
   check on the tick (every 250 ms while something happens, every 2 s at rest) catches Space
-  moves and missed notices. The Corner engine makes no SkyLight/CGS calls; the Spaces engine
-  does (below).
+  moves and missed notices. The Corner engine moves and hides no window through a SkyLight/CGS
+  call; the Spaces engine does (below).
+- **How windows are hidden and how they are pictured are two choices.** The first is the
+  engine's. The second is the same under every engine: the window server's own call first,
+  wherever it is there and works, and the public one as the fallback ("Window pictures",
+  below). No technique is an engine's only because its call is private.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`), unit tested: observations
   in, `Action`s out (`Hide`, `SetFrame`, `Raise`, `Focus`).
 - **Platform layer** (`src/platform`): AX, CGWindowList, ScreenCaptureKit, Carbon hotkeys,
-  NSWorkspace events, safety. Public APIs only, plus `_AXUIElementGetWindow`, under the
-  Corner engine; the Spaces engine adds SkyLight's Space calls, loaded at run time.
+  NSWorkspace events, safety. Windows are moved and hidden through public APIs only, plus
+  `_AXUIElementGetWindow`, under the Corner engine; the Spaces engine adds SkyLight's Space
+  calls, loaded at run time. Window pictures ask the window server's own capture first under
+  every engine and fall back to ScreenCaptureKit.
 - **UI** (`src/ui`): status item and menu, Settings, a strip panel per screen (CALayer
   cards), the motion overlay (just below floating windows; above everything only while a
   dragged window's card shows).
