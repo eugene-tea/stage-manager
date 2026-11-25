@@ -499,11 +499,16 @@ pub struct Desk {
     /// The window server's listing names no Space shown (`SLSCopyManagedDisplaySpaces` with
     /// no "Current Space"): the controller's listing is not readable.
     pub listing_unreadable: bool,
+    /// The listing's "Current Space" stays what it is whatever Desktop shows (never measured:
+    /// what a macOS that changed the listing might do): a listing there, and wrong.
+    pub listing_stuck: bool,
     /// The window server's Desktop reads answer on this desk (`platform/desk_reads.rs`: the
     /// listing and a window's Spaces, under every engine). False: a macOS where they do not
     /// (the calls gone, or the test switch that forces the fallback): Desktops are told apart
     /// by the windows on screen, as before the reads.
     pub desk_reads: bool,
+    /// The reads' health on this desk (`platform/desk_reads.rs`; the process's own in the app).
+    pub reads_health: crate::engine::desk_reads::Health,
     /// macOS's own windows listed above the apps' (Mission Control's covers, Show Desktop's).
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
@@ -674,7 +679,9 @@ impl Desk {
             flip_leads_notice: false,
             leaving_lingers_ms: 0.0,
             listing_unreadable: false,
+            listing_stuck: false,
             desk_reads: true,
+            reads_health: crate::engine::desk_reads::Health::new(),
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
             made_for: BTreeMap::new(),
@@ -1550,7 +1557,11 @@ impl Desk {
                 self.screens[screen].sliding_in = None;
                 self.screens[screen].sliding_to = None;
             }
-            Step::Flips { screen, to } => self.screens[screen].current = to,
+            Step::Flips { screen, to } => {
+                if !self.listing_stuck {
+                    self.screens[screen].current = to;
+                }
+            }
             Step::FullScreenSpace { screen, id, to, frame, ended } => {
                 if let Some(w) = self.windows.get_mut(&id) {
                     w.spaces = vec![to];

@@ -2060,12 +2060,14 @@ impl WindowEngine for SpacesEngine {
         SpacesEngine::lent(self, id.0)
     }
 
+    /// Through the reads' own layer, as under every engine (`platform/desk_reads.rs`: its
+    /// check, its fallback). The engine's own book-keeping reads stay on [`Sky`].
     fn desktops(&self) -> Option<Vec<ScreenDesks>> {
-        self.sky().map(Sky::displays)
+        crate::platform::desk_reads::desktops()
     }
 
     fn spaces_of(&self, id: WindowId) -> Option<Vec<u64>> {
-        self.sky().map(|sky| sky.spaces_of(&[id.0]))
+        crate::platform::desk_reads::spaces_of(id.0)
     }
 
     fn home_of(&self, id: WindowId) -> Option<u64> {

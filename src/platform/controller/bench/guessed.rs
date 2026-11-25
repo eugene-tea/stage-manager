@@ -1,7 +1,9 @@
 //! The fallback, pinned: with the window server's Desktops not read
 //! ([`crate::platform::fake::Desk::desk_reads`] false), every scenario that runs the Corner
-//! engine reads as it did before the Corner engine read them (1.9.2; `guessed.txt`, printed
-//! from the code as it stood then). A Mac where the reads do not work behaves as before.
+//! engine reads as it did before the Corner engine read them (1.9.2; `guessed.txt`: its
+//! first 50 lines printed from the code as it stood then, a scenario added since printed
+//! with the reads off). A Mac where the reads do not work behaves as before. Beside each
+//! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!
 //! Print the file again only when a scenario is added or its script changes:
 //! `BENCH_PRINT=1 cargo test --lib guessed::print_pins -- --nocapture`.

@@ -6,7 +6,7 @@
 //! ([`Bench::disagreed`]: the model against the window server's listing, through the
 //! bindings). Where a load changes an outcome the assertion is marked `// TIME DECIDES:`.
 
-use super::scenarios::{A, B, C, D1, D2, Run, Scenario, both_desktops_known, expect, seen, two_apps};
+use super::scenarios::{A, B, C, D1, D2, LOADS, Run, Scenario, both_desktops_known, expect, seen, two_apps};
 use super::*;
 
 /// Time moves on, 10 ms at a time, until `done` (`max_ms` at most): how long it took.
@@ -295,6 +295,66 @@ fn window_on_every_desktop_corner(load: f64) -> Run {
     window_on_every_desktop_on(EngineKind::Corner, load)
 }
 
+/// A hidden window moved to another Desktop by hand, under the Corner engine: Alpha's window
+/// on Desktop 1, in the park corner, is on its Desktop for Mission Control, which shows it
+/// and lets it be dragged to Desktop 2 (UX-SPEC, "Known gaps": "in the default mode it
+/// moves"). It leaves its stage here; on Desktop 2 it joins Alpha's stage there.
+fn hidden_window_moved_corner(load: f64) -> Run {
+    let mut b = both_desktops_known(EngineKind::Corner, load, |_| {});
+    let base = b.disagreed();
+    let home = b.space_of(11);
+    assert!(b.hidden().contains(&11), "the start: Alpha's window on Desktop 1 is hidden:\n{}", b.story());
+    b.desk(|d| d.space_moves(11, D2));
+    let left = match until(&mut b, 9000, |b| b.space_of(11) != home) {
+        None => "never",
+        Some(0..=2500) => "within 2.5 s",
+        Some(2501..=3500) => "within 3.5 s",
+        Some(_) => "later",
+    };
+    b.advance(4000);
+    let here = format!("stages {:?} {}", b.stages(), seen(&mut b));
+    b.go_to_desktop(D2, true);
+    b.advance(6000);
+    let out = format!("left its stage {left}; here: {here}; there: stages {:?} {}; {}", b.stages(), seen(&mut b), shadow(&b, base));
+    Run::of(&b, out)
+}
+
+// ----- the reads' own check --------------------------------------------------------------------------
+
+/// The listing is there and wrong (never measured: what a macOS update might do): its
+/// "Current Space" stays Desktop 1 while the person goes to Desktop 2 by its key and stays.
+/// The reads disagree with the windows on screen at three looks and rest; Desktop 2 is then
+/// recognized by its windows, as before the reads. Ten minutes on the listing is right
+/// again: it decides again once a look agreed.
+fn listing_stuck_corner(load: f64) -> Run {
+    let mut b = both_desktops_known(EngineKind::Corner, load, |_| {});
+    let reads = |b: &Bench| b.c.desks_json()["reads"]["state"].as_str().unwrap_or("none").to_string();
+    let start = reads(&b);
+    b.desk(|d| d.listing_stuck = true);
+    b.go_to_desktop(D2, true);
+    let took = until(&mut b, 20_000, |b| b.space_shown() == b.space_of(13));
+    let rested = reads(&b);
+    b.advance(4000);
+    let there = seen(&mut b);
+    b.desk(|d| {
+        d.listing_stuck = false;
+        d.screens[0].current = D2;
+    });
+    b.advance(crate::engine::desk_reads::OFF_FOR.as_millis() as u64 + 5000);
+    let after = reads(&b);
+    b.go_to_desktop(D1, true);
+    b.advance(6000);
+    let recognized = match took {
+        None => "never",
+        Some(0..=1000) => "within 1 s",
+        Some(1001..=6000) => "within 6 s",
+        Some(6001..=12_000) => "within 12 s",
+        Some(_) => "later",
+    };
+    let out = format!("reads {start}; Desktop 2 recognized {recognized}, reads {rested}; there: {there}; ten minutes on reads {after}; back: {}", seen(&mut b));
+    Run::of(&b, out)
+}
+
 // ----- full screen -----------------------------------------------------------------------------------
 
 /// A window into full screen and out (`engine/fullscreen.rs`, measured 10-12: "new synthetic
@@ -475,6 +535,88 @@ fn full_screen() {
     expect(full_screen_in_and_out, [want, want, want]);
 }
 
+// ----- the same under the Corner engine (round corner-desktops) -------------------------------------
+//
+// Each reads as its Spaces twin does. What each read before, with the Desktops guessed from
+// the windows on screen, is pinned in `guessed.txt` (the fallback) and told here.
+
+#[test]
+fn corner_desktop_keys_and_changes_with_no_notice() {
+    let keys = "there: front [13] shows [13] desktop 2 app 101 switches 0 slides 1; back: front [12] shows [12] desktop 1 app 102 switches 0 slides 2";
+    let agreed = "shadow 0 shown (0 open) 0 homes";
+    // Before: the same for a person.
+    let read_at_once = format!("{keys}; waited for the flip 0, taken before the notice 0, notices after 0; {agreed}");
+    expect(desktop_keys_flip_first_corner, [&read_at_once, &read_at_once, &read_at_once]);
+    let waited = format!("{keys}; waited for the flip 2, taken before the notice 0, notices after 0; {agreed}");
+    expect(desktop_keys_notice_first_corner, [&waited, &read_at_once, &read_at_once]);
+    // Before: FOREIGN_SETTLE, two looks a second apart ("within 2 s"), and at load 1 and 3 the
+    // activation of Desktop 2's front app, held for the slide, was decided for the Desktop
+    // left: a switch there and macOS slid back (front [11] on Desktop 1).
+    let ticked = "Desktop 2 recognized within 1 s; front [13] shows [13] desktop 2 app 101 switches 0 slides 0; shadow 0 shown (0 open) 0 homes";
+    // At load 10 a look falls at the slide's end: sooner, the same end.
+    let sooner = "Desktop 2 recognized by the slide's end; front [13] shows [13] desktop 2 app 101 switches 0 slides 0; shadow 0 shown (0 open) 0 homes";
+    expect(flip_with_no_notice_corner, [ticked, ticked, sooner]);
+    // Before: "settled at once" (the arrival guessed the same Desktop again). Now the
+    // listing is waited for, FLIP_WAIT (a cap, 300 ms), and nothing arrives.
+    let nothing = "settled within 0.5 s; front [12] shows [12] desktop 1 app 102 switches 0 slides 1; shadow 0 shown (0 open) 0 homes";
+    expect(notice_with_no_flip_corner, [nothing, nothing, nothing]);
+}
+
+#[test]
+fn corner_both_desktops_listed_a_listing_not_readable_and_a_first_visit() {
+    let keys = "there: front [13] shows [13] desktop 2 app 101 switches 0 slides 1; back: front [12] shows [12] desktop 1 app 102 switches 0 slides 2; shadow 0 shown (0 open) 0 homes";
+    let at_the_end = format!("Desktop 2 recognized by the slide's end; {keys}");
+    // Before: MIXED_WAIT ("within 1 s"). The windows of the Desktop left, parked ones too,
+    // are on their own Desktop by the window server's word and left out.
+    expect(both_desktops_listed_at_the_arrival_corner, [&at_the_end, &at_the_end, &at_the_end]);
+    // The arrival goes by the windows, as before; the next good read agrees (a parked window
+    // is listed on screen with its Desktop, so the guess finds the Space it knows).
+    expect(listing_unreadable_for_one_arrival_corner, [&at_the_end, &at_the_end, &at_the_end]);
+    // Before: Charlie's stage came in front with a switch in view after the arrival, and
+    // another on the way back (switches 1 each).
+    let right = "there: front [14] shows [14] desktop 2 app 103 switches 0 slides 1; Charlie's window placed on its own Desktop; back: front [12] shows [12] desktop 1 app 102 switches 0 slides 2; shadow 0 shown (0 open) 0 homes";
+    expect(first_visit_to_an_unknown_apps_desktop_corner, [right, right, right]);
+}
+
+#[test]
+fn corner_a_window_moved_and_a_window_on_every_desktop() {
+    // Before: SPACE_CHECKS, two looks ("within 3.5 s").
+    let moved = "left its stage within 2.5 s; here: front [] shows [] desktop 1 app 102 switches 0 slides 0; there: stages [[12, 15], [13]] front [12, 15] shows [12, 15] desktop 2 app 102 switches 0 slides 1; shadow 0 shown (0 open) 0 homes";
+    expect(window_moved_corner, [moved, moved, moved]);
+    // A hidden one, in the park corner of its Desktop: Mission Control shows it and it can be
+    // dragged. Asked for its Desktop as a shown one is (before: SPACE_CHECKS too).
+    let hidden = "left its stage within 2.5 s; here: stages [[12]] front [12] shows [12] desktop 1 app 102 switches 0 slides 0; there: stages [[11, 13], [15]] front [11, 13] shows [11, 13] desktop 2 app 101 switches 0 slides 1; shadow 0 shown (0 open) 0 homes";
+    expect(hidden_window_moved_corner, [hidden, hidden, hidden]);
+    // Before: STICKY_HOPS, a stage of its own on each Desktop in turn for two arrivals.
+    let every = "2: every stages [[13], [15]] shows [14, 15]; 1: every stages [[11]] shows [14]; 2: every stages [[13], [15]] shows [14, 15]; 1: every stages [[11]] shows [14]; shadow 0 shown (0 open) 0 homes";
+    expect(window_on_every_desktop_corner, [every, every, every]);
+}
+
+#[test]
+fn corner_full_screen_and_another_screens_desktop() {
+    // Before: the same (the kind of Space was asked of the window, through Accessibility).
+    let want = "full screen seen within 1 s, still true; the Desktop back within 1 s, its stages kept true; front [12] shows [12] desktop 1 app 102 switches 0 slides 2; shadow 0 shown (0 open) 0 homes";
+    expect(full_screen_in_and_out_corner, [want, want, want]);
+    // Before: every screen arrived at the notice, the second screen's Desktop was not
+    // recognized by its one window, and the main screen's hidden stage was brought out
+    // (shows [11, 12]).
+    let only = "the second screen shows window 16's Desktop true; arrivals 1; the main screen's Desktop kept true; front [12] shows [12, 16] desktop 1 app 102 switches 0 slides 1; shadow 0 shown (0 open) 0 homes";
+    expect(another_screens_desktop_changes_corner, [only, only, only]);
+}
+
+#[test]
+fn a_listing_that_is_there_and_wrong_rests_and_the_guess_takes_over() {
+    // The notice finds no flip (FLIP_WAIT), which brings the reads' check to the next looks:
+    // three disagree, the reads rest, and the Desktop is recognized by its windows as before
+    // the reads (FOREIGN_SETTLE). Once the listing is right again it decides again.
+    let want = "reads working; Desktop 2 recognized within 6 s, reads resting; there: front [13] shows [13] desktop 2 app 101 switches 0 slides 1; ten minutes on reads working; back: front [12] shows [12] desktop 1 app 102 switches 0 slides 2";
+    for load in LOADS {
+        let run = listing_stuck_corner(load);
+        assert_eq!(run.outcome, want, "at load {load}:\n{}", run.story);
+        assert_eq!(run.rests, 1, "at load {load}: one rest");
+    }
+}
+
 /// Every scenario here, for the load table.
 pub(super) const ALL: &[Scenario] = &[
     ("Desktop keys, the listing flips before the notice (Spaces)", "a slow main thread; the desk before 11-21", desktop_keys_flip_first),
@@ -504,4 +646,6 @@ pub(super) const ALL: &[Scenario] = &[
     ("a window on every Desktop (Corner)", "the Spaces scenario's twin (before: STICKY_HOPS)", window_on_every_desktop_corner),
     ("a window into full screen and out (Corner)", "the Spaces scenario's twin", full_screen_in_and_out_corner),
     ("another screen's Desktop changes (Corner)", "the Spaces scenario's twin (before: every screen arrived)", another_screens_desktop_changes_corner),
+    ("a hidden window moved to another Desktop by hand (Corner)", "UX-SPEC, Known gaps (before: SPACE_CHECKS)", hidden_window_moved_corner),
+    ("the listing stuck on the Desktop left (Corner)", "engine/desk_reads.rs, the reads' check", listing_stuck_corner),
 ];

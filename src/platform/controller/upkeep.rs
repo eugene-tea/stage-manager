@@ -118,6 +118,10 @@ impl Controller {
                     Some("shows owed")
                 } else if self.corner.patch_fast_until.is_some_and(|t| now < t) {
                     Some("the corner patch after a focus")
+                } else if self.phase.frames_settling(now) {
+                    // The park corner is judged by frames, the slide's for a moment after a
+                    // Desktop arrives: as brisk as before the listing named arrivals.
+                    Some("frames settle after a Space change")
                 } else {
                     None
                 }
