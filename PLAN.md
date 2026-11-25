@@ -177,18 +177,19 @@ order of events, can still go wrong. The bench first, then the live suite
 
 ## One way for every mode: what the audit of 11-25 found
 
-The rule: how windows are hidden is the mode's choice (Accessibility the default while the
-Spaces mode is proven; Spaces is to become the default). What the app captures is the same in
-every mode: the window server's own call first, wherever a check finds it working, and the
-public way as the fallback. Pictures follow the rule since 1.9. The items below are where the
-Accessibility mode was left behind for no reason of the mode.
+The rule: the app works in layers (hiding windows, picturing them, reading where they are,
+hearing what macOS does), and each layer can go through a public interface or the window
+server's own. Every layer takes the window server's own by default, wherever a check finds it
+working, at launch and while running, and falls back to the public way when it is not (a
+macOS update, for one). The one layer not there yet is how windows are hidden: Accessibility
+stays the default while the Spaces mode is proven. Pictures follow the rule since 1.9. The
+items below are where the Accessibility mode was left behind for no reason of the mode.
 
 - **The window server's list of Desktops is read under the Spaces engine only.** Under the
   Accessibility engine Desktops are still told apart by the windows on screen. Read there too
   (with its own check that the call answers, and the guess as the fallback), it brings the
   Desktop behaviours UX-SPEC lists for the Spaces engine and ends most of "What still decides
-  by time under the Accessibility engine", above. To be agreed first: the rule above is
-  stated for pictures, and this is a read.
+  by time under the Accessibility engine", above.
 - **Mission Control's opening and a Desktop change's end are found by a 1 s poll** under the
   Accessibility engine; the triggers that bring the look forward run under Spaces only (one,
   the Dock's notice, is public). `mission_control_key_keeps_stage` is honoured under Spaces

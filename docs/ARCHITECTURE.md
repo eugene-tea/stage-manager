@@ -41,10 +41,13 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   check on the tick (every 250 ms while something happens, every 2 s at rest) catches Space
   moves and missed notices. The Corner engine moves and hides no window through a SkyLight/CGS
   call; the Spaces engine does (below).
-- **How windows are hidden and how they are pictured are two choices.** The first is the
-  engine's. The second is the same under every engine: the window server's own call first,
-  wherever it is there and works, and the public one as the fallback ("Window pictures",
-  below). No technique is an engine's only because its call is private.
+- **Layers, each with a private and a public way.** Hiding windows, picturing them, reading
+  where they are and hearing what macOS does are separate layers. How windows are hidden is
+  the engine's. Every other layer is the same under every engine: the window server's own
+  call first, wherever a check finds it there and working, and the public one as the fallback
+  (pictures today: "Window pictures", below; the reads and notices are still the Spaces
+  engine's only: PLAN, "One way for every mode"). No technique is an engine's only because
+  its call is private.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`), unit tested: observations
   in, `Action`s out (`Hide`, `SetFrame`, `Raise`, `Focus`).
 - **Platform layer** (`src/platform`): AX, CGWindowList, ScreenCaptureKit, Carbon hotkeys,
