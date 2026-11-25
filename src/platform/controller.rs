@@ -2248,11 +2248,14 @@ impl Controller {
                 None
             }
         };
+        // Read before the pictures: it says when the keyboard was routed, and the wait for the
+        // pictures comes after (live 11-25: read after them it said 168 ms for a Dock click,
+        // the pictures' 119 ms in it).
+        let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
         if let Some((t, wanted)) = waiting {
             switch_pictures::take(id, wanted);
             self.present_with(Some(Transition { sent: Some(clock::now()), ..t }));
         }
-        let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
         let asked = clock::now();
         let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
         let waited = clock::now().saturating_duration_since(asked);

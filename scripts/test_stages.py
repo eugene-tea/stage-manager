@@ -5169,7 +5169,11 @@ def quiet_listings_check(s):
     where they sit, and its picture is asked for as the pointer coming onto a card asks (a
     mouse-moved event handed to our own strip view; no timer takes it since round
     switch-pictures): pictures come, and at most one listing goes (a window's look read again,
-    every 20 s at most, or the desktop's still). Before the fix each round listed."""
+    every 20 s at most, or the desktop's still). Before the fix each round listed. A round
+    also reads one window's look that is due through ScreenCaptureKit, a listing each, and no
+    timer keeps the looks read any more: hovers first until one adds no listing (every look
+    read), then the three that are judged (live 11-25: without them, a listing at each of
+    the three hovers, the looks')."""
     if corner_only("no ScreenCaptureKit listing for a picture beside the app's parked windows"):
         return
     say("-- beside the app's parked windows: a picture without a ScreenCaptureKit listing (review 1.9, D-2)")
@@ -5182,12 +5186,22 @@ def quiet_listings_check(s):
     card = next((c for c in (strip_probe() or {}).get("cards", []) if c.get("planes")), None)
     if check(card is not None, "a card is drawn to hover"):
         box = glass_box(card["planes"][0]["plane"])
-        a = state().get("capture", {})
-        for _ in range(3):
+
+        def hover():
             strip_hover([box[0] + box[2] / 2, box[1] + box[3] / 2])
             time.sleep(1.2)
             strip_hover(None)
             time.sleep(0.6)
+
+        # The looks due are read first, one a round (8 rounds at most: under their 20 s).
+        for _ in range(8):
+            before = state().get("capture", {}).get("listings", 0)
+            hover()
+            if state().get("capture", {}).get("listings", 0) == before:
+                break
+        a = state().get("capture", {})
+        for _ in range(3):
+            hover()
         b = state().get("capture", {})
         check(b.get("listings", 0) - a.get("listings", 0) <= 1 and b.get("images", 0) > a.get("images", 0),
               f"Fixture 3 reaching the parked windows' corner: its pictures at three hovers come without a listing each "
