@@ -79,7 +79,9 @@ an app quits), capture (the one phase with window
 captures on: real thumbnails and snapshots, a popup sticking out of a window drawn beside it on
 its card as Apple's thumbnails show it, two overlapping windows landing as one picture (the
 one behind never through the one in front), no capture while the strip is hidden, no
-ScreenCaptureKit listing at rest beside an app's parked windows (Corner), and a quit
+window captured at rest, a switch by `ctl switch` and by a Dock click taking its pictures
+at the switch, no ScreenCaptureKit listing for a picture beside an app's parked windows
+(Corner), and a quit
 that waits for captures in flight), expose (Mission Control and App Exposé,
 typed through the app with the user's own shortcuts, never a Desktop change: every strip pane
 is Transient, the window server no longer lists the strip on screen while they show, and after Escape it is back on the same
@@ -5056,7 +5058,11 @@ def phase_capture():
     the window (popup_picture_check). A stage's two overlapping windows land as one picture
     (landing_blend_check). Its activation grows over the desktop's still (8L4: the
     switch's cover forced to the still, STAGE_MANAGER_COVER=desktop, so it is seen on any
-    desktop, icons in the corner or not)."""
+    desktop, icons in the corner or not). Round switch-pictures (11-25), under either engine:
+    at rest no window is captured (rest_takes_no_picture_check); a Dock click, which nothing
+    announces, takes the pictures of the windows leaving at the switch and plays them
+    (dock_click_pictures_check); a card click plays with pictures its press took or the switch
+    did (card_click_pictures_check). `ctl switch` moves the windows at once, with no pictures."""
     say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
     stop_app()
     stop_fixture()
@@ -5084,6 +5090,7 @@ def phase_capture():
     check("works" in ((cap.get("window_server") or {}).get("fast"), (cap.get("window_server") or {}).get("whole")),
           f"the window server takes pictures once ScreenCaptureKit's probe opened the gate ({cap.get('window_server')})")
     popup_picture_check(state())
+    rest_takes_no_picture_check()
     quiet_listings_check(state())
     for n in (2, 1):
         do("switch", n)
@@ -5094,21 +5101,25 @@ def phase_capture():
           f"pictures keep coming ({cap.get('images')} so far)")
     sharp_ghost_check()
     if not os.environ.get("SM_SKIP_LANDING"):
+        before = len(log_text())
         landing_blend_check()
+        card_click_pictures_check(log_text()[before:])
     captures_stop_with_strip_hidden()
 
     say("-- an activation grows over a still of the desktop (8L4: only desktop-level windows in it)")
     start_extra("a", 1)
     shown = wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's own stage, shown")
-    if check(shown is not None, "Alpha 1 opened a stage of its own, shown") and not corner_only("the desktop's still for a switch's cover of the corner"):
-        kept = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("age_ms") is not None else None)(state()),
-                          15, "a still of the desktop")
-        still = state().get("desktop_still") or {}
-        if check(kept is not None, f"a still of the desktop is kept for a switch's cover ({still})"):
-            say(f"    the still: {still.get('region')}, opaque (the desktop picture's window in it): {still.get('opaque')}")
-            time.sleep(0.5)
-            activation_grows_check("open", "fixture", "an activation of the fixture over the desktop's still",
-                                   at_once_ok=(), cover_still=True)
+    if check(shown is not None, "Alpha 1 opened a stage of its own, shown"):
+        if not corner_only("the desktop's still for a switch's cover of the corner"):
+            kept = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("age_ms") is not None else None)(state()),
+                              15, "a still of the desktop")
+            still = state().get("desktop_still") or {}
+            if check(kept is not None, f"a still of the desktop is kept for a switch's cover ({still})"):
+                say(f"    the still: {still.get('region')}, opaque (the desktop picture's window in it): {still.get('opaque')}")
+                time.sleep(0.5)
+                activation_grows_check("open", "fixture", "an activation of the fixture over the desktop's still",
+                                       at_once_ok=(), cover_still=True)
+        dock_click_pictures_check()
     stop_extra("a")
     stop_app()
     text = log_text()
@@ -5119,30 +5130,152 @@ def phase_capture():
         popup_over_check(over)
 
 
+# How long a rest is watched for captures (s): until 11-25 three of the Corner engine's 2 s rounds.
+REST_WATCH = 6.5
+
+
+def rest_takes_no_picture_check():
+    """Round switch-pictures (11-25): no full-size picture is kept fresh on a timer under either
+    engine (`[animation] snapshot_interval_ms` 0, the default) and the cards' come at events
+    (`[strip] thumbnail_interval_ms` 0), so with no switch and nothing moving on the strip no
+    window is captured: over REST_WATCH seconds `ctl state`'s `capture.images` (every window
+    picture, a switch's included) and `costs.captures` (windows a round asked for) stand still.
+    Until 11-25 the Corner engine took the front stage's windows every 2 s. At most one
+    ScreenCaptureKit listing goes meanwhile (the desktop's still for the corner patch, every
+    10 s; it is no window's picture). Hands off the Mac: the pointer coming onto a card takes
+    pictures, by design."""
+    say("-- at rest: no window is captured, under either engine (round switch-pictures)")
+    time.sleep(3.0)  # the pictures of the windows first asked for, and their looks, are in
+    x = state()
+    a, ca = x.get("capture", {}), (x.get("costs") or {}).get("captures")
+    time.sleep(REST_WATCH)
+    x = state()
+    b, cb = x.get("capture", {}), (x.get("costs") or {}).get("captures")
+    check(b.get("images") == a.get("images") and cb == ca and b.get("in_flight", 0) == 0,
+          f"at rest for {REST_WATCH} s: no window captured (pictures {a.get('images')} -> {b.get('images')}, "
+          f"asked by a round {ca} -> {cb}, in flight {b.get('in_flight')})")
+    check(b.get("listings", 0) - a.get("listings", 0) <= 1,
+          f"at rest for {REST_WATCH} s: no listing but the desktop's still's (listings {a.get('listings')} -> {b.get('listings')})")
+
+
 def quiet_listings_check(s):
     """Review 1.9, D-2 (the Corner engine): an app's parked windows are listed on screen at their
     full frames in the park corner; they are no children of each other nor of the app's window
-    shown, so at rest no ScreenCaptureKit listing goes for them. Fixture 3, shown, of the app
+    shown, so no ScreenCaptureKit listing goes for a picture of it. Fixture 3, shown, of the app
     whose Fixture 1 and 2 are parked, is stretched to the display's bottom-right corner, over
-    where they sit; over 6.5 s (three of the motion capturer's 2 s rounds) at most one listing
-    goes (a window's look read again, every 20 s at most). Before the fix each round listed."""
-    if corner_only("no ScreenCaptureKit listing at rest beside the app's parked windows"):
+    where they sit, and its picture is asked for as the pointer coming onto a card asks (a
+    mouse-moved event handed to our own strip view; no timer takes it since round
+    switch-pictures): pictures come, and at most one listing goes (a window's look read again,
+    every 20 s at most, or the desktop's still). Before the fix each round listed."""
+    if corner_only("no ScreenCaptureKit listing for a picture beside the app's parked windows"):
         return
-    say("-- at rest beside the app's parked windows: no ScreenCaptureKit listing (review 1.9, D-2)")
+    say("-- beside the app's parked windows: a picture without a ScreenCaptureKit listing (review 1.9, D-2)")
     wid = by_title(s)["Fixture 3"]["id"]
     vis, display = s["display"]["visible"], s["display"]["frame"]
     r = frames_of(["Fixture 3"])["Fixture 3"]
     x = max(r["x"], vis["x"] + s["strip_width"] + 20)
     ctl("debug-frame", wid, x, r["y"], display["x"] + display["w"] - x, vis["y"] + vis["h"] - r["y"])
-    time.sleep(3.0)  # the frame settles, a round after it
-    a = state().get("capture", {})
-    time.sleep(6.5)
-    b = state().get("capture", {})
-    check(b.get("listings", 0) - a.get("listings", 0) <= 1 and b.get("images", 0) > a.get("images", 0),
-          f"at rest, Fixture 3 reaching the parked windows' corner: pictures keep coming without a listing a round "
-          f"(listings {a.get('listings')} -> {b.get('listings')}, pictures {a.get('images')} -> {b.get('images')})")
+    time.sleep(3.0)  # the frame settles
+    card = next((c for c in (strip_probe() or {}).get("cards", []) if c.get("planes")), None)
+    if check(card is not None, "a card is drawn to hover"):
+        box = glass_box(card["planes"][0]["plane"])
+        a = state().get("capture", {})
+        for _ in range(3):
+            strip_hover([box[0] + box[2] / 2, box[1] + box[3] / 2])
+            time.sleep(1.2)
+            strip_hover(None)
+            time.sleep(0.6)
+        b = state().get("capture", {})
+        check(b.get("listings", 0) - a.get("listings", 0) <= 1 and b.get("images", 0) > a.get("images", 0),
+              f"Fixture 3 reaching the parked windows' corner: its pictures at three hovers come without a listing each "
+              f"(listings {a.get('listings')} -> {b.get('listings')}, pictures {a.get('images')} -> {b.get('images')})")
     ctl("debug-frame", wid, r["x"], r["y"], r["w"], r["h"])
     time.sleep(0.9)  # past the echo window
+
+
+def switch_pictures_of(log):
+    """What each switch in `log` did for its pictures (the app's `outgoing pictures taken at
+    the switch` lines, `platform/controller/switch_pictures.rs`), in order: the transition's
+    `id`, the windows `asked` for and those left out as `fresh`, the pictures that came in
+    time (`got`), how long the wait took (`ms`), and why nothing was asked (`skipped`, None
+    when it was)."""
+    out = []
+    for line in log.splitlines():
+        if "outgoing pictures taken at the switch" not in line:
+            continue
+        num = lambda name: int(m.group(1)) if (m := re.search(r"\b" + name + r"=(\d+)", line)) else None  # noqa: E731
+        skipped = m.group(1) if (m := re.search(r'\bskipped="?([^"]*)"?', line)) else None
+        out.append({"id": num("id"), "asked": num("asked"), "fresh": num("fresh"), "got": num("got"), "ms": num("ms"), "skipped": skipped})
+    return out
+
+
+# The longest a switch waits for its pictures (ms): `switch_pictures::WAIT_MAX`, and slack for
+# the log's own rounding.
+SWITCH_PICTURES_MAX_MS = 170
+
+
+def switch_pictures_verdict(shots, covered, announced=False):
+    """(ok, note) for the last switch in the app's log, from its lines: `shots`
+    ([`switch_pictures_of`]) and the `transition covered` lines. Ok when every picture asked
+    for came within the wait and the strip drew pictures over the windows leaving; and, for a
+    switch nothing announced (no press on a card, no ⌘Tab: no picture of the windows leaving
+    is fresh), when at least one was asked for. `announced`: a picture taken a moment before
+    counts too (`fresh`)."""
+    if not shots:
+        return False, "no line of the switch's pictures in the log"
+    last = shots[-1]
+    if last["skipped"] is not None:
+        return False, f"no picture asked for: {last['skipped']}"
+    drawn = any("outgoing: true" in c for c in covered)
+    asked, fresh = last["asked"] or 0, last["fresh"] or 0
+    wanted = asked >= 1 or (announced and fresh >= 1)
+    ok = wanted and last["got"] == asked and (last["ms"] or 0) <= SWITCH_PICTURES_MAX_MS and drawn
+    return ok, (f"asked {asked}, fresh {fresh}, in time {last['got']}, {last['ms']} ms "
+                f"(at most {SWITCH_PICTURES_MAX_MS}); drawn over the windows leaving: {drawn}")
+
+
+def switch_pictures_check(what, log, announced=False):
+    """Round switch-pictures (11-25), under either engine: a switch nothing announced takes the
+    pictures of the windows leaving at the switch, before the strip is told, and plays with
+    them ([`switch_pictures_verdict`]). `log`: the app's log from just before the switch."""
+    ok, note = switch_pictures_verdict(switch_pictures_of(log), [line for line in log.splitlines() if "transition covered" in line], announced)
+    return check(ok, f"{what}: its pictures are taken at the switch and played ({note})")
+
+
+def card_click_pictures_check(log):
+    """Round switch-pictures: every card click in `log` (the landing blend check's) played with
+    pictures of the windows leaving, the press's own (fresh at the click) or the switch's,
+    each within the wait; how many of each, and the switch's wait, are said for the record."""
+    shots = [x for x in switch_pictures_of(log) if x["skipped"] is None and (x["asked"] or 0) + (x["fresh"] or 0) >= 1]
+    if not shots:
+        return skip("a card click's pictures", "no card click switched with a window leaving")
+    late = [x for x in shots if x["got"] != x["asked"] or (x["ms"] or 0) > SWITCH_PICTURES_MAX_MS]
+    taken = [x for x in shots if (x["asked"] or 0) >= 1]
+    waits = sorted(x["ms"] or 0 for x in taken)
+    say(f"    {len(shots)} switches with a window leaving: {len(taken)} took pictures at the switch "
+        f"(waits {waits[:12]} ms), {len(shots) - len(taken)} had them fresh from the press")
+    return check(not late, f"a card click's pictures, the press's or the switch's, are all there within the wait ({late[:3]})")
+
+
+def dock_click_pictures_check():
+    """Round switch-pictures (11-25): a Dock click on Alpha, its stage hidden, nothing touched
+    for 1.5 s before (no picture of the windows in front is fresh, and a Dock click announces
+    nothing). It grows as any activation ([`activation_grows_check`]: under the Corner engine
+    also how long macOS's raise shows Alpha's window in the corner before the motion's cover,
+    150 ms at most, which now holds the pictures' time), and the pictures of the windows
+    leaving were taken at the switch ([`switch_pictures_check`])."""
+    say("-- a Dock click's switch takes its pictures at the switch (round switch-pictures)")
+    s = state()
+    if "Alpha 1" in active_titles(s):
+        # The fixture's stage in front first: Alpha's window waits hidden.
+        do("switch", by_title(s)["Fixture 3"]["home"])
+        if not check(wait_state(lambda x: "Alpha 1" not in active_titles(x), "the fixture's stage in front") is not None,
+                     "the fixture's stage in front, Alpha's hidden"):
+            return
+    time.sleep(1.5)
+    before = len(log_text())
+    if activation_grows_check("dock", "a", "a Dock click on Alpha", at_once_ok=()):
+        switch_pictures_check("a Dock click on Alpha", log_text()[before:])
 
 
 GHOST_LAYER = 4  # NSFloatingWindowLevel + 1: a dragged card's ghost panel
