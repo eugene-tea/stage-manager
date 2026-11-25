@@ -53,6 +53,7 @@ mod causes;
 mod corner_screens;
 mod desktops;
 mod guessed;
+mod looks;
 mod screens;
 mod scenarios;
 mod switch;
