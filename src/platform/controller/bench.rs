@@ -50,6 +50,7 @@ use crate::platform::{safety, windows};
 use crate::ui::strip_model::StripEvent;
 
 mod causes;
+mod corner_screens;
 mod desktops;
 mod guessed;
 mod screens;

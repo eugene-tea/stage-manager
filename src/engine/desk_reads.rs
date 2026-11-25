@@ -12,8 +12,9 @@
 //! 2. a read answers: every managed screen has an entry naming a Space shown (the
 //!    controller's `match_screens`, at every pass: a pass with none goes by the guess);
 //! 3. what is read agrees with a public fact ([`cross_check`]): of the windows the window
-//!    list shows on a screen, at least one is on the Space the listing says that screen
-//!    shows. A screen with no window says nothing.
+//!    list shows wholly on a screen, at least one is on the Space the listing says that
+//!    screen shows. A screen with no such window says nothing (one parked in the corner or
+//!    reaching past an edge is not counted).
 //!
 //! The third is looked at while nothing moves (no Space change, no overview, no drag), every
 //! [`CHECK_EVERY`], at the next look after a Space change's notice the listing answered with
@@ -22,8 +23,8 @@
 //! the rest they are read for the check alone ([`State::Probing`]) and decide again only once
 //! a look agreed, so a listing that stays wrong (after a macOS update) never decides again.
 //!
-//! What the check cannot see: a listing that names the wrong Desktop while no window is on
-//! screen.
+//! What the check cannot see: a listing that names the wrong Desktop while no window lies
+//! wholly on the screen.
 
 use std::time::{Duration, Instant};
 

@@ -2,7 +2,9 @@
 //! ([`crate::platform::fake::Desk::desk_reads`] false), every scenario that runs the Corner
 //! engine reads as it did before the Corner engine read them (1.9.2; `guessed.txt`: its
 //! first 50 lines printed from the code as it stood then, a scenario added since printed
-//! with the reads off). A Mac where the reads do not work behaves as before. Beside each
+//! with the reads off; "another screen's Desktop changes (Corner)" printed again when the
+//! desk learned to keep a second screen's parked windows on that screen, `fake::Desk::place`).
+//! A Mac where the reads do not work behaves as before. Beside each
 //! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!
 //! Print the file again only when a scenario is added or its script changes:
@@ -42,13 +44,13 @@ impl Drop for Forced {
 
 /// Every scenario of the bench.
 fn all() -> impl Iterator<Item = &'static Scenario> {
-    super::scenarios::ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL)
+    super::scenarios::ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL)
 }
 
 /// The pinned outcomes: a scenario's name, then its outcome at each load, tab-separated.
 const PINS: &str = include_str!("guessed.txt");
 
-fn pins() -> BTreeMap<&'static str, [&'static str; 3]> {
+pub(super) fn pins() -> BTreeMap<&'static str, [&'static str; 3]> {
     PINS.lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| {

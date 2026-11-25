@@ -57,9 +57,8 @@ use serde_json::{Value, json};
 
 use super::corner::unrestored::LetGo;
 use super::{Controller, launch_hints};
-use crate::engine::desk_reads::{self as desk_reads_check, Screen};
+use crate::engine::desk_reads::{self as desk_reads_check, Screen, Verdict};
 use crate::engine::desk_shadow::{self, Change, Shadow, Sight, Subject};
-use crate::engine::displays::display_of;
 use crate::engine::geometry::Rect;
 use crate::engine::margin;
 use crate::engine::spill;
@@ -124,6 +123,14 @@ pub(super) fn match_screens(screens: &[(DisplayId, Option<String>, bool)], list:
         out.push((*d, entry.clone()));
     }
     Some(Listing(out, list.iter().flat_map(|s| s.desks.iter().map(|d| d.id)).collect()))
+}
+
+/// True when a window at `bounds` lies wholly on the screen at `screen`: a window the
+/// reads' check counts for that screen. One that reaches beyond its edge (parked in the
+/// corner, dragged partly off, across two screens) says nothing of the Space the screen
+/// shows: with a screen beyond that edge, macOS may count it on either.
+fn wholly_on(bounds: Rect, screen: Rect) -> bool {
+    bounds.w > 0.0 && bounds.h > 0.0 && bounds.x >= screen.x && bounds.y >= screen.y && bounds.max_x() <= screen.max_x() && bounds.max_y() <= screen.max_y()
 }
 
 /// Each of `displays` as [`match_screens`] takes them: its id, its uuid from ColorSync, and
@@ -194,8 +201,8 @@ impl Controller {
     }
 
     /// The reads' check (`engine/desk_reads.rs`, 3), at a look while nothing moves: of the
-    /// windows the window list shows on each managed screen that shows a Desktop, one must
-    /// be on the Space the listing names there. Read whatever the reads' state (after a
+    /// windows the window list shows wholly on each managed screen that shows a Desktop
+    /// ([`wholly_on`]), one must be on the Space the listing names there. Read whatever the reads' state (after a
     /// rest they are read for this alone), one window at a time until one agrees, and only
     /// when a look is due. True when the reads rest from now: this look goes on by the guess.
     pub(super) fn check_reads(&mut self, ob: &Observer, list: &[windows::CgWindow], now: Instant) -> bool {
@@ -207,19 +214,27 @@ impl Controller {
         let Some(listing) = desk_reads::raw_desktops().and_then(|raw| match_screens(&screens_of(&displays), &raw)) else { return false };
         let rects: Vec<(DisplayId, Rect)> = displays.iter().map(|d| (d.id, d.frame)).collect();
         let mut screens: Vec<Screen> = Vec::new();
+        let mut asked: Vec<(u32, u32)> = Vec::new();
         for (d, current) in listing.shown() {
             let mut screen = Screen { current, windows: Vec::new() };
-            for w in list.iter().filter(|w| w.onscreen && w.layer == 0 && ob.window(w.id).is_some() && display_of(w.bounds, &rects) == Some(d)) {
+            let Some(frame) = rects.iter().find(|(id, _)| *id == d).map(|(_, r)| *r) else { continue };
+            for w in list.iter().filter(|w| w.onscreen && w.layer == 0 && ob.window(w.id).is_some() && wholly_on(w.bounds, frame)) {
                 let on = desk_reads::raw_spaces_of(&[w.id]).unwrap_or_default();
                 let agrees = on.contains(&current);
                 screen.windows.push(on);
+                asked.push((d.0, w.id));
                 if agrees {
                     break;
                 }
             }
             screens.push(screen);
         }
-        desk_reads::checked(desk_reads_check::cross_check(&screens), now)
+        let verdict = desk_reads_check::cross_check(&screens);
+        if let Verdict::Disagree(why) = verdict {
+            // Ids only: each screen's Space shown with its windows' Spaces, and the windows asked.
+            tracing::debug!(why, ?screens, ?asked, "desktops: the listing and the windows on screen disagree at this look");
+        }
+        desk_reads::checked(verdict, now)
     }
 
     /// The Desktop screen `d` shows for an arrival there, read now.
@@ -647,6 +662,19 @@ mod tests {
             desks: desks.iter().map(|&id| Desk { id, uuid: format!("D{id}") }).collect(),
             others: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_window_counts_for_the_screen_it_lies_wholly_on() {
+        let main = Rect::new(0.0, 0.0, 1440.0, 900.0);
+        assert!(wholly_on(Rect::new(200.0, 100.0, 700.0, 450.0), main));
+        assert!(wholly_on(main, main), "a window filling the screen");
+        // Parked in the bottom-right corner, a sliver on the screen: not counted.
+        assert!(!wholly_on(Rect::new(1436.0, 836.0, 700.0, 450.0), main));
+        // Reaching past an edge, towards a screen beyond or not.
+        assert!(!wholly_on(Rect::new(1000.0, 100.0, 700.0, 450.0), main));
+        assert!(!wholly_on(Rect::new(200.0, 600.0, 700.0, 450.0), main));
+        assert!(!wholly_on(Rect::new(0.0, 0.0, 0.0, 0.0), main));
     }
 
     #[test]

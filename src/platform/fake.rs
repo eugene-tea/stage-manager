@@ -1223,7 +1223,14 @@ impl Desk {
 
     /// Window `id` asked to sit at `frame`: where macOS leaves it, with its move notice.
     fn place(&mut self, id: u32, frame: Rect) {
-        let visible = self.screens[0].display.visible;
+        // The screen the frame is asked on (its left edge; the main one when on none): the
+        // title bar is kept on that screen, and a window on a Desktop that comes to another
+        // screen is on the Desktop that screen shows (macOS with "Displays have separate
+        // Spaces"; not measured here).
+        let screen = self.screens.iter().position(|s| frame.x >= s.display.frame.x && frame.x < s.display.frame.max_x()).unwrap_or(0);
+        let visible = self.screens[screen].display.visible;
+        let (theirs, shown) = (self.screens[screen].desktops.clone(), self.screens[screen].shown);
+        let desktops: Vec<u64> = self.screens.iter().flat_map(|s| s.desktops.iter().copied()).collect();
         let late = self.lists_moves_ms.map(|ms| clock::now() + self.at_load(ms));
         let listed = self.windows.get(&id).map(|w| self.listed(w).bounds);
         let Some(w) = self.windows.get_mut(&id) else { return };
@@ -1236,6 +1243,10 @@ impl Desk {
         }
         let (moved, resized) = (to.origin() != w.frame.origin(), to.size() != w.frame.size());
         w.frame = to;
+        if w.spaces.iter().any(|s| desktops.contains(s)) && !w.spaces.iter().any(|s| theirs.contains(s)) {
+            w.spaces.retain(|s| !desktops.contains(s));
+            w.spaces.push(shown);
+        }
         let pid = w.pid;
         self.call(Call::Frame(id, to));
         if moved {
