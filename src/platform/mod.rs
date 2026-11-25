@@ -20,6 +20,7 @@ pub mod controller;
 pub(crate) mod corner;
 pub(crate) mod costs;
 pub mod ctl;
+pub(crate) mod desk_reads;
 pub mod desktop;
 pub(crate) mod desktop_counts;
 pub(crate) mod desktop_items;

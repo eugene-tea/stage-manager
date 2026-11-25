@@ -4378,6 +4378,9 @@ impl Controller {
                 return;
             }
             Some(desktops::Flip::Unchanged) => {
+                // Right for a notice with no change; a listing that stopped following the
+                // Desktops would say the same, so the reads are checked at the next look.
+                super::desk_reads::suspect();
                 self.settled_by_listing("the listing never named another Space: no change", now);
                 self.present();
                 return;
@@ -5079,6 +5082,9 @@ impl Controller {
         if self.phase.fullscreen() {
             return;
         }
+        // The reads themselves against the window list, when a look is due: resting from
+        // now, this look goes on by the windows on screen.
+        let keyed = if self.check_reads(ob, &list, now) { None } else { keyed };
         // The model's Desktops against the window server's (design r3, slice 1: logs only).
         self.look_at_desks("check");
         // A window tab selected takes the place of the tab it hides, before the tab left is
@@ -5759,6 +5765,12 @@ impl Controller {
             let connected: Vec<DisplayId> = displays.iter().map(|d| d.id).collect();
             self.displays_added = returned_screens(&self.displays_added, settling, added, &connected);
             self.frames_display_changed(heard);
+            // Taken by the windows on screen where every stage's windows are listed with
+            // their Desktop ([`Self::display_change_guessed`]): the Desktops are bound again
+            // by the arrivals after it.
+            if let Some(m) = self.model.as_mut().filter(|m| m.hidden_on_their_desktop()) {
+                m.unbind_all();
+            }
         }
         // A screen gone (not one seen again under a new id): under the Spaces engine its hidden
         // windows are kept in their stages, on their own Desktops, before the model's batch

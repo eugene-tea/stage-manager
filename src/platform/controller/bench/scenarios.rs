@@ -24,6 +24,11 @@ pub(super) struct Run {
     pub(super) story: String,
     /// What each focus and activation notice came to, in order.
     pub(super) trail: Vec<String>,
+    /// The window engine the scenario ran.
+    pub(super) engine: EngineKind,
+    /// How often the window server's Desktop reads rested (`desks.reads.checks.rests`): the
+    /// reads' check found them disagreeing with the windows on screen.
+    pub(super) rests: u64,
     /// The shadow's count since the launch: how often the model's Desktop shown and the
     /// window server's listing disagreed (`ctl state`'s `desks.disagree.shown_begun`).
     pub(super) disagreed: u64,
@@ -34,7 +39,9 @@ pub(super) struct Run {
 
 impl Run {
     pub(super) fn of(b: &Bench, outcome: String) -> Self {
-        Self { outcome, margins: b.margins(), story: b.story(), trail: b.trail(), disagreed: b.disagreed().0, homes: b.c.desks_json()["disagree"]["homes"].as_u64().unwrap_or(0) }
+        let desks = b.c.desks_json();
+        let rests = desks["reads"]["checks"]["rests"].as_u64().unwrap_or(0);
+        Self { outcome, engine: b.c.engine.kind(), rests, margins: b.margins(), story: b.story(), trail: b.trail(), disagreed: b.disagreed().0, homes: b.c.desks_json()["disagree"]["homes"].as_u64().unwrap_or(0) }
     }
 }
 
@@ -50,6 +57,8 @@ pub(super) fn expect<S: AsRef<str>>(script: fn(f64) -> Run, want: [S; 3]) {
         // Design r3: while the listing decides, the model never shows another Desktop than
         // the window server lists (the shadow, kept as the check).
         assert_eq!(run.disagreed, 0, "at load {load}: the model and the window server's listing disagreed on the Desktop shown:\n{}", run.story);
+        // The reads' own check never takes a right listing for a wrong one.
+        assert_eq!(run.rests, 0, "at load {load}: the window server's Desktop reads rested:\n{}", run.story);
         // Slice 4: the engine hides each window from the Desktop the model has it on.
         assert_eq!(run.homes, 0, "at load {load}: the engine and the model disagree on a hidden window's Desktop at the end:\n{}", run.story);
     }
@@ -998,7 +1007,7 @@ fn load_table() {
 fn bench_one() {
     let Ok(want) = std::env::var("BENCH_ONE") else { return };
     let load: f64 = std::env::var("BENCH_LOAD").ok().and_then(|l| l.parse().ok()).unwrap_or(1.0);
-    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).filter(|(name, _, _)| name.contains(&want)) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).filter(|(name, _, _)| name.contains(&want)) {
         let run = script(load);
         println!("== {name} ({told}) at load {load}\n{}\n=> {}", run.story, run.outcome);
         for m in &run.margins {
@@ -1027,7 +1036,7 @@ fn verdicts(run: &Run) -> std::collections::BTreeMap<&'static str, (usize, usize
 /// The load table as Markdown.
 pub(super) fn table() -> String {
     let mut out = String::from("| Scenario | Told by | Load 1 | Load 3 | Load 10 | Limits crossed only under load |\n|---|---|---|---|---|---|\n");
-    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL) {
         let runs = LOADS.map(script);
         let base = verdicts(&runs[0]);
         let mut changed: Vec<String> = Vec::new();

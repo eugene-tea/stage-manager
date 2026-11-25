@@ -10,6 +10,7 @@ pub(crate) mod busy_apps;
 pub(crate) mod card_park;
 pub(crate) mod causes;
 pub mod corner;
+pub(crate) mod desk_reads;
 pub(crate) mod desk_shadow;
 pub(crate) mod desktop_click;
 pub(crate) mod desktop_echo;

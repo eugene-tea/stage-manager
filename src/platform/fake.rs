@@ -503,6 +503,16 @@ pub struct Desk {
     /// The window server's listing names no Space shown (`SLSCopyManagedDisplaySpaces` with
     /// no "Current Space"): the controller's listing is not readable.
     pub listing_unreadable: bool,
+    /// The listing's "Current Space" stays what it is whatever Desktop shows (never measured:
+    /// what a macOS that changed the listing might do): a listing there, and wrong.
+    pub listing_stuck: bool,
+    /// The window server's Desktop reads answer on this desk (`platform/desk_reads.rs`: the
+    /// listing and a window's Spaces, under every engine). False: a macOS where they do not
+    /// (the calls gone, or the test switch that forces the fallback): Desktops are told apart
+    /// by the windows on screen, as before the reads.
+    pub desk_reads: bool,
+    /// The reads' health on this desk (`platform/desk_reads.rs`; the process's own in the app).
+    pub reads_health: crate::engine::desk_reads::Health,
     /// macOS's own windows listed above the apps' (Mission Control's covers, Show Desktop's).
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
@@ -681,6 +691,9 @@ impl Desk {
             flip_leads_notice: false,
             leaving_lingers_ms: 0.0,
             listing_unreadable: false,
+            listing_stuck: false,
+            desk_reads: true,
+            reads_health: crate::engine::desk_reads::Health::new(),
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
             made_for: BTreeMap::new(),
@@ -1224,7 +1237,14 @@ impl Desk {
 
     /// Window `id` asked to sit at `frame`: where macOS leaves it, with its move notice.
     fn place(&mut self, id: u32, frame: Rect) {
-        let visible = self.screens[0].display.visible;
+        // The screen the frame is asked on (its left edge; the main one when on none): the
+        // title bar is kept on that screen, and a window on a Desktop that comes to another
+        // screen is on the Desktop that screen shows (macOS with "Displays have separate
+        // Spaces"; not measured here).
+        let screen = self.screens.iter().position(|s| frame.x >= s.display.frame.x && frame.x < s.display.frame.max_x()).unwrap_or(0);
+        let visible = self.screens[screen].display.visible;
+        let (theirs, shown) = (self.screens[screen].desktops.clone(), self.screens[screen].shown);
+        let desktops: Vec<u64> = self.screens.iter().flat_map(|s| s.desktops.iter().copied()).collect();
         let late = self.lists_moves_ms.map(|ms| clock::now() + self.at_load(ms));
         let listed = self.windows.get(&id).map(|w| self.listed(w).bounds);
         let Some(w) = self.windows.get_mut(&id) else { return };
@@ -1237,6 +1257,10 @@ impl Desk {
         }
         let (moved, resized) = (to.origin() != w.frame.origin(), to.size() != w.frame.size());
         w.frame = to;
+        if w.spaces.iter().any(|s| desktops.contains(s)) && !w.spaces.iter().any(|s| theirs.contains(s)) {
+            w.spaces.retain(|s| !desktops.contains(s));
+            w.spaces.push(shown);
+        }
         let pid = w.pid;
         self.call(Call::Frame(id, to));
         if moved {
@@ -1558,7 +1582,11 @@ impl Desk {
                 self.screens[screen].sliding_in = None;
                 self.screens[screen].sliding_to = None;
             }
-            Step::Flips { screen, to } => self.screens[screen].current = to,
+            Step::Flips { screen, to } => {
+                if !self.listing_stuck {
+                    self.screens[screen].current = to;
+                }
+            }
             Step::FullScreenSpace { screen, id, to, frame, ended } => {
                 if let Some(w) = self.windows.get_mut(&id) {
                     w.spaces = vec![to];

@@ -62,7 +62,9 @@ impl Controller {
         if model_parked.is_empty()
             || self.frozen()
             || self.overview.freezes(now)
-            || self.phase.space_settling(now)
+            // Frames are judged: the slide's may still be listed after an arrival the
+            // window server's listing named, which has no settle of its own.
+            || self.phase.frames_settling(now)
             || self.macos_reveal_at.is_some()
             || self.phase.switching().is_some()
             || self.ahead.is_some()

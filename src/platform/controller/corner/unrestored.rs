@@ -372,7 +372,7 @@ impl Controller {
     /// Not while a Desktop change settles or a slide is held: the list is not to be trusted
     /// then, and the window stays on record as before.
     pub(in crate::platform::controller) fn forget_not_parked(&mut self, ob: &Observer) {
-        if self.corner.unrestored.is_empty() || self.phase.space_settling(clock::now()) || self.slide_held() {
+        if self.corner.unrestored.is_empty() || self.phase.frames_settling(clock::now()) || self.slide_held() {
             return;
         }
         let ids: Vec<u32> = self.corner.unrestored.keys().copied().collect();

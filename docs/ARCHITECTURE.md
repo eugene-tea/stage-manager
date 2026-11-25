@@ -33,11 +33,11 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   z-order, parks it, restores the target's, raises, focuses the remembered key window last.
   Nothing acts on another Space's windows except the safety paths.
 - **Spaces: the model's own ids.** No public API names a Space: each gets a synthetic id in
-  the model. Under the Corner engine (and the Apple mode, or wherever the window server's
-  listing cannot be read) a Desktop is recognized at `activeSpaceDidChangeNotification` from
-  the window server's on-screen list; under the Spaces engine the listing names the Desktop
-  each screen shows and each window's Desktops, bound to the model's ids ("The window
-  server's Desktops", below). A window reaches the engine only once it shows on a display. A
+  the model. Under both of our engines the window server's listing names the Desktop each
+  screen shows and each window's Desktops, bound to the model's ids ("The window server's
+  Desktops", below); in the Apple mode, and wherever the listing cannot be read or does not
+  pass its check, a Desktop is recognized at `activeSpaceDidChangeNotification` from the
+  window server's on-screen list. A window reaches the engine only once it shows on a display. A
   check on the tick (every 250 ms while something happens, every 2 s at rest) catches Space
   moves and missed notices. The Corner engine moves and hides no window through a SkyLight/CGS
   call; the Spaces engine does (below).
@@ -45,8 +45,9 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   where they are and hearing what macOS does are separate layers. How windows are hidden is
   the engine's. Every other layer is the same under every engine: the window server's own
   call first, wherever a check finds it there and working, and the public one as the fallback
-  (pictures today: "Window pictures", below; the reads and notices are still the Spaces
-  engine's only: PLAN, "One way for every mode"). No technique is an engine's only because
+  (pictures: "Window pictures", below; the Desktops' reads: "The window server's Desktops";
+  the window server's notices are still the Spaces engine's only: PLAN, "One way for every
+  mode"). No technique is an engine's only because
   its call is private.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`), unit tested: observations
   in, `Action`s out (`Hide`, `SetFrame`, `Raise`, `Focus`).
@@ -54,7 +55,9 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   NSWorkspace events, safety. Windows are moved and hidden through public APIs only, plus
   `_AXUIElementGetWindow`, under the Corner engine; the Spaces engine adds SkyLight's Space
   calls, loaded at run time. Window pictures ask the window server's own capture first under
-  every engine and fall back to ScreenCaptureKit.
+  every engine and fall back to ScreenCaptureKit; the Desktops are read from the window
+  server's listing under both of our engines (two read-only calls) and guessed from the
+  windows on screen where that does not work.
 - **UI** (`src/ui`): status item and menu, Settings, a strip panel per screen (CALayer
   cards), the motion overlay (just below floating windows; above everything only while a
   dragged window's card shows).
@@ -340,7 +343,8 @@ list), `recover` (the recovery scan), `stranded` (is a window read at this frame
 hidden away) and `assume` (the guardian takes the app's parked file as its own knowledge),
 with `platform::corner::engine::CornerEngine` and `platform::spaces::engine::SpacesEngine`
 behind it; the rest of its methods have defaults the Corner engine keeps (the lends, the
-window server's Desktops, the launch watch, the landing). A `SetFrame` is the
+launch watch, the landing), but for the window server's Desktops, which both engines answer
+from the reads' own layer (`platform/desk_reads.rs`). A `SetFrame` is the
 engine's `show`: the model counts the window shown either way, and the engine knows what it
 has hidden. Every engine's switch plays with pictures: the controller plans the transition,
 takes the outgoing windows' pictures where none is fresh (no window has moved yet, under any
@@ -406,16 +410,31 @@ for them and hide behind them in one step each. A window
 in a stage Space still draws and is captured with its current content, so an incoming
 window's picture taken while it is hidden (the pointer on its card) is current too.
 
-The window server's Desktops (design r3). The model names its Spaces by ids of its own; the
-Spaces engine reads the window server's listing (`SLSCopyManagedDisplaySpaces`, through
+The window server's Desktops (design r3). The model names its Spaces by ids of its own; both
+of our engines read the window server's listing (`SLSCopyManagedDisplaySpaces`, through
 `WindowEngine::desktops`: each screen's Space shown and its kind, its Desktops with their ids
-and uuids; `spaces_of` for a window's Spaces; the Corner engine answers `None` to both). The
-controller's one read is `Controller::listing()` (`platform/controller/desktops.rs`): `None`
-when the engine reads none, a managed screen has no entry, or one names no Space shown or not
-its kind. Each arrival is given its screen's Desktop, read again at the arrival, and the
+and uuids; `spaces_of` for a window's Spaces). The reads are a layer of their own
+(`platform/desk_reads.rs`): two read-only calls and the connection's id, loaded at run time
+for every engine with no launch probe (the Corner engine loads no call that moves or hides a
+window); the Spaces engine's own book-keeping uses the same two reads (`spaces/ffi.rs`).
+
+*The reads' check* (`engine/desk_reads.rs`). They decide while: the three names resolve; every
+managed screen has an entry naming a Space shown (each pass); and what they say agrees with
+the window list: of the windows listed wholly on a screen, one is on the Space the listing
+names there (`Controller::check_reads`, at the tick's look while nothing moves: every 10 s,
+at the next look after a Space change's notice the listing answered with no change, and at
+every look once one disagreed). Three disagreements in a row rest the reads for 10 minutes
+(one warning in the log); after the rest they are read for the check alone and decide again
+once a look agreed. `ctl state`'s `desks.reads` says which way it runs and why;
+`STAGE_MANAGER_DESKTOPS_GUESS` (a test run only) forces the fallback.
+
+The controller's one read is `Controller::listing()` (`platform/controller/desktops.rs`):
+`None` when the reads do not decide, a managed screen has no entry, or one names no Space
+shown or not its kind; and, under the Corner engine, while a display change settles (below).
+ Each arrival is given its screen's Desktop, read again at the arrival, and the
 Desktop and the model's Space are bound to each other (`engine/model/desks.rs`,
 `Model::arrive_on`; one id, one Space). The bindings follow a relabel, go with a pruned or
-merged Space and at a fallback, and are saved with their uuids (`state.json`'s `desks`; a
+merged Space, stay at a fallback to the Corner engine, and are saved with their uuids (`state.json`'s `desks`; a
 load logs how many the listing still has).
 
 **The listing decides** while it can be read and a Desktop is bound
@@ -448,8 +467,24 @@ the engine's kind; with no listing each of these runs as before, by the windows 
   the model, is on a Desktop not shown belongs to that Desktop's slide
   (`focus_on_another_desk`).
 
-**What is still guessed, and where.** With no listing (the Corner engine, the Apple
-mode, a listing that cannot be read): everything, as before (`MIXED_WAIT`, `SPACE_SETTLE`,
+**Where a hidden window is, and what follows.** The paths are the same under both engines
+but for one fact (`Model::hidden_on_their_desktop`): the Corner engine's hidden window is in
+the park corner of its own Desktop, the Spaces engine's in a stage Space on none. So under
+the Corner engine a hidden window the listing has on another Desktop was moved there by
+hand (Mission Control shows it): an arrival takes it as moved, the tick's look asks it as a
+shown one, and nothing hides it "again"; one of a Desktop listed no more waits for that
+Desktop's end with its stage. The park corner's own checks judge frames, the slide's for a
+moment after a Desktop arrives: they wait a second after every arrival, whoever named it
+(`phase::Tracker::frames_settling`), and the tick stays brisk for it. And a display change is
+the guess's: when a screen comes or goes the bindings are dropped and the listing stays out
+for the change's settle (`Controller::display_change_guessed`, `DISPLAY_SETTLE`), because
+the model takes a gone screen's Desktop into the one shown where macOS may keep it as a
+Desktop of its own (slice 5, not built); with every stage's windows listed on screen with
+their Desktop the guess takes the change right, which it cannot under the Spaces engine.
+
+**What is still guessed, and where.** With no listing (the reads missing, resting or forced
+off, the Apple mode, a display change's settle under the Corner engine): everything, as
+before (`MIXED_WAIT`, `SPACE_SETTLE`,
 `FOREIGN_SETTLE`, `SPACE_CHECKS`, `BESIDE_ARRIVALS`, `STICKY_HOPS`, `SLIDE_CARRY`, the
 display change's hold of new windows at an arrival); a guess made so is corrected at the
 next good read, where the model's Space is bound to no Desktop or to another. With the

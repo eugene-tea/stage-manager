@@ -757,11 +757,10 @@ impl Model {
     /// Which window engine's answers the model asks from now on ([`ModelOptions::engine`]):
     /// the controller's fallback mid-run to the Corner engine. Windows hidden stay counted
     /// hidden; the controller hides them again the new engine's way.
+    ///
+    /// The Desktops' bindings stay: the window server's Desktops are read under every engine
+    /// (`desks.rs`), and a Desktop is the same one whichever engine hides its windows.
     pub fn set_engine(&mut self, engine: crate::engine::recovery::EngineKind) {
-        if engine != self.options.engine {
-            // The window server's Desktops are the Spaces engine's to read (`desks.rs`).
-            self.unbind_all();
-        }
         self.options.engine = engine;
     }
 

@@ -280,20 +280,22 @@ pub trait WindowEngine: Send + Sync {
 
     /// The window server's listing of every screen's Desktops, read now
     /// (`SLSCopyManagedDisplaySpaces`: each screen's Space shown and its kind, its Desktops
-    /// with their uuids). `None`: this engine does not read it (the Corner engine).
+    /// with their uuids), through the reads' own layer under both of our engines
+    /// ([`super::desk_reads`]). `None`: the reads do not work now (the calls gone, or resting
+    /// after disagreeing with the window list), or this engine reads none (the Apple mode).
     fn desktops(&self) -> Option<Vec<crate::platform::spaces::ffi::ScreenDesks>> {
         None
     }
 
     /// The Spaces the window server lists window `id` on now (Desktops, stage Spaces, a
-    /// full-screen app's). `None`: this engine does not read them (the Corner engine).
+    /// full-screen app's). `None`: as [`Self::desktops`].
     fn spaces_of(&self, _id: WindowId) -> Option<Vec<u64>> {
         None
     }
 
     /// The Desktops the window server shows now, one per screen (SkyLight's own word, read
     /// now, [`Self::desktops`]): what Mission Control shows while a Space change made inside
-    /// it is not recognized yet. `None`: this engine does not know (the Corner engine).
+    /// it is not recognized yet. `None`: as [`Self::desktops`].
     fn shown_desktops(&self) -> Option<Vec<u64>> {
         self.desktops().map(|list| list.iter().map(|d| d.current).filter(|c| *c != 0).collect())
     }

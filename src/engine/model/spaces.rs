@@ -969,8 +969,14 @@ impl Model {
 
     /// Keyed ([`Model::arrive_on`]): of `known` (windows on the arriving Desktop by the window
     /// server's word), those the model counts hidden in a stage of another Space that the
-    /// window engine did not lend there and that are not on every Desktop.
+    /// window engine did not lend there and that are not on every Desktop. None under an
+    /// engine whose hidden windows stay on their Desktop ([`Model::hidden_on_their_desktop`]):
+    /// such a window was moved here, and goes with the moved ones ([`Self::listed_moves`]).
     fn hidden_elsewhere(&self, target: SpaceId, known: &[WindowId], listed: &Listed) -> Vec<WindowId> {
+        if self.hidden_on_their_desktop() {
+            // Hidden in the park corner of its Desktop: on this one, it was moved here.
+            return Vec::new();
+        }
         known
             .iter()
             .copied()

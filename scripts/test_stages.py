@@ -181,6 +181,12 @@ LIVE_LANDING = ENGINE == "spaces" and (os.environ.get("STAGE_MANAGER_LANDING") o
 SPACES = ENGINE == "spaces"
 if ENGINE != "corner":
     ENV["STAGE_MANAGER_ENGINE"] = ENGINE
+# SM_DESKTOPS=guess: every app run has the window server's Desktop reads forced off
+# (STAGE_MANAGER_DESKTOPS_GUESS): Desktops by the windows on screen, as 1.9.2 under the
+# Corner engine. Default: the reads on, under both engines.
+GUESS = (os.environ.get("SM_DESKTOPS") or "").strip().lower() == "guess"
+if GUESS:
+    ENV["STAGE_MANAGER_DESKTOPS_GUESS"] = "1"
 
 
 def log_path():
@@ -652,6 +658,8 @@ def start_app(expect_windows, extra_env=None, fresh_log=True, capture=False):
         env["STAGE_MANAGER_NO_CAPTURE"] = "1"
     if ENGINE != "corner":
         env["STAGE_MANAGER_ENGINE"] = ENGINE
+    if GUESS:
+        env["STAGE_MANAGER_DESKTOPS_GUESS"] = "1"
     env.update(extra_env or {})
     for k, v in env.items():
         args += ["--env", f"{k}={v}"]
@@ -8859,6 +8867,106 @@ def engine_windows():
     return [w for w in p["windows"] if w["layer"] == 0], p["display"]
 
 
+def reads_status(label, forced=None):
+    """The window server's Desktop reads in this app run (`ctl state`'s `desks.reads`; round
+    corner-desktops), printed and checked. With the reads on (the default, both engines):
+    they decide (`way` "window server", `state` "working"), the listing is there with an
+    entry a managed screen, and they never rested. Forced off (`forced`, or SM_DESKTOPS=guess
+    for the whole run): `way` "windows on screen", `state` "off", no listing, nothing bound.
+    Returns the reads' status."""
+    forced = GUESS if forced is None else forced
+    d = (ctl("state").get("desks") or {})
+    r = d.get("reads") or {}
+    c = r.get("checks") or {}
+    say(f"    desks.reads ({label}): way {r.get('way')!r}, state {r.get('state')!r}, why {r.get('why')!r}; "
+        f"checks agreed {c.get('agreed')}, disagreed {c.get('disagreed')}, rests {c.get('rests')} ({c.get('last_disagreement')})")
+    if forced:
+        check(r.get("way") == "windows on screen" and r.get("state") == "off" and "test run" in (r.get("why") or ""),
+              f"reads ({label}): forced off by the test switch, Desktops by the windows on screen ({r})")
+        check(d.get("listing") is None and not d.get("bindings") and d.get("decides") is False,
+              f"reads ({label}): no listing, nothing bound, nothing decided by it")
+    else:
+        check(r.get("way") == "window server" and r.get("state") == "working",
+              f"reads ({label}): the window server's Desktops are read and decide ({r})")
+        check(isinstance(d.get("listing"), list) and len(d["listing"]) >= 1 and all(e.get("current") for e in d["listing"]),
+              f"reads ({label}): the listing names a Space shown on every managed screen ({d.get('listing')})")
+        check(c.get("rests") == 0, f"reads ({label}): the reads never rested (checks {c})")
+    return r
+
+
+def phase_reads():
+    """Round corner-desktops: the window server's Desktop reads under the engine of this run
+    (the Corner engine by default), their check and the fallback. One Desktop is enough.
+    1. The reads on: `desks.reads` says "window server" / "working", the listing has an entry
+       for every managed screen, the Desktop shown is bound (`desks.decides`), and within
+       15 s the check looked at least once and agreed (`checks.agreed`), never disagreed.
+       Under the Corner engine the log has the line that the Desktops can be read, and no
+       launch probe ran.
+    2. A switch and back: stages work as ever, nothing disagrees (the shadow), no rest.
+    3. The same app run forced off (STAGE_MANAGER_DESKTOPS_GUESS): "windows on screen" /
+       "off", no listing, nothing bound; a switch and back work as ever.
+    Fixture windows only; no Desktop is changed."""
+    say("\n== reads: the window server's Desktops, their check and the fallback ==")
+    stop_app()
+    stop_all_fixtures()
+    for f in ("state.json", "config.toml", ".config-last-good.toml"):
+        path = os.path.join(HOME, f)
+        if os.path.exists(path):
+            os.remove(path)
+    start_fixture(2, "--frames", "80,80,640,420;260,160,560,380")
+
+    def two_stages(st):
+        # Both windows are one app's and open in one stage: Fixture 2 gets a stage of its own.
+        two = by_title(st).get("Fixture 2")
+        if two is not None and [t for t in stage_titles(st).get(two["home"], []) if t != "Fixture 2"]:
+            do("new", two["id"])
+        wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2"]], "Fixture 1 and 2 each in a stage")
+
+    def switch_and_back(label):
+        two_stages(ctl("state"))
+        st = ctl("state")
+        hidden = [x["number"] for x in st.get("stages", []) if x.get("space") == st.get("space") and x["number"] != st.get("active") and x.get("windows")]
+        if not check(bool(hidden), f"reads ({label}): a stage waits hidden to switch to ({[x['number'] for x in st.get('stages', [])]})"):
+            return
+        was = st["active"]
+        ctl("switch", hidden[0])
+        there = wait_state(lambda y: y["active"] == hidden[0] and not any(w["parked"] for w in y["windows"] if w["id"] in next(x["windows"] for x in y["stages"] if x["number"] == hidden[0])), "the switch", timeout=6)
+        ctl("switch", was)
+        back = wait_state(lambda y: y["active"] == was, "the switch back", timeout=6)
+        check(there is not None and back is not None, f"reads ({label}): a switch and back")
+        all_onscreen_or_parked = ctl("state")
+        g = (all_onscreen_or_parked.get("desks") or {}).get("disagree") or {}
+        check(g.get("shown", 0) == 0, f"reads ({label}): the model and the window server agree on the Desktop shown ({g})")
+
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_DESKTOPS_GUESS": ""} if not GUESS else {"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "reads: the app is up with two fixture windows"):
+        return
+    if GUESS:
+        reads_status("the whole run forced off")
+        switch_and_back("forced off")
+        stop_app()
+        return
+    r = reads_status("at the launch", forced=False)
+    d = ctl("state").get("desks") or {}
+    check(d.get("decides") is True and len(d.get("bindings") or []) >= 1, f"reads: the Desktop shown is bound and the listing decides (bindings {d.get('bindings')})")
+    if not SPACES:
+        e = ctl("state").get("engine") or {}
+        check(e.get("kind") == "corner" and e.get("probe") is None, f"reads: the Corner engine reads with no launch probe ({e.get('why')})")
+    looked = wait_state(lambda y: ((y.get("desks") or {}).get("reads") or {}).get("checks", {}).get("agreed", 0) >= 1, "the reads' check to look", timeout=15)
+    c = ((ctl("state").get("desks") or {}).get("reads") or {}).get("checks") or {}
+    check(looked is not None and c.get("disagreed") == 0, f"reads: the check looked and agreed with the windows on screen (checks {c})")
+    switch_and_back("the reads on")
+    reads_status("after the switches", forced=False)
+    stop_app()
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1", "STAGE_MANAGER_DESKTOPS_GUESS": "1"}, fresh_log=False)
+    if not check(s is not None, "reads: the app is up again with the reads forced off"):
+        return
+    reads_status("forced off", forced=True)
+    switch_and_back("forced off")
+    stop_app()
+    all_onscreen("reads")
+
+
 def phase_engine():
     """Round sm-probe (1.9, S5): which window engine runs. Each launch's probe and choice
     (`ctl state` `engine`: kind, why, probe, fallback):
@@ -10795,7 +10903,7 @@ def phase_mission_desktop():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine", "reads"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -10814,7 +10922,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine,
+             "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine, "reads": phase_reads,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel,
              "mission": phase_mission, "mission-probe": phase_mission_probe, "mission-desktop": phase_mission_desktop}[p]()

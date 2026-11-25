@@ -176,6 +176,16 @@ impl Model {
         }
     }
 
+    /// True when a window this engine hides stays on its Desktop for the window server (the
+    /// park corner): its Spaces read as a shown window's do, so one listed on another Desktop
+    /// was moved there (Mission Control shows it and lets it be dragged), never let out of
+    /// its hiding place. False for a window hidden in a stage Space, on no Desktop: listed on
+    /// a Desktop, something let it out, and it is hidden again. The same fact as
+    /// [`Model::macos_counts_hidden`], asked by the window server's Desktops (`desks.rs`).
+    pub(crate) fn hidden_on_their_desktop(&self) -> bool {
+        self.macos_counts_hidden()
+    }
+
     /// True when a window the model does not know yet, first seen at `listed` on `display`,
     /// is in the park corner's zone: hidden there by a Corner copy, or reopened there by its
     /// app. The Corner engine's test under either engine (module docs, "A window first seen").

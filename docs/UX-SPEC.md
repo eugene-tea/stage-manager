@@ -1384,10 +1384,11 @@ answers for let out at once (before: up to 10 s).
 ## The window server's Desktops
 
 Measured on macOS 27.2, 11-21 (`probe-system flip`, `probe-system names`, a process running
-the AppKit event loop). Under the Spaces engine the listing of the Desktops
-(`SLSCopyManagedDisplaySpaces`) says which Desktop each screen shows and which Desktops each
-window is on, in place of guesses from the windows on screen (ARCHITECTURE, "The window
-server's Desktops").
+the AppKit event loop). The listing of the Desktops (`SLSCopyManagedDisplaySpaces`) says
+which Desktop each screen shows and which Desktops each window is on, in place of guesses
+from the windows on screen (ARCHITECTURE, "The window server's Desktops"): under the Spaces
+engine since 1.9.2, under the Accessibility engine since round corner-desktops (11-25, on
+the bench; not yet run live there).
 
 | What | Measured |
 |---|---|
@@ -1398,7 +1399,7 @@ server's Desktops").
 | Space ids | small, stable through a login session (1, 4); the main screen's first Desktop has an empty uuid; a window on every Desktop lists every Desktop |
 | Screens | each named by its uuid, the main screen too (never "Main"), the main screen first; so a main screen that goes is seen going |
 
-What a person sees change under the Spaces engine:
+What a person sees change, under both engines:
 
 - The first visit to a Desktop since the app started stays there. Before, when that Desktop's
   front app also had a window in a hidden stage on the Desktop left, its stage came in front
@@ -1416,9 +1417,30 @@ What a person sees change under the Spaces engine:
 - After a Desktop arrives, a new window, a window moved here and a hidden window out of its
   stage are dealt with at once; before, nothing was inferred for a second.
 
+What differs between the engines, by where a hidden window is:
+
+- The Spaces engine's alone: the window server's notices (a change taken within a fast tick,
+  a moved window at once), so under the Accessibility engine each of the above comes at the
+  next look, within a second (2 s at rest); a hidden window let out of its stage Space is
+  hidden again.
+- The Accessibility engine's alone: a hidden window is in the park corner of its own Desktop,
+  so one dragged to another Desktop in Mission Control moves there with its Desktop's next
+  look, as a shown one does. The park corner's own checks still wait a second after a
+  Desktop arrives. A screen coming or going is taken by the windows on screen, as in 1.9.2,
+  and the listing decides again from the first Desktop change 10 s after it.
+- After a Space change's notice with no change, stage commands wait up to 0.3 s for the
+  listing (before, under the Accessibility engine: not at all).
+
+The reads are checked while the app runs. They decide while the calls are there, every
+screen has an entry, and one of the windows listed wholly on each screen is on the Desktop
+the listing shows there. Three looks in a row that disagree rest them for 10 minutes; the
+Desktops then go by the windows on screen, as in 1.9.2, and the listing decides again once a
+look agreed. On the bench a listing stuck on the Desktop left is found within 6 s.
+
 Not measured: what a window's Spaces read while it is dragged between Desktops, the listing
-with "Displays have separate Spaces" off, and whether a Desktop's uuid lasts over a restart
-(logged at each load).
+with "Displays have separate Spaces" off, whether a Desktop's uuid lasts over a restart
+(logged at each load), and whether a window moved to another screen is listed on that
+screen's Desktop at once.
 
 ## Known gaps
 
@@ -1449,9 +1471,9 @@ with "Displays have separate Spaces" off, and whether a Desktop's uuid lasts ove
 - Stage hotkeys and `ctl switch N` count and switch the strip of the screen the keyboard is
   on (the focused window's; the main screen's with no focused window); which screen
   Apple's hotkeys address is not measured.
-- No public API names a Desktop, so Desktops are told apart by their windows. An empty
-  Desktop is forgotten when you leave it, and one whose windows are all hidden or minimized
-  looks new until one of them shows.
+- Where the window server's list of Desktops cannot be read (or in the Apple mode), Desktops
+  are told apart by their windows: an empty Desktop is forgotten when you leave it, and one
+  whose windows are all hidden or minimized looks new until one of them shows.
 - A Dock click to another Desktop arranges it before it slides in. ⌘-Tab cannot: no public
   notice names the chosen app early enough, so the Desktop is arranged when it arrives.
 - A Desktop's strip appears after the Desktop has slid in on its first visit; Apple's slides

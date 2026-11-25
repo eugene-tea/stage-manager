@@ -128,12 +128,15 @@ def desk_shadow(label):
     """The shadow's counts for this app run (design r3, slice 1; `ctl state`'s `desks`): the
     Desktop the app's model says each screen shows against the window server's, and each held
     window's home against the model's Desktop for it, open now and begun since the launch,
-    with the longest. Under the Spaces engine, hands-free, the Desktop shown must agree once
-    settled (no open disagreement within 5 s); a guided run and window homes only print.
-    Under the Corner engine the listing is not read: it says so."""
+    with the longest. While the listing is read (both engines since round corner-desktops),
+    hands-free, the Desktop shown must agree once settled (no open disagreement within 5 s);
+    a guided run and window homes only print. The reads' own status is printed and checked
+    first (`ts.reads_status`: on and never rested, or forced off with SM_DESKTOPS=guess)."""
     d = (state() or {}).get("desks") or {}
+    if AUTO:
+        ts.reads_status(label)
     if d.get("listing") is None:
-        say(f"    desks ({label}): the window server's listing is not read (not the Spaces engine)")
+        say(f"    desks ({label}): the window server's listing is not read ({(d.get('reads') or {}).get('why')}): Desktops by the windows on screen")
         return
     settled = wait_for("the Desktop shown to agree", lambda: state()["desks"]["disagree"]["shown"] == 0, 5)
     d = state()["desks"]
@@ -1253,11 +1256,11 @@ def _slide_away_and_back(d1, d2):
 
 def keyed_counts(label):
     """What the window server's listing decided in this app run (design r3, slices 2 and 3;
-    `ctl state`'s `desks.keyed`): printed, never a check. Under the Corner engine it says the
+    `ctl state`'s `desks.keyed`): printed, never a check. With the reads off it says the
     listing is not read."""
     d = (state() or {}).get("desks") or {}
     if d.get("listing") is None:
-        say(f"    desks ({label}): the window server's listing is not read (not the Spaces engine)")
+        say(f"    desks ({label}): the window server's listing is not read ({(d.get('reads') or {}).get('why')})")
         return {}
     k = d.get("keyed") or {}
     say(f"    desks ({label}): the listing decides: {d.get('decides')}; arrivals by it {k.get('arrivals')}, "
@@ -1304,9 +1307,10 @@ def first_visit_by_key():
     the fixture app as there slides in. Before the listing decided, that activation switched
     to the fixture's stage on the Desktop being left, and macOS slid back (at every load on
     the bench). Now: one Space change, the Desktop stays, no stage switched for the
-    activation; under the Spaces engine the log says the activation was held (the window
-    server names the Desktop of the app's focused window). Under the Corner engine the two
-    checks are printed as known shortfalls of that engine's path, not failed.
+    activation; the log says the activation was held (the window server names the Desktop of
+    the app's focused window). That holds under both engines since round corner-desktops;
+    with the reads forced off (SM_DESKTOPS=guess: the windows' vote, as 1.9.2 under the
+    Corner engine) the two checks are printed as known shortfalls of the guess, not failed.
 
     Which fixture windows are on which Desktop by now is not assumed: the guardian drill's
     kill -9 leaves Desktop 2's hidden windows on Desktop 1 (the window server brings a
@@ -1407,7 +1411,8 @@ def first_visit_by_key():
           f"first visit: only Desktop {here[1]}'s windows are known and no saved Desktop waits (known: {here_titles})")
     if x is None:
         say("    (the fixture app's window is not hidden at the launch: the activation during the slide has nothing to switch to; the checks still run)")
-    spaces_engine = (now.get("desks") or {}).get("listing") is not None
+    reads = (now.get("desks") or {}).get("listing") is not None
+    check(reads != ts.GUESS, f"first visit: the window server's listing is {'not read (forced off)' if ts.GUESS else 'read'} in this run")
     time.sleep(1.5)
     t0 = time.time()
     go(there, f"Switch to Desktop {there[1]} (its first visit)")
@@ -1425,13 +1430,13 @@ def first_visit_by_key():
         f"{'held' if held else 'not held (none came before the notice, or the fixture was not its front app)'}")
     one = stayed and len(changes) == 1 and changes[0][0] == d_here
     quiet = not switched
-    if spaces_engine:
+    if reads:
         check(one, f"first visit: one Space change and Desktop {there[1]} stays (changes {changes}, now {current_space()}, was {d_here})")
         check(quiet, f"first visit: no stage switched on Desktop {here[1]} for an activation during the slide ({switched[:1]})")
         desk_shadow("the first visit")
     else:
-        say(f"    first visit (Corner engine, the windows' vote): one Space change and it stays: {one}; "
-            f"no stage switched on the Desktop left: {quiet} (the listing is not read under this engine)")
+        say(f"    first visit (the windows' vote): one Space change and it stays: {one}; "
+            f"no stage switched on the Desktop left: {quiet} (the listing is not read in this run)")
     if arrived is not None:
         now = state()
         t = sorted(w["title"] for w in now["windows"] if w["space"] == now["space"])

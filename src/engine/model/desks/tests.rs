@@ -67,7 +67,7 @@ fn an_empty_desktop_left_for_a_new_one_takes_the_new_desktop() {
 }
 
 #[test]
-fn the_bindings_follow_a_relabel_and_go_with_a_pruned_space_and_a_fallback() {
+fn the_bindings_follow_a_relabel_go_with_a_pruned_space_and_stay_at_a_fallback() {
     let mut m = model();
     arrive(&mut m, &desk(1, ""), &[1], &[]);
     let one = m.current_space(MAIN);
@@ -86,10 +86,10 @@ fn the_bindings_follow_a_relabel_and_go_with_a_pruned_space_and_a_fallback() {
     let four = m.current_space(MAIN);
     m.relabel_space(four, SpaceId(40));
     assert_eq!((m.space_of_desk(4), m.space_of_desk(1)), (Some(SpaceId(40)), None));
-    // The engine falls back: no listing any more.
+    // The engine falls back: the Corner engine reads the same listing, the bindings stay.
     let other = if m.options().engine == EngineKind::Spaces { EngineKind::Corner } else { EngineKind::Spaces };
     m.set_engine(other);
-    assert!(!m.keyed());
+    assert_eq!(m.space_of_desk(4), Some(SpaceId(40)));
 }
 
 #[test]
@@ -209,6 +209,8 @@ fn keyed_a_window_listed_on_two_desktops_is_on_every_desktop_at_once() {
 #[test]
 fn keyed_a_hidden_window_let_out_on_another_desktop_is_hidden_again_unless_lent() {
     let (mut m, one, four) = two_desktops();
+    // Hidden in a stage Space, on no Desktop (the Spaces engine).
+    m.set_engine(EngineKind::Spaces);
     let hidden = [w(1), w(2)].into_iter().find(|id| m.window(*id).is_some_and(|x| x.parked)).expect("one of Desktop 1's stages is hidden");
     // The window server let it out onto Desktop 4 (a screen went): hidden again, its stage kept.
     let actions = arrive_keyed(&mut m, &desk(4, "U4"), &Listed::default(), &[hidden.0, 3]);
@@ -221,6 +223,19 @@ fn keyed_a_hidden_window_let_out_on_another_desktop_is_hidden_again_unless_lent(
     let lent = Listed { every: Vec::new(), lent: vec![hidden] };
     arrive_keyed(&mut m, &desk(4, "U4"), &lent, &[hidden.0, 3]);
     assert_eq!((m.space_of(hidden), m.last_arrival().moved), (Some(four), 1));
+}
+
+#[test]
+fn keyed_a_window_hidden_on_its_desktop_and_found_on_another_was_moved_there() {
+    let (mut m, _, four) = two_desktops();
+    // Hidden in the park corner of Desktop 1 (the Corner engine): the window server has it
+    // on a Desktop all along, so on Desktop 4 it was moved there by hand (Mission Control
+    // shows it and lets it be dragged). Nothing can put it back: it joins Desktop 4.
+    assert_eq!(m.options().engine, EngineKind::Corner);
+    let hidden = [w(1), w(2)].into_iter().find(|id| m.window(*id).is_some_and(|x| x.parked)).expect("one of Desktop 1's stages is hidden");
+    arrive_keyed(&mut m, &desk(4, "U4"), &Listed::default(), &[hidden.0, 3]);
+    assert_eq!((m.space_of(hidden), m.last_arrival().moved), (Some(four), 1));
+    assert!(m.last_arrival().kept_hidden.is_empty());
 }
 
 #[test]

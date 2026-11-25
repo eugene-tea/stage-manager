@@ -1,6 +1,10 @@
 //! The window server's Desktops as the controller reads them (design r3). One read,
 //! [`Controller::listing`]: each managed screen's entry of `SLSCopyManagedDisplaySpaces`,
-//! from the window engine ([`WindowEngine::desktops`]; the Spaces engine only).
+//! through the window engine ([`WindowEngine::desktops`]) from the reads' own layer
+//! ([`crate::platform::desk_reads`]), the same under the Corner and the Spaces engine since
+//! round corner-desktops. The layer has its own check ([`Controller::check_reads`], at the
+//! tick's look: the listing against the windows on screen) and answers nothing while the
+//! reads rest.
 //!
 //! **While it can be read and a Desktop is bound** ([`Controller::keyed_listing`]) the
 //! listing decides, in place of the guesses from the window list (slices 2 and 3):
@@ -16,21 +20,26 @@
 //!   [`Controller::announced_late`]). The id an arrival uses is read again at the arrival.
 //! - **Which windows are on the Desktop** ([`Controller::keyed_live`]): each window of an
 //!   arrival is asked for its Spaces (22 µs); one not on the arriving Desktop is left out (a
-//!   Desktop still listed while it slides away, a window just shown on another), one on two
-//!   Desktops or more is on every Desktop. No wait for a list that shows one Desktop only,
+//!   Desktop still listed while it slides away, a window just shown on another, the Corner
+//!   engine's parked windows of the Desktop left), one on two Desktops or more is on every
+//!   Desktop. No wait for a list that shows one Desktop only,
 //!   no second look, no settle after.
 //! - **Where a window went** ([`Controller::desk_membership`], at the tick): a window of the
 //!   Desktop shown that is not on screen, or one of another Desktop that is, is asked for
 //!   its Desktop once: on its own, nothing; on one other, it moved there
 //!   ([`Model::window_on_desk`]); on none (hidden in a stage's Space, in full screen),
-//!   nothing.
+//!   nothing. A window hidden in the park corner stays on its Desktop and is asked as a
+//!   shown one is (Mission Control shows it, and it can be dragged to another Desktop); one
+//!   hidden in a stage Space is on no Desktop and is not asked.
 //! - **A window found** ([`Controller::found_on_desk_shown`]) is placed only when it is on
 //!   the Desktop the model shows, and an activation whose app's focused window is on another
 //!   Desktop belongs to that Desktop ([`Controller::focus_on_another_desk`]).
 //!
-//! With no listing (another engine, a screen with no entry, an entry naming no Space
-//! shown) every one of these runs as before, by the windows on screen: the paths part on
-//! what could be read, never on the engine's kind. A guess made so is corrected at the next
+//! With no listing (the reads missing or resting, the Apple mode, a screen with no entry,
+//! an entry naming no Space shown) every one of these runs as before, by the windows on
+//! screen: the paths part on what could be read, never on the engine's kind. Where the two
+//! engines differ here it is by where a hidden window is (`Model::hidden_on_their_desktop`:
+//! the park corner is on its Desktop, a stage Space on none). A guess made so is corrected at the next
 //! good read: the model's Space then is bound to no Desktop, or to another, which is a
 //! difference.
 //!
@@ -48,7 +57,9 @@ use serde_json::{Value, json};
 
 use super::corner::unrestored::LetGo;
 use super::{Controller, launch_hints};
+use crate::engine::desk_reads::{self as desk_reads_check, Screen, Verdict};
 use crate::engine::desk_shadow::{self, Change, Shadow, Sight, Subject};
+use crate::engine::geometry::Rect;
 use crate::engine::margin;
 use crate::engine::spill;
 use crate::engine::model::desks::{Desk, Listed, SavedDesk};
@@ -56,7 +67,7 @@ use crate::engine::model::{Display, DisplayId, WindowId, WindowMeta, WindowRole}
 use crate::engine::phase::{self, Hold};
 use crate::platform::observe::Observer;
 use crate::platform::spaces::ffi::ScreenDesks;
-use crate::platform::{clock, input, windows};
+use crate::platform::{clock, desk_reads, input, windows};
 
 /// How long after a Space change's notice the listing may still name the Space left before
 /// the notice is taken for one with no change. Measured 11-21: the notice 1-9 ms before the
@@ -114,6 +125,20 @@ pub(super) fn match_screens(screens: &[(DisplayId, Option<String>, bool)], list:
     Some(Listing(out, list.iter().flat_map(|s| s.desks.iter().map(|d| d.id)).collect()))
 }
 
+/// True when a window at `bounds` lies wholly on the screen at `screen`: a window the
+/// reads' check counts for that screen. One that reaches beyond its edge (parked in the
+/// corner, dragged partly off, across two screens) says nothing of the Space the screen
+/// shows: with a screen beyond that edge, macOS may count it on either.
+fn wholly_on(bounds: Rect, screen: Rect) -> bool {
+    bounds.w > 0.0 && bounds.h > 0.0 && bounds.x >= screen.x && bounds.y >= screen.y && bounds.max_x() <= screen.max_x() && bounds.max_y() <= screen.max_y()
+}
+
+/// Each of `displays` as [`match_screens`] takes them: its id, its uuid from ColorSync, and
+/// whether it is the main one (the first).
+fn screens_of(displays: &[Display]) -> Vec<(DisplayId, Option<String>, bool)> {
+    displays.iter().enumerate().map(|(i, d)| (d.id, crate::platform::desktop_counts::display_uuid(d.id.0), i == 0)).collect()
+}
+
 /// The Desktops' state on the WM thread: the shadow, and what the listing decided.
 #[derive(Debug, Default)]
 pub(super) struct DeskWatch {
@@ -147,15 +172,69 @@ impl Controller {
     /// `None` when the engine reads none, a managed screen has no entry, or one names no
     /// Space shown.
     pub(super) fn listing(&self) -> Option<Listing> {
+        if self.display_change_guessed() {
+            return None;
+        }
         self.listing_for(&self.managed_displays())
+    }
+
+    /// True while a display change settles ([`super::DISPLAY_SETTLE`]) under an engine whose
+    /// hidden windows stay on their Desktop: the change is taken by the windows on screen,
+    /// as before the reads. The bindings are dropped at the change (`set_displays`), so the
+    /// listing decides again from the first arrival after the settle, which binds its
+    /// Desktop as a launch's does.
+    ///
+    /// Why: when a screen goes the model takes its Desktop into the one shown on the screen
+    /// left (the adoption), while macOS may keep it as a Desktop of its own; the listing then
+    /// names a Desktop the model has merged away (design r3, slice 5, not built). With the
+    /// windows of every stage listed on screen with their Desktop (the park corner), the
+    /// guess takes the change right, and did before the reads; under the Spaces engine a
+    /// hidden window is off screen, the guess cannot, and the listing decides throughout.
+    pub(super) fn display_change_guessed(&self) -> bool {
+        self.displays_settling() && self.model.as_ref().is_some_and(|m| m.hidden_on_their_desktop())
     }
 
     /// [`Self::listing`] for `displays` (the first the main one), before the model is built.
     pub(super) fn listing_for(&self, displays: &[Display]) -> Option<Listing> {
         let list = self.engine.desktops()?;
-        let screens: Vec<(DisplayId, Option<String>, bool)> =
-            displays.iter().enumerate().map(|(i, d)| (d.id, crate::platform::desktop_counts::display_uuid(d.id.0), i == 0)).collect();
-        match_screens(&screens, &list)
+        match_screens(&screens_of(displays), &list)
+    }
+
+    /// The reads' check (`engine/desk_reads.rs`, 3), at a look while nothing moves: of the
+    /// windows the window list shows wholly on each managed screen that shows a Desktop
+    /// ([`wholly_on`]), one must be on the Space the listing names there. Read whatever the reads' state (after a
+    /// rest they are read for this alone), one window at a time until one agrees, and only
+    /// when a look is due. True when the reads rest from now: this look goes on by the guess.
+    pub(super) fn check_reads(&mut self, ob: &Observer, list: &[windows::CgWindow], now: Instant) -> bool {
+        if !desk_reads::check_due(now) || self.locked || input::left_button_down() || self.displays_settling() {
+            return false;
+        }
+        let displays = self.managed_displays();
+        // A pass with no entry for a screen goes by the guess already: nothing to compare.
+        let Some(listing) = desk_reads::raw_desktops().and_then(|raw| match_screens(&screens_of(&displays), &raw)) else { return false };
+        let rects: Vec<(DisplayId, Rect)> = displays.iter().map(|d| (d.id, d.frame)).collect();
+        let mut screens: Vec<Screen> = Vec::new();
+        let mut asked: Vec<(u32, u32)> = Vec::new();
+        for (d, current) in listing.shown() {
+            let mut screen = Screen { current, windows: Vec::new() };
+            let Some(frame) = rects.iter().find(|(id, _)| *id == d).map(|(_, r)| *r) else { continue };
+            for w in list.iter().filter(|w| w.onscreen && w.layer == 0 && ob.window(w.id).is_some() && wholly_on(w.bounds, frame)) {
+                let on = desk_reads::raw_spaces_of(&[w.id]).unwrap_or_default();
+                let agrees = on.contains(&current);
+                screen.windows.push(on);
+                asked.push((d.0, w.id));
+                if agrees {
+                    break;
+                }
+            }
+            screens.push(screen);
+        }
+        let verdict = desk_reads_check::cross_check(&screens);
+        if let Verdict::Disagree(why) = verdict {
+            // Ids only: each screen's Space shown with its windows' Spaces, and the windows asked.
+            tracing::debug!(why, ?screens, ?asked, "desktops: the listing and the windows on screen disagree at this look");
+        }
+        desk_reads::checked(verdict, now)
     }
 
     /// The Desktop screen `d` shows for an arrival there, read now.
@@ -349,10 +428,12 @@ impl Controller {
         for from in ended {
             let Some(m) = self.model.as_ref() else { return };
             let Some(space) = m.space_of_desk(from) else { continue };
-            // Where its shown windows are now; else what its screen shows.
+            // Where its shown windows are now (and its hidden ones, under an engine that
+            // keeps them on their Desktop); else what its screen shows.
+            let on_desktops = m.hidden_on_their_desktop();
             let peers: Vec<Vec<u64>> = m
                 .windows()
-                .filter(|w| w.space == space && !w.parked && w.meta.role == WindowRole::Standard)
+                .filter(|w| w.space == space && (!w.parked || on_desktops) && w.meta.role == WindowRole::Standard)
                 .filter_map(|w| self.engine.spaces_of(w.meta.id))
                 .collect();
             let screen = m.spaces().iter().find(|s| s.id == space).map(|s| s.display);
@@ -394,7 +475,15 @@ impl Controller {
             if m.is_shown_space(w.space) == shown.contains(&id) {
                 continue;
             }
-            if (w.parked && !self.engine.lent(w.meta.id)) || self.causes.wrote_recently(id, now) || ob.noted_closed(id) {
+            // Hidden off every Desktop (a stage Space): the engine's own check hides it again
+            // wherever it is listed. A hidden window that stays on its Desktop (the park
+            // corner) is asked as a shown one is: moved by hand, it is on another Desktop.
+            let off_desktops = w.parked && !m.hidden_on_their_desktop() && !self.engine.lent(w.meta.id);
+            // A hidden window of a Desktop listed no more waits for that Desktop's end, where
+            // its stage joins another whole ([`Self::ended_desktops`]), as one in a stage
+            // Space does.
+            let ending = w.parked && !listing.1.contains(&own);
+            if off_desktops || ending || self.causes.wrote_recently(id, now) || ob.noted_closed(id) {
                 continue;
             }
             let Some(spaces) = self.engine.spaces_of(w.meta.id) else { return };
@@ -505,6 +594,7 @@ impl Controller {
             .collect();
         let k = &self.desks;
         json!({
+            "reads": desk_reads::status(),
             "listing": listing,
             "bindings": bindings,
             "decides": self.keyed_listing().is_some(),
@@ -575,6 +665,19 @@ mod tests {
     }
 
     #[test]
+    fn a_window_counts_for_the_screen_it_lies_wholly_on() {
+        let main = Rect::new(0.0, 0.0, 1440.0, 900.0);
+        assert!(wholly_on(Rect::new(200.0, 100.0, 700.0, 450.0), main));
+        assert!(wholly_on(main, main), "a window filling the screen");
+        // Parked in the bottom-right corner, a sliver on the screen: not counted.
+        assert!(!wholly_on(Rect::new(1436.0, 836.0, 700.0, 450.0), main));
+        // Reaching past an edge, towards a screen beyond or not.
+        assert!(!wholly_on(Rect::new(1000.0, 100.0, 700.0, 450.0), main));
+        assert!(!wholly_on(Rect::new(200.0, 600.0, 700.0, 450.0), main));
+        assert!(!wholly_on(Rect::new(0.0, 0.0, 0.0, 0.0), main));
+    }
+
+    #[test]
     fn each_managed_screen_takes_its_entry_or_there_is_no_listing() {
         let (main, side) = (DisplayId(1), DisplayId(2));
         let list = [entry("Main", 4, 0, &[1, 4]), entry("AB-CD", 9, 4, &[8])];
@@ -591,17 +694,17 @@ mod tests {
         assert_eq!(match_screens(&[(main, Some("11-22".into()), true)], &list).and_then(|l| l.desk(main)).map(|d| d.id), Some(7));
     }
 
-    /// On the bench (the real controller on the fake desk, Spaces engine): Desktop keys
+    /// On the bench (the real controller on the fake desk, each engine): Desktop keys
     /// between two Desktops (two stages on the first, one hidden) bind each Desktop to its own
-    /// Space and the shadow finds nothing, at every load.
+    /// Space and the shadow finds nothing, at every load; the reads' check looked and agreed.
     #[test]
     fn desktop_keys_bind_each_desktop_and_nothing_disagrees() {
         use super::super::bench::{Bench, DEFAULTS, frame};
         use crate::engine::recovery::EngineKind;
         use crate::platform::fake::FIRST_DESKTOP as D1;
         let d2 = D1 + 1;
-        for load in [1.0, 3.0, 10.0] {
-            let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, load, 2, |d| {
+        for (engine, load) in [EngineKind::Spaces, EngineKind::Corner].into_iter().flat_map(|e| [1.0, 3.0, 10.0].map(|l| (e, l))) {
+            let mut b = Bench::new(engine, DEFAULTS, load, 2, |d| {
                 d.add_app(101, "com.example.alpha", "Alpha");
                 d.add_app(102, "com.example.bravo", "Bravo");
                 d.add_window(11, 101, frame(1), D1);
@@ -620,6 +723,9 @@ mod tests {
             assert!(!b.hidden().is_empty(), "load {load}: a stage hidden, its home compared");
             let g = &desks["disagree"];
             assert_eq!((g["shown_begun"].as_u64(), g["homes_begun"].as_u64()), (Some(0), Some(0)), "load {load}: {desks}\n{}", b.story());
+            let r = &desks["reads"];
+            assert_eq!((r["way"].as_str(), r["state"].as_str(), r["checks"]["disagreed"].as_u64()), (Some("window server"), Some("working"), Some(0)), "{engine:?} at load {load}: {r}");
+            assert!(r["checks"]["agreed"].as_u64().unwrap_or(0) >= 2, "{engine:?} at load {load}: the check looked: {r}");
         }
     }
 }

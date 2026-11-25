@@ -5,6 +5,16 @@
 - Less work at rest in the Accessibility mode: the pictures of the windows in front are taken
   when a switch starts, as in the Spaces mode, and no longer every two seconds.
   `[animation] snapshot_interval_ms`, now 0 by default, sets a timer for them in every mode.
+- In the default mode, the first switch to a Desktop after the app starts stays there, and a
+  window that opens while a Desktop slides in joins its own Desktop's stages. Before, the
+  stage could change on the Desktop being left, and macOS could slide back.
+- In the default mode, a window moved to another Desktop in Mission Control leaves its stage
+  about a second sooner, and a window set to show on all Desktops is shown with every stage
+  from the first Desktop change (before: from the third).
+- In the default mode, with several screens, a Desktop change on one screen leaves the other
+  screens' stages as they are.
+- In the default mode, a Desktop change that macOS does not announce is followed within a
+  second.
 
 ## 1.9.2 — 2026-11-24
 

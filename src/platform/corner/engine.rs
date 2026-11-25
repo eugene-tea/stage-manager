@@ -5,6 +5,7 @@
 //! zones).
 
 use crate::platform::ax::{AxElement, AxResult};
+use crate::platform::desk_reads;
 use crate::platform::safety::{self, Ours, Report, ScanScope};
 use crate::platform::window_engine::{EngineKind, ShowHow, WindowEngine};
 use crate::engine::corner;
@@ -87,6 +88,17 @@ impl WindowEngine for CornerEngine {
     /// The scan of the park zones ([`safety::recovery_scan_with`]).
     fn recover(&self, why: &str, scope: &ScanScope) -> (Report, Vec<i32>) {
         safety::recovery_scan_with(why, scope)
+    }
+
+    /// The window server's listing, while its reads work ([`desk_reads`]): a parked window
+    /// stays on its Desktop, so the listing says of it what it says of a shown one.
+    fn desktops(&self) -> Option<Vec<crate::platform::spaces::ffi::ScreenDesks>> {
+        desk_reads::desktops()
+    }
+
+    /// A window's Spaces, while the reads work ([`desk_reads`]).
+    fn spaces_of(&self, id: WindowId) -> Option<Vec<u64>> {
+        desk_reads::spaces_of(id.0)
     }
 
     /// None: a parked window is listed on screen, in the corner.

@@ -457,7 +457,7 @@ def desk_shadow(label, since_line):
         say(f"    desks ({label}): not read: {e}")
         return
     if d.get("listing") is None:
-        say(f"    desks ({label}): the window server's listing is not read (not the Spaces engine)")
+        say(f"    desks ({label}): the window server's listing is not read (the reads off or resting, or a display change's settle under the Corner engine)")
         return
     def homes_agree():
         try:
