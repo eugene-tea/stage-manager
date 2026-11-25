@@ -128,6 +128,20 @@ pub struct Taken {
     pub skipped: Option<&'static str>,
 }
 
+/// Whether [`take`] can capture now: the reason when it cannot (no strip to hand the pictures
+/// to, or captures may not run: [`capture::desktop_may_capture`]). A switch asks before it
+/// lets its early focus go ahead of the strip for pictures that would not come.
+pub fn may_take() -> Result<(), &'static str> {
+    #[cfg(test)]
+    if let Some(off) = super::fake::with(|d| d.captures_off) {
+        return if off { Err("window captures are off") } else { Ok(()) };
+    }
+    if DELIVER.get().is_none() {
+        return Err("no strip");
+    }
+    capture::desktop_may_capture()
+}
+
 /// Captures `targets` ([`shoot`]) and waits up to `max` for every answer (the WM thread, a
 /// switch before it is sent to the strip). Each picture goes to the strip on the main thread
 /// before the wait hears of it, so a snapshot presented after this returns finds every

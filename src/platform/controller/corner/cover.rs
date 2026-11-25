@@ -69,7 +69,8 @@ pub(in crate::platform::controller) fn staying_windows(
 /// Whether a switch's cover can draw a window that stays shown into the corner from a
 /// picture of it (round 8L5): the strip `holds` one, or the window is one the switch takes a
 /// picture of with the outgoing ones (`pinned`: the strip keeps pinned windows' pictures,
-/// `platform/controller/switch_pictures.rs`) and captures `may` run now. No timer keeps such
+/// `platform/controller/switch_pictures.rs`) and a switch `may` take pictures now
+/// (`switch_shots::may_take`). No timer keeps such
 /// a picture in the strip's cache (round switch-pictures): one dropped for its age, or never
 /// taken, is taken at the switch instead of leaving every activation to arrive at once.
 pub(in crate::platform::controller) fn picturable(holds: bool, pinned: bool, may: bool) -> bool {
@@ -148,7 +149,7 @@ impl Controller {
             .collect();
         let slivers = zone.iter().map(|w| w.bounds).collect();
         let raised = raised_windows(list, own, arriving, activated, in_zone);
-        let may = crate::platform::capture::desktop_may_capture().is_ok();
+        let may = crate::platform::switch_shots::may_take().is_ok();
         let pinned = |id: u32| m.window(WindowId(id)).is_some_and(|w| w.home == Home::Pinned);
         let staying = staying_windows(list, own, outgoing, arriving, &parked, |id| picturable(strip_model::has_snapshot(id), pinned(id), may));
         let now = clock::now();

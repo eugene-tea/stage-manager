@@ -164,6 +164,20 @@ fn dock_click_pictures_corner(load: f64) -> Run {
     dock_click_pictures(EngineKind::Corner, load)
 }
 
+/// The same Dock click with window captures off or not allowed (no Screen Recording, the
+/// way the app runs until it is granted): no picture can be taken, so none is waited for and
+/// the strip is told before the early focus, as before round switch-pictures.
+fn dock_click_captures_off(load: f64) -> Run {
+    let mut b = bench(EngineKind::Corner, load, |d| {
+        d.corner_covers = true;
+        d.captures_off = true;
+    });
+    b.dock_click(A, 90);
+    b.advance(3000);
+    let out = played(&mut b);
+    Run::of(&b, out)
+}
+
 fn dock_click_pictures_spaces(load: f64) -> Run {
     dock_click_pictures(EngineKind::Spaces, load)
 }
@@ -384,6 +398,14 @@ fn pinned_dock_click_pictures_corner() {
     expect(dock_click_pictures_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
 }
 
+/// a Dock click, captures off (Corner).
+#[test]
+fn pinned_dock_click_captures_off() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; strip, main 11, front 101, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(dock_click_captures_off, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, main 11, front 101, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
 /// a Dock click, its pictures (Spaces).
 #[test]
 fn pinned_dock_click_pictures_spaces() {
@@ -524,6 +546,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("a card click, the strip 200 ms late", "strip_model::wait_cover, COVER_TIMEOUT", strip_late),
     ("a Dock click, its pictures (Corner)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_corner),
     ("a Dock click, its pictures (Spaces)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_spaces),
+    ("a Dock click, captures off (Corner)", "platform/switch_shots.rs may_take", dock_click_captures_off),
     ("⌘Tab let go at once, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_quick),
     ("⌘Tab let go at once, its pictures (Spaces)", "controller/switch_pictures.rs FRESH", cmd_tab_quick_spaces),
     ("⌘Tab held 0.7 s, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_held),

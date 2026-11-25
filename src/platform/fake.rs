@@ -525,6 +525,9 @@ pub struct Desk {
     pub session: &'static str,
     /// What a picture of a window taken at a switch costs, in ms before the load factor.
     pub shot_ms: f64,
+    /// Window captures are off or not allowed (no Screen Recording, `[strip] capture =
+    /// false`): a switch takes no picture (`switch_shots::may_take`).
+    pub captures_off: bool,
     /// A switch's cover of the park corner can be drawn (the corner patch holds a picture of
     /// it, or a still of the desktop is kept: `Controller::cover_ready`), so an activation's
     /// windows grow from their card. False, as in a run with no patch drawn yet: they arrive
@@ -689,6 +692,7 @@ impl Desk {
             login_started: None,
             session: "bench-session",
             shot_ms: 40.0,
+            captures_off: false,
             corner_covers: false,
             unveil_after: Duration::from_millis(300),
             acts: Vec::new(),

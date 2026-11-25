@@ -2225,8 +2225,8 @@ impl Controller {
         let started = clock::now();
         // The windows leaving wait on screen for their pictures, taken now where none is fresh
         // (`switch_pictures`: every engine's way; none is kept fresh on a timer by default);
-        // the keyboard goes first. With no picture to take the strip is told at once and
-        // draws while the keyboard goes.
+        // the keyboard goes first. With no picture to take (or captures off) the strip is
+        // told at once and draws while the keyboard goes.
         let wanted = switch_pictures::Wanted::of(&t);
         let waiting = if wanted.none() {
             switch_pictures::take(id, wanted);

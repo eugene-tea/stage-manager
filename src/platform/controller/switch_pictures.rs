@@ -30,8 +30,9 @@
 //!
 //! **The order.** An activation's early focus (`Controller::focus_now`, the app already
 //! active: macOS decided any Desktop change at the activation), then these pictures, then the
-//! transition to the strip; with no picture to take the strip is told first and draws while
-//! the keyboard goes. A card click's focus is split after the strip's answer
+//! transition to the strip; with no picture to take (every one fresh, nothing leaving, or
+//! captures off or not allowed: `switch_shots::may_take`) the strip is told first and draws
+//! while the keyboard goes. A card click's focus is split after the strip's answer
 //! (`split_covered`), where `focus_waits_for_show` holds a held window's focus back for its
 //! show when its app has a window on a Desktop not shown. Neither path moves a window, and the
 //! pictures are taken by window id, whatever is in front, so the early focus coming before
@@ -90,29 +91,36 @@ pub(super) struct Wanted {
     targets: Vec<Target>,
     /// Those left out: a picture of each reached the strip within [`FRESH`].
     fresh: usize,
+    /// Why none of the targets can be captured now ([`switch_shots::may_take`]: captures
+    /// off, refused, not tried yet in this run, no Screen Recording).
+    skipped: Option<&'static str>,
 }
 
 impl Wanted {
     /// The pictures transition `t` needs taken now.
     pub(super) fn of(t: &Transition) -> Self {
         let (targets, fresh) = targets(t, strip_model::snapshot_age);
-        Self { targets, fresh }
+        let skipped = if targets.is_empty() { None } else { switch_shots::may_take().err() };
+        Self { targets, fresh, skipped }
     }
 
-    /// No picture to take: the transition goes to the strip at once.
+    /// No picture to take, or none can be taken: the transition goes to the strip at once.
     pub(super) fn none(&self) -> bool {
-        self.targets.is_empty()
+        self.targets.is_empty() || self.skipped.is_some()
     }
 }
 
 /// Takes the pictures `wanted` of transition `id` now and waits for them ([`WAIT_MAX`] at
-/// most); logged, also when every one was fresh.
+/// most); logged, also when every one was fresh or none can be taken.
 pub(super) fn take(id: u64, wanted: Wanted) -> Taken {
-    let Wanted { targets, fresh } = wanted;
+    let Wanted { targets, fresh, skipped } = wanted;
     if targets.is_empty() && fresh == 0 {
         return Taken::default();
     }
-    let taken = switch_shots::take(targets, WAIT_MAX);
+    let taken = match skipped {
+        Some(why) => Taken { asked: targets.len(), skipped: Some(why), ..Taken::default() },
+        None => switch_shots::take(targets, WAIT_MAX),
+    };
     if taken.skipped.is_none() && taken.asked > 0 {
         let how = if taken.answered < taken.asked { crate::engine::margin::End::Cap } else { crate::engine::margin::End::Met };
         crate::engine::margin::wait("switch_pictures::WAIT_MAX", Duration::from_millis(taken.ms), WAIT_MAX, how);

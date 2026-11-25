@@ -101,8 +101,9 @@ raise-order check after it: the strip answering in time, late or never (`Strip::
 `Strip::draws`), a second click, a click or an app's activation inside the cover wait or the
 check, an app reordering its windows late (`App::reorders_ms`), and the pictures a switch
 takes of the windows leaving (`shots` among the calls; `Desk::pictured` says the strip took
-one itself, as at a press on a card or at ⌘Tab; `Desk::corner_covers` lets an activation
-grow from its card under the Corner engine). Each outcome reads what a
+one itself, as at a press on a card or at ⌘Tab; `Desk::captures_off` is a Mac with no
+Screen Recording; `Desk::corner_covers` lets an activation grow from its card under the
+Corner engine). Each outcome reads what a
 person sees, how many switches played with their pictures (`Strip::covered`, `uncovered`)
 and the calls in order. What macOS does on its own clock, whatever the app's thread is
 doing, the desk plays with `Desk::at` (at a time) and `Desk::on_raise` (a while after the

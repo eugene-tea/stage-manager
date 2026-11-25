@@ -66,7 +66,7 @@ NSWorkspace notifications     persists state.json               ctl socket (test
 - **A switch's states** (round r6-waits): planned; an activation's keyboard routed at
   once; the outgoing windows' pictures taken where none is fresh (`switch_pictures`, 160 ms
   at most, every engine); the transition sent to the strip (first, with no picture to
-  take); the strip's answer waited for on the
+  take or captures off); the strip's answer waited for on the
   WM thread (`strip_model::wait_cover`, a condvar, `COVER_TIMEOUT` 150 ms; no answer: the
   windows move at once and the strip, told so, draws nothing), then `[animation] cover_ms`
   (20 ms) for the pictures to reach the screen; the hides run and the arrivals are held
