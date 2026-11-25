@@ -1118,8 +1118,8 @@ fn described_bounds(list: &[windows::CgWindow]) -> HashMap<u32, Rect> {
 
 /// The windows the strip keeps full-size snapshots of for the next switch (`windows`): none
 /// while the user has hidden the strip, when no switch animates ([`Controller`]'s animated
-/// batch runs at once then) and a snapshot could never be used (the review's U1: a capture of
-/// every active window every two seconds, for nothing).
+/// batch runs at once then) and a snapshot could never be used (the review's U1: captures of
+/// every active window, for nothing).
 fn kept_ready(strip_visible: bool, windows: Vec<CardWindow>) -> Vec<CardWindow> {
     if strip_visible { windows } else { Vec::new() }
 }
@@ -2215,20 +2215,25 @@ impl Controller {
         failed
     }
 
-    /// The part of an animated switch every engine shares: transition `t` sent to the strip,
-    /// an activation's keyboard routed at once, and the strip's answer waited for (what it
-    /// drew over the windows, [`strip_model::wait_cover`]), with `cover_ms` for the pictures
-    /// to reach the screen. No window has moved when this returns.
+    /// The part of an animated switch every engine shares: an activation's keyboard routed
+    /// at once, the pictures of the windows leaving taken where none is fresh
+    /// ([`switch_pictures`]), transition `t` sent to the strip, and the strip's answer waited
+    /// for (what it drew over the windows, [`strip_model::wait_cover`]), with `cover_ms` for
+    /// the pictures to reach the screen. No window has moved when this returns.
     fn send_transition(&mut self, ob: &Observer, t: Transition, actions: &[Action], run: &ActivationRun, cover_ms: u64) -> strip_model::Cover {
         let id = t.id;
         let started = clock::now();
-        // An engine that hides in one step: the outgoing windows wait on screen for pictures
-        // taken now, none being kept fresh on a timer; the keyboard goes first.
-        let waiting = if self.engine.pictures_at_switch() && !t.outgoing.is_empty() {
-            Some(t)
-        } else {
+        // The windows leaving wait on screen for their pictures, taken now where none is fresh
+        // (`switch_pictures`: every engine's way; none is kept fresh on a timer by default);
+        // the keyboard goes first. With no picture to take the strip is told at once and
+        // draws while the keyboard goes.
+        let wanted = switch_pictures::Wanted::of(&t);
+        let waiting = if wanted.none() {
+            switch_pictures::take(id, wanted);
             self.present_with(Some(Transition { sent: Some(started), ..t }));
             None
+        } else {
+            Some((t, wanted))
         };
         // An activation's keyboard goes at once, while the strip draws: macOS has activated
         // the app and raised its windows in the corner already, and typing right after ⌘Tab
@@ -2243,8 +2248,8 @@ impl Controller {
                 None
             }
         };
-        if let Some(t) = waiting {
-            switch_pictures::take(&t);
+        if let Some((t, wanted)) = waiting {
+            switch_pictures::take(id, wanted);
             self.present_with(Some(Transition { sent: Some(clock::now()), ..t }));
         }
         let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
@@ -2600,8 +2605,8 @@ impl Controller {
                     .collect()
             })
             .unwrap_or_default();
-        // Pinned windows stay shown through a switch: snapshots of them kept ready let the
-        // switch's cover draw one reaching the park corner (8L5).
+        // Pinned windows stay shown through a switch: a snapshot of each lets the switch's
+        // cover draw one reaching the park corner (8L5; taken again at the switch).
         let pinned_windows = m
             .windows()
             .filter(|w| !w.parked && w.home == Home::Pinned && (w.space == space || w.sticky) && on.contains(&w.meta.id.0))
@@ -2618,7 +2623,6 @@ impl Controller {
             window_drag_grab: dragged.map(|d| d.grab),
             announce: main && notes.announce,
             active_windows: kept_ready(self.strip_visible, active_windows),
-            pictures_at_switch: self.engine.pictures_at_switch(),
             pinned_windows: kept_ready(self.strip_visible, pinned_windows),
             transition,
             parked: notes.parked,

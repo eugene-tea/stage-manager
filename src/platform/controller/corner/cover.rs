@@ -49,8 +49,8 @@ pub(in crate::platform::controller) fn raised_windows(list: &[windows::CgWindow]
 /// parks: the outgoing stage's windows never count, however much of the screen they fill),
 /// nor arriving, nor parked in the park zone (`parked`, [`parked_in_zone`]): pinned windows,
 /// unmanaged ones (another app's, an ignored app's), a dialog of one, and one the model has
-/// parked that the window server lists elsewhere (8L6). `snapshot`: whether the strip holds a
-/// full-size snapshot of a window, for the cover to draw it (round 8L5).
+/// parked that the window server lists elsewhere (8L6). `snapshot`: whether the cover can
+/// draw a window from a full-size snapshot of it ([`picturable`], round 8L5).
 pub(in crate::platform::controller) fn staying_windows(
     list: &[windows::CgWindow],
     own: i32,
@@ -64,6 +64,16 @@ pub(in crate::platform::controller) fn staying_windows(
         .filter(|w| !outgoing.contains(&w.id) && !arriving.contains(&w.id) && !parked.contains(&w.id))
         .map(|w| Staying { id: w.id, bounds: w.bounds, snapshot: snapshot(w.id) })
         .collect()
+}
+
+/// Whether a switch's cover can draw a window that stays shown into the corner from a
+/// picture of it (round 8L5): the strip `holds` one, or the window is one the switch takes a
+/// picture of with the outgoing ones (`pinned`: the strip keeps pinned windows' pictures,
+/// `platform/controller/switch_pictures.rs`) and captures `may` run now. No timer keeps such
+/// a picture in the strip's cache (round switch-pictures): one dropped for its age, or never
+/// taken, is taken at the switch instead of leaving every activation to arrive at once.
+pub(in crate::platform::controller) fn picturable(holds: bool, pinned: bool, may: bool) -> bool {
+    holds || (pinned && may)
 }
 
 /// Test only (`STAGE_MANAGER_COVER=desktop`, honoured with `STAGE_MANAGER_TEST` set): a
@@ -107,8 +117,9 @@ impl Controller {
     /// 8L): macOS has raised an activated app's windows above the corner patch, and the
     /// switch's focus raises its key window there too. `list` is the window server's list now;
     /// `outgoing` the windows about to park. A window that stays shown into the corner is drawn
-    /// on the cover from the strip's snapshot of it (8L5). The reason, and the windows it
-    /// names, when the corner cannot be covered (it is left as it is).
+    /// on the cover from the strip's snapshot of it (8L5; a pinned one's is taken again at
+    /// the switch). The reason, and the windows it names, when the corner cannot be covered
+    /// (it is left as it is).
     pub(in crate::platform::controller) fn switch_corner(
         &self,
         arriving: &HashSet<u32>,
@@ -137,7 +148,9 @@ impl Controller {
             .collect();
         let slivers = zone.iter().map(|w| w.bounds).collect();
         let raised = raised_windows(list, own, arriving, activated, in_zone);
-        let staying = staying_windows(list, own, outgoing, arriving, &parked, strip_model::has_snapshot);
+        let may = crate::platform::capture::desktop_may_capture().is_ok();
+        let pinned = |id: u32| m.window(WindowId(id)).is_some_and(|w| w.home == Home::Pinned);
+        let staying = staying_windows(list, own, outgoing, arriving, &parked, |id| picturable(strip_model::has_snapshot(id), pinned(id), may));
         let now = clock::now();
         let facts = CoverFacts {
             on: config.windows.corner_patch,
@@ -221,6 +234,17 @@ mod tests {
         // The outgoing windows never count, even when the model has not marked them parked.
         let staying = staying_windows(&list[..2], own, &[1, 2].into(), &HashSet::new(), &HashSet::new(), |_| false);
         assert!(staying.is_empty());
+    }
+
+    /// Round switch-pictures: with no timer a pinned window's picture may be gone from the
+    /// strip's cache (dropped for its age) or not taken yet; the switch takes it, so the
+    /// corner is still covered. Another app's window the strip never pictures is not.
+    #[test]
+    fn a_pinned_window_with_no_picture_kept_is_pictured_at_the_switch() {
+        assert!(picturable(true, false, false), "the strip holds one");
+        assert!(picturable(false, true, true), "pinned: taken at the switch");
+        assert!(!picturable(false, true, false), "captures off or refused: none can be taken");
+        assert!(!picturable(false, false, true), "unmanaged: the strip takes no picture of it");
     }
 
     #[test]

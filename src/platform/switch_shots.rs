@@ -1,12 +1,12 @@
 //! Pictures taken at a switch (1.9, S4b): full-size stills of a few windows, now, outside any
 //! capturer's rounds.
 //!
-//! Under the Corner engine the switch's pictures come from a capturer that keeps every window
-//! of the active stage fresh every `[animation] snapshot_interval_ms` (a Dock click or ⌘Tab gives
-//! no warning). Under the Spaces engine a window leaves the screen in one window-server step
-//! (~2 ms), so it can stay where it is until its picture is taken at the switch, and a window
-//! in a stage Space not shown is still captured with its current content (measured 11-14,
-//! `probe-spaces capture`): [`shoot`] takes both, in parallel, each answered once.
+//! A switch's outgoing windows are still on screen when the switch is sent to the strip,
+//! under every engine, so their pictures are taken then (`controller/switch_pictures.rs`;
+//! until 11-25 the Corner engine's came from a capturer that kept every window of the active
+//! stage fresh on a timer instead). A window in a stage Space not shown is still captured
+//! with its current content (measured 11-14, `probe-spaces capture`), as one parked in the
+//! corner is: [`shoot`] takes either, each answered once.
 //!
 //! It follows the capture module's rules ([`capture::desktop_may_capture`]): captures on, not
 //! quitting, Screen Recording granted (never asked for here), and window captures already

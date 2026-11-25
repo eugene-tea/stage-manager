@@ -62,16 +62,15 @@ pub struct StripSnapshot {
     /// The shown Space is a full-screen app's: no strip there.
     pub fullscreen: bool,
     /// The active stage's standard windows, front to back, at their live frames: the strip
-    /// keeps full-size snapshots of them ready for the next switch (`[animation]`). Empty
-    /// while the user has hidden the strip: no switch animates then, nothing is captured.
+    /// takes a full-size snapshot of each as it comes, again as the pointer nears a card, and
+    /// on a timer when `[animation] snapshot_interval_ms` asks for one; the controller takes
+    /// the ones a switch moves at the switch (`platform/controller/switch_pictures.rs`).
+    /// Empty while the user has hidden the strip: no switch animates then, nothing is captured.
     pub active_windows: Vec<CardWindow>,
-    /// A switch's outgoing pictures are taken at the switch, the windows waiting on screen for
-    /// them (the engine hides in one step: [`crate::platform::window_engine::WindowEngine::pictures_at_switch`]):
-    /// the strip keeps no full-size picture fresh on a timer, only as the pointer nears a card.
-    pub pictures_at_switch: bool,
     /// The pinned windows shown on this Space, at their live frames: they stay shown through
-    /// a switch, and a snapshot of each kept ready lets the switch's cover of the park corner
-    /// draw one that reaches it (round 8L5). Empty while the user has hidden the strip.
+    /// a switch, and a snapshot of each lets the switch's cover of the park corner draw one
+    /// that reaches it (round 8L5; taken again at the switch when not fresh). Empty while the
+    /// user has hidden the strip.
     pub pinned_windows: Vec<CardWindow>,
     /// Windows are about to leave or arrive: animate them (this snapshot is the strip after
     /// the change).
@@ -549,8 +548,8 @@ pub fn note_snapshot(id: u32) {
 }
 
 /// How long ago a full-size picture of window `id` last reached the strips (any thread):
-/// a switch's pictures taken at the switch skip one this fresh (the pointer's press on a
-/// card took it).
+/// a switch's pictures taken at the switch skip one fresh enough (the pointer's press on a
+/// card took it, or the app switcher's key).
 pub fn snapshot_age(id: u32) -> Option<Duration> {
     #[cfg(test)]
     if let Some(age) = crate::platform::fake::with(|d| d.shot_age(id)) {

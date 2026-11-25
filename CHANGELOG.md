@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Less work at rest in the Accessibility mode: the pictures of the windows in front are taken
+  when a switch starts, as in the Spaces mode, and no longer every two seconds.
+  `[animation] snapshot_interval_ms`, now 0 by default, sets a timer for them in every mode.
+
 ## 1.9.2 — 2026-11-24
 
 - With `engine = "spaces"`, plugging a screen in or out leaves every hidden window on its own

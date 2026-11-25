@@ -371,15 +371,6 @@ pub trait WindowEngine: Send + Sync {
     /// app's screens or config).
     fn assume(&self, file: &ParkedFile);
 
-    /// True when a window leaves the screen in one step as soon as it is told (no move an
-    /// app carries out): a switch's outgoing windows can stay where they are until their
-    /// pictures are taken at the switch, so no full-size picture is kept fresh on a timer
-    /// for a switch nobody announced (a Dock click, ⌘Tab). False: the strip keeps the shown
-    /// windows' pictures fresh every `[animation] snapshot_interval_ms`. Any thread.
-    fn pictures_at_switch(&self) -> bool {
-        false
-    }
-
     /// True when this engine reads back each of its own hides and shows and tries again
     /// what did not take (its owed retries): the arrival's check of a Desktop arranged ahead
     /// ([`super::controller`]'s `Verify`, built for moves an app may apply late or not at

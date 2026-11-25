@@ -459,7 +459,7 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     display_options::install(|| with_strips(Strip::display_options_changed));
     // VoiceOver or Switch Control: the cards hit-testable where they rest while one is on.
     assistive::install(|| with_strips(Strip::update_access));
-    // A switch's pictures taken at the switch (the Spaces engine) come in as the others.
+    // A switch's pictures taken at the switch come in as the others.
     crate::platform::switch_shots::set_deliver(snapshot_arrived);
     strip_model::set_presenter(|snapshot| {
         DispatchQueue::main().exec_async(move || present_in_order(snapshot));
