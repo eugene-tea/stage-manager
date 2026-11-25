@@ -266,6 +266,58 @@ class StayingWindow(unittest.TestCase):
         self.assertFalse(t.ts.owners_window_only("off", ids, {1}))
 
 
+class SwitchPictures(unittest.TestCase):
+    """Round switch-pictures: a switch nothing announced takes the pictures of the windows
+    leaving at the switch, under either engine; read from the app's own lines."""
+
+    taken = ('DEBUG platform::controller::switch_pictures: transition: outgoing pictures taken at the switch '
+             'id=7 asked=2 fresh=0 got=2 answered=2 ms=41')
+    fresh = ('DEBUG platform::controller::switch_pictures: transition: outgoing pictures taken at the switch '
+             'id=8 asked=0 fresh=2 got=0 answered=0 ms=0')
+    off = ('DEBUG platform::controller::switch_pictures: transition: outgoing pictures taken at the switch '
+           'id=9 asked=1 fresh=0 got=0 answered=0 ms=0 skipped="window captures are off"')
+    covered = ['transition covered id=7 cover=Cover { outgoing: true, incoming: true } waited_ms=8']
+
+    def test_the_switchs_line_is_read(self):
+        got = t.ts.switch_pictures_of("\n".join(["a line", self.taken, self.fresh, self.off]))
+        self.assertEqual(got[0], {"id": 7, "asked": 2, "fresh": 0, "got": 2, "ms": 41, "skipped": None})
+        self.assertEqual((got[1]["asked"], got[1]["fresh"], got[1]["skipped"]), (0, 2, None))
+        self.assertEqual(got[2]["skipped"], "window captures are off")
+        self.assertEqual(t.ts.switch_pictures_of("transition covered id=7"), [])
+
+    def test_taken_in_time_and_drawn_is_ok(self):
+        ok, note = t.ts.switch_pictures_verdict(t.ts.switch_pictures_of(self.taken), self.covered)
+        self.assertTrue(ok, note)
+        self.assertIn("asked 2", note)
+
+    def test_none_taken_is_not(self):
+        v = t.ts.switch_pictures_verdict
+        self.assertFalse(v([], self.covered)[0], "no line: the switch never looked")
+        self.assertFalse(v(t.ts.switch_pictures_of(self.fresh), self.covered)[0], "every picture fresh: something announced it")
+        self.assertFalse(v(t.ts.switch_pictures_of(self.off), self.covered)[0], "captures off")
+        late = self.taken.replace("got=2", "got=1")
+        self.assertFalse(v(t.ts.switch_pictures_of(late), self.covered)[0], "one picture past the wait")
+        slow = self.taken.replace("ms=41", "ms=400")
+        self.assertFalse(v(t.ts.switch_pictures_of(slow), self.covered)[0], "waited past the cap")
+        bare = ['transition covered id=7 cover=Cover { outgoing: false, incoming: true } waited_ms=8']
+        self.assertFalse(v(t.ts.switch_pictures_of(self.taken), bare)[0], "no picture drawn over the windows leaving")
+
+    def test_a_picture_the_press_took_counts_for_a_card_click_only(self):
+        fresh = t.ts.switch_pictures_of(self.fresh)
+        self.assertTrue(t.ts.switch_pictures_verdict(fresh, self.covered, announced=True)[0])
+        self.assertFalse(t.ts.switch_pictures_verdict(fresh, self.covered)[0])
+
+    def test_the_windows_a_cover_draws_are_read(self):
+        line = ('DEBUG ui::strip_motion: transition: the park corner is covered while the incoming windows wait there '
+                'id=7 rect=2499,1348 61x92 cap=2240,1120 320x320 picture=Desktop staying=[4711, 12]')
+        bare = line.replace("staying=[4711, 12]", "staying=[]")
+        self.assertEqual(t.ts.cover_staying_of(line + "\n" + bare + "\ntransition covered id=7"), [[4711, 12], []])
+
+    def test_the_last_switch_in_the_log_is_judged(self):
+        both = t.ts.switch_pictures_of(self.fresh + "\n" + self.taken)
+        self.assertTrue(t.ts.switch_pictures_verdict(both, self.covered)[0])
+
+
 class SlideCarriesTheCorner(unittest.TestCase):
     """8L5: a parked window of a Desktop sliding in from the left is listed mid-screen, moved
     sideways only, while the slide runs (live 10-16 14:26); it is not shown."""

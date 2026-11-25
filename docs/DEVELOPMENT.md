@@ -99,7 +99,11 @@ person would see the same. After such a change, print what to assert:
 `src/platform/controller/bench/switch.rs` pins a switch's handshake with the strip and the
 raise-order check after it: the strip answering in time, late or never (`Strip::covers_ms`,
 `Strip::draws`), a second click, a click or an app's activation inside the cover wait or the
-check, an app reordering its windows late (`App::reorders_ms`). Each outcome reads what a
+check, an app reordering its windows late (`App::reorders_ms`), and the pictures a switch
+takes of the windows leaving (`shots` among the calls; `Desk::pictured` says the strip took
+one itself, as at a press on a card or at ⌘Tab; `Desk::captures_off` is a Mac with no
+Screen Recording; `Desk::corner_covers` lets an activation grow from its card under the
+Corner engine). Each outcome reads what a
 person sees, how many switches played with their pictures (`Strip::covered`, `uncovered`)
 and the calls in order. What macOS does on its own clock, whatever the app's thread is
 doing, the desk plays with `Desk::at` (at a time) and `Desk::on_raise` (a while after the
@@ -176,7 +180,9 @@ scripts/measure.sh --summary /tmp/sm-measure.XXXXXX   # the table again
 
 - **rest**: four stages of two fixture windows, a minute untouched: the app's CPU time over
   wall time and wakeups (`proc_pid_rusage`), `top`'s POWER, the window server's and replayd's
-  CPU. **sample**: the next minute under `sample`, split by what started the work (a timer
+  CPU, and the windows captured a minute (none by default; `SM_SNAPSHOT_MS=2000` runs the
+  full-size pictures' timer the Accessibility mode had until 11-25, to measure what it
+  costs on the same build). **sample**: the next minute under `sample`, split by what started the work (a timer
   and the function it calls, an Accessibility notice, Core Animation's commit, a capture
   reply) and by its kind.
 - **switch**: card clicks and Dock clicks timed from the command to the last incoming window
@@ -286,6 +292,7 @@ The installed app is never started with any of them, so none acts on a user's co
 | `SM_PROBE_DOCK_CLICK` | `probe_apple.py` | `real`: a real click on the Dock item instead of `AXPress` |
 | `SM_STAGES`, `SM_SETTLE_S`, `SM_REST_S`, `SM_SWITCHES`, `SM_SWITCH_CPU_S`, `SM_SWITCH_WAYS`, `SM_HIDDEN_ROUNDS`, `SM_HIDDEN_S`, `SM_AFTER_S` | `measure_stages.py` | the measure's stages (4), settle (10 s), rest (60 s), switches (20), CPU window per switch (1.5 s), switch ways (`card dock`), hidden rounds (8) and length (5 s), and the watch after (1.5 s) |
 | `SM_CAPTURE` | `measure_stages.py` | `0`: the app runs with captures off (`STAGE_MANAGER_NO_CAPTURE`) |
+| `SM_SNAPSHOT_MS` | `measure_stages.py` | `N`: `[animation] snapshot_interval_ms = N` in every scenario's scratch config (the full-size pictures on a timer; none by default) |
 
 ## The ctl socket
 

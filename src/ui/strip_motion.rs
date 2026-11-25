@@ -2,15 +2,17 @@
 //! window dragged over the strip, drawn in the [`Overlay`] above every window.
 //!
 //! - **Snapshots.** Apple animates the live windows; we cannot, so we move pictures of them.
-//!   A second capturer keeps full-size snapshots of the active stage's windows (every
-//!   `[animation] snapshot_interval_ms`, and at once when the pointer reaches a card or presses
-//!   one, so they are fresh when a switch starts), plus the hovered card's windows. A window's
-//!   last snapshot before it parks stays in the cache (`snapshot_cache_mb`) and is what grows
-//!   back when its stage returns; a card's thumbnail stands in when there is none. Under an
-//!   engine that hides in one step ([`strip_model::StripSnapshot::pictures_at_switch`]: the Spaces
-//!   engine) nothing is captured on the interval: the controller captures the outgoing
-//!   windows at the switch, before it sends the transition, and they reach the cache as any
-//!   other snapshot ([`crate::platform::switch_shots`]). With
+//!   A second capturer takes full-size snapshots of the active stage's windows and of the
+//!   hovered card's: each once as it is first asked for, and all of them at once when the
+//!   pointer reaches a card or presses one, or the app switcher's key is pressed. The ones a
+//!   switch moves are taken at the switch: the controller captures the outgoing windows whose
+//!   picture is not fresh before it sends the transition, under every engine, and they reach
+//!   the cache as any other snapshot ([`crate::platform::switch_shots`],
+//!   `platform/controller/switch_pictures.rs`). Nothing is captured on a timer unless
+//!   `[animation] snapshot_interval_ms` asks for one (0 by default; until 11-25 the Corner
+//!   engine's pictures came every 2 s, most of what it cost at rest). A window's last
+//!   snapshot before it parks stays in the cache (`snapshot_cache_mb`) and is what grows back
+//!   when its stage returns; a card's thumbnail stands in when there is none. With
 //!   captures off (`[strip] capture = false`, `STAGE_MANAGER_NO_CAPTURE`) or refused by
 //!   macOS, plain ghosts (a light card) move instead.
 //! - **Transitions.** When the controller announces one ([`Transition`]), outgoing windows'
@@ -65,7 +67,8 @@
 //!   [`Strip::card_glass_look`]). A card the snapshots land in under the pointer shows at
 //!   rest, then grows and turns solid together, as any card the pointer comes onto.
 //! - **A window dragged over the strip** is shown as a card-sized snapshot, turned like a
-//!   card, under the pointer (following every drag event through a global monitor); dropped
+//!   card, under the pointer (following every drag event through a global monitor; its
+//!   picture is taken again as the drag is first heard of); dropped
 //!   there, it shrinks into its new card's slot as the transition's outgoing snapshot.
 
 use std::collections::HashMap;
@@ -101,8 +104,6 @@ use crate::ui::strip_model::{self, Cover, GhostReport, MovingWindow, ShadowRepor
 use crate::ui::window_drop;
 use crate::ui::window_shadow::{self, DEFAULT_CORNER, WindowShadow};
 
-/// The interval used when `snapshot_interval_ms = 0` (captures only on demand).
-const ON_DEMAND: Duration = Duration::from_secs(24 * 3600);
 /// How close to its target the spring must stay before a transition's snapshots go.
 const SETTLED: f64 = 0.002;
 /// A card dragged out keeps its ghost on screen at most this long while its windows'
@@ -332,7 +333,7 @@ impl Motion {
             display,
             overlay: Overlay::new(mtm),
             cache: SnapshotCache::new(512 << 20),
-            capturer: Capturer::start_quiet(ON_DEMAND, super::snapshot_arrived),
+            capturer: Capturer::start_quiet(capture::NO_TIMER, super::snapshot_arrived),
             interval_ms: None,
             running: None,
             window_card: None,
@@ -1950,11 +1951,11 @@ impl Strip {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
         let a = self.style.animation.clone();
-        // Pictures taken at the switch (the Spaces engine): none on a timer.
-        let interval = (a.snapshot_interval_ms > 0 && !self.snapshot.pictures_at_switch).then_some(a.snapshot_interval_ms);
-        if self.motion.interval_ms != Some(interval.unwrap_or(0)) {
-            self.motion.interval_ms = Some(interval.unwrap_or(0));
-            self.motion.capturer.set_interval(interval.map_or(ON_DEMAND, Duration::from_millis));
+        // A switch's pictures are taken at the switch, under every engine: a timer only when
+        // the config asks for one (`[animation] snapshot_interval_ms`, 0 by default).
+        if self.motion.interval_ms != Some(a.snapshot_interval_ms) {
+            self.motion.interval_ms = Some(a.snapshot_interval_ms);
+            self.motion.capturer.set_interval(capture::interval_of(a.snapshot_interval_ms));
         }
         self.motion.cache.set_budget((a.snapshot_cache_mb as usize) << 20);
         let known: Vec<u32> = self
@@ -1985,6 +1986,11 @@ impl Strip {
         match (dragging, self.motion.drag_monitor.is_some()) {
             (true, false) => {
                 self.motion.drag_seen = self.snapshot.window_drag.map(|w| (w.id, self.pointer()));
+                // Its card under the pointer shows it as it is now: no timer keeps its
+                // picture fresh (the targets above hold it while it is in the stage shown).
+                if let Some(w) = self.snapshot.window_drag {
+                    self.motion.capturer.recapture(&[w.id]);
+                }
                 let block = RcBlock::new(move |_e: NonNull<NSEvent>| {
                     with_strip_of(display, Strip::update_visibility);
                 });
@@ -2009,7 +2015,8 @@ impl Strip {
 
     /// Tells the snapshot capturer what to keep: the active stage's windows, the pinned ones
     /// shown (for a switch's cover of the park corner, 8L5) and those of `card` (or the
-    /// hovered card), at full size. `now` captures them at once.
+    /// hovered card), at full size: each is captured once as it is first asked for, and
+    /// again on a timer only when the config sets one. `now` captures them all at once.
     fn update_snapshot_targets(&mut self, card: Option<u64>, now: bool) {
         if !self.style.animation.animates() {
             self.motion.capturer.set_targets(Vec::new());

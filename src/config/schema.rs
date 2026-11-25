@@ -367,8 +367,8 @@ pub const KEYS: &[KeyDef] = &[
     k("animation", "shadow_radius", f(0.0, 100.0), "24.0", "Blur radius of a moving snapshot's shadow with shadow = \"custom\"."),
     k("animation", "shadow_opacity", f(0.0, 1.0), "0.35", "Opacity of that shadow."),
     k("animation", "shadow_offset_y", f(-100.0, 100.0), "10.0", "Vertical offset of that shadow (down is positive)."),
-    k("animation", "snapshot_interval_ms", i(0, 60_000), "2000",
-        "How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip."),
+    k("animation", "snapshot_interval_ms", i(0, 60_000), "0",
+        "Full-size snapshots of the shown windows are also taken again this often, on a timer; 0 = no timer: they are taken when a switch starts and as the pointer nears the strip."),
     k("animation", "snapshot_cache_mb", i(16, 8192), "512", "Most memory kept for full-size window snapshots; the oldest go first."),
     k("animation", "reduce_motion", Kind::Choice(&["system", "on", "off"]), "\"system\"",
         "Reduce Motion: \"system\" follows macOS (System Settings > Accessibility > Display > Reduce motion); \"on\" always, \"off\" never. With it, nothing flies, slides, grows or turns: a switch is a short cross-fade, the strip fades in and out, cards change place with a fade and do not grow under the pointer."),
@@ -637,6 +637,7 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-50.toml"),
     include_str!("legacy/default-51.toml"),
     include_str!("legacy/default-52.toml"),
+    include_str!("legacy/default-53.toml"),
 ];
 
 #[cfg(test)]

@@ -49,6 +49,38 @@ class P90(unittest.TestCase):
         self.assertEqual(M.p90([None, 3.0, 1.0]), 3.0)
 
 
+class SnapshotTimer(unittest.TestCase):
+    """SM_SNAPSHOT_MS (round switch-pictures): the full-size pictures' timer written into a
+    scenario's scratch config, so its cost is measured on one build."""
+
+    def test_not_set_writes_nothing(self):
+        self.assertIsNone(M.snapshot_ms(None))
+        self.assertIsNone(M.snapshot_ms(""))
+        self.assertEqual(M.config_text(None), "")
+        self.assertEqual(M.config_text(None, "[strip]\norder = \"dock\"\n"), "[strip]\norder = \"dock\"\n")
+
+    def test_a_number_is_the_keys_value(self):
+        self.assertEqual(M.snapshot_ms("2000"), 2000)
+        self.assertEqual(M.snapshot_ms(" 0 "), 0)
+        self.assertEqual(M.config_text(2000), "[animation]\nsnapshot_interval_ms = 2000\n")
+        self.assertEqual(M.config_text(0), "[animation]\nsnapshot_interval_ms = 0\n", "0 says no timer aloud")
+
+    def test_it_follows_a_scenarios_own_sections(self):
+        text = M.config_text(1500, "[strip]\nthumbnail_interval_ms = 1500\norder = \"dock\"\n")
+        self.assertEqual(text, "[strip]\nthumbnail_interval_ms = 1500\norder = \"dock\"\n[animation]\nsnapshot_interval_ms = 1500\n")
+
+    def test_out_of_the_keys_range_is_refused(self):
+        for bad in ("-1", "60001", "soon"):
+            with self.assertRaises(ValueError):
+                M.snapshot_ms(bad)
+
+    def test_a_count_a_minute(self):
+        self.assertEqual(M.per_minute(10, 40, 60.0), 30.0)
+        self.assertEqual(M.per_minute(7, 7, 300.0), 0.0)
+        self.assertIsNone(M.per_minute(None, 40, 60.0))
+        self.assertIsNone(M.per_minute(1, 2, 0))
+
+
 class HiddenRound(unittest.TestCase):
     def test_a_clock_that_kept_drawing(self):
         rows = clock(100.0, 110.0)

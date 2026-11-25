@@ -1,12 +1,12 @@
 //! Pictures taken at a switch (1.9, S4b): full-size stills of a few windows, now, outside any
 //! capturer's rounds.
 //!
-//! Under the Corner engine the switch's pictures come from a capturer that keeps every window
-//! of the active stage fresh every `[animation] snapshot_interval_ms` (a Dock click or ⌘Tab gives
-//! no warning). Under the Spaces engine a window leaves the screen in one window-server step
-//! (~2 ms), so it can stay where it is until its picture is taken at the switch, and a window
-//! in a stage Space not shown is still captured with its current content (measured 11-14,
-//! `probe-spaces capture`): [`shoot`] takes both, in parallel, each answered once.
+//! A switch's outgoing windows are still on screen when the switch is sent to the strip,
+//! under every engine, so their pictures are taken then (`controller/switch_pictures.rs`;
+//! until 11-25 the Corner engine's came from a capturer that kept every window of the active
+//! stage fresh on a timer instead). A window in a stage Space not shown is still captured
+//! with its current content (measured 11-14, `probe-spaces capture`), as one parked in the
+//! corner is: [`shoot`] takes either, each answered once.
 //!
 //! It follows the capture module's rules ([`capture::desktop_may_capture`]): captures on, not
 //! quitting, Screen Recording granted (never asked for here), and window captures already
@@ -128,6 +128,20 @@ pub struct Taken {
     pub skipped: Option<&'static str>,
 }
 
+/// Whether [`take`] can capture now: the reason when it cannot (no strip to hand the pictures
+/// to, or captures may not run: [`capture::desktop_may_capture`]). A switch asks before it
+/// lets its early focus go ahead of the strip for pictures that would not come.
+pub fn may_take() -> Result<(), &'static str> {
+    #[cfg(test)]
+    if let Some(off) = super::fake::with(|d| d.captures_off) {
+        return if off { Err("window captures are off") } else { Ok(()) };
+    }
+    if DELIVER.get().is_none() {
+        return Err("no strip");
+    }
+    capture::desktop_may_capture()
+}
+
 /// Captures `targets` ([`shoot`]) and waits up to `max` for every answer (the WM thread, a
 /// switch before it is sent to the strip). Each picture goes to the strip on the main thread
 /// before the wait hears of it, so a snapshot presented after this returns finds every
@@ -136,8 +150,11 @@ pub struct Taken {
 pub fn take(targets: Vec<Target>, max: Duration) -> Taken {
     let asked = targets.len();
     #[cfg(test)]
-    if let Some(ms) = super::fake::with(|d| d.take_shots(asked, max)) {
-        return Taken { asked, got: asked, answered: asked, ms, skipped: None };
+    {
+        let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+        if let Some(ms) = super::fake::with(|d| d.take_shots(&ids, max)) {
+            return Taken { asked, got: asked, answered: asked, ms, skipped: None };
+        }
     }
     let Some(&deliver) = DELIVER.get() else { return Taken { asked, skipped: Some("no strip"), ..Taken::default() } };
     if asked == 0 {

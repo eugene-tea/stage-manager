@@ -60,7 +60,8 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   meanwhile (Grok Bot, 11-13 09:54); Apple's swaps cleanly (its Stage Manager is in the
   window server, so the window can wait for the swap). Three trims, about 30 to 50 ms left:
   - the outgoing windows' pictures ready ahead (09:54:24: 106 ms building them before the
-    motion could start);
+    motion could start; since 11-25 they are taken at the switch under this engine too, about
+    20 ms a window: take them as the new window is first seen, before its stage is decided);
   - no park-zone rescan or other AX pass while a new window waits for its stage (09:54:38:
     a rescan of two apps that did not answer held the decision 54 ms);
   - for a switch a new window starts, the outgoing pictures drawn under that window, not in
@@ -101,18 +102,21 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   corner as the Corner engine does.
 - **Less work while nobody looks: CPU and battery.** 4 to 5 % CPU at rest on 11-13; since
   1.9 the thumbnails come at events only (none at rest: a day's log of 11-19 counts no capture
-  in hours with no switch), the Spaces engine takes no full-size picture on a timer, and the
-  Dock's order is read at events. Aim: 1 to 2 %, with no card shown stale and no switch slower.
-  - Run `RUNS=1 ENGINES=spaces SM_REST_S=300 scripts/measure.sh covered` (and `rest`) and write
-    the numbers in UX-SPEC.
-  - Full-size switch pictures, the park corner only (every 2 s of the front stage's windows,
-    whether the strip shows or not): keep them (a Dock click or ⌘Tab switch has no pointer
-    near the strip to warn), but skip a window that has not changed since its last picture if
-    that can be told cheaply; measure before deciding.
+  in hours with no switch), no engine takes a full-size picture on a timer (the park corner
+  took the front stage's every 2 s until 11-25), and the Dock's order is read at events.
+  Aim: 1 to 2 %, with no card shown stale and no switch slower.
+  - Measure again, both engines: `scripts/measure.sh rest sample switch`, then
+    `RUNS=1 SM_REST_S=300 scripts/measure.sh covered`, and for what the timer cost
+    `SM_SNAPSHOT_MS=2000 OUT=<another> ENGINES=corner scripts/measure.sh rest sample`; write
+    the numbers in UX-SPEC ("Window engines measured") and MODES.
+  - A Dock click's switch under the park corner now waits for its pictures (about 20 ms a
+    window) before the corner is covered: the capture phase's "raised in the corner by macOS
+    before the motion" (150 ms at most) says whether it shows. If it does, the pictures can
+    start while the switch is planned, or the corner's cover go to the strip ahead of them.
   - Video calls: check whether our captures make a call's video stutter (it lags at times
     with ours where Apple's is smooth). The call stand-in missed no refresh at rest or
-    switching (11-14, 11-18), and at rest only the park corner's 2 s pictures touch a call
-    window in front; so a real call, recorded with and without captures, dropped frames
+    switching (11-14, 11-18), and at rest no picture is taken of a call window in front any
+    more; so a real call, recorded with and without captures, dropped frames
     counted at each capture round; if they show, capture a window that plays video or a call
     less often, or never at full size.
   - The Dock's bar is still read every 2 s for the inert slivers (its lists' frames, a few

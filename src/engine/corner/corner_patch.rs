@@ -518,8 +518,8 @@ pub struct Staying {
     pub id: u32,
     /// Its bounds as listed (global, top-left).
     pub bounds: Rect,
-    /// The strip holds a full-size snapshot of it, which the cover can draw where it reaches
-    /// the corner (round 8L5).
+    /// The strip holds a full-size snapshot of it, or the switch takes one, which the cover
+    /// can draw where it reaches the corner (round 8L5).
     pub snapshot: bool,
 }
 

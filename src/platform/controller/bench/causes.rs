@@ -520,11 +520,13 @@ fn an_apps_own_focus_of_another_window_brings_its_stage() {
     // it does).
     let other = "front [11] shows [11] desktop 1 app 101 switches 2 slides 0";
     let at1 = "activation 101: ours, focus 17: ours, focus 17: ours, focus 11: the user's: its stage comes";
-    let at3 = "activation 101: ours, focus 17: ours, focus 11: the user's: its stage comes, focus 17: ours";
-    // At load 10 the app's focus comes before its activation is in force (its app is
-    // behind), and again once it is.
-    let at10 = "focus 11: its app is behind, activation 101: ours, focus 17: ours, focus 11: the user's: its stage comes";
-    pin(app_focuses_its_other_window_after_ours, [other, other, other], [at1, at3, at10]);
+    // At load 3 and 10 the app's focus comes before its activation is in force (its app is
+    // behind), and again once it is. At load 3 since round switch-pictures: the click's
+    // switch takes the leaving window's picture first (120 ms there; the bench's click is
+    // one whose press took none), so our focus goes after the app's own, 150 ms in.
+    // TIME DECIDES: the pictures' time against the app's 150 ms.
+    let late = "focus 11: its app is behind, activation 101: ours, focus 17: ours, focus 11: the user's: its stage comes";
+    pin(app_focuses_its_other_window_after_ours, [other, other, other], [at1, late, late]);
     let next = "front [17] shows [17] desktop 1 app 101 switches 1 slides 0";
     let users = "focus 17: the user's: its stage comes";
     pin(next_window_key_to_another_stage, [next, next, next], [users, users, users]);

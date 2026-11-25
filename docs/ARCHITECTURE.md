@@ -72,9 +72,10 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   afresh by id; one unlisted and off screen on two looks a second apart is let go as closed
   (`engine::stale_handle`). Commands go main → WM by channel plus `CFRunLoopPerformBlock`;
   snapshots WM → main via GCD.
-- **A switch's states** (round r6-waits): planned; under the Spaces engine the outgoing
-  windows' pictures taken (`switch_pictures`, 160 ms at most); the transition sent to the
-  strip and the activation's keyboard routed at once; the strip's answer waited for on the
+- **A switch's states** (round r6-waits): planned; an activation's keyboard routed at
+  once; the outgoing windows' pictures taken where none is fresh (`switch_pictures`, 160 ms
+  at most, every engine); the transition sent to the strip (first, with no picture to
+  take or captures off); the strip's answer waited for on the
   WM thread (`strip_model::wait_cover`, a condvar, `COVER_TIMEOUT` 150 ms; no answer: the
   windows move at once and the strip, told so, draws nothing), then `[animation] cover_ms`
   (20 ms) for the pictures to reach the screen; the hides run and the arrivals are held
@@ -245,7 +246,8 @@ sequenceDiagram
     participant SM as Stage Manager
     participant WS as Window server
     Note over SM,WS: Corner engine
-    SM->>SM: pictures of the shown windows, captured ahead (every 2 s)
+    SM->>WS: pictures of the outgoing windows, captured now (none kept on a timer)
+    WS-->>SM: the pictures (the windows wait on screen for them)
     loop each outgoing window
         SM->>WS: AX set position (park corner)
         WS-->>WS: clamps it, a sliver stays (corner patch over it)
@@ -341,8 +343,9 @@ behind it; the rest of its methods have defaults the Corner engine keeps (the le
 window server's Desktops, the launch watch, the landing). A `SetFrame` is the
 engine's `show`: the model counts the window shown either way, and the engine knows what it
 has hidden. Every engine's switch plays with pictures: the controller plans the transition,
-sends it to the strip, waits for its answer, hides behind the outgoing pictures and holds the
-arrivals until the unveil. The engine is one value for the process
+takes the outgoing windows' pictures where none is fresh (no window has moved yet, under any
+engine: `platform/controller/switch_pictures.rs`), sends it to the strip, waits for its
+answer, hides behind the outgoing pictures and holds the arrivals until the unveil. The engine is one value for the process
 (`window_engine::current`), so the WM thread's batches and the safety paths on other threads
 ask the same one. The parked file names the engine (left out for Corner), and the guardian
 installs that engine before its first scan; its watch asks that engine whether a window is
@@ -398,13 +401,8 @@ beyond the Dock's edge first, as under the Corner engine, and hidden again once 
 bring-backs (quit, a stand-down, a panic, an abort) ask the window server which windows are
 in the engine's Spaces and move each onto its Desktop, from any thread, then end the Spaces;
 the registry still gives fitted windows their frames back. The motion is still the
-pictures, but none is kept fresh on a timer: the trait's
-`pictures_at_switch` answers true, so the strip captures full-size pictures only as the
-pointer nears a card, and the controller, before it sends a switch to the strip, captures
-every outgoing window whose picture is not fresh (`platform/controller/switch_pictures.rs`,
-through `platform/switch_shots.rs`: the window server's own capture a window at a time, any
-window it misses through ScreenCaptureKit) and waits for them, 160 ms at most. The
-windows stay on screen meanwhile and hide behind their pictures in one step each. A window
+pictures, taken as under every engine (below, "Window pictures"): the windows stay on screen
+for them and hide behind them in one step each. A window
 in a stage Space still draws and is captured with its current content, so an incoming
 window's picture taken while it is hidden (the pointer on its card) is current too.
 
@@ -530,8 +528,24 @@ from its shadow (every window of a round with no reading, a few at most and one 
 one a round, each window's every 20 s at most; and after each switch lands, for its windows
 with none). Card thumbnails are taken at
 events, no timer (`[strip] thumbnail_interval_ms = 0`): a window newly on a card, the strip
-coming into view, the pointer reaching a card; a failed one twice more, 3 s apart. The Corner
-engine keeps its full-size pictures fresh every 2 s, the same way.
+coming into view, the pointer reaching a card; a failed one twice more, 3 s apart.
+
+The full-size pictures a switch moves are taken at events too, the same under every engine
+(`[animation] snapshot_interval_ms = 0`; a number adds a timer). The strip takes one of each
+window of the stage in front as it is first asked for, and of all of them and the card's
+when the pointer reaches a card or presses one, or the app switcher's key is pressed
+(`ui/strip_motion.rs`). The controller, before it sends a switch to the strip, captures every
+outgoing window whose picture is older than half a second
+(`platform/controller/switch_pictures.rs`, through `platform/switch_shots.rs`: the window
+server's own capture a window at a time, any window it misses through ScreenCaptureKit) and
+waits for them, 160 ms at most; no window has moved by then under either engine, so the
+windows wait on screen. A window took 19 ms at the median, two 40 ms (the app's own lines,
+11-14 to 11-24, the Spaces engine). With them it takes a pinned window that stays shown into
+the park corner the switch covers, which the cover draws from its picture. A switch nothing
+announced (a Dock click, a hotkey) starts later by that wait; a card click and ⌘Tab find
+their pictures taken at the press and at the key. Until 11-25 the Corner engine kept the
+front stage's pictures fresh every 2 s instead, from when a picture took 80 to 150 ms; that
+timer was most of what it cost at rest (UX-SPEC, "Window engines measured").
 
 The landing, behind a test switch for now (round sm-landing; `ui/landing_math.rs`, pure;
 `STAGE_MANAGER_LANDING` with `STAGE_MANAGER_ONLY` or under `[windows] engine = "spaces"`, default today's): **ordered** puts each

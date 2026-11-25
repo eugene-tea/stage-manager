@@ -14,7 +14,9 @@ Scenarios (all by default, in this order):
   each), nothing touched for SM_REST_S seconds (60) after a SM_SETTLE_S (10) settle. Our
   process (and its guardian): CPU time over wall time and wakeups a second
   (`proc_pid_rusage`), billed energy; `top`'s %CPU, POWER and idle wakeups over the same
-  span; the window server's and replayd's CPU (`ps` time over wall time) and POWER.
+  span; the window server's and replayd's CPU (`ps` time over wall time) and POWER; and,
+  from `ctl state`, the windows captured a minute (`costs.captures`: a round's; and
+  `capture.images`: every window picture).
 - sample: the next SM_REST_S seconds, `sample` of our process (1 ms); its active samples
   (a thread not waiting) split by where the work comes from (a run-loop timer and the
   function it calls, an Accessibility notice, the main queue, Core Animation's commit, a
@@ -52,11 +54,17 @@ Scenarios (all by default, in this order):
   resting on a window over a card for 2 s: `ctl debug-strip`'s `under_windows` and the windows
   captured meanwhile. Pass: no Dock read on a timer (2 a minute at most, against 30 before
   1.9.1), no capture at that hover (a card under a window hovered before, and its windows
-  were taken), and, with the Spaces engine, no capture a minute with the strip slid away (the
-  park corner keeps the front windows' full-size pictures on its own 2 s timer). Not with `off`.
+  were taken), and no capture a minute with the strip slid away, under either engine (until
+  11-25 the park corner kept the front windows' full-size pictures on a 2 s timer; with
+  SM_SNAPSHOT_MS set the timer runs and this is not judged). Not with `off`.
 
 The app runs from the dev copy with captures on (as installed; SM_CAPTURE=0 turns them off), STAGE_MANAGER_ONLY the
 fixtures, in a scratch home; fixture windows only, at frames clear of the strip.
+
+SM_SNAPSHOT_MS=N writes `[animation] snapshot_interval_ms = N` into every scenario's scratch
+config: the full-size pictures of the front stage's windows on a timer again (2000 was the
+Corner engine's until 11-25), so what the timer costs is measured on one build, with and
+without it. Use another OUT for it; each row says the value (`snapshot_ms`).
 """
 
 import ctypes
@@ -119,6 +127,27 @@ AFTER_S = float(os.environ.get("SM_AFTER_S") or 1.5)
 # SM_CAPTURE=0 runs the app with window captures off (STAGE_MANAGER_NO_CAPTURE): what is left
 # once nothing is captured between switches. Use another OUT for it.
 CAPTURE = (os.environ.get("SM_CAPTURE") or "1") != "0"
+
+
+def snapshot_ms(value):
+    """SM_SNAPSHOT_MS as a number of milliseconds (0 to 60000, the key's range), None when
+    not set."""
+    if value is None or not str(value).strip():
+        return None
+    n = int(str(value).strip())
+    if not 0 <= n <= 60000:
+        raise ValueError(f"SM_SNAPSHOT_MS={value}: 0 to 60000")
+    return n
+
+
+def config_text(ms, text=""):
+    """A scenario's scratch config: its own `text` (other sections), with `[animation]
+    snapshot_interval_ms = ms` when SM_SNAPSHOT_MS is set (`ms`)."""
+    return text if ms is None else f"{text}[animation]\nsnapshot_interval_ms = {ms}\n"
+
+
+# SM_SNAPSHOT_MS: the full-size pictures' timer, written into every scratch config.
+SNAPSHOT_MS = snapshot_ms(os.environ.get("SM_SNAPSHOT_MS"))
 # Frames from the visible frame's top-left, clear of the strip's column (its cards stay
 # clickable, never covered).
 FRAMES = "330,60,1000,640;560,220,1000,640"
@@ -272,7 +301,8 @@ def say(msg):
 
 
 def record(scenario, data):
-    row = {"scenario": scenario, "engine": ENGINE, "run": RUN, "capture": CAPTURE, "at": time.strftime("%Y-%m-%d %H:%M:%S"), **data}
+    row = {"scenario": scenario, "engine": ENGINE, "run": RUN, "capture": CAPTURE, "snapshot_ms": SNAPSHOT_MS,
+           "at": time.strftime("%Y-%m-%d %H:%M:%S"), **data}
     with open(JSONL, "a") as f:
         f.write(json.dumps(row) + "\n")
     say(json.dumps(row))
@@ -312,11 +342,15 @@ def fixtures_up():
 
 def fresh_home():
     """No saved stages or config from an earlier scenario: a window would go back to its
-    saved stage (a relaunched Charlie to Charlie's stage of the four) instead of a new one."""
+    saved stage (a relaunched Charlie to Charlie's stage of the four) instead of a new one.
+    The scratch config holds SM_SNAPSHOT_MS's timer alone, when set."""
     for f in ("state.json", "config.toml", ".config-last-good.toml"):
         p = os.path.join(T.HOME, f)
         if os.path.exists(p):
             os.remove(p)
+    if config_text(SNAPSHOT_MS):
+        with open(os.path.join(T.HOME, "config.toml"), "w") as f:
+            f.write(config_text(SNAPSHOT_MS))
 
 
 def front_first_app():
@@ -377,13 +411,37 @@ def stages_up():
 
 # ----- rest ------------------------------------------------------------------------------
 
+def captured_now():
+    """The windows captured so far, from `ctl state`: (asked by a round, every picture); None
+    with `off`."""
+    if ENGINE == "off":
+        return None
+    s = T.state()
+    return ((s.get("costs") or {}).get("captures"), (s.get("capture") or {}).get("images"))
+
+
+def per_minute(before, after, wall_s):
+    """A count's rise from `before` to `after` over `wall_s` seconds, a minute; None when
+    either is not known."""
+    if before is None or after is None or not wall_s:
+        return None
+    return round((after - before) * 60.0 / wall_s, 1)
+
+
 def scenario_rest():
-    say(f"\n== rest ({ENGINE}, run {RUN}): {STAGES} stages, {SETTLE_S:.0f} s settle, {REST_S:.0f} s untouched ==")
+    say(f"\n== rest ({ENGINE}, run {RUN}): {STAGES} stages, {SETTLE_S:.0f} s settle, {REST_S:.0f} s untouched"
+        + (f", snapshots every {SNAPSHOT_MS} ms" if SNAPSHOT_MS else "") + " ==")
     stages_up()
     time.sleep(SETTLE_S)
+    c0 = captured_now()
     sp = Span(with_top_secs=REST_S)
     time.sleep(REST_S)
     m = sp.end()
+    c1 = captured_now()
+    if c0 and c1:
+        m["captures_per_min"] = per_minute(c0[0], c1[0], m.get("wall_s"))
+        m["pictures_per_min"] = per_minute(c0[1], c1[1], m.get("wall_s"))
+        say(f"  windows captured a minute: {m['captures_per_min']} asked by a round, {m['pictures_per_min']} pictures in all")
     return record("rest", m)
 
 
@@ -392,8 +450,8 @@ def scenario_rest():
 # The strip following the Dock, and thumbnails on a timer: what the Dock's event reads and the
 # capture gates save shows at rest. `HOVER_CONFIG` takes thumbnails at events again, so a
 # capture at the hover is the hover's.
-COVERED_CONFIG = '[strip]\nthumbnail_interval_ms = 1500\norder = "dock"\n'
-HOVER_CONFIG = '[strip]\norder = "dock"\n'
+COVERED_CONFIG = config_text(SNAPSHOT_MS, '[strip]\nthumbnail_interval_ms = 1500\norder = "dock"\n')
+HOVER_CONFIG = config_text(SNAPSHOT_MS, '[strip]\norder = "dock"\n')
 COST_KEYS = ("captures", "dock_reads", "window_lists", "launch_services")
 
 
@@ -472,7 +530,9 @@ def scenario_covered():
     hover_captures = (costs_now().get("captures") or 0) - c0
     T.ctl("debug-pointer-back")
     put_back(s)
-    edge_ok = ENGINE != "spaces" or edge.get("captures_per_min") == 0
+    # No timer takes a window's picture with the strip slid away, under either engine (the
+    # thumbnails' is gated; the full-size pictures have none unless SM_SNAPSHOT_MS sets one).
+    edge_ok = bool(SNAPSHOT_MS) or edge.get("captures_per_min") == 0
     dock_ok = all((m.get("dock_reads_per_min") or 0) <= 2 for m in (clear, edge))
     ok = bool(slid) and shown is True and hover_captures == 0 and edge_ok and dock_ok
     say(f"  {'pass' if ok else 'FAIL'}: captures a minute clear {clear.get('captures_per_min')}, slid away "
@@ -1038,6 +1098,8 @@ def summary(out):
     add("rest: window server CPU %", "rest", g("ws_cpu_pct"))
     add("rest: window server POWER (top)", "rest", g("top_ws_power"))
     add("rest: replayd CPU %", "rest", g("replayd_cpu_pct"))
+    add("rest: windows captured/min (rounds)", "rest", g("captures_per_min"))
+    add("rest: window pictures/min (all)", "rest", g("pictures_per_min"))
     add("sample: active ms in 60 s", "sample", g("active_ms"))
     for how in ("card", "dock", "ctl"):
         add(f"switch {how}: click to last frame ms", "switch", g(how, "end_ms_median"))

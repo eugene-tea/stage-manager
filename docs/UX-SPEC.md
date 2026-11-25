@@ -776,8 +776,16 @@ stages were saved on that is not connected yet (10 s at most).
 
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
 so switches are animated with snapshots in a click-through layer above every normal window
-(always-on-top windows stay above it), while the real windows move behind them. Snapshots are refreshed every 2 seconds (taken at the switch under the Spaces engine) and as the pointer
-nears a card, so content that changed meanwhile can jump when the motion ends. A click
+(always-on-top windows stay above it), while the real windows move behind them. A leaving
+window's snapshot is taken as the switch starts, the window still on screen, in both modes
+(not again when one came in the half second before: a press on a card and ⌘Tab's key take
+them ahead); an arriving window's is the last one taken before it left, or as the pointer
+reached its card, so content that changed meanwhile can jump when the motion ends. A switch
+nothing announced (a Dock click, a hotkey) starts later by the time its pictures take: 19 ms
+for one window at the median, 40 ms for two, 160 ms at the most (the app's own lines over
+956 switches, 11-14 to 11-24). No picture is taken on a timer (`[animation]
+snapshot_interval_ms`, 0; a number of milliseconds takes the front stage's again that
+often). Until 11-25 the Accessibility mode took them every 2 seconds instead. A click
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
 already the new stage's). An arriving window takes its place under its picture once the
 picture as shown on screen is within a point of it on every edge (about 600 ms after the
@@ -872,7 +880,8 @@ still: the file's render is used only at the frame known now (the clock's, or th
 still settled as the patch was last drawn from the file). Live 11-24 09:10: a frame settled
 at 08:34 was kept for the cover, macOS went to a brighter one at 09:04, and every switch
 showed a darker block of 61 x 112 pt in the corner for the motion's 0.8 s. A window that stays shown through the switch and
-reaches that corner (a pinned window, kept in pictures like the active stage's) is drawn on
+reaches that corner (a pinned window, its picture taken at the switch with the leaving
+windows') is drawn on
 the cover from its own picture, so it looks as it is (that corner of it holds still for the
 motion's moment, as a ghost does; a video or a busy terminal there may show a seam until the
 windows land); the outgoing stage's windows never count. Where it cannot be covered at all
@@ -1309,7 +1318,9 @@ The park corner (`engine = "accessibility"`) against the Spaces way (`engine = "
 fixture windows, an Apple silicon Mac with macOS 27, the median of three runs with the range
 in brackets (11-14, `scripts/measure.sh`). CPU is percent of one core. The window server's
 column "off" is its own load with Stage Manager quit; the difference is what each engine adds.
-[MODES.md](MODES.md) quotes these for the comparison.
+[MODES.md](MODES.md) quotes these for the comparison. The tables below were measured while
+the park corner took the front stage's pictures every 2 s; since 11-25 it takes them at the
+switch, as the Spaces way does, and its rows at rest are to be measured again.
 
 | | off | corner | spaces |
 |---|---|---|---|
