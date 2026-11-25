@@ -1353,6 +1353,45 @@ screen-capture service reads 0 and the window server, measured with other apps o
 | An animating window shown from a hidden stage: drawing again, ms | 161 | 153 |
 | Missed refreshes of a call window, at rest and switching | 0 | 0 |
 
+Measured again on 11-25, after every engine came to take a switch's pictures at the switch
+(`scripts/measure.sh rest sample switch launch`, the median of three runs, a 5K display, other
+apps open, so the window server's own load is higher than on 11-14). "Corner, timer" is the
+Corner engine as it was until that day, the front stage's windows pictured every 2 s: 1.9.2
+for the switches, and the new build with `SM_SNAPSHOT_MS=2000` for the rest (1.9.2 itself
+read 2.00 and 2.10 there).
+
+| | off | corner, timer | corner | spaces |
+|---|---|---|---|---|
+| App CPU at rest | | 2.03 | 0.83 | 0.50 |
+| Screen-capture service (replayd) CPU at rest | 0.00 | 2.10 | 0.25 | 0.02 |
+| Window server CPU at rest | 5.4 | 17 | 10 | 5.2 |
+| Windows pictured a minute at rest | | 60 | 0 | 0 |
+| App wake-ups a second at rest | | 4.4 | 4.4 | 3.7 |
+| App active ms in 60 s at rest | | | 392 | 216 |
+| Card click to the last frame, ms | | 875 | 951 | 941 |
+| Card click until the outgoing windows are gone, ms | | 234 | 312 | 306 |
+| Dock click until the outgoing windows are gone, ms | | 1032 | 1145 | 1143 |
+| A new app's window over the stage left, ms | | 62 | 77 | 0 |
+| A new app's window on screen, ms | | 188 | 188 | 278 |
+
+With the system's share the Corner engine went from about 16 % of a core at rest to about
+5.7 %; the Spaces engine reads about 0.5 %. The pictures taken at the switch cost a card click
+76 ms and a Dock click 113 ms under the Corner engine, what the Spaces engine has read since
+1.9 (940 and 1144 ms on 1.9.2). The test's card click presses and lets go at once, so the
+picture the press takes is never ready; a person's click was not measured. In the capture
+phase a Dock click routed the keyboard 37 ms after macOS's activation notice under the Corner
+engine and 59 ms under Spaces, and the activated app's windows showed raised in the park
+corner for 121 to 155 ms before the switch's cover (37 ms with the timer; the check allows
+150). At rest with the strip slid away (`covered`, 300 s) the app reads 0.80 % under the
+Corner engine and 0.39 % under Spaces, with 150 against 63 window lists a minute and about
+300 LaunchServices lookups a minute under both.
+
+A person does not notice a delay this small: a response to a click reads as instant up to
+about 100 ms, a click's latency is told apart from about 50 to 100 ms, and two durations near
+a second need 10 to 20 % between them (as the studies of input latency give them). The card
+shows pressed at once in any case. The Dock click's 113 ms is at that edge, so nothing more
+should be added there.
+
 ## The window server's notices
 
 Measured on macOS 27.2, 11-21 (`probe-spaces cgs`, a process running the AppKit event loop;

@@ -100,19 +100,25 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   its card shows grey tiles (11-16); Apple's keeps them playing. Option, the owner's call: a
   hidden call window (or the apps the config names) stays on its Desktop, parked in the
   corner as the Corner engine does.
-- **Less work while nobody looks: CPU and battery.** 4 to 5 % CPU at rest on 11-13; since
-  1.9 the thumbnails come at events only (none at rest: a day's log of 11-19 counts no capture
-  in hours with no switch), no engine takes a full-size picture on a timer (the park corner
-  took the front stage's every 2 s until 11-25), and the Dock's order is read at events.
-  Aim: 1 to 2 %, with no card shown stale and no switch slower.
-  - Measure again, both engines: `scripts/measure.sh rest sample switch`, then
-    `RUNS=1 SM_REST_S=300 scripts/measure.sh covered`, and for what the timer cost
-    `SM_SNAPSHOT_MS=2000 OUT=<another> ENGINES=corner scripts/measure.sh rest sample`; write
-    the numbers in UX-SPEC ("Window engines measured") and MODES.
-  - A Dock click's switch under the park corner now waits for its pictures (about 20 ms a
-    window) before the corner is covered: the capture phase's "raised in the corner by macOS
-    before the motion" (150 ms at most) says whether it shows. If it does, the pictures can
-    start while the switch is planned, or the corner's cover go to the strip ahead of them.
+- **Less work while nobody looks: CPU and battery.** Measured 11-25 on a 5K display (UX-SPEC,
+  "Window engines measured"): with the system's share the Accessibility engine costs about
+  5.7 % of a core at rest (about 16 % until the 2 s picture timer went), the Spaces engine
+  about 0.5 %. Aim: 1 to 2 %, with no card shown stale and no switch slower.
+  - What the Accessibility engine still costs with no window pictured: the window server
+    +4.6 %, the capture service 0.25 %, the app 0.83 % against 0.50 %. Find it (`sample`'s
+    split; `ctl state`'s `tick` and `costs`): the housekeeping that rests 0.75 s at most there
+    (150 window lists a minute against 63; "One way for every mode", below), the corner patch
+    and its stills.
+  - About 300 LaunchServices lookups a minute at rest under both engines: find what asks.
+  - A switch waits for its pictures under every engine: 76 ms at a card click, 113 ms at a
+    Dock click (11-25). Not noticed by a person, but at the edge, and after a Dock click the
+    activated app's windows show raised in the park corner 121 to 155 ms before the cover
+    (the capture phase allows 150 and failed once at 155). To take the wait away: pictures
+    taken when a switch is likely (the pointer in the Dock, a hotkey's modifiers down, as the
+    strip and ⌘Tab do already), one up to 2 s old accepted (0.5 s today, `FRESH`), one capture
+    call for all of a switch's windows if that is faster, and the corner's cover sent to the
+    strip ahead of the pictures. A person's card click, not the test's instant one, measured
+    first.
   - Video calls: check whether our captures make a call's video stutter (it lags at times
     with ours where Apple's is smooth). The call stand-in missed no refresh at rest or
     switching (11-14, 11-18), and at rest no picture is taken of a call window in front any
@@ -131,6 +137,13 @@ Nothing here changes what a person asks for; each closes a way a slower Mac, or 
 order of events, can still go wrong. The bench first, then the live suite
 (DEVELOPMENT, "The bench").
 
+- **A screen going away under the Accessibility engine: its windows leave their stages.**
+  The live check written for the Spaces engine (`scripts/test-stages.sh display-gone`) run
+  under the Accessibility engine for the first time, 11-25: 18 of 100 checks fail, the same 18
+  on 1.9.2. The windows of the screen that went are given new stages on the screen left, and
+  a Dock click 20 s after is not arranged at the press (the Spaces engine's way). Say which
+  of the 18 are the Accessibility engine's own way and which are defects, then mend those
+  with the item below.
 - **A screen going with its Desktops kept (the rest of the Desktops design's slice 5).**
   When a screen goes and macOS moves its Desktops to the screen left under the same ids, the
   model still merges the gone screen's Desktop into the one shown there, and `spill`'s watch
@@ -224,8 +237,7 @@ was left behind for no reason of the mode.
 - **A hidden window found shown is given up after four tries** under the Accessibility engine
   and then stays in view, counted hidden, with no card; the Spaces engine never gives up.
 - **Smaller.** The wait for a switch's pictures (160 ms) is sized for ScreenCaptureKit, not for
-  the window server's capture; the landing variants can be tried only with `engine = "spaces"`;
-  MODES.md's cost at rest quotes 11-14 and is to be measured again after the picture change.
+  the window server's capture; the landing variants can be tried only with `engine = "spaces"`.
 
 ## 2.0: new features
 
