@@ -102,7 +102,7 @@ impl Model {
     /// not bound yet, the Space the windows vote for among those bound to none; then the two
     /// are bound (module docs). Without `listed` the arrival is guessed as [`Model::arrive`]
     /// guesses it, and `desk` is bound to the Space guessed or checked against it. With no
-    /// `desk` (another engine, the listing not readable now): [`Model::arrive`].
+    /// `desk` (the listing not read or not readable now): [`Model::arrive`].
     pub fn arrive_on(
         &mut self,
         display: DisplayId,

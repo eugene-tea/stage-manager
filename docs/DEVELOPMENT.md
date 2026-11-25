@@ -126,13 +126,14 @@ its ctl socket and reading the window server's view of the windows:
 ```sh
 scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore strip native
                                           # visible parity motion slots expose mission capture raise park
-                                          # offscreen enhanced stale handles displays
+                                          # offscreen enhanced stale handles displays reads
 scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
                                           # card drawn whole, one of its windows lifted off
                                           # alone in the column, dropped in a gap, dragged out)
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
+SM_DESKTOPS=guess scripts/test-stages.sh spaces --auto   # the same with the Desktops guessed
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
 ```
 
@@ -243,6 +244,7 @@ The installed app is never started with any of them, so none acts on a user's co
 | `STAGE_MANAGER_PROBE_FAIL` | yes, `ONLY` | `hide` or `show`: that step of the Spaces engine's launch probe is not sent, as on a Mac that refuses it |
 | `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | yes, `ONLY` | activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
 | `STAGE_MANAGER_CAPTURE_SCK` | yes, `ONLY` | every window picture through ScreenCaptureKit, the window server's own source off (as before 1.9) |
+| `STAGE_MANAGER_DESKTOPS_GUESS` | yes, `ONLY` | the window server's Desktops are not read: Desktops by the windows on screen (as 1.9.2 under the Corner engine) |
 | `STAGE_MANAGER_LANDING` | `ONLY`, or any run under `[windows] engine = "spaces"` | the landing variant: `pictures` (the default), `ordered`, `live`, `live-early`, `live-late` (`ui/landing_math.rs`; the only test switch a user's config can open) |
 | `STAGE_MANAGER_LANDING_LEVEL` | as `STAGE_MANAGER_LANDING` | `ranked`: the live landing's windows get levels by rank instead of as made |
 | `STAGE_MANAGER_TEST_REOPEN_LIST` | yes, `TEST` | the copy joins the reopen list at a logout (turns regular) without a login item, as the live suite's restore phase checks |
@@ -270,6 +272,7 @@ The installed app is never started with any of them, so none acts on a user's co
 | `SM_DEV_APP` | `scripts/dev-app.sh`, `test_stages.py` | where the dev copy goes and runs from (`make install` points it at `~/Applications`) |
 | `SM_FIXTURE_ID` | `test-stages.sh`, `measure.sh`, `test_stages.py` | the main fixture's bundle id |
 | `SM_ENGINE` | `test-stages.sh`, `test_stages.py`, `measure_stages.py` | `spaces` runs the suite under the Spaces engine (sets `STAGE_MANAGER_ENGINE`); default the Corner engine |
+| `SM_DESKTOPS` | `test_stages.py`, `test_spaces.py` | `guess` runs every app with the window server's Desktop reads off (sets `STAGE_MANAGER_DESKTOPS_GUESS`); default the reads on |
 | `SM_SCREENSHOTS` | `test_stages.py` | a folder: turns on the visible phase's strip screenshots |
 | `SM_SHOTS` | `test_stages.py`, `test_spaces.py` | a folder: turns on `spaces --auto`'s by-eye screenshots and the Mission Control pixel checks |
 | `SM_PIXELS` | `test_stages.py` | turns on the checks read back from the overlay's pixels |
@@ -513,11 +516,25 @@ Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
 
 ### The Desktops: what the listing decides, and the shadow
 
-Under the Spaces engine the window server's listing says which Desktop arrived and where
-each window is (`src/platform/controller/desktops.rs`, `src/engine/model/desks.rs`; design
-r3, slices 2 and 3; ARCHITECTURE, "The window server's Desktops"), and the model is compared
-with it at every arrival and look (`src/engine/desk_shadow.rs`). The Corner engine reads
-nothing.
+Under both engines the window server's listing says which Desktop arrived and where each
+window is (`src/platform/controller/desktops.rs`, `src/engine/model/desks.rs`; design r3,
+slices 2 and 3; ARCHITECTURE, "The window server's Desktops"), and the model is compared
+with it at every arrival and look (`src/engine/desk_shadow.rs`). The reads are a layer of
+their own with their own check and fallback (`src/platform/desk_reads.rs`,
+`src/engine/desk_reads.rs`).
+
+- `ctl state`'s `desks.reads`: `way` (`window server`, or `windows on screen` while the
+  reads do not decide), `state` (`working`, `resting`, `probing` after a rest, `off`), `why`
+  (the calls missing, the test switch, a disagreement), `rest_s`, and `checks`: `agreed`,
+  `disagreed`, `rests`, `last_disagreement`. The log: `desktops: the window server's
+  Desktops can be read` once at the first read (or why not, a warning); `desktops: the
+  window server's listing disagrees with the windows on screen: its reads rest` (a warning,
+  the first rest of a run) and `... agrees with the windows on screen again: it decides
+  again`; at debug, each look that disagreed with every screen's Space and the windows
+  asked (ids only).
+- `STAGE_MANAGER_DESKTOPS_GUESS` (a test run) forces the fallback; `SM_DESKTOPS=guess` sets
+  it for every app run of the live suite. `scripts/test-stages.sh reads` checks the reads on
+  one Desktop: on and agreeing, then forced off.
 
 - `Space changed` (and `Space changed on another display`) carry `desk` (the window server's
   Desktop on that screen, read at the arrival) and `agree`: `yes` (its Space was bound to it)
@@ -533,8 +550,8 @@ nothing.
   out of the arrival` (debug); `window left this Space (the window server has it on another
   Desktop)` and `window moved to another Desktop that shows` (`from`, `to`: the window
   server's ids); `the window server has the window on another Desktop than the one shown; the
-  window is placed on its arrival` (debug). The margins table has `FLIP_WAIT`; under the
-  Spaces engine `MIXED_WAIT` and `FOREIGN_SETTLE` no longer appear.
+  window is placed on its arrival` (debug). The margins table has `FLIP_WAIT`; while the
+  listing decides `MIXED_WAIT` and `FOREIGN_SETTLE` no longer appear.
 - `ctl state`'s `desks.decides` (the listing decides now) and `desks.keyed`: `arrivals` (by
   the listing), `flips_waited` and `flips_capped` (notices that came before the flip and
   were waited for; those never followed by one), `unannounced` and `announced_late` (changes
@@ -559,15 +576,25 @@ nothing.
   5 s on; `display-gone` prints them and the log's disagreement lines at each round's end.
   Its last step is the first visit to a Desktop never shown since the launch, by its key,
   with no saved file: one Space change, the Desktop stays, no stage switched on the Desktop
-  left.
+  left. Under both engines it also checks the reads at each of those points (on, never
+  rested); `SM_DESKTOPS=guess scripts/test-stages.sh spaces --auto` runs the same with the
+  reads forced off, where the first visit's two checks are printed, not failed (1.9.2's
+  behaviour under the Corner engine).
 - On the bench (`src/platform/controller/bench/desktops.rs`) the desk keeps the listing
   apart from the window list: the "Current Space" flips 5 ms after the notice is sent
   (`flip_leads_notice` for the other order; a load of 3 or 10 handles the notice after the
   flip), the leaving Desktop's windows may stay listed past it (`leaving_lingers_ms`), the
-  listing may name no Space shown (`listing_unreadable`), a window goes into full screen and
+  listing may name no Space shown (`listing_unreadable`), keep naming the Desktop left
+  (`listing_stuck`) or not be read at all (`desk_reads` false), a window goes into full screen and
   out (`Bench::fullscreen`), is on every Desktop (`on_every_desktop`) or is moved to another
   (`space_moves`), a second screen has Desktops of its own (`screen_comes_with`). Every
-  scenario asserts that the shadow counted no disagreement on the Desktop shown.
+  scenario asserts that the shadow counted no disagreement on the Desktop shown and that the
+  reads never rested. Each Desktop scenario runs under both engines, and
+  `bench/corner_screens.rs` has a screen going and coming under the Corner engine.
+- The fallback is pinned (`bench/guessed.rs`): every scenario that runs the Corner engine is
+  also run with the reads off and must read as `bench/guessed.txt` has it, printed from the
+  code before the Corner engine read the Desktops. After adding a Corner scenario:
+  `BENCH_PRINT=1 cargo test --lib guessed::print_pins -- --nocapture`.
 
 ### A report from another Mac
 

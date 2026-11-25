@@ -8,8 +8,8 @@ their settings is a different job: [docs/AGENTS.md](docs/AGENTS.md).)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how the app is built and the rules the code
   keeps (threads, safety layers, and which private calls: none moves or hides a window under
   the Corner engine beyond `_AXUIElementGetWindow`, the Spaces engine adds SkyLight's Space
-  calls, and window pictures take the window server's own capture first under every engine,
-  with ScreenCaptureKit as the fallback).
+  calls, and window pictures and the Desktops' reads take the window server's own call first
+  under every engine, with a public way as the fallback).
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md): build, the fixture app, the live tests, the
   ctl socket, logs, the source layout.
 - [docs/UX-SPEC.md](docs/UX-SPEC.md): how Apple's Stage Manager behaves and where we differ.

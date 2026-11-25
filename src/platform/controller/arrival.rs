@@ -926,7 +926,7 @@ fn press_round(
 /// show: where a click on its app's Dock item may take macOS, the model not knowing it
 /// ([`AppFacts::unplaced`]). `on`: the Spaces the window server lists it on
 /// (the engine's `spaces_of`); `screens`: the listing of every screen's Spaces (its
-/// `desktops`); either `None` (the Corner engine reads neither): it may be.
+/// `desktops`); either `None` (the reads do not work now, `platform/desk_reads.rs`): it may be.
 /// Read, it is only when one of its Spaces is a Desktop or a full-screen Space of the
 /// listing that no screen shows. A window listed on no Space, or on the engine's own Spaces
 /// only, is on no Desktop: a tab not selected (the owner's log of 11-23: Terminal in front

@@ -162,10 +162,15 @@ order of events, can still go wrong. The bench first, then the live suite
   normal run: it seems to come only for windows asked for one by one
   (`SLSRequestNotificationsForWindows`), so the launch watch rests on its 4 ms read. Asking
   for each new app's windows, or another sign, would let it rest.
-- **What still decides by time under the Accessibility engine.** The Desktop guess's settles
-  (`MIXED_WAIT`, `SPACE_SETTLE`, `FOREIGN_SETTLE`, `SPACE_CHECKS`, `BESIDE_ARRIVALS`,
-  `STICKY_HOPS`, `SLIDE_CARRY`) and the corner patch's 22 time values, mostly blind settles:
-  each to be ended by what it waits for where a read can say, its value a cap.
+- **What still decides by time under the Accessibility engine.** The corner patch's 22 time
+  values, mostly blind settles: each to be ended by what it waits for where a read can say,
+  its value a cap. The Desktop guess's settles (`MIXED_WAIT`, `SPACE_SETTLE`,
+  `FOREIGN_SETTLE`, `SPACE_CHECKS`, `BESIDE_ARRIVALS`, `STICKY_HOPS`, `SLIDE_CARRY`) no
+  longer decide while the window server's list of Desktops is read; they stay as the
+  fallback's (the list missing or resting, a display change's settle, the launch's first
+  arrival). `SPACE_SETTLE` still holds the park corner's checks for the second after a
+  Desktop arrives (frames are judged there), and `SPACE_CHECKS` still counts windows moved
+  between screens.
 - **The strip's switch machine.** `Running` carries a switch in 10 flags and 16 timers with
   3 tests; one explicit state machine, tested on its own, in its place.
 - **One `wait_until` and one `Backoff`.** At least 16 hand-written "read until or deadline"
@@ -182,14 +187,22 @@ hearing what macOS does), and each layer can go through a public interface or th
 server's own. Every layer takes the window server's own by default, wherever a check finds it
 working, at launch and while running, and falls back to the public way when it is not (a
 macOS update, for one). The one layer not there yet is how windows are hidden: Accessibility
-stays the default while the Spaces mode is proven. Pictures follow the rule since 1.9. The
-items below are where the Accessibility mode was left behind for no reason of the mode.
+stays the default while the Spaces mode is proven. Pictures follow the rule since 1.9, the
+Desktops' reads since round corner-desktops. The items below are where the Accessibility mode
+was left behind for no reason of the mode.
 
-- **The window server's list of Desktops is read under the Spaces engine only.** Under the
-  Accessibility engine Desktops are still told apart by the windows on screen. Read there too
-  (with its own check that the call answers, and the guess as the fallback), it brings the
-  Desktop behaviours UX-SPEC lists for the Spaces engine and ends most of "What still decides
-  by time under the Accessibility engine", above.
+- **A display change is still taken by the windows on screen under the Accessibility engine.**
+  The window server's list of Desktops is read there too now, but its bindings are dropped
+  when a screen comes or goes and the list stays out for the change's 10 s settle
+  (`Controller::display_change_guessed`): with the list deciding, a screen that went and came
+  back with its Desktop kept left the Desktop on the screen that stayed with an empty stage in
+  front (on the bench). It goes when the Desktops design's slice 5 is built ("A screen going
+  with its Desktops kept", above); the bench has the scenarios (`bench/corner_screens.rs`).
+  Known and unchanged there: after a screen goes with its Desktop kept, the windows of the
+  Desktop left behind on the screen that stayed leave their stages until it shows again.
+- **The reads' check sees nothing on a screen with no window wholly on it.** A list of
+  Desktops that names the wrong Desktop there is not noticed until a window shows
+  (`engine/desk_reads.rs`). Never seen; a second public fact would close it.
 - **Mission Control's opening and a Desktop change's end are found by a 1 s poll** under the
   Accessibility engine; the triggers that bring the look forward run under Spaces only (one,
   the Dock's notice, is public). `mission_control_key_keeps_stage` is honoured under Spaces
