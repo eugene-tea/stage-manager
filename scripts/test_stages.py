@@ -5062,7 +5062,9 @@ def phase_capture():
     at rest no window is captured (rest_takes_no_picture_check); a Dock click, which nothing
     announces, takes the pictures of the windows leaving at the switch and plays them
     (dock_click_pictures_check); a card click plays with pictures its press took or the switch
-    did (card_click_pictures_check). `ctl switch` moves the windows at once, with no pictures."""
+    did (card_click_pictures_check); a pinned window reaching the park corner is drawn on the
+    cover from a picture taken at the switch (pinned_on_the_cover_check, Corner). `ctl switch`
+    moves the windows at once, with no pictures."""
     say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
     stop_app()
     stop_fixture()
@@ -5120,6 +5122,7 @@ def phase_capture():
                 activation_grows_check("open", "fixture", "an activation of the fixture over the desktop's still",
                                        at_once_ok=(), cover_still=True)
         dock_click_pictures_check()
+        pinned_on_the_cover_check()
     stop_extra("a")
     stop_app()
     text = log_text()
@@ -5276,6 +5279,79 @@ def dock_click_pictures_check():
     before = len(log_text())
     if activation_grows_check("dock", "a", "a Dock click on Alpha", at_once_ok=()):
         switch_pictures_check("a Dock click on Alpha", log_text()[before:])
+
+
+def cover_staying_of(log):
+    """The windows each switch cover in `log` drew over its picture (the strip's `the park
+    corner is covered` lines, `staying=[ids]`: those that stay shown into the corner, 8L5),
+    one list a cover."""
+    out = []
+    for line in log.splitlines():
+        if "the park corner is covered" in line and (m := re.search(r"\bstaying=\[([^\]]*)\]", line)):
+            out.append([int(i) for i in re.findall(r"\d+", m.group(1))])
+    return out
+
+
+def pinned_on_the_cover_check():
+    """Round switch-pictures (the Corner engine; 8L5): a pinned window that stays shown into
+    the park corner is drawn on a switch's cover from its picture, and no timer keeps that
+    picture fresh any more: the switch takes it with the pictures of the windows leaving.
+    Fixture 3, pinned and stretched to the display's bottom-right corner, a fixture stage in
+    front and Alpha's hidden, nothing touched for 1.5 s, then a Dock click on Alpha: the
+    activation grows (it does not arrive at once for the pinned window), the cover names the
+    pinned window among those it draws, the switch asked for its picture beside the leaving
+    window's and each came within the wait, and the strip had it when it drew the cover.
+    Fixture 3 is unpinned and put back after."""
+    if corner_only("a pinned window drawn on a switch's cover from a picture taken at the switch"):
+        return
+    say("-- a pinned window reaching the park corner: its picture is taken at the switch for the cover (8L5, round switch-pictures)")
+    s = state()
+    t = by_title(s)
+    wid = t["Fixture 3"]["id"]
+    r = frames_of(["Fixture 3"])["Fixture 3"]
+    vis, display = s["display"]["visible"], s["display"]["frame"]
+    do("pin", wid)
+    if not check(by_title(state())["Fixture 3"]["home"] == "pinned", "Fixture 3 pinned"):
+        return
+    try:
+        # A fixture stage in front, Alpha's hidden: Alpha's window waits in the corner.
+        do("switch", by_title(state())["Fixture 1"]["home"])
+        if not check(wait_state(lambda x: "Alpha 1" not in active_titles(x), "a fixture stage in front") is not None,
+                     "a fixture stage in front, Alpha's hidden"):
+            return
+        x = max(r["x"], vis["x"] + s["strip_width"] + 20)
+        ctl("debug-frame", wid, x, r["y"], display["x"] + display["w"] - x, display["y"] + display["h"] - r["y"])
+        time.sleep(3.0)  # the frame settles; the picture taken as it was pinned is old by now
+        before = len(log_text())
+        reply = ctl("debug-dock-click", EXTRA["a"][0])
+        if not check(reply.get("ok"), f"Alpha's Dock item was pressed ({reply.get('error') or 'ok'})"):
+            return
+        if not check(wait_state(lambda x: "Alpha 1" in active_titles(x), "Alpha's stage to come", timeout=5) is not None,
+                     "the Dock click switched to Alpha's stage"):
+            return
+        time.sleep(1.0)  # the motion has landed
+        log = log_text()[before:]
+        covered = [line for line in log.splitlines() if "transition covered" in line]
+        at_once, at_once_ids = next((at_once_of(c) for c in covered if at_once_of(c)[0] is not None), (None, []))
+        if at_once is not None and not (at_once == STAYING_UNPICTURED and wid in at_once_ids):
+            skip("the pinned window on the cover", f"the activation arrived at once for another reason ({at_once}, windows {at_once_ids})")
+            return
+        check(at_once is None, f"the activation grows with a pinned window reaching the corner (at once: {at_once}, windows {at_once_ids})")
+        staying = cover_staying_of(log)
+        if at_once is None and not any(wid in ids for ids in staying):
+            skip("the pinned window on the cover", f"Fixture 3 did not reach the cover's rectangle, or the corner was not covered (covers {staying})")
+            return
+        shots = switch_pictures_of(log)
+        last = shots[-1] if shots else {}
+        check(bool(shots) and last.get("skipped") is None and (last.get("asked") or 0) >= 2 and last.get("got") == last.get("asked"),
+              f"the switch took the pinned window's picture with the leaving window's, each within the wait ({last})")
+        check("no snapshot of a window that stays shown into the corner now" not in log,
+              "the strip had the pinned window's picture when it drew the cover")
+    finally:
+        ctl("debug-frame", wid, r["x"], r["y"], r["w"], r["h"])
+        time.sleep(0.9)  # past the echo window
+        do("pin", wid)
+        check(by_title(state())["Fixture 3"]["home"] != "pinned", "Fixture 3 unpinned again")
 
 
 GHOST_LAYER = 4  # NSFloatingWindowLevel + 1: a dragged card's ghost panel

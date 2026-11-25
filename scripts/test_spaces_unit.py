@@ -307,6 +307,12 @@ class SwitchPictures(unittest.TestCase):
         self.assertTrue(t.ts.switch_pictures_verdict(fresh, self.covered, announced=True)[0])
         self.assertFalse(t.ts.switch_pictures_verdict(fresh, self.covered)[0])
 
+    def test_the_windows_a_cover_draws_are_read(self):
+        line = ('DEBUG ui::strip_motion: transition: the park corner is covered while the incoming windows wait there '
+                'id=7 rect=2499,1348 61x92 cap=2240,1120 320x320 picture=Desktop staying=[4711, 12]')
+        bare = line.replace("staying=[4711, 12]", "staying=[]")
+        self.assertEqual(t.ts.cover_staying_of(line + "\n" + bare + "\ntransition covered id=7"), [[4711, 12], []])
+
     def test_the_last_switch_in_the_log_is_judged(self):
         both = t.ts.switch_pictures_of(self.fresh + "\n" + self.taken)
         self.assertTrue(t.ts.switch_pictures_verdict(both, self.covered)[0])
