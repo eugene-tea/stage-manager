@@ -8692,7 +8692,15 @@ def phase_reads():
             os.remove(path)
     start_fixture(2, "--frames", "80,80,640,420;260,160,560,380")
 
+    def two_stages(st):
+        # Both windows are one app's and open in one stage: Fixture 2 gets a stage of its own.
+        two = by_title(st).get("Fixture 2")
+        if two is not None and [t for t in stage_titles(st).get(two["home"], []) if t != "Fixture 2"]:
+            do("new", two["id"])
+        wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2"]], "Fixture 1 and 2 each in a stage")
+
     def switch_and_back(label):
+        two_stages(ctl("state"))
         st = ctl("state")
         hidden = [x["number"] for x in st.get("stages", []) if x.get("space") == st.get("space") and x["number"] != st.get("active") and x.get("windows")]
         if not check(bool(hidden), f"reads ({label}): a stage waits hidden to switch to ({[x['number'] for x in st.get('stages', [])]})"):

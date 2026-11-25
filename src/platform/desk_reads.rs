@@ -29,7 +29,8 @@ use super::clock;
 use super::spaces::ffi::{self, FnCopyByCid, FnCopySpacesForWindows, FnMain, SKYLIGHT, ScreenDesks};
 use crate::engine::desk_reads::{Change, Health, Verdict};
 
-/// Set (with `STAGE_MANAGER_ONLY`): the reads are off, Desktops go by the windows on screen.
+/// Set to anything but nothing (with `STAGE_MANAGER_ONLY`): the reads are off, Desktops go by
+/// the windows on screen. Set empty it asks for nothing (a runner clearing it for one launch).
 pub const FORCE_GUESS_ENV: &str = "STAGE_MANAGER_DESKTOPS_GUESS";
 
 /// The calls, loaded once.
@@ -79,7 +80,7 @@ fn open() -> Result<Calls, String> {
 /// True when a test run asked for the fallback ([`FORCE_GUESS_ENV`] with `STAGE_MANAGER_ONLY`).
 fn forced_off() -> bool {
     static FORCED: LazyLock<bool> = LazyLock::new(|| {
-        let forced = forced_by(std::env::var_os(FORCE_GUESS_ENV).is_some(), std::env::var_os("STAGE_MANAGER_ONLY").is_some());
+        let forced = forced_by(std::env::var_os(FORCE_GUESS_ENV).is_some_and(|v| !v.is_empty()), std::env::var_os("STAGE_MANAGER_ONLY").is_some());
         if forced {
             tracing::info!("desktops: {FORCE_GUESS_ENV} set (a test run): the window server's Desktops are not read");
         }
