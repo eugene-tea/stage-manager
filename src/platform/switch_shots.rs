@@ -136,8 +136,11 @@ pub struct Taken {
 pub fn take(targets: Vec<Target>, max: Duration) -> Taken {
     let asked = targets.len();
     #[cfg(test)]
-    if let Some(ms) = super::fake::with(|d| d.take_shots(asked, max)) {
-        return Taken { asked, got: asked, answered: asked, ms, skipped: None };
+    {
+        let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+        if let Some(ms) = super::fake::with(|d| d.take_shots(&ids, max)) {
+            return Taken { asked, got: asked, answered: asked, ms, skipped: None };
+        }
     }
     let Some(&deliver) = DELIVER.get() else { return Taken { asked, skipped: Some("no strip"), ..Taken::default() } };
     if asked == 0 {

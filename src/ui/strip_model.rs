@@ -552,6 +552,10 @@ pub fn note_snapshot(id: u32) {
 /// a switch's pictures taken at the switch skip one this fresh (the pointer's press on a
 /// card took it).
 pub fn snapshot_age(id: u32) -> Option<Duration> {
+    #[cfg(test)]
+    if let Some(age) = crate::platform::fake::with(|d| d.shot_age(id)) {
+        return age;
+    }
     snapshot_times().lock().ok().and_then(|t| t.get(&id).map(Instant::elapsed))
 }
 

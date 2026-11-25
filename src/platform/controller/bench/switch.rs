@@ -1,7 +1,9 @@
 //! The switch's handshake with the strip and the raise-order check after it (round
 //! r6-waits): a card click with the strip answering in time, late or never; a second click,
 //! a person's click or an app's own activation while the switch waits for the strip's
-//! pictures or checks the order of its raises; an app that reorders its windows late.
+//! pictures or checks the order of its raises; an app that reorders its windows late;
+//! a switch's pictures taken at the switch (a Dock click, ⌘Tab, a card click whose press took
+//! them).
 //!
 //! Each outcome reads what a person sees ([`seen`]), how many switches played with their
 //! pictures and how many moved the windows without them, and the order of the calls made
@@ -15,9 +17,10 @@ use super::scenarios::{A, B, C, D1, Run, Scenario, expect, seen, two_apps};
 use super::*;
 use crate::platform::fake::{Call, Desk};
 
-/// The calls made of the platform so far, in short words, in order: `strip` (a transition
-/// presented), `park` and `show` (a frame set into or out of the park zone), `space` (windows
-/// put into a Space), `raise`, `main`, `front` (an app made frontmost).
+/// The calls made of the platform so far, in short words, in order: `shots` (full-size
+/// pictures of windows taken at the switch and waited for), `strip` (a transition presented),
+/// `park` and `show` (a frame set into or out of the park zone), `space` (windows put into a
+/// Space), `raise`, `main`, `front` (an app made frontmost).
 fn calls(b: &mut Bench) -> String {
     let parks = b.desk(|d| d.screens[0].display);
     let words: Vec<String> = b
@@ -26,6 +29,7 @@ fn calls(b: &mut Bench) -> String {
         .filter_map(|c| match c {
             Call::Present(Some(_)) => Some("strip".to_string()),
             Call::Present(None) => None,
+            Call::Shots(ids) => Some(format!("shots {ids:?}")),
             Call::Frame(id, r) if parks.parks(r) => Some(format!("park {id}")),
             Call::Frame(id, _) => Some(format!("show {id}")),
             Call::IntoSpace(_, ids) => Some(format!("space {ids:?}")),
@@ -138,6 +142,69 @@ fn strip_late(load: f64) -> Run {
 /// `strip_model::wait_cover`: the strip never answers.
 fn strip_never(load: f64) -> Run {
     card_click_with(EngineKind::Corner, load, |d| d.strip.draws = false)
+}
+
+// ----- the pictures at the switch ------------------------------------------------------------------
+
+/// `controller/switch_pictures.rs` (round switch-pictures): a Dock click on Alpha, its window
+/// waiting in a hidden stage, the park corner's cover drawable (the activation grows from its
+/// card, `[animation] activation_grows`). Nothing announced the switch: no picture of
+/// Bravo's window, the one leaving, is fresh.
+fn dock_click_pictures(engine: EngineKind, load: f64) -> Run {
+    let mut b = bench(engine, load, |d| d.corner_covers = true);
+    b.dock_click(A, 90);
+    b.advance(3000);
+    let out = played(&mut b);
+    Run::of(&b, out)
+}
+
+fn dock_click_pictures_corner(load: f64) -> Run {
+    dock_click_pictures(EngineKind::Corner, load)
+}
+
+fn dock_click_pictures_spaces(load: f64) -> Run {
+    dock_click_pictures(EngineKind::Spaces, load)
+}
+
+/// ⌘Tab to Alpha, ⌘ let go `held_ms` after Tab. The switcher's key has the strip take every
+/// shown window's picture (`main.rs` `monitor_input`, `strip::prefetch`: the bench runs no
+/// strip, so the scenario says it); a release past `switch_pictures`' `FRESH` finds it old.
+fn cmd_tab_pictures(load: f64, held_ms: u64) -> Run {
+    let mut b = bench(EngineKind::Corner, load, |d| d.corner_covers = true);
+    b.cmd_tab(vec![B, A, C]);
+    b.desk(|d| d.pictured(&[12]));
+    b.advance(held_ms);
+    b.cmd_tab_release();
+    b.advance(3000);
+    let out = played(&mut b);
+    Run::of(&b, out)
+}
+
+fn cmd_tab_quick(load: f64) -> Run {
+    cmd_tab_pictures(load, 150)
+}
+
+fn cmd_tab_held(load: f64) -> Run {
+    cmd_tab_pictures(load, 700)
+}
+
+/// A card click for Alpha's stage whose press had the strip take the leaving window's
+/// picture (`ui/strip.rs` `mouse_down`, `prefetch`; said by the scenario, as above): still
+/// fresh at the click 80 ms later.
+fn card_click_pictures_fresh(load: f64) -> Run {
+    let mut b = bench(EngineKind::Corner, load, |_| {});
+    let alpha = b.stage_of(11);
+    b.desk(|d| {
+        d.last_press = Some(clock::now());
+        d.last_click = d.last_press;
+        d.post(0.0, Notice::Strip(StripEvent::CardPressed { stage: alpha }));
+        d.pictured(&[12]);
+    });
+    b.advance(80);
+    b.desk(|d| d.post(0.0, Notice::Strip(StripEvent::CardClicked { stage: alpha, shift: false })));
+    b.advance(3000);
+    let out = played(&mut b);
+    Run::of(&b, out)
 }
 
 // ----- notices during the cover wait --------------------------------------------------------------
@@ -280,9 +347,9 @@ fn pinned_strip_in_time() {
 /// a card click, the strip in time (Spaces).
 #[test]
 fn pinned_strip_in_time_spaces() {
-    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; strip, space [12], raise 11, main 11, front 101, space [11], raise 11, raise 11, main 11, front 101";
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; shots [12], strip, space [12], raise 11, main 11, front 101, space [11], raise 11, raise 11, main 11, front 101";
     // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
-    expect(strip_in_time_spaces, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, space [12], space [11], raise 11, raise 11, main 11, front 101"]);
+    expect(strip_in_time_spaces, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; shots [12], strip, space [12], space [11], raise 11, raise 11, main 11, front 101"]);
 }
 
 /// a card click, the strip 200 ms late.
@@ -299,6 +366,46 @@ fn pinned_strip_never() {
     expect(strip_never, [at_1, at_1, at_1]);
 }
 
+/// a Dock click, its pictures (Corner).
+#[test]
+fn pinned_dock_click_pictures_corner() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; strip, main 11, front 101, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(dock_click_pictures_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, main 11, front 101, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
+/// a Dock click, its pictures (Spaces).
+#[test]
+fn pinned_dock_click_pictures_spaces() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; main 11, front 101, shots [12], strip, space [12], raise 11, main 11, front 101, space [11], raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(dock_click_pictures_spaces, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; main 11, front 101, shots [12], strip, space [12], space [11], raise 11, raise 11, main 11, front 101"]);
+}
+
+/// ⌘Tab let go at once, its pictures.
+#[test]
+fn pinned_cmd_tab_quick() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; strip, main 11, front 101, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(cmd_tab_quick, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, main 11, front 101, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
+/// ⌘Tab held 0.7 s, its pictures.
+#[test]
+fn pinned_cmd_tab_held() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; strip, main 11, front 101, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(cmd_tab_held, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, main 11, front 101, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
+/// a card click, its pictures fresh from the press.
+#[test]
+fn pinned_card_click_pictures_fresh() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(card_click_pictures_fresh, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
 /// a second card click during the cover wait.
 #[test]
 fn pinned_second_click_corner() {
@@ -310,9 +417,9 @@ fn pinned_second_click_corner() {
 /// a second card click during the cover wait (Spaces).
 #[test]
 fn pinned_second_click_spaces() {
-    let at_1 = "front [13] shows [13] desktop 1 app 103 switches 2 slides 0; pictures 2, at once 0; strip, space [12], raise 11, main 11, front 101, space [11], raise 11, strip, space [11], raise 13, main 13, front 103, space [13], raise 13, raise 13, main 13, front 103";
+    let at_1 = "front [13] shows [13] desktop 1 app 103 switches 2 slides 0; pictures 2, at once 0; shots [12], strip, space [12], raise 11, main 11, front 101, space [11], raise 11, shots [11], strip, space [11], raise 13, main 13, front 103, space [13], raise 13, raise 13, main 13, front 103";
     // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
-    expect(second_click_spaces, [at_1, at_1, "front [13] shows [13] desktop 1 app 103 switches 2 slides 0; pictures 0, at once 2; strip, space [12], space [11], raise 11, raise 11, main 11, front 101, strip, space [11], space [13], raise 13, raise 13, main 13, front 103"]);
+    expect(second_click_spaces, [at_1, at_1, "front [13] shows [13] desktop 1 app 103 switches 2 slides 0; pictures 0, at once 2; shots [12], strip, space [12], space [11], raise 11, raise 11, main 11, front 101, shots [11], strip, space [11], space [13], raise 13, raise 13, main 13, front 103"]);
 }
 
 /// a click on a leaving window during the cover wait.
@@ -334,9 +441,9 @@ fn pinned_activation_during_the_cover_wait_corner() {
 /// an app's activation during the cover wait (Spaces).
 #[test]
 fn pinned_activation_during_the_cover_wait_spaces() {
-    let at_1 = "front [13] shows [13] desktop 1 app 103 switches 2 slides 0; pictures 2, at once 0; strip, space [12], raise 11, main 11, front 101, space [11], raise 11, main 13, front 103, strip, space [11], raise 13, main 13, front 103, space [13], raise 13, raise 13, main 13, front 103";
+    let at_1 = "front [13] shows [13] desktop 1 app 103 switches 2 slides 0; pictures 2, at once 0; shots [12], strip, space [12], raise 11, main 11, front 101, space [11], raise 11, main 13, front 103, shots [11], strip, space [11], raise 13, main 13, front 103, space [13], raise 13, raise 13, main 13, front 103";
     // TIME DECIDES: COVER_TIMEOUT: at load 10 no pictures, and Alpha ends frontmost under Charlie's stage (our focus of Alpha, sent before the wait, lands after Charlie's activation).
-    expect(activation_during_the_cover_wait_spaces, [at_1, at_1, "front [13] shows [13] desktop 1 app 101 switches 2 slides 0; pictures 0, at once 2; strip, space [12], space [11], raise 11, raise 11, main 11, front 101, main 13, front 103, strip, space [11], space [13], raise 13, raise 13, main 13, front 103"]);
+    expect(activation_during_the_cover_wait_spaces, [at_1, at_1, "front [13] shows [13] desktop 1 app 101 switches 2 slides 0; pictures 0, at once 2; shots [12], strip, space [12], space [11], raise 11, raise 11, main 11, front 101, main 13, front 103, shots [11], strip, space [11], space [13], raise 13, raise 13, main 13, front 103"]);
 }
 
 /// two apps' raises in order at once.
@@ -366,9 +473,9 @@ fn pinned_order_late_300() {
 /// an app reordering 40 ms late (Spaces).
 #[test]
 fn pinned_order_late_40_spaces() {
-    let at_1 = "front [11, 13] shows [11, 13] desktop 1 app 103 switches 1 slides 0; pictures 1, at once 0; strip, space [12], raise 13, main 13, front 103, space [11], space [13], raise 11, raise 13, raise 13, main 13, front 103, raise 13, raise 13, main 13, front 103; stacked [13, 11]";
+    let at_1 = "front [11, 13] shows [11, 13] desktop 1 app 103 switches 1 slides 0; pictures 1, at once 0; shots [12], strip, space [12], raise 13, main 13, front 103, space [11], space [13], raise 11, raise 13, raise 13, main 13, front 103, raise 13, raise 13, main 13, front 103; stacked [13, 11]";
     // TIME DECIDES: WATCH_AFTER_FIX: at load 3 Alpha's reorder (120 ms) lands after the watch, over the key; COVER_TIMEOUT at 10.
-    expect(order_late_40_spaces, [at_1, "front [11, 13] shows [11, 13] desktop 1 app 103 switches 1 slides 0; pictures 1, at once 0; strip, space [12], raise 13, main 13, front 103, space [11], space [13], raise 11, raise 13, raise 13, main 13, front 103; stacked [11, 13]", "front [11, 13] shows [11, 13] desktop 1 app 103 switches 1 slides 0; pictures 0, at once 1; strip, space [12], space [11], space [13], raise 11, raise 13, raise 13, main 13, front 103; stacked [11, 13]"]);
+    expect(order_late_40_spaces, [at_1, "front [11, 13] shows [11, 13] desktop 1 app 103 switches 1 slides 0; pictures 1, at once 0; shots [12], strip, space [12], raise 13, main 13, front 103, space [11], space [13], raise 11, raise 13, raise 13, main 13, front 103; stacked [11, 13]", "front [11, 13] shows [11, 13] desktop 1 app 103 switches 1 slides 0; pictures 0, at once 1; shots [12], strip, space [12], space [11], space [13], raise 11, raise 13, raise 13, main 13, front 103; stacked [11, 13]"]);
 }
 
 /// an app's activation during the order check.
@@ -395,6 +502,11 @@ pub(super) const ALL: &[Scenario] = &[
     ("a card click, the strip in time", "controller.rs send_transition, COVER_TIMEOUT", strip_in_time),
     ("a card click, the strip in time (Spaces)", "controller.rs send_transition, switch_pictures", strip_in_time_spaces),
     ("a card click, the strip 200 ms late", "strip_model::wait_cover, COVER_TIMEOUT", strip_late),
+    ("a Dock click, its pictures (Corner)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_corner),
+    ("a Dock click, its pictures (Spaces)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_spaces),
+    ("⌘Tab let go at once, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_quick),
+    ("⌘Tab held 0.7 s, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_held),
+    ("a card click, its pictures fresh from the press", "controller/switch_pictures.rs FRESH", card_click_pictures_fresh),
     ("a card click, the strip never answers", "strip_model::wait_cover, COVER_TIMEOUT", strip_never),
     ("a second card click during the cover wait", "controller.rs flush_superseded, r6-waits", second_click_corner),
     ("a second card click during the cover wait (Spaces)", "controller.rs flush_superseded, r6-waits", second_click_spaces),

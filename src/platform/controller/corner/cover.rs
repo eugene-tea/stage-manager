@@ -82,6 +82,11 @@ impl Controller {
     /// the desktop's still (round 8L3), whichever is ready; the cover as it will be drawn, or
     /// why not.
     pub(in crate::platform::controller) fn cover_ready(&self, c: SwitchCover) -> Result<SwitchCover, &'static str> {
+        // The bench: the desk says whether the pictures are there (the strip's own, main thread).
+        #[cfg(test)]
+        if crate::platform::fake::with(|d| d.corner_covers) == Some(true) {
+            return Ok(c);
+        }
         let screen = c.screen;
         let key = self.model.as_ref().and_then(|m| m.displays().iter().find(|d| d.id.0 == screen)).map(|d| self.shot_key(d));
         resolve_cover(c, |rect| crate::ui::corner_patch::cover_ready(screen, rect), |rect| match &key {

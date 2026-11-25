@@ -376,6 +376,8 @@ pub enum Call {
     IntoSpace(u64, Vec<u32>),
     /// A strip snapshot presented, with its transition's id.
     Present(Option<u64>),
+    /// Full-size pictures of these windows taken at a switch, waited for.
+    Shots(Vec<u32>),
 }
 
 /// The strip as the desk plays it.
@@ -401,6 +403,8 @@ pub struct Strip {
     pub count: usize,
     /// How many transitions were presented (animated switches).
     pub transitions: usize,
+    /// When a full-size picture of each window last reached it ([`Desk::pictured`]).
+    pictured: BTreeMap<u32, Instant>,
     /// The card frames it published, per display.
     pub cards: BTreeMap<u32, Vec<(u64, Rect)>>,
 }
@@ -521,6 +525,11 @@ pub struct Desk {
     pub session: &'static str,
     /// What a picture of a window taken at a switch costs, in ms before the load factor.
     pub shot_ms: f64,
+    /// A switch's cover of the park corner can be drawn (the corner patch holds a picture of
+    /// it, or a still of the desktop is kept: `Controller::cover_ready`), so an activation's
+    /// windows grow from their card. False, as in a run with no patch drawn yet: they arrive
+    /// at once.
+    pub corner_covers: bool,
     /// How long after a transition's pictures cover the windows the strip unveils them (the
     /// motion's length; the bench sets it from the config in force).
     pub unveil_after: Duration,
@@ -680,6 +689,7 @@ impl Desk {
             login_started: None,
             session: "bench-session",
             shot_ms: 40.0,
+            corner_covers: false,
             unveil_after: Duration::from_millis(300),
             acts: Vec::new(),
             late_raises: Vec::new(),
@@ -1848,12 +1858,31 @@ impl Desk {
         Cover { outgoing: true, incoming: true }
     }
 
-    /// Pictures of `asked` windows taken at a switch, waited for `max` at most: how long it
-    /// took, in ms.
-    pub fn take_shots(&mut self, asked: usize, max: Duration) -> u64 {
-        let took = if asked == 0 { Duration::ZERO } else { self.at_load(self.shot_ms).min(max) };
+    /// Pictures of windows `ids` taken at a switch, waited for `max` at most: how long it
+    /// took, in ms. Each reaches the strip ([`Self::pictured`]).
+    pub fn take_shots(&mut self, ids: &[u32], max: Duration) -> u64 {
+        if ids.is_empty() {
+            return 0;
+        }
+        self.call(Call::Shots(ids.to_vec()));
+        let took = self.at_load(self.shot_ms).min(max);
         clock::test::advance(took);
+        self.pictured(ids);
         took.as_millis() as u64
+    }
+
+    /// Full-size pictures of windows `ids` reached the strip now: a switch's own, or the
+    /// strip's (the pointer on a card or pressing it, the app switcher opened:
+    /// `ui::strip_motion`'s `prefetch`, which the bench does not run).
+    pub fn pictured(&mut self, ids: &[u32]) {
+        let now = clock::now();
+        self.strip.pictured.extend(ids.iter().map(|id| (*id, now)));
+    }
+
+    /// How long ago a full-size picture of window `id` reached the strip
+    /// (`strip_model::snapshot_age`).
+    pub fn shot_age(&self, id: u32) -> Option<Duration> {
+        self.strip.pictured.get(&id).map(|at| clock::now().saturating_duration_since(*at))
     }
 
     /// The observer started a probe of app `pid`: the app answers [`delays::APP_ANSWERS`]
