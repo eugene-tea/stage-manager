@@ -172,8 +172,8 @@ fn dock_click_pictures_spaces(load: f64) -> Run {
 /// shown window's picture (`main.rs` `monitor_input`, `strip::prefetch`: the bench runs no
 /// strip, so the scenario says it): let go within `switch_pictures`' `FRESH` the switch takes
 /// none and the strip is told first; past it the picture is old and taken again.
-fn cmd_tab_pictures(load: f64, held_ms: u64) -> Run {
-    let mut b = bench(EngineKind::Corner, load, |d| d.corner_covers = true);
+fn cmd_tab_pictures(engine: EngineKind, load: f64, held_ms: u64) -> Run {
+    let mut b = bench(engine, load, |d| d.corner_covers = true);
     b.cmd_tab(vec![B, A, C]);
     b.desk(|d| d.pictured(&[12]));
     b.advance(held_ms);
@@ -184,11 +184,17 @@ fn cmd_tab_pictures(load: f64, held_ms: u64) -> Run {
 }
 
 fn cmd_tab_quick(load: f64) -> Run {
-    cmd_tab_pictures(load, 150)
+    cmd_tab_pictures(EngineKind::Corner, load, 150)
+}
+
+/// The same under the Spaces engine: until round switch-pictures its early focus went before
+/// the strip was told also with no picture to take (`main 11, front 101, strip`).
+fn cmd_tab_quick_spaces(load: f64) -> Run {
+    cmd_tab_pictures(EngineKind::Spaces, load, 150)
 }
 
 fn cmd_tab_held(load: f64) -> Run {
-    cmd_tab_pictures(load, 700)
+    cmd_tab_pictures(EngineKind::Corner, load, 700)
 }
 
 /// A card click for Alpha's stage whose press had the strip take the leaving window's
@@ -394,6 +400,16 @@ fn pinned_cmd_tab_quick() {
     expect(cmd_tab_quick, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, main 11, front 101, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
 }
 
+/// ⌘Tab let go at once, its pictures (Spaces).
+#[test]
+fn pinned_cmd_tab_quick_spaces() {
+    // The strip first, as under the Corner engine: before round switch-pictures the early
+    // focus went ahead of it here ('main 11, front 101, strip').
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; strip, main 11, front 101, space [12], raise 11, main 11, front 101, space [11], raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(cmd_tab_quick_spaces, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, main 11, front 101, space [12], space [11], raise 11, raise 11, main 11, front 101"]);
+}
+
 /// ⌘Tab held 0.7 s, its pictures.
 #[test]
 fn pinned_cmd_tab_held() {
@@ -509,6 +525,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("a Dock click, its pictures (Corner)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_corner),
     ("a Dock click, its pictures (Spaces)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_spaces),
     ("⌘Tab let go at once, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_quick),
+    ("⌘Tab let go at once, its pictures (Spaces)", "controller/switch_pictures.rs FRESH", cmd_tab_quick_spaces),
     ("⌘Tab held 0.7 s, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_held),
     ("a card click, its pictures fresh from the press", "controller/switch_pictures.rs FRESH", card_click_pictures_fresh),
     ("a card click, the strip never answers", "strip_model::wait_cover, COVER_TIMEOUT", strip_never),
