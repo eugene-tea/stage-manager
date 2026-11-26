@@ -148,7 +148,7 @@ mod app {
     use stage_manager::platform::wm_thread::{self, WmCommand, WmHandle};
     use stage_manager::engine::{fullscreen, leftovers, logout_watch};
     use stage_manager::platform::space_keys::{self, Direction, Expose, SpaceKey, SpaceView};
-    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, window_engine, windows};
+    use stage_manager::platform::{capture, guardian, handoff, hotkeys, logging, login_item, paths, safety, session, switch_likely, window_engine, windows};
     use stage_manager::ui::shell;
     use stage_manager::ui::status_menu::{self, MenuAction, MenuState, StatusMenu};
     use stage_manager::ui::{strip, strip_model};
@@ -363,6 +363,7 @@ mod app {
                     }
                     if self.hotkeys.as_ref() != Some(&hotkeys) {
                         let r = hotkeys::register(&hotkeys.bindings());
+                        switch_likely::set_hotkey_mods(hotkeys::moving_mods(&hotkeys.bindings()));
                         tracing::info!(active = r.active, failed = ?r.failed, "hotkeys registered");
                         self.hotkeys = Some(hotkeys);
                     }
@@ -615,11 +616,11 @@ mod app {
                 }
                 stage_manager::platform::test_press::mission_pick(id, hover)
             }
-            Command::DebugClick { x, y, shift } => {
+            Command::DebugClick { x, y, shift, hold_ms } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-click needs STAGE_MANAGER_TEST=1");
                 }
-                match input::click(stage_manager::engine::geometry::Point::new(x, y), shift) {
+                match input::click(stage_manager::engine::geometry::Point::new(x, y), shift, hold_ms.map(Duration::from_millis)) {
                     Ok(()) => json!({ "ok": true }),
                     Err(e) => ctl::error_reply(&e),
                 }
@@ -923,6 +924,11 @@ mod app {
         let wm_keys = wm.clone();
         hotkeys::install(move |command| {
             wm_keys.send(WmCommand::Hotkey(command));
+        });
+        // The pointer in the Dock, a hotkey's modifiers down: a switch's pictures taken ahead.
+        let wm_likely = wm.clone();
+        switch_likely::install(move |sign| {
+            wm_likely.send(WmCommand::SwitchLikely(sign));
         });
 
         let wm_events = wm.clone();

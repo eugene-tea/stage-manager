@@ -9,7 +9,12 @@
 //! chain at load 3 to its reading at load 10 with the same outcome ("an app focuses its other
 //! window after our focus"), and add five scenarios of their own; the scenarios of round
 //! looks-forward, `looks.rs` and one of `desktops.rs`, printed with the reads off and with
-//! what each scenario's desk tells: their "before" is `looks_before.txt`).
+//! what each scenario's desk tells (their "before" is `looks_before.txt`); and the lines of
+//! round picture-wait as each step changed them: `corner` among the calls where the park
+//! corner's cover goes to the strip ahead of the pictures, and one scenario where it does
+//! not; `ahead` where a press on a Dock item, the pointer in the Dock or a hotkey's modifiers
+//! had the pictures taken before the switch, in the two Dock clicks of round switch-pictures
+//! and four scenarios of its own).
 //! A Mac where the reads do not work behaves as before. Beside each
 //! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!

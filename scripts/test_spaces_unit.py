@@ -317,6 +317,27 @@ class SwitchPictures(unittest.TestCase):
         both = t.ts.switch_pictures_of(self.fresh + "\n" + self.taken)
         self.assertTrue(t.ts.switch_pictures_verdict(both, self.covered)[0])
 
+    def test_the_pictures_taken_ahead_are_read(self):
+        # Round picture-wait: the app's line when a switch is likely, its sign and windows.
+        pointer = ('DEBUG platform::controller::switch_pictures: a switch is likely: its pictures are taken ahead '
+                   'sign="the pointer in the Dock" ids=[4711, 12] fresh=0')
+        press = pointer.replace("the pointer in the Dock", "a press on a Dock item").replace("ids=[4711, 12]", "ids=[12]")
+        got = t.ts.pictures_ahead_of("\n".join(["a line", pointer, self.taken, press]))
+        self.assertEqual(got, [{"sign": t.ts.SIGN_POINTER, "ids": [4711, 12]}, {"sign": t.ts.SIGN_PRESS, "ids": [12]}])
+        self.assertEqual(t.ts.pictures_ahead_of(self.taken), [])
+
+    def test_a_switch_that_waits_for_no_picture(self):
+        v = t.ts.waits_for_no_picture_verdict
+        ok, note = v(t.ts.switch_pictures_of(self.fresh))
+        self.assertTrue(ok, note)
+        self.assertIn("fresh 2", note)
+        self.assertFalse(v(t.ts.switch_pictures_of(self.taken))[0], "it took its own and waited")
+        self.assertFalse(v(t.ts.switch_pictures_of(self.off))[0], "captures off")
+        self.assertFalse(v([])[0], "no line")
+        none = self.fresh.replace("fresh=2", "fresh=0")
+        self.assertFalse(v(t.ts.switch_pictures_of(none))[0], "nothing leaving: nothing played")
+        self.assertFalse(v(t.ts.switch_pictures_of(self.fresh + "\n" + self.taken))[0], "the last switch is the one judged")
+
 
 class SlideCarriesTheCorner(unittest.TestCase):
     """8L5: a parked window of a Desktop sliding in from the left is listed mid-screen, moved

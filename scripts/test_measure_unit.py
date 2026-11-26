@@ -74,6 +74,18 @@ class SnapshotTimer(unittest.TestCase):
             with self.assertRaises(ValueError):
                 M.snapshot_ms(bad)
 
+    def test_a_clicks_hold_is_a_word_of_its_command_when_set(self):
+        # SM_CLICK_HOLD_MS (round picture-wait): not set, the click commands as they were.
+        self.assertIsNone(M.click_hold_ms(None))
+        self.assertIsNone(M.click_hold_ms(" "))
+        self.assertEqual(M.click_words(None), [])
+        self.assertEqual(M.click_hold_ms("100"), 100)
+        self.assertEqual(M.click_words(M.click_hold_ms("100")), ["hold=100"])
+        self.assertEqual(M.click_words(M.click_hold_ms("0")), ["hold=0"], "0 is a value: let go at once")
+        for bad in ("-1", "2001", "long"):
+            with self.assertRaises(ValueError):
+                M.click_hold_ms(bad)
+
     def test_a_count_a_minute(self):
         self.assertEqual(M.per_minute(10, 40, 60.0), 30.0)
         self.assertEqual(M.per_minute(7, 7, 300.0), 0.0)

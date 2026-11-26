@@ -779,15 +779,20 @@ stages were saved on that is not connected yet (10 s at most).
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
 so switches are animated with snapshots in a click-through layer above every normal window
 (always-on-top windows stay above it), while the real windows move behind them. A leaving
-window's snapshot is taken as the switch starts, the window still on screen, in both modes
-(not again when one came in the half second before: a press on a card and ⌘Tab's key take
-them ahead); an arriving window's is the last one taken before it left, or as the pointer
-reached its card, so content that changed meanwhile can jump when the motion ends. A switch
-nothing announced (a Dock click, a hotkey) starts later by the time its pictures take: 19 ms
-for one window at the median, 40 ms for two, 160 ms at the most (the app's own lines over
-956 switches, 11-14 to 11-24). No picture is taken on a timer (`[animation]
+window's snapshot is taken as the switch starts, the window still on screen, in both modes,
+unless one came in the 2 seconds before (as old as a picture could be while a timer took
+them). They are taken ahead when a switch is likely: as the pointer reaches a card or
+presses it, at ⌘Tab's key, as the pointer comes into the Dock or presses an item there, and
+as a hotkey's modifiers go down. An arriving window's is the last one taken before it left,
+or as the pointer reached its card, so content that changed meanwhile can jump when the
+motion ends. A switch nothing announced (an app that comes forward by itself, a click let go
+before its picture came) starts later by the time its pictures take: 19 ms for one window at
+the median, 40 ms for two, 160 ms at the most (the app's own lines over 956 switches, 11-14
+to 11-24); in the Accessibility mode the park corner is covered before they are taken,
+unless a window leaving reaches it. No picture is taken on a timer (`[animation]
 snapshot_interval_ms`, 0; a number of milliseconds takes the front stage's again that
-often). Until 11-25 the Accessibility mode took them every 2 seconds instead. A click
+often), and none while the pointer rests, in the Dock or anywhere. Until 11-25 the
+Accessibility mode took them every 2 seconds instead. A click
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
 already the new stage's). An arriving window takes its place under its picture once the
 picture as shown on screen is within a point of it on every edge (about 600 ms after the
@@ -1436,6 +1441,14 @@ window server about 12 ms and the capture service about 7 ms each in the `covere
 (240 thumbnails a minute under Spaces: 6.1 to 10.8 % and 0.01 to 2.9 %); six stills a minute
 at that price would be 0.1 % of the window server's 4.6 %, so either a still of the desktop
 costs it far more than a window's picture, or the cost is one of the other rows.
+
+Changed since these numbers (11-25, round picture-wait) and not measured yet: a Dock click's
+press, the pointer coming into the Dock and a hotkey's modifiers take the pictures before
+the switch, a picture up to 2 s old is played (0.5 s when the table was measured), and the
+park corner's cover no longer waits for the pictures. The switch rows and the time an
+activated window shows raised in the corner are to be measured again, with the test's own
+clicks and with clicks held as a person's (`SM_CLICK_HOLD_MS=100`: about 100 ms from the
+press to the release in the app's logs of real Dock clicks).
 
 A person does not notice a delay this small: a response to a click reads as instant up to
 about 100 ms, a click's latency is told apart from about 50 to 100 ms, and two durations near

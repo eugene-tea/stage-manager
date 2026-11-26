@@ -100,8 +100,11 @@ person would see the same. After such a change, print what to assert:
 raise-order check after it: the strip answering in time, late or never (`Strip::covers_ms`,
 `Strip::draws`), a second click, a click or an app's activation inside the cover wait or the
 check, an app reordering its windows late (`App::reorders_ms`), and the pictures a switch
-takes of the windows leaving (`shots` among the calls; `Desk::pictured` says the strip took
-one itself, as at a press on a card or at ⌘Tab; `Desk::captures_off` is a Mac with no
+takes of the windows leaving (`shots` among the calls; `ahead`: those taken when a switch
+was likely, waited for by nothing, which come `Desk::shot_ms` later; `corner`: the park
+corner's cover sent ahead of the pictures; `Desk::pictured` says the strip took
+one itself, as at a press on a card or at ⌘Tab; `Bench::likely` tells a sign the main thread
+would, the pointer in the Dock or a hotkey's modifiers; `Desk::captures_off` is a Mac with no
 Screen Recording; `Desk::corner_covers` lets an activation grow from its card under the
 Corner engine). Each outcome reads what a
 person sees, how many switches played with their pictures (`Strip::covered`, `uncovered`)
@@ -275,6 +278,7 @@ The installed app is never started with any of them, so none acts on a user's co
 | `STAGE_MANAGER_PROBE_FAIL` | yes, `ONLY` | `hide` or `show`: that step of the Spaces engine's launch probe is not sent, as on a Mac that refuses it |
 | `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | yes, `ONLY` | activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
 | `STAGE_MANAGER_CAPTURE_SCK` | yes, `ONLY` | every window picture through ScreenCaptureKit, the window server's own source off (as before 1.9) |
+| `STAGE_MANAGER_CAPTURE_LIST` | yes, `ONLY` | a switch's windows on screen are pictured in one call of the window server's capture instead of one call a window (to be measured: `probe-spaces capture BUNDLE fast list`) |
 | `STAGE_MANAGER_DESKTOPS_GUESS` | yes, `ONLY` | the window server's Desktops are not read: Desktops by the windows on screen (as 1.9.2 under the Corner engine) |
 | `STAGE_MANAGER_LANDING` | `ONLY`, or any run under `[windows] engine = "spaces"` | the landing variant: `pictures` (the default), `ordered`, `live`, `live-early`, `live-late` (`ui/landing_math.rs`; the only test switch a user's config can open) |
 | `STAGE_MANAGER_LANDING_LEVEL` | as `STAGE_MANAGER_LANDING` | `ranked`: the live landing's windows get levels by rank instead of as made |
@@ -321,6 +325,7 @@ The installed app is never started with any of them, so none acts on a user's co
 | `SM_PROBE_DOCK_CLICK` | `probe_apple.py` | `real`: a real click on the Dock item instead of `AXPress` |
 | `SM_STAGES`, `SM_SETTLE_S`, `SM_REST_S`, `SM_SWITCHES`, `SM_SWITCH_CPU_S`, `SM_SWITCH_WAYS`, `SM_HIDDEN_ROUNDS`, `SM_HIDDEN_S`, `SM_AFTER_S` | `measure_stages.py` | the measure's stages (4), settle (10 s), rest (60 s), switches (20), CPU window per switch (1.5 s), switch ways (`card dock`), hidden rounds (8) and length (5 s), and the watch after (1.5 s) |
 | `SM_CAPTURE` | `measure_stages.py` | `0`: the app runs with captures off (`STAGE_MANAGER_NO_CAPTURE`) |
+| `SM_CLICK_HOLD_MS` | `measure_stages.py` | `N`: each switch's click holds the button N ms between press and release (`hold=N` on `ctl debug-click` and `ctl debug-dock-click`); not set, the test's own clicks (a card's 60 ms, a Dock item's fed at once). A person's is about 100 |
 | `SM_SNAPSHOT_MS` | `measure_stages.py` | `N`: `[animation] snapshot_interval_ms = N` in every scenario's scratch config (the full-size pictures on a timer; none by default) |
 | `SM_CONFIG` | `measure_stages.py` | `section.key=value ...` (space-separated): lines added to every scenario's scratch config, merged by section |
 | `SM_ENV` | `measure_stages.py` | `STAGE_MANAGER_NAME=value ...`: test switches of the app for the run (never the home, the fixtures, the engine or the captures: the measure's own) |
@@ -363,7 +368,10 @@ Exit status is 0 on success, 1 on an error reply and 2 when the app is not runni
 Control shortcuts, ⌘M (`debug-cmd-m`), full-screen toggles and the strip shown or hidden for the scripted checks,
 `debug-minimize-button ID` gives a window's minimize button's frame (for `debug-click`), `debug-dock-lend
 BUNDLE` feeds a Dock click without pressing the item (what the press put home waits for an
-activation that never comes), and `debug-stale-handle
+activation that never comes), `debug-dock-hover BUNDLE` moves the pointer onto a fixture's
+Dock item and leaves it there (`debug-pointer-back` puts it back), a click takes `hold=MS`
+(`debug-click X Y hold=100`, `debug-dock-click BUNDLE hold=100`: the button held as a
+person's), and `debug-stale-handle
 ID` takes our handle on a window for dead until it is looked up afresh (`test-stages.sh
 handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` windows. See
 `src/platform/ctl.rs`.

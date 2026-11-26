@@ -1558,6 +1558,10 @@ impl Controller {
         let bars = pid.and_then(super::dock::bar_frame).into_iter().collect();
         let bar = sliver::DockBar { pid, bars };
         let changed = self.dock_bar.as_ref().is_none_or(|(_, was)| *was != bar);
+        if changed {
+            // The pointer coming into it says a switch is likely (`switch_likely`).
+            super::switch_likely::set_dock_bars(&bar.bars);
+        }
         self.dock_bar = Some((clock::now(), bar));
         if changed {
             tracing::debug!(bar = ?self.dock_bar.as_ref().map(|(_, b)| b), "inert slivers: the Dock's bar");
@@ -2261,6 +2265,20 @@ impl Controller {
         } else {
             Some((t, wanted))
         };
+        // The park corner's cover first, where it needs none of the pictures being taken:
+        // macOS has raised an activated app's windows there already (`switch_pictures`,
+        // "The corner's cover first").
+        if let Some((t, wanted)) = &waiting {
+            match switch_pictures::corner_ahead(t, wanted) {
+                Ok(cover) => {
+                    let display = self.transition_display(Some(t)).0;
+                    tracing::debug!(id, rect = %cover.rect, "transition: the corner's cover goes to the strip ahead of the pictures");
+                    strip_model::cover_corner_ahead(strip_model::CornerAhead { id, display, cover, under: t.under });
+                }
+                Err(why) if t.corner.is_some() => tracing::debug!(id, why, "transition: the corner's cover comes with the pictures"),
+                Err(_) => {}
+            }
+        }
         // An activation's keyboard goes at once, while the strip draws: macOS has activated
         // the app and raised its windows in the corner already, and typing right after ⌘Tab
         // must reach the window the switch focuses (8L). One bounded step (8L2); the whole
@@ -6904,17 +6922,23 @@ impl Controller {
                 }
                 self.debug_cmd_tab(ob, probe)
             }
-            Command::DebugDockClick { bundle, real } => {
+            Command::DebugDockClick { bundle, real, hold_ms } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-click needs STAGE_MANAGER_TEST=1" });
                 }
-                self.debug_dock_click(ob, &bundle, real)
+                self.debug_dock_click(ob, &bundle, real, hold_ms.map(Duration::from_millis))
             }
             Command::DebugDockLend { bundle } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-lend needs STAGE_MANAGER_TEST=1" });
                 }
                 self.debug_dock_lend(ob, &bundle)
+            }
+            Command::DebugDockHover { bundle } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-dock-hover needs STAGE_MANAGER_TEST=1" });
+                }
+                self.debug_dock_hover(ob, &bundle)
             }
             Command::DebugFrame { id, frame, only } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

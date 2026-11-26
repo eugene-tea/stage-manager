@@ -81,6 +81,7 @@ pub mod spaces;
 pub(crate) mod new_window_probe;
 #[cfg(feature = "probes")]
 pub mod spaces_probe;
+pub mod switch_likely;
 pub(crate) mod switch_shots;
 pub(crate) mod switcher_ax;
 pub(crate) mod switcher_notes;

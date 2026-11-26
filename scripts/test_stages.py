@@ -1889,7 +1889,12 @@ def cover_matches(read, tol=COVER_TOLERANCE):
                         + (f", still {[round(v) for v in still[:3]]}" if still else "") + f", off {off:.0f}")
 
 
-def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cover_still=False):
+# How long the last [`activation_grows_check`] saw macOS's raise show the arriving window in
+# the park corner before the motion's cover (ms); None when it was not judged.
+LAST_RAISED = {"ms": None}
+
+
+def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cover_still=False, hold_ms=None, raised_ms=150):
     """Round 8L: an activation of `app` (a key of EXTRA, or "fixture") whose windows wait in
     another stage, by `how`: "open" (an activation with no click, as ⌘Tab's) or "dock" (its
     Dock item, `ctl debug-dock-click`). The window server is sampled every 20 ms (with the
@@ -1906,8 +1911,13 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     with no snapshot of it ([`owners_window_only`], 8L5); any other is a failure. `cover_still` (8L4, the capture phase:
     captures on, the cover forced to the desktop's still): the cover is the still, and its
     pixels over the arriving window's sliver, away from any icon, read back from the overlay
-    during the grow, are the wallpaper's (the still never holds a window)."""
+    during the grow, are the wallpaper's (the still never holds a window). `hold_ms`: the Dock
+    click's press held that long before its release, as a person's is (`hold=MS`; none: let go
+    at once). `raised_ms`: the longest macOS's raise may show the window in the corner before
+    the motion's cover (150; RAISED_AHEAD_MS where the switch waits for no picture, or its
+    cover goes ahead of them)."""
     bundle, path = (FIX_ID, FIX_APP) if app == "fixture" else (EXTRA[app][0], EXTRA[app][1])
+    LAST_RAISED["ms"] = None
     s0 = state()
     mine = {w["id"] for w in s0["windows"] if w["bundle_id"] == bundle}
     waiting = {w["id"] for w in s0["windows"] if w["id"] in mine and w["parked"]}
@@ -1921,7 +1931,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     time.sleep(0.15)  # the sampler's first looks are before the activation
     t_sent = time.time()
     if how == "dock":
-        r = ctl("debug-dock-click", bundle)
+        r = ctl("debug-dock-click", bundle, *([f"hold={hold_ms}"] if hold_ms is not None else []))
         if not check(r.get("ok"), f"{what}: the Dock item was pressed ({r.get('error') or 'ok'})"):
             sampler.kill()
             return False
@@ -2071,7 +2081,8 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
         early = [v for v in seen if v < t_ov]
         check(not late, f"{what}: never seen in the park zone once the motion is up ({[rel(v) for v in late][:8]})")
         span = (max(early) - min(early) + 0.02) if early else 0.0
-        check(span <= 0.15, f"{what}: raised in the corner by macOS before the motion for {span * 1000:.0f} ms at most (150)")
+        LAST_RAISED["ms"] = span * 1000
+        check(span * 1000 <= raised_ms, f"{what}: raised in the corner by macOS before the motion for {span * 1000:.0f} ms at most ({raised_ms})")
     num = lambda name, line: int(m.group(1)) if (m := re.search(name + r"=(\d+)", line)) else None  # noqa: E731
     line = next((c for c in covered if "incoming: true" in c), covered[0] if covered else "")
     # The windows arrive at the unveil (`[animation] unpark_at` of the switch spring, at
@@ -5066,13 +5077,17 @@ def phase_capture():
     the window (popup_picture_check). A stage's two overlapping windows land as one picture
     (landing_blend_check). Its activation grows over the desktop's still (8L4: the
     switch's cover forced to the still, STAGE_MANAGER_COVER=desktop, so it is seen on any
-    desktop, icons in the corner or not). Round switch-pictures (11-25), under either engine:
-    at rest no window is captured (rest_takes_no_picture_check); a Dock click, which nothing
-    announces, takes the pictures of the windows leaving at the switch and plays them
-    (dock_click_pictures_check); a card click plays with pictures its press took or the switch
+    desktop, icons in the corner or not). Rounds switch-pictures and picture-wait (11-25),
+    under either engine: at rest no window is captured (rest_takes_no_picture_check), nor with
+    the pointer resting in the Dock (rest_in_the_dock_check); a Dock click's press takes the
+    pictures of the windows leaving, so its switch waits for none and plays them
+    (dock_click_pictures_check), as does the pointer coming into the Dock before the click
+    (dock_pointer_pictures_check); a switch nothing announced still takes them at the switch,
+    and where the park corner is covered its cover goes to the strip ahead of them
+    (cover_ahead_check, Corner); a card click plays with pictures its press took or the switch
     did (card_click_pictures_check); a pinned window reaching the park corner is drawn on the
-    cover from a picture taken at the switch (pinned_on_the_cover_check, Corner). `ctl switch`
-    moves the windows at once, with no pictures."""
+    cover from a picture of it (pinned_on_the_cover_check, Corner). `ctl switch` moves the
+    windows at once, with no pictures."""
     say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
     stop_app()
     stop_fixture()
@@ -5101,6 +5116,7 @@ def phase_capture():
           f"the window server takes pictures once ScreenCaptureKit's probe opened the gate ({cap.get('window_server')})")
     popup_picture_check(state())
     rest_takes_no_picture_check()
+    rest_in_the_dock_check()
     quiet_listings_check(state())
     for n in (2, 1):
         do("switch", n)
@@ -5130,6 +5146,8 @@ def phase_capture():
                 activation_grows_check("open", "fixture", "an activation of the fixture over the desktop's still",
                                        at_once_ok=(), cover_still=True)
         dock_click_pictures_check()
+        dock_pointer_pictures_check()
+        cover_ahead_check()
         pinned_on_the_cover_check()
     stop_extra("a")
     stop_app()
@@ -5167,6 +5185,41 @@ def rest_takes_no_picture_check():
           f"asked by a round {ca} -> {cb}, in flight {b.get('in_flight')})")
     check(b.get("listings", 0) - a.get("listings", 0) <= 1,
           f"at rest for {REST_WATCH} s: no listing but the desktop's still's (listings {a.get('listings')} -> {b.get('listings')})")
+
+
+def rest_in_the_dock_check():
+    """Round picture-wait: a sign that a switch is likely is an event, never a timer. The
+    pointer is moved onto the fixture's Dock item and left there (`ctl debug-dock-hover`: a
+    move, nothing pressed): its coming into the Dock's bar takes the pictures of the windows
+    in front once (a stage waits hidden). Then, the pointer resting there, no window is
+    captured over REST_WATCH seconds, as with the pointer anywhere else
+    ([`rest_takes_no_picture_check`]). The pointer goes back after."""
+    say("-- at rest with the pointer resting in the Dock: no window is captured (round picture-wait)")
+    before = len(log_text())
+    r = ctl("debug-dock-hover", FIX_ID)
+    try:
+        if not check(r.get("ok"), f"the pointer rests on the fixture's Dock item ({r.get('error') or 'ok'})"):
+            return
+        if r.get("in_bar"):
+            came = wait_until(lambda: [a for a in pictures_ahead_of(log_text()[before:]) if a["sign"] == SIGN_POINTER] or None,
+                              2, "the pictures taken as the pointer came into the Dock")
+            check(bool(came), f"the pointer coming into the Dock takes the pictures of the windows in front, once ({came})")
+        else:
+            say("    (the Dock's bar as the app reads it does not hold the item: an auto-hidden Dock; the rest is judged all the same)")
+        time.sleep(PICTURES_OLD)  # the pictures its coming took, and their looks, are in and old
+        x = state()
+        a, ca = x.get("capture", {}), (x.get("costs") or {}).get("captures")
+        time.sleep(REST_WATCH)
+        x = state()
+        b, cb = x.get("capture", {}), (x.get("costs") or {}).get("captures")
+        check(b.get("images") == a.get("images") and cb == ca and b.get("in_flight", 0) == 0,
+              f"the pointer at rest in the Dock for {REST_WATCH} s: no window captured (pictures {a.get('images')} -> "
+              f"{b.get('images')}, asked by a round {ca} -> {cb}, in flight {b.get('in_flight')})")
+        again = [a for a in pictures_ahead_of(log_text()[before:]) if a["sign"] == SIGN_POINTER]
+        check(len(again) <= 1, f"the pointer at rest in the Dock tells of a likely switch once, as it came ({len(again)} times)")
+    finally:
+        ctl("debug-pointer-back")
+        time.sleep(0.3)
 
 
 def quiet_listings_check(s):
@@ -5282,25 +5335,170 @@ def card_click_pictures_check(log):
     return check(not late, f"a card click's pictures, the press's or the switch's, are all there within the wait ({late[:3]})")
 
 
-def dock_click_pictures_check():
-    """Round switch-pictures (11-25): a Dock click on Alpha, its stage hidden, nothing touched
-    for 1.5 s before (no picture of the windows in front is fresh, and a Dock click announces
-    nothing). It grows as any activation ([`activation_grows_check`]: under the Corner engine
-    also how long macOS's raise shows Alpha's window in the corner before the motion's cover,
-    150 ms at most, which now holds the pictures' time), and the pictures of the windows
-    leaving were taken at the switch ([`switch_pictures_check`])."""
-    say("-- a Dock click's switch takes its pictures at the switch (round switch-pictures)")
+# The app's words for what made a switch likely (`platform/switch_likely.rs`, `Sign::as_str`).
+SIGN_POINTER = "the pointer in the Dock"
+SIGN_PRESS = "a press on a Dock item"
+
+# Past this (s) a picture is no longer fresh for a switch: `switch_shots::FRESH` (2 s), and slack.
+PICTURES_OLD = 3.0
+
+# How long a person's click holds the button (ms): the owner's Dock clicks in the app's logs,
+# press to release (`test_press::DOCK_PRESS_HOLD`).
+PERSON_HOLD_MS = 100
+
+# The longest macOS's raise may show an activated window in the park corner before the
+# motion's cover (ms) when the switch waits for no picture, or its cover goes ahead of them:
+# near the 37 ms measured while a timer kept the pictures (11-25), with room for the
+# sampler's 20 ms steps. A switch that waits for its pictures under a cover that cannot go
+# ahead keeps 150.
+RAISED_AHEAD_MS = 80
+
+
+def pictures_ahead_of(log):
+    """The pictures taken when a switch was likely in `log` (the app's `its pictures are taken
+    ahead` lines, `platform/controller/switch_pictures.rs`), in order: each one's `sign`
+    (SIGN_POINTER, SIGN_PRESS, a hotkey's modifiers) and the windows asked for (`ids`)."""
+    out = []
+    for line in log.splitlines():
+        if "its pictures are taken ahead" not in line:
+            continue
+        sign = m.group(1) if (m := re.search(r'\bsign="([^"]*)"', line)) else None
+        ids = [int(i) for i in re.findall(r"\d+", m.group(1))] if (m := re.search(r"\bids=\[([^\]]*)\]", line)) else []
+        out.append({"sign": sign, "ids": ids})
+    return out
+
+
+def waits_for_no_picture_verdict(shots):
+    """(ok, note) for the last switch of `shots` ([`switch_pictures_of`]): it waited for no
+    picture (none asked for) because each it plays was fresh (one at least), taken before it."""
+    if not shots:
+        return False, "no line of the switch's pictures in the log"
+    last = shots[-1]
+    asked, fresh = last["asked"] or 0, last["fresh"] or 0
+    return last["skipped"] is None and asked == 0 and fresh >= 1, f"asked {asked}, fresh {fresh}, waited {last['ms'] or 0} ms"
+
+
+def waits_for_no_picture_check(what, log):
+    """Round picture-wait: the last switch in `log` waited for no picture, each one it plays
+    taken before it ([`waits_for_no_picture_verdict`])."""
+    ok, note = waits_for_no_picture_verdict(switch_pictures_of(log))
+    return check(ok, f"{what}: the switch waits for no picture, every one fresh ({note})")
+
+
+def alpha_hidden_fixture_in_front():
+    """The fixture's stage in front and Alpha's window waiting hidden; False (a failed check)
+    when it could not be arranged."""
     s = state()
-    if "Alpha 1" in active_titles(s):
-        # The fixture's stage in front first: Alpha's window waits hidden.
-        do("switch", by_title(s)["Fixture 3"]["home"])
-        if not check(wait_state(lambda x: "Alpha 1" not in active_titles(x), "the fixture's stage in front") is not None,
-                     "the fixture's stage in front, Alpha's hidden"):
-            return
-    time.sleep(1.5)
+    if "Alpha 1" not in active_titles(s):
+        return True
+    do("switch", by_title(s)["Fixture 3"]["home"])
+    return check(wait_state(lambda x: "Alpha 1" not in active_titles(x), "the fixture's stage in front") is not None,
+                 "the fixture's stage in front, Alpha's hidden")
+
+
+def dock_click_pictures_check():
+    """Rounds switch-pictures and picture-wait (11-25): a Dock click on Alpha, its stage
+    hidden, nothing touched for PICTURES_OLD seconds before (no picture of the windows in
+    front is fresh), the press held as a person's (PERSON_HOLD_MS). The press on the item
+    says a switch is likely: the pictures of the windows in front are taken then (the app's
+    `taken ahead` line, its sign the press), so the switch waits for none and still plays
+    them ([`waits_for_no_picture_check`], [`switch_pictures_check`]). It grows as any
+    activation ([`activation_grows_check`]: under the Corner engine also how long macOS's
+    raise shows Alpha's window in the corner before the motion's cover, RAISED_AHEAD_MS at
+    most now that no picture is waited for)."""
+    say("-- a Dock click: its press takes the pictures, the switch waits for none (round picture-wait)")
+    if not alpha_hidden_fixture_in_front():
+        return
+    time.sleep(PICTURES_OLD)
     before = len(log_text())
-    if activation_grows_check("dock", "a", "a Dock click on Alpha", at_once_ok=()):
-        switch_pictures_check("a Dock click on Alpha", log_text()[before:])
+    if activation_grows_check("dock", "a", "a Dock click on Alpha", at_once_ok=(), hold_ms=PERSON_HOLD_MS, raised_ms=RAISED_AHEAD_MS):
+        log = log_text()[before:]
+        ahead = pictures_ahead_of(log)
+        check(any(a["sign"] == SIGN_PRESS and a["ids"] for a in ahead),
+              f"a Dock click on Alpha: its press takes the pictures a switch would wait for ({ahead})")
+        switch_pictures_check("a Dock click on Alpha", log, announced=True)
+        waits_for_no_picture_check("a Dock click on Alpha", log)
+
+
+def dock_pointer_pictures_check():
+    """Round picture-wait: the pointer brought into the Dock before the click. Alpha's stage
+    hidden, nothing touched for PICTURES_OLD seconds; the pointer moved onto Alpha's Dock item
+    (`ctl debug-dock-hover`: a move, nothing pressed) says a switch is likely, and the pictures
+    of the windows in front are taken (the `taken ahead` line, its sign the pointer). A moment
+    later the Dock click, let go at once (the test's fed click: its own press finds
+    the pictures fresh and takes none): the switch waits for no picture and plays them, and
+    macOS's raise shows Alpha's window in the corner RAISED_AHEAD_MS at most before the cover.
+    Skipped when the Dock's bar as the app reads it does not hold the item (an auto-hidden
+    Dock is read where it rests). The pointer goes back after."""
+    say("-- the pointer into the Dock, then a click: the switch waits for no picture (round picture-wait)")
+    if not alpha_hidden_fixture_in_front():
+        return
+    time.sleep(PICTURES_OLD)
+    before = len(log_text())
+    r = ctl("debug-dock-hover", EXTRA["a"][0])
+    try:
+        if not check(r.get("ok"), f"the pointer is on Alpha's Dock item ({r.get('error') or 'ok'})"):
+            return
+        if not r.get("in_bar"):
+            skip("the pointer into the Dock takes the pictures",
+                 "the Dock's bar as the app reads it does not hold the item (an auto-hidden Dock is read where it rests)")
+            return
+        came = wait_until(lambda: [a for a in pictures_ahead_of(log_text()[before:]) if a["sign"] == SIGN_POINTER] or None,
+                          2, "the pictures taken as the pointer came into the Dock")
+        if not check(bool(came) and bool(came[0]["ids"]),
+                     f"the pointer into the Dock: the pictures of the windows in front are taken ({came})"):
+            return
+        time.sleep(0.2)
+        mid = len(log_text())
+        what = "a Dock click with the pointer in the Dock"
+        if activation_grows_check("dock", "a", what, at_once_ok=(), raised_ms=RAISED_AHEAD_MS):
+            log = log_text()[mid:]
+            more = [a for a in pictures_ahead_of(log) if a["sign"] == SIGN_PRESS]
+            say(f"    the press after it took {more or 'no picture more (each fresh)'}")
+            switch_pictures_check(what, log, announced=True)
+            waits_for_no_picture_check(what, log)
+    finally:
+        ctl("debug-pointer-back")
+        time.sleep(0.3)
+
+
+def cover_ahead_check():
+    """Round picture-wait (the Corner engine): a switch nothing announced still takes its
+    pictures at the switch and waits for them, and the park corner's cover no longer waits
+    with it. Alpha's stage hidden, nothing touched for PICTURES_OLD seconds, then Alpha
+    activated with no click (`open`, as ⌘Tab's: no sign of a likely switch): the switch asks
+    for the pictures of the windows leaving ([`switch_pictures_check`]), the cover goes to the
+    strip ahead of them and is drawn at once (the app's and the strip's lines), and macOS's
+    raise shows Alpha's window in the corner RAISED_AHEAD_MS at most before it. Skipped when
+    the cover had to come with the pictures (a window leaving reaches its rectangle, or a
+    window that stays shown into it waits for its picture: the app's line says which)."""
+    if corner_only("the park corner's cover ahead of a switch's pictures"):
+        return
+    say("-- a switch nothing announced: the corner's cover goes ahead of its pictures (round picture-wait)")
+    if not alpha_hidden_fixture_in_front():
+        return
+    time.sleep(PICTURES_OLD)
+    before = len(log_text())
+    what = "an activation of Alpha with no click"
+    if not activation_grows_check("open", "a", what, at_once_ok=(), raised_ms=150):
+        return
+    log = log_text()[before:]
+    if not switch_pictures_check(what, log):
+        return
+    with_them = [line.split("why=")[-1][:90] for line in log.splitlines() if "the corner's cover comes with the pictures" in line]
+    if with_them:
+        skip("the corner's cover ahead of the pictures", f"the cover came with the pictures by design ({with_them[0]})")
+        return
+    sent = any("the corner's cover goes to the strip ahead of the pictures" in line for line in log.splitlines())
+    drawn = any("the park corner is covered ahead of the switch's pictures" in line for line in log.splitlines())
+    not_drawn = [line.split("why=")[-1][:90] for line in log.splitlines() if "the corner's cover is not drawn ahead" in line]
+    check(sent and drawn, f"{what}: the corner's cover goes to the strip ahead of the pictures and is drawn at once "
+                          f"(sent {sent}, drawn {drawn}{', not drawn: ' + not_drawn[0] if not_drawn else ''})")
+    # The same looks judged against the shorter time: the cover no longer waits for the pictures.
+    raised = LAST_RAISED["ms"]
+    if raised is not None and sent and drawn:
+        check(raised <= RAISED_AHEAD_MS,
+              f"{what}: with the cover ahead, raised in the corner for {raised:.0f} ms at most ({RAISED_AHEAD_MS})")
 
 
 def cover_staying_of(log):
@@ -5317,12 +5515,13 @@ def cover_staying_of(log):
 def pinned_on_the_cover_check():
     """Round switch-pictures (the Corner engine; 8L5): a pinned window that stays shown into
     the park corner is drawn on a switch's cover from its picture, and no timer keeps that
-    picture fresh any more: the switch takes it with the pictures of the windows leaving.
+    picture fresh any more: it is taken with the pictures of the windows leaving, at the Dock
+    click's press (round picture-wait) or at the switch.
     Fixture 3, pinned and stretched to the display's bottom-right corner, a fixture stage in
-    front and Alpha's hidden, nothing touched for 1.5 s, then a Dock click on Alpha: the
+    front and Alpha's hidden, nothing touched for 3 s, then a Dock click on Alpha: the
     activation grows (it does not arrive at once for the pinned window), the cover names the
-    pinned window among those it draws, the switch asked for its picture beside the leaving
-    window's and each came within the wait, and the strip had it when it drew the cover.
+    pinned window among those it draws, its picture and the leaving window's were there for
+    the switch, each within the wait, and the strip had it when it drew the cover.
     Fixture 3 is unpinned and put back after."""
     if corner_only("a pinned window drawn on a switch's cover from a picture taken at the switch"):
         return
@@ -5365,8 +5564,14 @@ def pinned_on_the_cover_check():
             return
         shots = switch_pictures_of(log)
         last = shots[-1] if shots else {}
-        check(bool(shots) and last.get("skipped") is None and (last.get("asked") or 0) >= 2 and last.get("got") == last.get("asked"),
-              f"the switch took the pinned window's picture with the leaving window's, each within the wait ({last})")
+        # Since round picture-wait the Dock press takes them ahead (the pinned window's with
+        # the leaving one's): asked for at the switch, or fresh from the press, two in all.
+        ahead = [a for a in pictures_ahead_of(log) if wid in a["ids"]]
+        say(f"    taken ahead with the pinned window among them: {ahead or 'none'}")
+        check(bool(shots) and last.get("skipped") is None and (last.get("asked") or 0) + (last.get("fresh") or 0) >= 2
+              and last.get("got") == last.get("asked"),
+              f"the pinned window's picture and the leaving window's are there for the switch, the press's or its own, "
+              f"each within the wait ({last})")
         check("no snapshot of a window that stays shown into the corner now" not in log,
               "the strip had the pinned window's picture when it drew the cover")
     finally:

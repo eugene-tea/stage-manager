@@ -15,6 +15,7 @@
 #   RUNS=1 ENGINES=spaces SM_REST_S=300 scripts/measure.sh covered   # by name only: at rest, the strip clear, then slid away; a hover under a window
 #   SM_SWITCH_WAYS=ctl scripts/measure.sh switch   # switches by `ctl switch` (default "card dock")
 #   SM_SNAPSHOT_MS=2000 OUT=/tmp/sm-timer scripts/measure.sh rest sample   # the full-size pictures on a timer again
+#   SM_CLICK_HOLD_MS=100 OUT=/tmp/sm-held scripts/measure.sh switch   # each click held 100 ms, as a person's
 #
 # scripts/measure_engines.py runs this for the two engines alone, captures off, and writes the
 # corner-against-spaces table (PLAN 1.9).

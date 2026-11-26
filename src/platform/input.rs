@@ -145,6 +145,15 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Op
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event = unsafe { event.as_ref() };
         if event.r#type() == NSEventType::FlagsChanged {
+            // A hotkey's modifiers going down: its pictures are taken ahead (told only when
+            // the keys held become a binding's; nothing else is done for ⇧, ⌥ or ⌃).
+            let flags = event.modifierFlags();
+            super::switch_likely::modifiers(crate::config::Mods {
+                ctrl: flags.contains(NSEventModifierFlags::Control),
+                alt: flags.contains(NSEventModifierFlags::Option),
+                shift: flags.contains(NSEventModifierFlags::Shift),
+                cmd: flags.contains(NSEventModifierFlags::Command),
+            });
             let held = event.modifierFlags().contains(NSEventModifierFlags::Command);
             if !command_changed(COMMAND_HELD.swap(held, Ordering::Relaxed), held) {
                 return;
@@ -570,6 +579,14 @@ pub fn reveal_edge(p: Point, rest: Duration) -> Result<(), String> {
     Ok(())
 }
 
+/// A synthetic pointer move onto a Dock item at `p`, no button (test only): the pointer in
+/// the Dock's bar, left there. Only for an item the caller hit-tested as a
+/// `STAGE_MANAGER_ONLY` app's (the Dock is no test window, so [`hover`] would refuse it).
+/// [`pointer_back`] puts the pointer where it was.
+pub fn dock_item_hover(p: Point) -> Result<(), String> {
+    reveal_edge(p, Duration::ZERO)
+}
+
 /// Puts the pointer back where it was before [`reveal_edge`] or [`hover`] moved it.
 pub fn pointer_back() {
     if let Some(home) = HOVER_HOME.lock().ok().and_then(|mut h| h.take()) {
@@ -577,16 +594,20 @@ pub fn pointer_back() {
     }
 }
 
-/// A synthetic click at `p`, only where the topmost window is ours or a fixture's. The
+/// How long a test click holds the button unless told ([`click`]).
+pub const CLICK_HOLD: Duration = Duration::from_millis(60);
+
+/// A synthetic click at `p`, only where the topmost window is ours or a fixture's, the
+/// button held `hold` ([`CLICK_HOLD`] unless given; a person's click is about 100 ms). The
 /// pointer goes back where it was.
-pub fn click(p: Point, shift: bool) -> Result<(), String> {
+pub fn click(p: Point, shift: bool, hold: Option<Duration>) -> Result<(), String> {
     path_is_safe(&[p], &test_pids(), true)?;
     let back = pointer_home();
     move_first(p, shift)?;
-    for kind in [CGEventType::LeftMouseDown, CGEventType::LeftMouseUp] {
-        post_mouse(kind, p, shift)?;
-        std::thread::sleep(Duration::from_millis(60));
-    }
+    post_mouse(CGEventType::LeftMouseDown, p, shift)?;
+    std::thread::sleep(hold.unwrap_or(CLICK_HOLD));
+    post_mouse(CGEventType::LeftMouseUp, p, shift)?;
+    std::thread::sleep(CLICK_HOLD);
     if shift {
         release_shift();
     }
