@@ -2,12 +2,17 @@
 """What the app costs, measured the same way each time (round sm-measure). Run through
 scripts/measure.sh, which builds, signs and runs every engine in turn.
 
-    measure_stages.py run --engine off|corner|spaces --out DIR [--run N] [SCENARIO...]
+    measure_stages.py run --engine off|corner|spaces|apple --out DIR [--run N] [SCENARIO...]
     measure_stages.py summary DIR
 
 Every scenario appends one JSON line to DIR/measure.jsonl and prints a short table; `summary`
 gives the median and the spread (min-max) of every number by scenario and engine. `off` is
-the app not running: the same fixture windows, the floor.
+the app not running: the same fixture windows, the floor. `apple` (the rest scenario; by
+name only, never in measure.sh's default engines) is the app not running and Apple's Stage
+Manager turned on for the span (`com.apple.WindowManager GloballyEnabled`, put back on every
+exit): the same fixture windows as its stages, its own process (WindowManager) and the Dock
+read beside the window server. Apple's takes every window on the Mac into its strip, not
+the fixtures alone, and draws its cards live: run it with little else open.
 
 Scenarios (all by default, in this order):
 - rest: N stages (SM_STAGES, default 4: the main fixture and fixtures A, B, C, 2 windows
@@ -97,11 +102,13 @@ and at rest (the two reads stir the tick: about 12 brisk ticks belong to them), 
 corner patch shows (`patch`).
 """
 
+import atexit
 import ctypes
 import json
 import math
 import os
 import re
+import signal
 import statistics
 import subprocess
 import sys
@@ -130,7 +137,7 @@ def parse_args(argv):
             o["scenarios"].append(a)
         else:
             sys.exit(f"unknown argument {a}\n{__doc__}")
-    if o["engine"] not in ("off", "corner", "spaces") or not o["out"]:
+    if o["engine"] not in ("off", "corner", "spaces", "apple") or not o["out"]:
         sys.exit(__doc__)
     o["scenarios"] = o["scenarios"] or list(SCENARIOS)
     return o
@@ -140,7 +147,7 @@ def parse_args(argv):
 ARGS = parse_args(sys.argv[1:]) if __name__ == "__main__" else {"cmd": "lib"}
 if ARGS["cmd"] == "run":
     # test_stages reads the engine once, at import.
-    os.environ["SM_ENGINE"] = "corner" if ARGS["engine"] == "off" else ARGS["engine"]
+    os.environ["SM_ENGINE"] = "corner" if ARGS["engine"] in ("off", "apple") else ARGS["engine"]
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import test_stages as T  # noqa: E402
 
@@ -351,10 +358,12 @@ class Span:
         self.guard = (T.guardian_pids(self.app) or [None])[0] if self.app else None
         self.ws = pid_named("WindowServer")
         self.rp0 = pid_named("replayd")
+        self.wm, self.dock = pid_named("WindowManager"), pid_named("Dock")
         self.top = start_top([self.app, self.guard, self.ws, self.rp0], with_top_secs) if with_top_secs else None
         self.t0 = time.time()
         self.a0, self.g0 = rusage(self.app), rusage(self.guard)
         self.ws0, self.r0 = ps_cpu(self.ws), ps_cpu(self.rp0)
+        self.wm0, self.dock0 = ps_cpu(self.wm), ps_cpu(self.dock)
 
     def end(self):
         a1, g1 = rusage(self.app), rusage(self.guard)
@@ -379,6 +388,10 @@ class Span:
         if self.ws0 is not None and ws1 is not None:
             out["ws_cpu_ms"] = round((ws1 - self.ws0) * 1e3)
             out["ws_cpu_pct"] = round(100 * (ws1 - self.ws0) / wall, 2)
+        for key, pid, before in (("wm", self.wm, self.wm0), ("dock", self.dock, self.dock0)):
+            after = ps_cpu(pid)
+            if before is not None and after is not None:
+                out[f"{key}_cpu_pct"] = round(100 * (after - before) / wall, 2)
         # replayd may start or restart within the span: all of a new one's time is in it.
         r = (r1 - self.r0) if (rp1 == self.rp0 and r1 is not None and self.r0 is not None) else (r1 or 0.0)
         out["replayd_cpu_ms"] = round(r * 1e3)
@@ -401,6 +414,54 @@ ENGINE = ARGS.get("engine")
 RUN = ARGS.get("run")
 CLOCK_ID = (os.environ.get("SM_FIXTURE_ID") or "dev.eugene.stagemanager.fixture.stages") + ".clock"
 CLOCK_EXE = "Clock.app/Contents/MacOS/sm-fixture"
+NO_APP = ("off", "apple")  # the engines with our app not running
+
+
+# ----- Apple's Stage Manager (the `apple` engine), put back on every exit ------------------
+
+APPLE_DOMAIN, APPLE_KEY = "com.apple.WindowManager", "GloballyEnabled"
+_apple_was = None  # (had, value) of GloballyEnabled, read before it is first written
+
+
+def apple_read():
+    r = subprocess.run(["defaults", "read", APPLE_DOMAIN, APPLE_KEY], capture_output=True, text=True)
+    return (True, r.stdout.strip()) if r.returncode == 0 else (False, "")
+
+
+def apple_set(on):
+    subprocess.run(["defaults", "write", APPLE_DOMAIN, APPLE_KEY, "-bool", "true" if on else "false"], check=True)
+
+
+def apple_on():
+    global _apple_was
+    if _apple_was is None:
+        _apple_was = apple_read()
+        atexit.register(apple_restore)
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, lambda *_: sys.exit(1))
+    apple_set(True)
+
+
+def apple_restore():
+    global _apple_was
+    if _apple_was is None:
+        return
+    had, value = _apple_was
+    _apple_was = None
+    if had:
+        apple_set(value == "1")
+    else:
+        subprocess.run(["defaults", "delete", APPLE_DOMAIN, APPLE_KEY], capture_output=True)
+    say(f"  {APPLE_DOMAIN} {APPLE_KEY} put back to {value if had else '<absent>'}")
+    time.sleep(2.0)  # Apple's brings every window back
+
+
+def apple_strip_windows():
+    """How many windows Apple's WindowManager has on screen (its strip's cards), or None."""
+    js = ("ObjC.import('CoreGraphics'); var ws = ObjC.deepUnwrap(ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1, 0))); "
+          "ws.filter(function (w) { return w.kCGWindowOwnerName == 'WindowManager'; }).length")
+    r = subprocess.run(["osascript", "-l", "JavaScript", "-e", js], capture_output=True, text=True, timeout=15)
+    return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else None
 
 
 def say(msg):
@@ -483,6 +544,15 @@ def stages_up():
     stop_everything()
     fresh_home()
     fixtures_up()
+    if ENGINE == "apple":
+        # Each fixture app in front once, so Apple's has seen each as a stage of its own (an
+        # app's windows are one stage with "Show windows from an application: all at once").
+        apple_on()
+        time.sleep(2.0)
+        for path, _, _, _ in reversed(apps()):
+            subprocess.run(["open", path], check=True)
+            time.sleep(1.5)
+        return None
     if ENGINE == "off":
         front_first_app()
         return None
@@ -522,7 +592,7 @@ def stages_up():
 def captured_now(s=None):
     """The windows captured so far, from `ctl state` (`s`: one read already): (asked by a
     round, every picture); None with `off`."""
-    if ENGINE == "off":
+    if ENGINE in NO_APP:
         return None
     s = s or T.state()
     return ((s.get("costs") or {}).get("captures"), (s.get("capture") or {}).get("images"))
@@ -573,12 +643,19 @@ def scenario_rest():
         + (f", clicks held {CLICK_HOLD_MS} ms" if CLICK_HOLD_MS is not None else "") + " ==")
     stages_up()
     time.sleep(SETTLE_S)
-    s0 = T.state() if ENGINE != "off" else None
+    s0 = T.state() if ENGINE not in NO_APP else None
     c0 = captured_now(s0)
+    strip0 = apple_strip_windows() if ENGINE == "apple" else None
     sp = Span(with_top_secs=REST_S)
     time.sleep(REST_S)
     m = sp.end()
-    s1 = T.state() if ENGINE != "off" else None
+    if ENGINE == "apple":
+        m["apple_strip_windows"] = [strip0, apple_strip_windows()]
+        m["apple_on"] = apple_read()[1]
+        say(f"  Apple's Stage Manager on ({m['apple_on']}); its windows on screen before and after: {m['apple_strip_windows']}; "
+            f"WindowManager {m.get('wm_cpu_pct')} %, the Dock {m.get('dock_cpu_pct')} %, the window server {m.get('ws_cpu_pct')} %")
+        apple_restore()
+    s1 = T.state() if ENGINE not in NO_APP else None
     c1 = captured_now(s1)
     if c0 and c1:
         m["captures_per_min"] = per_minute(c0[0], c1[0], m.get("wall_s"))
@@ -642,7 +719,7 @@ def put_back(s):
 
 
 def scenario_covered():
-    if ENGINE == "off":
+    if ENGINE in NO_APP:
         return None
     say(f"\n== covered ({ENGINE}, run {RUN}): {STAGES} stages, the strip following the Dock ==")
     stages_up()
@@ -906,7 +983,7 @@ def classify(path):
 
 
 def scenario_sample():
-    if ENGINE == "off":
+    if ENGINE in NO_APP:
         return None
     say(f"\n== sample ({ENGINE}, run {RUN}): {REST_S:.0f} s of `sample` at rest ==")
     if not T.app_pid():
@@ -1020,7 +1097,7 @@ def med(xs):
 
 
 def scenario_switch():
-    if ENGINE == "off":
+    if ENGINE in NO_APP:
         return None
     say(f"\n== switch ({ENGINE}, run {RUN}): {SWITCHES} each of {', '.join(SWITCH_WAYS)}, timed, then for CPU ==")
     if not T.app_pid():
@@ -1089,7 +1166,7 @@ def clock_span(rows, t0, t1):
 
 def scenario_call():
     say(f"\n== call ({ENGINE}, run {RUN}): a frame clock in front, {REST_S:.0f} s at rest, then {SWITCHES} activations ==")
-    if ENGINE == "off" or not T.app_pid():
+    if ENGINE in NO_APP or not T.app_pid():
         stages_up()
     stop_clock()
     clock_app = os.path.join(T.ROOT, "target", T.FIX_NAME + " Clock.app")
@@ -1119,7 +1196,7 @@ def scenario_call():
 # ----- launch ----------------------------------------------------------------------------
 
 def scenario_launch():
-    if ENGINE == "off":
+    if ENGINE in NO_APP:
         return None
     say(f"\n== launch ({ENGINE}, run {RUN}): Charlie opened {LAUNCHES} times over Alpha's stage ==")
     stop_everything()
@@ -1188,7 +1265,7 @@ def hidden_round(rows, t_hide, t_show, after_s):
 
 
 def scenario_hidden():
-    if ENGINE == "off":
+    if ENGINE in NO_APP:
         return None
     say(f"\n== hidden ({ENGINE}, run {RUN}): a drawing window hidden {HIDDEN_S:.0f} s in its stage and shown, {HIDDEN_ROUNDS} times ==")
     if STAGES > 3:
@@ -1255,7 +1332,7 @@ def spread(xs):
 
 def summary(out):
     rows = [json.loads(line) for line in open(os.path.join(out, "measure.jsonl")) if line.strip()]
-    engines = [e for e in ("off", "corner", "spaces") if any(r["engine"] == e for r in rows)]
+    engines = [e for e in ("off", "apple", "corner", "spaces") if any(r["engine"] == e for r in rows)]
     pick = lambda sc, e: [r for r in rows if r["scenario"] == sc and r["engine"] == e]  # noqa: E731
     lines = [("number", *engines)]
 
@@ -1273,6 +1350,8 @@ def summary(out):
     add("rest: window server CPU %", "rest", g("ws_cpu_pct"))
     add("rest: window server POWER (top)", "rest", g("top_ws_power"))
     add("rest: replayd CPU %", "rest", g("replayd_cpu_pct"))
+    add("rest: Apple's WindowManager CPU %", "rest", g("wm_cpu_pct"))
+    add("rest: Dock CPU %", "rest", g("dock_cpu_pct"))
     add("rest: windows captured/min (rounds)", "rest", g("captures_per_min"))
     add("rest: window pictures/min (all)", "rest", g("pictures_per_min"))
     add("rest: ticks at rest in the span", "rest", g("ticks_rest"))
@@ -1356,6 +1435,7 @@ def main():
                 # The next scenario sets its stages up again rather than measure a half set-up.
                 T.stop_app()
     finally:
+        apple_restore()
         T.stop_app()
         if T.pids_of(T.FIX_EXE) or any(T.pids_of(e[2]) for e in T.EXTRA.values()):
             T.all_onscreen("cleanup")

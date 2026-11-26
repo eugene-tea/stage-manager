@@ -128,6 +128,21 @@ pub enum Heard {
 /// off, and the log says so when it ends a switcher.
 pub const GONE_WAIT: Duration = Duration::from_millis(150);
 
+/// How long the tick finds ⌘ let go, with no key told for it, before a key tap that hears is
+/// taken to have missed the release ([`unheard_release`]). Live 11-25: a tick 3 ms after ⌘'s
+/// release found it let go before the tap's own word of it was handled, and the Desktop
+/// arranged ahead was undone for a release that could not be told from a cancel.
+pub const UNHEARD_WAIT: Duration = Duration::from_millis(100);
+
+/// The tick found ⌘ let go with the switcher up and no key told for it: whether that counts
+/// as the release now. `seen` is when a tick first found it so for this switcher (`None`:
+/// this is the first), `tap_hears` whether the key tap hears. A tap that hears tells the
+/// release itself a few ms after it, so the tick waits [`UNHEARD_WAIT`] for its word; with
+/// no tap hearing there is nothing to wait for.
+pub fn unheard_release(seen: Option<Instant>, tap_hears: bool, now: Instant) -> bool {
+    !tap_hears || seen.is_some_and(|at| now.saturating_duration_since(at) >= UNHEARD_WAIT)
+}
+
 /// The switcher as the keys show it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Switcher {
@@ -503,6 +518,15 @@ mod tests {
 
     fn down(code: u16) -> Key {
         Key::Down { code, cmd: true, shift: false }
+    }
+
+    #[test]
+    fn a_release_the_tick_finds_waits_for_a_hearing_taps_word() {
+        let t = Instant::now();
+        assert!(unheard_release(None, false, t), "no tap hears: the tick's word is all there is");
+        assert!(!unheard_release(None, true, t), "the first tick that finds it: the tap's word may be on its way");
+        assert!(!unheard_release(Some(t), true, t + Duration::from_millis(99)));
+        assert!(unheard_release(Some(t), true, t + UNHEARD_WAIT), "the tap missed it");
     }
 
     #[test]

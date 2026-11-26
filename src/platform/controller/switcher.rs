@@ -187,6 +187,9 @@ pub(super) struct SwitcherWatch {
     /// The app last asked for this switcher whose release takes macOS nowhere (nothing to
     /// arrange ahead): not asked again at each notice of the same selection.
     stays: Option<i32>,
+    /// When a tick first found ⌘ let go with no key told for it, this switcher
+    /// ([`switcher::unheard_release`]).
+    cmd_up_seen: Option<Instant>,
 }
 
 impl Controller {
@@ -297,6 +300,7 @@ impl Controller {
                     self.switcher.listed = false;
                     self.switcher.tap_heard = false;
                     self.switcher.stays = None;
+                    self.switcher.cmd_up_seen = None;
                     self.switcher.dock = dock::dock_pid();
                     self.watch_dock();
                 }
@@ -769,7 +773,8 @@ impl Controller {
     }
 
     /// The tick, while the switcher is up: ⌘ found let go without its event (the monitor
-    /// missed it) counts as the release; a switcher with no key for [`SWITCHER_MAX`] is
+    /// missed it) counts as the release, after [`switcher::UNHEARD_WAIT`] where the key tap
+    /// hears (its word comes first); a switcher with no key for [`SWITCHER_MAX`] is
     /// forgotten. Nothing is read while it is down.
     pub(super) fn switcher_tick(&mut self, ob: &Observer, now: Instant) {
         self.switcher_fast_tick(ob, now);
@@ -781,7 +786,19 @@ impl Controller {
         // session's state: its own release is posted. Only a test run posts one, so only a
         // test run asks.
         let probe_posting = std::env::var_os("STAGE_MANAGER_TEST").is_some() && space_keys::posted_command_down();
-        if (!input::command_held() && !probe_posting) || quiet {
+        let let_go = !input::command_held() && !probe_posting;
+        if !let_go {
+            self.switcher.cmd_up_seen = None;
+        }
+        if let_go && !quiet && !switcher::unheard_release(self.switcher.cmd_up_seen, mission_key_tap::hears(), now) {
+            // The tap's own word of the release is a few ms behind the keys' live state: it
+            // ends the switcher as a release heard, which this tick could not tell from a
+            // cancel.
+            self.switcher.cmd_up_seen.get_or_insert(now);
+            self.switcher_arm_tap();
+            return;
+        }
+        if let_go || quiet {
             let steps = self.switcher.keys.steps();
             self.switcher.keys.reset();
             let heard = if quiet { Heard::Lost } else { Heard::Released { steps } };

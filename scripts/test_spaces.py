@@ -1866,12 +1866,20 @@ def _cmd_tab_arrival_cases(d1, d2):
         time.sleep(0.1)
         return p
 
-    def said(r, label):
+    def said(r, label, tabs=1):
+        """The probe ran and the app predicts Alpha for one Tab. The report's own prediction is
+        for every Tab asked for (live 11-25: for two it names the app after Alpha), so for more
+        than one the order's second app is read."""
         ts.say_cmd_tab_report(r, label)
         if not check(r.get("ok"), f"{label}: the probe ran ({r.get('error') or r.get('outcome')})"):
             return False
-        expected = r.get("start", {}).get("expected_bundle")
-        return check(expected == alpha_bundle, f"{label}: one Tab selects Alpha, as the app predicts ({expected})")
+        start = r.get("start", {})
+        if tabs == 1:
+            expected = start.get("expected_bundle")
+            return check(expected == alpha_bundle, f"{label}: one Tab selects Alpha, as the app predicts ({expected})")
+        order, then = start.get("order") or [], start.get("expected_bundle")
+        return check(len(order) > 1 and order[1] == ts.extra_pid("a") and then in ts.ALL_IDS and then != alpha_bundle,
+                     f"{label}: one Tab selects Alpha and {tabs} another fixture app, as the app predicts (order {order[:3]}, then {then})")
 
     def put_back(label, words, why):
         """A ⌘Tab that ends with Escape: arranged for Alpha 1, then undone, unseen."""
@@ -1883,7 +1891,7 @@ def _cmd_tab_arrival_cases(d1, d2):
         before = {w["id"]: w["bounds"] for w in probe_all()}
         sampler, t0 = sampler_for(3500), time.time()
         r = ts.cmd_tab_probe(*words)
-        if not said(r, label):
+        if not said(r, label, int(words[1])):
             sampler.kill()
             return
         time.sleep(0.5)

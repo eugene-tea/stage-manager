@@ -116,9 +116,11 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
       each still a minute, most likely for its listing of what can be shared. If the
       listing can be kept between stills (the same desktop windows), the fallback costs
       what the window server's call does.
-    - The still phase's icon steps (a disk image's icon put under the patch and dragged)
-      were skipped live 11-25: Finder waited for the permission to control it. Run
-      `scripts/test-stages.sh still` once with that permission given.
+    - Apple's own Stage Manager adds nothing at rest that a run can see (UX-SPEC; its own
+      process and the Dock read 0), but it hides the Mac's other windows too, so its window
+      server row cannot be set beside the two engines'. Not measured: Apple mode (the app
+      beside Apple's; `measure.sh`'s `apple` runs Apple's alone), and the three with the
+      same windows hidden (an account with fixture windows only).
     - The proof's tolerance (a mean of 2 of 255, no cell over 12) is a guess: read
       `ctl debug-desktop-still`'s numbers on a wide-gamut display, with a dynamic, an HDR
       and an aerial wallpaper, and with an icon and a widget in the corner. Where the two
@@ -181,16 +183,7 @@ Nothing here changes what a person asks for; each closes a way a slower Mac, or 
 order of events, can still go wrong. The bench first, then the live suite
 (DEVELOPMENT, "The bench").
 
-- **A screen going away under the Accessibility engine, live again.** 11-25, 18 of about
-  100 checks of `scripts/test-stages.sh display-gone` failed there (the same on 1.9.2): 12
-  were the defect mended since (the windows of the Desktop the screen left no longer showed
-  left their stages), 3 asked for the Spaces engine's log line of a hide (the phase now asks
-  each engine), 3 for the Desktop arranged at a Dock press, which round arranged-ahead
-  brings. Run the phase again under the Accessibility engine: every `main` and `secondary`
-  round's watch and tour pass, and the `ahead` rounds fail only "arranged at the press"
-  until arranged-ahead is in. Then `SM_ENGINE=spaces` once, for the changed carry (the
-  Desktop a gone screen's front leaves shows its own front again).
-- **The same with the Desktop reads off (`SM_DESKTOPS=guess`, a macOS that breaks them).**
+- **A screen going away with the Desktop reads off (`SM_DESKTOPS=guess`, a macOS that breaks them).**
   The Accessibility engine takes the display change by the windows on screen as 1.9.2 did,
   and the defect stays there (bench `guessed.txt`, "the live phase's ..."). A guess could
   take a known window missing from screen in the change's settle for one on another Desktop
@@ -274,14 +267,9 @@ was left behind for no reason of the mode.
   window in a word the app learns only from the Spaces engine's own asks. A way to learn it
   with no Space call (a window the app sees open, matched by its id) would bring that look
   forward too.
-- **Round arranged-ahead, live.** Its checks are written and not run: `scripts/test-stages.sh
-  spaces --auto` under both engines (the Dock press that is no click, the click that goes
-  nowhere, the Dock arrivals arranged at the press, ⌘Tab to another Desktop cancelled,
-  tabbed on, let go at once and held), and the `looks` phase's rest check with the Dock's
-  observer kept in the default mode (`costs.dock_notices` must not grow at rest). Never
-  measured live: whether the Dock sends notices at rest under the Accessibility engine now
-  that its observer stays; how long the first Tab's round with the app selected takes on a
-  busy app (bounded at 100 ms on the WM thread).
+- **The first Tab's round with a busy app.** At the first Tab the app selected is asked as at
+  a Dock press (bounded at 100 ms on the WM thread; 23 ms with a fixture app, live 11-25).
+  Never measured with an app that answers slowly.
 - **A wrong ⌘Tab guess that comes into view.** ⌘ let go before the Dock lists the switcher,
   the guess wrong, and the app let go on living on the Desktop arranged for the guess: that
   Desktop slides in with the guessed app's stage, is put back at the other app's

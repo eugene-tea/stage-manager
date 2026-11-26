@@ -348,6 +348,16 @@ while the switcher shows; a listen-only event tap hears it, on from the Tab to t
 switcher's end and off again after): where macOS refuses that tap, or keeps it off while a
 password field has the keyboard, nothing is arranged ahead and the Desktop is arranged when
 it arrives, as before.
+Live 11-25 (fixture apps, both engines, `scripts/test-stages.sh spaces --auto`): the Desktop
+was arranged about 25 ms after the first Tab was heard. Let go 100 ms after ⌘'s press, or
+held 450 ms, the app's Desktop slid in with its stage in front and the stage left stayed
+hidden at every look (30 ms apart). Escape and a second Tab put it back with no window of
+that Desktop listed on screen meanwhile (it stood 230 to 260 ms before the second Tab). One
+quick ⌘-Tab of those runs had its arrangement undone at the release: the tick found ⌘ let
+go 3 ms before the key tap's word of it was handled, and could not tell a release from a
+cancel. Where the tap hears, the tick now waits 100 ms for its word (`switcher::UNHEARD_WAIT`).
+At rest the Dock sent no notice to its observer under the Accessibility engine (0 a minute,
+three runs of `measure.sh rest`).
 An app macOS activates as a Desktop slides in (a swipe,
 ⌃-arrow) never switches a stage on the Desktop being left: it is decided once the new
 Desktop is recognized, as Apple's never touches the Desktop left. Full-screen apps have no
@@ -1527,7 +1537,31 @@ window server what it did, about 1 % for each still a minute, so its slower pace
 no icon lies in the corner) holds it to about 2 %. In the still phase (`test-stages.sh still
 capture`) the two ways' stills of the same corner were the same picture (a mean of 0.0 and
 no cell apart, of 255; 640 by 640 pixels at 2x), taken in 15 to 20 ms by the window server's
-call and 28 to 29 ms by ScreenCaptureKit, and at rest the next still listed nothing.
+call and 28 to 29 ms by ScreenCaptureKit, and at rest the next still listed nothing. With a
+desktop icon put in the corner (a disk image's) they were the same picture again (a mean of
+0.0, the worst cell 1 apart), and a double click and a drag on the icon went through the
+patch as before, a new still following the drag.
+
+Apple's own Stage Manager at rest, later the same evening (`ENGINES="corner off apple"
+scripts/measure.sh rest`: the app not running, Apple's switched on for the run in its own
+preference and switched back after it, the same four fixture apps opened one after another;
+three runs of each in turn, 60 s untouched):
+
+| Run | Window server, % | Apple's WindowManager, % | Dock, % | Capture service, % |
+|---|---|---|---|---|
+| Nothing running | 4.9 to 5.2 | 0 | 0 | 0 |
+| Apple's Stage Manager on (16 windows of its own on screen) | 3.3 to 3.6 | 0.00 to 0.03 | 0 | 0 |
+| Corner, four stages | 5.7 to 6.0 | | | 0.28 |
+
+Apple's own process and the Dock use nothing that shows at rest. The window server reads
+about 1.6 % lower with Apple's on than with nothing running: Apple's hides every window on
+the Mac but the front stage's, the other apps' windows that the test leaves on screen in the
+other two rows as well, so less is drawn. The run therefore says that Apple's adds no cost
+at rest that can be seen, and cannot say what its strip alone costs the window server: for
+that the same windows would have to be hidden in each row, which a run on fixture windows
+only cannot do. The Corner engine's rows agree with the earlier ones (0.85 % above nothing
+in the window server at the medians, the app 0.55 %, 6 stills a minute, none asked of
+ScreenCaptureKit). Apple mode (the app beside Apple's) is not in these rows.
 
 Measured again the same day after round picture-wait: a Dock click's press, the pointer
 coming into the Dock and a hotkey's modifiers take the pictures before the switch, a picture
