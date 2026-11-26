@@ -29,12 +29,12 @@
 //! `STAGE_MANAGER_ONLY`, a test run) turns this source off: every picture through
 //! ScreenCaptureKit, as before 1.9.
 //!
-//! **Several windows in one call** ([`pictures`], round picture-wait). `SLSHWCaptureWindowList`
-//! takes a list of windows and hands back an image for each. A switch's pictures are taken
-//! one call a window, one after another; with [`LIST_ENV`] set in a test run the windows on
-//! screen go in one call. Which is faster is to be measured (`probe-spaces capture BUNDLE
-//! fast list`); until then the list is a test switch, and whatever it does not answer for
-//! (not one image a window, or a picture that is not its window) is taken as before.
+//! **One call a window.** `SLSHWCaptureWindowList` takes a list of windows, but one call for
+//! 2, 3 or 4 windows did not hand back one image a window (live 11-25, 30 of 30), so a
+//! switch's pictures are taken one call a window, one after another, and the test switch for
+//! one call (`STAGE_MANAGER_CAPTURE_LIST`, round picture-wait) is gone (round desktop-still).
+//! What the call does hand back for several ids is printed by the probe ([`handed_back`],
+//! `probe-spaces capture BUNDLE fast list`).
 //!
 //! The calls are synchronous: callers run them off the main thread (the capture workers, a
 //! switch's own thread). Each counts as a capture in flight for [`super::capture::quiesce`].
@@ -59,11 +59,6 @@ use crate::engine::geometry::Rect;
 
 /// Set (with `STAGE_MANAGER_ONLY`): every picture through ScreenCaptureKit.
 pub const FORCE_SCK_ENV: &str = "STAGE_MANAGER_CAPTURE_SCK";
-
-/// Set (with `STAGE_MANAGER_ONLY`): a switch's windows on screen are taken in one call of
-/// `SLSHWCaptureWindowList` with all their ids ([`pictures`]) instead of one call a window.
-/// A test switch until both ways are measured (`probe-spaces capture BUNDLE fast list`).
-pub const LIST_ENV: &str = "STAGE_MANAGER_CAPTURE_LIST";
 
 /// `SLSHWCaptureWindowList` options: best resolution (1 << 8) and the window's whole shape,
 /// not its part left by the windows over it (ignore the global clip shape, 1 << 11), as alt-tab
@@ -226,19 +221,6 @@ pub(crate) fn forced_by(asked: bool, only: bool) -> bool {
     asked && only
 }
 
-/// True when a test run asked for one call for several windows ([`LIST_ENV`] with
-/// `STAGE_MANAGER_ONLY`).
-pub fn list_capture() -> bool {
-    static LIST: LazyLock<bool> = LazyLock::new(|| {
-        let on = forced_by(std::env::var_os(LIST_ENV).is_some_and(|v| !v.is_empty()), std::env::var_os("STAGE_MANAGER_ONLY").is_some());
-        if on {
-            tracing::info!("window pictures: {LIST_ENV} set (a test run): a switch's windows on screen are taken in one call");
-        }
-        on
-    });
-    *LIST
-}
-
 /// True when this source may take pictures at all in this run (not forced off, the calls
 /// loaded, a route not resting).
 pub fn enabled() -> bool {
@@ -254,7 +236,6 @@ pub fn status() -> serde_json::Value {
     let word = |r: Route| r.health().word();
     serde_json::json!({
         "forced_off": forced_off(),
-        "list": list_capture(),
         "fast": calls().and_then(|c| c.hw).map(|_| word(Route::Fast)).unwrap_or("missing"),
         "whole": calls().and_then(|c| c.list_image).map(|_| word(Route::Whole)).unwrap_or("missing"),
     })
@@ -354,39 +335,20 @@ pub fn picture(t: Target, frame: Rect, displays: &[Rect]) -> Result<Picture, Mis
     judge(route, t, frame, image)
 }
 
-/// The pictures of several windows from one call: `SLSHWCaptureWindowList` with every id of
-/// `windows` (each with its frame as the window server describes it now), which hands back
-/// one image a window, in the order asked (round picture-wait; to be measured against one
-/// call a window, [`LIST_ENV`]). Only windows of [`Route::Fast`] may be asked for. Each
-/// window's picture or why it has none, in `windows`' order; `None` when the call cannot
-/// stand for them all (the source off, the call missing or resting, nothing handed back, or
-/// not one image a window): the caller takes them one by one.
-pub fn pictures(windows: &[(Target, Rect)], displays: &[Rect]) -> Option<Vec<Result<Picture, Miss>>> {
-    if windows.is_empty() || forced_off() || !usable(Route::Fast) {
-        return None;
-    }
-    if windows.iter().any(|(_, frame)| route_for(*frame, displays) != Route::Fast) {
-        return None;
-    }
+/// What one call of `SLSHWCaptureWindowList` hands back for the windows `ids` together, for
+/// the probe (`probe-spaces capture BUNDLE fast list`): the size in pixels of every image of
+/// its array, in the array's order; `None` when the call is missing or hands back no array.
+/// The app itself never asks for several windows in one call (module docs).
+#[cfg(feature = "probes")]
+pub fn handed_back(ids: &[u32]) -> Option<Vec<(usize, usize)>> {
     let calls = calls()?;
     let f = calls.hw?;
-    let ids: Vec<u32> = windows.iter().map(|(t, _)| t.id).collect();
     let flight = InFlight::issue();
     // SAFETY: `ids` outlives the call, with its own count; a +1 CFArray of CGImage or null.
     let list: Option<Retained<NSArray>> = unsafe { ffi::take_array(f(calls.cid, ids.as_ptr(), ids.len() as u32, HW_OPTIONS)) };
     drop(flight);
     let list = list?;
-    let images = images_of(&list);
-    if !one_each(images.len(), windows.len()) {
-        tracing::debug!(asked = windows.len(), images = images.len(), "window pictures: the list capture did not hand back one image a window; they are taken one by one");
-        return None;
-    }
-    Some(windows.iter().zip(images).map(|((t, frame), image)| judge(Route::Fast, *t, *frame, image)).collect())
-}
-
-/// True when a list capture's `images` can be matched to the `asked` windows: one each.
-pub fn one_each(images: usize, asked: usize) -> bool {
-    asked > 0 && images == asked
+    Some(images_of(&list).iter().map(|i| (CGImage::width(Some(i)), CGImage::height(Some(i)))).collect())
 }
 
 /// `image`, handed back by `route` for window `t.id` at `frame`, as its picture: checked to
@@ -610,15 +572,6 @@ mod tests {
         assert!(needs_scaling((2800, 1800), (420, 270)));
         assert!(!needs_scaling((2800, 1800), (2800, 1800)));
         assert!(!needs_scaling((2800, 1800), (2700, 1736)), "within a tenth");
-    }
-
-    /// Round picture-wait: a list capture stands for its windows only with one image each.
-    #[test]
-    fn a_list_capture_counts_only_with_one_image_a_window() {
-        assert!(one_each(3, 3));
-        assert!(!one_each(1, 3), "one image of them all, or some missing");
-        assert!(!one_each(4, 3));
-        assert!(!one_each(0, 0), "nothing asked");
     }
 
     #[test]
