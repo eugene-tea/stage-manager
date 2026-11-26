@@ -205,7 +205,8 @@ server's own. Every layer takes the window server's own by default, wherever a c
 working, at launch and while running, and falls back to the public way when it is not (a
 macOS update, for one). The one layer not there yet is how windows are hidden: Accessibility
 stays the default while the Spaces mode is proven. Pictures follow the rule since 1.9, the
-Desktops' reads since round corner-desktops. The items below are where the Accessibility mode
+Desktops' reads since round corner-desktops, hearing of Mission Control and of a Desktop
+change's end since round looks-forward. The items below are where the Accessibility mode
 was left behind for no reason of the mode.
 
 - **A display change is still taken by the windows on screen under the Accessibility engine.**
@@ -220,10 +221,17 @@ was left behind for no reason of the mode.
 - **The reads' check sees nothing on a screen with no window wholly on it.** A list of
   Desktops that names the wrong Desktop there is not noticed until a window shows
   (`engine/desk_reads.rs`). Never seen; a second public fact would close it.
-- **Mission Control's opening and a Desktop change's end are found by a 1 s poll** under the
-  Accessibility engine; the triggers that bring the look forward run under Spaces only (one,
-  the Dock's notice, is public). `mission_control_key_keeps_stage` is honoured under Spaces
-  only for the same reason.
+- **Mission Control and a Desktop change under the Accessibility engine: run it live.** The
+  window server's notices bring the looks forward there on the bench only so far
+  (`scripts/test-stages.sh looks`, the Mac untouched). The run also says what is not
+  measured: whether a notice comes for Mission Control opened by its launcher, a gesture or a
+  hot corner, and whether the Dock sends its notice as Mission Control opens (the public
+  fallback's second trigger; if it never does, its observer can go).
+- **A window moved to another Desktop is still found at the next look** under the
+  Accessibility engine: the window server's notice of a window added to a Space names its
+  window in a word the app learns only from the Spaces engine's own asks. A way to learn it
+  with no Space call (a window the app sees open, matched by its id) would bring that look
+  forward too.
 - **The housekeeping rests 0.75 s at most under the Accessibility engine**, 2 s under the
   others, to keep the list the inert slivers' tap trusts fresh; each wake is a full pass.
   Measure what the cap costs at rest, then keep that list fresh by something lighter. A show
@@ -237,7 +245,10 @@ was left behind for no reason of the mode.
 - **A hidden window found shown is given up after four tries** under the Accessibility engine
   and then stays in view, counted hidden, with no card; the Spaces engine never gives up.
 - **Smaller.** The wait for a switch's pictures (160 ms) is sized for ScreenCaptureKit, not for
-  the window server's capture; the landing variants can be tried only with `engine = "spaces"`.
+  the window server's capture; the landing variants can be tried only with `engine = "spaces"`;
+  the Spaces engine's lends keep their own copy of the watch that brings Mission Control's
+  looks forward (`engine/mission_control.rs`), where the Accessibility engine has
+  `engine/look_watch.rs`: one watch for both.
 
 ## 2.0: new features
 

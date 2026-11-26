@@ -5,7 +5,7 @@
 # base ID so no other fixture run is disturbed), then runs the phases.
 #
 #   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 restore strip native visible
-#                                          # parity motion slots expose mission capture raise park offscreen
+#                                          # parity motion slots expose mission looks capture raise park offscreen
 #                                          # enhanced stale handles displays screens engine
 #   scripts/test-stages.sh engine          # which window engine runs: each launch's probe and choice,
 #                                          # the fallback mid-run to the Corner engine (round sm-probe)
@@ -39,6 +39,10 @@
 #   SM_ENGINE=spaces scripts/test-stages.sh mission         # Mission Control and App Exposé show the hidden stages'
 #                                          # windows and put them back; a pick; kill -9 with them out
 #                                          # (round spaces-mission-control; skips under the park corner)
+#   scripts/test-stages.sh looks           # the Corner engine knows Mission Control shows within 400 ms of
+#                                          # its shortcut, by a look brought forward; nothing fires at rest;
+#                                          # mission_control_key_keeps_stage at a close by key (round
+#                                          # looks-forward; the Mac untouched meanwhile; skips under Spaces)
 #   SM_ENGINE=spaces scripts/test-stages.sh mission-desktop # a Desktop picked inside Mission Control (⌃→ there),
 #                                          # Mission Control opened again at once: the shown Desktop's
 #                                          # hidden windows still put home (needs a Desktop to the right;

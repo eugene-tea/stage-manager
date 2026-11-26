@@ -129,7 +129,7 @@ its ctl socket and reading the window server's view of the windows:
 
 ```sh
 scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore strip native
-                                          # visible parity motion slots expose mission capture raise park
+                                          # visible parity motion slots expose mission looks capture raise park
                                           # offscreen enhanced stale handles displays reads
 scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
@@ -508,6 +508,17 @@ Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
   `workspace_first`). `margins` names the waits: `OVERVIEW_LOOK`, `OVERVIEW_SETTLE`,
   `OVERVIEW_ARRIVAL_SETTLE`, `OVERVIEW_EXIT_CARRY`, `STRAY_LOOK`, `TIDY_EVERY`,
   `SPACE_POLL`, `launch_watch::EVERY`.
+- Under the Corner engine (round looks-forward) `engine.notices` is there too, with the
+  three types it hears, and under both engines `trust`: `state` (`working`, `silent`,
+  `resting`, `probing`, or `off` when they are not registered), `way` (`window server` or
+  `public triggers`), `why`, `told`, `missed`, `for_nothing`, `rests`; `uses.rested` counts
+  the notices that brought no look during a rest. `mission_control` (and `ctl
+  debug-mission-control status`) answers under the Corner engine: `up`, `tap`
+  (`wanted_by_engine`: on for Mission Control's keys), `keys`, and `looks` (`public_triggers`,
+  looks `made` and `found`, and how many openings each of the key, the Dock's notice and the
+  window server's announced). `costs` has `server_notices`, `dock_notices`, `trigger_looks`
+  and `taps_on.mission_keys`. `ctl debug-mission-control launch` opens Mission Control by
+  its launcher, with no key.
 - `ctl space`'s `overview_ms_ago`: `found`, `closed`, `told` (the last notice while an
   overview showed) and `settled_by_notice`.
 - The live phases `mission`, `expose`, `launch` (`SM_ENGINE=spaces`) and `spaces --auto`
@@ -517,6 +528,18 @@ Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
   notice), the close's notice comes after the closing key and before the list shows the close,
   and the look after it ends the freeze (`OVERVIEW_SETTLE` ended by the notice); the ms are
   printed (skipped when no notice 1508 came).
+- The live phase `looks` (the Corner engine, a default phase; the Mac untouched meanwhile):
+  nothing that brings a look forward fires in 10 s at rest and the key tap is off; Mission
+  Control by its shortcut is known within 400 ms of the ask at a look brought forward
+  (`OVERVIEW_LOOK` ended by a trigger's look), its close ends the freeze with no settle when
+  its notice came, no hidden window is asked to park again; opened by its launcher it is
+  judged only when a notice came for it; and `mission_control_key_keeps_stage` keeps the
+  stage at a close by key. With no notice 1508 on a Mac the first rounds are said, and the
+  round after the public triggers took over is judged.
+- On the bench `bench/looks.rs` has the Corner engine's scenarios: the desk lists the windows
+  in Mission Control's layout with `d.mission_lays_out`, sends the Dock's notice at its open
+  with `d.dock_tells_mission`, has no notices to register with `d.server_calls = false`, and
+  `looks_before.txt` pins each as it read before anything was heard there.
 - On the bench the desk sends them only with `d.server_notices = true` (scenarios "a hidden
   window taken out of its stage Space" and "Mission Control with no key", each with and
   without).

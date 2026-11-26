@@ -10902,8 +10902,267 @@ def phase_mission_desktop():
     all_onscreen("mission-desktop quit")
 
 
+# ----- looks: Mission Control known at once under the Corner engine (round looks-forward) --
+
+# The app knows Mission Control shows this long after its key was asked, at most: far under
+# the poll's second (2 s at rest). macOS lists its window 22 to 47 ms after the shortcut
+# (UX-SPEC), the look comes with the window server's notice or within a fast tick or two.
+LOOKS_KNOWN_MS = 400
+# With nothing touched, none of the triggers fires: counted over this long.
+LOOKS_REST_S = 10.0
+
+
+def looks_trust():
+    """`ctl state`'s `engine.notices.trust`: whether the window server's notices bring the looks."""
+    return (((ctl("state").get("engine") or {}).get("notices") or {}).get("trust") or {})
+
+
+def looks_costs():
+    """`ctl state`'s `costs`."""
+    return ctl("state").get("costs") or {}
+
+
+def looks_setup():
+    """Fixture 1 in the stage in front, Fixture 2 and 3 each hidden in a stage of its own,
+    parked in the corner, under the Corner engine with the test commands on. (state, ids) or
+    Nones."""
+    stop_app()
+    stop_all_fixtures()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(3, "--frames", "360,140,640,420;520,220,640,420;680,300,640,420")
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None and s["engine"]["kind"] == "corner", "looks: the Corner engine runs with the fixture's 3 windows"):
+        return None, None
+    t = by_title(s)
+    do("new", t["Fixture 2"]["id"])
+    do("new", t["Fixture 3"]["id"])
+    want = sorted([[k] for k in ("Fixture 1", "Fixture 2", "Fixture 3")])
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == want, "each window in a stage of its own")
+    if not check(s is not None, f"looks: each window in a stage of its own ({stage_titles(state())})"):
+        return None, None
+    do("switch", number_of(s, "Fixture 1"))
+    s = wait_state(lambda x: active_titles(x) == {"Fixture 1"}, "Fixture 1's stage in front")
+    if not check(s is not None, "looks: Fixture 1 in front, Fixture 2 and 3 each hidden in a stage"):
+        return None, None
+    if not make_fixture_front(s):
+        check(False, f"looks: a fixture is frontmost (so Escape reaches only a fixture); front is {frontmost_bundle()}")
+        return None, None
+    return s, {title: w["id"] for title, w in by_title(s).items()}
+
+
+def looks_open(how, label):
+    """Mission Control opened by its shortcut (`how` = "key": `ctl debug-expose`) or with no key
+    (`"launch"`: `ctl debug-mission-control launch`, its own launcher, as its Dock item). What
+    the open came to: when it was asked, the overlays before, the ms until the app knew, how
+    its look ended (by a trigger's look, the poll's, the cap), and whether a notice 1508 came
+    for it; None when it did not show."""
+    before = {o["id"] for o in screen_overlays()}
+    look_before = margin_row("OVERVIEW_LOOK")
+    heard_before = notices_heard(1508)
+    t0 = time.time()
+    r = ctl("debug-expose", "mission-control") if how == "key" else ctl("debug-mission-control", "launch")
+    if not check(r.get("ok"), f"{label}: Mission Control asked for ({r.get('key', r.get('by', r.get('error')))})"):
+        return None
+    seen = wait_until(lambda: [o for o in screen_overlays() if o["id"] not in before], 3, f"{label}: Mission Control to show")
+    if not check(bool(seen), f"{label}: macOS's cover is listed"):
+        ctl("debug-expose", "escape")
+        return None
+    up = wait_until(lambda: mission_status().get("up"), 4, f"{label}: the app to know")
+    found, _, _, _ = overview_ages()
+    ms = None if found is None else round((found - t0) * 1000.0)
+    by = ended_by(look_before, margin_row("OVERVIEW_LOOK"))
+    return {"t0": t0, "before": before, "up": bool(up), "ms": ms, "by": by, "noticed": notices_heard(1508) > heard_before}
+
+
+def looks_close(opened, label, key="escape"):
+    """Mission Control closed by Escape (or `key`, its own shortcut again): how its close's
+    freeze ended (by a trigger's look with no settle, by the poll's settle), and the ms from
+    the key to the app knowing it closed."""
+    settle_before = margin_row("OVERVIEW_SETTLE")
+    t0 = time.time()
+    ctl("debug-expose", key)
+    gone = wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in opened["before"]], 5, f"{label}: Mission Control to end")
+    down = wait_until(lambda: not mission_status().get("up"), 4, f"{label}: the app to know it closed")
+    _, closed, _, quick = overview_ages()
+    ms = None if closed is None else round((closed - t0) * 1000.0)
+    time.sleep(EXPOSE_SETTLE)
+    return {"gone": bool(gone), "down": bool(down), "ms": ms, "quick": quick, "by": ended_by(settle_before, margin_row("OVERVIEW_SETTLE"))}
+
+
+def looks_round(how, label, judged):
+    """One open and close. `judged` True: the open must be found at a trigger's look within
+    LOOKS_KNOWN_MS; `None`: only when its notice 1508 came (else its numbers are said: found by
+    the poll, as before); False: said. True when it was found at a trigger's look."""
+    mark = len(log_text())
+    opened = looks_open(how, label)
+    if not opened:
+        return False
+    at_trigger = opened["by"] == (1, 0, 0)
+    if judged is None:
+        judged = opened["noticed"]
+    told = (f"OVERVIEW_LOOK ended by a trigger's look, the poll, the cap: {opened['by']}; known {opened['ms']} ms after it was asked; "
+            f"its notice 1508 {'came' if opened['noticed'] else 'did not come'}")
+    if judged:
+        check(opened["up"] and at_trigger, f"{label}: the app knows at a look brought forward, not at its poll ({told})")
+        check(opened["ms"] is not None and opened["ms"] <= LOOKS_KNOWN_MS,
+              f"{label}: known within {LOOKS_KNOWN_MS} ms of the ask ({opened['ms']} ms; the poll: up to 1 s, 2 s at rest)")
+    else:
+        say(f"    {label}: {told}")
+    time.sleep(1.2)
+    x = ctl("space")
+    check(x.get("inference_frozen") is True, f"{label}: no Space is inferred while it shows (overview {x.get('overview')!r})")
+    closed = looks_close(opened, label)
+    check(closed["gone"] and closed["down"], f"{label}: closed, and the app knows ({closed['ms']} ms after Escape)")
+    if opened["noticed"]:
+        check(closed["quick"] and closed["by"] == (1, 0, 0),
+              f"{label}: the look after its close's notice ended the freeze with no settle (OVERVIEW_SETTLE ended by notice, poll, cap: {closed['by']})")
+    else:
+        say(f"    {label}: no notice 1508: its close's freeze ended as before, by its settle ({closed['by']})")
+    text = log_text()[mark:]
+    if at_trigger:
+        check("a parked window is listed out of the park zone" not in text,
+              f"{label}: the park reconcile asked no hidden window to park again while Mission Control had it laid out")
+    return at_trigger
+
+
+def phase_looks():
+    """Round looks-forward (the Corner engine, the default mode; fixture windows only; the
+    Mac untouched meanwhile: Mission Control covers the screen for a second or two five to
+    eight times, keys are posted, and the pointer is moved once and put back).
+
+    1. At rest for LOOKS_REST_S with nothing touched: none of what brings a look forward
+       fires (`ctl state`'s `costs`: `dock_notices`, `server_notices`, `trigger_looks` and
+       `tap_events` do not grow), and Mission Control's key tap is off while the window
+       server's notices are trusted (`costs.taps_on.mission_keys`, `engine.notices.trust`).
+    2. Mission Control by its shortcut, then Escape: the app knows it shows within
+       LOOKS_KNOWN_MS of the ask, at a look brought forward (`OVERVIEW_LOOK` ended by a
+       trigger's look, not by the poll); while it shows nothing is inferred; no hidden window
+       is asked to park again; with a notice 1508 its close ends the freeze with no settle.
+       When no notice 1508 comes on this macOS the first rounds are found by the poll, as
+       before, and are only said; after three opens and closes with none the public triggers
+       serve (`trust.state` `silent`, the key tap on) and the next open by its key is judged.
+    3. Mission Control with no key (`ctl debug-mission-control launch`, its launcher, as its
+       Dock item): judged when a notice 1508 came for it, else said (found by the poll: the
+       window server tells nothing of an open by its launcher).
+    4. `[windows] mission_control_key_keeps_stage = true` (audit 11-25 H6): Mission Control
+       open, the pointer over Fixture 2's laid-out window (`debug-mission-pick ID hover`),
+       its shortcut posted again: Fixture 1's stage still in front after, the keyboard its,
+       Fixture 2 still hidden; the log says the closing key was heard."""
+    say("\n== looks: Mission Control known at once under the Corner engine ==")
+    if SPACES:
+        skip("looks", "the Corner engine's own (the Spaces engine's twin is the mission phase): run without SM_ENGINE")
+        return
+    s, ids = looks_setup()
+    if not s:
+        stop_app()
+        return
+    active, space = s.get("active"), s.get("space")
+    trust = looks_trust()
+    say(f"  the window server's notices: {trust.get('state')} ({trust.get('way')}; {trust.get('why') or 'registered'})")
+
+    say(f"  -- at rest, {LOOKS_REST_S:g} s, nothing touched --")
+    time.sleep(2.5)
+    c0 = looks_costs()
+    time.sleep(LOOKS_REST_S)
+    c1 = looks_costs()
+    grew = {k: c1.get(k, 0) - c0.get(k, 0) for k in ("dock_notices", "server_notices", "trigger_looks", "tap_events")}
+    check(not any(grew.values()), f"looks at rest: nothing that brings a look forward fired ({grew})")
+    taps = c1.get("taps_on") or {}
+    if trust.get("state") == "working":
+        check(taps.get("mission_keys") is False, f"looks at rest: Mission Control's key tap is off while the window server's notices are trusted ({taps})")
+    else:
+        say(f"    the notices are not trusted ({trust.get('state')}): the key tap is the fallback ({taps})")
+
+    say("  -- by its shortcut --")
+    found = looks_round("key", "looks by key", judged=None)
+    if not found:
+        # No notice on this macOS (or none for the first open): the public way after three
+        # opens and closes with none.
+        say("    not found at a trigger's look: two more rounds, then the public triggers must serve")
+        looks_round("key", "looks by key, again", judged=False)
+        t = looks_trust()
+        tap = (mission_status().get("tap") or {})
+        check(t.get("state") in ("silent", "off") and tap.get("wanted_by_engine"),
+              f"looks: with no notice the public triggers took over (trust {t.get('state')}, the key tap wanted {tap.get('wanted_by_engine')})")
+        looks_round("key", "looks by key, the key tap telling", judged=True)
+
+    say("  -- with no key (its launcher) --")
+    heard = notices_heard(1508)
+    mark = len(log_text())
+    opened = looks_open("launch", "looks by its launcher")
+    if opened:
+        told = f"OVERVIEW_LOOK ended by a trigger's look, the poll, the cap: {opened['by']}; known {opened['ms']} ms after it was asked"
+        if opened["noticed"]:
+            check(opened["by"] == (1, 0, 0) and opened["ms"] is not None and opened["ms"] <= 2 * LOOKS_KNOWN_MS,
+                  f"looks by its launcher: its notice came and brought the look ({told}; the launcher itself takes a while to start)")
+        else:
+            skip("looks by its launcher: found at a trigger's look",
+                 f"no notice 1508 came for it ({notices_heard(1508) - heard} heard): found by the poll, as before ({told})")
+        time.sleep(1.0)
+        looks_close(opened, "looks by its launcher")
+    x = state()
+    check(x.get("active") == active and x.get("space") == space, "looks: the same stage in front after every round, no Space change")
+    consistent("after the looks rounds")
+
+    say("  -- a close by its key, the pointer over Fixture 2's window ([windows] mission_control_key_keeps_stage = true) --")
+    path = os.path.join(HOME, "config.toml")
+    try:
+        with open(path) as f:
+            config_was = f.read()
+    except FileNotFoundError:
+        config_was = ""
+    on = (config_was + "\n[windows]\nmission_control_key_keeps_stage = true\n" if "[windows]" not in config_was
+          else config_was.replace("[windows]\n", "[windows]\nmission_control_key_keeps_stage = true\n", 1))
+    if check(set_config_live(on), "looks close key: the setting turned on"):
+        try:
+            mark = len(log_text())
+            heard_before = (mission_status().get("tap") or {}).get("keys_heard") or 0
+            opened = looks_open("key", "looks close key")
+            if opened:
+                time.sleep(1.2)
+                r = ctl("debug-mission-pick", ids["Fixture 2"], "hover")
+                if check(r.get("ok"), f"looks close key: the pointer over Fixture 2 where Mission Control lays it out ({r.get('at')}; {r.get('error') or 'ok'})"):
+                    time.sleep(0.4)
+                    closed = looks_close(opened, "looks close key", key="mission-control")
+                    ctl("debug-pointer-back")
+                    check(closed["gone"], "looks close key: Mission Control closed by its shortcut")
+                    x = wait_state(lambda v: active_titles(v) == {"Fixture 1"}, "Fixture 1's stage still in front", 3)
+                    check(x is not None and state().get("active") == active,
+                          f"looks close key: the same stage in front after, nothing picked ({stage_titles(state()).get(state()['active'])})")
+                    w = by_title(state())
+                    check(w["Fixture 2"]["parked"] and w["Fixture 3"]["parked"], "looks close key: Fixture 2 and 3 are still hidden")
+                    front = wait_until(lambda: frontmost_bundle() == FIX_ID, 2, "the stage in front's app frontmost")
+                    check(bool(front), f"looks close key: the keyboard is the stage in front's (frontmost {frontmost_bundle()})")
+                    text = log_text()[mark:]
+                    tap = mission_status().get("tap") or {}
+                    heard = (tap.get("keys_heard") or 0) - heard_before
+                    closer = [ln for ln in text.splitlines() if "a key that closes it" in ln]
+                    if not check(heard >= 1 and bool(closer),
+                                 f"looks close key: the key tap heard the closing key ({heard} keys heard; tap {tap})"):
+                        say("    the posted key did not reach the HID tap: press the real ⌃↑ or F3 with the pointer over a hidden window and look "
+                            "for \"mission-control: a key that closes it\" in the log")
+                    refused = [ln.split("mission-control:", 1)[1].strip()[:200] for ln in text.splitlines() if "closed by its key, no click" in ln]
+                    say(f"    what macOS brought in front: {refused[-1] if refused else 'nothing taken for a pick (no activation or focus of a hidden stage came)'}")
+                else:
+                    looks_close(opened, "looks close key")
+                    ctl("debug-pointer-back")
+        finally:
+            set_config_live(config_was)
+    consistent("after the close by key")
+    m = mission_status()
+    say(f"  the looks brought forward in this run: {m.get('looks')}; trust {looks_trust()}")
+    c = looks_costs()
+    say(f"  costs: dock_notices {c.get('dock_notices')}, server_notices {c.get('server_notices')}, trigger_looks {c.get('trigger_looks')}, "
+        f"tap_events {c.get('tap_events')}, taps on {c.get('taps_on')}")
+    notice_report("looks", ("OVERVIEW_LOOK", "OVERVIEW_SETTLE", "OVERVIEW_EXIT_CARRY", "SPACE_POLL"))
+    stop_app()
+    all_onscreen("looks quit")
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine", "reads"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "looks", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine", "reads"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -10925,7 +11184,8 @@ def main():
              "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine, "reads": phase_reads,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel,
-             "mission": phase_mission, "mission-probe": phase_mission_probe, "mission-desktop": phase_mission_desktop}[p]()
+             "mission": phase_mission, "mission-probe": phase_mission_probe, "mission-desktop": phase_mission_desktop,
+             "looks": phase_looks}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):
