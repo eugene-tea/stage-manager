@@ -102,17 +102,23 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   corner as the Corner engine does.
 - **Less work while nobody looks: CPU and battery.** Measured 11-25 on a 5K display (UX-SPEC,
   "Window engines measured"): with the system's share the Accessibility engine costs about
-  6 % of a core at rest (about 16 % until the 2 s picture timer went), the Spaces engine
-  about 0.5 %. Aim: 1 to 2 %, with no card shown stale and no switch slower.
-  - The still of the desktop in the park corner was the cost: about 4.3 % of a core in the
-    window server and 0.3 % in the capture service, for one ScreenCaptureKit listing and
-    capture every 10 s while a sliver shows; without it the Accessibility engine reads
-    about 1.2 %. It now goes through the window server's own call first, ScreenCaptureKit
-    the fallback (ARCHITECTURE, "Window pictures"; round desktop-still, nothing of it run
-    live yet). Left:
-    - Run it: `scripts/test-stages.sh still capture`, the same with `SM_STILL=sck`, and
-      `scripts/measure.sh rest` with and without `SM_ENV="STAGE_MANAGER_STILL_SCK=1"`; then
-      the numbers in UX-SPEC and MODES (its cost rows and note 9).
+  2 % of a core at rest (about 6 % until the still of the desktop went through the window
+  server's own call, about 16 % until the 2 s picture timer went), the Spaces engine about
+  0.5 %. Aim: about 1 %, with no card shown stale and no switch slower.
+  - What is left of the 2 %: the app 0.5 %, the window server about 0.7 % for the tick and
+    its lists, and the still of the desktop in the park corner about 0.8 % (0.5 % in the
+    window server, 0.3 % in the capture service, six stills a minute). Left:
+    - The still's pace: every 10 s while a sliver shows. Each cause the app hears already
+      takes one (an icon, the wallpaper, a click on the desktop, an arrival, a wake); what
+      the timer alone catches is a widget in the corner. A longer rest, or none where no
+      widget can lie there, takes most of the 0.8 %.
+    - Through ScreenCaptureKit (the fallback) a still costs the window server about 1 % for
+      each still a minute, most likely for its listing of what can be shared. If the
+      listing can be kept between stills (the same desktop windows), the fallback costs
+      what the window server's call does.
+    - The still phase's icon steps (a disk image's icon put under the patch and dragged)
+      were skipped live 11-25: Finder waited for the permission to control it. Run
+      `scripts/test-stages.sh still` once with that permission given.
     - The proof's tolerance (a mean of 2 of 255, no cell over 12) is a guess: read
       `ctl debug-desktop-still`'s numbers on a wide-gamut display, with a dynamic, an HDR
       and an aerial wallpaper, and with an icon and a widget in the corner. Where the two
@@ -145,9 +151,8 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
     to 2 s old is played, and the corner's cover goes ahead of them (ARCHITECTURE, "Window
     pictures"); a card click held as a person's ends 13 ms later than on 1.9.2. Left:
     - One call a window takes about 18 ms a window, one after another: try them at once
-      from several threads, if that is safe. (One call for several windows did not hand
-      back an image a window; `probe-spaces capture BUNDLE fast list` prints what it does
-      hand back: one image of them all would be another way to the desktop's still.)
+      from several threads, if that is safe. (One call for several windows hands back one
+      image of them all together: UX-SPEC, "Window engines measured".)
     - A Dock click's outgoing windows still go 63 ms later than on 1.9.2 under the
       Accessibility engine with a click held as a person's (none under Spaces; UX-SPEC).
       Find what waits there.

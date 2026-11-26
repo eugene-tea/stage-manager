@@ -4,15 +4,16 @@
 
 - Much less work at rest in the Accessibility mode: the pictures of the windows in front are
   taken when a switch is likely or starts, as in the Spaces mode, and no longer every two
-  seconds. On a 5K display the app and the system together use about a third of the CPU they
-  did (about 6 % of one core against 16 %). A switch starts at most 0.06 seconds later.
+  seconds. A switch starts at most 0.06 seconds later.
   `[animation] snapshot_interval_ms`, now 0 by default, sets a timer for them in every mode.
 - Less work at rest in the Accessibility mode: the housekeeping runs every 2 seconds while
   nothing happens, as in the Spaces mode (every 0.75 seconds before, while a window was
   hidden). A press on a hidden window's edge in the corner is ignored as before.
 - Less work at rest in the Accessibility mode: the picture of the desktop that covers the
   hidden windows' edges in the corner, taken again every ten seconds, comes from a faster
-  system call. The slower one is used wherever the faster one does not work.
+  system call. The slower one is used wherever the faster one does not work. With both
+  changes the app and the system together use about an eighth of the CPU they did at rest on
+  a 5K display (about 2 % of one core against 16 %).
 - With `[strip] order = "dock"`, the running apps are no longer all looked up again once a
   minute.
 - In the default mode, the first switch to a Desktop after the app starts stays there, and a

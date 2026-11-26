@@ -1504,12 +1504,30 @@ tick and its lists about 1 %. Without the still the Corner engine reads about 1.
 core at rest with the system's share (the app 0.5 %, the window server 0.7 % above its own
 load).
 
-Round desktop-still (11-25, after these runs; not measured yet) takes that still through
-the window server's own call, with no listing, and through ScreenCaptureKit only for the
-first one on a screen, after the wallpaper or an icon in the corner changes, and where the
-call does not work. The rows above are the cost of the fallback at its old pace;
-`SM_ENV="STAGE_MANAGER_STILL_SCK=1"` measures it at its new one (30 s where no icon lies in
-the corner).
+Round desktop-still (11-25, after these runs) takes that still through the window server's
+own call, with no listing, and through ScreenCaptureKit only for the first one on a screen,
+after the wallpaper or an icon in the corner changes, and where the call does not work.
+Measured the same evening, the same Mac and windows (`scripts/measure.sh rest`; the first
+pair of runs had other work in it, 11.9 and 9.7 %, and is left out):
+
+| Run | Window server, % | Stills a minute | Capture service, % |
+|---|---|---|---|
+| The app quit (five runs) | 4.2 to 4.5 | | 0 |
+| Corner, four stages, the still by the window server's call (five runs) | 5.0 to 5.9 | 5 to 6, none asked of ScreenCaptureKit | 0.27 to 0.33 |
+| the same, the still forced through ScreenCaptureKit at its new pace (`SM_ENV="STAGE_MANAGER_STILL_SCK=1"`, two runs) | 6.7, 7.4 | 2 | 0.12 |
+
+So the Corner engine now costs the window server about 1.2 % of a core at rest (5.5 against
+4.3, the means), where it cost 4.6 to 5: the still's share fell from about 4.3 % to about
+0.5 %. The capture service works as much as before (0.3 %, about 0.05 % for a still a
+minute by either way: macOS 27 serves the window server's call through it too), so what was
+saved is most likely the listing of what can be shared. With the system's share the Corner
+engine reads about 2 % of a core at rest (the app 0.54 %, the capture service 0.3 %, the
+window server 1.2 %), the Spaces engine about 0.5 %. Through the fallback a still costs the
+window server what it did, about 1 % for each still a minute, so its slower pace (30 s where
+no icon lies in the corner) holds it to about 2 %. In the still phase (`test-stages.sh still
+capture`) the two ways' stills of the same corner were the same picture (a mean of 0.0 and
+no cell apart, of 255; 640 by 640 pixels at 2x), taken in 15 to 20 ms by the window server's
+call and 28 to 29 ms by ScreenCaptureKit, and at rest the next still listed nothing.
 
 Measured again the same day after round picture-wait: a Dock click's press, the pointer
 coming into the Dock and a hotkey's modifiers take the pictures before the switch, a picture
@@ -1538,10 +1556,12 @@ the pictures, 37 with the timer), and a new app's window shows over the stage le
 77 ms as before.
 
 One capture call for all of a switch's windows was tried (`probe-spaces capture BUNDLE fast
-list`, 30 rounds): the window server handed back no image a window for 2, 3 or 4 windows,
-every time. One call a window took 26, 44, 61 and 79 ms for 1 to 4 windows of about 1040 by
-784 pixels, about 18 ms a window, one after another. The test switch for one call is gone;
-the probe now prints what the call handed back (how many images, their sizes).
+list`, 30 rounds): for 2, 3 or 4 windows the window server handed back one image of them
+all together, the size of the rectangle around them (1340 by 984 pixels for two windows of
+1040 by 784, 1700 by 1264 for four), in 22 to 23 ms whatever their number; never an image a
+window. One call a window took 22, 38, 56 and 69 ms for 1 to 4 windows (26, 44, 61 and 79 in
+the first run), about 17 ms a window, one after another. The test switch for one call is
+gone.
 
 A person does not notice a delay this small: a response to a click reads as instant up to
 about 100 ms, a click's latency is told apart from about 50 to 100 ms, and two durations near

@@ -653,9 +653,9 @@ cover's rectangle (its picture is drawn over the cover) or a window that stays s
 the corner waits for its picture.
 
 A window's picture is always one call a window. One call of `SLSHWCaptureWindowList` with
-several windows' ids did not hand back an image a window (live 11-25, 30 of 30 for 2 to 4
-windows), so the test switch for it is gone; `probe-spaces capture BUNDLE fast list` prints
-what the call does hand back.
+several windows' ids hands back one image of them all together, never an image a window
+(live 11-25, 30 of 30 for 2 to 4 windows), so the test switch for it is gone;
+`probe-spaces capture BUNDLE fast list` prints what the call hands back.
 
 The still of the desktop in the park corner (the corner patch's picture, a switch's cover
 over a desktop with icons, the still that settles a solar frame) goes the same way, the

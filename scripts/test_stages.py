@@ -5683,9 +5683,14 @@ def captures_stop_with_strip_hidden():
 
 
 def finder_script(script):
-    """Runs AppleScript `script` in Finder's dictionary; its output, or None on an error."""
-    r = subprocess.run(["osascript", "-e", f'tell application "Finder"\n{script}\nend tell'],
-                       capture_output=True, text=True, timeout=15)
+    """Runs AppleScript `script` in Finder's dictionary; its output, or None on an error or with
+    no answer in 5 s (live 11-25: the first script from a new host app waits on macOS's prompt
+    for the permission to control Finder, and a run with nobody at the Mac must go on)."""
+    try:
+        r = subprocess.run(["osascript", "-e", f'with timeout of 5 seconds\ntell application "Finder"\n{script}\nend tell\nend timeout'],
+                           capture_output=True, text=True, timeout=15)
+    except subprocess.TimeoutExpired:
+        return None
     return r.stdout.strip() if r.returncode == 0 else None
 
 
@@ -5865,7 +5870,7 @@ def phase_still():
                 break
             want = (2 * want[0] - got[0], 2 * want[1] - got[1])  # Finder's position is not the centre
         if icon is None:
-            skip("still: a fixture icon under the corner", "Finder shows no disk image on the desktop, or did not move it")
+            skip("still: a fixture icon under the corner", "Finder shows no disk image on the desktop, did not move it, or did not answer (the permission to control Finder)")
             return
         at = mid(icon_image(icon))
         s1 = state()
