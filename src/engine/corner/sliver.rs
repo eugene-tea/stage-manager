@@ -20,7 +20,10 @@
 //!
 //! The exact test reads no window server: the WM thread publishes the on-screen windows near
 //! the zones every tick ([`Seen`], [`near_zones`]), and a press decides on that list while it
-//! is [`SEEN_FRESH`]; an older list (the WM thread busy) passes the press.
+//! stands ([`Seen::fresh`]): for [`SEEN_FRESH`] while the tick is brisk, and for the whole of
+//! a rest ([`Tick`]: a tick rests only while no event that may change windows came, and the
+//! first such event brings the next list within a brisk period). An older list (the WM thread
+//! busy) passes the press.
 
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -246,9 +249,10 @@ impl Button {
     }
 }
 
-/// How old the published on-screen list may be for a press to be judged on it. The WM thread
-/// publishes it every tick (a quarter of a second); older means it is busy, and a press then
-/// passes (fails open: a parked window's edge pressable for a moment, never a click lost).
+/// How long the WM thread is given to publish the on-screen list it owes before a press
+/// passes unjudged: while its tick is brisk it publishes one every quarter of a second, so a
+/// list older than this means it is busy (fails open: a parked window's edge pressable for a
+/// moment, never a click lost).
 pub const SEEN_FRESH: Duration = Duration::from_secs(1);
 
 /// The on-screen windows near the zones, front to back, as the WM thread last read them.
@@ -260,10 +264,48 @@ pub struct Seen {
     pub windows: Vec<Listed>,
 }
 
+/// The WM tick's pace as the tap needs it to judge how long a list stands ([`Seen::fresh`]),
+/// kept by the WM thread after every tick and every event ([`brisk_since`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tick {
+    /// Since when the tick has been brisk (an event that may change windows came, or a duty
+    /// waits); `None` while it rests.
+    pub brisk_since: Option<Instant>,
+    /// The longest two ticks are apart at rest: the rest and its timer's tolerance
+    /// ([`crate::engine::tick_pace`]).
+    pub due: Duration,
+}
+
+/// Since when the tick has been brisk once its pace was set at `now` (`was`: before; `None`:
+/// at rest). A tick that ends at rest (`at_rest` and `after_tick`) rests; an event that finds
+/// the pace brisk starts the brisk spell if none runs (its first moment is kept: a later
+/// event never moves it); an event that finds the pace at rest (one that does not stir, the
+/// stirred time just over) changes nothing: no tick has ended at rest since.
+pub fn brisk_since(was: Option<Instant>, at_rest: bool, after_tick: bool, now: Instant) -> Option<Instant> {
+    match (at_rest, after_tick) {
+        (true, true) => None,
+        (true, false) => was,
+        (false, _) => was.or(Some(now)),
+    }
+}
+
 impl Seen {
-    /// The list, when it is fresh enough at `now` to judge a press.
-    pub fn fresh(&self, now: Instant) -> Option<&[Listed]> {
-        (now.saturating_duration_since(self.at) <= SEEN_FRESH).then_some(self.windows.as_slice())
+    /// The list, when a press at `now` may be judged on it, the WM tick paced as `tick` says:
+    ///
+    /// - [`SEEN_FRESH`] old or less: always (a brisk tick's list, as before the tick rested);
+    /// - older while the tick rests: nothing that may change windows has happened since the
+    ///   list was read (every such event stirs the tick), so it stands until the next tick is
+    ///   due, and [`SEEN_FRESH`] more;
+    /// - older, read at rest, an event since: the event's tick is owed within a brisk period,
+    ///   so the list stands for [`SEEN_FRESH`] from the event, as a brisk tick's does from its
+    ///   read;
+    /// - else not: the WM thread is busy, and the press passes.
+    pub fn fresh(&self, now: Instant, tick: Tick) -> Option<&[Listed]> {
+        let age = now.saturating_duration_since(self.at);
+        let stands = age <= SEEN_FRESH
+            || (age <= tick.due + SEEN_FRESH
+                && tick.brisk_since.is_none_or(|since| since > self.at && now.saturating_duration_since(since) <= SEEN_FRESH));
+        stands.then_some(self.windows.as_slice())
     }
 }
 
@@ -594,9 +636,61 @@ mod tests {
     fn a_stale_list_judges_nothing() {
         let t0 = Instant::now();
         let seen = Seen { at: t0, windows: vec![sliver(7, 52.0)] };
-        assert_eq!(seen.fresh(t0).map(<[Listed]>::len), Some(1));
-        assert!(seen.fresh(t0 + SEEN_FRESH).is_some());
-        assert!(seen.fresh(t0 + SEEN_FRESH + Duration::from_millis(1)).is_none(), "the WM thread is busy: the press passes");
-        assert!(seen.fresh(t0 - Duration::from_millis(5)).is_some(), "a clock read before the list is not stale");
+        // The tick brisk since before the list was read: the list stands a second, as ever.
+        for since in [t0 - Duration::from_secs(5), t0] {
+            let tick = Tick { brisk_since: Some(since), due: REST_DUE };
+            assert_eq!(seen.fresh(t0, tick).map(<[Listed]>::len), Some(1));
+            assert!(seen.fresh(t0 + SEEN_FRESH, tick).is_some());
+            assert!(seen.fresh(t0 + SEEN_FRESH + Duration::from_millis(1), tick).is_none(), "the WM thread is busy: the press passes");
+            assert!(seen.fresh(t0 - Duration::from_millis(5), tick).is_some(), "a clock read before the list is not stale");
+        }
+    }
+
+    /// The longest two ticks are apart at rest.
+    const REST_DUE: Duration = Duration::from_millis(2200);
+
+    #[test]
+    fn at_rest_the_list_stands_until_the_next_tick_is_due() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let seen = Seen { at: t0, windows: vec![sliver(7, 52.0)] };
+        let rests = Tick { brisk_since: None, due: REST_DUE };
+        assert!(seen.fresh(ms(1001), rests).is_some(), "older than a brisk tick's list: nothing happened since");
+        assert!(seen.fresh(ms(2200), rests).is_some(), "the next tick at its latest");
+        assert!(seen.fresh(ms(3200), rests).is_some(), "a tick a second late");
+        assert!(seen.fresh(ms(3201), rests).is_none(), "the tick is overdue: the WM thread is busy, the press passes");
+    }
+
+    #[test]
+    fn an_event_at_rest_gives_the_wm_thread_a_second_for_the_next_list() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let seen = Seen { at: t0, windows: vec![sliver(7, 52.0)] };
+        // An event 1.9 s into the rest: the tick is brisk from then, its list owed within 0.25 s.
+        let stirred = Tick { brisk_since: Some(ms(1900)), due: REST_DUE };
+        assert!(seen.fresh(ms(1900), stirred).is_some(), "judged on the list read at rest until the tick comes");
+        assert!(seen.fresh(ms(2150), stirred).is_some());
+        assert!(seen.fresh(ms(2900), stirred).is_some(), "a second from the event");
+        assert!(seen.fresh(ms(2901), stirred).is_none(), "no list a second after the event: the WM thread is busy");
+        // An event late in an overdue rest never keeps a list past its own limit.
+        let late = Tick { brisk_since: Some(ms(3100)), due: REST_DUE };
+        assert!(seen.fresh(ms(3200), late).is_some());
+        assert!(seen.fresh(ms(3300), late).is_none(), "the rest's own limit");
+        // A list read while the tick was already brisk stands a second, whatever came before.
+        let brisk_before = Tick { brisk_since: Some(t0), due: REST_DUE };
+        assert!(seen.fresh(ms(1001), brisk_before).is_none());
+    }
+
+    #[test]
+    fn the_brisk_spell_starts_at_its_first_event_and_ends_at_a_tick_at_rest() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        assert_eq!(brisk_since(None, false, false, ms(10)), Some(ms(10)), "an event at rest");
+        assert_eq!(brisk_since(Some(ms(10)), false, false, ms(50)), Some(ms(10)), "a later event never moves it");
+        assert_eq!(brisk_since(Some(ms(10)), false, true, ms(250)), Some(ms(10)), "a brisk tick neither");
+        assert_eq!(brisk_since(None, false, true, ms(250)), Some(ms(250)), "a tick that ends with a duty waiting");
+        assert_eq!(brisk_since(Some(ms(10)), true, false, ms(3100)), Some(ms(10)), "the stirred time over at an event: no tick at rest yet");
+        assert_eq!(brisk_since(Some(ms(10)), true, true, ms(3250)), None, "a tick that ends at rest");
+        assert_eq!(brisk_since(None, true, false, ms(4000)), None, "an event that does not stir");
     }
 }

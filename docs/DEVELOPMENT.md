@@ -135,6 +135,9 @@ scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
                                           # card drawn whole, one of its windows lifted off
                                           # alone in the column, dropped in a gap, dragged out)
+scripts/test-stages.sh rest               # by name only: the housekeeping rests 2 s under every
+                                          # engine; a press on a parked window's sliver, judged on
+                                          # a list over a second old at rest, is still swallowed
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
 SM_DESKTOPS=guess scripts/test-stages.sh spaces --auto   # the same with the Desktops guessed
@@ -196,6 +199,28 @@ scripts/measure.sh --summary /tmp/sm-measure.XXXXXX   # the table again
 - **hidden** (by name only): a window drawing on every display refresh (the fixture's
   `--frame-clock-normal`) hidden in its stage and shown again by `ctl switch`: whether it
   drew while hidden, how soon it draws again after the show, refreshes missed after.
+- **covered** (by name only): at rest with the strip following the Dock, the windows clear
+  of the strip and then flush left (the strip slid away): captures, Dock reads, window lists
+  and LaunchServices lookups a minute. It fails above 5 lookups a minute in a span where no
+  app launched or quit (`costs.apps_changed` says whether one did).
+
+`rest` also records, from `ctl state` before and after its minute, every number of `costs` a
+minute (window lists, LaunchServices lookups, stills of the desktop, wallpaper reads), the
+ticks that ran brisk and at rest (the two reads stir the tick: about 12 brisk ticks are
+theirs), the rest's period and how the corner patch shows. What one part of the app costs is
+measured by one run with it off or slowed, each in an `OUT` of its own (every row says what
+it ran with):
+
+```sh
+E="RUNS=3 ENGINES=corner"                                   # add "off spaces" for the floor and the other engine
+env $E OUT=/tmp/sm-rest.base scripts/measure.sh rest sample
+env $E OUT=/tmp/sm-rest.nocap SM_CAPTURE=0 scripts/measure.sh rest          # no ScreenCaptureKit: no still of the desktop
+env $E OUT=/tmp/sm-rest.nopatch SM_CONFIG="windows.corner_patch=false" scripts/measure.sh rest   # no patch panel, still or icons read
+env $E OUT=/tmp/sm-rest.notap SM_CONFIG="windows.inert_slivers=false" scripts/measure.sh rest     # no event tap
+env $E OUT=/tmp/sm-rest.one SM_STAGES=1 scripts/measure.sh rest             # nothing hidden: nothing in the corner
+env $E OUT=/tmp/sm-rest.750 SM_ENV="STAGE_MANAGER_TICK_REST_MS=750" scripts/measure.sh rest       # the tick as before 11-25
+env $E OUT=/tmp/sm-rest.10s SM_ENV="STAGE_MANAGER_TICK_REST_MS=10000" scripts/measure.sh rest     # nearly no tick
+```
 
 `scripts/measure_engines.py` runs it for the park corner and the Spaces engine alone, with
 captures off, three stages and `ctl switch` switches, and prints one table, corner against
@@ -258,6 +283,7 @@ The installed app is never started with any of them, so none acts on a user's co
 | `STAGE_MANAGER_LOGOUT_NOTE` | yes, `TEST` | the logout signals are this one distributed notification only (the live suite posts it) |
 | `STAGE_MANAGER_DROP_AX_DESTROYED` | yes, `TEST` | Accessibility's destroyed notifications ignored, as from an app that sends none: a closed window leaves through the sweep alone |
 | `STAGE_MANAGER_COVER` | yes, `TEST` | `desktop`: a switch's cover is always the desktop's still, kept fresh |
+| `STAGE_MANAGER_TICK_REST_MS` | yes, `TEST` | the housekeeping rests this long (250 to 60000) in place of 2 s: what a tick costs, measured (750 was the Accessibility engine's until 11-25) |
 | `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only | the update check offers this version instead of asking GitHub |
 | `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only | an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
 | `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only | `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
@@ -296,6 +322,8 @@ The installed app is never started with any of them, so none acts on a user's co
 | `SM_STAGES`, `SM_SETTLE_S`, `SM_REST_S`, `SM_SWITCHES`, `SM_SWITCH_CPU_S`, `SM_SWITCH_WAYS`, `SM_HIDDEN_ROUNDS`, `SM_HIDDEN_S`, `SM_AFTER_S` | `measure_stages.py` | the measure's stages (4), settle (10 s), rest (60 s), switches (20), CPU window per switch (1.5 s), switch ways (`card dock`), hidden rounds (8) and length (5 s), and the watch after (1.5 s) |
 | `SM_CAPTURE` | `measure_stages.py` | `0`: the app runs with captures off (`STAGE_MANAGER_NO_CAPTURE`) |
 | `SM_SNAPSHOT_MS` | `measure_stages.py` | `N`: `[animation] snapshot_interval_ms = N` in every scenario's scratch config (the full-size pictures on a timer; none by default) |
+| `SM_CONFIG` | `measure_stages.py` | `section.key=value ...` (space-separated): lines added to every scenario's scratch config, merged by section |
+| `SM_ENV` | `measure_stages.py` | `STAGE_MANAGER_NAME=value ...`: test switches of the app for the run (never the home, the fixtures, the engine or the captures: the measure's own) |
 
 ## The ctl socket
 

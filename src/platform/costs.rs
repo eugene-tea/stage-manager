@@ -4,9 +4,12 @@
 //!
 //! - `window_lists`: `CGWindowListCopyWindowInfo` queries ([`super::windows`]).
 //! - `launch_services`: `NSRunningApplication` properties asked of LaunchServices (a bundle
-//!   URL or a pid, one XPC round trip each, [`super::dock::running_by_path`]).
+//!   URL or a pid, one XPC round trip each: [`super::dock::running_by_path`], the Dock's pid,
+//!   [`super::dock::dock_pid`]) and listings of the running apps (one each).
 //! - `dock_reads`: the Dock's list of apps read through Accessibility ([`super::dock::app_order`]).
 //! - `captures`: windows a capture round asked a picture of ([`super::capture`]).
+//! - `desktop_stills`: stills of the desktop in the park corner asked of ScreenCaptureKit
+//!   ([`super::desktop_shot`]: the corner patch's picture, kept fresh while slivers show).
 //! - `wallpaper_reads`: the desktop picture asked of NSWorkspace ([`super::wallpaper`]).
 //! - `lock_polls`: the login session asked whether the screen is locked ([`super::session`]).
 //! - `tap_events`: events through our two event taps, the inert slivers' and the minimize's
@@ -29,6 +32,8 @@ pub enum Cost {
     DockRead,
     /// A window's picture asked for.
     Capture,
+    /// A still of the desktop asked for.
+    DesktopStill,
     /// A desktop picture read.
     WallpaperRead,
     /// The screen lock asked.
@@ -40,8 +45,17 @@ pub enum Cost {
 }
 
 /// Every cost, in the order `ctl state` prints them.
-pub const ALL: [Cost; 8] =
-    [Cost::WindowList, Cost::LaunchServices, Cost::DockRead, Cost::Capture, Cost::WallpaperRead, Cost::LockPoll, Cost::TapEvent, Cost::MouseMove];
+pub const ALL: [Cost; 9] = [
+    Cost::WindowList,
+    Cost::LaunchServices,
+    Cost::DockRead,
+    Cost::Capture,
+    Cost::DesktopStill,
+    Cost::WallpaperRead,
+    Cost::LockPoll,
+    Cost::TapEvent,
+    Cost::MouseMove,
+];
 
 impl Cost {
     /// The key in `ctl state`'s `costs`.
@@ -51,6 +65,7 @@ impl Cost {
             Cost::LaunchServices => "launch_services",
             Cost::DockRead => "dock_reads",
             Cost::Capture => "captures",
+            Cost::DesktopStill => "desktop_stills",
             Cost::WallpaperRead => "wallpaper_reads",
             Cost::LockPoll => "lock_polls",
             Cost::TapEvent => "tap_events",
@@ -80,14 +95,16 @@ pub fn get(cost: Cost) -> u64 {
     COUNTS[cost.index()].load(Ordering::Relaxed)
 }
 
-/// `ctl state`'s `costs`: every count since the launch, and which of our event taps are
-/// switched on now (`taps_on`: they are on only while they have something to judge,
-/// [`super::tap_switch`]).
+/// `ctl state`'s `costs`: every count since the launch, the app launches and quits heard
+/// (`apps_changed`: what is read of the running apps once is read again after one, so
+/// `launch_services` rises with it), and which of our event taps are switched on now
+/// (`taps_on`: they are on only while they have something to judge, [`super::tap_switch`]).
 pub fn status() -> serde_json::Value {
     let mut out = serde_json::Map::new();
     for c in ALL {
         out.insert(c.key().to_string(), get(c).into());
     }
+    out.insert("apps_changed".to_string(), super::dock::apps_changes().into());
     out.insert(
         "taps_on".to_string(),
         serde_json::json!({ "slivers": super::corner::sliver_tap::tap_on(), "minimize": super::minimize_tap::tap_on() }),

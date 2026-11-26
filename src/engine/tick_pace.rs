@@ -18,8 +18,13 @@
 //! - a duty with work waiting (a switch under way, a save due, a window counted missing, a
 //!   stray parked again, a deadline set) keeps it brisk for as long as it waits: its owner says
 //!   why ([`Pace::Brisk`]'s reason), so the confirmations and retries run at their old pace;
-//! - a duty whose answer another thread reads while it is fresh caps the rest ([`Pace::Rest`]'s
-//!   period: the inert slivers' list, judged by the event tap only within a second).
+//! - the rest is [`REST`] under every engine. Until round rest-cost a duty whose answer
+//!   another thread reads while it is fresh capped it ([`Pace::Rest`]'s period): the inert
+//!   slivers' list, judged by the event tap only within a second, kept the Corner engine's
+//!   tick at 0.75 s, 80 full passes a minute against 30. That list now stands through a rest,
+//!   by the pace itself ([`crate::engine::corner::sliver::Seen::fresh`]): a tick rests only
+//!   while nothing that may change windows happened, which is what makes the list good. A
+//!   test run may still set another rest ([`rest_override`]).
 //!
 //! Every duty still runs at every tick, in the same order, so every case the tick caught is
 //! still caught; only how soon at rest changes (at most [`REST`] later). The full pass (the
@@ -45,13 +50,24 @@ pub const FULL_EVERY: Duration = Duration::from_millis(900);
 /// wake-ups. A brisk tick has none, as before.
 pub const REST_TOLERANCE: Duration = Duration::from_millis(200);
 
+/// The rest a test run asks for in place of [`REST`] (`value`, milliseconds, the app's
+/// `STAGE_MANAGER_TICK_REST_MS`), honoured only in a test run (`test_run`) and between
+/// [`BRISK`] and a minute: what a tick costs the app and the window server is measured by
+/// running the same rest at another pace (750 was the Corner engine's until round
+/// rest-cost). `None`: [`REST`].
+pub fn rest_override(test_run: bool, value: Option<&str>) -> Option<Duration> {
+    let ms: u64 = value.filter(|_| test_run)?.trim().parse().ok()?;
+    let rest = Duration::from_millis(ms);
+    (BRISK..=Duration::from_secs(60)).contains(&rest).then_some(rest)
+}
+
 /// The pace of the next tick.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pace {
     /// Every [`BRISK`]: stirred by an event within [`BRISK_FOR`] (`None`), or a duty waits
     /// (its reason).
     Brisk(Option<&'static str>),
-    /// Every so often: [`REST`], or less when a duty caps it.
+    /// Every so often: [`REST`] (a test run's own: [`rest_override`]).
     Rest(Duration),
 }
 
@@ -115,8 +131,8 @@ impl TickPace {
 
     /// Whether the tick at `now` is a full pass, noted as made when it is (asked once a tick):
     /// about once a second while brisk ([`FULL_EVERY`]), and every tick after a rest (two brisk
-    /// periods or more since the last tick: a rest shorter than a second, the inert slivers'
-    /// cap, must not make it every other rest).
+    /// periods or more since the last tick: a rest shorter than a second, a test run's own,
+    /// must not make it every other rest).
     pub fn full_pass(&mut self, now: Instant) -> bool {
         let rested = self.ticked.is_some_and(|t| now.saturating_duration_since(t) >= BRISK * 2);
         self.ticked = Some(now);
@@ -171,7 +187,19 @@ mod tests {
         let t0 = Instant::now();
         let p = TickPace::default();
         assert_eq!(p.pace(t0, Some("a save is due"), REST), Pace::Brisk(Some("a save is due")));
-        assert_eq!(p.pace(t0, None, Duration::from_millis(750)), Pace::Rest(Duration::from_millis(750)), "a duty caps the rest");
+        assert_eq!(p.pace(t0, None, Duration::from_millis(750)), Pace::Rest(Duration::from_millis(750)), "a test run's own rest");
+    }
+
+    #[test]
+    fn another_rest_counts_only_in_a_test_run() {
+        assert_eq!(rest_override(true, Some("750")), Some(Duration::from_millis(750)));
+        assert_eq!(rest_override(true, Some(" 10000 ")), Some(Duration::from_secs(10)));
+        assert_eq!(rest_override(false, Some("750")), None, "never on a user's copy");
+        assert_eq!(rest_override(true, None), None);
+        assert_eq!(rest_override(true, Some("")), None, "set empty: nothing asked");
+        assert_eq!(rest_override(true, Some("100")), None, "never faster than brisk");
+        assert_eq!(rest_override(true, Some("600000")), None, "nor a rest that never ticks");
+        assert_eq!(rest_override(true, Some("soon")), None);
     }
 
     #[test]
@@ -194,7 +222,7 @@ mod tests {
         assert_eq!(jitter, [true, false, false, false, true]);
         let rest: Vec<bool> = (1..5).map(|i| p.full_pass(ms(t0, 990) + REST * i)).collect();
         assert_eq!(rest, [true; 4]);
-        // A rest under a second (the inert slivers' cap): still every tick.
+        // A rest under a second (a test run's own): still every tick.
         let mut p = TickPace::default();
         let capped: Vec<bool> = (0..5).map(|i| p.full_pass(t0 + Duration::from_millis(750) * i)).collect();
         assert_eq!(capped, [true; 5]);

@@ -98,16 +98,40 @@ pub fn is_click<T>(press: &DockPress<T>, up: Point, up_at: Instant, modifiers: b
         && up_at.saturating_duration_since(press.when) <= CLICK_MAX
 }
 
-/// The Dock's pid, when it runs.
+/// The Dock's pid as last asked of LaunchServices, and the launches and quits heard by then
+/// ([`APPS_CHANGED`]).
+static DOCK_PID: Mutex<Option<(u64, i32)>> = Mutex::new(None);
+
+/// The Dock's pid as last read (`cached`: the launches and quits heard by then, the pid),
+/// while it stands: no app launched or quit since (`changes`; the Dock restarting is one
+/// quitting and one launching) and its process still exists (`gone`, one `kill(pid, 0)`: a
+/// Dock that died with no notice). `None`: ask LaunchServices.
+pub fn dock_pid_stands(cached: Option<(u64, i32)>, changes: u64, gone: impl FnOnce(i32) -> bool) -> Option<i32> {
+    cached.filter(|(seen, pid)| *seen == changes && !gone(*pid)).map(|(_, pid)| pid)
+}
+
+/// The Dock's pid, when it runs. Asked of LaunchServices (two lookups) only after an app
+/// launched or quit, or when the pid read last is gone ([`dock_pid_stands`]); until round
+/// rest-cost at every ask, the tick's read of the Dock's bar every 2 s among them.
 pub fn dock_pid() -> Option<i32> {
     #[cfg(test)]
     if let Some(pid) = super::fake::with(|d| d.dock.pid) {
         return Some(pid);
     }
-    NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(DOCK_BUNDLE))
+    let changes = APPS_CHANGED.load(Ordering::Relaxed);
+    let mut cached = DOCK_PID.lock().ok();
+    if let Some(pid) = dock_pid_stands(cached.as_deref().copied().flatten(), changes, super::apps::process_gone) {
+        return Some(pid);
+    }
+    super::costs::add(super::costs::Cost::LaunchServices, 2);
+    let pid = NSRunningApplication::runningApplicationsWithBundleIdentifier(&NSString::from_str(DOCK_BUNDLE))
         .iter()
         .next()
-        .map(|a| a.processIdentifier())
+        .map(|a| a.processIdentifier());
+    if let Some(cached) = cached.as_mut() {
+        **cached = pid.map(|pid| (changes, pid));
+    }
+    pid
 }
 
 /// What the Dock's hit-test found at a point that is no application item.
@@ -354,15 +378,23 @@ pub fn app_path(pid: i32) -> Option<String> {
 /// one ([`running_by_path`]).
 static APPS_CHANGED: AtomicU64 = AtomicU64::new(0);
 
-/// The running apps by their bundle's path, as read at a moment: the launches and quits
-/// heard by then, when, what.
-type PathsRead = (u64, Instant, HashMap<String, i32>);
+/// The running apps by their bundle's path, as read at a moment.
+struct PathsRead {
+    /// The launches and quits heard by then ([`APPS_CHANGED`]).
+    changes: u64,
+    /// When they were read, or last found unchanged ([`paths_unchanged`]).
+    at: Instant,
+    /// How many apps ran then, every kind.
+    apps: usize,
+    by_path: HashMap<String, i32>,
+}
 
 /// The running apps' paths as last read.
 static PATHS: Mutex<Option<PathsRead>> = Mutex::new(None);
 
-/// The longest the paths read stand with no launch or quit heard: a backstop for a change no
-/// notice told of.
+/// How long the paths read stand with no launch or quit heard before they are checked
+/// against the apps that run ([`paths_unchanged`]): a backstop for a change no notice told
+/// of.
 pub const PATHS_MAX_AGE: Duration = Duration::from_secs(60);
 
 /// An app is about to launch, launched or quit (NSWorkspace's notice, any app): the running
@@ -371,35 +403,64 @@ pub fn apps_changed() {
     APPS_CHANGED.fetch_add(1, Ordering::Relaxed);
 }
 
-/// Whether the running apps' paths are to be read again at `now`: never read (`last`:
-/// `None`), an app launched or quit since (`changes` differs from the read's), or the read
-/// [`PATHS_MAX_AGE`] old. A pid's bundle never changes while it runs, so between launches
-/// and quits the read stands.
+/// How many launches and quits NSWorkspace told of so far: what is read of the running apps
+/// once and kept (their paths, the Dock's pid, a window owner's bundle) stands while this
+/// does.
+pub fn apps_changes() -> u64 {
+    APPS_CHANGED.load(Ordering::Relaxed)
+}
+
+/// Whether the running apps' paths are due at `now`: never read (`last`: `None`), an app
+/// launched or quit since (`changes` differs from the read's), or the read [`PATHS_MAX_AGE`]
+/// old. A pid's bundle never changes while it runs, so between launches and quits the read
+/// stands; when it is due by its age alone it is first checked ([`paths_unchanged`]) and
+/// read again only when that finds a change.
 pub fn paths_due(last: Option<(u64, Instant)>, changes: u64, now: Instant) -> bool {
     last.is_none_or(|(seen, at)| seen != changes || now.saturating_duration_since(at) >= PATHS_MAX_AGE)
 }
 
+/// Whether a read that is due by its age alone still stands: as many apps run as when it was
+/// made (`apps_then`, `apps_now`: one listing, no property of any app asked) and none of the
+/// pids it holds is gone (`any_gone`, one `kill(pid, 0)` each). A launch or a quit no notice
+/// told of changes one or the other. Until round rest-cost the age alone had every running
+/// app's bundle URL and pid asked again, once a minute at rest while the strip follows the
+/// Dock (its backstop read, [`super::controller`]'s `dock_order`): about 300 lookups for 150
+/// apps, agents and helpers included (measured 11-25).
+pub fn paths_unchanged(apps_then: usize, apps_now: usize, any_gone: impl FnOnce() -> bool) -> bool {
+    apps_then == apps_now && !any_gone()
+}
+
 /// The running apps by their bundle's path (no trailing slash). Read from LaunchServices
 /// (two XPC round trips an app: its bundle's URL and its pid, every app running) only when
-/// [`paths_due`]; else as read last. Until 1.9 it was read afresh at each ask: every 2 s
-/// while the strip follows the Dock, the largest single cost of the WM thread at rest
-/// (a sample, 11-18).
+/// [`paths_due`] and, by age alone, not [`paths_unchanged`]; else as read last. Until 1.9 it
+/// was read afresh at each ask: every 2 s while the strip follows the Dock, the largest
+/// single cost of the WM thread at rest (a sample, 11-18).
 pub(crate) fn running_by_path() -> HashMap<String, i32> {
     let changes = APPS_CHANGED.load(Ordering::Relaxed);
     let now = Instant::now();
-    let Ok(mut cached) = PATHS.lock() else { return read_running_by_path() };
-    if let Some((_, _, by_path)) = cached.as_ref().filter(|(seen, at, _)| !paths_due(Some((*seen, *at)), changes, now)) {
-        return by_path.clone();
+    let Ok(mut cached) = PATHS.lock() else { return read_running_by_path().0 };
+    if let Some(read) = cached.as_mut().filter(|r| r.changes == changes) {
+        if !paths_due(Some((read.changes, read.at)), changes, now) {
+            return read.by_path.clone();
+        }
+        // Due by its age alone: one listing of the running apps, no property asked.
+        super::costs::bump(super::costs::Cost::LaunchServices);
+        let apps_now = NSWorkspace::sharedWorkspace().runningApplications().count();
+        if paths_unchanged(read.apps, apps_now, || read.by_path.values().any(|pid| super::apps::process_gone(*pid))) {
+            read.at = now;
+            return read.by_path.clone();
+        }
     }
-    let fresh = read_running_by_path();
-    *cached = Some((changes, now, fresh.clone()));
-    fresh
+    let (by_path, apps) = read_running_by_path();
+    *cached = Some(PathsRead { changes, at: now, apps, by_path: by_path.clone() });
+    by_path
 }
 
-/// [`running_by_path`] asked of LaunchServices now.
-fn read_running_by_path() -> HashMap<String, i32> {
-    NSWorkspace::sharedWorkspace()
-        .runningApplications()
+/// [`running_by_path`] asked of LaunchServices now, and how many apps run (every kind, with
+/// a bundle or not).
+fn read_running_by_path() -> (HashMap<String, i32>, usize) {
+    let apps = NSWorkspace::sharedWorkspace().runningApplications();
+    let by_path = apps
         .iter()
         .filter_map(|a| {
             super::costs::bump(super::costs::Cost::LaunchServices);
@@ -407,7 +468,8 @@ fn read_running_by_path() -> HashMap<String, i32> {
             super::costs::bump(super::costs::Cost::LaunchServices);
             Some((path.trim_end_matches('/').to_string(), a.processIdentifier()))
         })
-        .collect()
+        .collect();
+    (by_path, apps.count())
 }
 
 /// The bundle id of the app bundle at `path`.
@@ -447,6 +509,46 @@ mod tests {
             }
         }
         assert_eq!((before, after), (1140, 38), "the first read only (the launch's)");
+    }
+
+    /// An hour at rest with the strip following the Dock (its backstop read once a minute)
+    /// and 150 apps running: LaunchServices was asked every app's bundle and pid again each
+    /// minute, about 300 lookups (measured 11-25); now one listing a minute, and every app
+    /// again only when the count of apps or a pid says one launched or quit unheard.
+    #[test]
+    fn a_read_due_by_its_age_alone_stands_while_the_same_apps_run() {
+        let t0 = Instant::now();
+        let apps = 150;
+        let (mut before, mut after) = (0, 0);
+        let mut last: Option<(u64, Instant)> = None;
+        for minute in 0..60 {
+            let at = t0 + Duration::from_secs(60 * minute);
+            if paths_due(last, 0, at) {
+                before += 2 * apps;
+                // The first read asks every app; a later one is checked first.
+                after += if last.is_none() || !paths_unchanged(apps, apps, || false) { 2 * apps } else { 1 };
+                last = Some((0, at));
+            }
+        }
+        assert_eq!((before, after), (18_000, 300 + 59));
+        assert!(paths_unchanged(150, 150, || false));
+        assert!(!paths_unchanged(150, 151, || false), "an app launched with no notice: read again");
+        assert!(!paths_unchanged(150, 149, || false), "one quit with no notice");
+        assert!(!paths_unchanged(150, 150, || true), "one quit and one launched: a pid read is gone");
+        let never = || -> bool { panic!("the pids are tested only when the count is the same") };
+        assert!(!paths_unchanged(150, 151, never));
+    }
+
+    /// The Dock's pid is asked of LaunchServices again only after an app launched or quit,
+    /// or when the pid read is gone: the tick's read of the Dock's bar asked it every 2 s.
+    #[test]
+    fn the_docks_pid_stands_until_an_app_launches_or_quits() {
+        assert_eq!(dock_pid_stands(None, 0, |_| false), None, "never read");
+        assert_eq!(dock_pid_stands(Some((3, 411)), 3, |_| false), Some(411));
+        assert_eq!(dock_pid_stands(Some((3, 411)), 4, |_| false), None, "an app launched or quit (the Dock's restart is both)");
+        assert_eq!(dock_pid_stands(Some((3, 411)), 3, |pid| pid == 411), None, "the Dock died with no notice");
+        let never = |_| -> bool { panic!("not tested once a launch or quit was heard") };
+        assert_eq!(dock_pid_stands(Some((3, 411)), 4, never), None);
     }
 
     /// A Dock that stops answering mid-read is asked nothing more: each further item would

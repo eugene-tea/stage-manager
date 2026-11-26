@@ -322,6 +322,23 @@ const COVER_TIMEOUT: Duration = Duration::from_millis(150);
 /// How often the window server's list is checked for windows changing Spaces.
 const SPACE_POLL: Duration = Duration::from_secs(1);
 
+/// Test only (`STAGE_MANAGER_TICK_REST_MS=N`, honoured with `STAGE_MANAGER_TEST` set): the
+/// tick rests N ms in place of [`crate::engine::tick_pace::REST`], so a measured run can tell
+/// what a tick costs ([`crate::engine::tick_pace::rest_override`]).
+fn rest_for_test() -> Option<Duration> {
+    static REST: OnceLock<Option<Duration>> = OnceLock::new();
+    *REST.get_or_init(|| {
+        let rest = crate::engine::tick_pace::rest_override(
+            std::env::var_os("STAGE_MANAGER_TEST").is_some(),
+            std::env::var("STAGE_MANAGER_TICK_REST_MS").ok().as_deref(),
+        );
+        if let Some(rest) = rest {
+            tracing::warn!(rest_ms = rest.as_millis() as u64, "the tick's rest is set by a test run (STAGE_MANAGER_TICK_REST_MS)");
+        }
+        rest
+    })
+}
+
 /// A window counts as moved to or gone from the shown Space after this many checks in a row.
 const SPACE_CHECKS: u32 = 2;
 
@@ -6573,10 +6590,13 @@ impl Controller {
         input::left_button_down().then_some("the mouse button is down")
     }
 
-    /// The longest the tick may rest for the controller ([`crate::engine::tick_pace::REST`],
-    /// or less when the engine's upkeep caps it: [`Self::upkeep_rest_cap`]).
+    /// The longest the tick may rest for the controller: [`crate::engine::tick_pace::REST`]
+    /// under every engine (until round rest-cost the Corner engine capped it at 0.75 s for
+    /// the inert slivers' list, which now stands through a rest:
+    /// [`crate::engine::corner::sliver::Seen::fresh`]). A test run may set another
+    /// ([`rest_for_test`]: what a tick costs the window server, measured).
     pub fn tick_rest(&self) -> Duration {
-        self.upkeep_rest_cap().map_or(crate::engine::tick_pace::REST, |cap| cap.min(crate::engine::tick_pace::REST))
+        rest_for_test().unwrap_or(crate::engine::tick_pace::REST)
     }
 
     /// True while the restore window is open (the login settles): apps that do not answer
@@ -7115,6 +7135,8 @@ impl Controller {
         state["engine"] = self.status_engine();
         // The WM tick's pace (round sm-tick): ticks brisk and at rest since the launch.
         state["tick"] = super::wm_thread::tick_status();
+        // The list the inert slivers' tap judges on, and how long it stands (round rest-cost).
+        state["slivers"] = self.status_slivers();
         // What the app asked of macOS since the launch (round idle-subsystems).
         state["costs"] = super::costs::status();
         // Dock clicks and ⌘Tab releases watched for a Desktop slide (the Spaces engine), by `via`.

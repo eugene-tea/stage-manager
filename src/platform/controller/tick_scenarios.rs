@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
 use super::spaces::TIDY_EVERY;
-use super::upkeep::SLIVER_REST;
 use super::SPACE_POLL;
+use crate::engine::corner::sliver::{self, SEEN_FRESH, Seen, Tick};
 use crate::engine::corner::park_reconcile::{self, Facts, Stray, Verdict};
 use crate::engine::gone::{GoneCheck, gone};
 use crate::engine::model::{Action, Model, WindowId};
@@ -92,14 +92,16 @@ impl Clock {
     }
 }
 
-/// The longest the tick rests on `engine` with windows hidden: the inert slivers' cap under
-/// the Corner engine (on by default, and its tap judges presses while windows are parked).
-fn rest_on(engine: EngineKind) -> Duration {
-    match engine {
-        EngineKind::Corner => SLIVER_REST,
-        EngineKind::Spaces | EngineKind::Apple => REST,
-    }
+/// The longest the tick rests on `engine` with windows hidden: the same under every engine
+/// (until round rest-cost the Corner engine's was [`SLIVER_REST_BEFORE`] while its inert
+/// slivers' tap judged presses, which is nearly always).
+fn rest_on(_engine: EngineKind) -> Duration {
+    REST
 }
+
+/// The Corner engine's rest until round rest-cost: its tap trusted the tick's list for
+/// [`SEEN_FRESH`] only, so the whole tick ran this often.
+const SLIVER_REST_BEFORE: Duration = Duration::from_millis(750);
 
 /// The most a case caught at rest may come after it was caught before 1.9: a rest, its
 /// tolerance, and the brisk ticks and full-pass alignment it then needs (the old tick's
@@ -325,8 +327,8 @@ both_engines! {
 
 corner_nuance! {
     /// A parked window its app moved out of the corner with no notice (the moved notice
-    /// missed): the park reconcile sees it at the next tick (a rest is at most the inert
-    /// slivers' cap) and parks it again two looks later, at the old pace.
+    /// missed): the park reconcile sees it at the next tick (a rest later at most) and parks
+    /// it again two looks later, at the old pace.
     #[test]
     fn a_parked_window_moved_out_of_the_corner_with_no_notice_is_parked_again() {
         let run = |old: bool| {
@@ -349,7 +351,7 @@ corner_nuance! {
                         caught.get_or_insert(now);
                     }
                 }
-                ((!strays.is_empty()).then_some("parked windows out of the corner"), SLIVER_REST)
+                ((!strays.is_empty()).then_some("parked windows out of the corner"), REST)
             };
             clock.run(&mut world, 30.0, &mut tick);
             // App 30 moves its parked window 5 back on screen, no moved notice.
@@ -361,7 +363,122 @@ corner_nuance! {
         let (mut new, mut old) = (0.0, 0.0);
         crate::engine::testkit::on(EngineKind::Corner, || (new, old) = (run(false), run(true)));
         assert!(old <= 0.5 + 1e-9, "before 1.9: two ticks ({old:.2} s)");
-        assert!(new <= old + secs(SLIVER_REST) + secs(tick_pace::Pace::Rest(SLIVER_REST).tolerance()), "now {new:.2} s, before {old:.2} s");
+        assert!(new <= old + secs(REST) + secs(tick_pace::Pace::Rest(REST).tolerance()), "now {new:.2} s, before {old:.2} s");
+    }
+
+    /// The inert slivers' list through a quiet minute, an event and a busy WM thread: with
+    /// the tick at rest every 2 s the tap still judges a press at every moment it did while
+    /// the tick rested 0.75 s for its sake, on less than half the window lists.
+    #[test]
+    fn the_slivers_list_stands_through_a_rest_and_an_event_brings_the_next() {
+        /// What the tap knows: the list last published, and the tick's pace as the WM
+        /// thread tells it after every tick and every event (`wm_thread::pace_tick`).
+        #[derive(Default)]
+        struct Tap {
+            seen: Option<Seen>,
+            brisk_since: Option<Instant>,
+            due: Duration,
+            /// The lists read.
+            lists: usize,
+        }
+        impl Tap {
+            fn judged(&self, now: Instant) -> bool {
+                self.seen.as_ref().is_some_and(|s| s.fresh(now, Tick { brisk_since: self.brisk_since, due: self.due }).is_some())
+            }
+            fn paced(&mut self, pace: tick_pace::Pace, after_tick: bool, now: Instant) {
+                self.brisk_since = sliver::brisk_since(self.brisk_since, pace.at_rest(), after_tick, now);
+                if after_tick && pace.at_rest() {
+                    self.due = pace.period() + pace.tolerance();
+                }
+            }
+        }
+        /// The clock and the tap: every tick reads and publishes the list, then tells the pace.
+        struct Rig {
+            clock: Clock,
+            tap: Tap,
+        }
+        impl Rig {
+            fn new() -> Self {
+                Self { clock: Clock::new(false), tap: Tap::default() }
+            }
+            fn run(&mut self, until: Secs) {
+                // Nothing waits, so the pace after a tick follows from the last event alone.
+                let pace = self.clock.pace.clone();
+                self.clock.run(&mut self.tap, until, &mut |tap: &mut Tap, now: Instant, _full: bool| {
+                    tap.seen = Some(Seen { at: now, windows: Vec::new() });
+                    tap.lists += 1;
+                    tap.paced(pace.pace(now, None, REST), true, now);
+                    (None, REST)
+                });
+            }
+            /// An event at `at` that may change windows.
+            fn event(&mut self, at: Secs) {
+                self.clock.stir(at, REST);
+                let now = self.clock.at(at);
+                self.tap.paced(self.clock.pace.pace(now, None, REST), false, now);
+            }
+            fn last_tick(&self) -> Secs {
+                *self.clock.ticks.last().expect("a tick ran")
+            }
+            /// Runs to `to` in steps of 10 ms from `from`: a press at each step is judged.
+            fn judged_throughout(&mut self, from: Secs, to: Secs, what: &str) {
+                let mut t = from;
+                while t < to {
+                    self.run(t);
+                    assert!(self.tap.judged(self.clock.at(t)), "{what}: a press {t:.2} s in would pass unjudged");
+                    t += 0.01;
+                }
+            }
+        }
+
+        // A quiet minute: from the first tick on a press is judged at every moment, on 30
+        // lists or so (80 at the rest the tap needed before), none older than a rest.
+        let mut rig = Rig::new();
+        rig.judged_throughout(0.3, 60.0, "a quiet minute");
+        let before = (60.0 / secs(SLIVER_REST_BEFORE)) as usize;
+        assert!(rig.tap.lists <= 31 && rig.tap.lists * 2 < before, "{} lists in a quiet minute, {before} before", rig.tap.lists);
+        let apart = rig.clock.ticks.windows(2).map(|w| w[1] - w[0]).fold(0.0, f64::max);
+        assert!(apart <= secs(REST) + secs(tick_pace::REST_TOLERANCE) + 1e-9, "{apart:.2} s between two lists at rest");
+
+        // An event late in a rest (a window moved: its notice stirs the tick): judged on the
+        // list read at rest until the event's tick, within a brisk period, publishes the next;
+        // judged through the brisk ticks after it and into the next rest.
+        let mut rig = Rig::new();
+        rig.judged_throughout(0.3, 10.0, "before the event");
+        let event = rig.last_tick() + 1.9;
+        rig.judged_throughout(10.0, event, "the rest before the event");
+        rig.event(event);
+        assert!(rig.tap.brisk_since.is_some(), "the tap knows the tick is brisk");
+        rig.judged_throughout(event, event + 8.0, "after the event");
+        let next = rig.clock.ticks.iter().copied().find(|t| *t >= event).expect("the event's tick");
+        assert!(next - event <= secs(BRISK) + 1e-9, "the event's tick came {:.3} s after it", next - event);
+        assert_eq!(rig.tap.brisk_since, None, "at rest again");
+
+        // The WM thread held up after an event at rest (no tick comes): presses are judged on
+        // the list it left for a second from the event, then pass, as a busy thread's always did.
+        let mut rig = Rig::new();
+        rig.run(10.0);
+        let event = rig.last_tick() + 1.5;
+        let now = rig.clock.at(event);
+        rig.tap.paced(tick_pace::Pace::Brisk(None), false, now);
+        assert!(rig.tap.judged(now) && rig.tap.judged(now + SEEN_FRESH));
+        assert!(!rig.tap.judged(now + SEEN_FRESH + Duration::from_millis(10)), "the WM thread is busy: the press passes");
+
+        // Held up at rest with no event at all (a tick overdue): the list stands until the
+        // tick was due and a second more, then presses pass.
+        let mut rig = Rig::new();
+        rig.run(10.0);
+        let due = rig.clock.at(rig.last_tick()) + REST + tick_pace::REST_TOLERANCE;
+        assert!(rig.tap.judged(due + SEEN_FRESH));
+        assert!(!rig.tap.judged(due + SEEN_FRESH + Duration::from_millis(10)));
+
+        // While the tick stays brisk (a duty waits) the list stands a second, as before.
+        let mut tap = Tap::default();
+        let t0 = Instant::now();
+        tap.seen = Some(Seen { at: t0, windows: Vec::new() });
+        tap.paced(tick_pace::Pace::Brisk(Some("a switch")), true, t0);
+        assert!(tap.judged(t0 + SEEN_FRESH));
+        assert!(!tap.judged(t0 + SEEN_FRESH + Duration::from_millis(1)));
     }
 }
 

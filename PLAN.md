@@ -104,12 +104,33 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   "Window engines measured"): with the system's share the Accessibility engine costs about
   5.7 % of a core at rest (about 16 % until the 2 s picture timer went), the Spaces engine
   about 0.5 %. Aim: 1 to 2 %, with no card shown stale and no switch slower.
-  - What the Accessibility engine still costs with no window pictured: the window server
-    +4.6 %, the capture service 0.25 %, the app 0.83 % against 0.50 %. Find it (`sample`'s
-    split; `ctl state`'s `tick` and `costs`): the housekeeping that rests 0.75 s at most there
-    (150 window lists a minute against 63; "One way for every mode", below), the corner patch
-    and its stills.
-  - About 300 LaunchServices lookups a minute at rest under both engines: find what asks.
+  - The window server's +4.6 % under the Accessibility engine with no window pictured is not
+    explained: the app's own time is (UX-SPEC, the `sample` table), and since round
+    rest-cost its housekeeping rests 2 s there too. Run the matrix (DEVELOPMENT, "Measuring
+    cost"), shortest first: the base again (the app should read near 0.5 %, about 60 window
+    lists a minute, 6 stills); `SM_CAPTURE=0` (no still of the desktop: if the window
+    server and the capture service drop, the still is it); `windows.corner_patch=false`
+    (the panel too); `SM_STAGES=1` (nothing in the corner); `windows.inert_slivers=false`;
+    `STAGE_MANAGER_TICK_REST_MS=750` and `10000` (what a tick and its lists cost).
+  - If the still is it: taken on evidence only (the wallpaper read changed, the icons
+    changed, a press on the desktop: each already takes one), with the 10 s refresh kept
+    for a desktop with widgets, or far longer. The owner's call: a widget's own change would
+    show late in the corner.
+  - Run `scripts/test-stages.sh rest` (and `SM_ENGINE=spaces` for the rest alone): the first
+    live press on a sliver in the suite.
+  - The inert slivers' list at rest is up to 2.2 s behind a window that comes or goes with
+    no click, key or notice (a system panel, a notification of a process that is not
+    observed); 0.8 s before. If one is seen to matter: the mouse moves' monitor, on while a
+    strip shows, can ask for a list as the pointer nears a corner zone.
+  - The wallpaper is read every 2 s twice under the Accessibility engine (the card glass's
+    reader and the corner patch's own, 37 and 33 ms a minute, most of the main thread's
+    work at rest): one reader for both, and read on evidence where there is some.
+  - The Spaces engine asks LaunchServices whether each hidden window's app is hidden at
+    every Space check (about 10 ms a minute): the hide and unhide notices already say.
+  - With the tick at 2 s under the Accessibility engine, Mission Control and Show Desktop
+    opened with no click and no modifier key (a gesture, a hot corner, F3) are found up to
+    2.2 s late there (about a second before): until then the park reconcile and the patch
+    read their layout. "One way for every mode", below, brings the look forward.
   - A switch waits for its pictures under every engine: 76 ms at a card click, 113 ms at a
     Dock click (11-25). Not noticed by a person, but at the edge, and after a Dock click the
     activated app's windows show raised in the park corner 121 to 155 ms before the cover
@@ -224,10 +245,6 @@ was left behind for no reason of the mode.
   Accessibility engine; the triggers that bring the look forward run under Spaces only (one,
   the Dock's notice, is public). `mission_control_key_keeps_stage` is honoured under Spaces
   only for the same reason.
-- **The housekeeping rests 0.75 s at most under the Accessibility engine**, 2 s under the
-  others, to keep the list the inert slivers' tap trusts fresh; each wake is a full pass.
-  Measure what the cap costs at rest, then keep that list fresh by something lighter. A show
-  still owed for a window that only waits for its Desktop also keeps the pace brisk there.
 - **⌘Tab to another Desktop arranges the stage on arrival**, in both modes, though the chosen
   app is known before ⌘ is released (the Spaces engine's lend already follows it). Arranged
   ahead, as a Dock click's is; UX-SPEC's "known gap" sentence then goes.

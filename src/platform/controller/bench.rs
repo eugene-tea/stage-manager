@@ -53,6 +53,7 @@ mod causes;
 mod corner_screens;
 mod desktops;
 mod guessed;
+mod rest;
 mod screens;
 mod scenarios;
 mod switch;
@@ -75,6 +76,8 @@ pub(super) struct Bench {
     rest: Duration,
     next_tick: Instant,
     next_fast: Option<Instant>,
+    /// The ticks run so far.
+    pub(super) ticks: u64,
     started: Instant,
     /// What was handled, in order, with the ms since the start: the scenario's own log.
     pub(super) log: Vec<String>,
@@ -145,6 +148,7 @@ impl Bench {
             rest: tick_pace::REST,
             next_tick: now + tick_pace::BRISK,
             next_fast: None,
+            ticks: 0,
             started,
             log: Vec::new(),
             c,
@@ -221,6 +225,7 @@ impl Bench {
 
     /// `wm_thread::tick`.
     fn tick(&mut self) {
+        self.ticks += 1;
         {
             let _wake = windows::wake();
             let full = self.pace.full_pass(clock::now());

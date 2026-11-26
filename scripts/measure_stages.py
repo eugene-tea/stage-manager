@@ -49,14 +49,16 @@ Scenarios (all by default, in this order):
   them at events only, none at rest), written live. SM_REST_S seconds untouched with the
   windows clear of the strip, then SM_REST_S more with the front stage's windows flush with
   the screen's left edge (the strip slides away): our CPU and, from `ctl state`'s `costs`, the
-  windows captured and the Dock reads a minute in each. Then, thumbnails at events again, the
+  windows captured, the Dock reads and the LaunchServices lookups a minute in each. Then, thumbnails at events again, the
   front windows 100 pt in, over the cards (the strip stays shown, below them), and the pointer
   resting on a window over a card for 2 s: `ctl debug-strip`'s `under_windows` and the windows
   captured meanwhile. Pass: no Dock read on a timer (2 a minute at most, against 30 before
   1.9.1), no capture at that hover (a card under a window hovered before, and its windows
-  were taken), and no capture a minute with the strip slid away, under either engine (until
+  were taken), no capture a minute with the strip slid away, under either engine (until
   11-25 the park corner kept the front windows' full-size pictures on a 2 s timer; with
-  SM_SNAPSHOT_MS set the timer runs and this is not judged). Not with `off`.
+  SM_SNAPSHOT_MS set the timer runs and this is not judged), and 5 LaunchServices lookups a
+  minute at most in a span where no app launched or quit (about 300 until round rest-cost;
+  a span where one did is not judged). Not with `off`.
 
 The app runs from the dev copy with captures on (as installed; SM_CAPTURE=0 turns them off), STAGE_MANAGER_ONLY the
 fixtures, in a scratch home; fixture windows only, at frames clear of the strip.
@@ -65,6 +67,23 @@ SM_SNAPSHOT_MS=N writes `[animation] snapshot_interval_ms = N` into every scenar
 config: the full-size pictures of the front stage's windows on a timer again (2000 was the
 Corner engine's until 11-25), so what the timer costs is measured on one build, with and
 without it. Use another OUT for it; each row says the value (`snapshot_ms`).
+
+What one part of the app costs at rest is measured by one run with it off or slowed (round
+rest-cost), each in an OUT of its own; every row says what it ran with (`config`, `env`):
+- SM_CONFIG="section.key=value ..." adds config lines to every scenario's scratch config
+  (space-separated; a string value in TOML quotes): `SM_CONFIG="windows.corner_patch=false"`
+  (no patch panel, no still of the desktop, no read of Finder's icons),
+  `SM_CONFIG="windows.inert_slivers=false"` (no event tap, no list for it).
+- SM_ENV="NAME=value ..." sets test switches of the app for the run:
+  `SM_ENV="STAGE_MANAGER_TICK_REST_MS=750"` is the housekeeping's rest as the Accessibility
+  engine had it until round rest-cost (2000 since; any value from 250 to 60000).
+- SM_STAGES=1 leaves no window hidden (one stage): the engine with nothing in its corner.
+- SM_CAPTURE=0: no ScreenCaptureKit at all (no still of the desktop; the patch draws the
+  wallpaper's file).
+`rest` also records, from `ctl state` before and after the span, each of `costs` a minute
+(window lists, LaunchServices lookups, stills of the desktop, ...), the ticks that ran brisk
+and at rest (the two reads stir the tick: about 12 brisk ticks belong to them), and how the
+corner patch shows (`patch`).
 """
 
 import ctypes
@@ -140,10 +159,69 @@ def snapshot_ms(value):
     return n
 
 
-def config_text(ms, text=""):
+def extra_config(value):
+    """SM_CONFIG ("section.key=value ...", space-separated) as (section, key, value) triples;
+    a word that is not one is refused. A value is TOML as written (`false`, `1500`,
+    `"dock"`)."""
+    out = []
+    for word in (value or "").split():
+        m = re.fullmatch(r"([a-z_]+)\.([a-z_0-9]+)=(.+)", word)
+        if not m:
+            raise ValueError(f"SM_CONFIG: {word!r} is not section.key=value")
+        out.append(m.groups())
+    return out
+
+
+def merge_config(text, extra):
+    """`text` (a scratch config: `[section]` lines and `key = value` lines under them) with
+    the lines of `extra` ([`extra_config`]) added, each under its section (made when not
+    there). A key the scenario writes itself is replaced: the run's own value wins."""
+    sections, order = {}, []
+    current = None
+    for line in text.splitlines():
+        head = re.fullmatch(r"\[([a-z_]+)\]", line.strip())
+        if head:
+            current = head.group(1)
+            if current not in sections:
+                sections[current] = []
+                order.append(current)
+        elif line.strip() and current is not None:
+            sections[current].append(line.strip())
+    for section, key, value in extra:
+        if section not in sections:
+            sections[section] = []
+            order.append(section)
+        sections[section] = [l for l in sections[section] if l.split("=", 1)[0].strip() != key] + [f"{key} = {value}"]
+    return "".join(f"[{name}]\n" + "".join(f"{l}\n" for l in sections[name]) for name in order)
+
+
+def extra_env(value):
+    """SM_ENV ("NAME=value ...", space-separated) as a dict of the app's test switches for the
+    run; only STAGE_MANAGER_* names (the measure sets the home, the fixtures and the engine
+    itself: those are refused)."""
+    out = {}
+    for word in (value or "").split():
+        name, sep, val = word.partition("=")
+        if not sep or not re.fullmatch(r"STAGE_MANAGER_[A-Z_]+", name):
+            raise ValueError(f"SM_ENV: {word!r} is not STAGE_MANAGER_NAME=value")
+        if name in ("STAGE_MANAGER_HOME", "STAGE_MANAGER_ONLY", "STAGE_MANAGER_ENGINE", "STAGE_MANAGER_NO_CAPTURE"):
+            raise ValueError(f"SM_ENV: {name} is the measure's own")
+        out[name] = val
+    return out
+
+
+# SM_CONFIG, SM_ENV: one part of the app off or slowed for the run (the module's docs).
+EXTRA_CONFIG = extra_config(os.environ.get("SM_CONFIG"))
+EXTRA_ENV = extra_env(os.environ.get("SM_ENV"))
+
+
+def config_text(ms, text="", extra=None):
     """A scenario's scratch config: its own `text` (other sections), with `[animation]
-    snapshot_interval_ms = ms` when SM_SNAPSHOT_MS is set (`ms`)."""
-    return text if ms is None else f"{text}[animation]\nsnapshot_interval_ms = {ms}\n"
+    snapshot_interval_ms = ms` when SM_SNAPSHOT_MS is set (`ms`), and the run's own lines
+    (`extra`, SM_CONFIG's by default: [`merge_config`])."""
+    extra = EXTRA_CONFIG if extra is None else extra
+    text = text if ms is None else f"{text}[animation]\nsnapshot_interval_ms = {ms}\n"
+    return merge_config(text, extra) if extra else text
 
 
 # SM_SNAPSHOT_MS: the full-size pictures' timer, written into every scratch config.
@@ -302,6 +380,7 @@ def say(msg):
 
 def record(scenario, data):
     row = {"scenario": scenario, "engine": ENGINE, "run": RUN, "capture": CAPTURE, "snapshot_ms": SNAPSHOT_MS,
+           "config": [f"{s}.{k}={v}" for s, k, v in EXTRA_CONFIG], "env": EXTRA_ENV, "stages": STAGES,
            "at": time.strftime("%Y-%m-%d %H:%M:%S"), **data}
     with open(JSONL, "a") as f:
         f.write(json.dumps(row) + "\n")
@@ -343,7 +422,7 @@ def fixtures_up():
 def fresh_home():
     """No saved stages or config from an earlier scenario: a window would go back to its
     saved stage (a relaunched Charlie to Charlie's stage of the four) instead of a new one.
-    The scratch config holds SM_SNAPSHOT_MS's timer alone, when set."""
+    The scratch config holds SM_SNAPSHOT_MS's timer and SM_CONFIG's lines alone, when set."""
     for f in ("state.json", "config.toml", ".config-last-good.toml"):
         p = os.path.join(T.HOME, f)
         if os.path.exists(p):
@@ -378,7 +457,7 @@ def stages_up():
     if ENGINE == "off":
         front_first_app()
         return None
-    s = T.start_app(2 * STAGES, extra_env={"STAGE_MANAGER_TEST": "1"}, capture=CAPTURE)
+    s = T.start_app(2 * STAGES, extra_env={"STAGE_MANAGER_TEST": "1", **EXTRA_ENV}, capture=CAPTURE)
     if s is None:
         raise RuntimeError("the app did not come up")
     kind = (s.get("engine") or {}).get("kind")
@@ -411,13 +490,44 @@ def stages_up():
 
 # ----- rest ------------------------------------------------------------------------------
 
-def captured_now():
-    """The windows captured so far, from `ctl state`: (asked by a round, every picture); None
-    with `off`."""
+def captured_now(s=None):
+    """The windows captured so far, from `ctl state` (`s`: one read already): (asked by a
+    round, every picture); None with `off`."""
     if ENGINE == "off":
         return None
-    s = T.state()
+    s = s or T.state()
     return ((s.get("costs") or {}).get("captures"), (s.get("capture") or {}).get("images"))
+
+
+def rest_counts(s0, s1, wall_s):
+    """What `ctl state` counted between two reads `wall_s` seconds apart: every number of
+    `costs` a minute (`<key>_per_min`), the ticks that ran brisk and at rest (`ticks_brisk`,
+    `ticks_rest`: the reads themselves stir the tick for 3 s each) and the rest's period
+    (`tick_rest_ms`, when the last pace was a rest). Empty when either read is missing."""
+    out = {}
+    if not s0 or not s1 or not wall_s:
+        return out
+    c0, c1 = s0.get("costs") or {}, s1.get("costs") or {}
+    for k, v in c1.items():
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and isinstance(c0.get(k), (int, float)):
+            out[f"{k}_per_min"] = round((v - c0[k]) * 60.0 / wall_s, 1)
+    t0, t1 = s0.get("tick") or {}, s1.get("tick") or {}
+    for key, name in (("brisk_ticks", "ticks_brisk"), ("rest_ticks", "ticks_rest")):
+        if key in t0 and key in t1:
+            out[name] = t1[key] - t0[key]
+    if t0.get("rest_ms") or t1.get("rest_ms"):
+        out["tick_rest_ms"] = t0.get("rest_ms") or t1.get("rest_ms")
+    return out
+
+
+def patch_now(s):
+    """How the corner patch shows on the main screen, from `ctl state`: whether it is on and
+    shown, and what it draws ("still", "file" or None)."""
+    p = (s or {}).get("corner_patch") or {}
+    plan = ((s or {}).get("desktop_still") or {}).get("patch_plan") or {}
+    drawn = "still" if plan.get("still") is not None or plan.get("hold") else ("file" if plan.get("file") else None)
+    return {"on": p.get("on"), "shown": p.get("shown"), "mode": p.get("mode"), "draws": drawn if p.get("shown") else None,
+            "hidden_why": p.get("hidden_why")}
 
 
 def per_minute(before, after, wall_s):
@@ -433,15 +543,24 @@ def scenario_rest():
         + (f", snapshots every {SNAPSHOT_MS} ms" if SNAPSHOT_MS else "") + " ==")
     stages_up()
     time.sleep(SETTLE_S)
-    c0 = captured_now()
+    s0 = T.state() if ENGINE != "off" else None
+    c0 = captured_now(s0)
     sp = Span(with_top_secs=REST_S)
     time.sleep(REST_S)
     m = sp.end()
-    c1 = captured_now()
+    s1 = T.state() if ENGINE != "off" else None
+    c1 = captured_now(s1)
     if c0 and c1:
         m["captures_per_min"] = per_minute(c0[0], c1[0], m.get("wall_s"))
         m["pictures_per_min"] = per_minute(c0[1], c1[1], m.get("wall_s"))
         say(f"  windows captured a minute: {m['captures_per_min']} asked by a round, {m['pictures_per_min']} pictures in all")
+    counts = rest_counts(s0, s1, m.get("wall_s"))
+    if counts:
+        m.update({k: v for k, v in counts.items() if k not in m})
+        m["patch"] = patch_now(s1)
+        say(f"  ticks: {counts.get('ticks_rest')} at rest (every {counts.get('tick_rest_ms')} ms), {counts.get('ticks_brisk')} brisk; "
+            f"a minute: {counts.get('window_lists_per_min')} window lists, {counts.get('launch_services_per_min')} LaunchServices lookups, "
+            f"{counts.get('desktop_stills_per_min')} stills of the desktop; the patch {m['patch']}")
     return record("rest", m)
 
 
@@ -452,7 +571,7 @@ def scenario_rest():
 # capture at the hover is the hover's.
 COVERED_CONFIG = config_text(SNAPSHOT_MS, '[strip]\nthumbnail_interval_ms = 1500\norder = "dock"\n')
 HOVER_CONFIG = config_text(SNAPSHOT_MS, '[strip]\norder = "dock"\n')
-COST_KEYS = ("captures", "dock_reads", "window_lists", "launch_services")
+COST_KEYS = ("captures", "dock_reads", "window_lists", "launch_services", "apps_changed")
 
 
 def costs_now():
@@ -534,13 +653,36 @@ def scenario_covered():
     # thumbnails' is gated; the full-size pictures have none unless SM_SNAPSHOT_MS sets one).
     edge_ok = bool(SNAPSHOT_MS) or edge.get("captures_per_min") == 0
     dock_ok = all((m.get("dock_reads_per_min") or 0) <= 2 for m in (clear, edge))
-    ok = bool(slid) and shown is True and hover_captures == 0 and edge_ok and dock_ok
+    ls = [launch_services_at_rest(m) for m in (clear, edge)]
+    ls_ok = all(v is not False for v in ls)
+    ok = bool(slid) and shown is True and hover_captures == 0 and edge_ok and dock_ok and ls_ok
     say(f"  {'pass' if ok else 'FAIL'}: captures a minute clear {clear.get('captures_per_min')}, slid away "
         f"{edge.get('captures_per_min')}, at the hover over a card under a window {hover_captures} (strip shown "
         f"{shown}, cards under windows {under}); Dock reads a minute {clear.get('dock_reads_per_min')} and "
-        f"{edge.get('dock_reads_per_min')}")
+        f"{edge.get('dock_reads_per_min')}; LaunchServices lookups a minute {clear.get('launch_services_per_min')} and "
+        f"{edge.get('launch_services_per_min')} (app launches and quits heard a minute {clear.get('apps_changed_per_min')} and "
+        f"{edge.get('apps_changed_per_min')}: {'judged' if any(v is not None for v in ls) else 'not judged, apps came or went'})")
     return record("covered", {"ok": ok, "clear": clear, "slid_away": edge, "strip_slid": bool(slid), "strip_shown_under": shown,
-                              "under_windows": under, "cards": len(cards), "hover_captures": hover_captures})
+                              "under_windows": under, "cards": len(cards), "hover_captures": hover_captures,
+                              "launch_services_ok": ls})
+
+
+# LaunchServices lookups a minute allowed at rest with no app launched or quit: one listing
+# of the running apps at each of the Dock order's backstop reads (once a minute), with room.
+LAUNCH_SERVICES_MAX = 5
+
+
+def launch_services_at_rest(m):
+    """Whether a span at rest (`m`, from [`rest_with_costs`]) asked LaunchServices no more
+    than a rest may (round rest-cost: about 300 lookups a minute before, every running app's
+    bundle and pid at each backstop read of the Dock's order): True or False when no app
+    launch or quit was heard in the span, None (not judged) when one was, since what is read
+    of the running apps is rightly read again after it."""
+    if m.get("launch_services_per_min") is None or m.get("apps_changed_per_min") is None:
+        return None
+    if m["apps_changed_per_min"] > 0:
+        return None
+    return m["launch_services_per_min"] <= LAUNCH_SERVICES_MAX
 
 
 # ----- sample ----------------------------------------------------------------------------
@@ -1100,6 +1242,12 @@ def summary(out):
     add("rest: replayd CPU %", "rest", g("replayd_cpu_pct"))
     add("rest: windows captured/min (rounds)", "rest", g("captures_per_min"))
     add("rest: window pictures/min (all)", "rest", g("pictures_per_min"))
+    add("rest: ticks at rest in the span", "rest", g("ticks_rest"))
+    add("rest: brisk ticks in the span (the two state reads')", "rest", g("ticks_brisk"))
+    add("rest: window lists/min", "rest", g("window_lists_per_min"))
+    add("rest: LaunchServices lookups/min", "rest", g("launch_services_per_min"))
+    add("rest: stills of the desktop/min", "rest", g("desktop_stills_per_min"))
+    add("rest: wallpaper reads/min", "rest", g("wallpaper_reads_per_min"))
     add("sample: active ms in 60 s", "sample", g("active_ms"))
     for how in ("card", "dock", "ctl"):
         add(f"switch {how}: click to last frame ms", "switch", g(how, "end_ms_median"))
@@ -1124,6 +1272,8 @@ def summary(out):
     add("covered: captures/min clear", "covered", g("clear", "captures_per_min"))
     add("covered: captures/min slid away", "covered", g("slid_away", "captures_per_min"))
     add("covered: Dock reads/min", "covered", g("clear", "dock_reads_per_min"))
+    add("covered: LaunchServices lookups/min slid away", "covered", g("slid_away", "launch_services_per_min"))
+    add("covered: window lists/min slid away", "covered", g("slid_away", "window_lists_per_min"))
     add("covered: captures at a hover under a window", "covered", g("hover_captures"))
     widths = [max(len(str(l[i])) for l in lines) for i in range(len(lines[0]))]
     for i, l in enumerate(lines):

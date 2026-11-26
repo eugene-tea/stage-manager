@@ -18,7 +18,7 @@
 
 use crate::platform::clock;
 use std::collections::{BTreeSet, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
@@ -33,12 +33,6 @@ use crate::platform::observe::Observer;
 use crate::platform::safety::ParkedEntry;
 use crate::platform::window_engine::EngineKind;
 use crate::platform::windows;
-
-/// The longest the tick rests while the inert slivers' tap judges presses on the tick's list
-/// of the windows near the corners ([`Controller::upkeep_rest_cap`]): the tap trusts that list
-/// for [`crate::engine::corner::sliver::SEEN_FRESH`] (1 s), so a rest, its timer's tolerance
-/// (a tenth) and a tick's own time stay under it.
-pub(super) const SLIVER_REST: Duration = Duration::from_millis(750);
 
 impl Controller {
     /// The windows present on a Desktop that shows, as `list` (the window server's) and the
@@ -107,14 +101,15 @@ impl Controller {
 
     /// Why the tick stays brisk for the engine's upkeep ([`Controller::tick_waits`]): its
     /// retries at their old pace. The Corner engine: strays parked again, failed restores
-    /// retried, the patch planned again after a focus. The Spaces engine: strays hidden
-    /// again, shows owed.
+    /// retried (never one that only waits for its Desktop to show or its app to be unhidden:
+    /// [`super::corner::unrestored::only_waits`]), the patch planned again after a focus. The
+    /// Spaces engine: strays hidden again, shows owed.
     pub(super) fn upkeep_tick_waits(&self, now: Instant) -> Option<&'static str> {
         match self.engine.kind() {
             EngineKind::Corner => {
                 if self.corner.strays.values().any(|s| !s.gave_up) {
                     Some("parked windows out of the corner")
-                } else if !self.corner.unrestored.is_empty() {
+                } else if self.corner.unrestored.values().any(|u| !u.waits) {
                     Some("shows owed")
                 } else if self.corner.patch_fast_until.is_some_and(|t| now < t) {
                     Some("the corner patch after a focus")
@@ -139,18 +134,6 @@ impl Controller {
             }
             // Nothing of the Apple mode's is hidden: no controller of ours runs it.
             EngineKind::Apple => None,
-        }
-    }
-
-    /// How long the tick may rest at most for the engine's upkeep, if it caps the rest
-    /// ([`Controller::tick_rest`]). The Corner engine: while the inert slivers' tap judges
-    /// presses, on the tick's list of the windows near the corners, which it trusts only
-    /// while [`crate::engine::corner::sliver::SEEN_FRESH`] old ([`SLIVER_REST`]). The
-    /// Spaces engine: no cap.
-    pub(super) fn upkeep_rest_cap(&self) -> Option<Duration> {
-        match self.engine.kind() {
-            EngineKind::Corner => sliver_tap::wants_list().then_some(SLIVER_REST),
-            EngineKind::Spaces | EngineKind::Apple => None,
         }
     }
 
@@ -500,6 +483,15 @@ impl Controller {
             EngineKind::Corner => self.strays_status(),
             EngineKind::Spaces => self.spaces_strays_status(),
             EngineKind::Apple => Vec::new(),
+        }
+    }
+
+    /// `ctl state`'s `slivers`: the list the inert slivers' tap judges presses on and the
+    /// tick's pace as it knows it ([`sliver_tap::status`]); `null` under the others.
+    pub(super) fn status_slivers(&self) -> Value {
+        match self.engine.kind() {
+            EngineKind::Corner => sliver_tap::status(),
+            EngineKind::Spaces | EngineKind::Apple => Value::Null,
         }
     }
 

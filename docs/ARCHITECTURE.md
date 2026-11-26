@@ -118,12 +118,27 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   notice, a click, a key with ⌘, ⌥ or ⌃, any strip, hotkey, display or ctl command) and
   while a duty waits on it (`Controller::tick_waits` and the observer's and the thread's
   own: a switch, a save due, a window counted missing, a stray parked again, a deadline),
-  else every 2 s. The Corner engine caps the rest at 0.75 s while the inert slivers' tap
-  judges presses (it trusts the tick's list for a second). Every duty runs at every tick,
+  else every 2 s, under every engine. Every duty runs at every tick,
   so nothing is missed, only caught up to a rest later when nothing happens; at rest every
   tick is a full pass. The tick's duties share one read of each window list
   (`windows::wake`), read again after any window write of ours. `ctl state`'s `tick`
-  counts brisk and rest ticks.
+  counts brisk and rest ticks. A duty that only waits for something an event will tell
+  does not keep the tick brisk: a window whose show is owed but which is off screen, its
+  Desktop not shown or its app hidden, is looked at at every tick and within a second of
+  the Space change or unhide that lists it.
+- **The inert slivers' list** (`engine::corner::sliver`, `platform::corner::sliver_tap`):
+  the Corner engine's event tap judges a press in a corner zone on the tick's list of the
+  windows near the zones, never asking the window server itself. How long that list stands
+  follows the tick's pace, told to the tap after every tick and every event (two atomics,
+  no lock): a second while the tick is brisk; through a rest until the next tick is due and
+  a second more, because a tick rests only while no event that may change windows came;
+  and a second from the first such event, whose own tick brings the next list within
+  0.25 s. A WM thread too busy to publish in that time fails open (the press passes). So
+  the tick needs no shorter rest for the tap (until 11-25 it rested 0.75 s at most while a
+  window was parked). What a rest cannot see is a window of a process that is not observed
+  (a system panel, a notification) coming or going with no click, key or notice: the list
+  is then up to 2.2 s behind (0.8 s before). `ctl state`'s `slivers` says the list's age
+  and whether a press would be judged on it.
 - **Idle subsystems** (1.9): what a mode has no use for does not run. The Apple mode and the
   stand-down run no controller of ours (no Dock order, corner upkeep, lock poll or park
   checks); the Apple mode's closed-window sweep runs only on the list its mirror read in

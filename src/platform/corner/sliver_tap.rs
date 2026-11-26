@@ -11,8 +11,12 @@
 //! `try_lock`, never waiting: the corner zones and the parked windows ([`publish`]), and the
 //! on-screen windows near the zones, from the list the WM tick reads ([`refresh`], [`Seen`]). A press
 //! outside every zone (nearly all) passes after a few rectangle tests; one inside a zone is
-//! judged on the published list while it is fresh, and passes when it is not (the WM thread
-//! busy). Nothing in the callback asks the window server or writes the log: what it decided
+//! judged on the published list while it stands, and passes when it does not (the WM thread
+//! busy). How long it stands follows the tick's pace ([`tick_paced`], [`Seen::fresh`]): a
+//! second while the tick is brisk, the whole rest while it rests, so the tick needs no
+//! shorter rest for the tap's sake (until round rest-cost it rested 0.75 s at most while a
+//! window was parked, every wake a full pass with two window lists).
+//! Nothing in the callback asks the window server or writes the log: what it decided
 //! is noted in memory and logged by the WM thread at its next tick. A swallowed press
 //! swallows its drags and its release ([`PressGate`]). A tap macOS switched off for a
 //! timeout is switched on again at once; one switched off by user input (secure input, a
@@ -25,8 +29,8 @@
 
 use std::ffi::c_void;
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use objc2_core_foundation::{CFMachPort, CFRunLoop, kCFRunLoopCommonModes};
@@ -37,11 +41,20 @@ use objc2_core_graphics::{
 use crate::platform::tap_switch::TapSwitch;
 use crate::platform::windows::CgWindow;
 use crate::engine::geometry::{Point, Rect};
-use crate::engine::corner::sliver::{Button, Listed, Press, PressGate, Seen, Shield, near_zones, zone_owner};
+use crate::engine::corner::sliver::{Button, Listed, Press, PressGate, Seen, Shield, Tick, brisk_since, near_zones, zone_owner};
+use crate::engine::tick_pace::Pace;
 
 static SHIELD: Mutex<Option<Shield>> = Mutex::new(None);
 /// The on-screen windows near the zones, as the WM thread last read them ([`refresh`]).
 static SEEN: Mutex<Option<Seen>> = Mutex::new(None);
+/// The moment the tick's times below count from (their zero means "none").
+static EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+/// Since when the WM tick has been brisk, in ms after [`EPOCH`] plus one; 0 while it rests
+/// ([`tick_paced`]). Written by the WM thread only, read by the callback: no lock, so an
+/// event never holds up a press.
+static BRISK_MS: AtomicU64 = AtomicU64::new(1);
+/// The longest two ticks are apart at rest, in ms ([`Tick::due`]), as last paced.
+static DUE_MS: AtomicU64 = AtomicU64::new(0);
 /// What the callback decided, for the WM thread to log ([`refresh`]); bounded.
 static NOTES: Mutex<Vec<Note>> = Mutex::new(Vec::new());
 /// Most notes kept between two WM ticks.
@@ -104,9 +117,10 @@ fn gate_busy() -> bool {
 }
 
 /// Starts the tap thread once (no-op afterwards). A tap that cannot be made (no
-/// Accessibility yet) is tried again at the next start.
+/// Accessibility yet) is tried again at the next start. Never in a unit test: a real tap
+/// would filter the presses of the Mac the tests run on, judged by a fake desk's windows.
 fn start() {
-    if STARTED.swap(true, Ordering::SeqCst) {
+    if cfg!(test) || STARTED.swap(true, Ordering::SeqCst) {
         return;
     }
     let spawned = std::thread::Builder::new().name("sliver-tap".into()).spawn(|| {
@@ -225,8 +239,8 @@ pub(in crate::platform) fn secure_input_on() -> bool {
 /// What the callback decided, logged later by the WM thread.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Note {
-    /// A press on a parked window's sliver, swallowed.
-    Swallowed { id: u32, at: Point },
+    /// A press on a parked window's sliver, swallowed; how old the list it was judged on.
+    Swallowed { id: u32, at: Point, age_ms: u64 },
     /// A press in a zone, not on a sliver: passed.
     Passed { at: Point },
     /// A press in a zone passed unjudged: the published list was missing or too old.
@@ -272,6 +286,60 @@ pub fn wants_list() -> bool {
     judged_zones().is_some()
 }
 
+/// `t` in ms after [`EPOCH`] plus one (never 0).
+fn ms_of(t: Instant) -> u64 {
+    t.saturating_duration_since(*EPOCH).as_millis() as u64 + 1
+}
+
+/// The WM tick's pace as last told ([`tick_paced`]).
+fn tick() -> Tick {
+    let brisk = BRISK_MS.load(Ordering::Relaxed);
+    Tick {
+        brisk_since: (brisk != 0).then(|| *EPOCH + Duration::from_millis(brisk - 1)),
+        due: Duration::from_millis(DUE_MS.load(Ordering::Relaxed)),
+    }
+}
+
+/// From the WM thread, whenever it sets its tick's pace (after every tick, `after_tick`, and
+/// after every event): how long the callback may judge presses on the list last published
+/// follows from it ([`Seen::fresh`], [`brisk_since`]). Two atomic loads, a store when the
+/// pace changed.
+pub fn tick_paced(pace: Pace, after_tick: bool) {
+    let was = BRISK_MS.load(Ordering::Relaxed);
+    let since = (was != 0).then(|| *EPOCH + Duration::from_millis(was - 1));
+    let next = brisk_since(since, pace.at_rest(), after_tick, Instant::now()).map_or(0, ms_of);
+    if next != was {
+        BRISK_MS.store(next, Ordering::Relaxed);
+    }
+    if after_tick && pace.at_rest() {
+        let due = (pace.period() + pace.tolerance()).as_millis() as u64;
+        if DUE_MS.load(Ordering::Relaxed) != due {
+            DUE_MS.store(due, Ordering::Relaxed);
+        }
+    }
+}
+
+/// `ctl state`'s `slivers`: how the list the tap judges on stands now (`list_age_ms`, none
+/// while the tap judges nothing; `judged`: a press in a corner zone would be judged on it),
+/// and the tick's pace as the tap knows it (`tick`: "rest" or "brisk", `brisk_ms` since
+/// when; `due_ms`: the longest two ticks are apart at rest). A ctl command stirs the tick
+/// only once its reply is made, so the reply says the pace as it was before the command.
+pub fn status() -> serde_json::Value {
+    let now = Instant::now();
+    let tick = tick();
+    let (age, judged) = match SEEN.lock() {
+        Ok(seen) => (seen.as_ref().map(|s| now.saturating_duration_since(s.at).as_millis() as u64), seen.as_ref().is_some_and(|s| s.fresh(now, tick).is_some())),
+        Err(_) => (None, false),
+    };
+    serde_json::json!({
+        "list_age_ms": age,
+        "judged": judged,
+        "tick": if tick.brisk_since.is_some() { "brisk" } else { "rest" },
+        "brisk_ms": tick.brisk_since.map(|t| now.saturating_duration_since(t).as_millis() as u64),
+        "due_ms": tick.due.as_millis() as u64,
+    })
+}
+
 /// True while macOS keeps the tap off for user input (secure input): the WM tick switches it
 /// on again once secure input is over ([`refresh`]).
 pub fn off_for_secure_input() -> bool {
@@ -293,7 +361,8 @@ pub(in crate::platform) fn back_on(off_by_input: bool, last: Option<Instant>, no
 
 /// From the WM thread's tick: hands the callback the on-screen windows near the zones from
 /// `list`, the tick's own read of the window server's list (`None` when [`wants_list`] said
-/// no: the callback then passes presses unjudged), switches a tap that macOS switched off for
+/// no: the callback then passes presses unjudged; the tick's pace, told right after it,
+/// says how long the list stands: [`tick_paced`]), switches a tap that macOS switched off for
 /// user input on again once secure input is over, then logs what the callback noted since the
 /// last tick.
 pub fn refresh(list: Option<&[CgWindow]>) {
@@ -326,7 +395,9 @@ pub fn refresh(list: Option<&[CgWindow]>) {
 
 fn log_note(n: Note) {
     match n {
-        Note::Swallowed { id, at } => tracing::info!(id, x = at.x, y = at.y, "inert slivers: a press on a parked window's sliver swallowed"),
+        Note::Swallowed { id, at, age_ms } => {
+            tracing::info!(id, x = at.x, y = at.y, list_age_ms = age_ms, "inert slivers: a press on a parked window's sliver swallowed")
+        }
         Note::Passed { at } => tracing::debug!(x = at.x, y = at.y, "inert slivers: a press in the corner, not on a sliver: passed"),
         Note::Unjudged { at, age_ms } => tracing::info!(
             x = at.x,
@@ -362,7 +433,7 @@ fn on_sliver(at: Point) -> bool {
         return false;
     };
     let now = Instant::now();
-    let Some(list) = seen.as_ref().and_then(|s| s.fresh(now)) else {
+    let Some(list) = seen.as_ref().and_then(|s| s.fresh(now, tick())) else {
         let age_ms = seen.as_ref().map(|s| now.saturating_duration_since(s.at).as_millis() as u64);
         note(Note::Unjudged { at, age_ms });
         return false;
@@ -370,7 +441,10 @@ fn on_sliver(at: Point) -> bool {
     let own = std::process::id() as i32;
     let hit = shield.hits(list, at, own);
     match hit {
-        Some(id) => note(Note::Swallowed { id, at }),
+        Some(id) => {
+            let age_ms = seen.as_ref().map_or(0, |s| now.saturating_duration_since(s.at).as_millis() as u64);
+            note(Note::Swallowed { id, at, age_ms })
+        }
         None => {
             note(Note::Passed { at });
             note_zone_owner(&shield, list, at, own);

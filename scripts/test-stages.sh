@@ -9,6 +9,9 @@
 #                                          # enhanced stale handles displays screens engine
 #   scripts/test-stages.sh engine          # which window engine runs: each launch's probe and choice,
 #                                          # the fallback mid-run to the Corner engine (round sm-probe)
+#   scripts/test-stages.sh rest            # the housekeeping rests 2 s under every engine, and a press on
+#                                          # a parked window's sliver is still swallowed through a rest
+#                                          # (round rest-cost; not a default phase; SM_ENGINE=spaces: the rest only)
 #   scripts/test-stages.sh restore m6      # restore after a restart (simulated new sessions), and
 #                                          # the same-session relaunch
 #   scripts/test-stages.sh m3 safety       # some phases
