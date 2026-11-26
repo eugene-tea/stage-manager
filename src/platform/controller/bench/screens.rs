@@ -86,7 +86,7 @@ fn main_screen_goes(load: f64, keeps_ids: bool, ends_own: bool, locked: bool) ->
     let mut b = two_screens(load, |_| {});
     b.desk(|d| {
         d.locked = locked;
-        d.screen_goes_how(Goes { main: true, keeps_ids, ends_own, lets_out_ms: vec![150.0, 20_000.0] });
+        d.screen_goes_how(Goes { main: true, keeps_ids, ends_own, lets_out_ms: vec![150.0, 20_000.0], ..Goes::default() });
     });
     b.advance(30_000);
     b.desk(|d| d.locked = false);

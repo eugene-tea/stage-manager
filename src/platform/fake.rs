@@ -282,6 +282,15 @@ pub struct Goes {
     /// wave this many ms after the change, the machine's own time (`engine/spill.rs`: a
     /// moment later, and as late as 20 s after, 11-18). Empty: none is let out.
     pub lets_out_ms: Vec<f64>,
+    /// The Desktop of the screen left that an ended Desktop's windows land on (the gone
+    /// screen's, [`Self::keeps_ids`] false; the screen left's own, [`Self::ends_own`]);
+    /// `None`: the Desktop the screen left shows. Live 11-25, a virtual screen: the windows
+    /// of the Desktop that ended landed on the screen left's first Desktop, not the one shown.
+    pub lands_on: Option<u64>,
+    /// The screen left slides to [`Self::lands_on`] as the screen goes (live 11-25: a virtual
+    /// screen right of the main one went, and the main screen slid to its first Desktop,
+    /// where the gone screen's windows landed).
+    pub shows_landing: bool,
 }
 
 /// What macOS tells the app, queued until due.
@@ -870,16 +879,18 @@ impl Desk {
             let s = &mut self.screens[0];
             let own = std::mem::replace(&mut s.desktops, gone.desktops.clone());
             (s.shown, s.current, s.sliding_in, s.sliding_to) = (gone.shown, gone.current, None, None);
+            let lands = how.lands_on.unwrap_or(gone.shown);
             for w in self.windows.values_mut() {
                 if w.spaces.iter().any(|x| own.contains(x)) {
                     w.spaces.retain(|x| !own.contains(x));
-                    w.spaces.push(gone.shown);
+                    w.spaces.push(lands);
                 }
             }
         } else if how.keeps_ids {
             self.screens[0].desktops.extend(gone.desktops.iter().copied());
         }
         let (shown, main) = (self.screens[0].shown, self.screens[0].display);
+        let lands = if how.keeps_ids { shown } else { how.lands_on.unwrap_or(shown) };
         for w in self.windows.values_mut() {
             let theirs = w.spaces.iter().any(|s| gone.desktops.contains(s)) || !main.frame.contains(w.frame.center());
             if theirs {
@@ -887,8 +898,13 @@ impl Desk {
             }
             if !how.keeps_ids && w.spaces.iter().any(|s| gone.desktops.contains(s)) {
                 w.spaces.retain(|s| !gone.desktops.contains(s));
-                w.spaces.push(shown);
+                w.spaces.push(lands);
             }
+        }
+        if how.shows_landing
+            && let Some(to) = how.lands_on.filter(|to| *to != self.screens[0].shown)
+        {
+            self.slide(0, to);
         }
         // The hidden windows of the gone screen's Desktops, let out in waves.
         let hidden: Vec<u32> = self
