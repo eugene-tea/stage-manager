@@ -712,7 +712,8 @@ it let macOS slide away). The arrangement made at the press for another Desktop 
 the Space change's arrival and undone by a press that was no click or a switch the
 activation makes on the Desktop shown; the activation alone says nothing (a Dock item's may
 come at the slide's start, before the arriving Desktop's windows are listed), and with no
-notice it goes after 3 s (`DOCK_SWITCH_CAP`; the Corner engine keeps 1 s). It is moved to its park frame at the screen's corner first, while still in its
+notice it goes after 3 s (`DOCK_SWITCH_CAP`, under every engine: the 1 s the Corner engine had
+undid it before a busy Mac's notice, and the Desktop was arranged again in view). It is moved to its park frame at the screen's corner first, while still in its
 stage Space (`engine::lend_park`, as for ⌘Tab): macOS counts a window on a Desktop wherever
 it is, and at its own frame it showed before its stage's switch (under the front windows
 from the press, in front of them from the release). The park's move waits 30 ms for the app

@@ -17,11 +17,12 @@
 //!   else its frontmost in the window server's order) has its Desktop arranged at once:
 //!   macOS carries out moves of windows on a Desktop not shown (the 6T probe, 10-13), and
 //!   that Desktop's own strip pane is redrawn in its final order. The window is held as its
-//!   focus would be. No Space change within [`DOCK_SWITCH_WAIT`] undoes it. Under the
+//!   focus would be. No Space change within [`DOCK_SWITCH_CAP`] undoes it, whatever the
+//!   engine. Under the
 //!   Spaces engine the window waits off every Desktop, so its Desktop is arranged at the
 //!   press instead; that arrangement stands until its click's own end: the release (the
 //!   focus held then, nothing sent again), a press that is no click, or no Space change
-//!   within [`DOCK_SWITCH_CAP`]. No tick, focus or activation in between undoes it
+//!   within the same cap. No tick, focus or activation in between undoes it
 //!   ([`awaits_release`]). The click's activation is no word on it: it may come at the
 //!   slide's start, before any window of the arriving Desktop is listed (round
 //!   r2-lends-fix); one whose switch the model makes on the Desktop shown undoes it
@@ -68,7 +69,6 @@ use crate::platform::observe::{Observer, WindowKind};
 use crate::platform::safety::{self, ParkedEntry};
 use crate::platform::spaces::ffi::ScreenDesks;
 use crate::platform::test_press::{DOCK_PRESS_HOLD, dock_edge};
-use crate::platform::window_engine::EngineKind;
 use crate::platform::windows::{self, CgWindow};
 use crate::ui::strip_model::{self, StripSnapshot};
 
@@ -78,13 +78,11 @@ use crate::ui::strip_model::{self, StripSnapshot};
 const QUERY_AX_TIMEOUT_SECONDS: f32 = 0.05;
 
 
-/// An arrangement made at a Dock click is undone when no Space change has come this long
-/// after it (the notice comes ~0.35–0.45 s after the click). The Corner engine's, and any
-/// arrangement made for a focus the engine hid; the Spaces engine's Dock click has
-/// [`DOCK_SWITCH_CAP`].
-pub const DOCK_SWITCH_WAIT: Duration = Duration::from_millis(1000);
-
-/// The cap on an arrangement made at a Dock click under the Spaces engine (round r2-lends):
+/// The cap on an arrangement made ahead on a Desktop not shown, with no Space change yet
+/// ([`Trigger::away`]: at a Dock click, or for a focus the engine hid), whatever the engine
+/// (round r2-lends for the Spaces engine's Dock click; every engine and trigger since round
+/// arranged-ahead: what the cap waits for, a busy Mac's late Space change notice, is not the
+/// engine's):
 /// the Space change notice confirms it; a press that is no click refutes it at the release,
 /// and the click's activation switching a stage on the Desktop shown, or the user acting
 /// there, undoes it ([`Controller::forget_held`]). The activation alone refutes nothing:
@@ -96,8 +94,12 @@ pub const DOCK_SWITCH_WAIT: Duration = Duration::from_millis(1000);
 /// Time is left for a click with no notice; the arrangement is on a Desktop not shown
 /// meanwhile. As long as the click's focus is held
 /// ([`crate::engine::focus_replay::FOCUS_REPLAY_MAX`]), past which nothing held says it any
-/// more. The 1 s it replaces undid the arrangement before a busy Mac's notice, and the
-/// arrival arranged the Desktop again in view.
+/// more. The 1 s it replaces (`DOCK_SWITCH_WAIT`, sized for a quiet Mac's notice 0.35–0.45 s
+/// after the click) undid the arrangement before a busy Mac's notice, and the arrival
+/// arranged the Desktop again in view (on the bench under the Corner engine: an app 0.4 s
+/// slow to take the activation at load 3). Under the Corner engine the arrangement is real
+/// moves of windows on the Desktop not shown: a click that goes nowhere leaves them 2 s
+/// longer where nobody sees them, and the undo puts each back where it was.
 pub const DOCK_SWITCH_CAP: Duration = Duration::from_millis(3000);
 
 /// When a Desktop was arranged ahead.
@@ -714,7 +716,7 @@ fn contradicts(held: Option<Wanted>, window: WindowId, pid: i32, resolve: impl F
 /// (`press_down`: the press is still the one kept, no mouse-up yet). Its focus is held only at
 /// the release, so until then nothing held says anything about it: it ends at the release (a
 /// click holds its focus, a press that is no click undoes it), or with no Space change
-/// [`DOCK_SWITCH_WAIT`] after it (a release the monitor missed).
+/// [`DOCK_SWITCH_CAP`] after it (a release the monitor missed).
 fn awaits_release(at_press: bool, press_down: bool) -> bool {
     at_press && press_down
 }
@@ -800,9 +802,8 @@ fn notice_step(overview: bool, ahead_listed: Option<bool>) -> NoticeStep {
 }
 
 /// Why an arrangement is undone at a tick, if it is: never while a Space change settles; one
-/// made at a Dock click with no Space change `cap` after it ([`DOCK_SWITCH_WAIT`],
-/// [`DOCK_SWITCH_CAP`]); any other whose
-/// focus is no longer held (or what is held says otherwise).
+/// made on a Desktop not shown with no Space change `cap` after it ([`DOCK_SWITCH_CAP`]);
+/// any other whose focus is no longer held (or what is held says otherwise).
 fn expire_step(trigger: Trigger, pending: bool, changed: bool, waited: Duration, cap: Duration, contradicted: bool) -> Option<&'static str> {
     if pending {
         None
@@ -1681,7 +1682,7 @@ impl Controller {
     /// owner's log of 11-15 06:32:34: an active app, its window in a stage of Desktop 1; the
     /// second click went). The Corner engine's parked window is on its Desktop all along:
     /// arranged at the release as before. A press that is no click undoes it at the release
-    /// ([`Self::press_not_click`]); no Space change within [`DOCK_SWITCH_WAIT`] as at a click.
+    /// ([`Self::press_not_click`]); no Space change within [`DOCK_SWITCH_CAP`] as at a click.
     /// Until the release nothing else does ([`awaits_release`]): its focus is held only then.
     fn arrange_at_press(&mut self, ob: &Observer, item: &DockItem, window: WindowId, now: Instant) {
         if !self.engine.off_every_desktop(window) || self.frozen() || self.ahead.is_some() {
@@ -2138,24 +2139,13 @@ impl Controller {
         let changed = self.space_changes != sent.changes_at;
         let waited = now.saturating_duration_since(sent.sent_at);
         let away = sent.trigger.away() && !changed;
-        let (name, cap) = self.dock_switch_cap(sent.trigger);
+        let cap = DOCK_SWITCH_CAP;
         if let Some(why) = expire_step(sent.trigger, self.phase.changing(), changed, waited, cap, self.ahead_contradicted(now)) {
             // Undone for want of a Space change: the wait ended by its cap.
             if away && waited >= cap {
-                margin::wait(name, waited, cap, End::Cap);
+                margin::wait("DOCK_SWITCH_CAP", waited, cap, End::Cap);
             }
             self.undo_ahead(ob, why);
-        }
-    }
-
-    /// The cap on an arrangement made ahead (`trigger`) with no Space change, and its name:
-    /// [`DOCK_SWITCH_CAP`] for a Dock click under the Spaces engine, else
-    /// [`DOCK_SWITCH_WAIT`].
-    fn dock_switch_cap(&self, trigger: Trigger) -> (&'static str, Duration) {
-        if trigger == Trigger::DockClick && self.engine.kind() == EngineKind::Spaces {
-            ("DOCK_SWITCH_CAP", DOCK_SWITCH_CAP)
-        } else {
-            ("DOCK_SWITCH_WAIT", DOCK_SWITCH_WAIT)
         }
     }
 
@@ -2446,7 +2436,7 @@ mod tests {
         fn tick(&mut self, t: Duration) {
             let Some(_) = self.ahead else { return };
             let waited = t.saturating_sub(self.sent_at);
-            if let Some(why) = expire_step(Trigger::DockClick, false, self.changed, waited, DOCK_SWITCH_WAIT, self.contradicted()) {
+            if let Some(why) = expire_step(Trigger::DockClick, false, self.changed, waited, DOCK_SWITCH_CAP, self.contradicted()) {
                 self.undo(why);
             }
         }
@@ -2517,7 +2507,7 @@ mod tests {
         // The cause: nothing is held between the press and the release, and nothing held
         // contradicts any arrangement.
         assert!(contradicts(None, WINDOW, PID, PressRun::resolve));
-        assert_eq!(expire_step(Trigger::DockClick, false, false, ms(1), DOCK_SWITCH_WAIT, true), Some("its Desktop did not come"));
+        assert_eq!(expire_step(Trigger::DockClick, false, false, ms(1), DOCK_SWITCH_CAP, true), Some("its Desktop did not come"));
         // Replayed with the press not counted (the old reading): undone at +31 ms, sent again
         // at the release, too late for macOS.
         let mut run = PressRun::press(true, ms(30));
@@ -2533,16 +2523,16 @@ mod tests {
         let ms = Duration::from_millis;
         let mut run = PressRun::press(true, ms(30));
         run.release(ms(120));
-        run.tick(ms(30) + DOCK_SWITCH_WAIT - ms(1));
+        run.tick(ms(30) + DOCK_SWITCH_CAP - ms(1));
         assert_eq!(run.undone, None);
-        run.tick(ms(30) + DOCK_SWITCH_WAIT);
+        run.tick(ms(30) + DOCK_SWITCH_CAP);
         assert_eq!(run.undone, Some("no Space change came after the Dock click (or the focus it was arranged for)"));
         assert_eq!(run.sent, 1);
         // A release the monitor never saw: the wait ends it all the same.
         let mut run = PressRun::press(true, ms(30));
         run.tick(ms(500));
         assert_eq!(run.undone, None, "still pressed for all we know");
-        run.tick(ms(30) + DOCK_SWITCH_WAIT);
+        run.tick(ms(30) + DOCK_SWITCH_CAP);
         assert!(run.undone.is_some(), "no Space change: undone with the button still counted down");
     }
 
@@ -2619,17 +2609,19 @@ mod tests {
     fn a_dock_click_with_no_space_change_after_it_is_undone() {
         let ms = Duration::from_millis;
         let dock = Trigger::DockClick;
-        assert_eq!(expire_step(dock, false, false, ms(400), DOCK_SWITCH_WAIT, false), None, "the slide is under way");
-        assert!(expire_step(dock, false, false, DOCK_SWITCH_WAIT, DOCK_SWITCH_WAIT, false).is_some(), "no Space change in a second");
-        assert_eq!(expire_step(dock, false, false, ms(1500), DOCK_SWITCH_CAP, false), None, "the Spaces engine's Dock click: a busy Mac's notice still to come");
-        assert!(expire_step(dock, false, false, DOCK_SWITCH_CAP, DOCK_SWITCH_CAP, false).is_some(), "the cap");
-        assert_eq!(expire_step(dock, false, true, ms(1500), DOCK_SWITCH_WAIT, false), None, "the change came: the arrival decides");
-        assert_eq!(expire_step(dock, true, false, ms(1500), DOCK_SWITCH_WAIT, true), None, "never while a change settles");
-        assert!(expire_step(Trigger::Notice, false, true, ms(10), DOCK_SWITCH_WAIT, true).is_some(), "the hold is gone");
-        assert_eq!(expire_step(Trigger::Notice, false, false, ms(5000), DOCK_SWITCH_WAIT, false), None);
-        // Arranged for a focus the engine hid off its Desktop: away as a Dock click's is.
+        let cap = DOCK_SWITCH_CAP;
+        assert_eq!(expire_step(dock, false, false, ms(400), cap, false), None, "the slide is under way");
+        assert_eq!(expire_step(dock, false, false, ms(1500), cap, false), None, "a busy Mac's notice still to come, whatever the engine");
+        assert!(expire_step(dock, false, false, cap, cap, false).is_some(), "the cap");
+        assert_eq!(expire_step(dock, false, true, ms(4500), cap, false), None, "the change came: the arrival decides");
+        assert_eq!(expire_step(dock, true, false, ms(4500), cap, true), None, "never while a change settles");
+        assert!(expire_step(Trigger::Notice, false, true, ms(10), cap, true).is_some(), "the hold is gone");
+        assert_eq!(expire_step(Trigger::Notice, false, false, ms(5000), cap, false), None);
+        // Arranged for a focus the engine hid off its Desktop: away as a Dock click's is,
+        // and on the same cap.
         assert!(Trigger::Hidden.away());
-        assert!(expire_step(Trigger::Hidden, false, false, DOCK_SWITCH_WAIT, DOCK_SWITCH_WAIT, false).is_some(), "no Space change came for the focus");
+        assert_eq!(expire_step(Trigger::Hidden, false, false, ms(1500), cap, false), None);
+        assert!(expire_step(Trigger::Hidden, false, false, cap, cap, false).is_some(), "no Space change came for the focus");
     }
 
     #[test]

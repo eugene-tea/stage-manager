@@ -612,7 +612,7 @@ fn activation_that_slides(load: f64) -> Run {
     Run::of(&b, out)
 }
 
-/// The same by a Dock click (the Desktop arranged ahead at the click, `DOCK_SWITCH_WAIT`).
+/// The same by a Dock click (the Desktop arranged ahead at the click, `DOCK_SWITCH_CAP`).
 fn dock_click_that_slides(load: f64) -> Run {
     let mut b = both_desktops_known(EngineKind::Corner, load, |d| {
         d.add_app(C, "com.example.charlie", "Charlie");
@@ -712,11 +712,16 @@ fn dock_click_that_goes_nowhere(load: f64) -> Run {
 fn a_dock_click_to_another_desktop_on_a_busy_mac() {
     let ahead = "the stage left on Desktop 2 never shown; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
     let late = "the stage left on Desktop 2 shown as it slid in; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
-    // TIME DECIDES: DOCK_SWITCH_WAIT (1 s under the Corner engine). At load 3 Charlie takes
-    // the activation 1.2 s after the click: the arrangement was undone just before, and the
-    // Desktop slides in with the stage left in front, arranged again in view.
-    expect(dock_click_that_slides_late, [ahead, late, late]);
-    let nowhere = "arranged true, stood about 1 s, 4 moves in all, Desktop 2 as it was true, the Desktop in view changed false; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    // TIME DECIDES: DOCK_SWITCH_CAP (3 s under every engine since round arranged-ahead; the
+    // Corner engine's was 1 s, and at load 3, Charlie taking the activation 1.2 s after the
+    // click, the arrangement was undone just before and the Desktop slid in with the stage
+    // left in front, arranged again in view). At load 10 the activation comes 4 s after the
+    // click, past the cap.
+    expect(dock_click_that_slides_late, [ahead, ahead, late]);
+    // TIME DECIDES: DOCK_SWITCH_CAP, as meant: with no activation and no Space change the cap
+    // is the only end (about 1 s before). Nothing shows of it: the moves are on the Desktop
+    // not shown, and the undo puts every window back where it was.
+    let nowhere = "arranged true, stood about 3 s, 4 moves in all, Desktop 2 as it was true, the Desktop in view changed false; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
     expect(dock_click_that_goes_nowhere, [nowhere, nowhere, nowhere]);
 }
 
@@ -1071,7 +1076,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("Desktop keys between two known Desktops (Spaces)", "engine/slide_hold.rs, 10-23", desktop_keys_between_known_desktops),
     ("the first visit to a Desktop by its key (Spaces)", "engine/slide_hold.rs, 11-15", first_visit_to_a_desktop),
     ("an activation that slides to another Desktop (Corner)", "controller/arrival.rs, 10-13", activation_that_slides),
-    ("a Dock click that slides to another Desktop (Corner)", "controller/arrival.rs, DOCK_SWITCH_WAIT", dock_click_that_slides),
+    ("a Dock click that slides to another Desktop (Corner)", "controller/arrival.rs, DOCK_SWITCH_CAP", dock_click_that_slides),
     ("the same, its app 0.4 s slow to take the activation (Corner)", "audit 11-25 H3, the cap on an arrangement made ahead", dock_click_that_slides_late),
     ("the same click going nowhere, its app hung (Corner)", "audit 11-25 H3, the cap on an arrangement made ahead", dock_click_that_goes_nowhere),
     ("a Dock click whose activation leads the slide (Spaces)", "live 11-21 Dock arrivals, r2-lends-fix", dock_click_whose_activation_leads_the_slide),

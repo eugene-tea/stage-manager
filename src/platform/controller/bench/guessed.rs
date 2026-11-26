@@ -14,7 +14,9 @@
 //! corner's cover goes to the strip ahead of the pictures, and one scenario where it does
 //! not; `ahead` where a press on a Dock item, the pointer in the Dock or a hotkey's modifiers
 //! had the pictures taken before the switch, in the two Dock clicks of round switch-pictures
-//! and four scenarios of its own).
+//! and four scenarios of its own; and the scenarios of round arranged-ahead, printed with the
+//! reads off as each of its parts left them: the cap on an arrangement made ahead, 3 s under
+//! every engine, in the two Dock clicks to another Desktop on a busy Mac).
 //! A Mac where the reads do not work behaves as before. Beside each
 //! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!
