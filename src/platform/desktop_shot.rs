@@ -319,6 +319,8 @@ struct State {
     patch: Option<Still>,
     /// The screen was locked or the display asleep at the last plan ([`back`]).
     away: bool,
+    /// Finder's icons in the corner at the last still asked for ([`icons_differ`]).
+    asked_icons: Option<Option<Vec<Rect>>>,
 }
 
 /// Every screen's state, by its `CGDirectDisplayID` (round displays-2).
@@ -383,6 +385,12 @@ pub fn keep_fresh(screen: u32, key: Key, region: Rect, moment: Moment, wants: Wa
         }
         s.tried = Some(now);
         s.taking = Some(now);
+        // Other icons in the corner than at the last still: the window server's call is
+        // proven afresh on them (an icon is drawn over the picture).
+        if icons_differ(s.asked_icons.as_ref(), &key.icons) {
+            desktop_fast::unproven(screen);
+        }
+        s.asked_icons = Some(key.icons.clone());
         Some(s.generation)
     })
     .flatten();
@@ -465,6 +473,12 @@ pub fn crop(still: &CGImage, region: Rect, scale: f64, rect: Rect) -> Option<CFR
 /// dropped).
 pub fn touched(screen: u32, now: Instant) {
     with_state(screen, |s| add_mark(s, now + AGAIN_AFTER_TOUCH));
+}
+
+/// Whether Finder's icons in the corner now (`now`) are others than at the last still asked
+/// for (`asked`; `None`: none asked yet in this run, nothing to compare).
+fn icons_differ(asked: Option<&Option<Vec<Rect>>>, now: &Option<Vec<Rect>>) -> bool {
+    asked.is_some_and(|a| a != now)
 }
 
 /// The screen is unlocked or the display awake again after being `away` (WM thread, at every
@@ -751,6 +765,16 @@ mod tests {
         assert!(due(Some(&slow), &calm, region, &[touch], touch));
         let fast = meta(calm.clone(), now);
         assert!(due(Some(&fast), &calm, region, &[], now + REFRESH_EVERY));
+    }
+
+    #[test]
+    fn other_icons_in_the_corner_prove_the_window_servers_still_afresh() {
+        let icon = Some(vec![Rect::new(2400.0, 1300.0, 100.0, 100.0)]);
+        assert!(!icons_differ(None, &icon), "the first still of the run is proven anyway");
+        assert!(!icons_differ(Some(&icon), &icon));
+        assert!(icons_differ(Some(&Some(vec![])), &icon), "an icon came into the corner");
+        assert!(icons_differ(Some(&icon), &Some(vec![])));
+        assert!(icons_differ(Some(&None), &icon), "not known then, known now");
     }
 
     /// After an unlock or a wake a still is taken again once the fade is over and once more

@@ -33,8 +33,12 @@
 //!   the first still on a screen is taken both ways and stands only when the two agree
 //!   ([`compare`]: the same size, and on a grid drawn in one colour space a mean difference
 //!   of at most [`MEAN_TOLERANCE`] and no cell further than [`CELL_TOLERANCE`]). Proven is
-//!   kept by screen, display frame, scale and colour space, and forgotten when the wallpaper
-//!   read changes ([`unproven`]); until then every still is the window server's alone.
+//!   kept by screen for the display's frame, its scale, the still's colour space and the
+//!   very windows composited ([`Proof`]), and forgotten when the wallpaper read changes or
+//!   Finder's icons in the corner do ([`unproven`]: a still proven on a bare corner says
+//!   nothing of an icon drawn over the picture). Each of those takes a new still through
+//!   ScreenCaptureKit today, so a proof costs nothing more than before; with nothing
+//!   changing every still is the window server's alone.
 //! - **Its rest** ([`Health`]): [`BAD_STRIKES`] bad stills in a row (nothing handed back, not
 //!   proven the desktop, or a proof that fails) rest the call for [`OFF_FOR`], logged once
 //!   at info; ScreenCaptureKit takes every still meanwhile, then the call is tried again. A
@@ -204,13 +208,15 @@ impl Health {
     }
 }
 
-/// What a still was proven for: the display's frame, its pixels a point and the still's
-/// colour space. Another of any of them is proven afresh.
+/// What a still was proven for: the display's frame, its pixels a point, the still's colour
+/// space and the windows composited (a widget's window come or gone, another Desktop's
+/// picture). Another of any of them is proven afresh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Proof {
     display: Rect,
     scale: f64,
     space: String,
+    ids: Vec<u32>,
 }
 
 /// How far two stills of the same corner are apart ([`diff`]), of 255.
@@ -388,7 +394,7 @@ fn still(screen: u32, region: Rect) -> Result<Fast, Miss> {
     let scale = judge(&facts).map_err(Miss::NotTheDesktop)?;
     let bounds = CGDisplayBounds(screen);
     let display = Rect::new(bounds.origin.x, bounds.origin.y, bounds.size.width, bounds.size.height);
-    let proof = Proof { display, scale, space: wallpaper::space_name(&image) };
+    let proof = Proof { display, scale, space: wallpaper::space_name(&image), ids };
     Ok(Fast { image, scale, proof })
 }
 
@@ -442,7 +448,8 @@ fn proven(screen: u32, proof: &Proof) -> bool {
 }
 
 /// The wallpaper read of `screen` names another picture, frame or look (main thread,
-/// [`super::desktop_shot::wallpaper_changed`]): the next still there is proven afresh.
+/// [`super::desktop_shot::wallpaper_changed`]), or Finder's icons in its corner changed
+/// ([`super::desktop_shot::keep_fresh`]): the next still there is proven afresh.
 pub fn unproven(screen: u32) {
     if let Some(s) = route().screens.get_mut(&screen) {
         s.proof = None;
@@ -777,6 +784,17 @@ mod tests {
         assert!(!compare(&a, &holed).expect("compared").same(), "the icons only");
         let small = pixels::tests::picture(320, 320, [0.2, 0.5, 0.8, 1.0], false);
         assert_eq!(compare(&a, &small), Err("the two stills are not the same size"));
+    }
+
+    /// Proven for one set of windows on one display says nothing of another.
+    #[test]
+    fn a_proof_is_for_its_display_scale_colour_space_and_windows() {
+        let p = Proof { display: MAIN, scale: 2.0, space: "kCGColorSpaceDisplayP3".into(), ids: vec![3, 6] };
+        assert_eq!(p, p.clone());
+        assert_ne!(p, Proof { ids: vec![3, 5, 6], ..p.clone() }, "a widget's window came into the corner");
+        assert_ne!(p, Proof { scale: 1.0, ..p.clone() });
+        assert_ne!(p, Proof { space: "kCGColorSpaceSRGB".into(), ..p.clone() });
+        assert_ne!(p, Proof { display: Rect::new(0.0, 0.0, 1920.0, 1080.0), ..p.clone() });
     }
 
     #[test]
