@@ -205,9 +205,13 @@ fn hides_after_a_screen_went_and_a_screen_back() {
     expect(back_desktop_ended, [&back, &back, &back]);
     // The Desktop kept under its id: a hide 2 s or 36 s after the change takes the model's
     // Desktop, whatever the clock says, and with the screen back nothing disagrees (before:
-    // TIME DECIDED, and two windows homed on a Desktop the model did not have them on).
+    // TIME DECIDED, and two windows homed on a Desktop the model did not have them on). The
+    // screen left shows its own front again (Bravo's 12) once the gone screen's front, which
+    // the adoption had brought in front there, went on to the gone screen's own Desktop
+    // (`Model::carry_stages`; before: nothing in front there, `shows [21]`).
+    let kept = format!("{STAGES}; shows [12, 21]; hidden but on a Desktop []; homes [(11, Some(1)), (22, Some(1)), (23, Some(1))]; disagree 0 shown 0 homes");
     expect(hides_after_ids_kept, [&back, &back, &back]);
-    expect(back_ids_kept, [&back, &back, &back]);
+    expect(back_ids_kept, [&kept, &kept, &kept]);
 }
 
 /// Every scenario here, for the load table.
