@@ -565,10 +565,10 @@ impl Command {
             }
             ["debug-switcher"] => Ok(Self::DebugSwitcher),
             ["debug-mission-control", rest @ ..] => match rest {
-                ["status" | "lend" | "back"] | ["lend", "card"] | ["mode", "off" | "shown" | "key" | "config"] => {
+                ["status" | "lend" | "back" | "launch"] | ["lend", "card"] | ["mode", "off" | "shown" | "key" | "config"] => {
                     Ok(Self::DebugMissionControl(rest.iter().map(|w| (*w).to_string()).collect()))
                 }
-                _ => Err("debug-mission-control takes status, lend [card], back, or mode off|shown|key|config".into()),
+                _ => Err("debug-mission-control takes status, launch, lend [card], back, or mode off|shown|key|config".into()),
             },
             ["debug-cmd-tab", "result"] => Ok(Self::DebugCmdTab(CmdTabProbe::Result)),
             ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
