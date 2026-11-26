@@ -512,8 +512,8 @@ fn remove_now(ghost: &Ghost) {
 
 /// Whether a cover of the park corner sent ahead of its transition is drawn now, or why not:
 /// the strip draws no motion (`draws`: animation on, no full-screen Space), the controller
-/// stopped waiting for this transition (`given_up`), or a transition runs (`running`: its
-/// own cover is over the corner until the new one takes over).
+/// stopped waiting for this transition (`given_up`), or a transition runs (`running`: the
+/// overlay is its own until the new transition cuts it short and draws its cover itself).
 fn draws_ahead(draws: bool, given_up: bool, running: bool) -> Result<(), &'static str> {
     match (draws, given_up, running) {
         (false, ..) => Err("no motion is drawn"),
@@ -2303,8 +2303,7 @@ mod tests {
     }
 
     /// Round picture-wait: a cover sent ahead of its transition is drawn only where the
-    /// transition's own would be, and never under a transition still running (its cover is
-    /// over the corner already).
+    /// transition's own would be, and never into a transition still running.
     #[test]
     fn a_cover_ahead_is_drawn_only_where_its_transition_would_draw() {
         assert_eq!(draws_ahead(true, false, false), Ok(()));
