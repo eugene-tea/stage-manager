@@ -138,8 +138,9 @@ fn stirs(cmd: &WmCommand) -> bool {
 
 /// Sets the tick's next firing for its pace now ([`tick_pace::retime`]): after a tick
 /// (`after_tick`), and after every event (the next tick comes sooner when it must). The
-/// rest's cap is asked after a tick only (the inert slivers' answer takes the lock their tap
-/// tries at every press).
+/// rest is asked after a tick only. The inert slivers' tap is told the pace each time: how
+/// long it judges presses on the tick's list follows from it
+/// ([`super::corner::sliver_tap::tick_paced`]; no lock, the tap tries its own at every press).
 fn pace_tick(after_tick: bool) {
     let now = clock::now();
     let pace = STATE.with(|s| {
@@ -151,6 +152,7 @@ fn pace_tick(after_tick: bool) {
         Some(st.pace.pace(now, st.tick_waits(now), st.rest))
     });
     let Some(pace) = pace else { return };
+    super::corner::sliver_tap::tick_paced(pace, after_tick);
     let was = TICK_STATUS.lock().ok().and_then(|mut s| {
         if after_tick {
             match pace {
