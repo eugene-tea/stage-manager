@@ -628,6 +628,98 @@ fn dock_click_that_slides(load: f64) -> Run {
     Run::of(&b, out)
 }
 
+/// Charlie's window on Desktop 2 beside Alpha's and Bravo's, Desktop 2 left with Alpha's
+/// stage in front (the Corner engine: Charlie's and Bravo's windows there wait in the corner).
+fn charlie_on_desktop_2(load: f64) -> Bench {
+    both_desktops_known(EngineKind::Corner, load, |d| {
+        d.add_app(C, "com.example.charlie", "Charlie");
+        d.add_window(14, C, frame(4), D2);
+        d.raise(13);
+        d.raise(15);
+        d.raise(11);
+        d.raise(12);
+    })
+}
+
+/// Time moves on by `ms`, 10 ms at a time: for how long of it a person saw window `id`
+/// (listed on screen, out of the park zone).
+pub(super) fn seen_for(b: &mut Bench, id: u32, ms: u64) -> u64 {
+    let mut seen = 0;
+    for _ in 0..ms / 10 {
+        b.advance(10);
+        if b.on_screen().contains(&id) {
+            seen += 10;
+        }
+    }
+    seen
+}
+
+/// Whether the stage left on a Desktop showed while that Desktop slid in, in words.
+pub(super) fn left_shown(ms: u64) -> &'static str {
+    if ms == 0 { "never shown" } else { "shown as it slid in" }
+}
+
+/// Audit engine-uniformity 11-25, H3 (`controller/arrival.rs`, the cap on an arrangement made
+/// ahead): the Dock click of [`dock_click_that_slides`] on a busy Mac, Charlie taking the
+/// activation 0.4 s late (times the load), so the Space change's notice comes later than the
+/// cap allows at some load. An arrangement undone before its notice leaves the stage that was
+/// in front on Desktop 2 (Alpha's) showing as Desktop 2 slides in, arranged again in view.
+fn dock_click_that_slides_late(load: f64) -> Run {
+    let mut b = charlie_on_desktop_2(load);
+    b.desk(|d| d.apps.get_mut(&C).expect("Charlie").activates_ms = Some(400.0));
+    b.dock_click(C, 90);
+    let left = seen_for(&mut b, 13, 12_000);
+    let out = format!("the stage left on Desktop 2 {}; {}", left_shown(left), seen(&mut b));
+    Run::of(&b, out)
+}
+
+/// The same click going nowhere: Charlie never takes the activation (hung), so no Desktop
+/// slides. The arrangement on Desktop 2, not shown, stands until its cap and is undone:
+/// how long it stood, whether Desktop 2 is as it was after (every window at its frame of
+/// before, Alpha's stage in front there), how many moves it took in all, and whether anything
+/// changed on the Desktop in view meanwhile.
+fn dock_click_that_goes_nowhere(load: f64) -> Run {
+    let mut b = charlie_on_desktop_2(load);
+    b.desk(|d| d.apps.get_mut(&C).expect("Charlie").activates_ms = Some(10_000_000.0));
+    let there = b.space_of(13).expect("Desktop 2");
+    let frames = |b: &mut Bench| b.desk(|d| [13, 14, 15].map(|id| d.windows[&id].frame));
+    let before = frames(&mut b);
+    b.dock_click(C, 90);
+    b.advance(100);
+    let arranged = b.front_in(there) == Some(vec![14]);
+    let (mut stood, mut here_changed) = (100, false);
+    while b.front_in(there) == Some(vec![14]) && stood < 8000 {
+        b.advance(10);
+        stood += 10;
+        here_changed |= b.on_screen().into_iter().collect::<Vec<_>>() != [12];
+    }
+    b.advance(8000);
+    let as_it_was = frames(&mut b) == before && b.front_in(there) == Some(vec![13]);
+    let moves = b.calls().iter().filter(|c| matches!(c, fake::Call::Frame(..))).count();
+    let stood = match stood {
+        0..=1500 => "about 1 s",
+        1501..=3500 => "about 3 s",
+        _ => "longer",
+    };
+    let out = format!(
+        "arranged {arranged}, stood {stood}, {moves} moves in all, Desktop 2 as it was {as_it_was}, the Desktop in view changed {here_changed}; {}",
+        seen(&mut b)
+    );
+    Run::of(&b, out)
+}
+
+#[test]
+fn a_dock_click_to_another_desktop_on_a_busy_mac() {
+    let ahead = "the stage left on Desktop 2 never shown; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
+    let late = "the stage left on Desktop 2 shown as it slid in; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
+    // TIME DECIDES: DOCK_SWITCH_WAIT (1 s under the Corner engine). At load 3 Charlie takes
+    // the activation 1.2 s after the click: the arrangement was undone just before, and the
+    // Desktop slides in with the stage left in front, arranged again in view.
+    expect(dock_click_that_slides_late, [ahead, late, late]);
+    let nowhere = "arranged true, stood about 1 s, 4 moves in all, Desktop 2 as it was true, the Desktop in view changed false; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(dock_click_that_goes_nowhere, [nowhere, nowhere, nowhere]);
+}
+
 /// Live 11-21, `spaces --auto`, "Dock arrival N of 3" (round r2-lends-fix): a Dock click on
 /// Alpha, whose only window waits in a hidden stage of Desktop 1, from Desktop 2; Desktop 1
 /// is arranged at the press (Alpha's stage in front there, Bravo's, the stage left, hidden).
@@ -980,6 +1072,8 @@ pub(super) const ALL: &[Scenario] = &[
     ("the first visit to a Desktop by its key (Spaces)", "engine/slide_hold.rs, 11-15", first_visit_to_a_desktop),
     ("an activation that slides to another Desktop (Corner)", "controller/arrival.rs, 10-13", activation_that_slides),
     ("a Dock click that slides to another Desktop (Corner)", "controller/arrival.rs, DOCK_SWITCH_WAIT", dock_click_that_slides),
+    ("the same, its app 0.4 s slow to take the activation (Corner)", "audit 11-25 H3, the cap on an arrangement made ahead", dock_click_that_slides_late),
+    ("the same click going nowhere, its app hung (Corner)", "audit 11-25 H3, the cap on an arrangement made ahead", dock_click_that_goes_nowhere),
     ("a Dock click whose activation leads the slide (Spaces)", "live 11-21 Dock arrivals, r2-lends-fix", dock_click_whose_activation_leads_the_slide),
     ("a Dock click on the app in front, its other window in a hidden stage of another Desktop (Spaces)", "controller/arrival.rs, arrange_at_press", dock_click_on_the_app_in_front_no_tab),
     ("the same, a tab not selected of it waiting", "controller/arrival.rs, waits_elsewhere, live 11-23", dock_click_on_the_app_in_front_with_a_tab_waiting),
