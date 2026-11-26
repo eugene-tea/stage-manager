@@ -101,14 +101,15 @@ impl Controller {
 
     /// Why the tick stays brisk for the engine's upkeep ([`Controller::tick_waits`]): its
     /// retries at their old pace. The Corner engine: strays parked again, failed restores
-    /// retried, the patch planned again after a focus. The Spaces engine: strays hidden
-    /// again, shows owed.
+    /// retried (never one that only waits for its Desktop to show or its app to be unhidden:
+    /// [`super::corner::unrestored::only_waits`]), the patch planned again after a focus. The
+    /// Spaces engine: strays hidden again, shows owed.
     pub(super) fn upkeep_tick_waits(&self, now: Instant) -> Option<&'static str> {
         match self.engine.kind() {
             EngineKind::Corner => {
                 if self.corner.strays.values().any(|s| !s.gave_up) {
                     Some("parked windows out of the corner")
-                } else if !self.corner.unrestored.is_empty() {
+                } else if self.corner.unrestored.values().any(|u| !u.waits) {
                     Some("shows owed")
                 } else if self.corner.patch_fast_until.is_some_and(|t| now < t) {
                     Some("the corner patch after a focus")
