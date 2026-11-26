@@ -24,6 +24,9 @@
 - In the default mode, Mission Control and App Exposé opening and closing are followed at
   once; before, up to a second later, two with the Mac at rest.
 - `[windows] mission_control_key_keeps_stage = true` works in the default mode too.
+- In the default mode, a hidden window that its app keeps moving back onto the screen joins
+  the stage in front after a few tries, and its card is updated. Before, it stayed on screen
+  with no card, or was sent to the corner again and again.
 
 ## 1.9.2 — 2026-11-24
 

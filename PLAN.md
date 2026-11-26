@@ -259,8 +259,6 @@ was left behind for no reason of the mode.
 - **A Dock click's arrangement is undone after 1 s** under the Accessibility engine, 3 s under
   Spaces; the reason for 3 s (a busy Mac's late notice) is not the mode's. One cap; and
   whether the Accessibility engine can arrange at the press as Spaces does.
-- **A hidden window found shown is given up after four tries** under the Accessibility engine
-  and then stays in view, counted hidden, with no card; the Spaces engine never gives up.
 - **Smaller.** The wait for a switch's pictures (160 ms) is sized for ScreenCaptureKit, not for
   the window server's capture; the landing variants can be tried only with `engine = "spaces"`;
   the Spaces engine's lends keep their own copy of the watch that brings Mission Control's

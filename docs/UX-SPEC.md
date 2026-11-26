@@ -738,6 +738,19 @@ never probes, and is the default (GUIDE, Troubleshooting); `"spaces"` runs the p
 every launch and takes the Spaces way wherever it passes. The two are measured against each
 other in "Window engines measured", below.
 
+**A hidden window its app keeps showing (the park corner).** Apple's hidden windows are out
+of their apps' reach. A parked one is not: an app may move it back where it had it (one
+restoring its saved bounds, one re-centring its window). Such a window is parked again once
+it rests, four times at most, the tries 0.5, 1 and 2 s apart; each try shows, the window
+going to the corner and coming back. If its app moves it back every time, it joins the stage
+in front where it is, as a window you focus or drag out of the corner does at once, and its
+card loses it (the card goes if it held nothing else): on the bench, about 5 s after the app
+first moved it back. It is not parked again for that until a switch away from its new
+stage. A window the app moves back fewer times stays hidden. Before (audit 11-25), it was
+given up after the tries and stayed in view with no card, counted hidden; an app slower than
+the tick to move it back had it parked again for good. In the Spaces way a hide moves
+nothing, so an app has nothing to move back.
+
 **Updates.** Apple's Stage Manager updates with macOS; ours updates itself (GUIDE, Updates).
 A downloaded update also installs when you quit Stage Manager: the menu's Quit, or ⌘Q in
 Settings and About. It then stays closed (no relaunch: the user asked it to stop). Never at a
