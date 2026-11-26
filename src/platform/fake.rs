@@ -1884,6 +1884,19 @@ impl Desk {
         self.post(delays::SWITCHER_SHOWS, Notice::Switcher("AXCreated"));
     }
 
+    /// Another Tab with the switcher up: its selection moves on one; once its list shows, the
+    /// Dock says so (`AXSelectedChildrenChanged`, observed live 11-15:
+    /// `controller/switcher.rs`, `NOTICES`).
+    pub fn switcher_steps(&mut self) {
+        if self.switcher.pids.is_empty() {
+            return;
+        }
+        self.switcher.selected = (self.switcher.selected + 1) % self.switcher.pids.len();
+        if self.switcher.shown {
+            self.post(1.0, Notice::Switcher("AXSelectedChildrenChanged"));
+        }
+    }
+
     /// What the key tap heard while it is armed for ⌘Tab's switcher and hears: forwarded as
     /// the real tap does (`WmCommand::MissionInput`, stamped at its callback). Nothing when
     /// the tap is not armed or macOS refused it.

@@ -253,7 +253,9 @@ app's activation (up to 3 s after ⌘'s release, 5 s after a Dock press) and goe
 at Escape, at a press that was no click, or when another app comes in front. An app whose
 only window waits in a hidden stage of another Desktop is asked its focused window at its
 activation (within 50 ms), that window's Desktop is arranged and the window focused, and macOS
-goes there. An app that does not say in time is asked again 60, 180, 420 and 900 ms later
+goes there (what an activation nothing announced gets, an `open` say; a Dock click and
+⌘-Tab have that Desktop arranged before the release, "Desktops" below, and macOS goes by
+itself). An app that does not say in time is asked again 60, 180, 420 and 900 ms later
 (11-23: Messages took 55 to 79 ms at its activations; ⌘-Tab to it left it in front with no
 window, and no focus notice followed, its key window being the same). Under All at Once a Shift-click on a card brings in only the
 window clicked; that window dragged back to the strip takes the app's other windows along.
@@ -316,7 +318,37 @@ measured 11-09 with an app of two windows alone in front; a shared stage not mea
 windows. The same app can have stages on several Desktops. A card click never changes the
 Desktop. ⌘-Tab and the Dock switch Desktops as macOS's own setting says ("When switching to
 an application, switch to a Space with open windows for the application"), and the arriving
-Desktop shows that window's stage. An app macOS activates as a Desktop slides in (a swipe,
+Desktop shows that window's stage. For a Dock click that Desktop is arranged before it slides
+in, at the click's press (the Dock acts at the release, about 0.1 s later; under `engine =
+"spaces"` the window waits on no Desktop until then and macOS must find it there, under the
+Accessibility engine its moves get that time, where they went out at the release until round
+arranged-ahead), so the app's stage is in front as it arrives. A press that is no click (the
+icon dragged, held for its menu, a modifier down) has the arrangement put back at its
+release: every window where it was, on a Desktop nobody sees (on the bench four window moves
+in all, two each way, and nothing changed in view). A click that takes macOS
+nowhere has the arrangement put back as it was, on the Desktop nobody sees, 3 s after it (1 s
+under the Accessibility engine until round arranged-ahead: on a busy Mac, whose Desktop began
+to slide later than that, the arrangement was put back just before and the stage changed in
+view; on the bench an app 0.4 s slow to come in front, at three times the measured delays).
+For ⌘-Tab the same Desktop is arranged while the switcher shows, under both engines (round
+arranged-ahead; until then when it arrived: under the Accessibility engine it slid in with
+the stage that was there and changed in view, under `engine = "spaces"` the app was asked
+its focused window at its activation first). The app selected is the one ⌘'s release goes
+to: at the first Tab it is the app used before the one in front, and the Dock's own list,
+which shows about 0.18 s later, says it from then on. So a ⌘-Tab let go at once is arranged
+from that guess, and one held longer from the Dock's reading (the logs of 11-18 to 11-24:
+of 668 first Tabs, 220 were let go before the Dock's list was read; where both the guess
+and the list named an app, 442 times, they agreed in 435). The arrangement is put back, every window where it was on
+the Desktop nobody sees, when the selection moves on, at Escape, or when ⌘ is let go on
+another app; let go on its app, it waits for the Desktop as a Dock click's does. A guess
+that proves wrong is put back the same way: by the Dock's list while the switcher shows,
+else when the app ⌘ was let go on comes in front. Nothing moves on the Desktop in view for
+any of it (one case apart, under Known gaps). It needs the switcher's end heard (Escape is never told to an input monitor
+while the switcher shows; a listen-only event tap hears it, on from the Tab to the
+switcher's end and off again after): where macOS refuses that tap, or keeps it off while a
+password field has the keyboard, nothing is arranged ahead and the Desktop is arranged when
+it arrives, as before.
+An app macOS activates as a Desktop slides in (a swipe,
 ⌃-arrow) never switches a stage on the Desktop being left: it is decided once the new
 Desktop is recognized, as Apple's never touches the Desktop left. Full-screen apps have no
 strip.
@@ -343,7 +375,7 @@ showing most of it (macOS's rule).
   on a card's app icon: the app's windows come from that screen's stages. Decided, not
   measured: ⌘-Tab or the Dock to an app whose stage is on the other screen switches that
   screen only. A Dock click or ⌘-Tab to a Desktop on either screen is arranged as on one
-  screen (the Dock click ahead of the slide; see Known gaps).
+  screen, ahead of the slide.
 - **A new app** opens on the screen with keyboard focus, as its own stage there, by the
   one-screen rules (macOS picks the screen; the window is taken where it shows).
 - **The lid closed.** That screen's front stage comes to the remaining screen as its front
@@ -1663,8 +1695,12 @@ screen's Desktop at once.
 - Where the window server's list of Desktops cannot be read (or in the Apple mode), Desktops
   are told apart by their windows: an empty Desktop is forgotten when you leave it, and one
   whose windows are all hidden or minimized looks new until one of them shows.
-- A Dock click to another Desktop arranges it before it slides in. ⌘-Tab cannot: no public
-  notice names the chosen app early enough, so the Desktop is arranged when it arrives.
+- ⌘-Tab to another Desktop is arranged ahead from a guess when ⌘ is let go before the Dock
+  lists the switcher. When that guess is wrong (about 1 in 60 where the Dock's list could
+  tell) and the app let go on has its windows on the very Desktop arranged for the guess,
+  that Desktop slides in with the guessed app's stage in front and changes on arrival
+  (before: with the stage that was there, and changed on arrival). Where macOS refuses the
+  key tap, or keeps it off for a password field, ⌘-Tab's Desktop is arranged when it arrives.
 - A Desktop's strip appears after the Desktop has slid in on its first visit; Apple's slides
   in with it.
 - A dialog's parent window is a guess: the app's frontmost window at the time.

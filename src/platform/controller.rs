@@ -3126,6 +3126,9 @@ impl Controller {
             let before = m.before_activation(&obs);
             let actions = m.app_activated(pid, &obs);
             self.activation_switch = before.and_then(|b| m.switch_undo(b)).map(|undo| SwitchBack { pid, undo, at: now });
+            // An arrangement made ahead that this activation's switch undoes goes after the
+            // switch's own batch ([`Self::forget_held_for_switch`]).
+            let mut undo_after = false;
             if actions.is_empty() && !present {
                 // Nothing to show here: macOS may be on its way to the app's window
                 // on another Desktop (its focus may have come first and be held).
@@ -3155,10 +3158,13 @@ impl Controller {
                     tracing::info!(pid, since_activation_ms, decide_ms, asked_focus = needs_focus, "activated app lives in another stage; switching");
                 }
                 attribution::judged(Notice::Activation, i64::from(pid), if actions.is_empty() { "the user's: nothing to switch" } else { "the user's: its stage comes" });
-                self.forget_held(ob);
+                undo_after = self.forget_held_for_switch(ob);
             }
             self.activation = self.activation_for(pid, &actions, ob);
             self.execute_animated(ob, actions);
+            if undo_after {
+                self.undo_ahead(ob, "the user acted on the Desktop shown");
+            }
         }
     }
 
@@ -6932,11 +6938,11 @@ impl Controller {
                 }
                 self.debug_dock_click(ob, &bundle, real, hold_ms.map(Duration::from_millis))
             }
-            Command::DebugDockLend { bundle } => {
+            Command::DebugDockLend { bundle, hold_ms } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-lend needs STAGE_MANAGER_TEST=1" });
                 }
-                self.debug_dock_lend(ob, &bundle)
+                self.debug_dock_lend(ob, &bundle, hold_ms.map(Duration::from_millis))
             }
             Command::DebugDockHover { bundle } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

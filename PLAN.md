@@ -269,12 +269,21 @@ was left behind for no reason of the mode.
   window in a word the app learns only from the Spaces engine's own asks. A way to learn it
   with no Space call (a window the app sees open, matched by its id) would bring that look
   forward too.
-- **⌘Tab to another Desktop arranges the stage on arrival**, in both modes, though the chosen
-  app is known before ⌘ is released (the Spaces engine's lend already follows it). Arranged
-  ahead, as a Dock click's is; UX-SPEC's "known gap" sentence then goes.
-- **A Dock click's arrangement is undone after 1 s** under the Accessibility engine, 3 s under
-  Spaces; the reason for 3 s (a busy Mac's late notice) is not the mode's. One cap; and
-  whether the Accessibility engine can arrange at the press as Spaces does.
+- **Round arranged-ahead, live.** Its checks are written and not run: `scripts/test-stages.sh
+  spaces --auto` under both engines (the Dock press that is no click, the click that goes
+  nowhere, the Dock arrivals arranged at the press, ⌘Tab to another Desktop cancelled,
+  tabbed on, let go at once and held), and the `looks` phase's rest check with the Dock's
+  observer kept in the default mode (`costs.dock_notices` must not grow at rest). Never
+  measured live: whether the Dock sends notices at rest under the Accessibility engine now
+  that its observer stays; how long the first Tab's round with the app selected takes on a
+  busy app (bounded at 100 ms on the WM thread).
+- **A wrong ⌘Tab guess that comes into view.** ⌘ let go before the Dock lists the switcher,
+  the guess wrong, and the app let go on living on the Desktop arranged for the guess: that
+  Desktop slides in with the guessed app's stage, is put back at the other app's
+  activation and arranged again at the notice (three stages in view where there were two;
+  `bench/ahead.rs`). Going straight from the guessed stage to the right one there needs an
+  arrangement that can change its window without the undo between (`Model::arrange_ahead`
+  keeps one stage to go back to).
 - **Smaller.** The wait for a switch's pictures (160 ms) is sized for ScreenCaptureKit, not for
   the window server's capture; the landing variants can be tried only with `engine = "spaces"`;
   the Spaces engine's lends keep their own copy of the watch that brings Mission Control's

@@ -251,16 +251,16 @@ impl Controller {
         self.looks_refocus_due(ob, now);
     }
 
-    /// The tick: the Dock observed while its notice may serve (and no longer once the window
-    /// server's notices work again: its notices then reach nobody), the focus given back when
+    /// The tick: the Dock observed while its notice may serve (its observer stays once made:
+    /// ⌘Tab's switcher is followed through it under every engine since round arranged-ahead,
+    /// [`super::switcher`]; a notice of it is a hint here only while the public triggers
+    /// bring the looks, [`Self::looks_dock_notice`]), the focus given back when
     /// due, a close long over forgotten, the key tap told what to listen for. The look itself
     /// is the Space check's, as before ([`Controller::check_spaces`]).
     pub(super) fn looks_tick(&mut self, ob: &Observer, now: Instant) {
         server_notices::trust_tick(now);
         if self.looks_public() {
             self.looks_watch_dock();
-        } else {
-            self.unwatch_dock();
         }
         self.looks_refocus_due(ob, now);
         if !self.looks_showing() && self.looks.refocus.is_none() && self.looks.close.stale(now) {
