@@ -483,6 +483,18 @@ pub struct Desk {
     /// the AppKit event loop turning, 11-21). False: none come, as on a Mac where they do not
     /// (or before round r5-notices); every poll then decides alone.
     pub server_notices: bool,
+    /// The window server's notices can be registered on this desk
+    /// (`platform/server_notices.rs`, `listening`). False: a macOS where the calls are gone.
+    pub server_calls: bool,
+    /// The notices' standing on this desk (`platform/server_notices.rs`; the process's own in
+    /// the app).
+    pub notice_trust: crate::engine::notice_trust::Trust,
+    /// What the app last said it wants of the key tap (`mission_key_tap::publish`): on at all
+    /// (`None`: nothing said yet), and armed for Escape and presses while Mission Control
+    /// may show.
+    pub tap_keys: Option<bool>,
+    /// See [`Self::tap_keys`].
+    pub tap_armed: bool,
     /// How long after an app moved its window the window server lists it at its new place,
     /// in ms before the load factor (`None`: at once). Live 11-22, Mission Control's key 1 s
     /// after its close: six apps answered their parks in ~4 ms each and all six windows were
@@ -696,6 +708,10 @@ impl Desk {
             tap_switcher: false,
             activation_leads_slide: false,
             server_notices: false,
+            server_calls: true,
+            notice_trust: crate::engine::notice_trust::Trust::new(),
+            tap_keys: None,
+            tap_armed: false,
             lists_moves_ms: None,
             late_moves: BTreeMap::new(),
             flip_leads_notice: false,

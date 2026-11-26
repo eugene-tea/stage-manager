@@ -65,6 +65,7 @@ pub mod pixels;
 pub mod permissions;
 pub mod safety;
 pub mod self_capture;
+pub mod server_notices;
 pub mod session;
 #[cfg(feature = "probes")]
 pub(crate) mod pixels_probe;

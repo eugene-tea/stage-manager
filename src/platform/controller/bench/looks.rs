@@ -11,16 +11,17 @@
 //! (1508), Mission Control's key heard by the key tap, a notice of the Dock's. Each scenario
 //! says which of them the desk gives.
 //!
-//! **Pinned** (`looks_before.txt`): every scenario as it read before any of them was wired
-//! under the Corner engine (the poll alone). With none of them working ([`Silenced`]) every
-//! scenario still reads so: `with_nothing_telling_every_scenario_reads_as_before`. Print the
-//! file again only when a scenario is added or its script changes, from a build where the
-//! triggers are silenced: `BENCH_PRINT=1 cargo test --lib looks::print_before -- --nocapture`.
+//! **Pinned** (`looks_before.txt`): every scenario as it read before any of them was heard
+//! under the Corner engine (the poll alone; printed from the commit before the wiring). With
+//! none of them working ([`Silenced`]) every scenario still reads so:
+//! `with_nothing_telling_every_scenario_reads_as_before`. Print the file again only when a
+//! scenario is added or its script changes (`BENCH_PRINT=1 cargo test --lib
+//! looks::print_before -- --nocapture` prints them with nothing telling).
 
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
-use super::scenarios::{A, C, D1, LOADS, Run, Scenario, seen, two_apps};
+use super::scenarios::{A, C, D1, LOADS, Run, Scenario, expect, seen, two_apps};
 use super::*;
 use crate::engine::overview::Overview;
 use crate::platform::fake::Desk;
@@ -279,14 +280,83 @@ fn with_nothing_telling_every_scenario_reads_as_before() {
     }
 }
 
-/// As each reads today, whatever its desk tells: none of it is heard under the Corner
-/// engine, so each reads as with nothing telling.
+const FRONT_STAYS: &str = "front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+const ALPHA_COMES: &str = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
+
+fn told(shown: &str, parks: u32, closed: &str, trusted: &str) -> String {
+    format!("shown: known {shown}, the hidden windows asked to park again {parks} times; closed: known {closed}, the list trusted again {trusted}; {FRONT_STAYS}")
+}
+
+/// The window server's notice (1508) brings the look under the Corner engine too: Mission
+/// Control is known within a fast tick of its window being listed, however it was opened,
+/// the park reconcile never judges its layout, and the look that finds its window and the
+/// Dock's cover gone ends the freeze with no settle after. Before: `looks_before.txt`.
 #[test]
-fn as_they_read_today() {
-    let pins = before();
-    for (name, _, script) in ALL {
-        super::scenarios::expect(*script, pins[name]);
+fn the_window_servers_notice_brings_the_look() {
+    let at_once = told("at once", 0, "at once", "at once");
+    expect(by_key_server_tells, [&at_once, &at_once, &at_once]);
+    expect(no_key_server_tells, [&at_once, &at_once, &at_once]);
+}
+
+/// With no notice from the window server the first opens are found by the poll, as before;
+/// what closes Mission Control is heard by the key tap from then on (it is on while Mission
+/// Control shows), so its close is looked for at once, with the settle after as before.
+/// Three opens and closes with no notice, and the public triggers bring the opening's look
+/// too: its key heard by the key tap, or the Dock's notice (should the Dock send one).
+#[test]
+fn the_public_triggers_take_over_when_the_notices_do_not_come() {
+    let before = told("at the poll", 2, "at the poll", "after its settle");
+    expect(no_key_nothing_tells, [&before, &before, &before]);
+    let close_heard = told("at the poll", 2, "at once", "after its settle");
+    expect(by_key_tap_hears_first, [&close_heard, &close_heard, &close_heard]);
+    let by_tap = told("at once", 0, "at once", "after its settle");
+    expect(by_key_tap_hears_later, [&by_tap, &by_tap, &by_tap]);
+    let by_dock = told("at once", 0, "at the poll", "after its settle");
+    expect(no_key_dock_tells_later, [&by_dock, &by_dock, &by_dock]);
+}
+
+/// Audit 11-25, H6: the option is honoured under the Corner engine. Off (Apple's way, the
+/// default): the app macOS brings in front brings its stage, as before. On: the stage in
+/// front stays, with the closing key heard by the key tap, whatever tells of the opening.
+#[test]
+fn a_close_by_its_key_keeps_the_stage_with_the_option() {
+    expect(key_close_apples, [ALPHA_COMES, ALPHA_COMES, ALPHA_COMES]);
+    expect(key_close_keeps_stage, [FRONT_STAYS, FRONT_STAYS, FRONT_STAYS]);
+    expect(key_close_keeps_stage_tap_alone, [FRONT_STAYS, FRONT_STAYS, FRONT_STAYS]);
+}
+
+/// The check's third part (`engine/notice_trust.rs`): notices with nothing to find rest.
+/// Twenty in a row, each with its look and its short watch, then none brings a look for ten
+/// minutes; Mission Control opened by its key meanwhile is found at once all the same, by
+/// the key tap (the public triggers serve while the notices rest).
+#[test]
+fn notices_with_nothing_to_find_rest_and_the_public_triggers_serve() {
+    use crate::engine::server_notice::Kind;
+    let mut b = Bench::new(EngineKind::Corner, DEFAULTS, 1.0, 1, |d| desk(d, SERVER));
+    b.advance(6000);
+    let trust = |b: &Bench| b.c.status_engine()["notices"]["trust"]["state"].as_str().map(str::to_string);
+    let made = |b: &Bench| b.c.looks_status()["looks"]["made"].as_u64().unwrap_or(0);
+    assert_eq!(trust(&b).as_deref(), Some("working"));
+    for _ in 0..crate::engine::notice_trust::FRUITLESS {
+        b.desk(|d| d.server_notice(0.0, Kind::Overview, Vec::new()));
+        b.advance(400);
     }
+    assert_eq!(trust(&b).as_deref(), Some("resting"), "{}", b.story());
+    let looked = made(&b);
+    assert!(looked >= u64::from(crate::engine::notice_trust::FRUITLESS), "each notice brought its look until then ({looked})");
+    for _ in 0..10 {
+        b.desk(|d| d.server_notice(0.0, Kind::Overview, Vec::new()));
+        b.advance(400);
+    }
+    assert_eq!(made(&b), looked, "resting: no look for a notice");
+    assert_eq!(b.c.status_engine()["notices"]["uses"]["rested"].as_u64(), Some(10));
+    // Its key, heard by the tap: found at once.
+    b.advance(2000);
+    b.mission_open();
+    b.advance(fake::delays::MISSION_SHOWS as u64);
+    let known = until(&mut b, 4000, |b| b.c.overview.showing() == Some(Overview::MissionControl));
+    assert_eq!(how_soon(known), "at once", "{}", b.story());
+    assert_eq!(b.c.looks_status()["looks"]["shown_after_its_key"].as_u64(), Some(1));
 }
 
 /// Prints the pins of before (module docs).

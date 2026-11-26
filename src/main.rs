@@ -902,9 +902,9 @@ mod app {
             }
         };
         let _ = WM.set(wm.clone());
-        // The window server's notices (the Spaces engine; registered at the choice above).
+        // The window server's notices (every engine of ours; registered at the choice above).
         let wm_notices = wm.clone();
-        stage_manager::platform::spaces::notices::set_sink(move |burst| {
+        stage_manager::platform::server_notices::set_sink(move |burst| {
             wm_notices.send(WmCommand::ServerNotice(burst));
         });
         guardian::spawn();

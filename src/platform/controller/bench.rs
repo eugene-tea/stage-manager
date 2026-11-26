@@ -539,13 +539,14 @@ impl Bench {
         std::fs::read_to_string(home.join("state.json")).expect("a saved state")
     }
 
-    /// One of Mission Control's keys, as its key tap hears it (⌃↑ by default); the input
-    /// monitor never hears them (`controller/mission_control.rs`).
+    /// One of Mission Control's keys, as its key tap hears it (⌃↑ by default) while the app
+    /// has the tap on (`mission_key_tap::publish`; before its first word, as if on); the
+    /// input monitor never hears them (`controller/mission_control.rs`).
     pub(super) fn mission_key(&mut self) {
         let mods = crate::engine::mission_control::Mods { control: true, option: false, command: false };
         self.desk(|d| {
             d.last_press = Some(clock::now());
-            if !d.tap_hears {
+            if !d.tap_hears || d.tap_keys == Some(false) {
                 return;
             }
             d.post(0.0, Notice::Mission(crate::platform::mission_key_tap::Heard::Key { code: crate::platform::input::KEY_UP, mods }));
@@ -577,7 +578,8 @@ impl Bench {
         self.desk(|d| {
             d.last_press = Some(clock::now());
             d.last_click = d.last_press;
-            if d.tap_hears {
+            // The tap forwards a press only while armed (Mission Control may show).
+            if d.tap_hears && (d.tap_armed || d.tap_keys.is_none()) {
                 d.post(0.0, Notice::Mission(crate::platform::mission_key_tap::Heard::Click));
             }
         });

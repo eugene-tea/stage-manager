@@ -87,8 +87,6 @@ pub(super) struct SpacesUpkeep {
     /// Mission Control's lends: the hidden stages' windows on their Desktop while it shows
     /// ([`super::mission_control`]).
     pub(super) mission: super::mission_control::MissionWatch,
-    /// What the window server's notices brought forward ([`super::server_notices`]).
-    pub(super) server: super::server_notices::ServerWatch,
     /// When the model and the window server were last checked against each other
     /// ([`Controller::spaces_reconcile`]).
     reconciled: Instant,
@@ -105,7 +103,6 @@ impl SpacesUpkeep {
             frames_owed: BTreeMap::new(),
             left_behind: false,
             mission: super::mission_control::MissionWatch::default(),
-            server: super::server_notices::ServerWatch::default(),
             reconciled: now,
         }
     }
@@ -137,7 +134,8 @@ impl Controller {
             m.set_display_watch(watching);
         }
         // The window server's notices: their health, said once it is in.
-        crate::platform::spaces::notices::health_tick(now);
+        crate::platform::server_notices::health_tick(now);
+        crate::platform::server_notices::trust_tick(now);
         if self.model.is_none() {
             self.spaces.strays.clear();
             return;

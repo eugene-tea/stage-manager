@@ -8,8 +8,8 @@
 //! switch show in the calls of 11 scenarios as `shots [ids]` and nowhere else, move one cause
 //! chain at load 3 to its reading at load 10 with the same outcome ("an app focuses its other
 //! window after our focus"), and add five scenarios of their own; the scenarios of round
-//! looks-forward, `looks.rs` and one of `desktops.rs`, printed as they read before that round
-//! heard anything under the Corner engine).
+//! looks-forward, `looks.rs` and one of `desktops.rs`, printed with the reads off and with
+//! what each scenario's desk tells: their "before" is `looks_before.txt`).
 //! A Mac where the reads do not work behaves as before. Beside each
 //! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!

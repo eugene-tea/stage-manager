@@ -560,9 +560,10 @@ fn corner_desktop_keys_and_changes_with_no_notice() {
     // At load 10 a look falls at the slide's end: sooner, the same end.
     let sooner = "Desktop 2 recognized by the slide's end; front [13] shows [13] desktop 2 app 101 switches 0 slides 0; shadow 0 shown (0 open) 0 homes";
     expect(flip_with_no_notice_corner, [ticked, ticked, sooner]);
-    // As it read before round looks-forward: the window server's notice of the change's end
-    // (1401) was not heard under the Corner engine.
-    expect(flip_with_no_notice_corner_server_tells, [ticked, ticked, sooner]);
+    // With the window server's notice of the change's end (1401), heard under the Corner
+    // engine since round looks-forward: taken at the look it brings, as under Spaces (before:
+    // as above).
+    expect(flip_with_no_notice_corner_server_tells, [sooner, sooner, sooner]);
     // Before: "settled at once" (the arrival guessed the same Desktop again). Now the
     // listing is waited for, FLIP_WAIT (a cap, 300 ms), and nothing arrives.
     let nothing = "settled within 0.5 s; front [12] shows [12] desktop 1 app 102 switches 0 slides 1; shadow 0 shown (0 open) 0 homes";

@@ -164,6 +164,7 @@ mod desktops;
 mod dock_order;
 mod fallback;
 mod landing_focus;
+mod looks;
 mod mission_control;
 mod notices;
 mod raise_order;
@@ -969,6 +970,12 @@ pub struct Controller {
     /// Mission Control, App Exposé and Show Desktop: no Space is inferred from the window
     /// list while one shows and for a settle after ([`OverviewWatch`]).
     overview: OverviewWatch,
+    /// What the window server's notices brought forward, under every engine of ours
+    /// ([`server_notices`]).
+    server: server_notices::ServerWatch,
+    /// Mission Control looked for before the poll does, where nothing is lent for it
+    /// ([`looks`]: the Corner engine).
+    looks: looks::Looks,
     /// The windows as read when a card was pressed ([`StripEvent::CardPressed`]): the click
     /// that follows uses them instead of reading every frame again through AX after the
     /// release. Any event, batch, Space change, config reload, retried restore or window
@@ -1240,6 +1247,8 @@ impl Controller {
             desks: desktops::DeskWatch::default(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
+            server: server_notices::ServerWatch::default(),
+            looks: looks::Looks::default(),
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
             slide_hold: None,
@@ -4179,10 +4188,16 @@ impl Controller {
             overview::Change::Began(kind) => {
                 tracing::info!("{} shows: no Space is inferred from the window list until it closes", kind.name());
                 self.slide_watch_person(crate::engine::slide_watch::Person::MissionControl);
+                // The window server tells of Mission Control's and App Exposé's open (not of
+                // Show Desktop's): whether it did this time is its notices' standing.
+                super::server_notices::fact(kind == Overview::MissionControl, now);
+                self.upkeep_overview_changed(kind == Overview::MissionControl, now);
                 self.hidden_changed();
             }
             overview::Change::Ended(kind) => {
                 tracing::info!("{} closed: Space inference resumes after a settle", kind.name());
+                super::server_notices::fact(kind == Overview::MissionControl, now);
+                self.upkeep_overview_changed(false, now);
                 self.hidden_changed();
             }
             overview::Change::Stuck(kind) => {
@@ -4301,8 +4316,10 @@ impl Controller {
         let heard = heard.min(now);
         self.macos_reveal_at = None;
         self.space_changes += 1;
-        // A Desktop change's notice of the window server's needs no check of its own now.
-        self.spaces.server.workspace_heard(heard);
+        // A Desktop change's notice of the window server's needs no check of its own now,
+        // and had something to tell.
+        self.server.workspace_heard(heard);
+        super::server_notices::fact(false, now);
         counters::bump(Count::SpaceChange);
         tracing::debug!(changes = self.space_changes, "Space change notified");
         self.slide_watch_notice(heard);

@@ -9,8 +9,15 @@
 //! - `captures`: windows a capture round asked a picture of ([`super::capture`]).
 //! - `wallpaper_reads`: the desktop picture asked of NSWorkspace ([`super::wallpaper`]).
 //! - `lock_polls`: the login session asked whether the screen is locked ([`super::session`]).
-//! - `tap_events`: events through our two event taps, the inert slivers' and the minimize's
-//!   (each one wakes a thread of ours while every input of the session waits on it).
+//! - `tap_events`: events through our event taps, the inert slivers', the minimize's and
+//!   Mission Control's key tap (each one wakes a thread of ours; the first two while every
+//!   input of the session waits on them, the third only listens).
+//! - `dock_notices`: the Dock's Accessibility notices that reached the WM thread (its
+//!   switcher's list, its menus; [`super::controller`]'s `switcher_notice`).
+//! - `server_notices`: the window server's notices handed to the WM thread, a turn's of one
+//!   kind as one ([`super::server_notices`]).
+//! - `trigger_looks`: looks for Mission Control at the window list that one of those, or
+//!   its key, brought forward of the poll's (each one is a window list too).
 //! - `mouse_moves`: mouse moves the global monitor handed the strip (each one wakes the main
 //!   thread).
 //!
@@ -37,11 +44,28 @@ pub enum Cost {
     TapEvent,
     /// A mouse move from the global monitor.
     MouseMove,
+    /// A notice of the Dock's on the WM thread.
+    DockNotice,
+    /// A turn's notices of one kind from the window server, handed to the WM thread.
+    ServerNotice,
+    /// A look for Mission Control brought forward of the poll's.
+    TriggerLook,
 }
 
 /// Every cost, in the order `ctl state` prints them.
-pub const ALL: [Cost; 8] =
-    [Cost::WindowList, Cost::LaunchServices, Cost::DockRead, Cost::Capture, Cost::WallpaperRead, Cost::LockPoll, Cost::TapEvent, Cost::MouseMove];
+pub const ALL: [Cost; 11] = [
+    Cost::WindowList,
+    Cost::LaunchServices,
+    Cost::DockRead,
+    Cost::Capture,
+    Cost::WallpaperRead,
+    Cost::LockPoll,
+    Cost::TapEvent,
+    Cost::MouseMove,
+    Cost::DockNotice,
+    Cost::ServerNotice,
+    Cost::TriggerLook,
+];
 
 impl Cost {
     /// The key in `ctl state`'s `costs`.
@@ -55,6 +79,9 @@ impl Cost {
             Cost::LockPoll => "lock_polls",
             Cost::TapEvent => "tap_events",
             Cost::MouseMove => "mouse_moves",
+            Cost::DockNotice => "dock_notices",
+            Cost::ServerNotice => "server_notices",
+            Cost::TriggerLook => "trigger_looks",
         }
     }
 
@@ -81,8 +108,8 @@ pub fn get(cost: Cost) -> u64 {
 }
 
 /// `ctl state`'s `costs`: every count since the launch, and which of our event taps are
-/// switched on now (`taps_on`: they are on only while they have something to judge,
-/// [`super::tap_switch`]).
+/// switched on now (`taps_on`: they are on only while they have something to judge or to
+/// hear, [`super::tap_switch`]).
 pub fn status() -> serde_json::Value {
     let mut out = serde_json::Map::new();
     for c in ALL {
@@ -90,7 +117,11 @@ pub fn status() -> serde_json::Value {
     }
     out.insert(
         "taps_on".to_string(),
-        serde_json::json!({ "slivers": super::corner::sliver_tap::tap_on(), "minimize": super::minimize_tap::tap_on() }),
+        serde_json::json!({
+            "slivers": super::corner::sliver_tap::tap_on(),
+            "minimize": super::minimize_tap::tap_on(),
+            "mission_keys": super::mission_key_tap::tap_on(),
+        }),
     );
     serde_json::Value::Object(out)
 }
