@@ -362,7 +362,7 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make
 
 | Command | Does |
 |---|---|
-| `ping` | whether the app runs, its version, and whether Apple's Stage Manager is on |
+| `ping` | whether the app runs, its version, build number and commit, and whether Apple's Stage Manager is on |
 | `state` | stages, windows, frames, the strip, the Desktop shown, the config error |
 | `dump` | observed apps and windows, and every Desktop's stages |
 | `space` | the Desktop shown, as the engine sees it |

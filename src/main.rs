@@ -541,6 +541,10 @@ mod app {
                 "pong": true,
                 "pid": std::process::id(),
                 "version": env!("CARGO_PKG_VERSION"),
+                // The bundle's build number and the commit it was built from (bundle.sh);
+                // null outside a bundle.
+                "build": stage_manager::ui::about::bundle_info("CFBundleVersion"),
+                "commit": stage_manager::ui::about::bundle_info(stage_manager::ui::about::COMMIT_KEY),
                 // A launch during a quit waits for it instead of handing off (the review of 8A, M1).
                 "quitting": QUITTING.load(Ordering::SeqCst),
                 "uptime_ms": STARTED.get().map(|t| t.elapsed().as_millis() as u64),
@@ -852,7 +856,13 @@ mod app {
         let _ = STARTED.set(Instant::now());
         logging::init(logging::Process::App);
         safety::install_panic_hook();
-        tracing::info!(version = env!("CARGO_PKG_VERSION"), pid = std::process::id(), "Stage Manager starting");
+        tracing::info!(
+            version = env!("CARGO_PKG_VERSION"),
+            build = stage_manager::ui::about::bundle_info("CFBundleVersion").as_deref().unwrap_or(""),
+            commit = stage_manager::ui::about::bundle_info(stage_manager::ui::about::COMMIT_KEY).as_deref().unwrap_or(""),
+            pid = std::process::id(),
+            "Stage Manager starting"
+        );
         // How it was started, and how long after the login (rounds early-start, reopen-list:
         // the open event, once AppKit has it, tells a login item from macOS's reopen).
         tracing::info!(
