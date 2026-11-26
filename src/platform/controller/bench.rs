@@ -64,8 +64,15 @@ mod switch;
 /// The fast tick's period (`wm_thread::FAST_TICK_SECONDS`).
 const FAST_TICK: Duration = Duration::from_millis(20);
 
-/// The config a scenario runs on unless it says otherwise: the shipped defaults.
-pub(super) const DEFAULTS: &str = "";
+/// The config a scenario runs on unless it says otherwise: the shipped defaults, but for
+/// `[displays] frames_per_setup`, off here. On, its first snapshot of a run asks for a save
+/// 3 s in, the save keeps the tick brisk a moment, and the tick at rest falls elsewhere
+/// after: the scenarios pinned by when a tick at rest falls (`looks_before.txt`,
+/// `guessed.txt`, a window taken out of its stage's Space) then read otherwise for no change
+/// a person sees (found 11-26, when the default turned on: with the save left out every pin
+/// held). The frames' own rules are tested in `engine/setup_frames.rs`,
+/// `engine/model/displays_tests/setup_frames.rs` and `controller/setup_frames.rs`.
+pub(super) const DEFAULTS: &str = "[displays]\nframes_per_setup = false\n";
 
 /// The AX callback the observer registers: never called, the bench delivers the notices.
 unsafe extern "C-unwind" fn no_callback(_: NonNull<AXObserver>, _: NonNull<AXUIElement>, _: NonNull<CFString>, _: *mut c_void) {}

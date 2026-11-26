@@ -72,7 +72,7 @@ from an application" (`AppWindowGroupingBehavior`) are put back as they were on 
               to B_a (Alpha in front, Bravo in a strip). The virtual screen removed: where are
               they (A? B clamped? elsewhere?), Bravo also read once brought in front. Added
               again: B again? Frames (the window list's and the model's) at each step, each
-              judged against A and B. Decides setup_frames::ON_BY_DEFAULT. About 2 min.
+              judged against A and B. What Apple's does (setup_frames::ON_BY_DEFAULT is on either way). About 2 min.
 
 Nobody needs to be at the Mac, but nobody may use it either: the phases post clicks (the Dock
 item, Mission Control) and keys (Mission Control's own shortcut, Escape to a fixture). Only

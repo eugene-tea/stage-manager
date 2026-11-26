@@ -183,6 +183,14 @@ Nothing here changes what a person asks for; each closes a way a slower Mac, or 
 order of events, can still go wrong. The bench first, then the live suite
 (DEVELOPMENT, "The bench").
 
+- **Frames per screen setup, on by default since 11-26: its checks before a release.** Live:
+  `scripts/test-stages.sh display-gone frames` under the Accessibility engine (run under the
+  Spaces engine only, 11-19), and `display-gone` under both engines with the default on
+  (the runs of 11-25 had it off). The bench runs with it off (`bench.rs`, `DEFAULTS`): a
+  scenario under each engine with it on, a screen going and coming back with a stage's
+  windows hidden, and the scenarios pinned by when a tick at rest falls made to hold with
+  the frames' save in the run. The cost at rest with it on is not measured (a read of the
+  screens' bounds each tick).
 - **A screen going away with the Desktop reads off (`SM_DESKTOPS=guess`, a macOS that breaks them).**
   The Accessibility engine takes the display change by the windows on screen as 1.9.2 did,
   and the defect stays there (bench `guessed.txt`, "the live phase's ..."). A guess could

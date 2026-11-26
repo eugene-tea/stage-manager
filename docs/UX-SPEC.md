@@ -459,7 +459,7 @@ showing most of it (macOS's rule).
 - **`[displays] main_only`** (off) manages the main screen only, a window moved off it left
   alone. It is read at launch: turned on mid-session it would have to bring back every hidden
   window of the other screens, on Desktops not shown too, which a quit does safely.
-- **`[displays] frames_per_setup`** (off: Apple's keeps no frame per setup. Measured 11-19,
+- **`[displays] frames_per_setup`** (on: Apple's keeps no frame per setup, a gap this fills. Measured 11-19,
   `scripts/probe_apple.py frames-setup`: a window moved and resized on a screen that then
   goes comes back to its earlier place on the screen left, at the size it had on the gone
   screen; the screen back, macOS puts it there again at its frame. Sizes never go back)
@@ -1093,6 +1093,7 @@ until used; the rest are off.
 | Card numbers, stage names, an edge tab, a strip above windows | off |
 | Stages come back after a restart or a new login (`[stages] restore_after_restart`) | on |
 | A window an app reopens after a restart at under half its saved size gets its saved frame back, once (`[restore] saved_size`) | on |
+| Windows keep their size and place for each set of screens: a screen plugged in or out puts them back where they were the last time the same screens were connected (`[displays] frames_per_setup`) | on |
 | A newly opened app joins the current stage; Shift then gives it a stage of its own (`[stages] new_apps_join_current`) | off |
 | Keep stages in place: a stage's place never depends on which card was clicked (`[strip] order = "in_place"`) | off |
 | Follow the Dock: the stages' places in the Dock's order of their apps (`[strip] order = "dock"`) | off |

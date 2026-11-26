@@ -37,9 +37,10 @@ use serde::{Deserialize, Serialize};
 use super::geometry::Rect;
 use super::model::{Display, WindowId};
 
-/// `[displays] frames_per_setup`'s default: off, as Apple's keeps no frame per setup
-/// (measured 11-19, `scripts/probe_apple.py frames-setup`; UX-SPEC).
-pub const ON_BY_DEFAULT: bool = false;
+/// `[displays] frames_per_setup`'s default: on. Apple's keeps no frame per setup (measured
+/// 11-19, `scripts/probe_apple.py frames-setup`; UX-SPEC): a size set on one set of screens
+/// is lost at the next change, which is a gap this fills (the owner's word, 11-26).
+pub const ON_BY_DEFAULT: bool = true;
 
 /// The most setups a window keeps a frame for; the least recent goes first.
 pub const KEEP_SETUPS: usize = 8;

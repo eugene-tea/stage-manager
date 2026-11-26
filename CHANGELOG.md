@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Windows keep their size and place for each set of screens: with a screen plugged in or
+  out, they go back to where they were the last time the same screens were connected, about
+  10 seconds after the change. `[displays] frames_per_setup`, now on by default, turns it
+  off.
 - Much less work at rest in the Accessibility mode: the pictures of the windows in front are
   taken when a switch is likely or starts, as in the Spaces mode, and no longer every two
   seconds. A switch starts at most 0.06 seconds later.
