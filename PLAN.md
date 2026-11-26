@@ -110,15 +110,22 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
     (150 window lists a minute against 63; "One way for every mode", below), the corner patch
     and its stills.
   - About 300 LaunchServices lookups a minute at rest under both engines: find what asks.
-  - A switch waits for its pictures under every engine: 76 ms at a card click, 113 ms at a
-    Dock click (11-25). Not noticed by a person, but at the edge, and after a Dock click the
-    activated app's windows show raised in the park corner 121 to 155 ms before the cover
-    (the capture phase allows 150 and failed once at 155). To take the wait away: pictures
-    taken when a switch is likely (the pointer in the Dock, a hotkey's modifiers down, as the
-    strip and ⌘Tab do already), one up to 2 s old accepted (0.5 s today, `FRESH`), one capture
-    call for all of a switch's windows if that is faster, and the corner's cover sent to the
-    strip ahead of the pictures. A person's card click, not the test's instant one, measured
-    first.
+  - A switch's wait for its pictures (76 ms at a card click, 113 ms at a Dock click, 11-25):
+    the pictures are now taken when a switch is likely, one up to 2 s old is played, and the
+    corner's cover goes ahead of them (ARCHITECTURE, "Window pictures"). Left:
+    - Run the capture phase under both engines and measure the switches again, with the
+      test's clicks and with `SM_CLICK_HOLD_MS=100` (UX-SPEC, "Window engines measured").
+      Then say in the CHANGELOG what a switch costs now.
+    - One capture call for all of a switch's windows: run `probe-spaces capture BUNDLE fast
+      list`, then keep the faster way and drop `STAGE_MANAGER_CAPTURE_LIST`. The order of
+      the images handed back is proven only on windows that look different.
+    - The corner's cover still waits for the pictures when a window leaving reaches its
+      rectangle (a window that fills the screen above the Dock): the cover would need that
+      window's part cut out of it, or its picture.
+    - An auto-hidden Dock's bar is read where it rests, so the pointer coming into it is
+      not seen until the next read; only the press takes the pictures there.
+    - A picture asked for while one of the same window is still on its way is asked for
+      again (the pointer into the Dock and a press within the capture's time).
   - Video calls: check whether our captures make a call's video stutter (it lags at times
     with ours where Apple's is smooth). The call stand-in missed no refresh at rest or
     switching (11-14, 11-18), and at rest no picture is taken of a call window in front any

@@ -6,9 +6,11 @@
 //!   hovered card's: each once as it is first asked for, and all of them at once when the
 //!   pointer reaches a card or presses one, or the app switcher's key is pressed. The ones a
 //!   switch moves are taken at the switch: the controller captures the outgoing windows whose
-//!   picture is not fresh before it sends the transition, under every engine, and they reach
-//!   the cache as any other snapshot ([`crate::platform::switch_shots`],
-//!   `platform/controller/switch_pictures.rs`). Nothing is captured on a timer unless
+//!   picture is not fresh (2 s) before it sends the transition, under every engine, and they
+//!   reach the cache as any other snapshot ([`crate::platform::switch_shots`],
+//!   `platform/controller/switch_pictures.rs`); it takes them ahead, the same way, at the
+//!   other signs that a switch is likely (the pointer in the Dock, a press on a Dock item, a
+//!   hotkey's modifiers: [`crate::platform::switch_likely`]). Nothing is captured on a timer unless
 //!   `[animation] snapshot_interval_ms` asks for one (0 by default; until 11-25 the Corner
 //!   engine's pictures came every 2 s, most of what it cost at rest). A window's last
 //!   snapshot before it parks stays in the cache (`snapshot_cache_mb`) and is what grows back

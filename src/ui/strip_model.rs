@@ -64,7 +64,8 @@ pub struct StripSnapshot {
     /// The active stage's standard windows, front to back, at their live frames: the strip
     /// takes a full-size snapshot of each as it comes, again as the pointer nears a card, and
     /// on a timer when `[animation] snapshot_interval_ms` asks for one; the controller takes
-    /// the ones a switch moves at the switch (`platform/controller/switch_pictures.rs`).
+    /// the ones a switch moves at the switch, or ahead when a switch is likely
+    /// (`platform/controller/switch_pictures.rs`).
     /// Empty while the user has hidden the strip: no switch animates then, nothing is captured.
     pub active_windows: Vec<CardWindow>,
     /// The pinned windows shown on this Space, at their live frames: they stay shown through
@@ -596,7 +597,7 @@ pub fn note_snapshot(id: u32) {
 
 /// How long ago a full-size picture of window `id` last reached the strips (any thread):
 /// a switch's pictures taken at the switch skip one fresh enough (the pointer's press on a
-/// card took it, or the app switcher's key).
+/// card took it, the app switcher's key, or a sign that a switch was likely).
 pub fn snapshot_age(id: u32) -> Option<Duration> {
     #[cfg(test)]
     if let Some(age) = crate::platform::fake::with(|d| d.shot_age(id)) {
