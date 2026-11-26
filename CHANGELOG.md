@@ -24,6 +24,11 @@
 - In the default mode, Mission Control and App Exposé opening and closing are followed at
   once; before, up to a second later, two with the Mac at rest.
 - `[windows] mission_control_key_keeps_stage = true` works in the default mode too.
+- In the default mode, when a screen is unplugged and macOS shows another Desktop on the screen
+  left, the windows of the Desktop it showed before stay in their stages. Before, they left
+  them and came back as new stages when that Desktop showed again.
+- After a screen is unplugged, going back to the Desktop the remaining screen showed before
+  brings its own last stage in front, not an empty one.
 
 ## 1.9.2 — 2026-11-24
 
