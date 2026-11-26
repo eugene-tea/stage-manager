@@ -317,8 +317,13 @@ windows. The same app can have stages on several Desktops. A card click never ch
 Desktop. ⌘-Tab and the Dock switch Desktops as macOS's own setting says ("When switching to
 an application, switch to a Space with open windows for the application"), and the arriving
 Desktop shows that window's stage. For a Dock click that Desktop is arranged before it slides
-in (at the click's release; under `engine = "spaces"` at its press, the window waiting on no
-Desktop until then), so the app's stage is in front as it arrives. A click that takes macOS
+in, at the click's press (the Dock acts at the release, about 0.1 s later; under `engine =
+"spaces"` the window waits on no Desktop until then and macOS must find it there, under the
+Accessibility engine its moves get that time, where they went out at the release until round
+arranged-ahead), so the app's stage is in front as it arrives. A press that is no click (the
+icon dragged, held for its menu, a modifier down) has the arrangement put back at its
+release: every window where it was, on a Desktop nobody sees (on the bench four window moves
+in all, two each way, and nothing changed in view). A click that takes macOS
 nowhere has the arrangement put back as it was, on the Desktop nobody sees, 3 s after it (1 s
 under the Accessibility engine until round arranged-ahead: on a busy Mac, whose Desktop began
 to slide later than that, the arrangement was put back just before and the stage changed in

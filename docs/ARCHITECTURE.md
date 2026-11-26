@@ -702,14 +702,20 @@ unveil leaves its focus to the landing then. The model asks whether macOS counts
 window on its Desktop (`Model::macos_counts_hidden`) for the Dock-click prediction. At the
 press on a Dock item (the Dock activates the app on the release, ~100 ms later) the window
 macOS should go to is put on its Desktop first: an arrangement ahead for another Desktop is
-made at the press, and for an app whose stage on the Desktop shown is hidden while it shows
+made at the press (under every engine since round arranged-ahead: the Corner engine's hidden
+window is on its Desktop already and macOS goes either way, but its moves go through
+Accessibility, each as slow as its app, and the press gives them the click's time before the
+Desktop slides; the pictures a switch here would wait for are taken at the same press,
+`Controller::press_item`), and for an app whose stage on the Desktop shown is hidden while it shows
 a window elsewhere, that stage's window is put home for a while, still counted hidden
 (`WindowEngine::lend_home`, `Model::dock_home`). Events end that lend, time only caps it
 (`engine::lend_wait`): the app's activation and its switch confirm it; another app's
 activation, a press that was no click and the next press take it back at once; with
 neither it goes back after 5 s (`LEND_WAIT`; it was 1 s, and a busy app's activation after
 it let macOS slide away). The arrangement made at the press for another Desktop is confirmed by
-the Space change's arrival and undone by a press that was no click or a switch the
+the Space change's arrival and undone by a press that was no click (a drag, a held press, a
+modifier, a release never heard: the same moves back on the Desktop not shown, every window
+where it was) or a switch the
 activation makes on the Desktop shown; the activation alone says nothing (a Dock item's may
 come at the slide's start, before the arriving Desktop's windows are listed), and with no
 notice it goes after 3 s (`DOCK_SWITCH_CAP`, under every engine: the 1 s the Corner engine had

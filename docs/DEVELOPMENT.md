@@ -367,8 +367,9 @@ Exit status is 0 on success, 1 on an error reply and 2 when the app is not runni
 `STAGE_MANAGER_TEST=1` the `debug-*` commands post clicks, drags, Desktop and Mission
 Control shortcuts, ⌘M (`debug-cmd-m`), full-screen toggles and the strip shown or hidden for the scripted checks,
 `debug-minimize-button ID` gives a window's minimize button's frame (for `debug-click`), `debug-dock-lend
-BUNDLE` feeds a Dock click without pressing the item (what the press put home waits for an
-activation that never comes), `debug-dock-hover BUNDLE` moves the pointer onto a fixture's
+BUNDLE [hold=MS]` feeds a Dock click without pressing the item (what the press put home, or
+arranged on another Desktop, waits for an activation that never comes; `hold=700` makes it a
+press that is no click), `debug-dock-hover BUNDLE` moves the pointer onto a fixture's
 Dock item and leaves it there (`debug-pointer-back` puts it back), a click takes `hold=MS`
 (`debug-click X Y hold=100`, `debug-dock-click BUNDLE hold=100`: the button held as a
 person's), and `debug-stale-handle

@@ -25,8 +25,10 @@
   once; before, up to a second later, two with the Mac at rest.
 - `[windows] mission_control_key_keeps_stage = true` works in the default mode too.
 - In the default mode, a Dock click to an app on another Desktop shows that Desktop with the
-  app's stage in front also on a busy Mac. Before, when the Desktop took more than a second
-  to start sliding, it slid in with the stage that was there and changed after.
+  app's stage in front also on a busy Mac. Its windows are moved as the mouse button goes
+  down, about a tenth of a second sooner, and the Desktop may take up to three seconds to
+  start sliding (one before). Before, it could slide in with the stage that was there and
+  change after.
 
 ## 1.9.2 — 2026-11-24
 

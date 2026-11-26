@@ -6928,11 +6928,11 @@ impl Controller {
                 }
                 self.debug_dock_click(ob, &bundle, real, hold_ms.map(Duration::from_millis))
             }
-            Command::DebugDockLend { bundle } => {
+            Command::DebugDockLend { bundle, hold_ms } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-lend needs STAGE_MANAGER_TEST=1" });
                 }
-                self.debug_dock_lend(ob, &bundle)
+                self.debug_dock_lend(ob, &bundle, hold_ms.map(Duration::from_millis))
             }
             Command::DebugDockHover { bundle } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

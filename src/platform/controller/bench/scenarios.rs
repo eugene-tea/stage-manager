@@ -860,18 +860,22 @@ fn dock_press_release_missed_spaces(load: f64) -> Run {
 
 #[test]
 fn a_dock_press_arranges_the_other_desktop_and_one_that_is_no_click_undoes_it() {
-    // The Corner engine arranges at the release (audit 11-25, U2).
-    let at_release = "arranged at the press false; the stage left on Desktop 2 never shown; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
-    expect(dock_click_that_slides_when, [at_release, at_release, at_release]);
-    // So a press that is no click has nothing to undo under it.
-    let nothing = "arranged at the press false, the stage left in front again at its end true, 0 moves in all, the other Desktop as it was true, the Desktop in view changed false; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
-    expect(dock_press_dragged_off, [nothing, nothing, nothing]);
-    expect(dock_press_held, [nothing, nothing, nothing]);
+    // Every engine arranges at the press (round arranged-ahead; the Corner engine at the
+    // release until then, "arranged at the press false").
+    let at_press = "arranged at the press true; the stage left on Desktop 2 never shown; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
+    expect(dock_click_that_slides_when, [at_press, at_press, at_press]);
+    // A press that is no click undoes it, under the Corner engine with real moves: two to
+    // arrange (the stage left to the corner, the app's window out of it), two back, all on
+    // the Desktop not shown; every window where it was, nothing changed in view. (Before:
+    // nothing arranged, 0 moves.)
+    let back = "arranged at the press true, the stage left in front again at its end true, 4 moves in all, the other Desktop as it was true, the Desktop in view changed false; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(dock_press_dragged_off, [back, back, back]);
+    expect(dock_press_held, [back, back, back]);
     // (The next press is on the wallpaper: Finder comes in front.)
-    let nothing_finder = nothing.replace("app 102", "app 91");
-    expect(dock_press_release_missed, [&nothing_finder, &nothing_finder, &nothing_finder]);
-    // The Spaces engine arranges at the press; the press that is no click undoes it: the
-    // window into its Desktop and back out, the stage left out and back in, nothing in view.
+    let back_finder = back.replace("app 102", "app 91");
+    expect(dock_press_release_missed, [&back_finder, &back_finder, &back_finder]);
+    // The Spaces engine, as before: the window into its Desktop and back out, the stage left
+    // out and back in, nothing in view.
     let undone = "arranged at the press true, the stage left in front again at its end true, 4 moves in all, the other Desktop as it was true, the Desktop in view changed false; front [15] shows [15] desktop 2 app 102 switches 0 slides 0";
     expect(dock_press_dragged_off_spaces, [undone, undone, undone]);
     expect(dock_press_held_spaces, [undone, undone, undone]);

@@ -256,9 +256,6 @@ was left behind for no reason of the mode.
 - **⌘Tab to another Desktop arranges the stage on arrival**, in both modes, though the chosen
   app is known before ⌘ is released (the Spaces engine's lend already follows it). Arranged
   ahead, as a Dock click's is; UX-SPEC's "known gap" sentence then goes.
-- **A Dock click's Desktop is arranged at the release** under the Accessibility engine, at the
-  press under Spaces: whether the Accessibility engine can arrange at the press as Spaces
-  does.
 - **A hidden window found shown is given up after four tries** under the Accessibility engine
   and then stays in view, counted hidden, with no card; the Spaces engine never gives up.
 - **Smaller.** The wait for a switch's pictures (160 ms) is sized for ScreenCaptureKit, not for

@@ -16,7 +16,8 @@
 //! had the pictures taken before the switch, in the two Dock clicks of round switch-pictures
 //! and four scenarios of its own; and the scenarios of round arranged-ahead, printed with the
 //! reads off as each of its parts left them: the cap on an arrangement made ahead, 3 s under
-//! every engine, in the two Dock clicks to another Desktop on a busy Mac).
+//! every engine, in the two Dock clicks to another Desktop on a busy Mac; the Desktop
+//! arranged at the Dock press, and a press that is no click undoing it with four moves).
 //! A Mac where the reads do not work behaves as before. Beside each
 //! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!

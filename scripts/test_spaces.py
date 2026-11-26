@@ -35,7 +35,9 @@ Cmd-Tab) shows Desktop 1 with that window's stage active, arranged by the time t
 sent it (hands-free, twice: through the app's Dock item, where the stage left must never
 show even during the slide, and by `open`; the window server sampled every 30 ms through
 the slide, no transition for the arrival, the timeline printed; before it, a probe says
-whether macOS carries out a move of a window on a Desktop not shown); going back shows
+whether macOS carries out a move of a window on a Desktop not shown; and a Dock press that
+is no click, then a click that goes nowhere: Desktop 1 arranged at the press and put back as
+it was, at the release or at the 3 s cap, with nothing of it in view); going back shows
 Desktop 1's stages; quit with a window parked on the other
 Desktop brings it back (Accessibility reaching another Space); a relaunch rebuilds both
 Desktops' stages; kill -9 with a window parked on the other Desktop: the guardian waits,
@@ -641,6 +643,10 @@ planned steps (hands-free):
   probe       on Desktop 2: ctl debug-frame <Fixture 1 (Desktop 1, shown in its stage)> +40 pt only (no raise,
               no focus), the window server's bounds read (all Desktops), then put back; says whether macOS
               carries out moves on a Desktop not shown (round 6T); no Desktop 1 window may show meanwhile
+  dock press  on Desktop 2, Alpha 1 hidden on Desktop 1: Alpha's Dock press fed and held 700 ms (ctl debug-dock-lend
+              hold=700: no click): Desktop 1 arranged at the press, undone at the release; then the click fed alone
+              (no AXPress: it goes nowhere): still arranged 2 s after, undone at the 3 s cap; both: no Space
+              change, no Desktop 1 window on screen at any look, every window back at its bounds
   activation  on Desktop 2, the window server sampled every 30 ms for 3 s each: (1) $SM_DOCK_REPEATS (3) times Alpha's Dock item
               (ctl debug-dock-click: the Dock's hit-test at the item, as a real click, then AXPress), Alpha 1 parked in an
               inactive stage of Desktop 1: Desktop 1 comes up with Alpha 1's stage, the path is dock-click and
@@ -2071,6 +2077,8 @@ def activation_to_desktop_1(d1, d2):
     if not AUTO:
         arrive_on_desktop_1(d1, alpha, left, None)
         return
+    say("\n== a Dock press that is no click, and a click that goes nowhere: arranged, then put back unseen ==")
+    dock_press_cases(d1, d2, alpha, left)
     clean = []
     try:
         for n in range(DOCK_REPEATS):
@@ -2087,6 +2095,97 @@ def activation_to_desktop_1(d1, d2):
     if back_to_desktop_2(d1, d2):
         arrive_on_desktop_1(d1, alpha, left, "open")
     owners_case(d1, d2)
+
+
+def dock_press_cases(d1, d2, alpha, left):
+    """Round arranged-ahead (audit 11-25, H3 and U2), under every engine, hands-free. On
+    Desktop 2, Alpha 1 hidden behind the Fixture stage of Desktop 1 (`left`: that stage's
+    windows): a press on Alpha's Dock item arranges Desktop 1 at the press (Alpha 1's stage in
+    front there, the stage left hidden), with nothing of it in view. The press and its release
+    are fed to the app (`ctl debug-dock-lend`: the Dock's hit-test at the item, no `AXPress`),
+    so macOS itself does nothing.
+
+    1. **A press that is no click** (`hold=700`, past a click's 600 ms): arranged at the
+       press, undone at the release ("the Dock press was no click").
+    2. **A click that goes nowhere** (no hold: a click whose activation never comes): the
+       arrangement still stands 2 s after it (the Accessibility engine undid it after 1 s
+       until this round) and is undone at the 3 s cap ("no Space change came").
+
+    Both: no Space change; no window of Desktop 1 listed on screen at any look (every 30 ms);
+    after, every window of Desktop 1 at the bounds the window server had for it before, Alpha 1
+    hidden and the stage left shown again in the app's state. Leaves everything as it was."""
+    bundle = ts.EXTRA["a"][0]
+    d1_ids = set(WATCH.ids["d1"])
+    watched = [alpha["id"], *left]
+
+    def as_it_was(label, before):
+        x = state()
+        check(x.get("space") == d2, f"{label}: still on Desktop 2 (Space {x.get('space')})")
+        check(any(w["id"] == alpha["id"] and w["parked"] for w in x["windows"])
+              and not any(w["parked"] for w in x["windows"] if w["id"] in left),
+              f"{label}: Desktop 1 as it was in the app's state (Alpha 1 hidden, the stage left shown: {ts.stage_titles(x)})")
+        now = {w["id"]: w["bounds"] for w in probe_all()}
+        moved = [(i, before.get(i) and ts.fmt(before[i]), now.get(i) and ts.fmt(now[i])) for i in watched
+                 if not (before.get(i) and now.get(i) and ts.close(now[i], before[i]))]
+        check(not moved, f"{label}: every window of Desktop 1 back at its bounds of before ({moved or 'all'})")
+
+    def nothing_seen(label, sampler, t0):
+        samples, _ = _sampled(sampler, label)
+        if samples:
+            seen = sorted({w["id"] for x in samples for w in x["windows"] if w["onscreen"] and w["id"] in d1_ids})
+            check(not seen, f"{label}: no window of Desktop 1 listed on screen at any of {len(samples)} looks ({seen or 'none'})")
+        changes = space_changes_since(t0)
+        check(not changes, f"{label}: no Space change ({changes})")
+
+    def sampler_for(ms):
+        p = subprocess.Popen([ts.BIN, "probe-windows", "--every", "30", "--for", str(ms), *ts.ALL_IDS],
+                             env=ts.ENV, stdout=subprocess.PIPE, text=True)
+        time.sleep(0.1)
+        return p
+
+    WATCH.pause()
+    try:
+        # 1. A press that is no click.
+        label = "dock press, no click"
+        before = {w["id"]: w["bounds"] for w in probe_all()}
+        sampler, t0 = sampler_for(2500), time.time()
+        r = ctl("debug-dock-lend", bundle, "hold=700")
+        check(r.get("ok"), f"{label}: the press and its release were fed ({r.get('error') or 'ok'})")
+        check(r.get("predicted") is None and r.get("arranged") is None,
+              f"{label}: no prediction at the release, nothing left arranged ({r.get('predicted')}, {r.get('arranged')})")
+        time.sleep(0.5)
+        events = log_events(t0)
+        arranged = first_after(events, "dock: the Desktop the press goes to is arranged at the press", t0)
+        undone = next((t for t, line in events if "the arrangement made ahead is undone" in line and "the Dock press was no click" in line), None)
+        if check(arranged is not None, f"{label}: Desktop 1 arranged at the press (every engine; engine {ts.ENGINE})") \
+                and check(undone is not None, f"{label}: undone at the release (the Dock press was no click)"):
+            say(f"    arranged for {(undone - arranged) * 1000:.0f} ms (the press was held 700 ms)")
+            check(0.5 <= undone - arranged <= 1.2, f"{label}: it stood from the press to the release ({(undone - arranged) * 1000:.0f} ms)")
+        nothing_seen(label, sampler, t0)
+        as_it_was(label, before)
+
+        # 2. A click that goes nowhere.
+        label = "dock click to nowhere"
+        before = {w["id"]: w["bounds"] for w in probe_all()}
+        sampler, t0 = sampler_for(5500), time.time()
+        r = ctl("debug-dock-lend", bundle)
+        check(r.get("ok") and r.get("predicted") == alpha["id"] and r.get("arranged") == alpha["id"],
+              f"{label}: the click predicted Alpha 1 and Desktop 1 stands arranged for it ({r})")
+        time.sleep(2.0)
+        x = state()
+        check(any(w["id"] == alpha["id"] and not w["parked"] for w in x["windows"]),
+              "dock click to nowhere: the arrangement still stands 2 s after the click (a busy Mac's Space change may still come)")
+        time.sleep(2.5)
+        events = log_events(t0)
+        arranged = first_after(events, "dock: the Desktop the press goes to is arranged at the press", t0)
+        undone = next((t for t, line in events if "the arrangement made ahead is undone" in line and "no Space change came" in line), None)
+        if check(arranged is not None and undone is not None, f"{label}: arranged at the press, undone for want of a Space change"):
+            say(f"    undone {(undone - arranged) * 1000:.0f} ms after it was arranged (the cap is 3 s, looked at on the tick)")
+            check(2.9 <= undone - arranged <= 4.3, f"{label}: undone at the 3 s cap ({(undone - arranged):.2f} s)")
+        nothing_seen(label, sampler, t0)
+        as_it_was(label, before)
+    finally:
+        WATCH.desk("d2" if current_space() == d2 else "d1")
 
 
 def owners_case(d1, d2):
@@ -2344,6 +2443,9 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
               f"(Fixture 1-2 in the park zone at every look 50 ms after it){'' if not late else ': ' + str([rel(t) for t in late][:8])}")
     if how == "dock":
         check(trigger == "dock-click", f"arranged at the Dock click ({path})")
+        # Round arranged-ahead: at the press under every engine (the fed click's press).
+        check(first_after(events, "dock: the Desktop the press goes to is arranged at the press", t_open) is not None,
+              f"arranged at the Dock press, not at its release (engine {ts.ENGINE})")
         during = [t for t in stale if slide_from is not None and t >= slide_from]
         clean = clean and not during and trigger == "dock-click"
         check(not during, "the stage left never shows once Desktop 1 is on screen, not even during the slide"
