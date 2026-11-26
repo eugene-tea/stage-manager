@@ -357,6 +357,7 @@ pub fn keep_fresh(screen: u32, key: Key, region: Rect, moment: Moment, wants: Wa
     })
     .flatten();
     let Some(generation) = start else { return };
+    super::costs::bump(super::costs::Cost::DesktopStill);
     let wanted = key.clone();
     let done = Box::new(move |still: DesktopStill| arrived(screen, still, wanted, region, generation, now));
     if let Err(why) = capture::capture_desktop(screen, region, done) {
