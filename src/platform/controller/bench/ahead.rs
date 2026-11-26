@@ -75,6 +75,11 @@ enum Ends {
     Escape(u64),
     /// A second Tab 300 ms after the first (the selection moves on), ⌘ let go 150 ms later.
     TabOn,
+    /// ⌘ let go before the WM thread got to the Tab; macOS has picked its Desktop already.
+    Unhandled,
+    /// ⌘ let go this many ms after the Tab on macOS's own clock, while the Tab's handler may
+    /// still be asking the app selected (a slow one).
+    LetGoMeanwhile(u64),
 }
 
 /// The frame and Desktop (`None`: on no Desktop) of each of the windows `of` on the desk.
@@ -86,6 +91,10 @@ fn desk_as_is(b: &mut Bench, of: &BTreeSet<u32>) -> Vec<(u32, Rect, Option<u64>)
 /// selects the second), ended as `ends` says (module docs for the outcome).
 fn cmd_tab(engine: EngineKind, load: f64, order: Vec<i32>, ends: Ends, edit: impl FnOnce(&mut Desk)) -> Run {
     let mut b = charlie_used_before(engine, load, edit);
+    if let Ends::LetGoMeanwhile(_) = ends {
+        // Slow to answer, by the clock (whatever the load): its round takes about 90 ms.
+        b.desk(|d| d.apps.get_mut(&C).expect("Charlie").answers_ms = Some(22.0 / d.load));
+    }
     let there = b.space_of(14).expect("Desktop 2");
     // Desktop 2's windows: every one but Desktop 1's two.
     let theirs: BTreeSet<u32> = b.desk(|d| d.windows.keys().copied().filter(|id| ![11, 12].contains(id)).collect());
@@ -97,8 +106,19 @@ fn cmd_tab(engine: EngineKind, load: f64, order: Vec<i32>, ends: Ends, edit: imp
             on_the_way.extend(b.on_screen().intersection(&theirs));
         }
     };
-    b.cmd_tab(order);
+    if !matches!(ends, Ends::Unhandled) {
+        b.cmd_tab(order.clone());
+    }
     let at_end = match ends {
+        Ends::Unhandled => {
+            b.cmd_tab_let_go_unhandled(order);
+            b.front_in(there)
+        }
+        Ends::LetGoMeanwhile(ms) => {
+            b.cmd_tab_release_in(ms);
+            pass(&mut b, ms + 150);
+            b.front_in(there)
+        }
         Ends::LetGo(ms) => {
             pass(&mut b, ms);
             let at_end = b.front_in(there);
@@ -202,6 +222,34 @@ fn browsed_tap_refused_spaces(load: f64) -> Run {
     cmd_tab(EngineKind::Spaces, load, as_used(), Ends::LetGo(400), |d| d.tap_hears = false)
 }
 
+/// ⌘ let go before the WM thread got to the Tab: macOS picked the Desktop before anything
+/// could be arranged. A window in a stage Space was on no Desktop then, so macOS goes
+/// nowhere by itself.
+fn unhandled_corner(load: f64) -> Run {
+    cmd_tab(EngineKind::Corner, load, as_used(), Ends::Unhandled, |_| {})
+}
+
+fn unhandled_spaces(load: f64) -> Run {
+    cmd_tab(EngineKind::Spaces, load, as_used(), Ends::Unhandled, |_| {})
+}
+
+/// Charlie slow to answer (22 ms an answer; the Tab's round with it takes about 90), and ⌘
+/// let go 60 ms after the Tab: macOS picks the Desktop while the app is still being asked,
+/// before anything is arranged. Under the Spaces engine Charlie's window was on no Desktop
+/// then and macOS goes nowhere by itself.
+fn let_go_while_asked(engine: EngineKind, load: f64) -> Run {
+    // The race is the scenario's own: the app's slowness is set for the load it runs at.
+    cmd_tab(engine, load, as_used(), Ends::LetGoMeanwhile(60), move |_| {})
+}
+
+fn let_go_while_asked_corner(load: f64) -> Run {
+    let_go_while_asked(EngineKind::Corner, load)
+}
+
+fn let_go_while_asked_spaces(load: f64) -> Run {
+    let_go_while_asked(EngineKind::Spaces, load)
+}
+
 // ----- not released onto it -----------------------------------------------------------------
 
 /// Cancelled with Escape 400 ms after the Tab.
@@ -275,6 +323,10 @@ pub(super) const ALL: &[Scenario] = &[
     ("Cmd-Tab held 0.4 s, let go onto an app hidden on another Desktop (Spaces)", "audit 11-25 H5, the Dock's list read", browsed_spaces),
     ("the same, the key tap refused (Corner)", "mission_key_tap.rs, a cancel never heard", browsed_tap_refused_corner),
     ("the same, the key tap refused (Spaces)", "mission_key_tap.rs, a cancel never heard", browsed_tap_refused_spaces),
+    ("Cmd-Tab let go before its Tab was handled, the app on another Desktop (Corner)", "controller/switcher.rs, a Tab handled late", unhandled_corner),
+    ("Cmd-Tab let go before its Tab was handled, the app hidden on another Desktop (Spaces)", "controller/arrival.rs, late_for_macos", unhandled_spaces),
+    ("Cmd-Tab let go while the app selected is still asked, on another Desktop (Corner)", "controller/arrival.rs, late_for_macos", let_go_while_asked_corner),
+    ("Cmd-Tab let go while the app selected is still asked, hidden on another Desktop (Spaces)", "controller/arrival.rs, late_for_macos", let_go_while_asked_spaces),
     ("Cmd-Tab to an app on another Desktop, cancelled with Escape (Corner)", "audit 11-25 H5, undone at Escape", cancelled_corner),
     ("Cmd-Tab to an app hidden on another Desktop, cancelled with Escape (Spaces)", "audit 11-25 H5, undone at Escape", cancelled_spaces),
     ("Cmd-Tab past an app on another Desktop, let go on one here (Corner)", "audit 11-25 H5, undone when the selection moves on", tabbed_on_corner),
@@ -287,41 +339,88 @@ pub(super) const ALL: &[Scenario] = &[
     ("Cmd-Tab held 0.4 s, the guess wrong, the app on the guessed app's Desktop (Corner)", "audit 11-25 H5, the Dock's list corrects the guess", wrong_guess_browsed_same_desktop_corner),
 ];
 
-/// Before round arranged-ahead: no engine arranges ahead for ⌘Tab (the Corner engine at the
-/// Space change's notice, the Desktop already in view; the Spaces engine at the activation,
-/// then it focuses the window and macOS goes).
+/// Round arranged-ahead: the Desktop is arranged while the switcher shows, from the first
+/// Tab's guess on, under both engines. (Before: under the Corner engine at the Space change's
+/// notice, "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way
+/// [14, 15]": it slid in with the stage left in front and changed in view; under Spaces at
+/// the activation, "had [15] ...; seen ... [14]".)
 #[test]
 fn cmd_tab_to_an_app_on_another_desktop() {
-    // The Corner engine: Desktop 2 slides in with the stage left (15) in front, then changes.
+    let ahead = "Desktop 2 had [14] in front at the switcher's end; seen of Desktop 2 on the way [14]; 2 moves there; Desktop 2 as it was false; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
+    // A quick ⌘Tab, from the guess alone; a browsed one, the Dock's list agreeing.
+    expect(quick_corner, [ahead, ahead, ahead]);
+    expect(quick_spaces, [ahead, ahead, ahead]);
+    expect(browsed_corner, [ahead, ahead, ahead]);
+    expect(browsed_spaces, [ahead, ahead, ahead]);
+    // The key tap refused: nothing is arranged ahead, each engine as before the round.
     let in_view = "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way [14, 15]; 2 moves there; Desktop 2 as it was false; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
-    expect(quick_corner, [in_view, in_view, in_view]);
-    expect(browsed_corner, [in_view, in_view, in_view]);
-    expect(browsed_tap_refused_corner, [in_view, in_view, in_view]);
-    // The Spaces engine: arranged at the activation, before macOS goes.
     let at_activation = "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way [14]; 2 moves there; Desktop 2 as it was false; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
-    expect(quick_spaces, [at_activation, at_activation, at_activation]);
-    expect(browsed_spaces, [at_activation, at_activation, at_activation]);
+    expect(browsed_tap_refused_corner, [in_view, in_view, in_view]);
     expect(browsed_tap_refused_spaces, [at_activation, at_activation, at_activation]);
+    // ⌘ let go before the Tab was handled: the app is in front by then and the keys guess
+    // the app left (which has a window here): nothing arranged, as before the round.
+    expect(unhandled_corner, [in_view, in_view, in_view]);
+    expect(unhandled_spaces, [at_activation, at_activation, at_activation]);
 }
 
+/// ⌘ let go while the Tab's handler still asks a slow app: the arrangement goes out after
+/// macOS picked the Desktop. Under the Corner engine macOS slides anyway and finds it
+/// arranged. Under the Spaces engine the window was on no Desktop when macOS picked: the
+/// arrangement stands, and its window is focused at the app's activation, which takes macOS
+/// there (`late_for_macos`; without it the app stayed in front with no window, Desktop 1
+/// shown). When the app is found in front already while it is asked, nothing is arranged for
+/// it and its activation does both, as before the round (the same outcome but for what stood
+/// at the switcher's end).
+#[test]
+fn cmd_tab_let_go_while_the_app_selected_is_still_asked() {
+    let ahead = "Desktop 2 had [14] in front at the switcher's end; seen of Desktop 2 on the way [14]; 2 moves there; Desktop 2 as it was false; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
+    expect(let_go_while_asked_corner, [ahead, ahead, ahead]);
+    expect(let_go_while_asked_spaces, [ahead, ahead, ahead]);
+}
+
+/// Not let go on it: the arrangement is undone on the Desktop nobody sees, the same moves
+/// back, every window where it was. (Before: nothing arranged, "0 moves there".)
 #[test]
 fn cmd_tab_past_an_app_on_another_desktop() {
-    let untouched = "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way []; 0 moves there; Desktop 2 as it was true; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
-    expect(cancelled_corner, [untouched, untouched, untouched]);
-    expect(cancelled_spaces, [untouched, untouched, untouched]);
-    let here = "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way []; 0 moves there; Desktop 2 as it was true; front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
+    let cancelled = "Desktop 2 had [14] in front at the switcher's end; seen of Desktop 2 on the way []; 4 moves there; Desktop 2 as it was true; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(cancelled_corner, [cancelled, cancelled, cancelled]);
+    expect(cancelled_spaces, [cancelled, cancelled, cancelled]);
+    // Undone at the second Tab (the stage left in front again by ⌘'s release); Alpha's stage
+    // comes here, animated as before.
+    let here = "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way []; 4 moves there; Desktop 2 as it was true; front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
     expect(tabbed_on_corner, [here, here, here]);
     expect(tabbed_on_spaces, [here, here, here]);
 }
 
+/// The first Tab's guess wrong (the logs of 11-18 to 11-24: 7 of 442 where the Dock's list
+/// could tell). The Desktop arranged for the guess is put back as it was, unseen: by the
+/// Dock's list while the switcher shows, else by the activation of the app let go on.
 #[test]
 fn cmd_tab_with_the_first_tabs_guess_wrong() {
-    let here = "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way []; 0 moves there; Desktop 2 as it was true; front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
-    expect(wrong_guess_quick_corner, [here, here, here]);
-    expect(wrong_guess_quick_spaces, [here, here, here]);
-    expect(wrong_guess_browsed_corner, [here, here, here]);
-    expect(wrong_guess_browsed_spaces, [here, here, here]);
-    let there = "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way [15, 17]; 2 moves there; Desktop 2 as it was false; front [17] shows [17] desktop 2 app 104 switches 0 slides 1";
-    expect(wrong_guess_quick_same_desktop_corner, [there, there, there]);
-    expect(wrong_guess_browsed_same_desktop_corner, [there, there, there]);
+    // Let go before the Dock's list: still arranged for the guess at ⌘'s release, undone at
+    // Alpha's activation, after its switch here went out (animated, as before).
+    let at_activation = "Desktop 2 had [14] in front at the switcher's end; seen of Desktop 2 on the way []; 4 moves there; Desktop 2 as it was true; front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
+    expect(wrong_guess_quick_corner, [at_activation, at_activation, at_activation]);
+    expect(wrong_guess_quick_spaces, [at_activation, at_activation, at_activation]);
+    // TIME DECIDES: the Dock's list (180 ms after the Tab, times the load) against ⌘ held
+    // 0.4 s. At load 1 the list corrects the guess while the switcher shows; at load 3 and
+    // 10 it never shows, and the activation undoes it.
+    let by_the_dock = "Desktop 2 had [15] in front at the switcher's end; seen of Desktop 2 on the way []; 4 moves there; Desktop 2 as it was true; front [11] shows [11] desktop 1 app 101 switches 1 slides 0";
+    expect(wrong_guess_browsed_corner, [by_the_dock, at_activation, at_activation]);
+    expect(wrong_guess_browsed_spaces, [by_the_dock, at_activation, at_activation]);
+}
+
+/// The one wrong guess that comes into view: never corrected (⌘ let go before the Dock's
+/// list), and the app let go on has its windows on the Desktop arranged for the guess.
+/// macOS slides there: the guessed app's stage (14) shows as the Desktop slides in, then the
+/// stage left (15, the undo at the other app's activation), then the app's own (17). Before
+/// the round: the stage left, then the app's own ("seen ... [15, 17]; 2 moves there").
+#[test]
+fn cmd_tab_with_a_wrong_guess_that_comes_into_view() {
+    let seen_wrong = "Desktop 2 had [14] in front at the switcher's end; seen of Desktop 2 on the way [14, 15, 17]; 6 moves there; Desktop 2 as it was false; front [17] shows [17] desktop 2 app 104 switches 0 slides 1";
+    expect(wrong_guess_quick_same_desktop_corner, [seen_wrong, seen_wrong, seen_wrong]);
+    // TIME DECIDES: the Dock's list, as above. Corrected while the switcher shows, the
+    // Desktop slides in arranged for the app let go on.
+    let corrected = "Desktop 2 had [17] in front at the switcher's end; seen of Desktop 2 on the way [17]; 6 moves there; Desktop 2 as it was false; front [17] shows [17] desktop 2 app 104 switches 0 slides 1";
+    expect(wrong_guess_browsed_same_desktop_corner, [corrected, seen_wrong, seen_wrong]);
 }

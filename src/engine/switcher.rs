@@ -1,4 +1,5 @@
-//! ⌘Tab's app switcher, followed from the keys (round cmd-tab, the Spaces engine).
+//! ⌘Tab's app switcher, followed from the keys (round cmd-tab for the Spaces engine's lend;
+//! every engine since round arranged-ahead, for the Desktop arranged ahead: [`plan_ahead`]).
 //!
 //! Under the Spaces engine a window in a stage Space is on no Desktop for macOS. With "When
 //! switching to an application, switch to a Space with open windows for the application"
@@ -30,6 +31,34 @@
 //!
 //! The platform prefers the switcher's own selection, read from the Dock's Accessibility at
 //! these key events, over [`predict`]; the decision is the same either way.
+//!
+//! **The Desktop arranged ahead** (round arranged-ahead; audit engine-uniformity 11-25, H5).
+//! An app with no window on the Desktop shown and one on another makes macOS slide there at
+//! ⌘'s release, and Apple's Stage Manager slides that Desktop in with the app's stage in
+//! front. While the switcher shows the app is known, so that Desktop is arranged then, as at
+//! a Dock press ([`crate::engine::model::Model::dock_arrival`] says whether macOS will
+//! slide), under every engine: [`plan_ahead`] arranges for the app selected
+//! ([`AheadAct::Arrange`]), undoes it when the selection moves on, at Escape or when the
+//! keys lose the switcher ([`AheadAct::Undo`]), and lets it stand at ⌘'s release on that app
+//! ([`AheadAct::Stand`]: the Space change confirms it, as a Dock click's).
+//!
+//! *When.* At the first Tab's guess, corrected by the Dock's list, as the lend: a quick ⌘Tab
+//! (⌘ let go before the Dock lists the switcher, ~180 ms after the Tab) is arranged from
+//! [`predict`] alone, a browsed one from the Dock's reading from then on. Under the Spaces
+//! engine it has to be before the release: macOS picks the Desktop 3-12 ms after it, by the
+//! windows it counts there then. Under the Corner engine the hidden window is on its Desktop
+//! already, and the earlier start is its moves' (through Accessibility, each as slow as its
+//! app). Arranging only once the Dock confirmed, or at the release, would leave a quick
+//! ⌘Tab as it was: in the logs of 11-18 to 11-24, 226 of 668 first Tabs were let go before
+//! the Dock's list was read, and the list agreed with the guess in 435 of the 442 others.
+//! A wrong guess costs its moves twice, on a Desktop nobody sees: corrected by the Dock's
+//! list while the switcher shows; let go before that, undone by what macOS does next (the
+//! other app's activation, or the Space change that lists another Desktop).
+//!
+//! *Its end must be heard.* A cancelled switcher looks like a released one to the input
+//! monitor (it never hears Escape). Only with the key tap hearing is a release known for one:
+//! without it nothing is arranged ahead, and a switcher that closes with no key heard for its
+//! end has its arrangement undone, so the Desktop is arranged on arrival, as before.
 
 use std::time::{Duration, Instant};
 
@@ -400,6 +429,68 @@ pub fn plan(heard: Heard, selected: Option<Pid>, lent: Option<(Pid, WindowId)>, 
     }
 }
 
+/// What becomes of the Desktop arranged ahead for the switcher's selection ([`plan_ahead`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AheadAct {
+    /// App `pid` is selected and macOS will slide to another Desktop for its `window` at ⌘'s
+    /// release: that Desktop is arranged now.
+    Arrange {
+        /// The app selected.
+        pid: Pid,
+        /// The window macOS will show.
+        window: WindowId,
+    },
+    /// The arrangement made for the switcher is undone, on its Desktop not shown.
+    Undo {
+        /// Why, for the log.
+        why: &'static str,
+    },
+    /// ⌘ let go on the app it was arranged for: it stands for the Space change, the window
+    /// held as its focus would be.
+    Stand {
+        /// The window.
+        window: WindowId,
+    },
+}
+
+/// The acts on the Desktop arranged ahead for `heard`, with `selected` the app the switcher
+/// selects now (as for [`plan`]), `arranged` the app and window a Desktop stands arranged for
+/// while this switcher is up, `end_heard` whether its end was told by a key a hearing tap or
+/// the monitor could not mistake (a release taken from the Dock's list gone, or from the
+/// live modifiers, may be a cancel), and `slides_to` the window macOS will slide to another
+/// Desktop for when ⌘ is let go on an app (`None`: it stays here, or nothing says).
+pub fn plan_ahead(
+    heard: Heard,
+    selected: Option<Pid>,
+    arranged: Option<(Pid, WindowId)>,
+    end_heard: bool,
+    slides_to: impl FnOnce(Pid) -> Option<WindowId>,
+) -> Vec<AheadAct> {
+    let undo = |why| arranged.map(|_| AheadAct::Undo { why });
+    match heard {
+        Heard::Nothing => Vec::new(),
+        Heard::Selected { .. } => {
+            if selected.is_some() && arranged.map(|(pid, _)| pid) == selected {
+                return Vec::new();
+            }
+            let mut acts: Vec<AheadAct> = undo("the switcher's selection moved on").into_iter().collect();
+            if let Some(pid) = selected
+                && let Some(window) = slides_to(pid)
+            {
+                acts.push(AheadAct::Arrange { pid, window });
+            }
+            acts
+        }
+        Heard::Cancelled => undo("the switcher was cancelled").into_iter().collect(),
+        Heard::Lost => undo("the switcher was acted on in a way the keys do not follow").into_iter().collect(),
+        Heard::Released { .. } => match arranged {
+            Some((pid, window)) if selected == Some(pid) && end_heard => vec![AheadAct::Stand { window }],
+            Some((pid, _)) if selected == Some(pid) => undo("the switcher closed with no key heard for its end: it may have been cancelled").into_iter().collect(),
+            _ => undo("⌘ was let go on another app").into_iter().collect(),
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,5 +785,52 @@ mod tests {
         assert_eq!(plan(Heard::Nothing, Some(40), Some((40, w(5))), home), vec![]);
         // Under the Corner engine `home` answers nothing: no act at all.
         assert_eq!(plan(sel, Some(40), None, |_| None), vec![]);
+    }
+
+    #[test]
+    fn the_desktop_of_the_app_selected_is_arranged_ahead_and_undone_when_the_selection_moves_on() {
+        let w = WindowId;
+        // App 40's window 5 waits on another Desktop; app 20 has a window here.
+        let slides = |pid: Pid| (pid == 40).then_some(w(5));
+        let first = Heard::Selected { steps: Some(1), first: true };
+        let next = Heard::Selected { steps: Some(2), first: false };
+        assert_eq!(plan_ahead(first, Some(40), None, true, slides), vec![AheadAct::Arrange { pid: 40, window: w(5) }], "at the first Tab's guess");
+        assert_eq!(plan_ahead(next, Some(40), Some((40, w(5))), true, slides), vec![], "the Dock's list agrees: it stands as it is");
+        assert_eq!(plan_ahead(first, Some(20), None, true, slides), vec![], "an app macOS activates here: nothing");
+        assert_eq!(plan_ahead(first, None, None, true, slides), vec![], "no guess: nothing");
+        assert_eq!(
+            plan_ahead(next, Some(20), Some((40, w(5))), true, slides),
+            vec![AheadAct::Undo { why: "the switcher's selection moved on" }],
+            "the Dock's list names another app, or another Tab: undone"
+        );
+        // The guess was app 20 (nothing arranged); the Dock's list says app 40.
+        assert_eq!(plan_ahead(next, Some(40), None, true, slides), vec![AheadAct::Arrange { pid: 40, window: w(5) }]);
+        // Two apps on other Desktops in a row: one undone, the next arranged.
+        let both = |pid: Pid| Some(w(pid as u32));
+        assert_eq!(
+            plan_ahead(next, Some(41), Some((40, w(40))), true, both),
+            vec![AheadAct::Undo { why: "the switcher's selection moved on" }, AheadAct::Arrange { pid: 41, window: w(41) }]
+        );
+        assert_eq!(plan_ahead(Heard::Cancelled, Some(40), Some((40, w(5))), true, slides), vec![AheadAct::Undo { why: "the switcher was cancelled" }]);
+        assert!(matches!(plan_ahead(Heard::Lost, Some(40), Some((40, w(5))), true, slides)[..], [AheadAct::Undo { .. }]));
+        assert_eq!(plan_ahead(Heard::Cancelled, Some(40), None, true, slides), vec![], "nothing arranged, nothing to undo");
+        assert_eq!(plan_ahead(Heard::Nothing, Some(40), Some((40, w(5))), true, slides), vec![]);
+    }
+
+    #[test]
+    fn at_the_release_the_arrangement_stands_only_when_the_release_was_heard_for_one() {
+        let w = WindowId(5);
+        let released = Heard::Released { steps: Some(1) };
+        let none = |_: Pid| None;
+        assert_eq!(plan_ahead(released, Some(40), Some((40, w)), true, none), vec![AheadAct::Stand { window: w }], "⌘ let go on its app");
+        assert_eq!(
+            plan_ahead(released, Some(20), Some((40, w)), true, none),
+            vec![AheadAct::Undo { why: "⌘ was let go on another app" }]
+        );
+        assert!(matches!(plan_ahead(released, None, Some((40, w)), true, none)[..], [AheadAct::Undo { .. }]), "the selection unknown");
+        // A release taken from the Dock's list gone, the key tap not hearing: Escape looks
+        // the same, so it is undone and the Desktop is arranged on arrival, as before.
+        assert!(matches!(plan_ahead(released, Some(40), Some((40, w)), false, none)[..], [AheadAct::Undo { .. }]));
+        assert_eq!(plan_ahead(released, Some(40), None, true, |_| Some(w)), vec![], "nothing is arranged at the release itself");
     }
 }

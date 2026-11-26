@@ -1,5 +1,7 @@
 //! ⌘Tab's switcher on the WM thread (round cmd-tab): the app it selects gets its stage's
-//! window put home before ⌘'s release, as a Dock press does ([`Model::dock_home`]).
+//! window put home before ⌘'s release, as a Dock press does ([`Model::dock_home`]); and,
+//! under every engine, the Desktop macOS will slide to for it arranged before the release,
+//! as a Dock press does too (round arranged-ahead, below).
 //!
 //! Under the Spaces engine a window in a stage Space is on no Desktop for macOS. ⌘Tab to an
 //! app whose windows here all wait in stage Spaces, while it has a window on another Desktop,
@@ -51,8 +53,38 @@
 //! it counts as the release when ⌘'s own release is not heard within
 //! [`switcher::GONE_WAIT`]. Both waits run on the fast tick, armed only then. The
 //! tick asks the live modifiers only while the switcher is up (a release the monitor
-//! missed). The Corner engine: [`Model::dock_home`] answers nothing, nothing is read or put
-//! home.
+//! missed). The Corner engine: [`Model::dock_home`] answers nothing, nothing is put
+//! home; the switcher is followed all the same, for the Desktop arranged ahead.
+//!
+//! **The Desktop arranged ahead** (round arranged-ahead; audit engine-uniformity 11-25, H5;
+//! the rules are [`switcher::plan_ahead`]'s and its module's). An app selected whose windows
+//! are all on another Desktop takes macOS there at ⌘'s release. Until this round that
+//! Desktop was arranged when it arrived (the Corner engine: at the Space change's notice,
+//! the stage left in view through the slide; the Spaces engine: at the activation, the app
+//! asked its focused window first). Now the selection is asked what a Dock press is
+//! ([`Controller::app_asked`], [`Model::dock_arrival`]; never for the app in front, on which
+//! ⌘'s release changes nothing), and the Desktop it names is arranged at once
+//! ([`Controller::arrange_for_switcher`]): from the first Tab's guess, corrected by the
+//! Dock's list. It is undone when the selection moves on, at Escape, when the keys lose the
+//! switcher, or when ⌘ is let go on another app; at ⌘'s release on its app it stands for the
+//! Space change ([`Controller::switcher_ahead_stands`]). A lend and an arrangement never
+//! stand for the same app: an app with a stage here gets the lend, and macOS stays.
+//!
+//! Only while the key tap hears ([`mission_key_tap::hears`]; it is made at ⌘'s first press,
+//! [`mission_key_tap::prepare`], and on from the Tab to the switcher's end): with no word of
+//! Escape a cancelled switcher would leave another Desktop arranged for an app nobody went
+//! to. Without it (macOS refused the tap, or keeps it off for secure input) nothing is
+//! arranged ahead, and a switcher that closes with no key heard for its end has its
+//! arrangement undone: the Desktop is arranged on arrival, as before.
+//!
+//! What following the switcher costs the Corner engine, which did not follow it: the Dock's
+//! observer, made at ⌘'s first press and kept (its notices come while the Dock makes or
+//! drops an element: the switcher, its menus; each read while the switcher is down is one
+//! bounded call to the Dock); the key tap on from the Tab to the switcher's end (each key,
+//! modifier change and press meanwhile wakes its thread once; `ctl state`'s `costs`:
+//! `tap_events`, `dock_notices`); at each selection one read of the Dock's switcher, one
+//! window list and, for an app with a window on another Desktop and none here, one bounded
+//! round with that app (100 ms at most, [`Controller::app_asked`]).
 //!
 //! A ⌘Tab let go before its Tab is handled on this thread gets nothing put home: macOS
 //! decides at the activation, as before (`⌘ let go … lent=false` in the log, with the time
@@ -82,13 +114,14 @@ use crate::engine::corner;
 use crate::engine::lend_park::{ParkAsk, Zone};
 use crate::engine::model::{AppFacts, WindowId};
 use crate::engine::lend_wait::LendWait;
-use crate::engine::switcher::{self, Act, Choice, Heard, Key, List, Switcher};
+use crate::engine::switcher::{self, Act, AheadAct, Choice, Heard, Key, List, Switcher};
 use crate::platform::ctl::CmdTabProbe;
 use crate::platform::input::{self, InputEvent, InputKind};
 use crate::platform::observe::Observer;
 use crate::platform::ax::{AxElement, AxObserver};
 use crate::platform::window_engine::LendPark;
 use crate::platform::mission_key_tap::{self, HeardAt};
+use crate::platform::windows::CgWindow;
 use crate::platform::{apps, dock, space_keys, switcher_ax, switcher_notes, windows};
 
 /// The Dock's notices about the switcher (observed on its application element, live 11-15):
@@ -151,6 +184,9 @@ pub(super) struct SwitcherWatch {
     /// The key tap heard the switcher's end (Escape, ⌘'s release, a click) for this switcher:
     /// its activation's wait takes the long cap ([`switcher::activation_cap`]).
     tap_heard: bool,
+    /// The app last asked for this switcher whose release takes macOS nowhere (nothing to
+    /// arrange ahead): not asked again at each notice of the same selection.
+    stays: Option<i32>,
 }
 
 impl Controller {
@@ -162,26 +198,39 @@ impl Controller {
             (InputKind::KeyDown, Some(code)) => Key::Down { code, cmd: event.cmd, shift: event.shift },
             _ => return,
         };
-        // Only where a hidden window is on no Desktop for macOS (the Spaces engine): under
-        // the Corner engine nothing is read, observed or put home.
-        if !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
+        // Under every engine of ours (round arranged-ahead; the Spaces engine alone until
+        // then, for its lend).
+        if self.model.is_none() {
             if matches!(key, Key::Command(false) | Key::Down { code: switcher::KEY_TAB, cmd: true, .. }) {
-                switcher_notes::note("heard", || format!("{key:?} (nothing done: no model, or the Corner engine)"));
+                switcher_notes::note("heard", || format!("{key:?} (nothing done: no model)"));
             }
             return;
         }
         if key == Key::Command(true) && self.switcher.ax.is_none() && self.switcher.ax_tried.is_none() {
             // The Dock's notices observed before the first switcher shows, so a Tab the
-            // monitor misses is still seen when the Dock lists the switcher.
+            // monitor misses is still seen when the Dock lists the switcher; and the key tap
+            // made, so the first switcher's end is heard.
             self.switcher.dock = dock::dock_pid();
             self.watch_dock();
+            mission_key_tap::prepare();
         }
         let heard = self.switcher.keys.hear_at(key, now);
         if heard != Heard::Nothing || self.switcher.keys.is_open() {
             switcher_notes::note("heard", || format!("{key:?} -> {heard:?}"));
         }
+        if self.switcher.keys.is_open() {
+            // On before its selection is acted on: what is arranged ahead asks whether the
+            // tap hears.
+            self.switcher_arm_tap();
+        }
         self.switcher_heard(ob, heard, true, now);
         self.switcher_arm_tap();
+    }
+
+    /// True while ⌘Tab's switcher is up for the keys (its list gone and its key still on its
+    /// way counts as up).
+    pub(super) fn switcher_is_up(&self) -> bool {
+        self.switcher.keys.is_open()
     }
 
     /// What the key tap heard while the switcher is up ([`mission_key_tap`]): Escape (the
@@ -191,7 +240,7 @@ impl Controller {
     /// when the tap got it. Nothing while the switcher is down: a cancel or release the
     /// monitor told first leaves the tap's copy nothing to do.
     pub(super) fn switcher_tap(&mut self, ob: &Observer, heard: HeardAt) {
-        if !self.switcher.keys.is_open() || !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
+        if !self.switcher.keys.is_open() || self.model.is_none() {
             return;
         }
         let at = heard.at;
@@ -225,6 +274,8 @@ impl Controller {
             tracing::info!(pid = l.pid, window = l.window.0, cap = cap.name, "cmd-tab: a click while the switcher shows (heard by the key tap): the window put home stays for its app's activation at the mouse's release");
             switcher_notes::note("picked", || format!("window={} cap={}", l.window.0, cap.name));
         }
+        // The Desktop arranged for the selection stands for the pick's activation likewise.
+        self.switcher_ahead_stands(at, clock::now());
     }
 
     /// The key tap on while the switcher is up, off once it closes (unless Mission Control
@@ -245,6 +296,7 @@ impl Controller {
                     self.switcher.released = None;
                     self.switcher.listed = false;
                     self.switcher.tap_heard = false;
+                    self.switcher.stays = None;
                     self.switcher.dock = dock::dock_pid();
                     self.watch_dock();
                 }
@@ -282,6 +334,25 @@ impl Controller {
         let first = matches!(heard, Heard::Selected { first: true, .. });
         for act in acts {
             self.switcher_act(ob, act, first, by_key, now);
+        }
+        // The Desktop arranged ahead for the selection, after the lend: an app whose window
+        // was just put home stays here, and nothing is arranged for it.
+        let end_heard = (by_key || self.switcher.tap_heard) && mission_key_tap::hears();
+        let (stays, mut asked) = (self.switcher.stays, None);
+        let ahead = switcher::plan_ahead(heard, selected, self.ahead_of_switcher(), end_heard, |pid| {
+            // One answer a selection: its notices repeat, the app is asked once.
+            if stays == Some(pid) {
+                return None;
+            }
+            let window = self.switcher_slides_to(ob, pid);
+            asked = Some((pid, window.is_some()));
+            window
+        });
+        if let Some((pid, slides)) = asked {
+            self.switcher.stays = (!slides).then_some(pid);
+        }
+        for act in ahead {
+            self.switcher_ahead_act(ob, act, now);
         }
         if let (Heard::Released { .. }, Some(pid)) = (heard, selected) {
             // Watched for a Desktop slide from ⌘'s release ([`Self::slide_watch_cmd_tab`]).
@@ -388,6 +459,68 @@ impl Controller {
         m.dock_home(pid, facts)
     }
 
+    /// The window macOS will slide to another Desktop for when ⌘ is let go on app `pid`
+    /// selected in the switcher (round arranged-ahead): what a click on its Dock item would
+    /// go to ([`Model::dock_arrival`], the app asked as at a Dock press,
+    /// [`Controller::app_asked`]). `None`: macOS stays (a window of it here, or one put home
+    /// for the switcher); the app is the one in front (⌘'s release on it changes nothing,
+    /// where a Dock click goes to its other Desktop); a Space change settles; the probe's
+    /// `nolend`; or the key tap does not hear, so a cancel could not be told ([module
+    /// docs](self)).
+    fn switcher_slides_to(&self, ob: &Observer, pid: i32) -> Option<WindowId> {
+        let m = self.model.as_ref()?;
+        if self.switcher.lend_off || self.frozen() || self.lent.is_some_and(|l| l.switcher && l.pid == pid) {
+            return None;
+        }
+        m.dock_gates(pid).ok()?;
+        if !mission_key_tap::hears() {
+            tracing::debug!(pid, "cmd-tab: the key tap does not hear the switcher's end: nothing arranged ahead; its Desktop is arranged on arrival");
+            return None;
+        }
+        let list: Vec<CgWindow> = windows::list_windows();
+        let bundle = ob.bundle_id(pid).unwrap_or("?").to_owned();
+        let (facts, ax_window, _) = match self.app_asked(ob, &list, pid, &bundle, "cmd-tab: the app selected, asked as at a Dock press") {
+            Ok(asked) => asked,
+            Err(why) => {
+                tracing::debug!(pid, why, "cmd-tab: no Desktop to arrange ahead for the app selected");
+                return None;
+            }
+        };
+        if facts.active {
+            return None;
+        }
+        match m.dock_arrival(pid, facts, ax_window) {
+            Ok(window) => Some(window),
+            Err(why) => {
+                tracing::debug!(pid, why, "cmd-tab: ⌘'s release on the app selected stays on this Desktop (or nothing says where it goes)");
+                None
+            }
+        }
+    }
+
+    /// Carries out one act on the Desktop arranged ahead for the switcher
+    /// ([`switcher::plan_ahead`]).
+    fn switcher_ahead_act(&mut self, ob: &Observer, act: AheadAct, now: Instant) {
+        match act {
+            AheadAct::Arrange { pid, window } => {
+                let arranged = self.arrange_for_switcher(ob, pid, window, now);
+                switcher_notes::note("arranged ahead", || format!("pid={pid} window={} arranged={arranged}", window.0));
+            }
+            AheadAct::Undo { why } => {
+                if self.ahead_of_switcher().is_some() {
+                    switcher_notes::note("arrangement undone", || why.to_string());
+                    self.undo_ahead(ob, why);
+                }
+            }
+            AheadAct::Stand { .. } => {
+                // From when the release was heard (the monitor's or the tap's stamp).
+                let released = self.received_at(now);
+                self.switcher_ahead_stands(released, now);
+                switcher_notes::note("arrangement stands", || "⌘ let go on its app".to_string());
+            }
+        }
+    }
+
     /// The park asked for window `window`'s lend (round cmdtab-park): its frame's size at its
     /// display's park corner ([`corner::park_frame_of`], the Corner engine's geometry and
     /// request), moved through its element; `must`: lend even when the park does not take;
@@ -483,22 +616,14 @@ impl Controller {
 
     /// The Dock's notices observed for Dock process `pid` (round looks-forward: the Corner
     /// engine's look for Mission Control, while its public triggers serve): as
-    /// [`Self::watch_dock`], once per Dock process.
+    /// [`Self::watch_dock`], once per Dock process. The observer stays: the switcher is
+    /// followed through it under every engine.
     pub(super) fn watch_dock_of(&mut self, pid: i32) {
         if self.switcher.ax.as_ref().is_some_and(|(p, _)| *p == pid) || self.switcher.ax_tried == Some(pid) {
             return;
         }
         self.switcher.dock = Some(pid);
         self.watch_dock();
-    }
-
-    /// The Dock's notices observed no longer (the Corner engine, its public triggers at rest
-    /// again): its observer goes, and may be made again for the same Dock later.
-    pub(super) fn unwatch_dock(&mut self) {
-        if self.switcher.ax.take().is_some() {
-            self.switcher.ax_tried = None;
-            tracing::debug!("mission-control: the Dock's notices are observed no longer");
-        }
     }
 
     /// Makes the observer of the Dock's switcher notices, once per Dock process
@@ -538,13 +663,7 @@ impl Controller {
     pub fn switcher_notice(&mut self, ob: &Observer, name: &str) {
         crate::platform::costs::bump(crate::platform::costs::Cost::DockNotice);
         let now = clock::now();
-        if !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
-            // Where macOS counts the hidden windows on their Desktop (the Corner engine) the
-            // switcher is not followed; the Dock draws Mission Control too, and its notice
-            // may come as it opens.
-            if self.model.is_some() {
-                self.upkeep_dock_notice(name, now);
-            }
+        if self.model.is_none() {
             return;
         }
         switcher_notes::note("dock notice", || name.to_string());
@@ -599,6 +718,11 @@ impl Controller {
                     "cmd-tab: the Dock's switcher list is gone (a pick with the mouse): the window put home stays for its app's activation"
                 );
             }
+        }
+        if unread && self.switcher.tap_heard && mission_key_tap::hears() {
+            // A pick the key tap heard: the Desktop arranged for the selection stands for
+            // its activation.
+            self.switcher_ahead_stands(now, clock::now());
         }
         tracing::debug!(unread, "cmd-tab: the Dock's switcher list is gone; the key on its way decides");
     }

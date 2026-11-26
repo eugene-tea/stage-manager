@@ -32,7 +32,17 @@
 //!   r2-lends-fix); one whose switch the model makes on the Desktop shown undoes it
 //!   ([`Controller::forget_held`]). A press that could arrange nothing (a Space change
 //!   settling, another arrangement standing) has its click arranged at the release.
-//! - **At the notice**: an arrangement made at the click whose window the window server
+//! - **While ⌘Tab's switcher shows** ([`super::switcher`], round arranged-ahead): the app it
+//!   selects is where the user goes at ⌘'s release. When macOS will switch Desktops for it
+//!   (the same prediction, the app asked the same way), that Desktop is arranged at once,
+//!   under every engine, from the first Tab's guess on ([`Controller::arrange_for_switcher`]);
+//!   it is undone when the selection moves on, at Escape, or when ⌘ is let go on another app
+//!   ([`crate::engine::switcher::plan_ahead`]), and nothing else touches it while the
+//!   switcher is up. ⌘ let go on its app: it stands as a Dock click's does after its release
+//!   (the window held as its focus would be, [`DOCK_SWITCH_CAP`] from the release). Only
+//!   while the key tap hears the switcher's end; else the Desktop is arranged at the notice,
+//!   as below.
+//! - **At the notice**: an arrangement made ahead whose window the window server
 //!   does not list on its screen now is undone (another Desktop slid in). With none,
 //!   when the held window, or with none held the activated (else frontmost) app's focused
 //!   window asked at once (a bounded Accessibility query), waits on the Desktop listed now,
@@ -112,6 +122,9 @@ pub const DOCK_SWITCH_CAP: Duration = Duration::from_millis(3000);
 pub(super) enum Trigger {
     /// At a click on the app's Dock item, the Desktop not shown yet.
     DockClick,
+    /// While ⌘Tab's switcher selects the app, the Desktop not shown yet
+    /// ([`Controller::arrange_for_switcher`]).
+    Switcher,
     /// At the Space change notice, for the focus held before it.
     Notice,
     /// At the Space change notice, for the app's focused window (its focus event not seen
@@ -130,6 +143,7 @@ impl Trigger {
     fn name(self) -> &'static str {
         match self {
             Trigger::DockClick => "dock-click",
+            Trigger::Switcher => "cmd-tab",
             Trigger::Notice => "notice",
             Trigger::NoticeAx => "notice-ax",
             Trigger::Settle => "settle",
@@ -140,7 +154,7 @@ impl Trigger {
     /// Arranged while its Desktop was not shown (its restores registered until seen, its
     /// moves checked while the Desktop slides in, undone when no Space change comes).
     fn away(self) -> bool {
-        matches!(self, Trigger::DockClick | Trigger::Hidden)
+        matches!(self, Trigger::DockClick | Trigger::Switcher | Trigger::Hidden)
     }
 }
 
@@ -670,6 +684,20 @@ pub(super) struct AheadSent {
     /// Made at the Dock press, before the release (every engine: the Dock acts at the
     /// release).
     at_press: bool,
+    /// Made for ⌘Tab's switcher, which is still up: its end decides it (⌘ let go on its app:
+    /// it stands; anything else undoes it). Until then nothing held says anything of it and
+    /// no cap runs ([`awaits_switcher`]).
+    switcher_up: bool,
+    /// From when its Space change is waited for ([`DOCK_SWITCH_CAP`]): when it went out; the
+    /// switcher's, from ⌘'s release.
+    waits_from: Instant,
+    /// Its window waited off every Desktop until it was arranged (the Spaces engine's stage
+    /// Space): macOS counts it on its Desktop only from then on.
+    was_off: bool,
+    /// Arranged for the switcher too late for macOS to have counted its window when it picked
+    /// a Desktop ([`late_for_macos`]): at its app's activation the window is focused, which
+    /// takes macOS there, as with nothing arranged ([`Controller::arrange_for_hidden_focus`]).
+    focus_owed: bool,
 }
 
 /// Milliseconds from `then` to `now`.
@@ -724,6 +752,23 @@ fn contradicts(held: Option<Wanted>, window: WindowId, pid: i32, resolve: impl F
 /// [`DOCK_SWITCH_CAP`] after it (a release the monitor missed).
 fn awaits_release(at_press: bool, press_down: bool) -> bool {
     at_press && press_down
+}
+
+/// True while an arrangement made for ⌘Tab's switcher waits for the switcher's end
+/// (`switcher_up`): as one made at a Dock press before its release ([`awaits_release`]),
+/// nothing held says anything of it yet, the user's word being the switcher still up; and no
+/// cap runs, however long ⌘ is held.
+fn awaits_switcher(switcher_up: bool) -> bool {
+    switcher_up
+}
+
+/// True when an arrangement made for the switcher, its window off every Desktop until then
+/// (`was_off`), went out (`sent_at`) after ⌘'s release was heard (`released_at`, the
+/// event's own time): macOS picks the Desktop 3-12 ms after the release by the windows it
+/// counts there, and may have counted none (a ⌘Tab let go before its Tab was handled on the
+/// WM thread). An engine whose hidden window is on its Desktop all along is never late.
+fn late_for_macos(was_off: bool, sent_at: Instant, released_at: Instant) -> bool {
+    was_off && sent_at > released_at
 }
 
 /// [`contradicts`] for a standing arrangement, but never while it waits for its click's
@@ -967,6 +1012,9 @@ impl Controller {
     /// its release).
     fn ahead_contradicted(&self, now: Instant) -> bool {
         let Some(sent) = &self.ahead else { return false };
+        if awaits_switcher(sent.switcher_up) {
+            return false;
+        }
         let m = self.model.as_ref();
         ahead_contradicted_by(self.focus_replay.peek(now), sent.ahead.window, sent.pid, sent.at_press, self.dock_press.is_some(), |id| {
             m.and_then(|m| m.resolve_standard(id))
@@ -974,9 +1022,10 @@ impl Controller {
     }
 
     /// True while an arrangement made at a Dock press waits for its click's release
-    /// ([`awaits_release`]).
+    /// ([`awaits_release`]), or one made for ⌘Tab's switcher for the switcher's end
+    /// ([`awaits_switcher`]).
     fn ahead_awaits_release(&self) -> bool {
-        self.ahead.as_ref().is_some_and(|s| awaits_release(s.at_press, self.dock_press.is_some()))
+        self.ahead.as_ref().is_some_and(|s| awaits_release(s.at_press, self.dock_press.is_some()) || awaits_switcher(s.switcher_up))
     }
 
     /// True when a focus of window `id`, within the echo window of an arrangement's own
@@ -1119,6 +1168,15 @@ impl Controller {
     pub(super) fn arrange_for_hidden_focus(&mut self, ob: &Observer, id: WindowId, pid: i32, now: Instant) -> bool {
         let Some(m) = self.model.as_ref() else { return false };
         let Some(standard) = m.resolve_standard(id) else { return false };
+        // Its Desktop already arranged for ⌘Tab's switcher, but too late for macOS to have
+        // counted the window there when it picked one: focused now, as below, once.
+        if let Some(sent) = self.ahead.as_mut().filter(|s| s.focus_owed && s.ahead.window == standard) {
+            sent.focus_owed = false;
+            self.focus_replay.hold(Wanted::Window { id: standard, pid }, now);
+            self.execute(ob, vec![Action::Raise { id: standard }, Action::Focus { id: standard }]);
+            tracing::info!(window = standard.0, pid, "arrival: the Desktop was arranged for ⌘Tab's switcher after ⌘'s release, its window off every Desktop until then; focused, macOS goes");
+            return true;
+        }
         if !m.waits_on_another_space(standard) || !self.engine.off_every_desktop(standard) || self.ahead.is_some() {
             return false;
         }
@@ -1239,7 +1297,7 @@ impl Controller {
             since_input_ms = self.since_input_ms(sent),
             "arrival: the Desktop arranged ahead for the window it is shown for"
         );
-        self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent, changes_at, at_press: false });
+        self.ahead = Some(AheadSent { ahead, pid, trigger, focus_at, sent_at: sent, changes_at, at_press: false, switcher_up: false, waits_from: sent, was_off: false, focus_owed: false });
         // A previous arrival's check still looking ends here (its tally logged).
         self.finish_verify("a new arrangement went out");
         // The first look a fast tick later: right after the calls the window server's list
@@ -1613,6 +1671,69 @@ impl Controller {
         record_resend(e, nudge, exact, exact_full)
     }
 
+    /// The app and window a Desktop stands arranged for while ⌘Tab's switcher is up
+    /// ([`Self::arrange_for_switcher`]); none once the switcher ended (it stands as any
+    /// arrangement then, or is gone).
+    pub(super) fn ahead_of_switcher(&self) -> Option<(i32, WindowId)> {
+        self.ahead.as_ref().filter(|s| s.switcher_up).map(|s| (s.pid, s.ahead.window))
+    }
+
+    /// ⌘Tab's switcher selects app `pid`, and ⌘'s release on it will take macOS to the
+    /// Desktop of its `window` ([`super::switcher`], `Controller::switcher_slides_to`): that
+    /// Desktop is arranged now, as at a Dock press ([`Self::arrange_at_press`]), under every
+    /// engine. Under the Spaces engine the window waits off every Desktop and macOS must
+    /// count it on its Desktop before the release; under the Corner engine its moves get the
+    /// time the switcher shows. It stands while the switcher is up, whatever is held or
+    /// done meanwhile ([`awaits_switcher`]); the switcher's own end undoes it or lets it
+    /// stand ([`Self::switcher_ahead_stands`]). Nothing while a Space change settles or
+    /// another arrangement stands. True when arranged.
+    pub(super) fn arrange_for_switcher(&mut self, ob: &Observer, pid: i32, window: WindowId, now: Instant) -> bool {
+        if self.frozen() || self.ahead.is_some() {
+            return false;
+        }
+        let was_off = self.engine.off_every_desktop(window);
+        if !self.arrange_ahead(ob, window, Trigger::Switcher, now, None) {
+            return false;
+        }
+        if let Some(sent) = self.ahead.as_mut() {
+            sent.switcher_up = true;
+            sent.was_off = was_off;
+        }
+        if let Some(space) = self.ahead_space() {
+            self.present_away(space);
+        }
+        tracing::info!(
+            pid,
+            window = window.0,
+            off_every_desktop = was_off,
+            took_ms = ms(now, clock::now()),
+            "cmd-tab: the Desktop ⌘'s release on the app selected goes to is arranged while the switcher shows"
+        );
+        true
+    }
+
+    /// ⌘ was let go on the app a Desktop was arranged for while the switcher showed (heard
+    /// at `released_at`, the event's own time; or a click picked it in the switcher): the
+    /// arrangement stands as a Dock click's after its release. The window is held as its
+    /// focus would be, and the Space change is waited for from now ([`DOCK_SWITCH_CAP`]). One
+    /// that went out too late for macOS ([`late_for_macos`]) has its window focused at its
+    /// app's activation.
+    pub(super) fn switcher_ahead_stands(&mut self, released_at: Instant, now: Instant) {
+        let Some(sent) = self.ahead.as_mut().filter(|s| s.switcher_up) else { return };
+        sent.switcher_up = false;
+        sent.waits_from = now;
+        sent.focus_owed = late_for_macos(sent.was_off, sent.sent_at, released_at);
+        let (window, pid, owed, since_ms) = (sent.ahead.window, sent.pid, sent.focus_owed, ms(sent.sent_at, now));
+        self.focus_replay.hold(Wanted::Window { id: window, pid }, now);
+        tracing::info!(
+            window = window.0,
+            pid,
+            arranged_before_ms = since_ms,
+            focus_owed = owed,
+            "cmd-tab: ⌘ let go on the app its Desktop was arranged for: the arrangement stands for the Space change"
+        );
+    }
+
     /// A left mouse-down at `p` (`list`: the window list read for it): over the Dock's bar,
     /// the application item there is hit-tested and its click's prediction worked out now
     /// (the app's state does not change during a press), kept for the mouse-up
@@ -1905,17 +2026,21 @@ impl Controller {
         (waiting.len(), elsewhere)
     }
 
-    /// The app a Dock item is for and the window macOS will show for it on another
-    /// Desktop, or why there is no prediction: the model's gates and the window list
-    /// (`list`) first, the app asked (bounded) only when they pass.
-    fn dock_prediction(&mut self, ob: &Observer, list: &[CgWindow], item: &DockItem) -> Prediction {
+    /// App `pid` (`bundle`) as a click on its Dock item, or ⌘'s release on it in the switcher,
+    /// would find it, for [`Model::dock_arrival`] and [`Model::dock_home`]: the model's gates
+    /// and the window list (`list`) first, then one bounded round with the app
+    /// ([`press_round`]) only when they pass. Its facts, the window it names (its focused,
+    /// else main one) and when the round began; or why nothing can be predicted. `what`: the
+    /// log line's words.
+    pub(super) fn app_asked(
+        &self,
+        ob: &Observer,
+        list: &[CgWindow],
+        pid: i32,
+        bundle: &str,
+        what: &'static str,
+    ) -> Result<(AppFacts, Option<WindowId>, Instant), &'static str> {
         let m = self.model.as_ref().ok_or("not managing")?;
-        let bundle = dock::bundle_id_at(&item.path).ok_or("the item's bundle has no id")?;
-        let pid = match ob.pids_with_bundle(&bundle)[..] {
-            [] => return Err("the app is not running (or not managed)"),
-            [pid] => pid,
-            _ => return Err("several instances of the app run"),
-        };
         m.dock_gates(pid)?;
         let displays = m.displays().to_vec();
         let visible_here = dock::visible_window_of(list, pid, |r| displays.iter().any(|d| self.engine.is_hidden(d, r)));
@@ -1943,11 +2068,11 @@ impl Controller {
         let took_ms = ms(started, clock::now());
         let PressAnswer { hidden, active, focused, main: main_window } = answer;
         let Some(hidden) = hidden else {
-            tracing::info!(bundle, pid, took_ms, "dock: the app did not say whether it is hidden");
+            tracing::info!(bundle, pid, took_ms, "arrival: the app asked did not say whether it is hidden");
             return Err("the app did not answer in 50 ms (hidden or not)");
         };
         let Some(active) = active else {
-            tracing::info!(bundle, pid, took_ms, "dock: the app did not say whether it is active");
+            tracing::info!(bundle, pid, took_ms, "arrival: the app asked did not say whether it is active");
             return Err("the app did not say whether it is active");
         };
         let space_of = |id: Option<u32>| id.and_then(|id| m.space_of(WindowId(id))).map(|s| s.0);
@@ -1965,10 +2090,24 @@ impl Controller {
             unplaced,
             waiting,
             took_ms,
-            "dock: the app at the press"
+            "{what}"
         );
-        let ax_window = focused.or(main_window).map(WindowId);
-        let facts = AppFacts { hidden, unplaced, active, visible_here };
+        Ok((AppFacts { hidden, unplaced, active, visible_here }, focused.or(main_window).map(WindowId), started))
+    }
+
+    /// The app a Dock item is for and the window macOS will show for it on another
+    /// Desktop, or why there is no prediction: the model's gates and the window list
+    /// (`list`) first, the app asked (bounded) only when they pass.
+    fn dock_prediction(&mut self, ob: &Observer, list: &[CgWindow], item: &DockItem) -> Prediction {
+        let m = self.model.as_ref().ok_or("not managing")?;
+        let bundle = dock::bundle_id_at(&item.path).ok_or("the item's bundle has no id")?;
+        let pid = match ob.pids_with_bundle(&bundle)[..] {
+            [] => return Err("the app is not running (or not managed)"),
+            [pid] => pid,
+            _ => return Err("several instances of the app run"),
+        };
+        let (facts, ax_window, started) = self.app_asked(ob, list, pid, &bundle, "dock: the app at the press")?;
+        let active = facts.active;
         let home = m.dock_home(pid, facts);
         if let Some(mut prev) = self.lent.take_if(|l| dock_takes_back(l.switcher, home.is_some())) {
             // A press after a press: the window put home for the first goes back (one put
@@ -2153,12 +2292,39 @@ impl Controller {
         }
     }
 
+    /// [`Self::forget_held`] for an activation about to switch stages on the Desktop shown.
+    /// With no arrangement standing, the same. With one that the switch undoes: the held
+    /// focus is forgotten now and `true` returned; the caller sends the switch's batch first
+    /// and undoes the arrangement after it ([`Self::undo_ahead`]). Undone before, the undo's
+    /// own batch presented the strip with the stage already switched, and the switch that
+    /// followed found nothing to animate: an app let go on in the switcher that was not the
+    /// one guessed (or a Dock click macOS answered here) came in front with no motion.
+    pub(super) fn forget_held_for_switch(&mut self, ob: &Observer) -> bool {
+        if self.ahead.is_none() {
+            self.forget_held(ob);
+            return false;
+        }
+        if !forget_undoes(self.phase.changing(), self.ahead_awaits_release()) {
+            return false;
+        }
+        self.focus_replay.clear();
+        true
+    }
+
     /// About every tick: an arrangement whose Desktop did not come is undone ([`expire_step`]).
     pub(super) fn expire_ahead(&mut self, ob: &Observer, now: Instant) {
         self.expire_lent(now);
         let Some(sent) = &self.ahead else { return };
+        if awaits_switcher(sent.switcher_up) {
+            // Its end is the switcher's to tell ([`super::switcher`]). One whose switcher is
+            // no longer up for the keys was lost track of: undone.
+            if !self.switcher_is_up() {
+                self.undo_ahead(ob, "its switcher is no longer up");
+            }
+            return;
+        }
         let changed = self.space_changes != sent.changes_at;
-        let waited = now.saturating_duration_since(sent.sent_at);
+        let waited = now.saturating_duration_since(sent.waits_from);
         let away = sent.trigger.away() && !changed;
         let cap = DOCK_SWITCH_CAP;
         if let Some(why) = expire_step(sent.trigger, self.phase.changing(), changed, waited, cap, self.ahead_contradicted(now)) {
@@ -2606,6 +2772,33 @@ mod tests {
             assert_eq!(ahead_contradicted_by(held, w, PID, true, false, resolve), contradicts(held, w, PID, resolve), "released");
         }
         assert!(!forget_undoes(false, true));
+    }
+
+    #[test]
+    fn an_arrangement_made_for_the_switcher_waits_for_the_switchers_end() {
+        // While the switcher is up nothing held contradicts it and no cap runs; it is away as
+        // a Dock click's is (its moves checked, its restores registered, capped once it stands).
+        assert!(awaits_switcher(true));
+        assert!(!awaits_switcher(false), "⌘ let go on its app: it stands as any other from then on");
+        assert!(Trigger::Switcher.away());
+        assert_eq!(Trigger::Switcher.name(), "cmd-tab");
+        let cap = DOCK_SWITCH_CAP;
+        let ms = Duration::from_millis;
+        // Standing after the release, counted from the release: a busy Mac's notice may come.
+        assert_eq!(expire_step(Trigger::Switcher, false, false, ms(1500), cap, false), None);
+        assert!(expire_step(Trigger::Switcher, false, false, cap, cap, false).is_some(), "no Space change came: undone");
+        assert!(expire_step(Trigger::Switcher, false, false, ms(300), cap, true).is_some(), "another app's activation, or another window's focus");
+    }
+
+    #[test]
+    fn an_arrangement_too_late_for_macos_owes_its_window_a_focus() {
+        let t0 = Instant::now();
+        let at = |n: u64| t0 + Duration::from_millis(n);
+        // The Tab at 0, the app asked until 90, ⌘ let go at 60: macOS picked the Desktop
+        // with the window still off every Desktop.
+        assert!(late_for_macos(true, at(92), at(60)));
+        assert!(!late_for_macos(true, at(8), at(60)), "arranged before the release: macOS counts the window there");
+        assert!(!late_for_macos(false, at(92), at(60)), "a window on its Desktop all along (the Corner engine): macOS goes either way");
     }
 
     #[test]

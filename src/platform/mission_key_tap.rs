@@ -22,7 +22,9 @@
 //!   ([`crate::engine::mission_control::MISSION_CONTROL_KEY`]), never a repeat;
 //! - while Mission Control may show ([`publish`]'s `armed`), Escape and mouse-downs: what
 //!   closed it ([`crate::engine::mission_close`]);
-//! - while ⌘Tab's switcher is up ([`switcher_up`], round r2-lends): Escape (with ⌘ held, as
+//! - while ⌘Tab's switcher is up ([`switcher_up`], round r2-lends; under every engine since
+//!   round arranged-ahead, which arranges another Desktop for the switcher's selection only
+//!   while its end is heard here): Escape (with ⌘ held, as
 //!   the switcher takes it), ⌘ let go (a modifier change with ⌘ no longer held,
 //!   [`Heard::CommandUp`]) and mouse-downs (a pick). The input monitor never hears Escape
 //!   while the switcher shows, nor always ⌘'s release, so before the tap a cancel and a
@@ -173,6 +175,21 @@ pub fn switcher_up(up: bool) {
     }
     if SWITCHER.swap(up, Ordering::Relaxed) != up {
         sync();
+    }
+}
+
+/// From the WM thread, at ⌘'s first press: the tap's thread started and its tap made,
+/// switched off until something wants it, so that the first switcher of a run already finds
+/// it hearing when it comes up ([`switcher_up`] then costs one call; made at the first Tab
+/// instead, the tap would not hear that switcher's end, and nothing could be arranged ahead
+/// for it: `controller/switcher.rs`). Nothing while the WM thread does not arrange.
+pub fn prepare() {
+    #[cfg(test)]
+    if super::fake::with(|_| ()).is_some() {
+        return;
+    }
+    if ADMITTED.load(Ordering::Relaxed) {
+        start();
     }
 }
 
