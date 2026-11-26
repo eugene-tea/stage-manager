@@ -457,6 +457,17 @@ pub fn bundle_of(pid: i32) -> Option<String> {
     running(pid).and_then(|a| a.bundleIdentifier()).map(|s| s.to_string())
 }
 
+/// True when no process `pid` exists any more (`kill(pid, 0)` answers `ESRCH`: nothing is
+/// sent). A process of another user counts as there.
+pub fn process_gone(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 only checks that the process exists; nothing is sent.
+    let r = unsafe { libc::kill(pid, 0) };
+    r == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
 /// Process `pid`'s executable (`proc_pidpath`), as the kernel reports it; `None` when it
 /// cannot be read (the process is gone).
 pub fn exe_path(pid: i32) -> Option<String> {

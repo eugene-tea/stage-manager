@@ -1889,7 +1889,12 @@ def cover_matches(read, tol=COVER_TOLERANCE):
                         + (f", still {[round(v) for v in still[:3]]}" if still else "") + f", off {off:.0f}")
 
 
-def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cover_still=False):
+# How long the last [`activation_grows_check`] saw macOS's raise show the arriving window in
+# the park corner before the motion's cover (ms); None when it was not judged.
+LAST_RAISED = {"ms": None}
+
+
+def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cover_still=False, hold_ms=None, raised_ms=150):
     """Round 8L: an activation of `app` (a key of EXTRA, or "fixture") whose windows wait in
     another stage, by `how`: "open" (an activation with no click, as ⌘Tab's) or "dock" (its
     Dock item, `ctl debug-dock-click`). The window server is sampled every 20 ms (with the
@@ -1906,8 +1911,13 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     with no snapshot of it ([`owners_window_only`], 8L5); any other is a failure. `cover_still` (8L4, the capture phase:
     captures on, the cover forced to the desktop's still): the cover is the still, and its
     pixels over the arriving window's sliver, away from any icon, read back from the overlay
-    during the grow, are the wallpaper's (the still never holds a window)."""
+    during the grow, are the wallpaper's (the still never holds a window). `hold_ms`: the Dock
+    click's press held that long before its release, as a person's is (`hold=MS`; none: let go
+    at once). `raised_ms`: the longest macOS's raise may show the window in the corner before
+    the motion's cover (150; RAISED_AHEAD_MS where the switch waits for no picture, or its
+    cover goes ahead of them)."""
     bundle, path = (FIX_ID, FIX_APP) if app == "fixture" else (EXTRA[app][0], EXTRA[app][1])
+    LAST_RAISED["ms"] = None
     s0 = state()
     mine = {w["id"] for w in s0["windows"] if w["bundle_id"] == bundle}
     waiting = {w["id"] for w in s0["windows"] if w["id"] in mine and w["parked"]}
@@ -1921,7 +1931,7 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
     time.sleep(0.15)  # the sampler's first looks are before the activation
     t_sent = time.time()
     if how == "dock":
-        r = ctl("debug-dock-click", bundle)
+        r = ctl("debug-dock-click", bundle, *([f"hold={hold_ms}"] if hold_ms is not None else []))
         if not check(r.get("ok"), f"{what}: the Dock item was pressed ({r.get('error') or 'ok'})"):
             sampler.kill()
             return False
@@ -2071,7 +2081,8 @@ def activation_grows_check(how, app, what, at_once_ok=AT_ONCE_CAPTURES_OFF, cove
         early = [v for v in seen if v < t_ov]
         check(not late, f"{what}: never seen in the park zone once the motion is up ({[rel(v) for v in late][:8]})")
         span = (max(early) - min(early) + 0.02) if early else 0.0
-        check(span <= 0.15, f"{what}: raised in the corner by macOS before the motion for {span * 1000:.0f} ms at most (150)")
+        LAST_RAISED["ms"] = span * 1000
+        check(span * 1000 <= raised_ms, f"{what}: raised in the corner by macOS before the motion for {span * 1000:.0f} ms at most ({raised_ms})")
     num = lambda name, line: int(m.group(1)) if (m := re.search(name + r"=(\d+)", line)) else None  # noqa: E731
     line = next((c for c in covered if "incoming: true" in c), covered[0] if covered else "")
     # The windows arrive at the unveil (`[animation] unpark_at` of the switch spring, at
@@ -5066,13 +5077,17 @@ def phase_capture():
     the window (popup_picture_check). A stage's two overlapping windows land as one picture
     (landing_blend_check). Its activation grows over the desktop's still (8L4: the
     switch's cover forced to the still, STAGE_MANAGER_COVER=desktop, so it is seen on any
-    desktop, icons in the corner or not). Round switch-pictures (11-25), under either engine:
-    at rest no window is captured (rest_takes_no_picture_check); a Dock click, which nothing
-    announces, takes the pictures of the windows leaving at the switch and plays them
-    (dock_click_pictures_check); a card click plays with pictures its press took or the switch
+    desktop, icons in the corner or not). Rounds switch-pictures and picture-wait (11-25),
+    under either engine: at rest no window is captured (rest_takes_no_picture_check), nor with
+    the pointer resting in the Dock (rest_in_the_dock_check); a Dock click's press takes the
+    pictures of the windows leaving, so its switch waits for none and plays them
+    (dock_click_pictures_check), as does the pointer coming into the Dock before the click
+    (dock_pointer_pictures_check); a switch nothing announced still takes them at the switch,
+    and where the park corner is covered its cover goes to the strip ahead of them
+    (cover_ahead_check, Corner); a card click plays with pictures its press took or the switch
     did (card_click_pictures_check); a pinned window reaching the park corner is drawn on the
-    cover from a picture taken at the switch (pinned_on_the_cover_check, Corner). `ctl switch`
-    moves the windows at once, with no pictures."""
+    cover from a picture of it (pinned_on_the_cover_check, Corner). `ctl switch` moves the
+    windows at once, with no pictures."""
     say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
     stop_app()
     stop_fixture()
@@ -5101,6 +5116,7 @@ def phase_capture():
           f"the window server takes pictures once ScreenCaptureKit's probe opened the gate ({cap.get('window_server')})")
     popup_picture_check(state())
     rest_takes_no_picture_check()
+    rest_in_the_dock_check()
     quiet_listings_check(state())
     for n in (2, 1):
         do("switch", n)
@@ -5130,6 +5146,8 @@ def phase_capture():
                 activation_grows_check("open", "fixture", "an activation of the fixture over the desktop's still",
                                        at_once_ok=(), cover_still=True)
         dock_click_pictures_check()
+        dock_pointer_pictures_check()
+        cover_ahead_check()
         pinned_on_the_cover_check()
     stop_extra("a")
     stop_app()
@@ -5167,6 +5185,41 @@ def rest_takes_no_picture_check():
           f"asked by a round {ca} -> {cb}, in flight {b.get('in_flight')})")
     check(b.get("listings", 0) - a.get("listings", 0) <= 1,
           f"at rest for {REST_WATCH} s: no listing but the desktop's still's (listings {a.get('listings')} -> {b.get('listings')})")
+
+
+def rest_in_the_dock_check():
+    """Round picture-wait: a sign that a switch is likely is an event, never a timer. The
+    pointer is moved onto the fixture's Dock item and left there (`ctl debug-dock-hover`: a
+    move, nothing pressed): its coming into the Dock's bar takes the pictures of the windows
+    in front once (a stage waits hidden). Then, the pointer resting there, no window is
+    captured over REST_WATCH seconds, as with the pointer anywhere else
+    ([`rest_takes_no_picture_check`]). The pointer goes back after."""
+    say("-- at rest with the pointer resting in the Dock: no window is captured (round picture-wait)")
+    before = len(log_text())
+    r = ctl("debug-dock-hover", FIX_ID)
+    try:
+        if not check(r.get("ok"), f"the pointer rests on the fixture's Dock item ({r.get('error') or 'ok'})"):
+            return
+        if r.get("in_bar"):
+            came = wait_until(lambda: [a for a in pictures_ahead_of(log_text()[before:]) if a["sign"] == SIGN_POINTER] or None,
+                              2, "the pictures taken as the pointer came into the Dock")
+            check(bool(came), f"the pointer coming into the Dock takes the pictures of the windows in front, once ({came})")
+        else:
+            say("    (the Dock's bar as the app reads it does not hold the item: an auto-hidden Dock; the rest is judged all the same)")
+        time.sleep(PICTURES_OLD)  # the pictures its coming took, and their looks, are in and old
+        x = state()
+        a, ca = x.get("capture", {}), (x.get("costs") or {}).get("captures")
+        time.sleep(REST_WATCH)
+        x = state()
+        b, cb = x.get("capture", {}), (x.get("costs") or {}).get("captures")
+        check(b.get("images") == a.get("images") and cb == ca and b.get("in_flight", 0) == 0,
+              f"the pointer at rest in the Dock for {REST_WATCH} s: no window captured (pictures {a.get('images')} -> "
+              f"{b.get('images')}, asked by a round {ca} -> {cb}, in flight {b.get('in_flight')})")
+        again = [a for a in pictures_ahead_of(log_text()[before:]) if a["sign"] == SIGN_POINTER]
+        check(len(again) <= 1, f"the pointer at rest in the Dock tells of a likely switch once, as it came ({len(again)} times)")
+    finally:
+        ctl("debug-pointer-back")
+        time.sleep(0.3)
 
 
 def quiet_listings_check(s):
@@ -5282,25 +5335,170 @@ def card_click_pictures_check(log):
     return check(not late, f"a card click's pictures, the press's or the switch's, are all there within the wait ({late[:3]})")
 
 
-def dock_click_pictures_check():
-    """Round switch-pictures (11-25): a Dock click on Alpha, its stage hidden, nothing touched
-    for 1.5 s before (no picture of the windows in front is fresh, and a Dock click announces
-    nothing). It grows as any activation ([`activation_grows_check`]: under the Corner engine
-    also how long macOS's raise shows Alpha's window in the corner before the motion's cover,
-    150 ms at most, which now holds the pictures' time), and the pictures of the windows
-    leaving were taken at the switch ([`switch_pictures_check`])."""
-    say("-- a Dock click's switch takes its pictures at the switch (round switch-pictures)")
+# The app's words for what made a switch likely (`platform/switch_likely.rs`, `Sign::as_str`).
+SIGN_POINTER = "the pointer in the Dock"
+SIGN_PRESS = "a press on a Dock item"
+
+# Past this (s) a picture is no longer fresh for a switch: `switch_shots::FRESH` (2 s), and slack.
+PICTURES_OLD = 3.0
+
+# How long a person's click holds the button (ms): the owner's Dock clicks in the app's logs,
+# press to release (`test_press::DOCK_PRESS_HOLD`).
+PERSON_HOLD_MS = 100
+
+# The longest macOS's raise may show an activated window in the park corner before the
+# motion's cover (ms) when the switch waits for no picture, or its cover goes ahead of them:
+# near the 37 ms measured while a timer kept the pictures (11-25), with room for the
+# sampler's 20 ms steps. A switch that waits for its pictures under a cover that cannot go
+# ahead keeps 150.
+RAISED_AHEAD_MS = 80
+
+
+def pictures_ahead_of(log):
+    """The pictures taken when a switch was likely in `log` (the app's `its pictures are taken
+    ahead` lines, `platform/controller/switch_pictures.rs`), in order: each one's `sign`
+    (SIGN_POINTER, SIGN_PRESS, a hotkey's modifiers) and the windows asked for (`ids`)."""
+    out = []
+    for line in log.splitlines():
+        if "its pictures are taken ahead" not in line:
+            continue
+        sign = m.group(1) if (m := re.search(r'\bsign="([^"]*)"', line)) else None
+        ids = [int(i) for i in re.findall(r"\d+", m.group(1))] if (m := re.search(r"\bids=\[([^\]]*)\]", line)) else []
+        out.append({"sign": sign, "ids": ids})
+    return out
+
+
+def waits_for_no_picture_verdict(shots):
+    """(ok, note) for the last switch of `shots` ([`switch_pictures_of`]): it waited for no
+    picture (none asked for) because each it plays was fresh (one at least), taken before it."""
+    if not shots:
+        return False, "no line of the switch's pictures in the log"
+    last = shots[-1]
+    asked, fresh = last["asked"] or 0, last["fresh"] or 0
+    return last["skipped"] is None and asked == 0 and fresh >= 1, f"asked {asked}, fresh {fresh}, waited {last['ms'] or 0} ms"
+
+
+def waits_for_no_picture_check(what, log):
+    """Round picture-wait: the last switch in `log` waited for no picture, each one it plays
+    taken before it ([`waits_for_no_picture_verdict`])."""
+    ok, note = waits_for_no_picture_verdict(switch_pictures_of(log))
+    return check(ok, f"{what}: the switch waits for no picture, every one fresh ({note})")
+
+
+def alpha_hidden_fixture_in_front():
+    """The fixture's stage in front and Alpha's window waiting hidden; False (a failed check)
+    when it could not be arranged."""
     s = state()
-    if "Alpha 1" in active_titles(s):
-        # The fixture's stage in front first: Alpha's window waits hidden.
-        do("switch", by_title(s)["Fixture 3"]["home"])
-        if not check(wait_state(lambda x: "Alpha 1" not in active_titles(x), "the fixture's stage in front") is not None,
-                     "the fixture's stage in front, Alpha's hidden"):
-            return
-    time.sleep(1.5)
+    if "Alpha 1" not in active_titles(s):
+        return True
+    do("switch", by_title(s)["Fixture 3"]["home"])
+    return check(wait_state(lambda x: "Alpha 1" not in active_titles(x), "the fixture's stage in front") is not None,
+                 "the fixture's stage in front, Alpha's hidden")
+
+
+def dock_click_pictures_check():
+    """Rounds switch-pictures and picture-wait (11-25): a Dock click on Alpha, its stage
+    hidden, nothing touched for PICTURES_OLD seconds before (no picture of the windows in
+    front is fresh), the press held as a person's (PERSON_HOLD_MS). The press on the item
+    says a switch is likely: the pictures of the windows in front are taken then (the app's
+    `taken ahead` line, its sign the press), so the switch waits for none and still plays
+    them ([`waits_for_no_picture_check`], [`switch_pictures_check`]). It grows as any
+    activation ([`activation_grows_check`]: under the Corner engine also how long macOS's
+    raise shows Alpha's window in the corner before the motion's cover, RAISED_AHEAD_MS at
+    most now that no picture is waited for)."""
+    say("-- a Dock click: its press takes the pictures, the switch waits for none (round picture-wait)")
+    if not alpha_hidden_fixture_in_front():
+        return
+    time.sleep(PICTURES_OLD)
     before = len(log_text())
-    if activation_grows_check("dock", "a", "a Dock click on Alpha", at_once_ok=()):
-        switch_pictures_check("a Dock click on Alpha", log_text()[before:])
+    if activation_grows_check("dock", "a", "a Dock click on Alpha", at_once_ok=(), hold_ms=PERSON_HOLD_MS, raised_ms=RAISED_AHEAD_MS):
+        log = log_text()[before:]
+        ahead = pictures_ahead_of(log)
+        check(any(a["sign"] == SIGN_PRESS and a["ids"] for a in ahead),
+              f"a Dock click on Alpha: its press takes the pictures a switch would wait for ({ahead})")
+        switch_pictures_check("a Dock click on Alpha", log, announced=True)
+        waits_for_no_picture_check("a Dock click on Alpha", log)
+
+
+def dock_pointer_pictures_check():
+    """Round picture-wait: the pointer brought into the Dock before the click. Alpha's stage
+    hidden, nothing touched for PICTURES_OLD seconds; the pointer moved onto Alpha's Dock item
+    (`ctl debug-dock-hover`: a move, nothing pressed) says a switch is likely, and the pictures
+    of the windows in front are taken (the `taken ahead` line, its sign the pointer). A moment
+    later the Dock click, let go at once (the test's fed click: its own press finds
+    the pictures fresh and takes none): the switch waits for no picture and plays them, and
+    macOS's raise shows Alpha's window in the corner RAISED_AHEAD_MS at most before the cover.
+    Skipped when the Dock's bar as the app reads it does not hold the item (an auto-hidden
+    Dock is read where it rests). The pointer goes back after."""
+    say("-- the pointer into the Dock, then a click: the switch waits for no picture (round picture-wait)")
+    if not alpha_hidden_fixture_in_front():
+        return
+    time.sleep(PICTURES_OLD)
+    before = len(log_text())
+    r = ctl("debug-dock-hover", EXTRA["a"][0])
+    try:
+        if not check(r.get("ok"), f"the pointer is on Alpha's Dock item ({r.get('error') or 'ok'})"):
+            return
+        if not r.get("in_bar"):
+            skip("the pointer into the Dock takes the pictures",
+                 "the Dock's bar as the app reads it does not hold the item (an auto-hidden Dock is read where it rests)")
+            return
+        came = wait_until(lambda: [a for a in pictures_ahead_of(log_text()[before:]) if a["sign"] == SIGN_POINTER] or None,
+                          2, "the pictures taken as the pointer came into the Dock")
+        if not check(bool(came) and bool(came[0]["ids"]),
+                     f"the pointer into the Dock: the pictures of the windows in front are taken ({came})"):
+            return
+        time.sleep(0.2)
+        mid = len(log_text())
+        what = "a Dock click with the pointer in the Dock"
+        if activation_grows_check("dock", "a", what, at_once_ok=(), raised_ms=RAISED_AHEAD_MS):
+            log = log_text()[mid:]
+            more = [a for a in pictures_ahead_of(log) if a["sign"] == SIGN_PRESS]
+            say(f"    the press after it took {more or 'no picture more (each fresh)'}")
+            switch_pictures_check(what, log, announced=True)
+            waits_for_no_picture_check(what, log)
+    finally:
+        ctl("debug-pointer-back")
+        time.sleep(0.3)
+
+
+def cover_ahead_check():
+    """Round picture-wait (the Corner engine): a switch nothing announced still takes its
+    pictures at the switch and waits for them, and the park corner's cover no longer waits
+    with it. Alpha's stage hidden, nothing touched for PICTURES_OLD seconds, then Alpha
+    activated with no click (`open`, as ⌘Tab's: no sign of a likely switch): the switch asks
+    for the pictures of the windows leaving ([`switch_pictures_check`]), the cover goes to the
+    strip ahead of them and is drawn at once (the app's and the strip's lines), and macOS's
+    raise shows Alpha's window in the corner RAISED_AHEAD_MS at most before it. Skipped when
+    the cover had to come with the pictures (a window leaving reaches its rectangle, or a
+    window that stays shown into it waits for its picture: the app's line says which)."""
+    if corner_only("the park corner's cover ahead of a switch's pictures"):
+        return
+    say("-- a switch nothing announced: the corner's cover goes ahead of its pictures (round picture-wait)")
+    if not alpha_hidden_fixture_in_front():
+        return
+    time.sleep(PICTURES_OLD)
+    before = len(log_text())
+    what = "an activation of Alpha with no click"
+    if not activation_grows_check("open", "a", what, at_once_ok=(), raised_ms=150):
+        return
+    log = log_text()[before:]
+    if not switch_pictures_check(what, log):
+        return
+    with_them = [line.split("why=")[-1][:90] for line in log.splitlines() if "the corner's cover comes with the pictures" in line]
+    if with_them:
+        skip("the corner's cover ahead of the pictures", f"the cover came with the pictures by design ({with_them[0]})")
+        return
+    sent = any("the corner's cover goes to the strip ahead of the pictures" in line for line in log.splitlines())
+    drawn = any("the park corner is covered ahead of the switch's pictures" in line for line in log.splitlines())
+    not_drawn = [line.split("why=")[-1][:90] for line in log.splitlines() if "the corner's cover is not drawn ahead" in line]
+    check(sent and drawn, f"{what}: the corner's cover goes to the strip ahead of the pictures and is drawn at once "
+                          f"(sent {sent}, drawn {drawn}{', not drawn: ' + not_drawn[0] if not_drawn else ''})")
+    # The same looks judged against the shorter time: the cover no longer waits for the pictures.
+    raised = LAST_RAISED["ms"]
+    if raised is not None and sent and drawn:
+        check(raised <= RAISED_AHEAD_MS,
+              f"{what}: with the cover ahead, raised in the corner for {raised:.0f} ms at most ({RAISED_AHEAD_MS})")
 
 
 def cover_staying_of(log):
@@ -5317,12 +5515,13 @@ def cover_staying_of(log):
 def pinned_on_the_cover_check():
     """Round switch-pictures (the Corner engine; 8L5): a pinned window that stays shown into
     the park corner is drawn on a switch's cover from its picture, and no timer keeps that
-    picture fresh any more: the switch takes it with the pictures of the windows leaving.
+    picture fresh any more: it is taken with the pictures of the windows leaving, at the Dock
+    click's press (round picture-wait) or at the switch.
     Fixture 3, pinned and stretched to the display's bottom-right corner, a fixture stage in
-    front and Alpha's hidden, nothing touched for 1.5 s, then a Dock click on Alpha: the
+    front and Alpha's hidden, nothing touched for 3 s, then a Dock click on Alpha: the
     activation grows (it does not arrive at once for the pinned window), the cover names the
-    pinned window among those it draws, the switch asked for its picture beside the leaving
-    window's and each came within the wait, and the strip had it when it drew the cover.
+    pinned window among those it draws, its picture and the leaving window's were there for
+    the switch, each within the wait, and the strip had it when it drew the cover.
     Fixture 3 is unpinned and put back after."""
     if corner_only("a pinned window drawn on a switch's cover from a picture taken at the switch"):
         return
@@ -5365,8 +5564,14 @@ def pinned_on_the_cover_check():
             return
         shots = switch_pictures_of(log)
         last = shots[-1] if shots else {}
-        check(bool(shots) and last.get("skipped") is None and (last.get("asked") or 0) >= 2 and last.get("got") == last.get("asked"),
-              f"the switch took the pinned window's picture with the leaving window's, each within the wait ({last})")
+        # Since round picture-wait the Dock press takes them ahead (the pinned window's with
+        # the leaving one's): asked for at the switch, or fresh from the press, two in all.
+        ahead = [a for a in pictures_ahead_of(log) if wid in a["ids"]]
+        say(f"    taken ahead with the pinned window among them: {ahead or 'none'}")
+        check(bool(shots) and last.get("skipped") is None and (last.get("asked") or 0) + (last.get("fresh") or 0) >= 2
+              and last.get("got") == last.get("asked"),
+              f"the pinned window's picture and the leaving window's are there for the switch, the press's or its own, "
+              f"each within the wait ({last})")
         check("no snapshot of a window that stays shown into the corner now" not in log,
               "the strip had the pinned window's picture when it drew the cover")
     finally:
@@ -8967,6 +9172,144 @@ def phase_reads():
     all_onscreen("reads")
 
 
+def sliver_point(parked_id):
+    """Where to press parked fixture window `parked_id`'s sliver: half a point in from the
+    edge it shows at, 12 pt below its top (its title bar), as the window server lists it; and
+    its sliver. None when it shows none on its display."""
+    wins, d = fixture_windows()
+    w = next((x for x in wins if x["id"] == parked_id), None)
+    if w is None or d is None:
+        return None
+    sliver = intersect(w["bounds"], d)
+    if sliver is None or sliver["w"] > 4 or sliver["h"] < 20:
+        return None
+    return (sliver["x"] + sliver["w"] / 2, sliver["y"] + 12), sliver
+
+
+def phase_rest():
+    """Round rest-cost: the housekeeping rests 2 s under every engine, and a press on a parked
+    window's sliver stays as inert as it was while it rested 0.75 s for the sliver's sake.
+    Fixture windows only; one Desktop; about 80 s. By name only (not a default phase).
+    1. The rest: two fixture windows, each a stage, one hidden. Across 20 s untouched between
+       two `ctl state` reads the tick ran at rest 6 to 10 times (every 2 s once the first
+       read's stir is over; it was 20 and more at 0.75 s) and the pace says 2000 ms.
+    2. The Corner engine's list at rest (`ctl state`'s `slivers`, read before the read's own
+       stir is told): the tap knows the tick rests, and a press would be judged on the list
+       whatever its age (2.2 s at most).
+    3. Three presses on the parked window's sliver (`ctl debug-click`, posted from the ctl
+       thread: the command itself stirs nothing), each 4.6 s after the last command that
+       does: the tick went to rest 3.0 to 3.25 s after that one and published its list then,
+       so the press is judged on a list 1.4 to 1.8 s old, older than the second the tap
+       trusted before. Each is swallowed (the log's line, with the list's age), the window stays
+       hidden, nothing takes the focus, and no press in the corner passes unjudged. When no
+       press met a list over a second old (the Mac was busy, the timing slipped) that one
+       check is skipped, not failed."""
+    say("\n== rest: the tick's rest, and the inert slivers' list through it ==")
+    stop_app()
+    stop_all_fixtures()
+    for f in ("state.json", "config.toml", ".config-last-good.toml"):
+        path = os.path.join(HOME, f)
+        if os.path.exists(path):
+            os.remove(path)
+    start_fixture(2, "--frames", "380,120,640,420;460,200,560,380")
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "rest: the app is up with two fixture windows"):
+        return
+    two = by_title(ctl("state")).get("Fixture 2")
+    if two is not None and [t for t in stage_titles(ctl("state")).get(two["home"], []) if t != "Fixture 2"]:
+        do("new", two["id"])
+    st = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2"]], "Fixture 1 and 2 each in a stage")
+    if not check(st is not None, "rest: Fixture 1 and 2 each in a stage, one hidden"):
+        stop_app()
+        return
+    pointer_off_strip(st, "the rest")
+    time.sleep(5.0)
+
+    # 1. The rest.
+    s0 = ctl("state")
+    t0 = time.time()
+    time.sleep(20.0)
+    s1 = ctl("state")
+    wall = time.time() - t0
+    tick0, tick1 = s0.get("tick") or {}, s1.get("tick") or {}
+    rests = tick1.get("rest_ticks", 0) - tick0.get("rest_ticks", 0)
+    brisk = tick1.get("brisk_ticks", 0) - tick0.get("brisk_ticks", 0)
+    lists = (s1.get("costs") or {}).get("window_lists", 0) - (s0.get("costs") or {}).get("window_lists", 0)
+    say(f"    {wall:.1f} s untouched: {rests} ticks at rest, {brisk} brisk (the first read's 3 s are 12 or 13), {lists} window lists; "
+        f"the pace at the second read: {tick1.get('pace')} {tick1.get('rest_ms')} ms, why {tick1.get('why')}")
+    # An event of the Mac's own (an app launched, a notice) stirs the tick for 3 s: read again.
+    for _ in range(3):
+        if tick1.get("pace") == "rest":
+            break
+        say(f"    the tick was brisk at that read (why: {tick1.get('why') or 'an event in the last 3 s'}); reading again in 4.5 s")
+        time.sleep(4.5)
+        s1 = ctl("state")
+        tick1 = s1.get("tick") or {}
+    check(tick1.get("pace") == "rest" and tick1.get("rest_ms") == 2000,
+          f"rest: the tick rests 2 s with a window hidden ({tick1.get('pace')} {tick1.get('rest_ms')} ms; why brisk: {tick1.get('why')})")
+    check(6 <= rests <= 10, f"rest: {rests} ticks at rest in {wall:.0f} s, the first 3 s brisk (6 to 10; 20 and more when it rested 0.75 s; "
+          f"{brisk} brisk ticks: more than 13 says events of the Mac's own stirred it)")
+
+    # 2 and 3: the Corner engine's own.
+    if corner_only("rest: the inert slivers' list through a rest"):
+        stop_app()
+        all_onscreen("rest")
+        return
+    sl = s1.get("slivers") or {}
+    say(f"    slivers at the second read: {sl}")
+    check(sl.get("tick") == "rest" and sl.get("judged") is True and (sl.get("list_age_ms") or 0) <= 2300,
+          f"rest: at rest the tap would judge a press on the tick's list (tick {sl.get('tick')}, judged {sl.get('judged')}, the list {sl.get('list_age_ms')} ms old)")
+    check(((s1.get("costs") or {}).get("taps_on") or {}).get("slivers") is True, "rest: the inert slivers' tap is on")
+    st = ctl("state")
+    parked = [w for w in st["windows"] if w["parked"] and w["role"] == "standard"]
+    if not check(len(parked) == 1, f"rest: one fixture window is parked ({[w['title'] for w in parked]})"):
+        stop_app()
+        all_onscreen("rest")
+        return
+    pid_w = parked[0]["id"]
+    seen_before = len(re.findall(r"a press on a parked window's sliver swallowed", log_text()))
+    ages = []
+    for n in range(3):
+        at = sliver_point(pid_w)
+        if not check(at is not None, f"rest: press {n + 1}: the parked fixture shows a sliver to press"):
+            break
+        (x, y), sliver = at
+        before = ctl("state")
+        mark = time.time()
+        # The tick rests 3.0 to 3.25 s after this command and next ticks 2.0 to 2.2 s later.
+        time.sleep(max(0.0, 4.6 - (time.time() - mark)))
+        r = ctl("debug-click", f"{x:.1f}", f"{y:.1f}")
+        if blocked(r, f"rest: press {n + 1} on the sliver at {x:.1f},{y:.1f}"):
+            break
+        if not check(bool(r.get("ok")), f"rest: press {n + 1} posted on the sliver at {x:.1f},{y:.1f} ({r.get('error', 'ok')})"):
+            break
+        # A swallowed press reaches nobody, the input monitor neither: nothing stirs the tick,
+        # and the tap's word is logged at the next tick, a rest later at most.
+        swallowed = lambda: re.findall(r"a press on a parked window's sliver swallowed id=(\d+) .*?list_age_ms=(\d+)", log_text())  # noqa: E731
+        wait_until(lambda: len(swallowed()) > seen_before, 3.5, f"the log's line for press {n + 1}")
+        lines = swallowed()
+        fresh = lines[seen_before:]
+        seen_before = len(lines)
+        after = ctl("state")
+        mine = [int(age) for wid, age in fresh if int(wid) == pid_w]
+        w_after = next((w for w in after["windows"] if w["id"] == pid_w), {})
+        check(len(mine) >= 1, f"rest: press {n + 1} on the sliver ({fmt(sliver)}) was swallowed (the list {mine} ms old; the log's lines since: {fresh})")
+        check(w_after.get("parked") is True and after.get("active") == before.get("active") and after.get("focused") != pid_w,
+              f"rest: press {n + 1}: the window stays hidden, its stage behind, the focus elsewhere (parked {w_after.get('parked')}, active {after.get('active')}, focused {after.get('focused')})")
+        ages += mine[:1]
+    old = [a for a in ages if a > 1000]
+    say(f"    the lists the presses were judged on: {ages} ms old")
+    if old:
+        check(True, f"rest: {len(old)} of {len(ages)} presses were judged on a list over a second old, at rest, and swallowed ({ages} ms)")
+    elif ages:
+        skip("rest: a press judged on a list over a second old", f"the timing slipped (the lists were {ages} ms old): the rule is pinned on the bench")
+    unjudged = len(re.findall(r"no fresh window list to judge it by", log_text()))
+    check(unjudged == 0, f"rest: no press in the corner passed unjudged ({unjudged} lines)")
+    ctl("debug-pointer-back")
+    stop_app()
+    all_onscreen("rest")
+
+
 def phase_engine():
     """Round sm-probe (1.9, S5): which window engine runs. Each launch's probe and choice
     (`ctl state` `engine`: kind, why, probe, fallback):
@@ -10902,8 +11245,267 @@ def phase_mission_desktop():
     all_onscreen("mission-desktop quit")
 
 
+# ----- looks: Mission Control known at once under the Corner engine (round looks-forward) --
+
+# The app knows Mission Control shows this long after its key was asked, at most: far under
+# the poll's second (2 s at rest). macOS lists its window 22 to 47 ms after the shortcut
+# (UX-SPEC), the look comes with the window server's notice or within a fast tick or two.
+LOOKS_KNOWN_MS = 400
+# With nothing touched, none of the triggers fires: counted over this long.
+LOOKS_REST_S = 10.0
+
+
+def looks_trust():
+    """`ctl state`'s `engine.notices.trust`: whether the window server's notices bring the looks."""
+    return (((ctl("state").get("engine") or {}).get("notices") or {}).get("trust") or {})
+
+
+def looks_costs():
+    """`ctl state`'s `costs`."""
+    return ctl("state").get("costs") or {}
+
+
+def looks_setup():
+    """Fixture 1 in the stage in front, Fixture 2 and 3 each hidden in a stage of its own,
+    parked in the corner, under the Corner engine with the test commands on. (state, ids) or
+    Nones."""
+    stop_app()
+    stop_all_fixtures()
+    p = os.path.join(HOME, "state.json")
+    if os.path.exists(p):
+        os.remove(p)
+    start_fixture(3, "--frames", "360,140,640,420;520,220,640,420;680,300,640,420")
+    s = start_app(3, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None and s["engine"]["kind"] == "corner", "looks: the Corner engine runs with the fixture's 3 windows"):
+        return None, None
+    t = by_title(s)
+    do("new", t["Fixture 2"]["id"])
+    do("new", t["Fixture 3"]["id"])
+    want = sorted([[k] for k in ("Fixture 1", "Fixture 2", "Fixture 3")])
+    s = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == want, "each window in a stage of its own")
+    if not check(s is not None, f"looks: each window in a stage of its own ({stage_titles(state())})"):
+        return None, None
+    do("switch", number_of(s, "Fixture 1"))
+    s = wait_state(lambda x: active_titles(x) == {"Fixture 1"}, "Fixture 1's stage in front")
+    if not check(s is not None, "looks: Fixture 1 in front, Fixture 2 and 3 each hidden in a stage"):
+        return None, None
+    if not make_fixture_front(s):
+        check(False, f"looks: a fixture is frontmost (so Escape reaches only a fixture); front is {frontmost_bundle()}")
+        return None, None
+    return s, {title: w["id"] for title, w in by_title(s).items()}
+
+
+def looks_open(how, label):
+    """Mission Control opened by its shortcut (`how` = "key": `ctl debug-expose`) or with no key
+    (`"launch"`: `ctl debug-mission-control launch`, its own launcher, as its Dock item). What
+    the open came to: when it was asked, the overlays before, the ms until the app knew, how
+    its look ended (by a trigger's look, the poll's, the cap), and whether a notice 1508 came
+    for it; None when it did not show."""
+    before = {o["id"] for o in screen_overlays()}
+    look_before = margin_row("OVERVIEW_LOOK")
+    heard_before = notices_heard(1508)
+    t0 = time.time()
+    r = ctl("debug-expose", "mission-control") if how == "key" else ctl("debug-mission-control", "launch")
+    if not check(r.get("ok"), f"{label}: Mission Control asked for ({r.get('key', r.get('by', r.get('error')))})"):
+        return None
+    seen = wait_until(lambda: [o for o in screen_overlays() if o["id"] not in before], 3, f"{label}: Mission Control to show")
+    if not check(bool(seen), f"{label}: macOS's cover is listed"):
+        ctl("debug-expose", "escape")
+        return None
+    up = wait_until(lambda: mission_status().get("up"), 4, f"{label}: the app to know")
+    found, _, _, _ = overview_ages()
+    ms = None if found is None else round((found - t0) * 1000.0)
+    by = ended_by(look_before, margin_row("OVERVIEW_LOOK"))
+    return {"t0": t0, "before": before, "up": bool(up), "ms": ms, "by": by, "noticed": notices_heard(1508) > heard_before}
+
+
+def looks_close(opened, label, key="escape"):
+    """Mission Control closed by Escape (or `key`, its own shortcut again): how its close's
+    freeze ended (by a trigger's look with no settle, by the poll's settle), and the ms from
+    the key to the app knowing it closed."""
+    settle_before = margin_row("OVERVIEW_SETTLE")
+    t0 = time.time()
+    ctl("debug-expose", key)
+    gone = wait_until(lambda: not [o for o in screen_overlays() if o["id"] not in opened["before"]], 5, f"{label}: Mission Control to end")
+    down = wait_until(lambda: not mission_status().get("up"), 4, f"{label}: the app to know it closed")
+    _, closed, _, quick = overview_ages()
+    ms = None if closed is None else round((closed - t0) * 1000.0)
+    time.sleep(EXPOSE_SETTLE)
+    return {"gone": bool(gone), "down": bool(down), "ms": ms, "quick": quick, "by": ended_by(settle_before, margin_row("OVERVIEW_SETTLE"))}
+
+
+def looks_round(how, label, judged):
+    """One open and close. `judged` True: the open must be found at a trigger's look within
+    LOOKS_KNOWN_MS; `None`: only when its notice 1508 came (else its numbers are said: found by
+    the poll, as before); False: said. True when it was found at a trigger's look."""
+    mark = len(log_text())
+    opened = looks_open(how, label)
+    if not opened:
+        return False
+    at_trigger = opened["by"] == (1, 0, 0)
+    if judged is None:
+        judged = opened["noticed"]
+    told = (f"OVERVIEW_LOOK ended by a trigger's look, the poll, the cap: {opened['by']}; known {opened['ms']} ms after it was asked; "
+            f"its notice 1508 {'came' if opened['noticed'] else 'did not come'}")
+    if judged:
+        check(opened["up"] and at_trigger, f"{label}: the app knows at a look brought forward, not at its poll ({told})")
+        check(opened["ms"] is not None and opened["ms"] <= LOOKS_KNOWN_MS,
+              f"{label}: known within {LOOKS_KNOWN_MS} ms of the ask ({opened['ms']} ms; the poll: up to 1 s, 2 s at rest)")
+    else:
+        say(f"    {label}: {told}")
+    time.sleep(1.2)
+    x = ctl("space")
+    check(x.get("inference_frozen") is True, f"{label}: no Space is inferred while it shows (overview {x.get('overview')!r})")
+    closed = looks_close(opened, label)
+    check(closed["gone"] and closed["down"], f"{label}: closed, and the app knows ({closed['ms']} ms after Escape)")
+    if opened["noticed"]:
+        check(closed["quick"] and closed["by"] == (1, 0, 0),
+              f"{label}: the look after its close's notice ended the freeze with no settle (OVERVIEW_SETTLE ended by notice, poll, cap: {closed['by']})")
+    else:
+        say(f"    {label}: no notice 1508: its close's freeze ended as before, by its settle ({closed['by']})")
+    text = log_text()[mark:]
+    if at_trigger:
+        check("a parked window is listed out of the park zone" not in text,
+              f"{label}: the park reconcile asked no hidden window to park again while Mission Control had it laid out")
+    return at_trigger
+
+
+def phase_looks():
+    """Round looks-forward (the Corner engine, the default mode; fixture windows only; the
+    Mac untouched meanwhile: Mission Control covers the screen for a second or two five to
+    eight times, keys are posted, and the pointer is moved once and put back).
+
+    1. At rest for LOOKS_REST_S with nothing touched: none of what brings a look forward
+       fires (`ctl state`'s `costs`: `dock_notices`, `server_notices`, `trigger_looks` and
+       `tap_events` do not grow), and Mission Control's key tap is off while the window
+       server's notices are trusted (`costs.taps_on.mission_keys`, `engine.notices.trust`).
+    2. Mission Control by its shortcut, then Escape: the app knows it shows within
+       LOOKS_KNOWN_MS of the ask, at a look brought forward (`OVERVIEW_LOOK` ended by a
+       trigger's look, not by the poll); while it shows nothing is inferred; no hidden window
+       is asked to park again; with a notice 1508 its close ends the freeze with no settle.
+       When no notice 1508 comes on this macOS the first rounds are found by the poll, as
+       before, and are only said; after three opens and closes with none the public triggers
+       serve (`trust.state` `silent`, the key tap on) and the next open by its key is judged.
+    3. Mission Control with no key (`ctl debug-mission-control launch`, its launcher, as its
+       Dock item): judged when a notice 1508 came for it, else said (found by the poll: the
+       window server tells nothing of an open by its launcher).
+    4. `[windows] mission_control_key_keeps_stage = true` (audit 11-25 H6): Mission Control
+       open, the pointer over Fixture 2's laid-out window (`debug-mission-pick ID hover`),
+       its shortcut posted again: Fixture 1's stage still in front after, the keyboard its,
+       Fixture 2 still hidden; the log says the closing key was heard."""
+    say("\n== looks: Mission Control known at once under the Corner engine ==")
+    if SPACES:
+        skip("looks", "the Corner engine's own (the Spaces engine's twin is the mission phase): run without SM_ENGINE")
+        return
+    s, ids = looks_setup()
+    if not s:
+        stop_app()
+        return
+    active, space = s.get("active"), s.get("space")
+    trust = looks_trust()
+    say(f"  the window server's notices: {trust.get('state')} ({trust.get('way')}; {trust.get('why') or 'registered'})")
+
+    say(f"  -- at rest, {LOOKS_REST_S:g} s, nothing touched --")
+    time.sleep(2.5)
+    c0 = looks_costs()
+    time.sleep(LOOKS_REST_S)
+    c1 = looks_costs()
+    grew = {k: c1.get(k, 0) - c0.get(k, 0) for k in ("dock_notices", "server_notices", "trigger_looks", "tap_events")}
+    check(not any(grew.values()), f"looks at rest: nothing that brings a look forward fired ({grew})")
+    taps = c1.get("taps_on") or {}
+    if trust.get("state") == "working":
+        check(taps.get("mission_keys") is False, f"looks at rest: Mission Control's key tap is off while the window server's notices are trusted ({taps})")
+    else:
+        say(f"    the notices are not trusted ({trust.get('state')}): the key tap is the fallback ({taps})")
+
+    say("  -- by its shortcut --")
+    found = looks_round("key", "looks by key", judged=None)
+    if not found:
+        # No notice on this macOS (or none for the first open): the public way after three
+        # opens and closes with none.
+        say("    not found at a trigger's look: two more rounds, then the public triggers must serve")
+        looks_round("key", "looks by key, again", judged=False)
+        t = looks_trust()
+        tap = (mission_status().get("tap") or {})
+        check(t.get("state") in ("silent", "off") and tap.get("wanted_by_engine"),
+              f"looks: with no notice the public triggers took over (trust {t.get('state')}, the key tap wanted {tap.get('wanted_by_engine')})")
+        looks_round("key", "looks by key, the key tap telling", judged=True)
+
+    say("  -- with no key (its launcher) --")
+    heard = notices_heard(1508)
+    mark = len(log_text())
+    opened = looks_open("launch", "looks by its launcher")
+    if opened:
+        told = f"OVERVIEW_LOOK ended by a trigger's look, the poll, the cap: {opened['by']}; known {opened['ms']} ms after it was asked"
+        if opened["noticed"]:
+            check(opened["by"] == (1, 0, 0) and opened["ms"] is not None and opened["ms"] <= 2 * LOOKS_KNOWN_MS,
+                  f"looks by its launcher: its notice came and brought the look ({told}; the launcher itself takes a while to start)")
+        else:
+            skip("looks by its launcher: found at a trigger's look",
+                 f"no notice 1508 came for it ({notices_heard(1508) - heard} heard): found by the poll, as before ({told})")
+        time.sleep(1.0)
+        looks_close(opened, "looks by its launcher")
+    x = state()
+    check(x.get("active") == active and x.get("space") == space, "looks: the same stage in front after every round, no Space change")
+    consistent("after the looks rounds")
+
+    say("  -- a close by its key, the pointer over Fixture 2's window ([windows] mission_control_key_keeps_stage = true) --")
+    path = os.path.join(HOME, "config.toml")
+    try:
+        with open(path) as f:
+            config_was = f.read()
+    except FileNotFoundError:
+        config_was = ""
+    on = (config_was + "\n[windows]\nmission_control_key_keeps_stage = true\n" if "[windows]" not in config_was
+          else config_was.replace("[windows]\n", "[windows]\nmission_control_key_keeps_stage = true\n", 1))
+    if check(set_config_live(on), "looks close key: the setting turned on"):
+        try:
+            mark = len(log_text())
+            heard_before = (mission_status().get("tap") or {}).get("keys_heard") or 0
+            opened = looks_open("key", "looks close key")
+            if opened:
+                time.sleep(1.2)
+                r = ctl("debug-mission-pick", ids["Fixture 2"], "hover")
+                if check(r.get("ok"), f"looks close key: the pointer over Fixture 2 where Mission Control lays it out ({r.get('at')}; {r.get('error') or 'ok'})"):
+                    time.sleep(0.4)
+                    closed = looks_close(opened, "looks close key", key="mission-control")
+                    ctl("debug-pointer-back")
+                    check(closed["gone"], "looks close key: Mission Control closed by its shortcut")
+                    x = wait_state(lambda v: active_titles(v) == {"Fixture 1"}, "Fixture 1's stage still in front", 3)
+                    check(x is not None and state().get("active") == active,
+                          f"looks close key: the same stage in front after, nothing picked ({stage_titles(state()).get(state()['active'])})")
+                    w = by_title(state())
+                    check(w["Fixture 2"]["parked"] and w["Fixture 3"]["parked"], "looks close key: Fixture 2 and 3 are still hidden")
+                    front = wait_until(lambda: frontmost_bundle() == FIX_ID, 2, "the stage in front's app frontmost")
+                    check(bool(front), f"looks close key: the keyboard is the stage in front's (frontmost {frontmost_bundle()})")
+                    text = log_text()[mark:]
+                    tap = mission_status().get("tap") or {}
+                    heard = (tap.get("keys_heard") or 0) - heard_before
+                    closer = [ln for ln in text.splitlines() if "a key that closes it" in ln]
+                    if not check(heard >= 1 and bool(closer),
+                                 f"looks close key: the key tap heard the closing key ({heard} keys heard; tap {tap})"):
+                        say("    the posted key did not reach the HID tap: press the real ⌃↑ or F3 with the pointer over a hidden window and look "
+                            "for \"mission-control: a key that closes it\" in the log")
+                    refused = [ln.split("mission-control:", 1)[1].strip()[:200] for ln in text.splitlines() if "closed by its key, no click" in ln]
+                    say(f"    what macOS brought in front: {refused[-1] if refused else 'nothing taken for a pick (no activation or focus of a hidden stage came)'}")
+                else:
+                    looks_close(opened, "looks close key")
+                    ctl("debug-pointer-back")
+        finally:
+            set_config_live(config_was)
+    consistent("after the close by key")
+    m = mission_status()
+    say(f"  the looks brought forward in this run: {m.get('looks')}; trust {looks_trust()}")
+    c = looks_costs()
+    say(f"  costs: dock_notices {c.get('dock_notices')}, server_notices {c.get('server_notices')}, trigger_looks {c.get('trigger_looks')}, "
+        f"tap_events {c.get('tap_events')}, taps on {c.get('taps_on')}")
+    notice_report("looks", ("OVERVIEW_LOOK", "OVERVIEW_SETTLE", "OVERVIEW_EXIT_CARRY", "SPACE_POLL"))
+    stop_app()
+    all_onscreen("looks quit")
+
+
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine", "reads"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "looks", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine", "reads"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -10922,10 +11524,11 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine, "reads": phase_reads,
+             "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine, "reads": phase_reads, "rest": phase_rest,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel,
-             "mission": phase_mission, "mission-probe": phase_mission_probe, "mission-desktop": phase_mission_desktop}[p]()
+             "mission": phase_mission, "mission-probe": phase_mission_probe, "mission-desktop": phase_mission_desktop,
+             "looks": phase_looks}[p]()
     finally:
         stop_app()
         if pids_of(FIX_EXE) or any(pids_of(e[2]) for e in EXTRA.values()):

@@ -525,7 +525,9 @@ same by default (11-20 11:16:36, pressed again from the stage in front: Terminal
 was under the pointer, came in front with its stage). With `[windows]
 mission_control_key_keeps_stage` an activation or a focus within 1 s of that key, with no
 click since, switches nothing: the windows put home go back, and the stage in front's key
-window is focused again once Mission Control is gone (about 0.6 s after the key). A click
+window is focused again once Mission Control is gone (about 0.6 s after the key). Under both
+engines (the Accessibility engine since round looks-forward, on the bench: nothing is put
+home there, and the closing key is heard by the key tap, on while Mission Control shows). A click
 while it shows is a pick either way. Mission Control lays
 out a window that arrives after it opened (`scripts/test-stages.sh mission-probe`, 11-18; the
 log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
@@ -777,15 +779,20 @@ stages were saved on that is not connected yet (10 s at most).
 **Motion is drawn with pictures.** The public Accessibility API cannot scale a live window,
 so switches are animated with snapshots in a click-through layer above every normal window
 (always-on-top windows stay above it), while the real windows move behind them. A leaving
-window's snapshot is taken as the switch starts, the window still on screen, in both modes
-(not again when one came in the half second before: a press on a card and ⌘Tab's key take
-them ahead); an arriving window's is the last one taken before it left, or as the pointer
-reached its card, so content that changed meanwhile can jump when the motion ends. A switch
-nothing announced (a Dock click, a hotkey) starts later by the time its pictures take: 19 ms
-for one window at the median, 40 ms for two, 160 ms at the most (the app's own lines over
-956 switches, 11-14 to 11-24). No picture is taken on a timer (`[animation]
+window's snapshot is taken as the switch starts, the window still on screen, in both modes,
+unless one came in the 2 seconds before (as old as a picture could be while a timer took
+them). They are taken ahead when a switch is likely: as the pointer reaches a card or
+presses it, at ⌘Tab's key, as the pointer comes into the Dock or presses an item there, and
+as a hotkey's modifiers go down. An arriving window's is the last one taken before it left,
+or as the pointer reached its card, so content that changed meanwhile can jump when the
+motion ends. A switch nothing announced (an app that comes forward by itself, a click let go
+before its picture came) starts later by the time its pictures take: 19 ms for one window at
+the median, 40 ms for two, 160 ms at the most (the app's own lines over 956 switches, 11-14
+to 11-24); in the Accessibility mode the park corner is covered before they are taken,
+unless a window leaving reaches it. No picture is taken on a timer (`[animation]
 snapshot_interval_ms`, 0; a number of milliseconds takes the front stage's again that
-often). Until 11-25 the Accessibility mode took them every 2 seconds instead. A click
+often), and none while the pointer rests, in the Dock or anywhere. Until 11-25 the
+Accessibility mode took them every 2 seconds instead. A click
 during the motion brings the windows in at once; typing never cuts it short (the keyboard is
 already the new stage's). An arriving window takes its place under its picture once the
 picture as shown on screen is within a point of it on every edge (about 600 ms after the
@@ -1386,6 +1393,63 @@ corner for 121 to 155 ms before the switch's cover (37 ms with the timer; the ch
 Corner engine and 0.39 % under Spaces, with 150 against 63 window lists a minute and about
 300 LaunchServices lookups a minute under both.
 
+Where the app's own time at rest goes, from the `sample` profiles of those runs (the mean
+of three, ms of work in 60 s; 390 under the Corner engine, 217 under Spaces):
+
+| | corner | spaces |
+|---|---|---|
+| The housekeeping tick, in all | 259 | 155 |
+| of it: the window server's two lists a tick, read and parsed | 180 | 83 |
+| of it: process tests for windows closed and apps gone with no notice | 49 | 23 |
+| of it: LaunchServices asked (a window owner's bundle, the Dock's pid; under Spaces whether a hidden window's app is hidden) | 13 | 14 |
+| of it: the Desktops read from the window server | | 26 |
+| of it: the rest | 17 | 9 |
+| Ticks a minute | 80 | 30 |
+| The card glass's read of the wallpaper, every 2 s (main thread) | 37 | 39 |
+| The corner patch's own read of the wallpaper, every 2 s (main thread) | 33 | |
+| The still of the desktop in the park corner, every 10 s (ScreenCaptureKit's replies, its pixels checked) | 26 | |
+| The patch drawn again at each still; Finder's icons read every 5 s | 8 | |
+| Everything else | 27 | 23 |
+
+The Corner engine's tick was no heavier than the Spaces engine's (3.2 ms a pass against
+5.2 ms); it ran 2.7 times as often, because it rested 0.75 s at most while a window was
+parked, for the list its inert slivers' tap trusted for one second. Since round rest-cost
+(11-25) that list stands through a rest and the tick rests 2 s under every engine: by these
+figures about 160 ms a minute less under the Corner engine, which would bring the app near
+the Spaces engine's 0.5 % (to be measured). The same round stopped the LaunchServices
+lookups at rest (the running apps' paths read again once a minute with the strip following
+the Dock, about 300 lookups for 150 apps; the Dock's pid every 2 s; a window owner's bundle
+at every tick) and a tick kept brisk for as long as a window put back on a Desktop not
+shown waited there.
+
+What the samples do not explain is the window server: 4.6 % of a core more under the Corner
+engine than with the app quit, with no window pictured. They are of the app alone. What
+the Corner engine asks of the window server and of the capture service at rest, each to be
+measured by a run with it off (DEVELOPMENT, "Measuring cost"):
+
+| What | How often at rest | A run without it |
+|---|---|---|
+| A still of the desktop in the park corner, through ScreenCaptureKit (a listing of what can be shared, then a capture) | every 10 s while a sliver shows | `SM_CAPTURE=0` |
+| The corner patch's panel, ordered above the parked windows and redrawn at each still | every 10 s | `windows.corner_patch=false` (the still and the icons' read go too) |
+| Window lists | 150 a minute until round rest-cost, about 60 since | `STAGE_MANAGER_TICK_REST_MS=750` against `10000` |
+| Hidden windows on the Desktop, a sliver of each on screen | always | `SM_STAGES=1` |
+| The inert slivers' event tap | no event at rest | `windows.inert_slivers=false` |
+
+The capture service's 0.25 % is the still's: every stack of the app on its connection to
+it is the still's capture or ScreenCaptureKit's listing for it. A window picture cost the
+window server about 12 ms and the capture service about 7 ms each in the `covered` runs
+(240 thumbnails a minute under Spaces: 6.1 to 10.8 % and 0.01 to 2.9 %); six stills a minute
+at that price would be 0.1 % of the window server's 4.6 %, so either a still of the desktop
+costs it far more than a window's picture, or the cost is one of the other rows.
+
+Changed since these numbers (11-25, round picture-wait) and not measured yet: a Dock click's
+press, the pointer coming into the Dock and a hotkey's modifiers take the pictures before
+the switch, a picture up to 2 s old is played (0.5 s when the table was measured), and the
+park corner's cover no longer waits for the pictures. The switch rows and the time an
+activated window shows raised in the corner are to be measured again, with the test's own
+clicks and with clicks held as a person's (`SM_CLICK_HOLD_MS=100`: about 100 ms from the
+press to the release in the app's logs of real Dock clicks).
+
 A person does not notice a delay this small: a response to a click reads as instant up to
 about 100 ms, a click's latency is told apart from about 50 to 100 ms, and two durations near
 a second need 10 to 20 % between them (as the studies of input latency give them). The card
@@ -1395,8 +1459,11 @@ should be added there.
 ## The window server's notices
 
 Measured on macOS 27.2, 11-21 (`probe-spaces cgs`, a process running the AppKit event loop;
-no notice of these types in 52 rests of 3 s). The Spaces engine uses them as triggers for its
-looks, never as facts (ARCHITECTURE, "The window server's notices").
+no notice of these types in 52 rests of 3 s). Both engines use them as triggers for their
+looks, never as facts (ARCHITECTURE, "The window server's notices"): the Spaces engine all
+of them since 1.9.2, the Accessibility engine the three that tell of Mission Control and of
+a Desktop change's end (1508, 1401, 1329) since round looks-forward (11-25, on the bench;
+not yet run live there).
 
 | Type | Payload | Comes |
 |---|---|---|
@@ -1419,6 +1486,28 @@ look that finds macOS's own window and the Dock's cover gone ends the freeze on 
 inference (before: 1 s more); a hidden window taken out of its stage's Space by macOS is
 hidden again at once (before: at the next tick, up to 2 s), a window in a stage Space nothing
 answers for let out at once (before: up to 10 s).
+
+What they change under the Accessibility engine (the bench, `bench/looks.rs`, at load 1, 3
+and 10): Mission Control and App Exposé are known within a fast tick of macOS's window being
+listed, however they were opened (before: at the Space check, 0.7 to 1.2 s later, 2 s at
+rest), so the inert slivers' shield, the park reconcile and the corner patch stop for them at
+once; on the bench the reconcile asked both hidden windows to park again while Mission
+Control had them laid out, and no longer does. After their close the look that finds macOS's
+window and the Dock's cover gone ends the freeze with no settle (before: found up to a
+second after the cover went, then 1 s more). A Desktop change with no notice from
+NSWorkspace is taken within a fast tick of its end (before: within a second).
+
+The notices are checked while the app runs. A missed one changes nothing (the poll's look
+finds what it would have told), so nothing rests for that; but three opens or closes of
+Mission Control in a row with no notice in the 2 s before make them count as silent, and
+twenty notices in a row with no open, close or Space change between them rest them for
+10 minutes (`ctl state`, `engine.notices.trust`). While they are not trusted the
+Accessibility engine falls back to the public triggers: Mission Control's shortcut heard by
+the key tap, and a notice of the Dock's (whether the Dock sends one as Mission Control opens
+is not measured; `ctl state`'s `mission_control.looks` counts what each announced). With the
+notices working neither runs: the key tap is on only while Mission Control shows, to hear
+what closes it. None of the three fires while nothing happens (`costs`: `server_notices`,
+`dock_notices`, `trigger_looks`, `tap_events`).
 
 ## The window server's Desktops
 
@@ -1458,10 +1547,11 @@ What a person sees change, under both engines:
 
 What differs between the engines, by where a hidden window is:
 
-- The Spaces engine's alone: the window server's notices (a change taken within a fast tick,
-  a moved window at once), so under the Accessibility engine each of the above comes at the
-  next look, within a second (2 s at rest); a hidden window let out of its stage Space is
-  hidden again.
+- The Spaces engine's alone: the window server's notices of a window added to or taken out
+  of a Space (which word names the window is learned from the engine's own asks), so a
+  window moved to another Desktop leaves its stage at once there and at the next look, within
+  a second (2 s at rest), under the Accessibility engine; a hidden window let out of its
+  stage Space is hidden again. The notices of a Desktop change's end are both engines'.
 - The Accessibility engine's alone: a hidden window is in the park corner of its own Desktop,
   so one dragged to another Desktop in Mission Control moves there with its Desktop's next
   look, as a shown one does. The park corner's own checks still wait a second after a

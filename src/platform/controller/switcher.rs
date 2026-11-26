@@ -481,6 +481,26 @@ impl Controller {
         }
     }
 
+    /// The Dock's notices observed for Dock process `pid` (round looks-forward: the Corner
+    /// engine's look for Mission Control, while its public triggers serve): as
+    /// [`Self::watch_dock`], once per Dock process.
+    pub(super) fn watch_dock_of(&mut self, pid: i32) {
+        if self.switcher.ax.as_ref().is_some_and(|(p, _)| *p == pid) || self.switcher.ax_tried == Some(pid) {
+            return;
+        }
+        self.switcher.dock = Some(pid);
+        self.watch_dock();
+    }
+
+    /// The Dock's notices observed no longer (the Corner engine, its public triggers at rest
+    /// again): its observer goes, and may be made again for the same Dock later.
+    pub(super) fn unwatch_dock(&mut self) {
+        if self.switcher.ax.take().is_some() {
+            self.switcher.ax_tried = None;
+            tracing::debug!("mission-control: the Dock's notices are observed no longer");
+        }
+    }
+
     /// Makes the observer of the Dock's switcher notices, once per Dock process
     /// ([`NOTICES`], [`crate::platform::wm_thread::switcher_ax_callback`]).
     fn watch_dock(&mut self) {
@@ -516,10 +536,17 @@ impl Controller {
     /// ([`Self::switcher_fast_tick`]). The list made while the keys missed the Tab opens the switcher, its selection
     /// the Dock's only. Nothing when the switcher is down otherwise (the Dock's menus).
     pub fn switcher_notice(&mut self, ob: &Observer, name: &str) {
+        crate::platform::costs::bump(crate::platform::costs::Cost::DockNotice);
+        let now = clock::now();
         if !self.model.as_ref().is_some_and(|m| !m.macos_counts_hidden()) {
+            // Where macOS counts the hidden windows on their Desktop (the Corner engine) the
+            // switcher is not followed; the Dock draws Mission Control too, and its notice
+            // may come as it opens.
+            if self.model.is_some() {
+                self.upkeep_dock_notice(name, now);
+            }
             return;
         }
-        let now = clock::now();
         switcher_notes::note("dock notice", || name.to_string());
         // The Dock draws Mission Control too: its notice may come as it opens.
         self.upkeep_dock_notice(name, now);

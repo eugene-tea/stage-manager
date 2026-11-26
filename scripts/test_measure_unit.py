@@ -74,11 +74,74 @@ class SnapshotTimer(unittest.TestCase):
             with self.assertRaises(ValueError):
                 M.snapshot_ms(bad)
 
+    def test_a_clicks_hold_is_a_word_of_its_command_when_set(self):
+        # SM_CLICK_HOLD_MS (round picture-wait): not set, the click commands as they were.
+        self.assertIsNone(M.click_hold_ms(None))
+        self.assertIsNone(M.click_hold_ms(" "))
+        self.assertEqual(M.click_words(None), [])
+        self.assertEqual(M.click_hold_ms("100"), 100)
+        self.assertEqual(M.click_words(M.click_hold_ms("100")), ["hold=100"])
+        self.assertEqual(M.click_words(M.click_hold_ms("0")), ["hold=0"], "0 is a value: let go at once")
+        for bad in ("-1", "2001", "long"):
+            with self.assertRaises(ValueError):
+                M.click_hold_ms(bad)
+
     def test_a_count_a_minute(self):
         self.assertEqual(M.per_minute(10, 40, 60.0), 30.0)
         self.assertEqual(M.per_minute(7, 7, 300.0), 0.0)
         self.assertIsNone(M.per_minute(None, 40, 60.0))
         self.assertIsNone(M.per_minute(1, 2, 0))
+
+
+class RunKnobs(unittest.TestCase):
+    """SM_CONFIG and SM_ENV: one part of the app off or slowed for a measured run."""
+
+    def test_config_words_are_section_key_value(self):
+        self.assertEqual(M.extra_config(None), [])
+        self.assertEqual(M.extra_config("windows.corner_patch=false strip.order=\"dock\""),
+                         [("windows", "corner_patch", "false"), ("strip", "order", '"dock"')])
+        for bad in ("corner_patch=false", "windows.corner_patch", "[windows]"):
+            with self.assertRaises(ValueError):
+                M.extra_config(bad)
+
+    def test_a_runs_lines_join_the_scenarios_sections(self):
+        extra = M.extra_config("windows.corner_patch=false windows.inert_slivers=false")
+        self.assertEqual(M.config_text(None, "", extra), "[windows]\ncorner_patch = false\ninert_slivers = false\n")
+        text = M.config_text(2000, '[strip]\norder = "dock"\n', M.extra_config("strip.capture=false animation.snapshot_interval_ms=0"))
+        self.assertEqual(text, '[strip]\norder = "dock"\ncapture = false\n[animation]\nsnapshot_interval_ms = 0\n',
+                         "one table a section; the run's own value wins")
+        self.assertEqual(M.config_text(None, '[strip]\norder = "dock"\n', []), '[strip]\norder = "dock"\n', "nothing asked: as written")
+
+    def test_env_words_are_the_apps_test_switches_only(self):
+        self.assertEqual(M.extra_env(None), {})
+        self.assertEqual(M.extra_env("STAGE_MANAGER_TICK_REST_MS=750"), {"STAGE_MANAGER_TICK_REST_MS": "750"})
+        for bad in ("PATH=/tmp", "STAGE_MANAGER_TICK_REST_MS", "STAGE_MANAGER_HOME=/tmp/x", "STAGE_MANAGER_ENGINE=spaces"):
+            with self.assertRaises(ValueError):
+                M.extra_env(bad)
+
+    def test_what_a_rest_counted(self):
+        s0 = {"costs": {"window_lists": 100, "launch_services": 40, "taps_on": {"slivers": True}, "desktop_stills": 3},
+              "tick": {"brisk_ticks": 50, "rest_ticks": 10, "pace": "brisk"}}
+        s1 = {"costs": {"window_lists": 166, "launch_services": 41, "taps_on": {"slivers": True}, "desktop_stills": 9},
+              "tick": {"brisk_ticks": 62, "rest_ticks": 38, "pace": "rest", "rest_ms": 2000}}
+        got = M.rest_counts(s0, s1, 60.0)
+        self.assertEqual(got, {"window_lists_per_min": 66.0, "launch_services_per_min": 1.0, "desktop_stills_per_min": 6.0,
+                               "ticks_brisk": 12, "ticks_rest": 28, "tick_rest_ms": 2000})
+        self.assertEqual(M.rest_counts(None, s1, 60.0), {}, "the app not running: nothing counted")
+
+    def test_how_the_patch_shows(self):
+        s = {"corner_patch": {"on": True, "shown": True, "mode": "ordered", "hidden_why": None},
+             "desktop_still": {"patch_plan": {"show": {"x": 1}, "still": 7, "hold": False, "file": False}}}
+        self.assertEqual(M.patch_now(s)["draws"], "still")
+        s["desktop_still"]["patch_plan"] = {"show": {"x": 1}, "still": None, "hold": False, "file": True}
+        self.assertEqual(M.patch_now(s)["draws"], "file")
+        self.assertEqual(M.patch_now({"corner_patch": {"on": False, "shown": False}})["draws"], None)
+
+    def test_launch_services_at_rest_is_judged_only_when_no_app_came_or_went(self):
+        self.assertIs(M.launch_services_at_rest({"launch_services_per_min": 1.0, "apps_changed_per_min": 0.0}), True)
+        self.assertIs(M.launch_services_at_rest({"launch_services_per_min": 300.9, "apps_changed_per_min": 0.0}), False)
+        self.assertIs(M.launch_services_at_rest({"launch_services_per_min": 300.9, "apps_changed_per_min": 0.4}), None)
+        self.assertIs(M.launch_services_at_rest({"launch_services_per_min": 300.9}), None, "an older build: not counted")
 
 
 class HiddenRound(unittest.TestCase):

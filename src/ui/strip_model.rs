@@ -64,7 +64,8 @@ pub struct StripSnapshot {
     /// The active stage's standard windows, front to back, at their live frames: the strip
     /// takes a full-size snapshot of each as it comes, again as the pointer nears a card, and
     /// on a timer when `[animation] snapshot_interval_ms` asks for one; the controller takes
-    /// the ones a switch moves at the switch (`platform/controller/switch_pictures.rs`).
+    /// the ones a switch moves at the switch, or ahead when a switch is likely
+    /// (`platform/controller/switch_pictures.rs`).
     /// Empty while the user has hidden the strip: no switch animates then, nothing is captured.
     pub active_windows: Vec<CardWindow>,
     /// The pinned windows shown on this Space, at their live frames: they stay shown through
@@ -435,6 +436,53 @@ pub fn present(snapshot: StripSnapshot) {
     }
 }
 
+/// A switch's cover of the park corner, sent to the strip ahead of the switch's transition
+/// while the controller takes the pictures of the windows leaving
+/// (`platform/controller/switch_pictures.rs`, `corner_ahead`): macOS has raised an activated
+/// app's windows in the corner already, and the cover needs none of those pictures.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CornerAhead {
+    /// The transition that follows ([`Transition::id`]); it takes the cover over.
+    pub id: u64,
+    /// The display the transition plays on (its `CGDirectDisplayID`).
+    pub display: u32,
+    /// The cover, as the transition will carry it ([`Transition::corner`]).
+    pub cover: SwitchCover,
+    /// The window the transition's pictures pass under ([`Transition::under`]): the cover
+    /// goes under it too.
+    pub under: Option<u32>,
+}
+
+type CornerPresenter = Box<dyn Fn(CornerAhead) + Send + Sync>;
+
+fn corner_presenter() -> &'static Mutex<Option<CornerPresenter>> {
+    static P: OnceLock<Mutex<Option<CornerPresenter>>> = OnceLock::new();
+    P.get_or_init(|| Mutex::new(None))
+}
+
+/// Registers the strip's handler for a cover sent ahead (called by the UI at startup). The
+/// handler is invoked on the caller's thread; it must hop to the main thread itself.
+pub fn set_corner_presenter(f: impl Fn(CornerAhead) + Send + Sync + 'static) {
+    if let Ok(mut p) = corner_presenter().lock() {
+        *p = Some(Box::new(f));
+    }
+}
+
+/// Hands a switch's cover of the park corner to the strip ahead of its transition (called by
+/// the controller, before it takes the switch's pictures). With no strip nothing is drawn;
+/// the transition brings the cover as before.
+pub fn cover_corner_ahead(ahead: CornerAhead) {
+    #[cfg(test)]
+    if crate::platform::fake::with(|d| d.corner_ahead(ahead.id)).is_some() {
+        return;
+    }
+    if let Ok(p) = corner_presenter().lock()
+        && let Some(f) = p.as_ref()
+    {
+        f(ahead);
+    }
+}
+
 /// Reports strip input to the controller (called by the strip on the main thread).
 pub fn emit(event: StripEvent) {
     match event_sink().lock() {
@@ -549,7 +597,7 @@ pub fn note_snapshot(id: u32) {
 
 /// How long ago a full-size picture of window `id` last reached the strips (any thread):
 /// a switch's pictures taken at the switch skip one fresh enough (the pointer's press on a
-/// card took it, or the app switcher's key).
+/// card took it, the app switcher's key, or a sign that a switch was likely).
 pub fn snapshot_age(id: u32) -> Option<Duration> {
     #[cfg(test)]
     if let Some(age) = crate::platform::fake::with(|d| d.shot_age(id)) {

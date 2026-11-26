@@ -7,6 +7,11 @@
   display the app and the system together use about a third of the CPU they did (about 6 %
   of one core against 16 %). A switch starts about a tenth of a second later.
   `[animation] snapshot_interval_ms`, now 0 by default, sets a timer for them in every mode.
+- Less work at rest in the Accessibility mode: the housekeeping runs every 2 seconds while
+  nothing happens, as in the Spaces mode (every 0.75 seconds before, while a window was
+  hidden). A press on a hidden window's edge in the corner is ignored as before.
+- With `[strip] order = "dock"`, the running apps are no longer all looked up again once a
+  minute.
 - In the default mode, the first switch to a Desktop after the app starts stays there, and a
   window that opens while a Desktop slides in joins its own Desktop's stages. Before, the
   stage could change on the Desktop being left, and macOS could slide back.
@@ -15,8 +20,10 @@
   from the first Desktop change (before: from the third).
 - In the default mode, with several screens, a Desktop change on one screen leaves the other
   screens' stages as they are.
-- In the default mode, a Desktop change that macOS does not announce is followed within a
-  second.
+- In the default mode, a Desktop change that macOS does not announce is followed at once.
+- In the default mode, Mission Control and App Exposé opening and closing are followed at
+  once; before, up to a second later, two with the Mac at rest.
+- `[windows] mission_control_key_keeps_stage = true` works in the default mode too.
 
 ## 1.9.2 — 2026-11-24
 

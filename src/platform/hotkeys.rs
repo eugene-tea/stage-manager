@@ -96,6 +96,20 @@ pub fn carbon_mods(mods: Mods) -> u32 {
     m
 }
 
+/// The modifiers of the `bindings` whose command moves windows between a stage and the
+/// strip (a switch, a window sent to a stage or to a new one), each once: when they go down
+/// such a hotkey may follow, and its pictures are taken ahead ([`super::switch_likely`]).
+pub fn moving_mods(bindings: &[(Hotkey, HotkeyCommand)]) -> Vec<Mods> {
+    let mut mods: Vec<Mods> = Vec::new();
+    for (key, command) in bindings {
+        let moves = matches!(command, HotkeyCommand::SwitchTo(_) | HotkeyCommand::SendTo(_) | HotkeyCommand::NewStage);
+        if moves && !key.mods.is_empty() && !mods.contains(&key.mods) {
+            mods.push(key.mods);
+        }
+    }
+    mods
+}
+
 /// The US-layout virtual key code (`kVK_*`) of a key.
 pub fn key_code(key: Key) -> Option<u32> {
     const LETTERS: [u32; 26] = [
@@ -282,6 +296,19 @@ mod tests {
         dispatch(1);
         assert_eq!(seen.get(), 2, "the sink stayed after the panic");
         assert!(STATE.with(|s| s.borrow().sink.is_some()));
+    }
+
+    /// Round picture-wait: the default bindings' modifiers that tell a switch is likely are
+    /// ⌃⌥ (switch to a stage, a new stage) and ⌃⌥⇧ (send to a stage), each once; none while
+    /// hotkeys are off.
+    #[test]
+    fn the_modifiers_of_the_bindings_that_move_windows() {
+        let on = HotkeyConfig { enabled: true, ..HotkeyConfig::default() };
+        let ctrl_alt = Mods { ctrl: true, alt: true, shift: false, cmd: false };
+        assert_eq!(moving_mods(&on.bindings()), vec![ctrl_alt, Mods { shift: true, ..ctrl_alt }]);
+        assert!(moving_mods(&HotkeyConfig::default().bindings()).is_empty(), "off by default");
+        let only_strip = HotkeyConfig { enabled: true, switch: None, send: None, new_stage: None, ..HotkeyConfig::default() };
+        assert!(moving_mods(&only_strip.bindings()).is_empty(), "pin and the strip's toggle move no window to a card");
     }
 
     #[test]

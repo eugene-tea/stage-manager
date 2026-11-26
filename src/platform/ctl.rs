@@ -11,12 +11,14 @@
 //! [next|hide|show|park|all|off]` makes the Spaces engine's next hide or show (or every bridged
 //! call) fail as a refusing window server would (the fallback drill; `park`: the next lend's
 //! park is not asked, as of an app that does not move its window in time), `debug-click X Y
-//! [shift]` clicks at a global point, `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
+//! [shift] [hold=MS]` clicks at a global point (the button held `MS`, 60 ms unless given), `debug-drag X1 Y1 X2 Y2 [X Y ...] [shift] [hold=MS]` drags
 //! along the points (both only where our own windows or a `STAGE_MANAGER_ONLY` app's windows are
 //! topmost), `debug-desktop X Y [double | drag X2 Y2 | hold MS]` clicks, double-clicks, drags or presses
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
-//! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real]` clicks a fixture's Dock item as the Dock-click
-//! prediction sees it (in the Apple mode: found, hit-tested and pressed, no prediction),
+//! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real] [hold=MS]` clicks a fixture's Dock item as the Dock-click
+//! prediction sees it (`hold=MS`: the press held that long before its release, as a person's is) (in the Apple mode: found, hit-tested and pressed, no prediction),
+//! `debug-dock-hover BUNDLE` moves the pointer onto that item and leaves it there (no press:
+//! the pointer in the Dock; `debug-pointer-back` puts it back),
 //! `debug-dock-lend BUNDLE` feeds that click without pressing the item (what the press put
 //! home waits for an activation that does not come),
 //! `debug-mission-pick ID [hover]` clicks a fixture's window where Mission Control lays it out
@@ -331,6 +333,9 @@ pub enum Command {
         bundle: String,
         /// A posted press and release, not the controller fed and `AXPress`.
         real: bool,
+        /// How long the press is held before its release (`hold=MS`): the posted one's
+        /// (100 ms unless given), or the fed one's (none unless given: the release at once).
+        hold_ms: Option<u64>,
     },
     /// A posted ⌘Tab and what answered it, or the last one's report (needs
     /// `STAGE_MANAGER_TEST=1`; round cmd-tab, [`crate::platform::switcher_probe`]).
@@ -339,6 +344,14 @@ pub enum Command {
     /// `STAGE_MANAGER_TEST=1`; the Spaces engine, round r2-lends): what the press puts home
     /// waits for an activation that never comes, for the live checks of what ends it.
     DebugDockLend {
+        /// The app's bundle id.
+        bundle: String,
+    },
+    /// The pointer moved onto the Dock item of a `STAGE_MANAGER_ONLY` app and left there,
+    /// nothing pressed (needs `STAGE_MANAGER_TEST=1`; round picture-wait): the pointer in
+    /// the Dock's bar, for the live checks of the pictures taken when a switch is likely.
+    /// `debug-pointer-back` puts the pointer back.
+    DebugDockHover {
         /// The app's bundle id.
         bundle: String,
     },
@@ -400,6 +413,8 @@ pub enum Command {
         y: f64,
         /// Hold shift.
         shift: bool,
+        /// How long the button stays down (`hold=MS`; 60 ms unless given).
+        hold_ms: Option<u64>,
     },
     /// A synthetic click, double click (`double`), drag (to `to`) or still press held `hold` ms
     /// on the desktop itself, posted
@@ -492,9 +507,13 @@ impl Command {
                 let id = id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}"))?;
                 Ok(Self::DebugMissionPick { id, hover: !rest.is_empty() })
             }
-            ["debug-click", x, y, rest @ ..] if rest.is_empty() || rest == ["shift"] => {
+            ["debug-click", x, y, rest @ ..] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
-                Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty() })
+                let (rest, hold_ms) = hold_word(rest)?;
+                if !(rest.is_empty() || rest == ["shift"]) {
+                    return Err("debug-click needs X Y [shift] [hold=MS]".into());
+                }
+                Ok(Self::DebugClick { x: coord(x)?, y: coord(y)?, shift: !rest.is_empty(), hold_ms })
             }
             ["debug-desktop", x, y, rest @ ..] => {
                 let coord = |w: &str| w.parse::<f64>().map_err(|_| format!("expected a coordinate, got {w:?}"));
@@ -546,16 +565,22 @@ impl Command {
             }
             ["debug-switcher"] => Ok(Self::DebugSwitcher),
             ["debug-mission-control", rest @ ..] => match rest {
-                ["status" | "lend" | "back"] | ["lend", "card"] | ["mode", "off" | "shown" | "key" | "config"] => {
+                ["status" | "lend" | "back" | "launch"] | ["lend", "card"] | ["mode", "off" | "shown" | "key" | "config"] => {
                     Ok(Self::DebugMissionControl(rest.iter().map(|w| (*w).to_string()).collect()))
                 }
-                _ => Err("debug-mission-control takes status, lend [card], back, or mode off|shown|key|config".into()),
+                _ => Err("debug-mission-control takes status, launch, lend [card], back, or mode off|shown|key|config".into()),
             },
             ["debug-cmd-tab", "result"] => Ok(Self::DebugCmdTab(CmdTabProbe::Result)),
             ["debug-cmd-tab", mode, rest @ ..] => CmdTabProbe::parse(mode, rest).map(Self::DebugCmdTab),
-            ["debug-dock-click", bundle] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: false }),
-            ["debug-dock-click", bundle, "real"] => Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: true }),
+            ["debug-dock-click", bundle, rest @ ..] => {
+                let (rest, hold_ms) = hold_word(rest)?;
+                if !(rest.is_empty() || rest == ["real"]) {
+                    return Err("debug-dock-click needs BUNDLE [real] [hold=MS]".into());
+                }
+                Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: !rest.is_empty(), hold_ms })
+            }
             ["debug-dock-lend", bundle] => Ok(Self::DebugDockLend { bundle: (*bundle).to_string() }),
+            ["debug-dock-hover", bundle] => Ok(Self::DebugDockHover { bundle: (*bundle).to_string() }),
             ["adopted", ids @ ..] => ids
                 .iter()
                 .map(|id| id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}")))
@@ -980,6 +1005,24 @@ pub fn run_mark(words: &[String]) -> ExitCode {
     }
 }
 
+/// The longest hold a test click takes (`hold=MS`): past it a press is no click (the Dock
+/// opens an item's menu after 600 ms; a card's press turns into a drag).
+const CLICK_HOLD_MAX_MS: u64 = 2000;
+
+/// A click command's words without its last one when that is `hold=MS`, and the hold.
+fn hold_word<'a, 'b>(words: &'a [&'b str]) -> Result<(&'a [&'b str], Option<u64>), String> {
+    match words.split_last() {
+        Some((last, rest)) if last.starts_with("hold=") => {
+            let ms = last["hold=".len()..].parse::<u64>().map_err(|_| format!("expected hold=MS, got {last:?}"))?;
+            if ms > CLICK_HOLD_MAX_MS {
+                return Err(format!("hold={ms}: {CLICK_HOLD_MAX_MS} ms at most"));
+            }
+            Ok((rest, Some(ms)))
+        }
+        _ => Ok((words, None)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1052,8 +1095,19 @@ mod tests {
         assert!(Command::parse("debug-mission-pick x").is_err());
         assert_eq!(
             Command::parse("debug-click 60 700.5 shift"),
-            Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true })
+            Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true, hold_ms: None })
         );
+        assert_eq!(
+            Command::parse("debug-click 60 700.5 hold=100"),
+            Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: false, hold_ms: Some(100) })
+        );
+        assert_eq!(
+            Command::parse("debug-click 60 700.5 shift hold=100"),
+            Ok(Command::DebugClick { x: 60.0, y: 700.5, shift: true, hold_ms: Some(100) })
+        );
+        assert!(Command::parse("debug-click 60 700.5 hold=long").is_err());
+        assert!(Command::parse("debug-click 60 700.5 hold=9000").is_err(), "a hold past 2 s is no click");
+        assert!(Command::parse("debug-click 60 700.5 twice").is_err());
         assert_eq!(
             Command::parse("debug-desktop 2490 1380 double"),
             Ok(Command::DebugDesktop { at: Point::new(2490.0, 1380.0), double: true, to: None, hold: None })
@@ -1102,15 +1156,25 @@ mod tests {
         assert!(Command::parse("debug-frame 7 200 300 800").is_err());
         assert_eq!(
             Command::parse("debug-dock-click dev.example.app"),
-            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: false })
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: false, hold_ms: None })
         );
         assert_eq!(
             Command::parse("debug-dock-click dev.example.app real"),
-            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: true })
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: true, hold_ms: None })
+        );
+        assert_eq!(
+            Command::parse("debug-dock-click dev.example.app hold=100"),
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: false, hold_ms: Some(100) })
+        );
+        assert_eq!(
+            Command::parse("debug-dock-click dev.example.app real hold=250"),
+            Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: true, hold_ms: Some(250) })
         );
         assert!(Command::parse("debug-dock-click dev.example.app fake").is_err());
         assert_eq!(Command::parse("debug-dock-lend dev.example.app"), Ok(Command::DebugDockLend { bundle: "dev.example.app".into() }));
         assert!(Command::parse("debug-dock-lend").is_err());
+        assert_eq!(Command::parse("debug-dock-hover dev.example.app"), Ok(Command::DebugDockHover { bundle: "dev.example.app".into() }));
+        assert!(Command::parse("debug-dock-hover").is_err());
         assert_eq!(
             Command::parse("debug-cmd-tab cancel"),
             Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 1, hold_ms: 300, gap_ms: 40, lend: true }))

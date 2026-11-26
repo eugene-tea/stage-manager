@@ -39,6 +39,7 @@ them.
 | Windows moved and hidden through documented macOS interfaces only | ✓ | — ⁷ | ◐ ⁸ |
 | Window pictures: macOS's faster undocumented capture first, the documented one wherever it fails | ✓ | ✓ | — |
 | Desktops: read from macOS's own undocumented list first, told apart by their windows wherever it fails | ✓ | ✓ | — |
+| Mission Control and Desktop changes: heard from macOS's own undocumented notices first, found by a regular look wherever they fail | ✓ | ✓ | — |
 | ***Cost at rest*** (test windows, nobody at the Mac) ⁹ | | | |
 | **Total, with the system's share** | **about 5.7 %** | **about 0.5 %** | — |
 | Stage Manager itself (what Activity Monitor shows) | 0.83 % | 0.50 % | — |
@@ -95,8 +96,8 @@ All three are in the `[windows]` section of the config file; `engine` and
   show the hidden stages' windows. `"shown"` (the default) puts them on the Desktop once
   Mission Control shows; `"key"` already when its keyboard shortcut is pressed; `"off"` leaves
   them hidden. Read when the config file changes.
-- `mission_control_key_keeps_stage`: with `engine = "spaces"`, closing Mission Control with its
-  key or Escape keeps the stage in front. Off (the default) is Apple's: the app whose window is
+- `mission_control_key_keeps_stage`: closing Mission Control with its key or Escape keeps the
+  stage in front, with either engine. Off (the default) is Apple's: the app whose window is
   under the pointer comes in front with its stage.
 - `apple_stage_manager_on`: what happens while Apple's Stage Manager is on. `"pause"` (the
   default) brings every window back and arranges nothing until Apple's is off; `"integrate"`

@@ -272,15 +272,64 @@ pub(crate) fn covers_screen(bounds: Rect, screen: Rect) -> bool {
         && bounds.max_y() >= screen.max_y() - 1.0
 }
 
-/// [`click_through_overlay`] for window `w`: its owner read now (bundle id, else its
-/// executable), against every active display. A window at layer 0 or below, or one not
-/// drawn, is answered at once with no read ([`Through::Covers`]).
+/// A process's bundle id and, without one, its executable ([`overlay_of`]).
+type OwnerRead = (Option<String>, Option<String>);
+
+/// The owners read for [`overlay_of`], kept until an app launches or quits: a process's
+/// bundle never changes while it runs, and the inert slivers' list asks it of every window
+/// above the app windows near a corner at every tick (LaunchServices, a lookup each: 6 ms of
+/// the WM thread's minute at rest, a sample of 11-25).
+#[derive(Default)]
+struct Owners {
+    /// The launches and quits heard when these were read ([`super::dock::apps_changes`]).
+    changes: u64,
+    read: Vec<(i32, OwnerRead)>,
+}
+
+/// The most owners kept (the windows above the app windows are a handful of processes').
+const OWNERS_MAX: usize = 64;
+
+impl Owners {
+    /// Process `pid`'s owner: as read before while no app launched or quit since (`changes`;
+    /// a pid is only ever reused after its process quit), else `read` now.
+    fn of(&mut self, pid: i32, changes: u64, read: impl FnOnce() -> OwnerRead) -> OwnerRead {
+        if self.changes != changes {
+            *self = Self { changes, read: Vec::new() };
+        }
+        if let Some((_, owner)) = self.read.iter().find(|(p, _)| *p == pid) {
+            return owner.clone();
+        }
+        let owner = read();
+        if self.read.len() < OWNERS_MAX {
+            self.read.push((pid, owner.clone()));
+        }
+        owner
+    }
+}
+
+static OWNERS: std::sync::Mutex<Owners> = std::sync::Mutex::new(Owners { changes: 0, read: Vec::new() });
+
+/// Process `pid`'s bundle id, else its executable, asked now.
+fn read_owner(pid: i32) -> OwnerRead {
+    super::costs::bump(super::costs::Cost::LaunchServices);
+    let bundle = super::apps::bundle_of(pid);
+    let exe = if bundle.is_none() { super::apps::exe_path(pid) } else { None };
+    (bundle, exe)
+}
+
+/// [`click_through_overlay`] for window `w`: its owner (bundle id, else its executable; read
+/// once a process, [`Owners`]), against every active display. A window at layer 0 or below,
+/// or one not drawn, is answered at once with no read ([`Through::Covers`]).
 pub fn overlay_of(w: &CgWindow) -> Through {
     if w.layer <= 0 || !w.onscreen || w.alpha <= 0.0 {
         return Through::Covers;
     }
-    let bundle = super::apps::bundle_of(w.pid);
-    let exe = if bundle.is_none() { super::apps::exe_path(w.pid) } else { None };
+    // A unit test's desks reuse pids: nothing is kept between them.
+    let kept = if cfg!(test) { None } else { OWNERS.lock().ok() };
+    let (bundle, exe) = match kept {
+        Some(mut owners) => owners.of(w.pid, super::dock::apps_changes(), || read_owner(w.pid)),
+        None => read_owner(w.pid),
+    };
     let owner = Owner { name: &w.owner, bundle: bundle.as_deref(), exe: exe.as_deref() };
     click_through_overlay(w.layer, w.bounds, &owner, &cg_display_bounds())
 }
@@ -331,6 +380,32 @@ mod tests {
 
     fn w(layer: i64, bounds: Rect, onscreen: bool) -> CgWindow {
         CgWindow { id: 1, pid: 2, owner: String::new(), name: None, layer, bounds, onscreen, alpha: 1.0 }
+    }
+
+    /// A window's owner is asked of LaunchServices once a process, and again only after an
+    /// app launched or quit: the inert slivers' list asked it at every tick.
+    #[test]
+    fn a_window_owners_bundle_is_read_once_until_an_app_launches_or_quits() {
+        let asked = std::cell::Cell::new(0);
+        let read = |bundle: &str| {
+            asked.set(asked.get() + 1);
+            (Some(bundle.to_string()), None)
+        };
+        let mut owners = Owners::default();
+        for _ in 0..30 {
+            assert_eq!(owners.of(77, 0, || read("com.example.bar")).0.as_deref(), Some("com.example.bar"));
+            assert_eq!(owners.of(78, 0, || read("com.example.menu")).0.as_deref(), Some("com.example.menu"));
+        }
+        assert_eq!(asked.get(), 2, "a minute of ticks: one read a process");
+        // An app quit and another launched, the pid reused: read again.
+        assert_eq!(owners.of(77, 1, || read("com.example.other")).0.as_deref(), Some("com.example.other"));
+        assert_eq!(asked.get(), 3);
+        // Never more than a handful kept: past that, asked each time.
+        let mut owners = Owners::default();
+        for pid in 0..(OWNERS_MAX as i32 + 5) {
+            owners.of(pid, 0, || read("x"));
+        }
+        assert_eq!(owners.read.len(), OWNERS_MAX);
     }
 
     #[test]

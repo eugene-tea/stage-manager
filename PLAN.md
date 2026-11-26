@@ -104,21 +104,49 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   "Window engines measured"): with the system's share the Accessibility engine costs about
   5.7 % of a core at rest (about 16 % until the 2 s picture timer went), the Spaces engine
   about 0.5 %. Aim: 1 to 2 %, with no card shown stale and no switch slower.
-  - What the Accessibility engine still costs with no window pictured: the window server
-    +4.6 %, the capture service 0.25 %, the app 0.83 % against 0.50 %. Find it (`sample`'s
-    split; `ctl state`'s `tick` and `costs`): the housekeeping that rests 0.75 s at most there
-    (150 window lists a minute against 63; "One way for every mode", below), the corner patch
-    and its stills.
-  - About 300 LaunchServices lookups a minute at rest under both engines: find what asks.
-  - A switch waits for its pictures under every engine: 76 ms at a card click, 113 ms at a
-    Dock click (11-25). Not noticed by a person, but at the edge, and after a Dock click the
-    activated app's windows show raised in the park corner 121 to 155 ms before the cover
-    (the capture phase allows 150 and failed once at 155). To take the wait away: pictures
-    taken when a switch is likely (the pointer in the Dock, a hotkey's modifiers down, as the
-    strip and ⌘Tab do already), one up to 2 s old accepted (0.5 s today, `FRESH`), one capture
-    call for all of a switch's windows if that is faster, and the corner's cover sent to the
-    strip ahead of the pictures. A person's card click, not the test's instant one, measured
-    first.
+  - The window server's +4.6 % under the Accessibility engine with no window pictured is not
+    explained: the app's own time is (UX-SPEC, the `sample` table), and since round
+    rest-cost its housekeeping rests 2 s there too. Run the matrix (DEVELOPMENT, "Measuring
+    cost"), shortest first: the base again (the app should read near 0.5 %, about 60 window
+    lists a minute, 6 stills); `SM_CAPTURE=0` (no still of the desktop: if the window
+    server and the capture service drop, the still is it); `windows.corner_patch=false`
+    (the panel too); `SM_STAGES=1` (nothing in the corner); `windows.inert_slivers=false`;
+    `STAGE_MANAGER_TICK_REST_MS=750` and `10000` (what a tick and its lists cost).
+  - If the still is it: taken on evidence only (the wallpaper read changed, the icons
+    changed, a press on the desktop: each already takes one), with the 10 s refresh kept
+    for a desktop with widgets, or far longer. The owner's call: a widget's own change would
+    show late in the corner.
+  - Run `scripts/test-stages.sh rest` (and `SM_ENGINE=spaces` for the rest alone): the first
+    live press on a sliver in the suite.
+  - The inert slivers' list at rest is up to 2.2 s behind a window that comes or goes with
+    no click, key or notice (a system panel, a notification of a process that is not
+    observed); 0.8 s before. If one is seen to matter: the mouse moves' monitor, on while a
+    strip shows, can ask for a list as the pointer nears a corner zone.
+  - The wallpaper is read every 2 s twice under the Accessibility engine (the card glass's
+    reader and the corner patch's own, 37 and 33 ms a minute, most of the main thread's
+    work at rest): one reader for both, and read on evidence where there is some.
+  - The Spaces engine asks LaunchServices whether each hidden window's app is hidden at
+    every Space check (about 10 ms a minute): the hide and unhide notices already say.
+  - Where neither the window server's notices nor the public signs tell of Mission
+    Control or Show Desktop (a gesture or a hot corner with the notices not working),
+    they are found up to 2.2 s late under the Accessibility engine with the tick at 2 s
+    (about a second before).
+  - A switch's wait for its pictures (76 ms at a card click, 113 ms at a Dock click, 11-25):
+    the pictures are now taken when a switch is likely, one up to 2 s old is played, and the
+    corner's cover goes ahead of them (ARCHITECTURE, "Window pictures"). Left:
+    - Run the capture phase under both engines and measure the switches again, with the
+      test's clicks and with `SM_CLICK_HOLD_MS=100` (UX-SPEC, "Window engines measured").
+      Then say in the CHANGELOG what a switch costs now.
+    - One capture call for all of a switch's windows: run `probe-spaces capture BUNDLE fast
+      list`, then keep the faster way and drop `STAGE_MANAGER_CAPTURE_LIST`. The order of
+      the images handed back is proven only on windows that look different.
+    - The corner's cover still waits for the pictures when a window leaving reaches its
+      rectangle (a window that fills the screen above the Dock): the cover would need that
+      window's part cut out of it, or its picture.
+    - An auto-hidden Dock's bar is read where it rests, so the pointer coming into it is
+      not seen until the next read; only the press takes the pictures there.
+    - A picture asked for while one of the same window is still on its way is asked for
+      again (the pointer into the Dock and a press within the capture's time).
   - Video calls: check whether our captures make a call's video stutter (it lags at times
     with ours where Apple's is smooth). The call stand-in missed no refresh at rest or
     switching (11-14, 11-18), and at rest no picture is taken of a call window in front any
@@ -205,7 +233,8 @@ server's own. Every layer takes the window server's own by default, wherever a c
 working, at launch and while running, and falls back to the public way when it is not (a
 macOS update, for one). The one layer not there yet is how windows are hidden: Accessibility
 stays the default while the Spaces mode is proven. Pictures follow the rule since 1.9, the
-Desktops' reads since round corner-desktops. The items below are where the Accessibility mode
+Desktops' reads since round corner-desktops, hearing of Mission Control and of a Desktop
+change's end since round looks-forward. The items below are where the Accessibility mode
 was left behind for no reason of the mode.
 
 - **A display change is still taken by the windows on screen under the Accessibility engine.**
@@ -220,14 +249,17 @@ was left behind for no reason of the mode.
 - **The reads' check sees nothing on a screen with no window wholly on it.** A list of
   Desktops that names the wrong Desktop there is not noticed until a window shows
   (`engine/desk_reads.rs`). Never seen; a second public fact would close it.
-- **Mission Control's opening and a Desktop change's end are found by a 1 s poll** under the
-  Accessibility engine; the triggers that bring the look forward run under Spaces only (one,
-  the Dock's notice, is public). `mission_control_key_keeps_stage` is honoured under Spaces
-  only for the same reason.
-- **The housekeeping rests 0.75 s at most under the Accessibility engine**, 2 s under the
-  others, to keep the list the inert slivers' tap trusts fresh; each wake is a full pass.
-  Measure what the cap costs at rest, then keep that list fresh by something lighter. A show
-  still owed for a window that only waits for its Desktop also keeps the pace brisk there.
+- **Mission Control and a Desktop change under the Accessibility engine: run it live.** The
+  window server's notices bring the looks forward there on the bench only so far
+  (`scripts/test-stages.sh looks`, the Mac untouched). The run also says what is not
+  measured: whether a notice comes for Mission Control opened by its launcher, a gesture or a
+  hot corner, and whether the Dock sends its notice as Mission Control opens (the public
+  fallback's second trigger; if it never does, its observer can go).
+- **A window moved to another Desktop is still found at the next look** under the
+  Accessibility engine: the window server's notice of a window added to a Space names its
+  window in a word the app learns only from the Spaces engine's own asks. A way to learn it
+  with no Space call (a window the app sees open, matched by its id) would bring that look
+  forward too.
 - **⌘Tab to another Desktop arranges the stage on arrival**, in both modes, though the chosen
   app is known before ⌘ is released (the Spaces engine's lend already follows it). Arranged
   ahead, as a Dock click's is; UX-SPEC's "known gap" sentence then goes.
@@ -237,7 +269,10 @@ was left behind for no reason of the mode.
 - **A hidden window found shown is given up after four tries** under the Accessibility engine
   and then stays in view, counted hidden, with no card; the Spaces engine never gives up.
 - **Smaller.** The wait for a switch's pictures (160 ms) is sized for ScreenCaptureKit, not for
-  the window server's capture; the landing variants can be tried only with `engine = "spaces"`.
+  the window server's capture; the landing variants can be tried only with `engine = "spaces"`;
+  the Spaces engine's lends keep their own copy of the watch that brings Mission Control's
+  looks forward (`engine/mission_control.rs`), where the Accessibility engine has
+  `engine/look_watch.rs`: one watch for both.
 
 ## 2.0: new features
 

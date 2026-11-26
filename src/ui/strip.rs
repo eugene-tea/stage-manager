@@ -464,6 +464,13 @@ pub fn install(mtm: MainThreadMarker, thumbnail_interval_ms: u64) {
     strip_model::set_presenter(|snapshot| {
         DispatchQueue::main().exec_async(move || present_in_order(snapshot));
     });
+    // A switch's cover of the park corner, ahead of its transition (the main queue keeps
+    // their order). A strip busy just then draws none: the transition brings the cover.
+    strip_model::set_corner_presenter(|ahead| {
+        DispatchQueue::main().exec_async(move || {
+            with_strip_of(ahead.display, |s| s.cover_corner_ahead(ahead));
+        });
+    });
     tracing::info!(thumbnail_interval_ms, "strip installed");
 }
 
@@ -517,6 +524,8 @@ pub fn drop_slot(p: Point) -> Option<StripDrop> {
 /// desktop (the global monitor). Main thread.
 pub fn pointer_moved(p: Point) {
     with_strips(|s| s.pointer_moved(p));
+    // In the Dock's bar a click there may switch stages: its pictures are taken ahead.
+    crate::platform::switch_likely::pointer_at(p);
 }
 
 /// The global monitor feeds [`pointer_moved`]: a strip hidden at the edge waits for its moves

@@ -6,9 +6,11 @@
 //!   hovered card's: each once as it is first asked for, and all of them at once when the
 //!   pointer reaches a card or presses one, or the app switcher's key is pressed. The ones a
 //!   switch moves are taken at the switch: the controller captures the outgoing windows whose
-//!   picture is not fresh before it sends the transition, under every engine, and they reach
-//!   the cache as any other snapshot ([`crate::platform::switch_shots`],
-//!   `platform/controller/switch_pictures.rs`). Nothing is captured on a timer unless
+//!   picture is not fresh (2 s) before it sends the transition, under every engine, and they
+//!   reach the cache as any other snapshot ([`crate::platform::switch_shots`],
+//!   `platform/controller/switch_pictures.rs`); it takes them ahead, the same way, at the
+//!   other signs that a switch is likely (the pointer in the Dock, a press on a Dock item, a
+//!   hotkey's modifiers: [`crate::platform::switch_likely`]). Nothing is captured on a timer unless
 //!   `[animation] snapshot_interval_ms` asks for one (0 by default; until 11-25 the Corner
 //!   engine's pictures came every 2 s, most of what it cost at rest). A window's last
 //!   snapshot before it parks stays in the cache (`snapshot_cache_mb`) and is what grows back
@@ -52,7 +54,9 @@
 //!   where
 //!   they wait (raised above the corner patch when an activation brought them), is covered on
 //!   the overlay with the patch's picture (a still of the desktop where icons lie, 8L3),
-//!   under every snapshot ([`Transition::corner`], round 8L). The outgoing stage's card
+//!   under every snapshot ([`Transition::corner`], round 8L); where it needs none of the
+//!   pictures the controller is still taking, it is drawn ahead of the transition, which
+//!   takes it over ([`Strip::cover_corner_ahead`], round picture-wait). The outgoing stage's card
 //!   stays hidden until its snapshots land, then everything goes in one frame, except the
 //!   corner's cover while the corner patch is not drawn yet: it stays until
 //!   the patch has been on screen a moment, a few hundred milliseconds at most
@@ -114,6 +118,10 @@ const LANDING_MAX: f64 = 1.0;
 const PARK_WAIT_MAX: f64 = 0.2;
 /// How often a landed switch's held cover looks whether the patch shows (seconds: a frame).
 const HOLD_POLL: f64 = 1.0 / 60.0;
+/// A cover of the park corner sent ahead of its transition ([`Ahead`]) goes after this if
+/// the transition never came (seconds): the controller waits 160 ms at most for the
+/// switch's pictures before it sends the transition, and the main thread may be busy.
+const AHEAD_MAX: f64 = 0.5;
 /// How long incoming snapshots stay over their windows after the unveil (seconds): the
 /// windows are placed through the Accessibility API and reach the screen a presentation lag
 /// or more later; the snapshots, within a point of them by then, go after that.
@@ -278,6 +286,17 @@ struct Hold {
     timer: Retained<NSTimer>,
 }
 
+/// The park corner's cover drawn ahead of its transition
+/// ([`strip_model::CornerAhead`]): the transition takes it over when it comes
+/// ([`Strip::start_transition`]).
+struct Ahead {
+    /// The transition it is of.
+    id: u64,
+    ghost: Ghost,
+    /// Takes it off if the transition never comes ([`AHEAD_MAX`]).
+    timer: Retained<NSTimer>,
+}
+
 /// The card shown under the pointer while a window is dragged over the strip.
 struct WindowCard {
     window: u32,
@@ -316,6 +335,8 @@ pub(super) struct Motion {
     hold: Option<Hold>,
     /// A landed switch's incoming snapshots, fading out.
     fading: Option<Fading>,
+    /// The park corner's cover of a transition not here yet.
+    ahead: Option<Ahead>,
 }
 
 /// The most app icons a strip keeps (one per app and look); past it, those of apps on no
@@ -343,13 +364,37 @@ impl Motion {
             drag_monitor: None,
             hold: None,
             fading: None,
+            ahead: None,
         }
     }
 
     /// Nothing draws in the overlay: no transition, no dragged window's card, no held cover,
-    /// no landed snapshot fading.
+    /// no landed snapshot fading, no cover ahead of its transition.
     fn overlay_idle(&self) -> bool {
-        self.running.is_none() && self.window_card.is_none() && self.hold.is_none() && self.fading.is_none()
+        self.running.is_none() && self.window_card.is_none() && self.hold.is_none() && self.fading.is_none() && self.ahead.is_none()
+    }
+
+    /// The cover drawn ahead for transition `id`, handed to that transition; one drawn for
+    /// another transition goes (the overlay is left as it is: the caller draws in it next).
+    fn take_ahead(&mut self, id: u64) -> Option<Ghost> {
+        let a = self.ahead.take()?;
+        a.timer.invalidate();
+        if a.id == id {
+            return Some(a.ghost);
+        }
+        remove_now(&a.ghost);
+        None
+    }
+
+    /// Takes a cover drawn ahead off the corner now (the overlay hidden if nothing else is
+    /// in it): its transition never came, or the Desktop was left.
+    fn drop_ahead(&mut self) {
+        let Some(a) = self.ahead.take() else { return };
+        a.timer.invalidate();
+        remove_now(&a.ghost);
+        if self.overlay_idle() {
+            self.overlay.hide();
+        }
     }
 
     /// Takes a landed switch's fading snapshots off now (the overlay hidden if nothing else
@@ -414,6 +459,7 @@ impl Motion {
         // A cover held on the Desktop left goes with it.
         self.drop_hold();
         self.drop_fading();
+        self.drop_ahead();
         // In use (a transition, a dragged window's card): the fresh panel comes once it hides.
         self.overlay.renew(mtm, self.running.is_some() || self.window_card.is_some());
     }
@@ -453,6 +499,27 @@ impl Drop for Motion {
             // SAFETY: the token came from addGlobalMonitorForEventsMatchingMask.
             unsafe { NSEvent::removeMonitor(&token) };
         }
+    }
+}
+
+/// Takes `ghost` off the overlay at once, with no implicit fade.
+fn remove_now(ghost: &Ghost) {
+    objc2_quartz_core::CATransaction::begin();
+    objc2_quartz_core::CATransaction::setDisableActions(true);
+    ghost.remove();
+    objc2_quartz_core::CATransaction::commit();
+}
+
+/// Whether a cover of the park corner sent ahead of its transition is drawn now, or why not:
+/// the strip draws no motion (`draws`: animation on, no full-screen Space), the controller
+/// stopped waiting for this transition (`given_up`), or a transition runs (`running`: the
+/// overlay is its own until the new transition cuts it short and draws its cover itself).
+fn draws_ahead(draws: bool, given_up: bool, running: bool) -> Result<(), &'static str> {
+    match (draws, given_up, running) {
+        (false, ..) => Err("no motion is drawn"),
+        (_, true, _) => Err("the switch moved its windows already"),
+        (_, _, true) => Err("a transition runs"),
+        _ => Ok(()),
     }
 }
 
@@ -705,7 +772,53 @@ impl Strip {
         }
     }
 
+    /// The park corner's cover of a transition on its way ([`strip_model::CornerAhead`]),
+    /// drawn now, under where that transition's snapshots will be: the controller is still
+    /// taking the pictures of the windows leaving, and macOS has raised an activated app's
+    /// windows in the corner already. The transition takes the cover over when it comes
+    /// ([`Self::start_transition`]); if it never does, the cover goes ([`AHEAD_MAX`]).
+    pub(super) fn cover_corner_ahead(&mut self, ahead: strip_model::CornerAhead) {
+        let id = ahead.id;
+        let draws = draws_motion(self.style.animation.animates(), self.snapshot.fullscreen);
+        if let Err(why) = draws_ahead(draws, strip_model::given_up(id), self.motion.running.is_some()) {
+            tracing::debug!(id, why, "transition: the corner's cover is not drawn ahead");
+            return;
+        }
+        self.motion.drop_ahead();
+        self.place_overlay();
+        let Some(ghost) = self.corner_cover(id, ahead.cover) else {
+            if self.motion.overlay_idle() {
+                self.motion.overlay.hide();
+            }
+            return;
+        };
+        self.show_overlay(ahead.under, false);
+        self.motion.overlay.flush();
+        let display = self.display;
+        let timer = after(AHEAD_MAX, move || {
+            with_strip_of(display, |s| {
+                if s.motion.ahead.as_ref().is_some_and(|a| a.id == id) {
+                    tracing::debug!(id, "transition: the corner's cover drawn ahead goes: its transition never came");
+                    s.motion.drop_ahead();
+                }
+            });
+        });
+        self.motion.ahead = Some(Ahead { id, ghost, timer });
+        tracing::debug!(id, "transition: the park corner is covered ahead of the switch's pictures");
+    }
+
     fn start_transition(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>, Option<GlassLook>)>) {
+        // The corner's cover drawn ahead for it is its own from here; one it does not take
+        // (nothing drawn, no incoming picture) goes.
+        let mut ahead = self.motion.take_ahead(t.id);
+        self.start_transition_over(t, starts, &mut ahead);
+        if let Some(ghost) = ahead {
+            remove_now(&ghost);
+        }
+    }
+
+    /// [`Self::start_transition`], with the corner's cover drawn `ahead` for it, if any.
+    fn start_transition_over(&mut self, t: Transition, starts: HashMap<u32, (Plane, Option<usize>, Option<GlassLook>)>, ahead: &mut Option<Ghost>) {
         // Its timers come back to this strip (round displays-live-1).
         let display = self.display;
         self.finish_transition(false);
@@ -930,8 +1043,12 @@ impl Strip {
             strip_model::cover(t.id, cover);
             return;
         }
-        // The park corner, under every snapshot, while the incoming windows wait there (8L).
-        let corner = if cover.incoming { t.corner.clone().and_then(|c| self.corner_cover(t.id, c)) } else { None };
+        // The park corner, under every snapshot, while the incoming windows wait there (8L):
+        // the cover drawn ahead of the pictures, else drawn now.
+        let corner = match (cover.incoming, t.corner.as_ref()) {
+            (true, Some(c)) => ahead.take().or_else(|| self.corner_cover(t.id, c.clone())),
+            _ => None,
+        };
         let corner_at = corner.as_ref().and(t.corner.as_ref()).map(|c| (c.rect, c.screen));
         let arrived = t.incoming.iter().map(|w| (w.window.id, w.window.frame)).collect();
         // Gone at once, never an implicit fade (review R1-ui 11).
@@ -2183,6 +2300,16 @@ mod tests {
         assert!(draws_motion(true, false));
         assert!(!draws_motion(true, true));
         assert!(!draws_motion(false, false));
+    }
+
+    /// Round picture-wait: a cover sent ahead of its transition is drawn only where the
+    /// transition's own would be, and never into a transition still running.
+    #[test]
+    fn a_cover_ahead_is_drawn_only_where_its_transition_would_draw() {
+        assert_eq!(draws_ahead(true, false, false), Ok(()));
+        assert!(draws_ahead(false, false, false).is_err(), "animation off, or a full-screen Space");
+        assert!(draws_ahead(true, true, false).is_err(), "the controller stopped waiting");
+        assert!(draws_ahead(true, false, true).is_err(), "a transition runs");
     }
 
     /// The overlay never goes to the floating level for a switch (an always-on-top window

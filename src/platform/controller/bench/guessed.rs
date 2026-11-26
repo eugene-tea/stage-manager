@@ -7,7 +7,14 @@
 //! and the whole file at the merge with round switch-pictures, whose pictures taken at the
 //! switch show in the calls of 11 scenarios as `shots [ids]` and nowhere else, move one cause
 //! chain at load 3 to its reading at load 10 with the same outcome ("an app focuses its other
-//! window after our focus"), and add five scenarios of their own).
+//! window after our focus"), and add five scenarios of their own; the scenarios of round
+//! looks-forward, `looks.rs` and one of `desktops.rs`, printed with the reads off and with
+//! what each scenario's desk tells (their "before" is `looks_before.txt`); and the lines of
+//! round picture-wait as each step changed them: `corner` among the calls where the park
+//! corner's cover goes to the strip ahead of the pictures, and one scenario where it does
+//! not; `ahead` where a press on a Dock item, the pointer in the Dock or a hotkey's modifiers
+//! had the pictures taken before the switch, in the two Dock clicks of round switch-pictures
+//! and four scenarios of its own).
 //! A Mac where the reads do not work behaves as before. Beside each
 //! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!
@@ -48,7 +55,7 @@ impl Drop for Forced {
 
 /// Every scenario of the bench.
 fn all() -> impl Iterator<Item = &'static Scenario> {
-    super::scenarios::ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL)
+    super::scenarios::ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL)
 }
 
 /// The pinned outcomes: a scenario's name, then its outcome at each load, tab-separated.
