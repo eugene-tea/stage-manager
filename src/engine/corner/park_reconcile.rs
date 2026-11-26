@@ -23,9 +23,16 @@
 //! - **Otherwise it is parked again**, after it has been listed at the same place out of
 //!   the zone on [`SETTLE_TICKS`] ticks in a row (one listing can lie: a Space slide's
 //!   first frame, a window on its way), with a backoff between tries ([`backoff`]) and at
-//!   most [`MAX_TRIES`] tries; then the reconciler gives up on it and says so once
-//!   ([`Verdict::GiveUp`]), rather than moving a window its app keeps moving back forever.
-//! - A window listed in the zone is settled ([`Verdict::Settled`]): forget it.
+//!   most [`MAX_TRIES`] tries.
+//! - **Then the screen wins.** A window its app put back after every try is the app's to
+//!   show ([`Verdict::Kept`]): it joins the active stage as shown, where it is, said once, as
+//!   a window the user focused does. A park is a move the app sees and undoes, so trying for
+//!   good would be a tug of war a person watches; given up and still counted hidden (before,
+//!   audit 11-25 H4), it sat in view with no card until the next Desktop change. Once it
+//!   joins, it is not parked for this again: only a switch away from its new stage parks it.
+//! - A window listed in the zone for [`SETTLED_AFTER`] is settled ([`Verdict::Settled`]):
+//!   forget it. Until then its tries are kept: an app that puts the window back a moment
+//!   after each park lands is the same stray each time, not a new one with no tries.
 //!
 //! The caller skips whole ticks when the list cannot be trusted (a Space change settling, a
 //! Desktop slide, Mission Control, a transition, an arrangement made ahead, a drag), and a
@@ -41,10 +48,17 @@ pub const SETTLE_TICKS: u32 = 2;
 /// Listed bounds this far apart (a point: the window server rounds) are the same place.
 const SAME_PLACE: f64 = 1.0;
 
-/// Parks tried before the reconciler gives a window up.
+/// Parks tried before the window is taken as its app shows it ([`Verdict::Kept`]).
 pub const MAX_TRIES: u32 = 4;
 
-/// Never again (a stray is forgotten once settled or adopted; a given-up one stays so).
+/// How long a stray stays listed in the park zone before it is forgotten
+/// ([`Verdict::Settled`]): an app that puts its window back does so a while after each park
+/// lands, at its own pace. Forgotten at its first listing in the zone, such a window was a
+/// new stray at each move back, its tries counted from none, and parked for good (the bench's
+/// `kept_out`: the app answering in 450 ms, a park every 0.8 s for as long as it ran).
+pub const SETTLED_AFTER: Duration = Duration::from_secs(10);
+
+/// The pace of the tries (a stray is forgotten once settled or adopted).
 const BACKOFF: [Duration; 4] = [Duration::ZERO, Duration::from_millis(500), Duration::from_secs(1), Duration::from_secs(2)];
 
 /// How long after park `tries` the next park may go: at once, then half a second, a second,
@@ -103,8 +117,9 @@ pub enum Verdict {
     Park,
     /// Nothing this tick.
     Wait,
-    /// Tried enough: given up, to be said once.
-    GiveUp,
+    /// Tried enough: its app keeps it out of the zone. It joins the active stage as shown,
+    /// where it is, said once; never tried again.
+    Kept,
 }
 
 /// One window the screen contradicts.
@@ -118,8 +133,11 @@ pub struct Stray {
     pub tries: u32,
     /// The next park may go from here.
     pub next: Option<Instant>,
-    /// The reconciler gave it up (said once).
+    /// Tried enough ([`Verdict::Kept`], said once): nothing more is tried. The caller forgets
+    /// a stray its model took as shown; one it could not take stays so.
     pub gave_up: bool,
+    /// Since when it is listed in the zone, without a break ([`SETTLED_AFTER`]).
+    pub in_zone: Option<Instant>,
     /// The user moved it while parked (noted by the caller from a move with the button down).
     pub user_moved: bool,
     /// Since when it is known (its park failed, or it was first seen out of the zone).
@@ -134,6 +152,15 @@ impl Stray {
     }
 }
 
+impl Stray {
+    /// True while the tick stays brisk for it: tried again soon. Not one tried enough, nor
+    /// one in the zone waiting to be forgotten (its app's move back is seen at the next
+    /// tick, at rest too).
+    pub fn wants_brisk(&self) -> bool {
+        !self.gave_up && self.in_zone.is_none()
+    }
+}
+
 /// True when listed bounds `a` and `b` are the same place ([`SAME_PLACE`]).
 fn same_place(a: Rect, b: Rect) -> bool {
     (a.x - b.x).abs() <= SAME_PLACE && (a.y - b.y).abs() <= SAME_PLACE && (a.w - b.w).abs() <= SAME_PLACE && (a.h - b.h).abs() <= SAME_PLACE
@@ -145,13 +172,20 @@ pub fn step(s: &mut Stray, f: Facts, now: Instant) -> Verdict {
         s.since = Some(now);
     }
     match f.seen {
-        Seen::InZone => return Verdict::Settled,
+        Seen::InZone => {
+            // In the zone: the next listing out counts from none again.
+            s.seen_out = 0;
+            s.at = None;
+            let since = *s.in_zone.get_or_insert(now);
+            return if now.saturating_duration_since(since) >= SETTLED_AFTER { Verdict::Settled } else { Verdict::Wait };
+        }
         Seen::NotListed => {
             s.seen_out = 0;
             s.at = None;
             return Verdict::Wait;
         }
         Seen::OutOfZone => {
+            s.in_zone = None;
             // Listed somewhere else than last time: still moving; the count starts again.
             let moved = s.at.is_some_and(|at| !same_place(at, f.bounds));
             s.at = Some(f.bounds);
@@ -169,12 +203,16 @@ pub fn step(s: &mut Stray, f: Facts, now: Instant) -> Verdict {
     if f.focused {
         return Verdict::Adopt;
     }
-    if f.busy || s.gave_up || s.seen_out < SETTLE_TICKS || s.next.is_some_and(|t| now < t) {
+    if f.busy || s.gave_up || s.seen_out < SETTLE_TICKS {
         return Verdict::Wait;
     }
     if s.tries >= MAX_TRIES {
+        // The last try undone: nothing is left to wait for.
         s.gave_up = true;
-        return Verdict::GiveUp;
+        return Verdict::Kept;
+    }
+    if s.next.is_some_and(|t| now < t) {
+        return Verdict::Wait;
     }
     s.tries += 1;
     s.next = Some(now + backoff(s.tries));
@@ -189,9 +227,9 @@ mod tests {
     const OUT: Facts = Facts { seen: Seen::OutOfZone, bounds: MID, focused: false, user_moved: false, busy: false, echo: false };
 
     /// L1: a model-parked window listed mid-screen is parked again after two ticks, then with
-    /// a backoff, and given up after four tries, said once.
+    /// a backoff; after four tries it is its app's to show (said once), never tried again.
     #[test]
-    fn a_window_listed_out_of_the_zone_is_parked_again_with_backoff_then_given_up() {
+    fn a_window_listed_out_of_the_zone_is_parked_again_with_backoff_then_taken_as_shown() {
         let t0 = Instant::now();
         let mut s = Stray::default();
         assert_eq!(step(&mut s, OUT, t0), Verdict::Wait, "one listing can lie");
@@ -201,10 +239,51 @@ mod tests {
         assert_eq!(step(&mut s, OUT, t0 + Duration::from_millis(800)), Verdict::Park, "half a second later: again");
         assert_eq!(step(&mut s, OUT, t0 + Duration::from_millis(1900)), Verdict::Park, "a second later");
         assert_eq!(step(&mut s, OUT, t0 + Duration::from_millis(4000)), Verdict::Park, "two seconds later: the fourth");
-        assert_eq!(step(&mut s, OUT, t0 + Duration::from_millis(7000)), Verdict::GiveUp, "tried enough");
-        assert!(s.gave_up);
+        assert_eq!(step(&mut s, OUT, t0 + Duration::from_millis(7000)), Verdict::Kept, "tried enough: the app's");
+        assert!(s.gave_up && !s.wants_brisk());
         assert_eq!(step(&mut s, OUT, t0 + Duration::from_millis(8000)), Verdict::Wait, "said once; nothing more");
-        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, t0 + Duration::from_secs(9)), Verdict::Settled, "back in the zone: forgotten");
+        let back = t0 + Duration::from_secs(9);
+        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, back), Verdict::Wait, "back in the zone: kept a while");
+        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, back + SETTLED_AFTER), Verdict::Settled, "then forgotten");
+    }
+
+    /// Audit 11-25, H4: an app that puts its window back a while after each park lands (the
+    /// park listed in the zone first) is the same stray each time: its tries add up, and
+    /// after the fourth it is taken as shown, not parked again for good.
+    #[test]
+    fn a_window_its_app_puts_back_after_each_park_lands_is_taken_as_shown() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let zone = Facts { seen: Seen::InZone, ..OUT };
+        let mut s = Stray::default();
+        let mut parks = Vec::new();
+        let mut kept = None;
+        // A tick every 250 ms; the window is in the zone from each park to 500 ms after it.
+        let mut landed: Option<u64> = None;
+        for t in (0..20_000u64).step_by(250) {
+            let f = if landed.is_some_and(|l| t < l + 500) { zone } else { OUT };
+            match step(&mut s, f, ms(t)) {
+                Verdict::Park => {
+                    parks.push(t);
+                    landed = Some(t + 250);
+                }
+                Verdict::Kept => kept = Some(t),
+                Verdict::Wait => {}
+                v => panic!("{v:?} at {t}"),
+            }
+            assert_eq!(s.wants_brisk(), !s.gave_up && f.seen != Seen::InZone, "at {t}");
+        }
+        assert_eq!(parks.len() as u32, MAX_TRIES, "{parks:?}");
+        assert!(kept.is_some_and(|k| k < 10_000), "taken as shown at {kept:?}");
+        // A window that stays in the zone after a try is settled once it stayed there.
+        let mut s = Stray::default();
+        assert_eq!(step(&mut s, OUT, ms(0)), Verdict::Wait);
+        assert_eq!(step(&mut s, OUT, ms(250)), Verdict::Park);
+        assert_eq!(step(&mut s, zone, ms(500)), Verdict::Wait);
+        assert_eq!(step(&mut s, OUT, ms(2000)), Verdict::Wait, "out again: one listing can lie");
+        assert_eq!(s.tries, 1, "the try still counted");
+        assert_eq!(step(&mut s, zone, ms(2500)), Verdict::Wait);
+        assert_eq!(step(&mut s, zone, ms(2500) + SETTLED_AFTER), Verdict::Settled);
     }
 
     /// Live 10-29, the parity phase's ⌘M: the window is parked and un-minimized there; macOS
@@ -228,7 +307,8 @@ mod tests {
         // the zone for two ticks running.
         assert_eq!(step(&mut s, Facts { bounds: down, ..OUT }, ms(850)), Verdict::Park, "parked again, never adopted");
         assert_eq!(s.tries, 1);
-        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, ms(1100)), Verdict::Settled, "its card stays");
+        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, ms(1100)), Verdict::Wait, "its card stays");
+        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, ms(1100) + SETTLED_AFTER), Verdict::Settled);
     }
 
     /// A window listed somewhere else each tick (an app sliding it, a Space slide's last
@@ -283,7 +363,8 @@ mod tests {
         assert_eq!(step(&mut s, OUT, t0 + Duration::from_millis(250)), Verdict::Wait, "the batch's try counts");
         assert_eq!(step(&mut s, OUT, t0 + Duration::from_millis(600)), Verdict::Park);
         assert_eq!(s.tries, 2);
-        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, t0 + Duration::from_millis(900)), Verdict::Settled);
+        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, t0 + Duration::from_millis(900)), Verdict::Wait, "landed");
+        assert_eq!(step(&mut s, Facts { seen: Seen::InZone, ..OUT }, t0 + Duration::from_millis(900) + SETTLED_AFTER), Verdict::Settled);
         let mut s = Stray::park_failed(t0);
         assert_eq!(step(&mut s, Facts { seen: Seen::NotListed, ..OUT }, t0 + Duration::from_secs(1)), Verdict::Wait, "not on screen: nothing to do");
     }

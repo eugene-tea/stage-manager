@@ -5,8 +5,8 @@
 # base ID so no other fixture run is disturbed), then runs the phases.
 #
 #   scripts/test-stages.sh                 # every phase: m3 safety m4 m6 restore strip native visible
-#                                          # parity motion slots expose mission looks capture raise park offscreen
-#                                          # enhanced stale handles displays screens engine
+#                                          # parity motion slots expose mission looks capture raise park kept
+#                                          # offscreen enhanced stale handles displays screens engine
 #   scripts/test-stages.sh engine          # which window engine runs: each launch's probe and choice,
 #                                          # the fallback mid-run to the Corner engine (round sm-probe)
 #   scripts/test-stages.sh rest            # the housekeeping rests 2 s under every engine, and a press on
