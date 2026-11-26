@@ -108,7 +108,7 @@ impl Controller {
     pub(super) fn upkeep_tick_waits(&self, now: Instant) -> Option<&'static str> {
         match self.engine.kind() {
             EngineKind::Corner => {
-                if self.corner.strays.values().any(|s| !s.gave_up) {
+                if self.corner.strays.values().any(crate::engine::corner::park_reconcile::Stray::wants_brisk) {
                     Some("parked windows out of the corner")
                 } else if self.corner.unrestored.values().any(|u| !u.waits) {
                     Some("shows owed")

@@ -16,8 +16,9 @@ const BACK_MS: f64 = 150.0;
 
 /// Two apps, Bravo in front, Alpha's window 11 hidden; Alpha moves it back `times` times
 /// (`None`: every time). Watched for [`WATCH_MS`]: what the model counts hidden, what a person
-/// sees, the stage in front, how often the app sent 11 to the park corner, and, when the
-/// model stopped counting 11 hidden, how long after the launch, in whole seconds.
+/// sees, the stage in front, how often the app sent 11 to the park corner, when the model
+/// stopped counting 11 hidden (how long after the launch, in whole seconds), and the windows
+/// the reconcile still follows.
 fn kept_out(engine: EngineKind, load: f64, times: Option<u32>) -> Run {
     let mut b = Bench::new(engine, DEFAULTS, load, 1, |d| {
         two_apps(d);
@@ -38,7 +39,8 @@ fn kept_out(engine: EngineKind, load: f64, times: Option<u32>) -> Run {
     let shows: Vec<u32> = b.on_screen().into_iter().collect();
     let front = b.front().map_or("none".to_string(), |w| format!("{w:?}"));
     let joined = joined.map_or("never".to_string(), |ms| format!("after {} s", ms.div_ceil(1000)));
-    let out = format!("hidden {hidden:?} shows {shows:?} front {front} parks of 11: {parks}; joined the front {joined}");
+    let strays = b.c.corner.strays.len() + b.c.spaces.strays.len();
+    let out = format!("hidden {hidden:?} shows {shows:?} front {front} parks of 11: {parks}; joined the front {joined}; strays {strays}");
     Run::of(&b, out)
 }
 
@@ -56,21 +58,25 @@ fn moved_back_twice_corner(load: f64) -> Run {
 
 #[test]
 fn a_hidden_window_its_app_keeps_showing_is_not_left_counted_hidden() {
-    // Today: an app as quick as the tick is given up after the tries, counted hidden while
-    // it shows, with no card; a slower one is a new stray at each move back (its park listed
-    // in the zone first) and parked again for good, every 0.8 s at load 3.
-    let corner = "hidden [11] shows [11, 12] front [12] parks of 11: 5; joined the front never";
-    let slow = "hidden [11] shows [12] front [12] parks of 11: 21; joined the front never";
-    let slower = "hidden [11] shows [12] front [12] parks of 11: 9; joined the front never";
-    expect(kept_out_corner, [corner, slow, slower]);
+    // The launch's park and four tries, then it joins the stage in front where its app keeps
+    // it, its card gone, and is not parked again. Before (audit 11-25 H4): an app as quick as
+    // the tick was given up after the tries, the window counted hidden while it showed, with
+    // no card; a slower one was a new stray at each move back (its park listed in the zone
+    // first) and parked again for good, every 0.8 s at load 3 (21 parks in the 15 s).
+    let corner = "hidden [] shows [11, 12] front [11, 12] parks of 11: 5; joined the front after 6 s; strays 0";
+    // The app answers ten times slower: the same tries, each undone later.
+    let slower = "hidden [] shows [11, 12] front [11, 12] parks of 11: 5; joined the front after 11 s; strays 0";
+    expect(kept_out_corner, [corner, corner, slower]);
     // Under the Spaces engine a hide moves nothing: the app has nothing to put back.
-    let spaces = "hidden [11] shows [12] front [12] parks of 11: 0; joined the front never";
+    let spaces = "hidden [11] shows [12] front [12] parks of 11: 0; joined the front never; strays 0";
     expect(kept_out_spaces, [spaces, spaces, spaces]);
 }
 
+/// The third try holds: hidden, as before, and its stray forgotten once it stayed in the
+/// park zone ([`crate::engine::corner::park_reconcile::SETTLED_AFTER`]).
 #[test]
 fn a_hidden_window_its_app_moves_back_twice_stays_hidden() {
-    let hidden = "hidden [11] shows [12] front [12] parks of 11: 3; joined the front never";
+    let hidden = "hidden [11] shows [12] front [12] parks of 11: 3; joined the front never; strays 0";
     expect(moved_back_twice_corner, [hidden, hidden, hidden]);
 }
 
