@@ -49,7 +49,10 @@ the fixture moves to the middle of the screen by itself, SIGALRM, is parked agai
 second, its restore frame untouched, and a switch brings it back exactly; round fixes-151:
 the corner patch is its sliver grown by a parked window's shadow reach per side; a dialog opened
 while its stage is hidden is parked with its window, no switch; a window showing only a piece
-at the hidden corner is a card at launch and comes back whole in that corner), offscreen
+at the hidden corner is a card at launch and comes back whole in that corner), kept (audit
+11-25 H4: a hidden window the fixture puts back after every move from outside, `--moves-back-ms`,
+joins the stage in front after a few tries under the park corner, said once, and is not parked
+again; put back twice only, it stays hidden; under the Spaces engine it stays hidden), offscreen
 (round offscreen-windows: a window the fixture opens wholly off every display, as a headless
 browser does, never joins a stage, never moves, stays off screen through switches and a
 relaunch, and is never saved), enhanced (round enhanced-ui: the fixture's
@@ -8078,7 +8081,7 @@ def phase_park():
     check(t["Fixture 1"]["parked"] and close(t["Fixture 1"]["restore"], restore), "the model still has it parked, its restore frame untouched by the app's move")
     consistent("after the re-park")
     time.sleep(1.0)
-    check(not any("given up on" in ln for ln in log_text().splitlines()[-40:]), "no give-up: one re-park held")
+    check(not any("keeps out of the corner" in ln for ln in log_text().splitlines()[-40:]), "one re-park held: not taken as the app's")
     do("switch", 1)
     s = wait_state(lambda x: x["active"] == 1, "stage 1 back")
     check(s is not None, "a switch brings stage 1")
@@ -8089,6 +8092,88 @@ def phase_park():
     all_onscreen("park reconcile quit")
     dialog_born_parked()
     corner_piece_at_launch()
+
+
+def kept_out_run(times):
+    """`phase_kept`'s one run: the fixture's two windows in stages of their own, Fixture 2's in
+    front, the fixture putting back every move from outside 150 ms later (`times`: only that
+    many times in all, None: every time). (state, seconds from the switch until the model shows
+    Fixture 1 or None, the log's lines of this run's reconcile, where the window server lists
+    Fixture 1 at the end, where it was before the switch); None when it could not start."""
+    stop_app()
+    stop_fixture()
+    for k in EXTRA:
+        stop_extra(k)
+    for f in ("state.json", "config.toml"):
+        p = os.path.join(HOME, f)
+        if os.path.exists(p):
+            os.remove(p)
+    extra = ["--moves-back-ms", "150"] + (["--moves-back-times", str(times)] if times is not None else [])
+    start_fixture(2, *extra)
+    time.sleep(1.5)  # the fixture puts moves back once its windows have settled
+    s = start_app(2)
+    if not check(s is not None, "app manages the 2 fixture windows"):
+        return None
+    t = by_title(s)
+    w1, w2 = t["Fixture 1"]["id"], t["Fixture 2"]["id"]
+    own = t["Fixture 1"]["restore"]
+    before = len(log_text().splitlines())
+    do("new", w2)
+    t0 = time.time()
+    do("switch", 2)
+    shown = wait_state(lambda x: x["active"] == 2 and not by_title(x)["Fixture 1"]["parked"], "Fixture 1 shown by the model", timeout=12)
+    took = time.time() - t0 if shown else None
+    time.sleep(4.0)  # never a loop: nothing parks it again for the same cause
+    lines = [ln for ln in log_text().splitlines()[before:] if "out of the corner" in ln or "parked again" in ln]
+    try:
+        frame = frames_of(["Fixture 1"])["Fixture 1"]
+    except KeyError:
+        frame = None
+    return state(), took, lines, frame, own
+
+
+def phase_kept():
+    """Audit 11-25, H4: a hidden window its app keeps putting back. The fixture
+    (`--moves-back-ms 150`) puts Fixture 1 back where it had it each time something else moves
+    it, as an app restoring its saved bounds does. Under the park corner, after a few tries
+    it joins the stage in front where it is, said once in the log, its stage's card gone, the
+    model and the screen agreeing, and it is not parked again (before: given up and counted
+    hidden while it showed, or parked again for good). Put back only twice, it stays hidden.
+    Under the Spaces engine a hide moves nothing: the fixture has nothing to put back and the
+    window stays hidden."""
+    say("\n== kept: a hidden window its app keeps putting back ==")
+    got = kept_out_run(None)
+    if got is None:
+        return
+    s, took, lines, frame, own = got
+    for ln in lines:
+        say(f"    {ln[ln.find('a parked window'):]}")
+    if SPACES:
+        check(took is None, "Spaces: Fixture 1 stays hidden (a hide moves nothing the fixture could put back)")
+        consistent("Spaces: the window kept hidden")
+    else:
+        check(took is not None and took <= 10.0, f"Fixture 1 joined the stage in front after the tries ({took if took is None else round(took, 1)} s after the switch)")
+        joined = [ln for ln in lines if "keeps out of the corner joins the active stage" in ln]
+        check(len(joined) == 1, f"the log says it once ({len(joined)})")
+        tries = [ln for ln in lines if "parked again" in ln]
+        check(len(tries) <= 4, f"at most four tries ({len(tries)})")
+        check(frame is not None and close(frame, own, 2.0), f"Fixture 1 where the fixture keeps it ({fmt(frame) if frame else 'not listed'}, its own {fmt(own)})")
+        names = stage_sets(s)
+        check(any("Fixture 1" in v and "Fixture 2" in v for v in names.values()), f"both windows in the stage in front, Fixture 1's card gone ({names})")
+        check(not by_title(s)["Fixture 1"]["parked"], "not parked again in the 4 s after")
+        consistent("after the window joined the stage in front")
+    stop_app()
+    all_onscreen("kept quit")
+    say("-- put back twice only: the third try holds")
+    got = kept_out_run(2)
+    if got is None:
+        return
+    s, took, lines, _, _ = got
+    check(took is None and by_title(s)["Fixture 1"]["parked"], "Fixture 1 stays hidden")
+    check(not any("keeps out of the corner" in ln for ln in lines), "never taken as the app's")
+    consistent("after the third try")
+    stop_app()
+    all_onscreen("kept twice quit")
 
 
 def dialog_born_parked():
@@ -11505,7 +11590,7 @@ def phase_looks():
 
 
 def main():
-    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "looks", "capture", "raise", "park", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine", "reads"]
+    phases = sys.argv[1:] or ["m3", "safety", "m4", "m6", "restore", "strip", "native", "visible", "parity", "motion", "slots", "expose", "mission", "looks", "capture", "raise", "park", "kept", "offscreen", "enhanced", "stale", "handles", "tabs", "displays", "screens", "engine", "reads"]
     if not os.path.exists(BIN) or not all(os.path.exists(p) for p in [FIX_APP] + [e[1] for e in EXTRA.values()]):
         say("build first: scripts/test-stages.sh builds the app and the fixture")
         return 2
@@ -11523,7 +11608,7 @@ def main():
             {"visible": phase_visible, "m3": phase_m3, "safety": phase_safety, "m4": phase_m4, "m6": phase_m6, "strip": phase_strip,
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
-             "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
+             "park": phase_park, "kept": phase_kept, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
              "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine, "reads": phase_reads, "rest": phase_rest,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel,

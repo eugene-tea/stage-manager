@@ -133,7 +133,7 @@ its ctl socket and reading the window server's view of the windows:
 ```sh
 scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore strip native
                                           # visible parity motion slots expose mission looks capture raise park
-                                          # offscreen enhanced stale handles displays reads
+                                          # kept offscreen enhanced stale handles displays reads
 scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
                                           # card drawn whole, one of its windows lifted off

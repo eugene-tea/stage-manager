@@ -114,6 +114,14 @@
 //                                      the activation can take (live 11-17)
 //   --all-spaces                      the first window joins every Space (canJoinAllSpaces: on
 //                                      every Desktop, as "All Desktops"; probe-spaces names)
+//   --moves-back-ms N | FIXTURE_MOVES_BACK_MS=N  a standard window moved from outside (an
+//                                      Accessibility write, no mouse button down) is put back
+//                                      where the app had it N ms later, as an app restoring its
+//                                      saved bounds does; a drag by the user is its new place.
+//                                      Armed 1 s after the windows open (not with the signals
+//                                      that move windows: SIGALRM, SIGWINCH, SIGINFO)
+//   --moves-back-times N | FIXTURE_MOVES_BACK_TIMES=N  with --moves-back-ms: only the first N
+//                                      times in all (default: every time)
 // A bare number argument is the same as --windows N.
 // SIGUSR1 opens one more standard window ("T N+1"), ordered front without activating the app.
 // SIGUSR2 minimizes the first visible standard window (as ⌘M would).
@@ -170,6 +178,8 @@ struct Options {
     var frameClockNormal = false
     var reopen = false
     var allSpaces = false
+    var movesBackMs = -1
+    var movesBackTimes = -1
 
     static func parseColors(_ text: String) -> [NSColor] {
         text.split(separator: ",").compactMap { part in
@@ -225,6 +235,8 @@ struct Options {
         if let f = env["FIXTURE_FRAME_CLOCK"], !f.isEmpty { o.frameClock = f }
         if env["FIXTURE_FRAME_CLOCK_NORMAL"] == "1" { o.frameClockNormal = true }
         if env["FIXTURE_REOPEN"] == "1" { o.reopen = true }
+        if let n = env["FIXTURE_MOVES_BACK_MS"].flatMap(Int.init) { o.movesBackMs = n }
+        if let n = env["FIXTURE_MOVES_BACK_TIMES"].flatMap(Int.init) { o.movesBackTimes = n }
         var args = CommandLine.arguments.dropFirst().makeIterator()
         while let a = args.next() {
             switch a {
@@ -257,6 +269,8 @@ struct Options {
             case "--frame-clock-normal": o.frameClockNormal = true
             case "--reopen": o.reopen = true
             case "--all-spaces": o.allSpaces = true
+            case "--moves-back-ms": if let n = args.next().flatMap(Int.init) { o.movesBackMs = n }
+            case "--moves-back-times": if let n = args.next().flatMap(Int.init) { o.movesBackTimes = n }
             default: if let n = Int(a) { o.windows = n }
             }
         }
@@ -524,10 +538,61 @@ final class EnhancedMotion {
     }
 }
 
+/// `--moves-back-ms`: a frame change made from outside (Accessibility's writes, no mouse
+/// button down) is put back to where the app had the window `afterMs` later, at most `left`
+/// more times in all (nil: every time). A change made with a button down is the user's: the
+/// window's place from then on.
+final class MovesBack {
+    let afterMs: Int
+    var left: Int?
+    /// Frames are taken from outside only once the windows are in place.
+    var armed = false
+    var own: [ObjectIdentifier: NSRect] = [:]
+    var pending: Set<ObjectIdentifier> = []
+    var ours: Set<ObjectIdentifier> = []
+
+    init(afterMs: Int, times: Int) {
+        self.afterMs = afterMs
+        self.left = times < 0 ? nil : times
+    }
+
+    func watch(_ w: NSWindow) {
+        own[ObjectIdentifier(w)] = w.frame
+        for name in [NSWindow.didMoveNotification, NSWindow.didResizeNotification] {
+            NotificationCenter.default.addObserver(forName: name, object: w, queue: nil) { [weak self, weak w] _ in
+                if let self, let w { self.changed(w) }
+            }
+        }
+    }
+
+    func changed(_ w: NSWindow) {
+        let k = ObjectIdentifier(w)
+        guard armed, !ours.contains(k), let mine = own[k] else { return }
+        if NSEvent.pressedMouseButtons != 0 {
+            own[k] = w.frame
+            return
+        }
+        guard w.frame != mine, left != 0, !pending.contains(k) else { return }
+        pending.insert(k)
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(afterMs)) { self.putBack(w) }
+    }
+
+    func putBack(_ w: NSWindow) {
+        let k = ObjectIdentifier(w)
+        pending.remove(k)
+        guard let mine = own[k], w.frame != mine, !w.isMiniaturized, left != 0 else { return }
+        if let n = left { left = n - 1 }
+        ours.insert(k)
+        w.setFrame(mine, display: true)
+        ours.remove(k)
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let options = Options.parse()
     var windows: [NSWindow] = []
     let motion = EnhancedMotion()
+    lazy var movesBack = MovesBack(afterMs: options.movesBackMs, times: options.movesBackTimes)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // The menu bar's screen, the one --frames and the checks mean: `NSScreen.main` is the
@@ -577,6 +642,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.delayMs + 1000)) {
                 for w in self.windows where w.styleMask.contains(.titled) && !(w is NSPanel) { self.motion.watch(w) }
                 self.motion.armed = true
+            }
+        }
+        if options.movesBackMs >= 0 {
+            // Moves from outside are put back once the windows have settled where they opened.
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(options.delayMs + 1000)) {
+                for w in self.windows where w.styleMask.contains(.titled) && !(w is NSPanel) { self.movesBack.watch(w) }
+                self.movesBack.armed = true
             }
         }
         if options.offscreenMs >= 0 {
