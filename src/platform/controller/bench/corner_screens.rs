@@ -221,23 +221,34 @@ pub(super) const ALL: &[Scenario] = &[
     ("the live phase's main screen goes, the other's windows onto the first Desktop (Corner)", "scripts/test_display_gone.py main, 11-25", live_main),
 ];
 
-/// A display change is taken by the windows on screen under the Corner engine, with the
-/// reads working too (`Controller::display_change_guessed`): each scenario reads as it does
-/// with the reads off (`guessed.txt`), nothing disagrees and the reads never rest.
-///
-/// Known and unchanged: when the screen left stops showing its own Desktop (the gone
-/// screen's Desktop kept under its id; the live phase's rounds, macOS showing the Desktop
-/// the windows landed on), that Desktop's windows leave their stages while macOS shows the
-/// other one (stages [[21], [22], [23]]; `left their stage [31, 32]`), and come back as new
-/// windows when theirs shows. The live phase's two are pinned with the reads off only: with
-/// them on, the listing decides once the settle is over, and at load 10 a later stage of
-/// the Desktop left shows there.
+/// A display change is taken from the window server's listing under the Corner engine as
+/// any Space change is (round display-gone): every scenario reads as it does with the reads
+/// off (`guessed.txt`, 1.9.2's way: the change taken by the windows on screen for its
+/// settle) but where the screen left stops showing its own Desktop. There, before, that
+/// Desktop's windows left their stages as macOS showed the other one and came back as new
+/// stages when theirs showed (live 11-25, every round of `display-gone` under the Corner
+/// engine); now every stage keeps its windows. Nothing disagrees and the reads never rest.
 #[test]
-fn a_display_change_reads_as_with_the_desktops_guessed() {
+fn a_display_change_is_taken_from_the_listing() {
     let pins = super::guessed::pins();
-    for (name, _, script) in ALL.iter().filter(|(_, why, _)| *why == "screens.rs's twin") {
-        let want = pins.get(name).unwrap_or_else(|| panic!("{name}: no pin"));
-        expect(*script, *want);
+    let all = "stages [[11], [12], [21], [22], [23]]; front Some([21]); shows [21]; hidden [11, 12, 22, 23]";
+    let kept = "left their stage [], after the tour []; shows [41, 42], then [31]; stages [[31], [32], [41, 42], [43], [44], [45]]";
+    let main = "left their stage [], after the tour []; shows [41, 42], then [41, 42]; stages [[31], [32], [41, 42], [43], [44], [45]]";
+    let read: [(&str, &str); 3] = [
+        // Before: stages [[21], [22], [23]], Alpha's and Bravo's windows out of their stages.
+        ("the second screen goes, its Desktop kept under its id (Corner)", all),
+        ("the live phase's screen right of the main one goes, its windows onto the first Desktop (Corner)", kept),
+        ("the live phase's main screen goes, the other's windows onto the first Desktop (Corner)", main),
+    ];
+    for (name, _, script) in ALL {
+        let pinned = pins.get(name).unwrap_or_else(|| panic!("{name}: no pin"));
+        match read.iter().find(|(n, _)| n == name) {
+            Some((_, want)) => {
+                assert!(pinned.iter().all(|p| p != want), "{name}: read as with the reads off");
+                expect(*script, [*want; 3]);
+            }
+            None => expect(*script, *pinned),
+        }
     }
 }
 
@@ -259,3 +270,4 @@ fn print_them() {
         }
     }
 }
+
