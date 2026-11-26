@@ -87,6 +87,17 @@ pub fn bgra(image: &CGImage, space: Option<&CGColorSpace>) -> Option<(Vec<u8>, u
     draw_into(&[image], w, h, space).map(|b| (b, w, h))
 }
 
+/// `image` drawn at `w` x `h` pixels in `space` (or device RGB; Core Graphics converts from the
+/// image's own colour space): B, G, R, A per pixel, premultiplied, rows of `w * 4` bytes. Two
+/// pictures of one thing drawn so, on the same grid and in the same space, compare pixel for
+/// pixel ([`super::desktop_fast`]'s proof). `None` when no bitmap can be made in `space`.
+pub fn drawn(image: &CGImage, w: usize, h: usize, space: Option<&CGColorSpace>) -> Option<Vec<u8>> {
+    if w > 16_384 || h > 16_384 {
+        return None;
+    }
+    draw_into(&[image], w, h, space)
+}
+
 /// `image` drawn at `w` x `h` pixels, in its own colour space (device RGB when a bitmap cannot
 /// use it): a window's picture at the size a card asks for ([`super::capture_fast`]).
 pub fn scaled(image: &CGImage, w: usize, h: usize) -> Option<CFRetained<CGImage>> {

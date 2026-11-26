@@ -13,6 +13,13 @@ VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 # The build number (CFBundleVersion, shown in parentheses in About): the commit count, which
 # only grows; the version itself (CFBundleShortVersionString) comes from Cargo.toml.
 BUILD="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+# The commit built (StageManagerCommit, shown after the build number): the count says which of
+# two builds is newer, and only on dev; the commit says which source, in any clone or fork. A
+# "+" after it: tracked files differed from the commit. Left out where there is no git.
+COMMIT="$(git rev-parse --short=9 HEAD 2>/dev/null || true)"
+if [ -n "$COMMIT" ] && [ -n "$(git status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+  COMMIT="$COMMIT+"
+fi
 
 write_plist() { # path id name executable extra-keys
   cat > "$1" <<PLIST
@@ -72,9 +79,12 @@ case "${1:-}" in
     mkdir -p "$APP/Contents/Library/LaunchAgents"
     cp packaging/dev.eugene.stagemanager.agent.plist "$APP/Contents/Library/LaunchAgents/"
     plutil -lint -s "$APP/Contents/Library/LaunchAgents/dev.eugene.stagemanager.agent.plist"
-    write_plist "$APP/Contents/Info.plist" dev.eugene.stagemanager "Stage Manager" stage-manager \
-      $'\t<key>LSUIElement</key>\n\t<true/>\n\t<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>\n\t<key>CFBundleIconName</key>\n\t<string>AppIcon</string>'
-    echo "Bundled $APP ($VERSION)"
+    EXTRA=$'\t<key>LSUIElement</key>\n\t<true/>\n\t<key>CFBundleIconFile</key>\n\t<string>AppIcon</string>\n\t<key>CFBundleIconName</key>\n\t<string>AppIcon</string>'
+    if [ -n "$COMMIT" ]; then
+      EXTRA+=$'\n\t<key>StageManagerCommit</key>\n\t<string>'"$COMMIT"'</string>'
+    fi
+    write_plist "$APP/Contents/Info.plist" dev.eugene.stagemanager "Stage Manager" stage-manager "$EXTRA"
+    echo "Bundled $APP ($VERSION, build $BUILD${COMMIT:+, $COMMIT})"
     ;;
   fixture)
     APP="${FIXTURE_APP:-target/SM Fixture.app}"

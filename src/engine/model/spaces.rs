@@ -969,8 +969,14 @@ impl Model {
 
     /// Keyed ([`Model::arrive_on`]): of `known` (windows on the arriving Desktop by the window
     /// server's word), those the model counts hidden in a stage of another Space that the
-    /// window engine did not lend there and that are not on every Desktop.
+    /// window engine did not lend there and that are not on every Desktop. None under an
+    /// engine whose hidden windows stay on their Desktop ([`Model::hidden_on_their_desktop`]):
+    /// such a window was moved here, and goes with the moved ones ([`Self::listed_moves`]).
     fn hidden_elsewhere(&self, target: SpaceId, known: &[WindowId], listed: &Listed) -> Vec<WindowId> {
+        if self.hidden_on_their_desktop() {
+            // Hidden in the park corner of its Desktop: on this one, it was moved here.
+            return Vec::new();
+        }
         known
             .iter()
             .copied()
@@ -1300,6 +1306,9 @@ impl Model {
         // Strip order: the carried stages in their old Spaces' slot order.
         let mut slots: Vec<StageId> = Vec::new();
         let mut was_active: Option<StageId> = None;
+        // The Spaces left by a front stage a removed display brought ([`Model::adopt_display`]):
+        // that front was never their own, and their own most recent stage comes back.
+        let mut owed: BTreeSet<SpaceId> = BTreeSet::new();
         for &(sid, from) in &whole {
             if let Some(from_slots) = self.slots.get_mut(&from) {
                 if from_slots.contains(&sid) {
@@ -1310,6 +1319,9 @@ impl Model {
             if self.active.get(&from) == Some(&sid) {
                 self.active.remove(&from);
                 was_active.get_or_insert(sid);
+                if self.stage(sid).is_some_and(|s| s.windows.iter().all(|w| self.adopted.contains(w))) {
+                    owed.insert(from);
+                }
             }
             let mut group: Vec<WindowId> = self.stage(sid).map(|s| s.windows.clone()).unwrap_or_default();
             for &m in &group {
@@ -1376,12 +1388,17 @@ impl Model {
         // a fresh empty active stage (as Apple's: the Desktop left shows nothing, every stage
         // still there keeps its card). Never one of their parked stages made active without
         // its windows shown: no card, its app "present", ⌘-Tab doing nothing (review H3).
+        // A Desktop whose front was a removed display's ([`Model::carry_adopted`]'s rule): its
+        // own most recent card, now or when it shows again ([`Model::forward_after_emptied`]).
         let froms: BTreeSet<SpaceId> = whole.iter().map(|(_, from)| *from).collect();
         for from in froms {
             if self.space_is_empty(from) && !self.is_shown_space(from) {
                 self.prune_space(from);
             } else if self.has_space(from) && !self.active.contains_key(&from) {
                 self.fresh_active(from);
+                if owed.contains(&from) {
+                    self.forward_after_emptied(from, actions);
+                }
             }
         }
         carried.len()

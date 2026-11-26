@@ -36,13 +36,16 @@ them.
 | Works with apps that refuse or limit a window move | — | ✓ | ✓ |
 | Mission Control shows every stage's windows | ✓ | ◐ ⁵ | ✓ |
 | Pointer never moved by the app | ✓ | ✓ | — ⁶ |
-| Documented macOS interfaces only | ✓ | — ⁷ | ◐ ⁸ |
+| Windows moved and hidden through documented macOS interfaces only | ✓ | — ⁷ | ◐ ⁸ |
+| Window pictures: macOS's faster undocumented capture first, the documented one wherever it fails | ✓ | ✓ | — |
+| Desktops: read from macOS's own undocumented list first, told apart by their windows wherever it fails | ✓ | ✓ | — |
+| Mission Control and Desktop changes: heard from macOS's own undocumented notices first, found by a regular look wherever they fail | ✓ | ✓ | — |
 | ***Cost at rest*** (test windows, nobody at the Mac) ⁹ | | | |
-| **Total, with the system's share** | **about 4.9 %** | **about 1.2 %** | — |
-| Stage Manager itself (what Activity Monitor shows) | 1.07 % | 0.35 % | — |
-| macOS's screen-capture service | 1.23 % | 0 % | — |
-| Window server, above its own load | +2.58 % | +0.86 % | — |
-| Time awake per minute | 500 ms | 125 ms | — |
+| **Total, with the system's share** | **about 2 %** | **about 0.5 %** | — |
+| Stage Manager itself (what Activity Monitor shows) | 0.55 % | 0.49 % | — |
+| macOS's screen-capture service | 0.3 % | 0 % | — |
+| Window server, above its own load | about +1 % | about 0 | — |
+| Time awake per minute | 278 ms | 222 ms | — |
 | ***Cost in use*** ¹⁰ | | | |
 | Stage Manager itself, while working | 1–2 % | — | about 1 % |
 | ***Speed*** | | | |
@@ -71,9 +74,12 @@ them.
    is drawn, as measured on macOS 27, and a macOS update can change that. The live tests
    recheck it.
 9. Percent of one CPU core at rest, test windows only, the median of three runs (Apple
-   silicon, macOS 27, 11-14; details in [UX-SPEC.md](UX-SPEC.md), "Window engines measured").
-   Most of Accessibility's cost is in macOS's screen-capture service and window server, so
-   Activity Monitor's line for Stage Manager shows only about a fifth of it.
+   silicon, macOS 27, a 5K display, 11-25; details in [UX-SPEC.md](UX-SPEC.md), "Window engines
+   measured"). More than half of Accessibility's cost is in macOS's window server and its
+   screen-capture service, so Activity Monitor's line for Stage Manager shows only a part of
+   it. Until 1.9.2 Accessibility took pictures of the front windows every two seconds and a
+   slower picture of the desktop behind the parked window edges every ten, and the total read
+   about 16 % on the same Mac.
 10. Activity Monitor's figure for Stage Manager in everyday use (11-18), without the system's
    share. Accessibility: about 1.9 % over a minute of work (0.9 to 3.6 %), rising with every
    click and switch. Integrated with Apple's: the average over 13 hours, overnight included.
@@ -91,8 +97,8 @@ All three are in the `[windows]` section of the config file; `engine` and
   show the hidden stages' windows. `"shown"` (the default) puts them on the Desktop once
   Mission Control shows; `"key"` already when its keyboard shortcut is pressed; `"off"` leaves
   them hidden. Read when the config file changes.
-- `mission_control_key_keeps_stage`: with `engine = "spaces"`, closing Mission Control with its
-  key or Escape keeps the stage in front. Off (the default) is Apple's: the app whose window is
+- `mission_control_key_keeps_stage`: closing Mission Control with its key or Escape keeps the
+  stage in front, with either engine. Off (the default) is Apple's: the app whose window is
   under the pointer comes in front with its stage.
 - `apple_stage_manager_on`: what happens while Apple's Stage Manager is on. `"pause"` (the
   default) brings every window back and arranges nothing until Apple's is off; `"integrate"`

@@ -1,7 +1,7 @@
 //! AppKit UI: status item, strip panel and the motion overlay; the app's own windows
 //! (Settings, the welcome, About, update alerts) and the shell that runs them.
 
-pub(crate) mod about;
+pub mod about;
 pub(crate) mod alert;
 pub mod app_icons;
 pub mod app_menu;

@@ -29,6 +29,13 @@
 //! `STAGE_MANAGER_ONLY`, a test run) turns this source off: every picture through
 //! ScreenCaptureKit, as before 1.9.
 //!
+//! **One call a window.** `SLSHWCaptureWindowList` takes a list of windows, but one call for
+//! 2, 3 or 4 windows did not hand back one image a window (live 11-25, 30 of 30), so a
+//! switch's pictures are taken one call a window, one after another, and the test switch for
+//! one call (`STAGE_MANAGER_CAPTURE_LIST`, round picture-wait) is gone (round desktop-still).
+//! What the call does hand back for several ids is printed by the probe ([`handed_back`],
+//! `probe-spaces capture BUNDLE fast list`).
+//!
 //! The calls are synchronous: callers run them off the main thread (the capture workers, a
 //! switch's own thread). Each counts as a capture in flight for [`super::capture::quiesce`].
 //! Every route needs Screen Recording; callers check it first (without it the window server's
@@ -198,7 +205,7 @@ fn calls() -> Option<&'static Calls> {
 
 /// True when a test run asked for ScreenCaptureKit alone ([`FORCE_SCK_ENV`] with
 /// `STAGE_MANAGER_ONLY`).
-fn forced_off() -> bool {
+pub(crate) fn forced_off() -> bool {
     static FORCED: LazyLock<bool> = LazyLock::new(|| {
         let forced = forced_by(std::env::var_os(FORCE_SCK_ENV).is_some(), std::env::var_os("STAGE_MANAGER_ONLY").is_some());
         if forced {
@@ -210,7 +217,7 @@ fn forced_off() -> bool {
 }
 
 /// The test switch counts only in a test run (`only`: `STAGE_MANAGER_ONLY` set).
-fn forced_by(asked: bool, only: bool) -> bool {
+pub(crate) fn forced_by(asked: bool, only: bool) -> bool {
     asked && only
 }
 
@@ -325,6 +332,29 @@ pub fn picture(t: Target, frame: Rect, displays: &[Rect]) -> Result<Picture, Mis
         tracing::trace!(window = t.id, route = route.as_str(), "window picture: nothing handed back");
         return Err(Miss::Nothing);
     };
+    judge(route, t, frame, image)
+}
+
+/// What one call of `SLSHWCaptureWindowList` hands back for the windows `ids` together, for
+/// the probe (`probe-spaces capture BUNDLE fast list`): the size in pixels of every image of
+/// its array, in the array's order; `None` when the call is missing or hands back no array.
+/// The app itself never asks for several windows in one call (module docs).
+#[cfg(feature = "probes")]
+pub fn handed_back(ids: &[u32]) -> Option<Vec<(usize, usize)>> {
+    let calls = calls()?;
+    let f = calls.hw?;
+    let flight = InFlight::issue();
+    // SAFETY: `ids` outlives the call, with its own count; a +1 CFArray of CGImage or null.
+    let list: Option<Retained<NSArray>> = unsafe { ffi::take_array(f(calls.cid, ids.as_ptr(), ids.len() as u32, HW_OPTIONS)) };
+    drop(flight);
+    let list = list?;
+    Some(images_of(&list).iter().map(|i| (CGImage::width(Some(i)), CGImage::height(Some(i)))).collect())
+}
+
+/// `image`, handed back by `route` for window `t.id` at `frame`, as its picture: checked to
+/// be the window (not empty, its shape, not see-through all over: [`fits_window`],
+/// [`see_through`]), the route's health noted, sized to `t`'s pixels at most.
+fn judge(route: Route, t: Target, frame: Rect, image: CFRetained<CGImage>) -> Result<Picture, Miss> {
     let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
     let blank = w == 0 || h == 0 || see_through(&alphas(&image, w, h));
     if blank || !fits_window(w, h, frame) {
@@ -413,10 +443,18 @@ fn alphas(image: &CGImage, w: usize, h: usize) -> Vec<Option<u8>> {
 
 /// The first image of a capture's array, retained.
 fn first_image(list: &NSArray) -> Option<CFRetained<CGImage>> {
-    let first = list.iter().next()?;
-    let p = std::ptr::NonNull::new(Retained::as_ptr(&first).cast_mut().cast::<CGImage>())?;
-    // SAFETY: the array's members are CGImages (the call's contract), alive in the array.
-    Some(unsafe { CFRetained::retain(p) })
+    images_of(list).into_iter().next()
+}
+
+/// Every image of a capture's array, in its order, retained.
+fn images_of(list: &NSArray) -> Vec<CFRetained<CGImage>> {
+    list.iter()
+        .filter_map(|member| {
+            let p = std::ptr::NonNull::new(Retained::as_ptr(&member).cast_mut().cast::<CGImage>())?;
+            // SAFETY: the array's members are CGImages (the call's contract), alive in the array.
+            Some(unsafe { CFRetained::retain(p) })
+        })
+        .collect()
 }
 
 #[cfg(test)]

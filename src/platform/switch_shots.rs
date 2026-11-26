@@ -1,12 +1,12 @@
 //! Pictures taken at a switch (1.9, S4b): full-size stills of a few windows, now, outside any
 //! capturer's rounds.
 //!
-//! Under the Corner engine the switch's pictures come from a capturer that keeps every window
-//! of the active stage fresh every `[animation] snapshot_interval_ms` (a Dock click or ⌘Tab gives
-//! no warning). Under the Spaces engine a window leaves the screen in one window-server step
-//! (~2 ms), so it can stay where it is until its picture is taken at the switch, and a window
-//! in a stage Space not shown is still captured with its current content (measured 11-14,
-//! `probe-spaces capture`): [`shoot`] takes both, in parallel, each answered once.
+//! A switch's outgoing windows are still on screen when the switch is sent to the strip,
+//! under every engine, so their pictures are taken then (`controller/switch_pictures.rs`;
+//! until 11-25 the Corner engine's came from a capturer that kept every window of the active
+//! stage fresh on a timer instead). A window in a stage Space not shown is still captured
+//! with its current content (measured 11-14, `probe-spaces capture`), as one parked in the
+//! corner is: [`shoot`] takes either, each answered once.
 //!
 //! It follows the capture module's rules ([`capture::desktop_may_capture`]): captures on, not
 //! quitting, Screen Recording granted (never asked for here), and window captures already
@@ -20,6 +20,9 @@
 //! thread counts as one capture in flight for its whole run and issues nothing once quit has
 //! begun, so [`capture::quiesce`] never sees none in flight between two of its windows (the
 //! review's D-5).
+//!
+//! One call a window: one call of the same capture for several windows did not hand back an
+//! image a window (live 11-25; [`super::capture_fast`], "One call a window").
 //!
 //! **The listing** (ScreenCaptureKit only). Every such capture starts from a listing of the
 //! shareable content (every window of the system: ~50 ms on a busy screen, 11-14). The last listing any capture made
@@ -49,6 +52,15 @@ use objc2_screen_capture_kit::{SCScreenshotManager, SCShareableContent};
 use super::capture::{self, Deliver, InFlight, Picture, Target, WindowShot};
 use crate::engine::geometry::Rect;
 use crate::logbook::counters::{self, Count};
+
+/// A picture that reached the strip this recently is fresh: a switch plays it and takes no
+/// other (`controller/switch_pictures.rs`). Two seconds: what a switch played under the
+/// Corner engine from 1.0 until 11-25, when its pictures came from a timer every 2 s
+/// (`[animation] snapshot_interval_ms`, 2000 then), so a picture up to that old over its
+/// window is what switches have always shown. At 0.5 s (round switch-pictures, sized for the
+/// press on a card alone) a picture taken as the pointer came into the Dock, or at the app
+/// switcher's key held a moment, was taken again at the switch and waited for.
+pub const FRESH: Duration = Duration::from_secs(2);
 
 /// A remembered listing older than this is never reused.
 const LISTING_MAX_AGE: Duration = Duration::from_secs(60);
@@ -128,6 +140,20 @@ pub struct Taken {
     pub skipped: Option<&'static str>,
 }
 
+/// Whether [`take`] can capture now: the reason when it cannot (no strip to hand the pictures
+/// to, or captures may not run: [`capture::desktop_may_capture`]). A switch asks before it
+/// lets its early focus go ahead of the strip for pictures that would not come.
+pub fn may_take() -> Result<(), &'static str> {
+    #[cfg(test)]
+    if let Some(off) = super::fake::with(|d| d.captures_off) {
+        return if off { Err("window captures are off") } else { Ok(()) };
+    }
+    if DELIVER.get().is_none() {
+        return Err("no strip");
+    }
+    capture::desktop_may_capture()
+}
+
 /// Captures `targets` ([`shoot`]) and waits up to `max` for every answer (the WM thread, a
 /// switch before it is sent to the strip). Each picture goes to the strip on the main thread
 /// before the wait hears of it, so a snapshot presented after this returns finds every
@@ -136,8 +162,11 @@ pub struct Taken {
 pub fn take(targets: Vec<Target>, max: Duration) -> Taken {
     let asked = targets.len();
     #[cfg(test)]
-    if let Some(ms) = super::fake::with(|d| d.take_shots(asked, max)) {
-        return Taken { asked, got: asked, answered: asked, ms, skipped: None };
+    {
+        let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+        if let Some(ms) = super::fake::with(|d| d.take_shots(&ids, max)) {
+            return Taken { asked, got: asked, answered: asked, ms, skipped: None };
+        }
     }
     let Some(&deliver) = DELIVER.get() else { return Taken { asked, skipped: Some("no strip"), ..Taken::default() } };
     if asked == 0 {
@@ -169,6 +198,31 @@ pub fn take(targets: Vec<Target>, max: Duration) -> Taken {
         Err(_) => (0, 0),
     };
     Taken { asked, got: n.1, answered: n.0, ms: t0.elapsed().as_millis() as u64, skipped: None }
+}
+
+/// Captures `targets` ([`shoot`]) and waits for none (the WM thread, when a switch is likely:
+/// [`super::switch_likely`]): each picture goes to the strip on the main thread as it comes,
+/// fresh for the switch that follows. How many were asked for, or why none was.
+pub fn take_ahead(targets: Vec<Target>) -> Result<usize, &'static str> {
+    let asked = targets.len();
+    #[cfg(test)]
+    {
+        let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+        if super::fake::with(|d| d.take_ahead(&ids)).is_some() {
+            return Ok(asked);
+        }
+    }
+    let Some(&deliver) = DELIVER.get() else { return Err("no strip") };
+    if asked == 0 {
+        return Ok(0);
+    }
+    let done: ShotDone = Arc::new(move |id, picture| {
+        if let Some(p) = picture {
+            DispatchQueue::main().exec_async(move || deliver(id, p));
+        }
+    });
+    shoot(targets, done)?;
+    Ok(asked)
 }
 
 /// Captures `targets` now, each at its size: through the window server where it can, one

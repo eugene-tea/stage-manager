@@ -164,6 +164,7 @@ mod desktops;
 mod dock_order;
 mod fallback;
 mod landing_focus;
+mod looks;
 mod mission_control;
 mod notices;
 mod raise_order;
@@ -321,6 +322,23 @@ const COVER_TIMEOUT: Duration = Duration::from_millis(150);
 
 /// How often the window server's list is checked for windows changing Spaces.
 const SPACE_POLL: Duration = Duration::from_secs(1);
+
+/// Test only (`STAGE_MANAGER_TICK_REST_MS=N`, honoured with `STAGE_MANAGER_TEST` set): the
+/// tick rests N ms in place of [`crate::engine::tick_pace::REST`], so a measured run can tell
+/// what a tick costs ([`crate::engine::tick_pace::rest_override`]).
+fn rest_for_test() -> Option<Duration> {
+    static REST: OnceLock<Option<Duration>> = OnceLock::new();
+    *REST.get_or_init(|| {
+        let rest = crate::engine::tick_pace::rest_override(
+            std::env::var_os("STAGE_MANAGER_TEST").is_some(),
+            std::env::var("STAGE_MANAGER_TICK_REST_MS").ok().as_deref(),
+        );
+        if let Some(rest) = rest {
+            tracing::warn!(rest_ms = rest.as_millis() as u64, "the tick's rest is set by a test run (STAGE_MANAGER_TICK_REST_MS)");
+        }
+        rest
+    })
+}
 
 /// A window counts as moved to or gone from the shown Space after this many checks in a row.
 const SPACE_CHECKS: u32 = 2;
@@ -506,7 +524,7 @@ fn offered_at_notice(waiting: impl IntoIterator<Item = u32>, listed: &HashSet<u3
 /// `debug-space`, `debug-expose`, ...) never reach the WM thread's `ctl`, so they leave the
 /// motion alone too (`mark` asks `state` and `dump`).
 fn ctl_lands_switch(cmd: &Command) -> bool {
-    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher | Command::DebugMissionControl(_))
+    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher | Command::DebugDesktopStill | Command::DebugMissionControl(_))
 }
 
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
@@ -969,6 +987,12 @@ pub struct Controller {
     /// Mission Control, App Exposé and Show Desktop: no Space is inferred from the window
     /// list while one shows and for a settle after ([`OverviewWatch`]).
     overview: OverviewWatch,
+    /// What the window server's notices brought forward, under every engine of ours
+    /// ([`server_notices`]).
+    server: server_notices::ServerWatch,
+    /// Mission Control looked for before the poll does, where nothing is lent for it
+    /// ([`looks`]: the Corner engine).
+    looks: looks::Looks,
     /// The windows as read when a card was pressed ([`StripEvent::CardPressed`]): the click
     /// that follows uses them instead of reading every frame again through AX after the
     /// release. Any event, batch, Space change, config reload, retried restore or window
@@ -1118,8 +1142,8 @@ fn described_bounds(list: &[windows::CgWindow]) -> HashMap<u32, Rect> {
 
 /// The windows the strip keeps full-size snapshots of for the next switch (`windows`): none
 /// while the user has hidden the strip, when no switch animates ([`Controller`]'s animated
-/// batch runs at once then) and a snapshot could never be used (the review's U1: a capture of
-/// every active window every two seconds, for nothing).
+/// batch runs at once then) and a snapshot could never be used (the review's U1: captures of
+/// every active window, for nothing).
 fn kept_ready(strip_visible: bool, windows: Vec<CardWindow>) -> Vec<CardWindow> {
     if strip_visible { windows } else { Vec::new() }
 }
@@ -1240,6 +1264,8 @@ impl Controller {
             desks: desktops::DeskWatch::default(),
             foreign: Persisting::default(),
             overview: OverviewWatch::default(),
+            server: server_notices::ServerWatch::default(),
+            looks: looks::Looks::default(),
             pressed_obs: None,
             focus_replay: FocusReplay::default(),
             slide_hold: None,
@@ -1532,6 +1558,10 @@ impl Controller {
         let bars = pid.and_then(super::dock::bar_frame).into_iter().collect();
         let bar = sliver::DockBar { pid, bars };
         let changed = self.dock_bar.as_ref().is_none_or(|(_, was)| *was != bar);
+        if changed {
+            // The pointer coming into it says a switch is likely (`switch_likely`).
+            super::switch_likely::set_dock_bars(&bar.bars);
+        }
         self.dock_bar = Some((clock::now(), bar));
         if changed {
             tracing::debug!(bar = ?self.dock_bar.as_ref().map(|(_, b)| b), "inert slivers: the Dock's bar");
@@ -2215,21 +2245,40 @@ impl Controller {
         failed
     }
 
-    /// The part of an animated switch every engine shares: transition `t` sent to the strip,
-    /// an activation's keyboard routed at once, and the strip's answer waited for (what it
-    /// drew over the windows, [`strip_model::wait_cover`]), with `cover_ms` for the pictures
-    /// to reach the screen. No window has moved when this returns.
+    /// The part of an animated switch every engine shares: an activation's keyboard routed
+    /// at once, the pictures of the windows leaving taken where none is fresh
+    /// ([`switch_pictures`]), transition `t` sent to the strip, and the strip's answer waited
+    /// for (what it drew over the windows, [`strip_model::wait_cover`]), with `cover_ms` for
+    /// the pictures to reach the screen. No window has moved when this returns.
     fn send_transition(&mut self, ob: &Observer, t: Transition, actions: &[Action], run: &ActivationRun, cover_ms: u64) -> strip_model::Cover {
         let id = t.id;
         let started = clock::now();
-        // An engine that hides in one step: the outgoing windows wait on screen for pictures
-        // taken now, none being kept fresh on a timer; the keyboard goes first.
-        let waiting = if self.engine.pictures_at_switch() && !t.outgoing.is_empty() {
-            Some(t)
-        } else {
+        // The windows leaving wait on screen for their pictures, taken now where none is fresh
+        // (`switch_pictures`: every engine's way; none is kept fresh on a timer by default);
+        // the keyboard goes first. With no picture to take (or captures off) the strip is
+        // told at once and draws while the keyboard goes.
+        let wanted = switch_pictures::Wanted::of(&t);
+        let waiting = if wanted.none() {
+            switch_pictures::take(id, wanted);
             self.present_with(Some(Transition { sent: Some(started), ..t }));
             None
+        } else {
+            Some((t, wanted))
         };
+        // The park corner's cover first, where it needs none of the pictures being taken:
+        // macOS has raised an activated app's windows there already (`switch_pictures`,
+        // "The corner's cover first").
+        if let Some((t, wanted)) = &waiting {
+            match switch_pictures::corner_ahead(t, wanted) {
+                Ok(cover) => {
+                    let display = self.transition_display(Some(t)).0;
+                    tracing::debug!(id, rect = %cover.rect, "transition: the corner's cover goes to the strip ahead of the pictures");
+                    strip_model::cover_corner_ahead(strip_model::CornerAhead { id, display, cover, under: t.under });
+                }
+                Err(why) if t.corner.is_some() => tracing::debug!(id, why, "transition: the corner's cover comes with the pictures"),
+                Err(_) => {}
+            }
+        }
         // An activation's keyboard goes at once, while the strip draws: macOS has activated
         // the app and raised its windows in the corner already, and typing right after ⌘Tab
         // must reach the window the switch focuses (8L). One bounded step (8L2); the whole
@@ -2243,11 +2292,14 @@ impl Controller {
                 None
             }
         };
-        if let Some(t) = waiting {
-            switch_pictures::take(&t);
+        // Read before the pictures: it says when the keyboard was routed, and the wait for the
+        // pictures comes after (live 11-25: read after them it said 168 ms for a Dock click,
+        // the pictures' 119 ms in it).
+        let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
+        if let Some((t, wanted)) = waiting {
+            switch_pictures::take(id, wanted);
             self.present_with(Some(Transition { sent: Some(clock::now()), ..t }));
         }
-        let focus_since_activation_ms = early_focus_ms.and(run.noticed).map(|t| t.elapsed().as_millis() as u64);
         let asked = clock::now();
         let cover = strip_model::wait_cover(id, COVER_TIMEOUT);
         let waited = clock::now().saturating_duration_since(asked);
@@ -2600,8 +2652,8 @@ impl Controller {
                     .collect()
             })
             .unwrap_or_default();
-        // Pinned windows stay shown through a switch: snapshots of them kept ready let the
-        // switch's cover draw one reaching the park corner (8L5).
+        // Pinned windows stay shown through a switch: a snapshot of each lets the switch's
+        // cover draw one reaching the park corner (8L5; taken again at the switch).
         let pinned_windows = m
             .windows()
             .filter(|w| !w.parked && w.home == Home::Pinned && (w.space == space || w.sticky) && on.contains(&w.meta.id.0))
@@ -2618,7 +2670,6 @@ impl Controller {
             window_drag_grab: dragged.map(|d| d.grab),
             announce: main && notes.announce,
             active_windows: kept_ready(self.strip_visible, active_windows),
-            pictures_at_switch: self.engine.pictures_at_switch(),
             pinned_windows: kept_ready(self.strip_visible, pinned_windows),
             transition,
             parked: notes.parked,
@@ -3075,6 +3126,9 @@ impl Controller {
             let before = m.before_activation(&obs);
             let actions = m.app_activated(pid, &obs);
             self.activation_switch = before.and_then(|b| m.switch_undo(b)).map(|undo| SwitchBack { pid, undo, at: now });
+            // An arrangement made ahead that this activation's switch undoes goes after the
+            // switch's own batch ([`Self::forget_held_for_switch`]).
+            let mut undo_after = false;
             if actions.is_empty() && !present {
                 // Nothing to show here: macOS may be on its way to the app's window
                 // on another Desktop (its focus may have come first and be held).
@@ -3104,10 +3158,13 @@ impl Controller {
                     tracing::info!(pid, since_activation_ms, decide_ms, asked_focus = needs_focus, "activated app lives in another stage; switching");
                 }
                 attribution::judged(Notice::Activation, i64::from(pid), if actions.is_empty() { "the user's: nothing to switch" } else { "the user's: its stage comes" });
-                self.forget_held(ob);
+                undo_after = self.forget_held_for_switch(ob);
             }
             self.activation = self.activation_for(pid, &actions, ob);
             self.execute_animated(ob, actions);
+            if undo_after {
+                self.undo_ahead(ob, "the user acted on the Desktop shown");
+            }
         }
     }
 
@@ -4172,10 +4229,16 @@ impl Controller {
             overview::Change::Began(kind) => {
                 tracing::info!("{} shows: no Space is inferred from the window list until it closes", kind.name());
                 self.slide_watch_person(crate::engine::slide_watch::Person::MissionControl);
+                // The window server tells of Mission Control's and App Exposé's open (not of
+                // Show Desktop's): whether it did this time is its notices' standing.
+                super::server_notices::fact(kind == Overview::MissionControl, now);
+                self.upkeep_overview_changed(kind == Overview::MissionControl, now);
                 self.hidden_changed();
             }
             overview::Change::Ended(kind) => {
                 tracing::info!("{} closed: Space inference resumes after a settle", kind.name());
+                super::server_notices::fact(kind == Overview::MissionControl, now);
+                self.upkeep_overview_changed(false, now);
                 self.hidden_changed();
             }
             overview::Change::Stuck(kind) => {
@@ -4294,8 +4357,10 @@ impl Controller {
         let heard = heard.min(now);
         self.macos_reveal_at = None;
         self.space_changes += 1;
-        // A Desktop change's notice of the window server's needs no check of its own now.
-        self.spaces.server.workspace_heard(heard);
+        // A Desktop change's notice of the window server's needs no check of its own now,
+        // and had something to tell.
+        self.server.workspace_heard(heard);
+        super::server_notices::fact(false, now);
         counters::bump(Count::SpaceChange);
         tracing::debug!(changes = self.space_changes, "Space change notified");
         self.slide_watch_notice(heard);
@@ -4371,6 +4436,9 @@ impl Controller {
                 return;
             }
             Some(desktops::Flip::Unchanged) => {
+                // Right for a notice with no change; a listing that stopped following the
+                // Desktops would say the same, so the reads are checked at the next look.
+                super::desk_reads::suspect();
                 self.settled_by_listing("the listing never named another Space: no change", now);
                 self.present();
                 return;
@@ -5072,6 +5140,9 @@ impl Controller {
         if self.phase.fullscreen() {
             return;
         }
+        // The reads themselves against the window list, when a look is due: resting from
+        // now, this look goes on by the windows on screen.
+        let keyed = if self.check_reads(ob, &list, now) { None } else { keyed };
         // The model's Desktops against the window server's (design r3, slice 1: logs only).
         self.look_at_desks("check");
         // A window tab selected takes the place of the tab it hides, before the tab left is
@@ -6554,10 +6625,13 @@ impl Controller {
         input::left_button_down().then_some("the mouse button is down")
     }
 
-    /// The longest the tick may rest for the controller ([`crate::engine::tick_pace::REST`],
-    /// or less when the engine's upkeep caps it: [`Self::upkeep_rest_cap`]).
+    /// The longest the tick may rest for the controller: [`crate::engine::tick_pace::REST`]
+    /// under every engine (until round rest-cost the Corner engine capped it at 0.75 s for
+    /// the inert slivers' list, which now stands through a rest:
+    /// [`crate::engine::corner::sliver::Seen::fresh`]). A test run may set another
+    /// ([`rest_for_test`]: what a tick costs the window server, measured).
     pub fn tick_rest(&self) -> Duration {
-        self.upkeep_rest_cap().map_or(crate::engine::tick_pace::REST, |cap| cap.min(crate::engine::tick_pace::REST))
+        rest_for_test().unwrap_or(crate::engine::tick_pace::REST)
     }
 
     /// True while the restore window is open (the login settles): apps that do not answer
@@ -6836,6 +6910,16 @@ impl Controller {
                     None => json!({ "ok": false, "error": "the Dock does not run" }),
                 }
             }
+            Command::DebugDesktopStill => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-desktop-still needs STAGE_MANAGER_TEST=1" });
+                }
+                let Some(d) = self.model.as_ref().map(|m| *m.main_display()) else { return json!({ "ok": false, "error": "not managing" }) };
+                // The block the patch's still holds now (grown to hold the patch), else the
+                // corner's own.
+                let block = desktop_shot::kept_region(d.id.0).unwrap_or_else(|| desktop_shot::block(d.frame, None, d.corner));
+                super::desktop_fast::compare_now(d.id.0, block)
+            }
             Command::DebugMissionControl(words) => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-mission-control needs STAGE_MANAGER_TEST=1" });
@@ -6848,17 +6932,23 @@ impl Controller {
                 }
                 self.debug_cmd_tab(ob, probe)
             }
-            Command::DebugDockClick { bundle, real } => {
+            Command::DebugDockClick { bundle, real, hold_ms } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-click needs STAGE_MANAGER_TEST=1" });
                 }
-                self.debug_dock_click(ob, &bundle, real)
+                self.debug_dock_click(ob, &bundle, real, hold_ms.map(Duration::from_millis))
             }
-            Command::DebugDockLend { bundle } => {
+            Command::DebugDockLend { bundle, hold_ms } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-lend needs STAGE_MANAGER_TEST=1" });
                 }
-                self.debug_dock_lend(ob, &bundle)
+                self.debug_dock_lend(ob, &bundle, hold_ms.map(Duration::from_millis))
+            }
+            Command::DebugDockHover { bundle } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-dock-hover needs STAGE_MANAGER_TEST=1" });
+                }
+                self.debug_dock_hover(ob, &bundle)
             }
             Command::DebugFrame { id, frame, only } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
@@ -7096,6 +7186,8 @@ impl Controller {
         state["engine"] = self.status_engine();
         // The WM tick's pace (round sm-tick): ticks brisk and at rest since the launch.
         state["tick"] = super::wm_thread::tick_status();
+        // The list the inert slivers' tap judges on, and how long it stands (round rest-cost).
+        state["slivers"] = self.status_slivers();
         // What the app asked of macOS since the launch (round idle-subsystems).
         state["costs"] = super::costs::status();
         // Dock clicks and ⌘Tab releases watched for a Desktop slide (the Spaces engine), by `via`.

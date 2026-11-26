@@ -1310,11 +1310,11 @@ impl AppleController {
             Command::New(id) => asked(self.ask(ob, Ask::New(id))),
             Command::AppleTry(t) => self.try_route(ob, t),
             Command::AppleRestore => asked(self.ask(ob, Ask::Restore)),
-            Command::DebugDockClick { bundle, real } => {
+            Command::DebugDockClick { bundle, real, hold_ms } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-click needs STAGE_MANAGER_TEST=1" });
                 }
-                crate::platform::test_press::dock_press(&bundle, real, self.screen().map(|d| d.frame))
+                crate::platform::test_press::dock_press(&bundle, real, hold_ms.map(Duration::from_millis), self.screen().map(|d| d.frame))
             }
             Command::DebugFrame { id, frame, .. } => self.debug_frame(ob, id, frame),
             Command::Reload => {

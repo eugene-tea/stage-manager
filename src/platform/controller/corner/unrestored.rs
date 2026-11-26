@@ -35,6 +35,12 @@ pub(in crate::platform::controller) struct Unrestored {
     /// while so (the review's W4: the model says shown the moment the restore is
     /// asked, and a press on its sliver reached the window for the retry second).
     pub(in crate::platform::controller) in_zone: bool,
+    /// Nothing could be done for it at its last check but wait ([`only_waits`]): listed off
+    /// screen (its Desktop not shown, its app hidden). It keeps its entry and is looked at
+    /// again at every tick, a rest apart at most, and within a second of the Space change or
+    /// the unhide that lists it on screen (each stirs the tick); it does not keep the tick
+    /// brisk ([`Controller::upkeep_tick_waits`], audit U3). False until checked.
+    pub(in crate::platform::controller) waits: bool,
 }
 
 /// Why the model let a parked window go ([`Unrestored::why`]).
@@ -73,7 +79,7 @@ pub(in crate::platform::controller) enum Forgotten {
 
 impl Unrestored {
     pub(in crate::platform::controller) fn failed(entry: ParkedEntry) -> Self {
-        Self { entry, tries: 0, forgotten: Forgotten::Not, refreshed: false, why: LetGo::Kept, in_zone: true }
+        Self { entry, tries: 0, forgotten: Forgotten::Not, refreshed: false, why: LetGo::Kept, in_zone: true, waits: false }
     }
 }
 
@@ -132,6 +138,14 @@ pub(in crate::platform::controller) fn unrestored_step(model_parked: Option<bool
         (Some(false), Some((false, _))) | (None, Some((false, true))) => UnrestoredStep::Wait,
         (None, Some((false, false))) => UnrestoredStep::Done,
     }
+}
+
+/// Whether an [`Unrestored`] window whose check gave `step` only waits: the window server
+/// lists it off screen (`listed`, as for [`unrestored_step`]), so no retry can act until its
+/// Desktop shows or its app is unhidden. One that waits for a busy app's backoff is on
+/// screen in the park zone: its retry is owed, and the tick stays brisk for it as before.
+pub(in crate::platform::controller) fn only_waits(step: UnrestoredStep, listed: Option<(bool, bool)>) -> bool {
+    step == UnrestoredStep::Wait && listed.is_some_and(|(onscreen, _)| !onscreen)
 }
 
 /// [`unrestored_step`], or with `force` (quit) a retry at once for every window still listed
@@ -223,6 +237,7 @@ impl Controller {
             let step = unrestored_step_at(force, model_parked, listed, hidden_tab, busy);
             let Some(u) = self.corner.unrestored.get_mut(&id) else { continue };
             u.in_zone = listed.is_some_and(|(_, zone)| zone);
+            u.waits = only_waits(step, listed);
             // A forgotten window is quiet until it is seen in the zone a second time (L6).
             let quiet = u.forgotten == Forgotten::Once;
             let (forgotten, warn) = u.forgotten.after(step);
@@ -372,7 +387,7 @@ impl Controller {
     /// Not while a Desktop change settles or a slide is held: the list is not to be trusted
     /// then, and the window stays on record as before.
     pub(in crate::platform::controller) fn forget_not_parked(&mut self, ob: &Observer) {
-        if self.corner.unrestored.is_empty() || self.phase.space_settling(clock::now()) || self.slide_held() {
+        if self.corner.unrestored.is_empty() || self.phase.frames_settling(clock::now()) || self.slide_held() {
             return;
         }
         let ids: Vec<u32> = self.corner.unrestored.keys().copied().collect();
@@ -422,6 +437,26 @@ mod tests {
         assert_eq!(unrestored_step(Some(false), Some((true, false)), false, false), Done);
         assert_eq!(unrestored_step(Some(false), None, false, false), Done);
         assert_eq!(unrestored_step(Some(true), Some((true, true)), false, false), Done);
+    }
+
+    /// Audit U3 (11-25): a window brought back on a Desktop not shown, or off screen with its
+    /// app hidden, only waits: no retry can act, so it does not keep the tick brisk. One still
+    /// on screen in the park zone does, a busy app's included.
+    #[test]
+    fn a_window_that_only_waits_off_screen_does_not_keep_the_tick_brisk() {
+        use UnrestoredStep::*;
+        let step = |model, listed, busy| (unrestored_step(model, listed, false, busy), listed);
+        let waits = |(step, listed)| only_waits(step, listed);
+        assert!(waits(step(Some(false), Some((false, false)), false)), "put back on a Desktop not shown");
+        assert!(waits(step(Some(false), Some((false, true)), false)), "in another Desktop's corner, the model says shown");
+        assert!(waits(step(None, Some((false, true)), false)), "forgotten, in another Desktop's corner");
+        assert!(!waits(step(Some(false), Some((true, true)), false)), "on screen in the corner: moved again");
+        assert!(!waits(step(Some(false), Some((true, true)), true)), "a busy app's: its retry is owed after the backoff");
+        assert_eq!(step(Some(false), Some((true, true)), true).0, Wait);
+        assert!(!waits(step(Some(false), Some((true, false)), false)), "seen back: done");
+        assert!(!waits(step(Some(false), None, false)), "closed: done");
+        let u = Unrestored::failed(ParkedEntry { element: AxElement::system_wide(), restore: Rect::new(0.0, 0.0, 10.0, 10.0), child: false, fitted: None });
+        assert!(!u.waits, "not checked yet: its first check comes at the brisk pace");
     }
 
     /// S8 (the review of 10-29): quit's forced retry tries every window still listed in

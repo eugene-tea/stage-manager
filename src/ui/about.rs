@@ -19,18 +19,34 @@ use crate::updates::{PAGES_URL, REPO_URL};
 /// The copyright line.
 pub const COPYRIGHT: &str = "© 2026 Eugene T";
 
-/// The version shown (`CFBundleShortVersionString`, else the crate's) and the build
-/// (`CFBundleVersion`, when the bundle has one that differs).
+/// The Info.plist key of the commit the bundle was built from (`scripts/bundle.sh`).
+pub const COMMIT_KEY: &str = "StageManagerCommit";
+
+/// A string of the bundle's Info.plist. None outside a bundle (`cargo run`, the tests).
+pub fn bundle_info(key: &str) -> Option<String> {
+    NSBundle::mainBundle()
+        .objectForInfoDictionaryKey(&NSString::from_str(key))
+        .and_then(|v| v.downcast::<NSString>().ok())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// The version shown (`CFBundleShortVersionString`, else the crate's) and the build after it
+/// in parentheses: the build number (`CFBundleVersion`, when the bundle has one that differs)
+/// and the commit (`COMMIT_KEY`), as [`build_label`] joins them.
 pub fn versions() -> (String, Option<String>) {
-    let info = |key: &str| {
-        NSBundle::mainBundle()
-            .objectForInfoDictionaryKey(&NSString::from_str(key))
-            .and_then(|v| v.downcast::<NSString>().ok())
-            .map(|s| s.to_string())
-    };
-    let version = info("CFBundleShortVersionString").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-    let build = info("CFBundleVersion").filter(|b| *b != version);
-    (version, build)
+    let version = bundle_info("CFBundleShortVersionString").unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let number = bundle_info("CFBundleVersion").filter(|b| *b != version);
+    (version, build_label(number, bundle_info(COMMIT_KEY)))
+}
+
+/// The build as shown: the build number, then the commit ("1195, e14056cb0"). The number
+/// orders two builds and counts dev's commits; the commit names the source in any clone.
+pub fn build_label(number: Option<String>, commit: Option<String>) -> Option<String> {
+    match (number, commit) {
+        (Some(n), Some(c)) => Some(format!("{n}, {c}")),
+        (n, c) => n.or(c),
+    }
 }
 
 fn run(text: &str, link: Option<&str>, color: &NSColor) -> Retained<NSAttributedString> {
@@ -103,4 +119,19 @@ pub fn show_and_find(mtm: MainThreadMarker) -> Option<Retained<objc2_app_kit::NS
     // SAFETY: as in `show`.
     unsafe { app.orderFrontStandardAboutPanelWithOptions(&options()) };
     app.windows().iter().find(|w| !before.contains(&(Retained::as_ptr(w) as usize)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_build_shown_is_the_number_then_the_commit() {
+        let s = |t: &str| Some(t.to_string());
+        assert_eq!(build_label(s("1195"), s("e14056cb0")), s("1195, e14056cb0"));
+        assert_eq!(build_label(s("1195"), s("e14056cb0+")), s("1195, e14056cb0+"), "a tree that differed from its commit");
+        assert_eq!(build_label(s("1"), None), s("1"), "built where there is no git");
+        assert_eq!(build_label(None, s("e14056cb0")), s("e14056cb0"));
+        assert_eq!(build_label(None, None), None, "outside a bundle: no parentheses");
+    }
 }

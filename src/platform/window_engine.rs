@@ -280,20 +280,22 @@ pub trait WindowEngine: Send + Sync {
 
     /// The window server's listing of every screen's Desktops, read now
     /// (`SLSCopyManagedDisplaySpaces`: each screen's Space shown and its kind, its Desktops
-    /// with their uuids). `None`: this engine does not read it (the Corner engine).
+    /// with their uuids), through the reads' own layer under both of our engines
+    /// ([`super::desk_reads`]). `None`: the reads do not work now (the calls gone, or resting
+    /// after disagreeing with the window list), or this engine reads none (the Apple mode).
     fn desktops(&self) -> Option<Vec<crate::platform::spaces::ffi::ScreenDesks>> {
         None
     }
 
     /// The Spaces the window server lists window `id` on now (Desktops, stage Spaces, a
-    /// full-screen app's). `None`: this engine does not read them (the Corner engine).
+    /// full-screen app's). `None`: as [`Self::desktops`].
     fn spaces_of(&self, _id: WindowId) -> Option<Vec<u64>> {
         None
     }
 
     /// The Desktops the window server shows now, one per screen (SkyLight's own word, read
     /// now, [`Self::desktops`]): what Mission Control shows while a Space change made inside
-    /// it is not recognized yet. `None`: this engine does not know (the Corner engine).
+    /// it is not recognized yet. `None`: as [`Self::desktops`].
     fn shown_desktops(&self) -> Option<Vec<u64>> {
         self.desktops().map(|list| list.iter().map(|d| d.current).filter(|c| *c != 0).collect())
     }
@@ -370,15 +372,6 @@ pub trait WindowEngine: Send + Sync {
     /// its windows is taken as this process's own knowledge (the guardian never saw the
     /// app's screens or config).
     fn assume(&self, file: &ParkedFile);
-
-    /// True when a window leaves the screen in one step as soon as it is told (no move an
-    /// app carries out): a switch's outgoing windows can stay where they are until their
-    /// pictures are taken at the switch, so no full-size picture is kept fresh on a timer
-    /// for a switch nobody announced (a Dock click, ⌘Tab). False: the strip keeps the shown
-    /// windows' pictures fresh every `[animation] snapshot_interval_ms`. Any thread.
-    fn pictures_at_switch(&self) -> bool {
-        false
-    }
 
     /// True when this engine reads back each of its own hides and shows and tries again
     /// what did not take (its owed retries): the arrival's check of a Desktop arranged ahead
@@ -507,8 +500,12 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
     // `"spaces"` opens the landing variants as a test run does: the review build (11-14).
     crate::ui::landing_math::Landing::open_for_review(config == ConfigEngine::Spaces);
     // The window server's notices, registered before the probe so its panel's are heard
-    // (round r5-notices); forwarded only if the Spaces engine is chosen, else removed.
-    let notices = asked.probes() && super::spaces::notices::register();
+    // (round r5-notices); once the engine is chosen it hears its own types, and the others
+    // are removed again (round looks-forward: the Corner engine hears those that bring a
+    // look).
+    if asked.probes() {
+        super::server_notices::register(&crate::engine::server_notice::Kind::ALL);
+    }
     let probe = asked.probes().then(|| super::spaces::probe::run(mtm));
     match &probe {
         Some(p) if p.ok => tracing::info!(ms = format!("{:.1}", p.ms), steps = p.steps, "window engine: launch probe passed: {}", p.reason),
@@ -522,9 +519,7 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
         tracing::info!(landing = landing.name(), "window engine: a test or review run lands switches this way");
     }
     install(of(choice.kind));
-    if notices {
-        super::spaces::notices::chosen(choice.kind == EngineKind::Spaces);
-    }
+    super::server_notices::chosen(choice.kind);
     *lock_choice() = Some(choice.clone());
     choice
 }
@@ -534,7 +529,7 @@ pub fn choose_at_launch(mtm: MainThreadMarker, config: ConfigEngine) -> Choice {
 /// for `ctl state`; the parked file names the engine from its next write.
 pub fn fall_back(why: &str) {
     install(of(EngineKind::Corner));
-    super::spaces::notices::stop();
+    super::server_notices::fell_back();
     let mut c = lock_choice();
     match c.as_mut() {
         Some(choice) => {

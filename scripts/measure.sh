@@ -14,11 +14,19 @@
 #   scripts/measure.sh hidden                  # by name only: a drawing window hidden in its stage and shown
 #   RUNS=1 ENGINES=spaces SM_REST_S=300 scripts/measure.sh covered   # by name only: at rest, the strip clear, then slid away; a hover under a window
 #   SM_SWITCH_WAYS=ctl scripts/measure.sh switch   # switches by `ctl switch` (default "card dock")
+#   SM_SNAPSHOT_MS=2000 OUT=/tmp/sm-timer scripts/measure.sh rest sample   # the full-size pictures on a timer again
+#   SM_CLICK_HOLD_MS=100 OUT=/tmp/sm-held scripts/measure.sh switch   # each click held 100 ms, as a person's
 #
 # scripts/measure_engines.py runs this for the two engines alone, captures off, and writes the
 # corner-against-spaces table (PLAN 1.9).
 #
-# `off` is the app not running: the same fixture windows, the floor. Fixture windows only
+#   RUNS=3 ENGINES="corner off apple" scripts/measure.sh rest   # by name only: Apple's own Stage Manager at rest
+#
+# `off` is the app not running: the same fixture windows, the floor. `apple` (rest only, by
+# name only) is the app not running and Apple's Stage Manager on: it writes GloballyEnabled in
+# com.apple.WindowManager for the run and puts it back, Apple's takes every window on the Mac
+# into its strip meanwhile, and Apple's WindowManager and the Dock are read beside the window
+# server. Fixture windows only
 # (STAGE_MANAGER_ONLY), a scratch home per run; nothing is measured while another Stage
 # Manager runs (quit the installed one first). The measured processes start through
 # LaunchServices, so a `nice` on this script never reaches them; run it without one anyway

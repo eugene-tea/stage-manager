@@ -36,7 +36,8 @@
 //! desktop stays: [`super::show_desktop`]). The expectation lasts [`REVEAL_EXPECTED`], a
 //! timer, since no event says macOS showed nothing, and ends when Show Desktop is listed.
 //!
-//! **The window server's notice** ([`OverviewWatch::told`], round r5-notices): type 1508 comes
+//! **The window server's notice** ([`OverviewWatch::told`], round r5-notices; under every
+//! engine of ours since round looks-forward): type 1508 comes
 //! at Mission Control's and App Exposé's open (~40 ms after the key) and close (~32 ms; the
 //! list shows its window gone ~320 ms after, the Dock's cover ~610 ms), whatever opened them.
 //! It is a trigger for a look, never a fact: the look at it finds an overview opened by a
@@ -321,7 +322,8 @@ impl OverviewWatch {
         }
     }
 
-    /// The looks from now until `false` are brought by a notice (for the margin's count).
+    /// The looks from now until `false` are brought by a notice or another trigger (its key,
+    /// the Dock's notice), not by the poll: for the margin's count.
     pub fn look_at_notice(&mut self, on: bool) {
         self.at_notice = on;
     }

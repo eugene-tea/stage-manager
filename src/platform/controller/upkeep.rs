@@ -18,7 +18,7 @@
 
 use crate::platform::clock;
 use std::collections::{BTreeSet, HashSet};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
@@ -33,12 +33,6 @@ use crate::platform::observe::Observer;
 use crate::platform::safety::ParkedEntry;
 use crate::platform::window_engine::EngineKind;
 use crate::platform::windows;
-
-/// The longest the tick rests while the inert slivers' tap judges presses on the tick's list
-/// of the windows near the corners ([`Controller::upkeep_rest_cap`]): the tap trusts that list
-/// for [`crate::engine::corner::sliver::SEEN_FRESH`] (1 s), so a rest, its timer's tolerance
-/// (a tenth) and a tick's own time stay under it.
-pub(super) const SLIVER_REST: Duration = Duration::from_millis(750);
 
 impl Controller {
     /// The windows present on a Desktop that shows, as `list` (the window server's) and the
@@ -96,10 +90,11 @@ impl Controller {
     }
 
     /// True while the upkeep has work for the WM thread's fast tick. The Corner engine: the
-    /// patch after a focus or through Show Desktop.
+    /// patch after a focus or through Show Desktop, and Mission Control looked for after a
+    /// hint or a notice of the window server's.
     pub(super) fn upkeep_wants_fast_tick(&self, now: Instant) -> bool {
         match self.engine.kind() {
-            EngineKind::Corner => self.patch_replans(now) || self.reveal_fast(now),
+            EngineKind::Corner => self.patch_replans(now) || self.reveal_fast(now) || self.looks_wants_fast(now) || self.server_wants_fast(now),
             EngineKind::Spaces => self.mission_wants_fast(now) || self.server_wants_fast(now),
             EngineKind::Apple => false,
         }
@@ -107,17 +102,22 @@ impl Controller {
 
     /// Why the tick stays brisk for the engine's upkeep ([`Controller::tick_waits`]): its
     /// retries at their old pace. The Corner engine: strays parked again, failed restores
-    /// retried, the patch planned again after a focus. The Spaces engine: strays hidden
-    /// again, shows owed.
+    /// retried (never one that only waits for its Desktop to show or its app to be unhidden:
+    /// [`super::corner::unrestored::only_waits`]), the patch planned again after a focus. The
+    /// Spaces engine: strays hidden again, shows owed.
     pub(super) fn upkeep_tick_waits(&self, now: Instant) -> Option<&'static str> {
         match self.engine.kind() {
             EngineKind::Corner => {
-                if self.corner.strays.values().any(|s| !s.gave_up) {
+                if self.corner.strays.values().any(crate::engine::corner::park_reconcile::Stray::wants_brisk) {
                     Some("parked windows out of the corner")
-                } else if !self.corner.unrestored.is_empty() {
+                } else if self.corner.unrestored.values().any(|u| !u.waits) {
                     Some("shows owed")
                 } else if self.corner.patch_fast_until.is_some_and(|t| now < t) {
                     Some("the corner patch after a focus")
+                } else if self.phase.frames_settling(now) {
+                    // The park corner is judged by frames, the slide's for a moment after a
+                    // Desktop arrives: as brisk as before the listing named arrivals.
+                    Some("frames settle after a Space change")
                 } else {
                     None
                 }
@@ -138,25 +138,19 @@ impl Controller {
         }
     }
 
-    /// How long the tick may rest at most for the engine's upkeep, if it caps the rest
-    /// ([`Controller::tick_rest`]). The Corner engine: while the inert slivers' tap judges
-    /// presses, on the tick's list of the windows near the corners, which it trusts only
-    /// while [`crate::engine::corner::sliver::SEEN_FRESH`] old ([`SLIVER_REST`]). The
-    /// Spaces engine: no cap.
-    pub(super) fn upkeep_rest_cap(&self) -> Option<Duration> {
-        match self.engine.kind() {
-            EngineKind::Corner => sliver_tap::wants_list().then_some(SLIVER_REST),
-            EngineKind::Spaces | EngineKind::Apple => None,
-        }
-    }
-
     /// The fast tick's share of the upkeep. The Corner engine: one plan of the patch at most
-    /// ([`Self::corner_fast_tick`]). The Spaces engine: Mission Control looked for after one
+    /// ([`Self::corner_fast_tick`]), and Mission Control looked for after a hint
+    /// ([`Self::looks_fast_tick`]). The Spaces engine: Mission Control looked for after one
     /// of its keys, the hidden stages' windows put home for it and taken back
-    /// ([`Self::mission_fast_tick`]).
+    /// ([`Self::mission_fast_tick`]). Both: what the window server's notices brought
+    /// ([`Self::server_fast_tick`]).
     pub(super) fn upkeep_fast_tick(&mut self, ob: &mut Observer, now: Instant) {
         match self.engine.kind() {
-            EngineKind::Corner => self.corner_fast_tick(now),
+            EngineKind::Corner => {
+                self.corner_fast_tick(now);
+                self.looks_fast_tick(ob, now);
+                self.server_fast_tick(ob, now);
+            }
             EngineKind::Spaces => {
                 self.mission_fast_tick(ob, now);
                 self.server_fast_tick(ob, now);
@@ -165,48 +159,61 @@ impl Controller {
         }
     }
 
-    /// A key-down in another app. The Spaces engine: one of Mission Control's shortcuts
-    /// ([`Self::mission_key`]); the Corner engine's hidden windows are on their Desktop,
-    /// where Mission Control shows them.
+    /// A key-down in another app: one of Mission Control's shortcuts brings its look
+    /// forward. The Spaces engine: with its lends ([`Self::mission_key`]). The Corner engine:
+    /// the look alone ([`Self::looks_key`]; its hidden windows are on their Desktop, where
+    /// Mission Control shows them).
     pub(super) fn upkeep_key(&mut self, ob: &Observer, event: &crate::platform::input::InputEvent, now: Instant) {
         match self.engine.kind() {
             EngineKind::Spaces => self.mission_key(ob, event, now),
-            EngineKind::Corner | EngineKind::Apple => {}
+            EngineKind::Corner => self.looks_key(event, now),
+            EngineKind::Apple => {}
         }
     }
 
     /// One of Mission Control's keys, or a press while it may show, heard by its key tap
     /// ([`crate::platform::mission_key_tap`]). The Spaces engine: Escape, ⌘'s release or a
-    /// press while ⌘Tab's switcher is up first ([`Self::switcher_tap`]), then a hint, or the
-    /// key that closed Mission Control ([`Self::mission_heard`]); the Corner engine's hidden
-    /// windows are on their Desktop, where Mission Control shows them.
+    /// press while ⌘Tab's switcher is up first, under both engines ([`Self::switcher_tap`]:
+    /// the switcher is followed whatever the engine, round arranged-ahead). Then the Spaces
+    /// engine: a hint, or the
+    /// key that closed Mission Control ([`Self::mission_heard`]). The Corner engine: the
+    /// hint or the key that closed it, for its look ([`Self::looks_heard`]).
     pub fn mission_input(&mut self, ob: &mut Observer, heard: crate::platform::mission_key_tap::HeardAt) {
         match self.engine.kind() {
             EngineKind::Spaces => {
                 self.switcher_tap(ob, heard);
                 self.mission_heard(ob, heard);
             }
-            EngineKind::Corner | EngineKind::Apple => {}
+            EngineKind::Corner => {
+                self.switcher_tap(ob, heard);
+                self.looks_heard(heard);
+            }
+            EngineKind::Apple => {}
         }
     }
 
-    /// A left mouse-down in another app at `now`. The Spaces engine: while Mission Control
-    /// shows, its close is a pick ([`Self::mission_click`]).
+    /// A left mouse-down in another app at `now`: while Mission Control shows, its close is
+    /// a pick ([`Self::mission_click`], [`Self::looks_click`]).
     pub(super) fn upkeep_press(&mut self, now: Instant) {
         match self.engine.kind() {
             EngineKind::Spaces => self.mission_click(now),
-            EngineKind::Corner | EngineKind::Apple => {}
+            EngineKind::Corner => self.looks_click(now),
+            EngineKind::Apple => {}
         }
     }
 
     /// A switch for app `by` is about to be made (an activation's or a focus's), `predict`
     /// its model change on a copy of the model. The Spaces engine: a window picked in Mission
     /// Control, its stage's windows put home set at their frames as it closes, the switch
-    /// waiting for the close ([`Self::mission_pick`]). True when the switch waits.
+    /// waiting for the close ([`Self::mission_pick`]). Both engines: just after the key that
+    /// closed Mission Control it is no pick when `[windows] mission_control_key_keeps_stage`
+    /// says so ([`Self::looks_pick`] under the Corner engine). True when the caller makes no
+    /// switch now.
     pub(super) fn upkeep_pick(&mut self, by: PickBy, predict: impl FnOnce(&mut Model) -> Vec<Action>, now: Instant) -> bool {
         match self.engine.kind() {
             EngineKind::Spaces => self.mission_pick(by, predict, now),
-            EngineKind::Corner | EngineKind::Apple => false,
+            EngineKind::Corner => self.looks_pick(by, now),
+            EngineKind::Apple => false,
         }
     }
 
@@ -219,22 +226,67 @@ impl Controller {
         }
     }
 
-    /// A notice of the Dock's (`name`). The Spaces engine: Mission Control may be opening
-    /// ([`Self::mission_dock_notice`]).
+    /// A notice of the Dock's (`name`): Mission Control may be opening
+    /// ([`Self::mission_dock_notice`], [`Self::looks_dock_notice`]).
     pub(super) fn upkeep_dock_notice(&mut self, name: &str, now: Instant) {
         match self.engine.kind() {
             EngineKind::Spaces => self.mission_dock_notice(name, now),
-            EngineKind::Corner | EngineKind::Apple => {}
+            EngineKind::Corner => self.looks_dock_notice(name, now),
+            EngineKind::Apple => {}
         }
     }
 
-    /// `ctl debug-mission-control …` (a test's). The Spaces engine only
-    /// ([`Self::debug_mission_control`]).
+    /// The window server's notice of an overview's open or close (1508): the engine's look
+    /// for it now. The Spaces engine: through Mission Control's step while its lends follow
+    /// it, so that they follow what the look finds at once. The Corner engine:
+    /// [`Self::looks_server_notice`].
+    pub(super) fn upkeep_overview_noticed(&mut self, ob: &mut Observer, now: Instant) {
+        match self.engine.kind() {
+            EngineKind::Spaces => {
+                if self.mission_server_hint(now) {
+                    self.mission_step(ob, true, now);
+                } else if let Some(main) = self.model.as_ref().map(|m| *m.main_display()) {
+                    let list = windows::wake_on_screen();
+                    self.look_for_overview(&list, main.frame, now);
+                }
+            }
+            EngineKind::Corner => self.looks_server_notice(now),
+            EngineKind::Apple => {}
+        }
+    }
+
+    /// A look found an overview opened or closed; `showing` Mission Control or App Exposé
+    /// now. The Corner engine: its watch of the looks ([`Self::looks_saw`]); the Spaces
+    /// engine's lends read the overview themselves at their step.
+    pub(super) fn upkeep_overview_changed(&mut self, showing: bool, now: Instant) {
+        match self.engine.kind() {
+            EngineKind::Corner => self.looks_saw(showing, now),
+            EngineKind::Spaces | EngineKind::Apple => {}
+        }
+    }
+
+    /// True when the window server's notices of a window added to or taken out of a Space
+    /// are this engine's to use: the Spaces engine's (its own stage Spaces, and the notice's
+    /// layout learned from its own asks).
+    pub(super) fn upkeep_hears_membership(&self) -> bool {
+        self.engine.kind() == EngineKind::Spaces
+    }
+
+    /// `ctl debug-mission-control …` (a test's). `launch` opens Mission Control with no key,
+    /// under every engine. The Spaces engine: [`Self::debug_mission_control`]. The Corner
+    /// engine: `status` alone (it lends nothing).
     pub(super) fn upkeep_debug_mission_control(&mut self, ob: &Observer, words: &[String]) -> Value {
+        if words.iter().map(String::as_str).eq(["launch"]) {
+            // Mission Control by its own launcher, as its Dock item opens it (and closes it
+            // when it shows): no key for the key tap to hear.
+            let ok = std::process::Command::new("/usr/bin/open").args(["-b", "com.apple.exposelauncher"]).status().is_ok_and(|s| s.success());
+            return json!({ "ok": ok, "by": "com.apple.exposelauncher" });
+        }
         match self.engine.kind() {
             EngineKind::Spaces => self.debug_mission_control(ob, words),
+            EngineKind::Corner if words.iter().map(String::as_str).eq(["status"]) => json!({ "ok": true, "mission_control": self.looks_status() }),
             EngineKind::Corner | EngineKind::Apple => {
-                json!({ "ok": false, "error": "only under the Spaces engine: with the others Mission Control shows every window already" })
+                json!({ "ok": false, "error": "only under the Spaces engine: with the others Mission Control shows every window already (status answers under the Corner engine too)" })
             }
         }
     }
@@ -245,8 +297,9 @@ impl Controller {
     pub(super) fn upkeep_tick(&mut self, ob: &mut Observer) {
         match self.engine.kind() {
             EngineKind::Corner => {
-                // Mission Control shows the Corner engine's hidden windows already.
-                crate::platform::mission_key_tap::publish(false, None, false);
+                // Mission Control shows the Corner engine's hidden windows already: only its
+                // looks are kept up (the key tap told what to listen for).
+                self.looks_tick(ob, clock::now());
                 self.corner_tick(ob)
             }
             EngineKind::Spaces => {
@@ -471,15 +524,17 @@ impl Controller {
             EngineKind::Spaces => {
                 let mut status = crate::platform::spaces::engine::shared().status();
                 status["kind"] = json!(EngineKind::Spaces.name());
-                // The window server's notices (round r5-notices): what was heard, and what it
-                // brought forward.
-                let mut notices = crate::platform::spaces::notices::status();
-                notices["uses"] = self.server_status();
-                status["notices"] = notices;
                 status
             }
             EngineKind::Apple => json!({ "kind": EngineKind::Apple.name() }),
         };
+        // The window server's notices (rounds r5-notices and looks-forward), under both of
+        // our engines: what was heard, whether it is trusted, and what it brought forward.
+        if self.engine.kind() != EngineKind::Apple {
+            let mut notices = crate::platform::server_notices::status();
+            notices["uses"] = self.server_status();
+            status["notices"] = notices;
+        }
         // Why it runs (the launch's choice, the probe's verdict, a fallback), every engine.
         if let Some(c) = crate::platform::window_engine::choice() {
             status["why"] = json!(c.why);
@@ -499,12 +554,23 @@ impl Controller {
         }
     }
 
+    /// `ctl state`'s `slivers`: the list the inert slivers' tap judges presses on and the
+    /// tick's pace as it knows it ([`sliver_tap::status`]); `null` under the others.
+    pub(super) fn status_slivers(&self) -> Value {
+        match self.engine.kind() {
+            EngineKind::Corner => sliver_tap::status(),
+            EngineKind::Spaces | EngineKind::Apple => Value::Null,
+        }
+    }
+
     /// `ctl state`'s `mission_control`: the Spaces engine's lends for Mission Control
-    /// ([`Self::mission_status`]); `null` under the others.
+    /// ([`Self::mission_status`]); under the Corner engine its looks and the key tap
+    /// ([`Self::looks_status`]); `null` in the Apple mode.
     pub(super) fn status_mission_control(&self) -> Value {
         match self.engine.kind() {
             EngineKind::Spaces => self.mission_status(),
-            EngineKind::Corner | EngineKind::Apple => Value::Null,
+            EngineKind::Corner => self.looks_status(),
+            EngineKind::Apple => Value::Null,
         }
     }
 

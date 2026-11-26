@@ -2060,12 +2060,14 @@ impl WindowEngine for SpacesEngine {
         SpacesEngine::lent(self, id.0)
     }
 
+    /// Through the reads' own layer, as under every engine (`platform/desk_reads.rs`: its
+    /// check, its fallback). The engine's own book-keeping reads stay on [`Sky`].
     fn desktops(&self) -> Option<Vec<ScreenDesks>> {
-        self.sky().map(Sky::displays)
+        crate::platform::desk_reads::desktops()
     }
 
     fn spaces_of(&self, id: WindowId) -> Option<Vec<u64>> {
-        self.sky().map(|sky| sky.spaces_of(&[id.0]))
+        crate::platform::desk_reads::spaces_of(id.0)
     }
 
     fn home_of(&self, id: WindowId) -> Option<u64> {
@@ -2153,13 +2155,6 @@ impl WindowEngine for SpacesEngine {
     /// True: each hide and show is read back from the window server, and one that did not
     /// take is owed and tried again ([`Self::retry_owed`]).
     fn verifies_own_moves(&self) -> bool {
-        true
-    }
-
-    /// True: a hide is one window-server call (~2 ms a window), so the outgoing windows wait
-    /// on screen for pictures taken at the switch; a window in a stage Space still draws and
-    /// is captured with its current content there (`probe-spaces capture`, 11-14).
-    fn pictures_at_switch(&self) -> bool {
         true
     }
 

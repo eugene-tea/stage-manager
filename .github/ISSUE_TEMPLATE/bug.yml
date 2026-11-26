@@ -13,7 +13,7 @@ body:
     id: app
     attributes:
       label: Stage Manager version
-      description: In the menu bar icon's menu, About Stage Manager.
+      description: In the menu bar icon's menu, About Stage Manager. With the build in parentheses, as in 1.9.2 (1195, e14056cb0).
     validations:
       required: true
   - type: input

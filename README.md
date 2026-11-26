@@ -29,6 +29,8 @@ It also adds what people have asked Apple for since 2022. Apple's clicks, drags 
 the same with every addition; left unused, the app behaves exactly like Apple's.
 
 - Stages come back after a restart, in the same order.
+- Windows keep their size and place for each set of screens: the laptop alone, or with an
+  external screen.
 - An app opened with Shift held goes into the current stage.
 - A card dropped on another combines the two stages.
 - Stages can be switched, and windows sent to them, from the keyboard (⌃⌥1–9, turned on in
@@ -57,7 +59,7 @@ macOS has no public way to hide a window and keep it ready, so three ways are bu
 | Strip drawn by | Stage Manager | Stage Manager | Apple |
 | Every addition on the strip | ✓ | ✓ | — |
 | Hidden windows leave the screen | — | ✓ | ✓ |
-| CPU at rest, with the system's share | about 4.9 % | about 1.2 % | — |
+| CPU at rest, with the system's share | about 2 % | about 0.5 % | — |
 
 [Three ways to keep stages](docs/MODES.md) has the full comparison and its notes.
 

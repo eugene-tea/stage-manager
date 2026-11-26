@@ -1,6 +1,6 @@
 //! The window server's Desktops, bound to the model's Spaces (design r3).
 //!
-//! The model names its Spaces by ids of its own ([`SpaceId`]). Under the Spaces engine the
+//! The model names its Spaces by ids of its own ([`SpaceId`]). Under both window engines the
 //! window server's listing names the Desktop shown on each screen (`SLSCopyManagedDisplaySpaces`:
 //! a small id of the login session and a uuid) and the Desktops each window is on. An
 //! arrival is given that Desktop ([`Model::arrive_on`]) and the two are bound to each other
@@ -23,8 +23,8 @@
 //! to learn whether a uuid lasts over a restart.
 //!
 //! The table is kept right as Spaces change name ([`Model::relabel_space`]), go
-//! ([`Model::prune_space`], a Desktop of a screen gone merged into the main one) and when the
-//! engine falls back to one with no listing ([`Model::set_engine`]).
+//! ([`Model::prune_space`], a Desktop of a screen gone merged into the main one), and stays
+//! at a fallback to the Corner engine, which reads the same listing ([`Model::set_engine`]).
 
 use std::collections::BTreeMap;
 
@@ -102,7 +102,7 @@ impl Model {
     /// not bound yet, the Space the windows vote for among those bound to none; then the two
     /// are bound (module docs). Without `listed` the arrival is guessed as [`Model::arrive`]
     /// guesses it, and `desk` is bound to the Space guessed or checked against it. With no
-    /// `desk` (another engine, the listing not readable now): [`Model::arrive`].
+    /// `desk` (the listing not read or not readable now): [`Model::arrive`].
     pub fn arrive_on(
         &mut self,
         display: DisplayId,
@@ -278,11 +278,6 @@ impl Model {
     /// Space `space` is gone: its Desktop is bound to nothing.
     pub(crate) fn unbind_space(&mut self, space: SpaceId) {
         self.desks.retain(|_, b| b.space != space);
-    }
-
-    /// Forgets every binding (the engine falls back to one with no listing).
-    pub(crate) fn unbind_all(&mut self) {
-        self.desks.clear();
     }
 
     /// Takes the bindings `state.json` saved (`desks`): kept for the saved Spaces not visited

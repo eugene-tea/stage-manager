@@ -71,11 +71,6 @@ impl WindowEngine for AppleEngine {
         safety::assume_zones(&file.zones);
     }
 
-    /// True: no picture is kept fresh on a timer.
-    fn pictures_at_switch(&self) -> bool {
-        true
-    }
-
     /// Nothing of ours is away but the registry's held windows (a release's), brought back
     /// as the Corner engine does; true with none. First, a posted gesture still in flight is
     /// ended (Shift up, the button up, the pointer back: quit, a signal, the panic hook).

@@ -108,6 +108,23 @@ impl ScreenDesks {
     }
 }
 
+/// Every screen's entry of `SLSCopyManagedDisplaySpaces` (`f`) on connection `cid`, in its
+/// order: the one read of the listing, for the Spaces engine ([`Sky::displays`]) and for
+/// every engine's Desktops ([`crate::platform::desk_reads`]).
+pub(crate) fn read_displays(f: FnCopyByCid, cid: i32) -> Vec<ScreenDesks> {
+    // SAFETY: returns a +1 CFArray of CFDictionary (or null).
+    let Some(list) = (unsafe { take_array(f(cid)) }) else { return Vec::new() };
+    list.iter().filter_map(|d| d.downcast::<NSDictionary>().ok()).map(|d| ScreenDesks::parse(&d)).collect()
+}
+
+/// The Spaces windows `ids` are on by `SLSCopySpacesForWindows` (`f`) on connection `cid`
+/// ([`read_displays`]'s twin).
+pub(crate) fn read_spaces_of(f: FnCopySpacesForWindows, cid: i32, ids: &[u32]) -> Vec<u64> {
+    let arr = wid_array(ids);
+    // SAFETY: a CFArray of window numbers; returns a +1 CFArray of CFNumber (or null).
+    unsafe { take_array(f(cid, ALL_SPACES_MASK, Retained::as_ptr(&arr).cast())) }.map(|a| numbers(&a)).unwrap_or_default()
+}
+
 /// The C functions, each `None` when SkyLight does not export it.
 pub(crate) struct Sky {
     pub(crate) cid: i32,
@@ -234,9 +251,7 @@ impl Sky {
             return out;
         }
         let Some(f) = self.copy_managed else { return Vec::new() };
-        // SAFETY: returns a +1 CFArray of CFDictionary (or null).
-        let Some(list) = (unsafe { take_array(f(self.cid)) }) else { return Vec::new() };
-        list.iter().filter_map(|d| d.downcast::<NSDictionary>().ok()).map(|d| ScreenDesks::parse(&d)).collect()
+        read_displays(f, self.cid)
     }
 
     /// The main display's Desktop shown and its uuid.
@@ -273,9 +288,7 @@ impl Sky {
             return out;
         }
         let Some(f) = self.spaces_for_windows else { return Vec::new() };
-        let arr = wid_array(ids);
-        // SAFETY: a CFArray of window numbers; returns a +1 CFArray of CFNumber (or null).
-        unsafe { take_array(f(self.cid, ALL_SPACES_MASK, Retained::as_ptr(&arr).cast())) }.map(|a| numbers(&a)).unwrap_or_default()
+        read_spaces_of(f, self.cid, ids)
     }
 
     #[cfg(feature = "probes")]
@@ -472,7 +485,7 @@ impl Sky {
     pub(crate) fn add_remove_from(&self, route: Route, sid: u64, ids: &[u32], options: i32) -> Result<i32, String> {
         crate::platform::windows::note_write();
         // Its notices are ours: they trigger nothing (round r5-notices).
-        super::notices::expect(sid, ids);
+        crate::platform::server_notices::expect(sid, ids);
         #[cfg(test)]
         if crate::platform::fake::with(|d| d.sky_add_remove(route == Route::Bridged, sid, ids, options)).is_some() {
             return Ok(0);
@@ -507,7 +520,7 @@ impl Sky {
     /// The windows onto the managed Space (a Desktop) `sid`.
     pub(crate) fn move_managed(&self, route: Route, ids: &[u32], sid: u64) -> Result<i32, String> {
         crate::platform::windows::note_write();
-        super::notices::expect(sid, ids);
+        crate::platform::server_notices::expect(sid, ids);
         #[cfg(test)]
         if crate::platform::fake::with(|d| d.sky_add_remove(route == Route::Bridged, sid, ids, 0xf)).is_some() {
             return Ok(0);

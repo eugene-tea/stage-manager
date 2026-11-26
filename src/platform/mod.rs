@@ -20,8 +20,10 @@ pub mod controller;
 pub(crate) mod corner;
 pub(crate) mod costs;
 pub mod ctl;
+pub(crate) mod desk_reads;
 pub mod desktop;
 pub(crate) mod desktop_counts;
+pub(crate) mod desktop_fast;
 pub(crate) mod desktop_items;
 pub mod desktop_shot;
 pub(crate) mod dock;
@@ -64,6 +66,7 @@ pub mod pixels;
 pub mod permissions;
 pub mod safety;
 pub mod self_capture;
+pub mod server_notices;
 pub mod session;
 #[cfg(feature = "probes")]
 pub(crate) mod pixels_probe;
@@ -79,6 +82,7 @@ pub mod spaces;
 pub(crate) mod new_window_probe;
 #[cfg(feature = "probes")]
 pub mod spaces_probe;
+pub mod switch_likely;
 pub(crate) mod switch_shots;
 pub(crate) mod switcher_ax;
 pub(crate) mod switcher_notes;

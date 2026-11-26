@@ -49,8 +49,14 @@ use crate::platform::observe_probe::Note;
 use crate::platform::{safety, windows};
 use crate::ui::strip_model::StripEvent;
 
+mod ahead;
 mod causes;
+mod corner_screens;
 mod desktops;
+mod guessed;
+mod kept_out;
+mod looks;
+mod rest;
 mod screens;
 mod scenarios;
 mod switch;
@@ -58,8 +64,15 @@ mod switch;
 /// The fast tick's period (`wm_thread::FAST_TICK_SECONDS`).
 const FAST_TICK: Duration = Duration::from_millis(20);
 
-/// The config a scenario runs on unless it says otherwise: the shipped defaults.
-pub(super) const DEFAULTS: &str = "";
+/// The config a scenario runs on unless it says otherwise: the shipped defaults, but for
+/// `[displays] frames_per_setup`, off here. On, its first snapshot of a run asks for a save
+/// 3 s in, the save keeps the tick brisk a moment, and the tick at rest falls elsewhere
+/// after: the scenarios pinned by when a tick at rest falls (`looks_before.txt`,
+/// `guessed.txt`, a window taken out of its stage's Space) then read otherwise for no change
+/// a person sees (found 11-26, when the default turned on: with the save left out every pin
+/// held). The frames' own rules are tested in `engine/setup_frames.rs`,
+/// `engine/model/displays_tests/setup_frames.rs` and `controller/setup_frames.rs`.
+pub(super) const DEFAULTS: &str = "[displays]\nframes_per_setup = false\n";
 
 /// The AX callback the observer registers: never called, the bench delivers the notices.
 unsafe extern "C-unwind" fn no_callback(_: NonNull<AXObserver>, _: NonNull<AXUIElement>, _: NonNull<CFString>, _: *mut c_void) {}
@@ -73,6 +86,8 @@ pub(super) struct Bench {
     rest: Duration,
     next_tick: Instant,
     next_fast: Option<Instant>,
+    /// The ticks run so far.
+    pub(super) ticks: u64,
     started: Instant,
     /// What was handled, in order, with the ms since the start: the scenario's own log.
     pub(super) log: Vec<String>,
@@ -111,6 +126,10 @@ impl Bench {
         crate::engine::attribution::trail::start();
         let mut desk = Desk::new(desktops, load);
         setup(&mut desk);
+        if engine == EngineKind::Corner && guessed::forced() {
+            // The fallback, pinned ([`guessed`]): the window server's Desktops are not read.
+            desk.desk_reads = false;
+        }
         let home = desk.home.clone();
         let displays = desk.displays();
         let apps = desk.running();
@@ -139,6 +158,7 @@ impl Bench {
             rest: tick_pace::REST,
             next_tick: now + tick_pace::BRISK,
             next_fast: None,
+            ticks: 0,
             started,
             log: Vec::new(),
             c,
@@ -215,6 +235,7 @@ impl Bench {
 
     /// `wm_thread::tick`.
     fn tick(&mut self) {
+        self.ticks += 1;
         {
             let _wake = windows::wake();
             let full = self.pace.full_pass(clock::now());
@@ -448,6 +469,50 @@ impl Bench {
         self.desk(|d| d.switcher_opens(order));
     }
 
+    /// A ⌘Tab let go before the WM thread got to its Tab (`controller/switcher.rs`: "a ⌘Tab
+    /// let go before its Tab is handled on this thread"): ⌘ down, Tab and ⌘ up reach the
+    /// queue together, and macOS has already activated the app selected, picking its Desktop
+    /// by the windows it counted there then. The key tap, not on yet, forwards nothing.
+    pub(super) fn cmd_tab_let_go_unhandled(&mut self, order: Vec<i32>) {
+        self.command(true);
+        self.key(crate::engine::switcher::KEY_TAB, false);
+        self.command(false);
+        self.desk(|d| {
+            d.switcher_opens(order);
+            d.switcher_closes(false);
+            if let Some(pid) = d.switcher.pids.get(d.switcher.selected).copied() {
+                d.step(fake::Step::Activation { pid, raise_all: true });
+            }
+        });
+    }
+
+    /// ⌘ let go `ms` from now on macOS's own clock, whatever the WM thread is doing then (a
+    /// Tab's handler still asking a slow app, say): the switcher closes and macOS activates
+    /// the app selected at once, picking its Desktop by the windows it counts there at that
+    /// moment (the 3-12 ms from the release to the activation are left out).
+    pub(super) fn cmd_tab_release_in(&mut self, ms: u64) {
+        let due = clock::now() + Duration::from_millis(ms);
+        self.desk(|d| {
+            d.at(due, |d| {
+                d.cmd = false;
+                let mut event = d.input(InputKind::CommandKey, None);
+                event.cmd = false;
+                d.post(0.0, Notice::Input(event));
+                d.tap_forwards(crate::platform::mission_key_tap::Heard::CommandUp);
+                d.switcher_closes(false);
+                if let Some(pid) = d.switcher.pids.get(d.switcher.selected).copied() {
+                    d.step(fake::Step::Activation { pid, raise_all: true });
+                }
+            });
+        });
+    }
+
+    /// Another Tab with ⌘ still held: the switcher's selection moves on one.
+    pub(super) fn cmd_tab_again(&mut self) {
+        self.key(crate::engine::switcher::KEY_TAB, false);
+        self.desk(|d| d.switcher_steps());
+    }
+
     /// ⌘ let go with the switcher up: it closes and macOS activates the app selected.
     pub(super) fn cmd_tab_release(&mut self) {
         self.command(false);
@@ -502,6 +567,25 @@ impl Bench {
         self.desk(|d| d.post(0.0, Notice::Strip(StripEvent::CardClicked { stage, shift: false })));
     }
 
+    /// A sign that a switch is likely, as the main thread tells it (the pointer in the Dock's
+    /// bar, a hotkey's modifiers down: `platform/switch_likely.rs`).
+    pub(super) fn likely(&mut self, sign: crate::platform::switch_likely::Sign) {
+        self.note(format!("switch likely: {}", sign.as_str()));
+        self.c.switch_likely(sign);
+        self.pump();
+        self.after();
+    }
+
+    /// A hotkey pressed (`WmCommand::Hotkey`).
+    pub(super) fn hotkey(&mut self, command: crate::config::HotkeyCommand) {
+        self.note(format!("hotkey {command:?}"));
+        self.desk(|d| d.last_press = Some(clock::now()));
+        self.pace.stir(clock::now());
+        self.c.hotkey(&mut self.ob, command);
+        self.pump();
+        self.after();
+    }
+
     /// The left button pressed on app `pid`'s Dock item.
     pub(super) fn dock_press(&mut self, pid: i32) {
         let p = self.desk(|d| d.dock_point(pid));
@@ -532,13 +616,14 @@ impl Bench {
         std::fs::read_to_string(home.join("state.json")).expect("a saved state")
     }
 
-    /// One of Mission Control's keys, as its key tap hears it (⌃↑ by default); the input
-    /// monitor never hears them (`controller/mission_control.rs`).
+    /// One of Mission Control's keys, as its key tap hears it (⌃↑ by default) while the app
+    /// has the tap on (`mission_key_tap::publish`; before its first word, as if on); the
+    /// input monitor never hears them (`controller/mission_control.rs`).
     pub(super) fn mission_key(&mut self) {
         let mods = crate::engine::mission_control::Mods { control: true, option: false, command: false };
         self.desk(|d| {
             d.last_press = Some(clock::now());
-            if !d.tap_hears {
+            if !d.tap_hears || d.tap_keys == Some(false) {
                 return;
             }
             d.post(0.0, Notice::Mission(crate::platform::mission_key_tap::Heard::Key { code: crate::platform::input::KEY_UP, mods }));
@@ -570,7 +655,8 @@ impl Bench {
         self.desk(|d| {
             d.last_press = Some(clock::now());
             d.last_click = d.last_press;
-            if d.tap_hears {
+            // The tap forwards a press only while armed (Mission Control may show).
+            if d.tap_hears && (d.tap_armed || d.tap_keys.is_none()) {
                 d.post(0.0, Notice::Mission(crate::platform::mission_key_tap::Heard::Click));
             }
         });

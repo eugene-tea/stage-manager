@@ -367,8 +367,8 @@ pub const KEYS: &[KeyDef] = &[
     k("animation", "shadow_radius", f(0.0, 100.0), "24.0", "Blur radius of a moving snapshot's shadow with shadow = \"custom\"."),
     k("animation", "shadow_opacity", f(0.0, 1.0), "0.35", "Opacity of that shadow."),
     k("animation", "shadow_offset_y", f(-100.0, 100.0), "10.0", "Vertical offset of that shadow (down is positive)."),
-    k("animation", "snapshot_interval_ms", i(0, 60_000), "2000",
-        "How often full-size snapshots of the shown windows are refreshed for the next switch; 0 = only as the pointer nears the strip."),
+    k("animation", "snapshot_interval_ms", i(0, 60_000), "0",
+        "Full-size snapshots of the shown windows are also taken again this often, on a timer; 0 = no timer: they are taken when a switch starts and as the pointer nears the strip."),
     k("animation", "snapshot_cache_mb", i(16, 8192), "512", "Most memory kept for full-size window snapshots; the oldest go first."),
     k("animation", "reduce_motion", Kind::Choice(&["system", "on", "off"]), "\"system\"",
         "Reduce Motion: \"system\" follows macOS (System Settings > Accessibility > Display > Reduce motion); \"on\" always, \"off\" never. With it, nothing flies, slides, grows or turns: a switch is a short cross-fade, the strip fades in and out, cards change place with a fade and do not grow under the pointer."),
@@ -402,7 +402,7 @@ pub const KEYS: &[KeyDef] = &[
     k("windows", "mission_control_stages", Kind::Choice(&["off", "shown", "key"]), "\"shown\"",
         "With [windows] engine = \"spaces\": Mission Control and App Exposé show every stage's windows, as Apple's Stage Manager does and as they do with \"accessibility\". \"shown\" puts the hidden stages' windows on the Desktop, out of view at the screen's corner, once Mission Control shows, and back into their stages when it closes; \"key\" already at its keyboard shortcut; \"off\" leaves them hidden, so Mission Control shows only the stage in front."),
     k("windows", "mission_control_key_keeps_stage", Kind::Bool, "false",
-        "With [windows] engine = \"spaces\": closing Mission Control with its key or Escape keeps the stage in front. Off is Apple's: macOS brings in front the app whose window is under the pointer, and its stage comes in front with it."),
+        "Closing Mission Control with its key or Escape keeps the stage in front. Off is Apple's: macOS brings in front the app whose window is under the pointer, and its stage comes in front with it."),
     // [displays]
     KeyDef {
         applies: Applies::Restart,
@@ -637,6 +637,9 @@ pub const LEGACY_DEFAULTS: &[&str] = &[
     include_str!("legacy/default-50.toml"),
     include_str!("legacy/default-51.toml"),
     include_str!("legacy/default-52.toml"),
+    include_str!("legacy/default-53.toml"),
+    include_str!("legacy/default-54.toml"),
+    include_str!("legacy/default-55.toml"),
 ];
 
 #[cfg(test)]

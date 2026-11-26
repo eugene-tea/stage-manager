@@ -67,9 +67,10 @@
 //! - `pixels --rect X,Y,W,H --windows ID,… [--every MS] [--for MS] --then CMD ARG…` (round
 //!   landing-order): runs the command (a switch) while the screen's region is captured every
 //!   few ms with only these fixture windows in it ([`super::pixels_probe`]); reads only.
-//! - `capture BUNDLE [--rounds N] [hidden|cached file=PATH] [fast]` (S4b, S6b): a switch's
+//! - `capture BUNDLE [--rounds N] [hidden|cached file=PATH] [fast [list]]` (S4b, S6b): a switch's
 //!   pictures taken at the switch, through the app's path, timed on screen and in a stage
-//!   Space not shown; `fast` through the window server's call alone ([`capture`]'s docs).
+//!   Space not shown; `fast` through the window server's call alone, `fast list` what one
+//!   call of it hands back for several windows ([`capture`]'s docs).
 //! - `notices --ids ID,… [--events A-B] [--for MS]`: the window server's notices this process
 //!   hears for windows that exist, asked for by id (`SLSRequestNotificationsForWindows`), while
 //!   they are closed, moved or ordered out by hand ([`super::new_window_probe::notices`],

@@ -1,4 +1,4 @@
-//! `probe-spaces capture BUNDLE [--rounds N] [hidden file=PATH]` (1.9, S4b): what taking a
+//! `probe-spaces capture BUNDLE [--rounds N] [fast] [list] [hidden file=PATH]` (1.9, S4b): what taking a
 //! switch's pictures at the switch would cost, through the app's own path
 //! ([`crate::platform::switch_shots`]: one listing of the shareable content, then a still per
 //! window, in parallel, at full size).
@@ -18,6 +18,18 @@
 //! ([`crate::platform::capture_fast`], via [`switch_shots::shoot_fast`]: no listing), one window
 //! after another; a window it misses answers with no picture (counted as missing), never through
 //! ScreenCaptureKit. `cached` with `fast` captures the same way (there is no listing to keep).
+//!
+//! With `fast list` (round picture-wait; what it prints, round desktop-still): for the first
+//! 1, 2, … of the fixture's windows, N rounds each of the window server's capture one call a
+//! window, one after another (what a switch does), against one call with all their ids
+//! ([`capture_fast::handed_back`]), each timed from the first call to the last answer in
+//! hand, the two ways taking turns to go first. For the one call it prints what came back:
+//! `handed_back`, every different answer met with how many rounds gave it (`images`: the
+//! size of each image of the array, in its order; `null` for no array at all), beside each
+//! window's own size from its own call (`pixels`) and frame (`windows`), so one image a
+//! window, one image of them all (its size the windows' union) or fewer images can be told
+//! apart. The app never asks for several windows in one call (one call for 2 to 4 windows
+//! did not hand back an image a window, live 11-25). The windows stay where they are.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -27,6 +39,7 @@ use serde_json::{Value, json};
 
 use super::{Opts, Sky, fixture_pids, fixture_windows, frames, ids_of, ms, pump, wait_onscreen};
 use crate::platform::capture::Target;
+use crate::platform::capture_fast;
 use crate::platform::capture_pixels::{self, PixelRect};
 use crate::platform::switch_shots;
 use crate::platform::windows;
@@ -63,13 +76,19 @@ pub(super) fn run(sky: &Sky, bundle: &str, o: &Opts, scale: f64) -> Result<Value
         .collect();
     let hidden = o.words.iter().any(|w| w == "hidden");
     let fast = o.words.iter().any(|w| w == "fast");
+    let listed = o.words.iter().any(|w| w == "list");
+    if listed && !fast {
+        return Err("list takes fast (the window server's capture): capture BUNDLE fast list".into());
+    }
     FAST.store(fast, Ordering::SeqCst);
     let cached = o.words.iter().any(|w| w == "cached");
     let file = o.words.iter().find_map(|w| w.strip_prefix("file=").map(String::from));
     let rounds = o.rounds;
     let windows_json = frames(&list);
     let worker = std::thread::spawn(move || {
-        if cached {
+        if listed {
+            Ok(list_rounds(&targets, rounds))
+        } else if cached {
             let file = file.ok_or("cached takes file=PATH (the fixture's --color-file)")?;
             Ok(cached_rounds(&targets, &file, rounds, hidden))
         } else if hidden {
@@ -211,6 +230,82 @@ fn shown_rounds(targets: &[Target], rounds: usize) -> Value {
         })
         .collect();
     json!({ "captures": per_count, "listing_ms": spread(&listings) })
+}
+
+/// A picture's size in pixels.
+type Print = (usize, usize);
+
+/// What one call for several windows handed back: each image's size, or no array at all.
+type HandedBack = Option<Vec<Print>>;
+
+fn print_of(p: &crate::platform::capture::Picture) -> Print {
+    (objc2_core_graphics::CGImage::width(Some(&p.image)), objc2_core_graphics::CGImage::height(Some(&p.image)))
+}
+
+/// `fast list` (module docs): one call a window against one call for them all.
+fn list_rounds(targets: &[Target], rounds: usize) -> Value {
+    let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+    let now = windows::describe(&ids);
+    let displays = crate::platform::desktop::cg_display_bounds();
+    let framed: Vec<(Target, crate::engine::geometry::Rect)> = targets.iter().filter_map(|t| now.iter().find(|w| w.id == t.id).map(|w| (*t, w.bounds))).collect();
+    if framed.is_empty() {
+        return json!({ "error": "the window server describes none of the fixture's windows" });
+    }
+    let each = |k: usize| {
+        let t0 = Instant::now();
+        let got: Vec<Option<Print>> = framed[..k].iter().map(|(t, f)| capture_fast::picture(*t, *f, &displays).ok().map(|p| print_of(&p))).collect();
+        (ms(t0), got)
+    };
+    let list = |k: usize| {
+        let ids: Vec<u32> = framed[..k].iter().map(|(t, _)| t.id).collect();
+        let t0 = Instant::now();
+        let got = capture_fast::handed_back(&ids);
+        (ms(t0), got)
+    };
+    // One of each first: a process's first capture is slower.
+    let _ = (each(1), list(1));
+    let pause = || std::thread::sleep(Duration::from_millis(120));
+    let mut per_count = Vec::new();
+    for k in 1..=framed.len() {
+        let (mut each_ms, mut list_ms) = (Vec::new(), Vec::new());
+        let mut missing = 0;
+        // Every different answer of the one call, with how many rounds gave it.
+        let mut answers: Vec<(HandedBack, usize)> = Vec::new();
+        let mut prints: Vec<Option<Print>> = Vec::new();
+        for r in 0..rounds {
+            // The two ways take turns to go first.
+            let (one, all) = if r % 2 == 0 {
+                let one = each(k);
+                pause();
+                (one, list(k))
+            } else {
+                let all = list(k);
+                pause();
+                (each(k), all)
+            };
+            pause();
+            each_ms.push(one.0);
+            missing += one.1.iter().filter(|p| p.is_none()).count();
+            list_ms.push(all.0);
+            match answers.iter_mut().find(|(a, _)| *a == all.1) {
+                Some((_, n)) => *n += 1,
+                None => answers.push((all.1, 1)),
+            }
+            prints = one.1;
+        }
+        let px: Vec<Print> = prints.iter().flatten().copied().collect();
+        let one_each = answers.iter().filter(|(a, _)| a.as_ref().is_some_and(|a| a.len() == k)).map(|(_, n)| n).sum::<usize>();
+        per_count.push(json!({
+            "windows": k,
+            "pixels": px,
+            "one_call_a_window_ms": spread(&each_ms),
+            "one_call_for_all_ms": spread(&list_ms),
+            "handed_back": answers.iter().map(|(a, n)| json!({ "images": a, "rounds": n })).collect::<Vec<_>>(),
+            "one_image_a_window_rounds": one_each,
+            "missing": missing,
+        }));
+    }
+    json!({ "list": per_count })
 }
 
 /// One capture's answers as `[id, ms, mean]` rows.

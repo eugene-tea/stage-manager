@@ -172,12 +172,13 @@ screen's stages come back on that screen, by the screen itself, not the cable it
 `[displays] main_only = true` manages only the main screen (the one with the menu bar): a
 window moved to another screen leaves its stage and is left alone there. It is read at launch: quit and open Stage Manager again after changing it.
 
-`[displays] frames_per_setup = true` keeps each window's size and place for each set of
-screens: unplug the external screen and the windows go back to where you had them on the
-laptop alone; plug it in again and they go back to where they were with both. It happens once
-the change settles, about 10 s after it. A window you moved, resized or clicked meanwhile
-stays where you put it, and a set of screens not seen before keeps macOS's placement. A
-resolution changed counts as another set of screens.
+Each window keeps its size and place for each set of screens: unplug the external screen and
+the windows go back to where you had them on the laptop alone; plug it in again and they go
+back to where they were with both. It happens once the change settles, about 10 s after it.
+A window you moved, resized or clicked meanwhile stays where you put it, and a set of screens
+not seen before keeps macOS's placement. A resolution changed counts as another set of
+screens. `[displays] frames_per_setup = false` turns it off and leaves the windows where
+macOS puts them, as Apple's Stage Manager does.
 
 ### After a restart
 
@@ -534,8 +535,10 @@ Some limits to know about:
 
 - Windows an app keeps wholly off every screen, as headless browsers and test tools do, are
   left alone: they get no stage and no card, and are never moved onto the screen.
-- Moving windows are pictures taken a moment earlier, so content that changed meanwhile can
-  jump when the motion ends. Their shadow is drawn like macOS's own and hands over to the
+- Moving windows are pictures: one of a window leaving is taken as the switch starts, one of
+  a window arriving is the last taken before it left, so content that changed meanwhile can
+  jump when the motion ends (`[animation] snapshot_interval_ms` adds a timer for the windows
+  in front). Their shadow is drawn like macOS's own and hands over to the
   window's as it takes its place, which can still show as a faint flicker at the shadow's
   edge. Card pictures are taken when a stage leaves for its card, when the strip comes into
   view and when the pointer reaches a card, not live (`[strip] thumbnail_interval_ms` adds a

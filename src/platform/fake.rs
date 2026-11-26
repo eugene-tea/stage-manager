@@ -161,6 +161,16 @@ pub enum Val {
     El(El),
 }
 
+/// An app that puts its window back where it had it whenever something else moves it
+/// ([`App::moves_back`]): one restoring its saved bounds, one re-centring its window.
+#[derive(Debug, Clone, Copy)]
+pub struct MovesBack {
+    /// How long after the move it puts the window back, in ms before the load factor.
+    pub after_ms: f64,
+    /// How many times it does (`None`: every time).
+    pub times: Option<u32>,
+}
+
 /// An app on the desk.
 #[derive(Debug, Clone)]
 pub struct App {
@@ -210,6 +220,9 @@ pub struct App {
     /// its reorder reaches the window server" (`engine/raise_order.rs`: the fixture's 40 ms
     /// lag; a slow app's longer).
     pub reorders_ms: Option<f64>,
+    /// It moves its window back when the app (our park, our show) moves it away from where
+    /// the app itself had it ([`MovesBack`]; `None`: it leaves it where it was put).
+    pub moves_back: Option<MovesBack>,
 }
 
 /// A window on the desk.
@@ -282,6 +295,15 @@ pub struct Goes {
     /// wave this many ms after the change, the machine's own time (`engine/spill.rs`: a
     /// moment later, and as late as 20 s after, 11-18). Empty: none is let out.
     pub lets_out_ms: Vec<f64>,
+    /// The Desktop of the screen left that an ended Desktop's windows land on (the gone
+    /// screen's, [`Self::keeps_ids`] false; the screen left's own, [`Self::ends_own`]);
+    /// `None`: the Desktop the screen left shows. Live 11-25, a virtual screen: the windows
+    /// of the Desktop that ended landed on the screen left's first Desktop, not the one shown.
+    pub lands_on: Option<u64>,
+    /// The screen left slides to [`Self::lands_on`] as the screen goes (live 11-25: a virtual
+    /// screen right of the main one went, and the main screen slid to its first Desktop,
+    /// where the gone screen's windows landed).
+    pub shows_landing: bool,
 }
 
 /// What macOS tells the app, queued until due.
@@ -376,6 +398,14 @@ pub enum Call {
     IntoSpace(u64, Vec<u32>),
     /// A strip snapshot presented, with its transition's id.
     Present(Option<u64>),
+    /// Full-size pictures of these windows taken at a switch, waited for.
+    Shots(Vec<u32>),
+    /// A switch's cover of the park corner sent to the strip ahead of its transition (the
+    /// transition's id).
+    Corner(u64),
+    /// Full-size pictures of these windows taken when a switch was likely, waited for by
+    /// nothing.
+    Ahead(Vec<u32>),
 }
 
 /// The strip as the desk plays it.
@@ -401,6 +431,8 @@ pub struct Strip {
     pub count: usize,
     /// How many transitions were presented (animated switches).
     pub transitions: usize,
+    /// When a full-size picture of each window last reached it ([`Desk::pictured`]).
+    pictured: BTreeMap<u32, Instant>,
     /// The card frames it published, per display.
     pub cards: BTreeMap<u32, Vec<(u64, Rect)>>,
 }
@@ -479,6 +511,18 @@ pub struct Desk {
     /// the AppKit event loop turning, 11-21). False: none come, as on a Mac where they do not
     /// (or before round r5-notices); every poll then decides alone.
     pub server_notices: bool,
+    /// The window server's notices can be registered on this desk
+    /// (`platform/server_notices.rs`, `listening`). False: a macOS where the calls are gone.
+    pub server_calls: bool,
+    /// The notices' standing on this desk (`platform/server_notices.rs`; the process's own in
+    /// the app).
+    pub notice_trust: crate::engine::notice_trust::Trust,
+    /// What the app last said it wants of the key tap (`mission_key_tap::publish`): on at all
+    /// (`None`: nothing said yet), and armed for Escape and presses while Mission Control
+    /// may show.
+    pub tap_keys: Option<bool>,
+    /// See [`Self::tap_keys`].
+    pub tap_armed: bool,
     /// How long after an app moved its window the window server lists it at its new place,
     /// in ms before the load factor (`None`: at once). Live 11-22, Mission Control's key 1 s
     /// after its close: six apps answered their parks in ~4 ms each and all six windows were
@@ -487,6 +531,9 @@ pub struct Desk {
     /// Windows moved whose new place is not listed yet ([`Self::lists_moves_ms`]): until when,
     /// and where they are listed until then.
     late_moves: BTreeMap<u32, (Instant, Rect)>,
+    /// Where an app that moves its windows back ([`App::moves_back`]) has each of them: the
+    /// frame before the app's first move of it, or where the user last put it.
+    own_frames: BTreeMap<u32, Rect>,
     /// The "Current Space" flips with the leaving Desktop's windows going from the list,
     /// before the notice is sent (never measured so; the order a slow main thread gives at
     /// any load). False, the desk's way: [`delays::FLIP_AFTER_NOTICE`] after the notice is
@@ -499,6 +546,16 @@ pub struct Desk {
     /// The window server's listing names no Space shown (`SLSCopyManagedDisplaySpaces` with
     /// no "Current Space"): the controller's listing is not readable.
     pub listing_unreadable: bool,
+    /// The listing's "Current Space" stays what it is whatever Desktop shows (never measured:
+    /// what a macOS that changed the listing might do): a listing there, and wrong.
+    pub listing_stuck: bool,
+    /// The window server's Desktop reads answer on this desk (`platform/desk_reads.rs`: the
+    /// listing and a window's Spaces, under every engine). False: a macOS where they do not
+    /// (the calls gone, or the test switch that forces the fallback): Desktops are told apart
+    /// by the windows on screen, as before the reads.
+    pub desk_reads: bool,
+    /// The reads' health on this desk (`platform/desk_reads.rs`; the process's own in the app).
+    pub reads_health: crate::engine::desk_reads::Health,
     /// macOS's own windows listed above the apps' (Mission Control's covers, Show Desktop's).
     pub overlays: Vec<CgWindow>,
     /// Stage Spaces the app made through SkyLight (never a Desktop).
@@ -509,6 +566,16 @@ pub struct Desk {
     pub mission: bool,
     /// The frames Mission Control's layout took the windows from.
     mission_frames: BTreeMap<u32, Rect>,
+    /// While Mission Control shows, the window server lists the windows of the Desktop shown
+    /// where its layout has them (`engine/overview.rs`: "Mission Control lists every window
+    /// moved into its layout"; 11-18, a 1949x1288 window listed at 718x474), the parked ones
+    /// too. False, the desk's way until round looks-forward: listed where they were.
+    pub mission_lays_out: bool,
+    /// Where the window list has each window while Mission Control shows ([`Self::mission_lays_out`]).
+    mission_layout: BTreeMap<u32, Rect>,
+    /// The Dock sends `AXCreated` as Mission Control opens (never measured: `engine/mission_control.rs`,
+    /// "whether one comes as it opens is not measured"). False: it sends none.
+    pub dock_tells_mission: bool,
     /// What the app asked, in order, each with the ms since the desk was made.
     pub calls: Vec<(u64, Call)>,
     /// The probes the observer started: pid to (probe id, retry).
@@ -521,6 +588,14 @@ pub struct Desk {
     pub session: &'static str,
     /// What a picture of a window taken at a switch costs, in ms before the load factor.
     pub shot_ms: f64,
+    /// Window captures are off or not allowed (no Screen Recording, `[strip] capture =
+    /// false`): a switch takes no picture (`switch_shots::may_take`).
+    pub captures_off: bool,
+    /// A switch's cover of the park corner can be drawn (the corner patch holds a picture of
+    /// it, or a still of the desktop is kept: `Controller::cover_ready`), so an activation's
+    /// windows grow from their card. False, as in a run with no patch drawn yet: they arrive
+    /// at once.
+    pub corner_covers: bool,
     /// How long after a transition's pictures cover the windows the strip unveils them (the
     /// motion's length; the bench sets it from the config in force).
     pub unveil_after: Duration,
@@ -664,22 +739,35 @@ impl Desk {
             tap_switcher: false,
             activation_leads_slide: false,
             server_notices: false,
+            server_calls: true,
+            notice_trust: crate::engine::notice_trust::Trust::new(),
+            tap_keys: None,
+            tap_armed: false,
             lists_moves_ms: None,
             late_moves: BTreeMap::new(),
+            own_frames: BTreeMap::new(),
             flip_leads_notice: false,
             leaving_lingers_ms: 0.0,
             listing_unreadable: false,
+            listing_stuck: false,
+            desk_reads: true,
+            reads_health: crate::engine::desk_reads::Health::new(),
             overlays: Vec::new(),
             made_spaces: BTreeSet::new(),
             made_for: BTreeMap::new(),
             mission: false,
             mission_frames: BTreeMap::new(),
+            mission_lays_out: false,
+            mission_layout: BTreeMap::new(),
+            dock_tells_mission: false,
             calls: Vec::new(),
             probes: BTreeMap::new(),
             home: dir,
             login_started: None,
             session: "bench-session",
             shot_ms: 40.0,
+            captures_off: false,
+            corner_covers: false,
             unveil_after: Duration::from_millis(300),
             acts: Vec::new(),
             late_raises: Vec::new(),
@@ -702,7 +790,7 @@ impl Desk {
     pub fn add_app(&mut self, pid: i32, bundle: &str, name: &str) {
         self.apps.insert(
             pid,
-            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, quiet_key: false, wakes_ms: None, busy_until: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None },
+            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, quiet_key: false, wakes_ms: None, busy_until: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None, moves_back: None },
         );
         let n = self.dock.items.len() as f64;
         self.dock.items.push((format!("/Applications/{name}.app/"), Rect::new(self.dock.bar.x + 8.0 + 58.0 * n, self.dock.bar.y + 8.0, 50.0, 50.0)));
@@ -808,16 +896,18 @@ impl Desk {
             let s = &mut self.screens[0];
             let own = std::mem::replace(&mut s.desktops, gone.desktops.clone());
             (s.shown, s.current, s.sliding_in, s.sliding_to) = (gone.shown, gone.current, None, None);
+            let lands = how.lands_on.unwrap_or(gone.shown);
             for w in self.windows.values_mut() {
                 if w.spaces.iter().any(|x| own.contains(x)) {
                     w.spaces.retain(|x| !own.contains(x));
-                    w.spaces.push(gone.shown);
+                    w.spaces.push(lands);
                 }
             }
         } else if how.keeps_ids {
             self.screens[0].desktops.extend(gone.desktops.iter().copied());
         }
         let (shown, main) = (self.screens[0].shown, self.screens[0].display);
+        let lands = if how.keeps_ids { shown } else { how.lands_on.unwrap_or(shown) };
         for w in self.windows.values_mut() {
             let theirs = w.spaces.iter().any(|s| gone.desktops.contains(s)) || !main.frame.contains(w.frame.center());
             if theirs {
@@ -825,8 +915,13 @@ impl Desk {
             }
             if !how.keeps_ids && w.spaces.iter().any(|s| gone.desktops.contains(s)) {
                 w.spaces.retain(|s| !gone.desktops.contains(s));
-                w.spaces.push(shown);
+                w.spaces.push(lands);
             }
+        }
+        if how.shows_landing
+            && let Some(to) = how.lands_on.filter(|to| *to != self.screens[0].shown)
+        {
+            self.slide(0, to);
         }
         // The hidden windows of the gone screen's Desktops, let out in waves.
         let hidden: Vec<u32> = self
@@ -1006,6 +1101,8 @@ impl Desk {
 
     fn listed(&self, w: &Win) -> CgWindow {
         let bounds = self.late_moves.get(&w.id).filter(|(until, _)| clock::now() < *until).map_or(w.frame, |(_, old)| *old);
+        // In Mission Control's layout while it shows ([`Self::mission_lays_out`]).
+        let bounds = self.mission_layout.get(&w.id).copied().unwrap_or(bounds);
         CgWindow { id: w.id, pid: w.pid, owner: w.owner.clone(), name: None, layer: w.layer, bounds, onscreen: self.on_screen(w), alpha: 1.0 }
     }
 
@@ -1210,7 +1307,14 @@ impl Desk {
 
     /// Window `id` asked to sit at `frame`: where macOS leaves it, with its move notice.
     fn place(&mut self, id: u32, frame: Rect) {
-        let visible = self.screens[0].display.visible;
+        // The screen the frame is asked on (its left edge; the main one when on none): the
+        // title bar is kept on that screen, and a window on a Desktop that comes to another
+        // screen is on the Desktop that screen shows (macOS with "Displays have separate
+        // Spaces"; not measured here).
+        let screen = self.screens.iter().position(|s| frame.x >= s.display.frame.x && frame.x < s.display.frame.max_x()).unwrap_or(0);
+        let visible = self.screens[screen].display.visible;
+        let (theirs, shown) = (self.screens[screen].desktops.clone(), self.screens[screen].shown);
+        let desktops: Vec<u64> = self.screens.iter().flat_map(|s| s.desktops.iter().copied()).collect();
         let late = self.lists_moves_ms.map(|ms| clock::now() + self.at_load(ms));
         let listed = self.windows.get(&id).map(|w| self.listed(w).bounds);
         let Some(w) = self.windows.get_mut(&id) else { return };
@@ -1222,7 +1326,12 @@ impl Desk {
             self.late_moves.insert(id, (until, old));
         }
         let (moved, resized) = (to.origin() != w.frame.origin(), to.size() != w.frame.size());
+        let before = w.frame;
         w.frame = to;
+        if w.spaces.iter().any(|s| desktops.contains(s)) && !w.spaces.iter().any(|s| theirs.contains(s)) {
+            w.spaces.retain(|s| !desktops.contains(s));
+            w.spaces.push(shown);
+        }
         let pid = w.pid;
         self.call(Call::Frame(id, to));
         if moved {
@@ -1231,6 +1340,31 @@ impl Desk {
         if resized {
             self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_RESIZED });
         }
+        if let Some(back) = self.apps.get(&pid).and_then(|a| a.moves_back).filter(|b| b.times != Some(0)) {
+            let own = *self.own_frames.entry(id).or_insert(before);
+            if to != own {
+                let due = clock::now() + self.at_load(back.after_ms);
+                self.at(due, move |d| d.app_moves_back(id));
+            }
+        }
+    }
+
+    /// An app that moves its windows back ([`App::moves_back`]) puts window `id` where it
+    /// had it, and says it moved; once for each of its times.
+    fn app_moves_back(&mut self, id: u32) {
+        let Some(own) = self.own_frames.get(&id).copied() else { return };
+        let Some(w) = self.windows.get(&id).filter(|w| !w.minimized && w.frame != own) else { return };
+        let pid = w.pid;
+        let Some(back) = self.apps.get_mut(&pid).and_then(|a| a.moves_back.as_mut()) else { return };
+        match back.times {
+            Some(0) => return,
+            Some(ref mut n) => *n -= 1,
+            None => {}
+        }
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.frame = own;
+        }
+        self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_MOVED });
     }
 
     /// An action.
@@ -1320,6 +1454,9 @@ impl Desk {
         }
         w.frame = frame;
         let pid = w.pid;
+        if let Some(own) = self.own_frames.get_mut(&id) {
+            *own = frame;
+        }
         self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_MOVED });
     }
 
@@ -1544,7 +1681,11 @@ impl Desk {
                 self.screens[screen].sliding_in = None;
                 self.screens[screen].sliding_to = None;
             }
-            Step::Flips { screen, to } => self.screens[screen].current = to,
+            Step::Flips { screen, to } => {
+                if !self.listing_stuck {
+                    self.screens[screen].current = to;
+                }
+            }
             Step::FullScreenSpace { screen, id, to, frame, ended } => {
                 if let Some(w) = self.windows.get_mut(&id) {
                     w.spaces = vec![to];
@@ -1589,6 +1730,9 @@ impl Desk {
                     self.overlays.push(CgWindow { id, pid, owner: owner.into(), name: None, layer, bounds: self.screens[0].display.frame, onscreen: true, alpha: 1.0 });
                     self.overlays.sort_by_key(|w| std::cmp::Reverse(w.layer));
                 }
+                if on && owner == "WindowManager" && layer == 19 && self.mission && self.mission_lays_out {
+                    self.lay_out_mission();
+                }
             }
             Step::Switcher(shown) => self.switcher.shown = shown,
             Step::Opens { id, pid, frame, title } => {
@@ -1599,6 +1743,7 @@ impl Desk {
             }
             Step::MissionRestores => {
                 self.mission = false;
+                self.mission_layout.clear();
                 for (id, frame) in std::mem::take(&mut self.mission_frames) {
                     if let Some(w) = self.windows.get_mut(&id) {
                         w.frame = frame;
@@ -1679,6 +1824,25 @@ impl Desk {
         self.post_after(delays::MISSION_SHOWS, 0.0, Notice::Step(Step::Overlay { owner: "Dock", layer: 20, on: true }));
         self.mission = true;
         self.server_notice(delays::SERVER_MISSION_OPENS, Kind::Overview, Vec::new());
+        if self.dock_tells_mission {
+            self.post_after(delays::MISSION_SHOWS, 0.0, Notice::Switcher("AXCreated"));
+        }
+    }
+
+    /// Mission Control's layout ([`Self::mission_lays_out`]): every window of the main
+    /// screen's Desktop shown that is listed on screen, front to back, in a row across the
+    /// top at two fifths of its size.
+    fn lay_out_mission(&mut self) {
+        let display = self.screens[0].display.frame;
+        let shown = self.screens[0].shown;
+        let ids: Vec<u32> = self.z.iter().copied().filter(|id| self.windows.get(id).is_some_and(|w| w.layer == 0 && self.on_screen(w) && w.spaces.contains(&shown))).collect();
+        let mut x = display.x + 80.0;
+        for id in ids {
+            let frame = self.windows[&id].frame;
+            let (w, h) = (frame.w * 0.4, frame.h * 0.4);
+            self.mission_layout.insert(id, Rect::new(x, display.y + 140.0, w, h));
+            x += w + 40.0;
+        }
     }
 
     /// The window server's notice of `kind` naming `members` (window, Space), `ms` from now
@@ -1718,6 +1882,19 @@ impl Desk {
         self.switcher = Switcher { shown: false, pids: order, selected: 1 };
         self.post(delays::SWITCHER_SHOWS, Notice::Step(Step::Switcher(true)));
         self.post(delays::SWITCHER_SHOWS, Notice::Switcher("AXCreated"));
+    }
+
+    /// Another Tab with the switcher up: its selection moves on one; once its list shows, the
+    /// Dock says so (`AXSelectedChildrenChanged`, observed live 11-15:
+    /// `controller/switcher.rs`, `NOTICES`).
+    pub fn switcher_steps(&mut self) {
+        if self.switcher.pids.is_empty() {
+            return;
+        }
+        self.switcher.selected = (self.switcher.selected + 1) % self.switcher.pids.len();
+        if self.switcher.shown {
+            self.post(1.0, Notice::Switcher("AXSelectedChildrenChanged"));
+        }
     }
 
     /// What the key tap heard while it is armed for ⌘Tab's switcher and hears: forwarded as
@@ -1848,12 +2025,50 @@ impl Desk {
         Cover { outgoing: true, incoming: true }
     }
 
-    /// Pictures of `asked` windows taken at a switch, waited for `max` at most: how long it
-    /// took, in ms.
-    pub fn take_shots(&mut self, asked: usize, max: Duration) -> u64 {
-        let took = if asked == 0 { Duration::ZERO } else { self.at_load(self.shot_ms).min(max) };
+    /// Pictures of windows `ids` taken at a switch, waited for `max` at most: how long it
+    /// took, in ms. Each reaches the strip ([`Self::pictured`]).
+    pub fn take_shots(&mut self, ids: &[u32], max: Duration) -> u64 {
+        if ids.is_empty() {
+            return 0;
+        }
+        self.call(Call::Shots(ids.to_vec()));
+        let took = self.at_load(self.shot_ms).min(max);
         clock::test::advance(took);
+        self.pictured(ids);
         took.as_millis() as u64
+    }
+
+    /// Pictures of windows `ids` asked for when a switch is likely
+    /// (`switch_shots::take_ahead`): nothing waits; they reach the strip [`Self::shot_ms`]
+    /// later (at the desk's load), on macOS's own clock.
+    pub fn take_ahead(&mut self, ids: &[u32]) {
+        if ids.is_empty() {
+            return;
+        }
+        self.call(Call::Ahead(ids.to_vec()));
+        let due = clock::now() + self.at_load(self.shot_ms);
+        let ids = ids.to_vec();
+        self.at(due, move |d| d.pictured(&ids));
+    }
+
+    /// A switch's cover of the park corner handed to the strip ahead of transition `id`
+    /// (`strip_model::cover_corner_ahead`).
+    pub fn corner_ahead(&mut self, id: u64) {
+        self.call(Call::Corner(id));
+    }
+
+    /// Full-size pictures of windows `ids` reached the strip now: a switch's own, or the
+    /// strip's (the pointer on a card or pressing it, the app switcher opened:
+    /// `ui::strip_motion`'s `prefetch`, which the bench does not run).
+    pub fn pictured(&mut self, ids: &[u32]) {
+        let now = clock::now();
+        self.strip.pictured.extend(ids.iter().map(|id| (*id, now)));
+    }
+
+    /// How long ago a full-size picture of window `id` reached the strip
+    /// (`strip_model::snapshot_age`).
+    pub fn shot_age(&self, id: u32) -> Option<Duration> {
+        self.strip.pictured.get(&id).map(|at| clock::now().saturating_duration_since(*at))
     }
 
     /// The observer started a probe of app `pid`: the app answers [`delays::APP_ANSWERS`]

@@ -26,7 +26,7 @@
 //! (`new_missed`), placed as before.
 //!
 //! The window server's notice of a window's creation (type 811, 3-11 ms after the cause in
-//! `probe-spaces cgs`, 11-21: [`super::notices`]) would wake the watch for a look at once
+//! `probe-spaces cgs`, 11-21: [`crate::platform::server_notices`]) would wake the watch for a look at once
 //! ([`nudge`]), but the app has never heard it: in the live `launch` phase (11-21, 20
 //! launches) no 811, 815 or 816 came and every one of the 100 windows held was found by the
 //! read every [`EVERY`] (the probe also asked `SLSRequestNotificationsForWindows` for its

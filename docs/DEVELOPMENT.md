@@ -88,6 +88,14 @@ person and macOS did, as its log tells it, and its test asserts what came of it 
 3 and 10. An assertion marked `// TIME DECIDES:` names the constant that changed the
 outcome under load.
 
+`src/platform/controller/bench/ahead.rs` pins ⌘Tab to an app on another Desktop under both
+engines (the twin of the Dock click that slides): let go at once, held past the Dock's
+list, cancelled, tabbed on, the first Tab's guess wrong, the key tap refused, ⌘ let go while
+the app is still asked. Each outcome reads what stood in front on the other Desktop when the
+switcher ended, which of its windows a person saw on the way, how many of its windows were
+moved and whether it ended as it was. Print them:
+`BENCH_PRINT=1 cargo test --lib ahead::print_them -- --nocapture`.
+
 `src/platform/controller/bench/causes.rs` pins the focus and activation chains ("who caused
 this notice", `engine/attribution.rs`): one scenario for each gate, from the incident its doc
 comment tells. Their outcomes also read what each focus and activation notice came to, in
@@ -99,7 +107,14 @@ person would see the same. After such a change, print what to assert:
 `src/platform/controller/bench/switch.rs` pins a switch's handshake with the strip and the
 raise-order check after it: the strip answering in time, late or never (`Strip::covers_ms`,
 `Strip::draws`), a second click, a click or an app's activation inside the cover wait or the
-check, an app reordering its windows late (`App::reorders_ms`). Each outcome reads what a
+check, an app reordering its windows late (`App::reorders_ms`), and the pictures a switch
+takes of the windows leaving (`shots` among the calls; `ahead`: those taken when a switch
+was likely, waited for by nothing, which come `Desk::shot_ms` later; `corner`: the park
+corner's cover sent ahead of the pictures; `Desk::pictured` says the strip took
+one itself, as at a press on a card or at ⌘Tab; `Bench::likely` tells a sign the main thread
+would, the pointer in the Dock or a hotkey's modifiers; `Desk::captures_off` is a Mac with no
+Screen Recording; `Desk::corner_covers` lets an activation grow from its card under the
+Corner engine). Each outcome reads what a
 person sees, how many switches played with their pictures (`Strip::covered`, `uncovered`)
 and the calls in order. What macOS does on its own clock, whatever the app's thread is
 doing, the desk plays with `Desk::at` (at a time) and `Desk::on_raise` (a while after the
@@ -125,14 +140,20 @@ its ctl socket and reading the window server's view of the windows:
 
 ```sh
 scripts/test-stages.sh                    # every phase: m3 safety m4 m6 restore strip native
-                                          # visible parity motion slots expose mission capture raise park
-                                          # offscreen enhanced stale handles displays
+                                          # visible parity motion slots expose mission looks capture raise park
+                                          # kept offscreen enhanced stale handles displays reads
 scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
                                           # card drawn whole, one of its windows lifted off
                                           # alone in the column, dropped in a gap, dragged out)
+SM_STILL=sck scripts/test-stages.sh still capture   # the desktop's still through ScreenCaptureKit
+                                          # alone (default: the window server's call first)
+scripts/test-stages.sh rest               # by name only: the housekeeping rests 2 s under every
+                                          # engine; a press on a parked window's sliver, judged on
+                                          # a list over a second old at rest, is still swallowed
 scripts/test-stages.sh spaces             # the two-Desktop check, guided (you switch Desktops)
 scripts/test-stages.sh spaces --auto      # the same, hands-free, on an unlocked idle Mac
+SM_DESKTOPS=guess scripts/test-stages.sh spaces --auto   # the same with the Desktops guessed
 SKIP_BUILD=1 TEST_HOME=/tmp/sm scripts/test-stages.sh
 ```
 
@@ -176,7 +197,9 @@ scripts/measure.sh --summary /tmp/sm-measure.XXXXXX   # the table again
 
 - **rest**: four stages of two fixture windows, a minute untouched: the app's CPU time over
   wall time and wakeups (`proc_pid_rusage`), `top`'s POWER, the window server's and replayd's
-  CPU. **sample**: the next minute under `sample`, split by what started the work (a timer
+  CPU, and the windows captured a minute (none by default; `SM_SNAPSHOT_MS=2000` runs the
+  full-size pictures' timer the Accessibility mode had until 11-25, to measure what it
+  costs on the same build). **sample**: the next minute under `sample`, split by what started the work (a timer
   and the function it calls, an Accessibility notice, Core Animation's commit, a capture
   reply) and by its kind.
 - **switch**: card clicks and Dock clicks timed from the command to the last incoming window
@@ -189,6 +212,30 @@ scripts/measure.sh --summary /tmp/sm-measure.XXXXXX   # the table again
 - **hidden** (by name only): a window drawing on every display refresh (the fixture's
   `--frame-clock-normal`) hidden in its stage and shown again by `ctl switch`: whether it
   drew while hidden, how soon it draws again after the show, refreshes missed after.
+- **covered** (by name only): at rest with the strip following the Dock, the windows clear
+  of the strip and then flush left (the strip slid away): captures, Dock reads, window lists
+  and LaunchServices lookups a minute. It fails above 5 lookups a minute in a span where no
+  app launched or quit (`costs.apps_changed` says whether one did).
+
+`rest` also records, from `ctl state` before and after its minute, every number of `costs` a
+minute (window lists, LaunchServices lookups, stills of the desktop and how many of them the
+window server took and how many were asked of ScreenCaptureKit, wallpaper reads), the
+ticks that ran brisk and at rest (the two reads stir the tick: about 12 brisk ticks are
+theirs), the rest's period and how the corner patch shows. What one part of the app costs is
+measured by one run with it off or slowed, each in an `OUT` of its own (every row says what
+it ran with):
+
+```sh
+E="RUNS=3 ENGINES=corner"                                   # add "off spaces" for the floor and the other engine
+env $E OUT=/tmp/sm-rest.base scripts/measure.sh rest sample
+env $E OUT=/tmp/sm-rest.nocap SM_CAPTURE=0 scripts/measure.sh rest          # no ScreenCaptureKit: no still of the desktop
+env $E OUT=/tmp/sm-rest.sck SM_ENV="STAGE_MANAGER_STILL_SCK=1" scripts/measure.sh rest           # the still through ScreenCaptureKit
+env $E OUT=/tmp/sm-rest.nopatch SM_CONFIG="windows.corner_patch=false" scripts/measure.sh rest   # no patch panel, still or icons read
+env $E OUT=/tmp/sm-rest.notap SM_CONFIG="windows.inert_slivers=false" scripts/measure.sh rest     # no event tap
+env $E OUT=/tmp/sm-rest.one SM_STAGES=1 scripts/measure.sh rest             # nothing hidden: nothing in the corner
+env $E OUT=/tmp/sm-rest.750 SM_ENV="STAGE_MANAGER_TICK_REST_MS=750" scripts/measure.sh rest       # the tick as before 11-25
+env $E OUT=/tmp/sm-rest.10s SM_ENV="STAGE_MANAGER_TICK_REST_MS=10000" scripts/measure.sh rest     # nearly no tick
+```
 
 `scripts/measure_engines.py` runs it for the park corner and the Spaces engine alone, with
 captures off, three stages and `ctl switch` switches, and prints one table, corner against
@@ -242,7 +289,9 @@ The installed app is never started with any of them, so none acts on a user's co
 | `STAGE_MANAGER_ENGINE` | yes, `ONLY` | `spaces`: the Spaces window engine, whatever the config says (`SM_ENGINE` sets it) |
 | `STAGE_MANAGER_PROBE_FAIL` | yes, `ONLY` | `hide` or `show`: that step of the Spaces engine's launch probe is not sent, as on a Mac that refuses it |
 | `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | yes, `ONLY` | activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
-| `STAGE_MANAGER_CAPTURE_SCK` | yes, `ONLY` | every window picture through ScreenCaptureKit, the window server's own source off (as before 1.9) |
+| `STAGE_MANAGER_CAPTURE_SCK` | yes, `ONLY` | every window picture and the desktop's still through ScreenCaptureKit, the window server's own source off (as before 1.9) |
+| `STAGE_MANAGER_STILL_SCK` | yes, `ONLY` | the still of the desktop in the park corner through ScreenCaptureKit alone, the window server's call off (as before round desktop-still; `SM_STILL=sck` sets it) |
+| `STAGE_MANAGER_DESKTOPS_GUESS` | yes, `ONLY` | the window server's Desktops are not read: Desktops by the windows on screen (as 1.9.2 under the Corner engine) |
 | `STAGE_MANAGER_LANDING` | `ONLY`, or any run under `[windows] engine = "spaces"` | the landing variant: `pictures` (the default), `ordered`, `live`, `live-early`, `live-late` (`ui/landing_math.rs`; the only test switch a user's config can open) |
 | `STAGE_MANAGER_LANDING_LEVEL` | as `STAGE_MANAGER_LANDING` | `ranked`: the live landing's windows get levels by rank instead of as made |
 | `STAGE_MANAGER_TEST_REOPEN_LIST` | yes, `TEST` | the copy joins the reopen list at a logout (turns regular) without a login item, as the live suite's restore phase checks |
@@ -250,6 +299,7 @@ The installed app is never started with any of them, so none acts on a user's co
 | `STAGE_MANAGER_LOGOUT_NOTE` | yes, `TEST` | the logout signals are this one distributed notification only (the live suite posts it) |
 | `STAGE_MANAGER_DROP_AX_DESTROYED` | yes, `TEST` | Accessibility's destroyed notifications ignored, as from an app that sends none: a closed window leaves through the sweep alone |
 | `STAGE_MANAGER_COVER` | yes, `TEST` | `desktop`: a switch's cover is always the desktop's still, kept fresh |
+| `STAGE_MANAGER_TICK_REST_MS` | yes, `TEST` | the housekeeping rests this long (250 to 60000) in place of 2 s: what a tick costs, measured (750 was the Accessibility engine's until 11-25) |
 | `STAGE_MANAGER_UPDATE_VERSION` | builds with `--features update-test` only | the update check offers this version instead of asking GitHub |
 | `STAGE_MANAGER_UPDATE_DMG` | builds with `--features update-test` only | an update installs from this local disk image instead of downloading one (a locally signed app then trusts its own designated requirement) |
 | `STAGE_MANAGER_UPDATE_AUTO` | builds with `--features update-test` only | `1` makes `ctl debug-update` ready the update as an automatic install (it waits for the user to be away, or installs at the user's Quit) |
@@ -270,6 +320,8 @@ The installed app is never started with any of them, so none acts on a user's co
 | `SM_DEV_APP` | `scripts/dev-app.sh`, `test_stages.py` | where the dev copy goes and runs from (`make install` points it at `~/Applications`) |
 | `SM_FIXTURE_ID` | `test-stages.sh`, `measure.sh`, `test_stages.py` | the main fixture's bundle id |
 | `SM_ENGINE` | `test-stages.sh`, `test_stages.py`, `measure_stages.py` | `spaces` runs the suite under the Spaces engine (sets `STAGE_MANAGER_ENGINE`); default the Corner engine |
+| `SM_DESKTOPS` | `test_stages.py`, `test_spaces.py` | `guess` runs every app with the window server's Desktop reads off (sets `STAGE_MANAGER_DESKTOPS_GUESS`); default the reads on |
+| `SM_STILL` | `test_stages.py` | `sck` runs every app with the desktop's still through ScreenCaptureKit alone (sets `STAGE_MANAGER_STILL_SCK`); default the window server's call first. The `still` and `capture` phases run both ways |
 | `SM_SCREENSHOTS` | `test_stages.py` | a folder: turns on the visible phase's strip screenshots |
 | `SM_SHOTS` | `test_stages.py`, `test_spaces.py` | a folder: turns on `spaces --auto`'s by-eye screenshots and the Mission Control pixel checks |
 | `SM_PIXELS` | `test_stages.py` | turns on the checks read back from the overlay's pixels |
@@ -286,6 +338,10 @@ The installed app is never started with any of them, so none acts on a user's co
 | `SM_PROBE_DOCK_CLICK` | `probe_apple.py` | `real`: a real click on the Dock item instead of `AXPress` |
 | `SM_STAGES`, `SM_SETTLE_S`, `SM_REST_S`, `SM_SWITCHES`, `SM_SWITCH_CPU_S`, `SM_SWITCH_WAYS`, `SM_HIDDEN_ROUNDS`, `SM_HIDDEN_S`, `SM_AFTER_S` | `measure_stages.py` | the measure's stages (4), settle (10 s), rest (60 s), switches (20), CPU window per switch (1.5 s), switch ways (`card dock`), hidden rounds (8) and length (5 s), and the watch after (1.5 s) |
 | `SM_CAPTURE` | `measure_stages.py` | `0`: the app runs with captures off (`STAGE_MANAGER_NO_CAPTURE`) |
+| `SM_CLICK_HOLD_MS` | `measure_stages.py` | `N`: each switch's click holds the button N ms between press and release (`hold=N` on `ctl debug-click` and `ctl debug-dock-click`); not set, the test's own clicks (a card's 60 ms, a Dock item's fed at once). A person's is about 100 |
+| `SM_SNAPSHOT_MS` | `measure_stages.py` | `N`: `[animation] snapshot_interval_ms = N` in every scenario's scratch config (the full-size pictures on a timer; none by default) |
+| `SM_CONFIG` | `measure_stages.py` | `section.key=value ...` (space-separated): lines added to every scenario's scratch config, merged by section |
+| `SM_ENV` | `measure_stages.py` | `STAGE_MANAGER_NAME=value ...`: test switches of the app for the run (never the home, the fixtures, the engine or the captures: the measure's own) |
 
 ## The ctl socket
 
@@ -306,7 +362,7 @@ B="target/Stage Manager.app/Contents/MacOS/stage-manager"    # a dev build (make
 
 | Command | Does |
 |---|---|
-| `ping` | whether the app runs, its version, and whether Apple's Stage Manager is on |
+| `ping` | whether the app runs, its version, build number and commit, and whether Apple's Stage Manager is on |
 | `state` | stages, windows, frames, the strip, the Desktop shown, the config error |
 | `dump` | observed apps and windows, and every Desktop's stages |
 | `space` | the Desktop shown, as the engine sees it |
@@ -324,8 +380,12 @@ Exit status is 0 on success, 1 on an error reply and 2 when the app is not runni
 `STAGE_MANAGER_TEST=1` the `debug-*` commands post clicks, drags, Desktop and Mission
 Control shortcuts, ⌘M (`debug-cmd-m`), full-screen toggles and the strip shown or hidden for the scripted checks,
 `debug-minimize-button ID` gives a window's minimize button's frame (for `debug-click`), `debug-dock-lend
-BUNDLE` feeds a Dock click without pressing the item (what the press put home waits for an
-activation that never comes), and `debug-stale-handle
+BUNDLE [hold=MS]` feeds a Dock click without pressing the item (what the press put home, or
+arranged on another Desktop, waits for an activation that never comes; `hold=700` makes it a
+press that is no click), `debug-dock-hover BUNDLE` moves the pointer onto a fixture's
+Dock item and leaves it there (`debug-pointer-back` puts it back), a click takes `hold=MS`
+(`debug-click X Y hold=100`, `debug-dock-click BUNDLE hold=100`: the button held as a
+person's), and `debug-stale-handle
 ID` takes our handle on a window for dead until it is looked up afresh (`test-stages.sh
 handles`); each refuses to act outside the app's own and `STAGE_MANAGER_ONLY` windows. See
 `src/platform/ctl.rs`.
@@ -498,6 +558,17 @@ Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
   `workspace_first`). `margins` names the waits: `OVERVIEW_LOOK`, `OVERVIEW_SETTLE`,
   `OVERVIEW_ARRIVAL_SETTLE`, `OVERVIEW_EXIT_CARRY`, `STRAY_LOOK`, `TIDY_EVERY`,
   `SPACE_POLL`, `launch_watch::EVERY`.
+- Under the Corner engine (round looks-forward) `engine.notices` is there too, with the
+  three types it hears, and under both engines `trust`: `state` (`working`, `silent`,
+  `resting`, `probing`, or `off` when they are not registered), `way` (`window server` or
+  `public triggers`), `why`, `told`, `missed`, `for_nothing`, `rests`; `uses.rested` counts
+  the notices that brought no look during a rest. `mission_control` (and `ctl
+  debug-mission-control status`) answers under the Corner engine: `up`, `tap`
+  (`wanted_by_engine`: on for Mission Control's keys), `keys`, and `looks` (`public_triggers`,
+  looks `made` and `found`, and how many openings each of the key, the Dock's notice and the
+  window server's announced). `costs` has `server_notices`, `dock_notices`, `trigger_looks`
+  and `taps_on.mission_keys`. `ctl debug-mission-control launch` opens Mission Control by
+  its launcher, with no key.
 - `ctl space`'s `overview_ms_ago`: `found`, `closed`, `told` (the last notice while an
   overview showed) and `settled_by_notice`.
 - The live phases `mission`, `expose`, `launch` (`SM_ENGINE=spaces`) and `spaces --auto`
@@ -507,17 +578,43 @@ Under the Spaces engine (docs/ARCHITECTURE.md, "The window server's notices"):
   notice), the close's notice comes after the closing key and before the list shows the close,
   and the look after it ends the freeze (`OVERVIEW_SETTLE` ended by the notice); the ms are
   printed (skipped when no notice 1508 came).
+- The live phase `looks` (the Corner engine, a default phase; the Mac untouched meanwhile):
+  nothing that brings a look forward fires in 10 s at rest and the key tap is off; Mission
+  Control by its shortcut is known within 400 ms of the ask at a look brought forward
+  (`OVERVIEW_LOOK` ended by a trigger's look), its close ends the freeze with no settle when
+  its notice came, no hidden window is asked to park again; opened by its launcher it is
+  judged only when a notice came for it; and `mission_control_key_keeps_stage` keeps the
+  stage at a close by key. With no notice 1508 on a Mac the first rounds are said, and the
+  round after the public triggers took over is judged.
+- On the bench `bench/looks.rs` has the Corner engine's scenarios: the desk lists the windows
+  in Mission Control's layout with `d.mission_lays_out`, sends the Dock's notice at its open
+  with `d.dock_tells_mission`, has no notices to register with `d.server_calls = false`, and
+  `looks_before.txt` pins each as it read before anything was heard there.
 - On the bench the desk sends them only with `d.server_notices = true` (scenarios "a hidden
   window taken out of its stage Space" and "Mission Control with no key", each with and
   without).
 
 ### The Desktops: what the listing decides, and the shadow
 
-Under the Spaces engine the window server's listing says which Desktop arrived and where
-each window is (`src/platform/controller/desktops.rs`, `src/engine/model/desks.rs`; design
-r3, slices 2 and 3; ARCHITECTURE, "The window server's Desktops"), and the model is compared
-with it at every arrival and look (`src/engine/desk_shadow.rs`). The Corner engine reads
-nothing.
+Under both engines the window server's listing says which Desktop arrived and where each
+window is (`src/platform/controller/desktops.rs`, `src/engine/model/desks.rs`; design r3,
+slices 2 and 3; ARCHITECTURE, "The window server's Desktops"), and the model is compared
+with it at every arrival and look (`src/engine/desk_shadow.rs`). The reads are a layer of
+their own with their own check and fallback (`src/platform/desk_reads.rs`,
+`src/engine/desk_reads.rs`).
+
+- `ctl state`'s `desks.reads`: `way` (`window server`, or `windows on screen` while the
+  reads do not decide), `state` (`working`, `resting`, `probing` after a rest, `off`), `why`
+  (the calls missing, the test switch, a disagreement), `rest_s`, and `checks`: `agreed`,
+  `disagreed`, `rests`, `last_disagreement`. The log: `desktops: the window server's
+  Desktops can be read` once at the first read (or why not, a warning); `desktops: the
+  window server's listing disagrees with the windows on screen: its reads rest` (a warning,
+  the first rest of a run) and `... agrees with the windows on screen again: it decides
+  again`; at debug, each look that disagreed with every screen's Space and the windows
+  asked (ids only).
+- `STAGE_MANAGER_DESKTOPS_GUESS` (a test run) forces the fallback; `SM_DESKTOPS=guess` sets
+  it for every app run of the live suite. `scripts/test-stages.sh reads` checks the reads on
+  one Desktop: on and agreeing, then forced off.
 
 - `Space changed` (and `Space changed on another display`) carry `desk` (the window server's
   Desktop on that screen, read at the arrival) and `agree`: `yes` (its Space was bound to it)
@@ -533,8 +630,8 @@ nothing.
   out of the arrival` (debug); `window left this Space (the window server has it on another
   Desktop)` and `window moved to another Desktop that shows` (`from`, `to`: the window
   server's ids); `the window server has the window on another Desktop than the one shown; the
-  window is placed on its arrival` (debug). The margins table has `FLIP_WAIT`; under the
-  Spaces engine `MIXED_WAIT` and `FOREIGN_SETTLE` no longer appear.
+  window is placed on its arrival` (debug). The margins table has `FLIP_WAIT`; while the
+  listing decides `MIXED_WAIT` and `FOREIGN_SETTLE` no longer appear.
 - `ctl state`'s `desks.decides` (the listing decides now) and `desks.keyed`: `arrivals` (by
   the listing), `flips_waited` and `flips_capped` (notices that came before the flip and
   were waited for; those never followed by one), `unannounced` and `announced_late` (changes
@@ -559,15 +656,25 @@ nothing.
   5 s on; `display-gone` prints them and the log's disagreement lines at each round's end.
   Its last step is the first visit to a Desktop never shown since the launch, by its key,
   with no saved file: one Space change, the Desktop stays, no stage switched on the Desktop
-  left.
+  left. Under both engines it also checks the reads at each of those points (on, never
+  rested); `SM_DESKTOPS=guess scripts/test-stages.sh spaces --auto` runs the same with the
+  reads forced off, where the first visit's two checks are printed, not failed (1.9.2's
+  behaviour under the Corner engine).
 - On the bench (`src/platform/controller/bench/desktops.rs`) the desk keeps the listing
   apart from the window list: the "Current Space" flips 5 ms after the notice is sent
   (`flip_leads_notice` for the other order; a load of 3 or 10 handles the notice after the
   flip), the leaving Desktop's windows may stay listed past it (`leaving_lingers_ms`), the
-  listing may name no Space shown (`listing_unreadable`), a window goes into full screen and
+  listing may name no Space shown (`listing_unreadable`), keep naming the Desktop left
+  (`listing_stuck`) or not be read at all (`desk_reads` false), a window goes into full screen and
   out (`Bench::fullscreen`), is on every Desktop (`on_every_desktop`) or is moved to another
   (`space_moves`), a second screen has Desktops of its own (`screen_comes_with`). Every
-  scenario asserts that the shadow counted no disagreement on the Desktop shown.
+  scenario asserts that the shadow counted no disagreement on the Desktop shown and that the
+  reads never rested. Each Desktop scenario runs under both engines, and
+  `bench/corner_screens.rs` has a screen going and coming under the Corner engine.
+- The fallback is pinned (`bench/guessed.rs`): every scenario that runs the Corner engine is
+  also run with the reads off and must read as `bench/guessed.txt` has it, printed from the
+  code before the Corner engine read the Desktops. After adding a Corner scenario:
+  `BENCH_PRINT=1 cargo test --lib guessed::print_pins -- --nocapture`.
 
 ### A report from another Mac
 
