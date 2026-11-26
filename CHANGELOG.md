@@ -20,8 +20,10 @@
   from the first Desktop change (before: from the third).
 - In the default mode, with several screens, a Desktop change on one screen leaves the other
   screens' stages as they are.
-- In the default mode, a Desktop change that macOS does not announce is followed within a
-  second.
+- In the default mode, a Desktop change that macOS does not announce is followed at once.
+- In the default mode, Mission Control and App Exposé opening and closing are followed at
+  once; before, up to a second later, two with the Mac at rest.
+- `[windows] mission_control_key_keeps_stage = true` works in the default mode too.
 
 ## 1.9.2 — 2026-11-24
 

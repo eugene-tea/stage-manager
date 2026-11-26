@@ -1,5 +1,7 @@
 //! A listen-only event tap at the HID level that hears Mission Control's keys (round
-//! mc-key; the Spaces engine, `[windows] mission_control_stages` not `"off"`).
+//! mc-key: the Spaces engine, `[windows] mission_control_stages` not `"off"`; round
+//! looks-forward: the Corner engine while Mission Control shows, and all along only while
+//! the window server's notices do not bring its looks, `platform/server_notices.rs`).
 //!
 //! The global input monitor ([`super::input::monitor`]) never heard one: macOS takes its
 //! symbolic hotkeys (Mission Control's ⌃↑, App Exposé's ⌃↓, the keyboard's Mission Control
@@ -33,8 +35,10 @@
 //! a Mission Control key that comes as one shows there. Modifier changes are read for ⌘
 //! only, and forwarded only while the switcher is up.
 //!
-//! On only while wanted ([`TapSwitch`]): the Spaces engine arranging with the mode not off,
-//! or ⌘Tab's switcher up (from its Tab heard to its end, whatever the mode).
+//! On only while wanted ([`TapSwitch`]): the Spaces engine arranging with the mode not off;
+//! the Corner engine arranging while Mission Control shows (its close by key or by a press)
+//! or while the window server's notices are not trusted to tell of its opening (the public
+//! fallback); or ⌘Tab's switcher up (from its Tab heard to its end, whatever the mode).
 //! macOS switches a tap off for secure input (a password field) and for a timeout; the tick
 //! switches it on again once secure input is over, a timeout's at once. macOS also sends the
 //! callback its "disabled by user input" notice when we switch the tap off ourselves: one that
@@ -133,10 +137,21 @@ pub fn admit(on: bool) {
     sync();
 }
 
-/// From the engine's tick: `wanted` (the Spaces engine, the mode not off), the shortcuts read
-/// from the user's settings, and whether Mission Control may show now (`armed`: it is seen,
-/// or windows are out for it).
+/// From the engine's tick: `wanted` (the Spaces engine, the mode not off; the Corner engine,
+/// Mission Control showing or the public fallback on), the shortcuts read from the user's
+/// settings, and whether Mission Control may show now (`armed`: it is seen, or windows are
+/// out for it).
 pub fn publish(wanted: bool, keys: Option<Keys>, armed: bool) {
+    // On a fake desk: its own tap is told, the process's is left alone.
+    #[cfg(test)]
+    if super::fake::with(|d| {
+        d.tap_keys = Some(wanted);
+        d.tap_armed = wanted && armed;
+    })
+    .is_some()
+    {
+        return;
+    }
     WANTED_BY_ENGINE.store(wanted, Ordering::Relaxed);
     ARMED.store(wanted && armed, Ordering::Relaxed);
     if let Ok(mut k) = KEYS.lock()
@@ -205,6 +220,7 @@ pub fn status() -> Value {
     let last = LAST_KEY.load(Ordering::Relaxed);
     json!({
         "on": tap_on(),
+        "wanted_by_engine": WANTED_BY_ENGINE.load(Ordering::Relaxed),
         "running": !PORT.load(Ordering::SeqCst).is_null(),
         "armed": ARMED.load(Ordering::Relaxed),
         "switcher_armed": SWITCHER.load(Ordering::Relaxed),

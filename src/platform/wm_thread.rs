@@ -249,7 +249,7 @@ pub enum WmCommand {
     /// The launch's recovery scan read an app after observation's start ([`launch_scan`]).
     LaunchScan(launch_scan::Done<launch_scan::Read>),
     /// The window server's notices of one kind heard in one turn of the main run loop
-    /// ([`super::spaces::notices`], the Spaces engine only): a trigger for a look, never a fact.
+    /// ([`super::server_notices`], every engine of ours): a trigger for a look, never a fact.
     ServerNotice(crate::engine::server_notice::Burst),
 }
 

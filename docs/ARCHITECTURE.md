@@ -46,9 +46,9 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   the engine's. Every other layer is the same under every engine: the window server's own
   call first, wherever a check finds it there and working, and the public one as the fallback
   (pictures: "Window pictures", below; the Desktops' reads: "The window server's Desktops";
-  the window server's notices are still the Spaces engine's only: PLAN, "One way for every
-  mode"). No technique is an engine's only because
-  its call is private.
+  hearing of Mission Control and of a Desktop change's end: "The window server's notices",
+  with Mission Control's key and the Dock's notice as the public way). No technique is an
+  engine's only because its call is private.
 - **Engine is pure Rust** (`src/engine`, `src/config.rs`), unit tested: observations
   in, `Action`s out (`Hide`, `SetFrame`, `Raise`, `Focus`).
 - **Platform layer** (`src/platform`): AX, CGWindowList, ScreenCaptureKit, Carbon hotkeys,
@@ -57,7 +57,9 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   calls, loaded at run time. Window pictures ask the window server's own capture first under
   every engine and fall back to ScreenCaptureKit; the Desktops are read from the window
   server's listing under both of our engines (two read-only calls) and guessed from the
-  windows on screen where that does not work.
+  windows on screen where that does not work; Mission Control's opening and close and a
+  Desktop change's end are heard from the window server's notices under both engines, and
+  from Mission Control's key and the Dock's notice where those do not come.
 - **UI** (`src/ui`): status item and menu, Settings, a strip panel per screen (CALayer
   cards), the motion overlay (just below floating windows; above everything only while a
   dragged window's card shows).
@@ -541,13 +543,16 @@ listing's, and each held window's home with the model's Desktop for it; each dis
 logged once when it begins and once when it ends (`ctl state`'s `desks`). On the bench it
 reads 0 on the Desktop shown in every scenario.
 
-The window server's notices (round r5-notices, the Spaces engine only). The window server
+The window server's notices (round r5-notices for the Spaces engine; both of our engines
+since round looks-forward). The window server
 tells a process that runs the AppKit event loop of some of its changes: a window created,
 shown or hidden, added to or taken out of a Space, Mission Control's or App Exposé's open and
 close, a Desktop change's end (UX-SPEC, "The window server's notices"). The launch registers
-them before its probe when it may run the Spaces engine (`platform/spaces/notices.rs`,
-`SLSRegisterNotifyProc`), forwards them once that engine is chosen and removes them
-otherwise; under the Corner engine nothing is registered. The callback only stamps the notice
+them (`platform/server_notices.rs`, `SLSRegisterNotifyProc`): before its probe when it may
+run the Spaces engine, which hears every type; else once the Corner engine is chosen, which
+hears only the three that bring a look every engine makes (1508, 1401, 1329) and has the
+others removed, so no window made, shown or moved between Spaces wakes the process there.
+The callback only stamps the notice
 and copies its payload; the main run loop's next pass folds a turn's notices into one burst
 per kind (`engine/server_notice.rs`), drops those of the engine's own adds (by the window
 and the Space it asked, never by a time window) and sends the rest to the WM thread
@@ -564,6 +569,23 @@ type came, `silent` when none came within 5 s of the launch probe (silent is no 
 `never_heard` (the types that never came) and each type's counts,
 and `margins` says per wait how often it ended at a notice's look (`noticed`), at the poll's,
 or by its cap.
+
+Those three come with a check and a fallback, as the Desktops' reads do
+(`engine/notice_trust.rs`, `ctl state`'s `engine.notices.trust`). A missed notice changes
+nothing, the poll finds what it would have told, so nothing rests for one; what a trigger can
+do wrong is cost a look for nothing. Working means: the calls there and the registration
+taken, else off for the run; they come: Mission Control's open or close found three times in
+a row with no notice in the two seconds before makes them `silent`; they tell something:
+twenty in a row with no open, close or Space change between them rest them for ten minutes
+(none brings a look), after which they are heard on trial. Under the Corner engine the public
+triggers are the fallback, used only while the notices are not `working`: Mission Control's
+shortcuts heard by the key tap (or the input monitor) and the Dock's `AXCreated`, its
+observer made then from the Dock's pid the tick already has. So with the notices working
+the default mode runs no key tap and no Dock observer at rest, and none of the three fires
+while nothing happens (`ctl state`'s `costs`: `server_notices`, `dock_notices`,
+`trigger_looks`, `tap_events`, `taps_on.mission_keys`). A window added to or taken out of a
+Space (1325, 1326) stays the Spaces engine's: which word of that notice names the window is
+learned from the engine's own asks, and its uses are the stage Spaces'.
 
 Window pictures (`platform/capture.rs`, `platform/capture_fast.rs`, 1.9): every capture asks
 the window server first, one call a window and no listing (`SLSHWCaptureWindowList` for a
@@ -700,6 +722,20 @@ picked window's stage, which the activation's switch shows. An activation just a
 key that closed it, with no click, is no pick (`engine::mission_close`): nothing switches
 and the stage in front's key window is focused again. The engine counts each as lent and parked, so a hide, a show, a
 quit's sweep and the guardian's scan of the park corner bring it back like ⌘Tab's.
+
+Under the Corner engine nothing is lent (a hidden window is on its Desktop already), but its
+upkeep leans on knowing that Mission Control shows: the inert slivers' shield goes off for
+it, the park reconcile, the stills and the patch stop judging the window list. So the same
+triggers bring its look forward there (`platform/controller/looks.rs`,
+`engine/look_watch.rs`): the window server's notice, and while that is not trusted Mission
+Control's key and the Dock's notice. None is a fact; each makes the look for an overview run
+now and for a moment at the fast tick, and the Space check's look stays behind them. While
+Mission Control shows the key tap is on, whatever told of its opening, to hear what closes
+it: the looks for its close come at the fast tick, and with `[windows]
+mission_control_key_keeps_stage` an activation or a focus just after its closing key is no
+pick under this engine too. Found by the Space check alone, Mission Control was known up to
+a second late (two at rest); on the bench the park reconcile then read its layout as parked
+windows out of their corner (`bench/looks.rs`).
 
 ```mermaid
 sequenceDiagram

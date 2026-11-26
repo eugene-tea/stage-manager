@@ -85,7 +85,7 @@ pub(super) struct MissionWatch {
 }
 
 /// A shortcut of the settings as the engine compares it.
-fn shortcut(key: SpaceKey) -> Shortcut {
+pub(super) fn shortcut(key: SpaceKey) -> Shortcut {
     Shortcut { keycode: key.keycode, mods: Mods::from_flags(key.modifiers), enabled: key.enabled }
 }
 
@@ -328,7 +328,7 @@ impl Controller {
 
     /// The key window of the main display's stage in front, with its app: the focus a close
     /// by key gives back ([`Self::mission_no_pick`]).
-    fn mission_front_key(&self) -> Option<(WindowId, i32)> {
+    pub(super) fn mission_front_key(&self) -> Option<(WindowId, i32)> {
         let m = self.model.as_ref()?;
         let stage = m.stage(m.main_active_stage()?)?;
         let key = m.focus_key(stage.key, &stage.windows)?;
@@ -388,6 +388,13 @@ impl Controller {
             return;
         }
         self.spaces.mission.refocus = None;
+        self.refocus_front_stage(ob, since, now);
+    }
+
+    /// The stage in front's key window raised and focused, when another app or another
+    /// window has the focus: what a close by key that was no pick gives back (`since`: since
+    /// when it waited). Every engine's.
+    pub(super) fn refocus_front_stage(&mut self, ob: &Observer, since: Instant, now: Instant) {
         let Some((key, pid)) = self.mission_front_key() else { return };
         let front = apps::frontmost_pid();
         if front == Some(pid) && super::focused_window() == Some(key.0) {
@@ -875,7 +882,7 @@ impl Controller {
 /// True when `by` is the focus a close by key gives back: the activation of the app of the
 /// stage in front's key window (`front_key`, with its app), or that window's own focus. Another
 /// window of that app focused (one put home under the pointer) is not.
-fn gives_focus_back(by: PickBy, front_key: Option<(WindowId, i32)>) -> bool {
+pub(super) fn gives_focus_back(by: PickBy, front_key: Option<(WindowId, i32)>) -> bool {
     match (by, front_key) {
         (PickBy::App(pid), Some((_, front))) => pid == front,
         (PickBy::Window(id, _), Some((key, _))) => id == key,

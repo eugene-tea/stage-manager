@@ -525,7 +525,9 @@ same by default (11-20 11:16:36, pressed again from the stage in front: Terminal
 was under the pointer, came in front with its stage). With `[windows]
 mission_control_key_keeps_stage` an activation or a focus within 1 s of that key, with no
 click since, switches nothing: the windows put home go back, and the stage in front's key
-window is focused again once Mission Control is gone (about 0.6 s after the key). A click
+window is focused again once Mission Control is gone (about 0.6 s after the key). Under both
+engines (the Accessibility engine since round looks-forward, on the bench: nothing is put
+home there, and the closing key is heard by the key tap, on while Mission Control shows). A click
 while it shows is a pick either way. Mission Control lays
 out a window that arrives after it opened (`scripts/test-stages.sh mission-probe`, 11-18; the
 log's `mission-control:` lines say how many it laid out each time). Where Show Desktop pushes a window (while it
@@ -1444,8 +1446,11 @@ should be added there.
 ## The window server's notices
 
 Measured on macOS 27.2, 11-21 (`probe-spaces cgs`, a process running the AppKit event loop;
-no notice of these types in 52 rests of 3 s). The Spaces engine uses them as triggers for its
-looks, never as facts (ARCHITECTURE, "The window server's notices").
+no notice of these types in 52 rests of 3 s). Both engines use them as triggers for their
+looks, never as facts (ARCHITECTURE, "The window server's notices"): the Spaces engine all
+of them since 1.9.2, the Accessibility engine the three that tell of Mission Control and of
+a Desktop change's end (1508, 1401, 1329) since round looks-forward (11-25, on the bench;
+not yet run live there).
 
 | Type | Payload | Comes |
 |---|---|---|
@@ -1468,6 +1473,28 @@ look that finds macOS's own window and the Dock's cover gone ends the freeze on 
 inference (before: 1 s more); a hidden window taken out of its stage's Space by macOS is
 hidden again at once (before: at the next tick, up to 2 s), a window in a stage Space nothing
 answers for let out at once (before: up to 10 s).
+
+What they change under the Accessibility engine (the bench, `bench/looks.rs`, at load 1, 3
+and 10): Mission Control and App Exposé are known within a fast tick of macOS's window being
+listed, however they were opened (before: at the Space check, 0.7 to 1.2 s later, 2 s at
+rest), so the inert slivers' shield, the park reconcile and the corner patch stop for them at
+once; on the bench the reconcile asked both hidden windows to park again while Mission
+Control had them laid out, and no longer does. After their close the look that finds macOS's
+window and the Dock's cover gone ends the freeze with no settle (before: found up to a
+second after the cover went, then 1 s more). A Desktop change with no notice from
+NSWorkspace is taken within a fast tick of its end (before: within a second).
+
+The notices are checked while the app runs. A missed one changes nothing (the poll's look
+finds what it would have told), so nothing rests for that; but three opens or closes of
+Mission Control in a row with no notice in the 2 s before make them count as silent, and
+twenty notices in a row with no open, close or Space change between them rest them for
+10 minutes (`ctl state`, `engine.notices.trust`). While they are not trusted the
+Accessibility engine falls back to the public triggers: Mission Control's shortcut heard by
+the key tap, and a notice of the Dock's (whether the Dock sends one as Mission Control opens
+is not measured; `ctl state`'s `mission_control.looks` counts what each announced). With the
+notices working neither runs: the key tap is on only while Mission Control shows, to hear
+what closes it. None of the three fires while nothing happens (`costs`: `server_notices`,
+`dock_notices`, `trigger_looks`, `tap_events`).
 
 ## The window server's Desktops
 
@@ -1507,10 +1534,11 @@ What a person sees change, under both engines:
 
 What differs between the engines, by where a hidden window is:
 
-- The Spaces engine's alone: the window server's notices (a change taken within a fast tick,
-  a moved window at once), so under the Accessibility engine each of the above comes at the
-  next look, within a second (2 s at rest); a hidden window let out of its stage Space is
-  hidden again.
+- The Spaces engine's alone: the window server's notices of a window added to or taken out
+  of a Space (which word names the window is learned from the engine's own asks), so a
+  window moved to another Desktop leaves its stage at once there and at the next look, within
+  a second (2 s at rest), under the Accessibility engine; a hidden window let out of its
+  stage Space is hidden again. The notices of a Desktop change's end are both engines'.
 - The Accessibility engine's alone: a hidden window is in the park corner of its own Desktop,
   so one dragged to another Desktop in Mission Control moves there with its Desktop's next
   look, as a shown one does. The park corner's own checks still wait a second after a

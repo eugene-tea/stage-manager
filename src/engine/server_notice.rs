@@ -1,5 +1,5 @@
 //! The window server's notices to the app, the pure half (round r5-notices; the platform half
-//! is [`crate::platform::spaces::notices`], docs/ARCHITECTURE.md "The window server's
+//! is [`crate::platform::server_notices`], docs/ARCHITECTURE.md "The window server's
 //! notices"). A notice is a **trigger for a read**, never a fact: it says "look now", and what
 //! the look finds decides, as the tick's look decides without it. Every poll stays as the cap
 //! behind it.
@@ -100,6 +100,16 @@ impl Kind {
     /// The WM thread has a use for it ([`Burst`]); the others are only counted.
     pub fn forwarded(self) -> bool {
         matches!(self, Kind::Added | Kind::TakenOut | Kind::DesktopChanged | Kind::DesktopChangedToo | Kind::Overview)
+    }
+
+    /// The kinds that bring forward a look every window engine of ours makes (round
+    /// looks-forward): the look for an overview, the check for a Desktop change with no
+    /// notice. The others serve the Spaces engine's own book-keeping.
+    pub const LOOKS: [Kind; 3] = [Kind::DesktopChangedToo, Kind::DesktopChanged, Kind::Overview];
+
+    /// True for a kind of [`Self::LOOKS`].
+    pub fn brings_look(self) -> bool {
+        Self::LOOKS.contains(&self)
     }
 }
 

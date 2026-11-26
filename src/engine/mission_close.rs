@@ -30,6 +30,11 @@ use super::model::Pid;
 /// Escape's virtual key code: it closes Mission Control and App Exposé.
 pub const ESCAPE_KEY: u16 = 53;
 
+/// With no window out to say when a close is over (an engine that lends nothing), it is
+/// over this long after the last key or press heard for it ([`CloseWatch::stale`]): past
+/// [`KEY_COUNTS`] and the focus that follows a refused activation by tens of ms.
+pub const CLOSE_OVER: Duration = Duration::from_millis(2000);
+
 /// An activation or a focus this long after the key that closed Mission Control (no click
 /// since) is macOS's, not a pick: Mission Control's close plays about half a second (its
 /// own window gone 0.53 s after a pick, `scripts/probe_apple.py mission-pick`, 11-19), and the
@@ -95,6 +100,12 @@ impl CloseWatch {
     /// The close is over (every window put home is back): nothing counts any more.
     pub fn over(&mut self) {
         *self = Self::default();
+    }
+
+    /// True once every key and press heard for this close is [`CLOSE_OVER`] old (or none
+    /// was): nothing of it counts any more.
+    pub fn stale(&self, now: Instant) -> bool {
+        [self.key, self.click].into_iter().flatten().all(|t| now.saturating_duration_since(t) >= CLOSE_OVER)
     }
 }
 
@@ -196,6 +207,11 @@ mod tests {
         w.key(t0);
         w.opened();
         assert!(!w.closed_by_key(t0 + ms(10)), "opened again: the last close's key counts no more");
+        // With nothing lent, the close is over a while after its last key or press.
+        assert!(w.stale(t0), "nothing heard");
+        w.key(t0);
+        w.click(t0 + ms(500));
+        assert!(!w.stale(t0 + ms(2100)) && w.stale(t0 + ms(500) + CLOSE_OVER));
     }
 
     /// Apple's brings the activated app's stage in front (`mission-close-key`, 11-20): the

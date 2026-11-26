@@ -115,6 +115,10 @@ fn flip_with_no_notice_corner(load: f64) -> Run {
     flip_with_no_notice(EngineKind::Corner, load, false)
 }
 
+fn flip_with_no_notice_corner_server_tells(load: f64) -> Run {
+    flip_with_no_notice(EngineKind::Corner, load, true)
+}
+
 /// A Space change's notice with no change (another screen's Desktop that is not managed, a
 /// slide given up): nothing moves, and the stages are not held for long.
 fn notice_with_no_flip_on(engine: EngineKind, load: f64) -> Run {
@@ -556,6 +560,10 @@ fn corner_desktop_keys_and_changes_with_no_notice() {
     // At load 10 a look falls at the slide's end: sooner, the same end.
     let sooner = "Desktop 2 recognized by the slide's end; front [13] shows [13] desktop 2 app 101 switches 0 slides 0; shadow 0 shown (0 open) 0 homes";
     expect(flip_with_no_notice_corner, [ticked, ticked, sooner]);
+    // With the window server's notice of the change's end (1401), heard under the Corner
+    // engine since round looks-forward: taken at the look it brings, as under Spaces (before:
+    // as above).
+    expect(flip_with_no_notice_corner_server_tells, [sooner, sooner, sooner]);
     // Before: "settled at once" (the arrival guessed the same Desktop again). Now the
     // listing is waited for, FLIP_WAIT (a cap, 300 ms), and nothing arrives.
     let nothing = "settled within 0.5 s; front [12] shows [12] desktop 1 app 102 switches 0 slides 1; shadow 0 shown (0 open) 0 homes";
@@ -638,6 +646,7 @@ pub(super) const ALL: &[Scenario] = &[
     ("Desktop keys, the listing flips before the notice (Corner)", "the Spaces scenario's twin", desktop_keys_flip_first_corner),
     ("Desktop keys, the notice 5 ms before the flip (Corner)", "the Spaces scenario's twin", desktop_keys_notice_first_corner),
     ("a Desktop change whose notice never comes (Corner)", "the Spaces scenario's twin (before: FOREIGN_SETTLE)", flip_with_no_notice_corner),
+    ("a Desktop change whose notice never comes, the window server tells (Corner)", "looks-forward, 1401", flip_with_no_notice_corner_server_tells),
     ("a Space change's notice with no change (Corner)", "the Spaces scenario's twin", notice_with_no_flip_corner),
     ("both Desktops listed at the arrival (Corner)", "the Spaces scenario's twin (before: MIXED_WAIT)", both_desktops_listed_at_the_arrival_corner),
     ("the listing not readable for one arrival (Corner)", "the Spaces scenario's twin", listing_unreadable_for_one_arrival_corner),

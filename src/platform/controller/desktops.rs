@@ -321,7 +321,7 @@ impl Controller {
         if !self.phase.changing() && !self.desk_differences(&listing).is_empty() {
             return false;
         }
-        self.spaces.server.workspace_heard(heard);
+        self.server.workspace_heard(heard);
         self.desks.announced_late += 1;
         tracing::info!("Space change notified after a look had taken it from the window server's listing: nothing more to do");
         true

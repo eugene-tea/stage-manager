@@ -483,6 +483,18 @@ pub struct Desk {
     /// the AppKit event loop turning, 11-21). False: none come, as on a Mac where they do not
     /// (or before round r5-notices); every poll then decides alone.
     pub server_notices: bool,
+    /// The window server's notices can be registered on this desk
+    /// (`platform/server_notices.rs`, `listening`). False: a macOS where the calls are gone.
+    pub server_calls: bool,
+    /// The notices' standing on this desk (`platform/server_notices.rs`; the process's own in
+    /// the app).
+    pub notice_trust: crate::engine::notice_trust::Trust,
+    /// What the app last said it wants of the key tap (`mission_key_tap::publish`): on at all
+    /// (`None`: nothing said yet), and armed for Escape and presses while Mission Control
+    /// may show.
+    pub tap_keys: Option<bool>,
+    /// See [`Self::tap_keys`].
+    pub tap_armed: bool,
     /// How long after an app moved its window the window server lists it at its new place,
     /// in ms before the load factor (`None`: at once). Live 11-22, Mission Control's key 1 s
     /// after its close: six apps answered their parks in ~4 ms each and all six windows were
@@ -523,6 +535,16 @@ pub struct Desk {
     pub mission: bool,
     /// The frames Mission Control's layout took the windows from.
     mission_frames: BTreeMap<u32, Rect>,
+    /// While Mission Control shows, the window server lists the windows of the Desktop shown
+    /// where its layout has them (`engine/overview.rs`: "Mission Control lists every window
+    /// moved into its layout"; 11-18, a 1949x1288 window listed at 718x474), the parked ones
+    /// too. False, the desk's way until round looks-forward: listed where they were.
+    pub mission_lays_out: bool,
+    /// Where the window list has each window while Mission Control shows ([`Self::mission_lays_out`]).
+    mission_layout: BTreeMap<u32, Rect>,
+    /// The Dock sends `AXCreated` as Mission Control opens (never measured: `engine/mission_control.rs`,
+    /// "whether one comes as it opens is not measured"). False: it sends none.
+    pub dock_tells_mission: bool,
     /// What the app asked, in order, each with the ms since the desk was made.
     pub calls: Vec<(u64, Call)>,
     /// The probes the observer started: pid to (probe id, retry).
@@ -686,6 +708,10 @@ impl Desk {
             tap_switcher: false,
             activation_leads_slide: false,
             server_notices: false,
+            server_calls: true,
+            notice_trust: crate::engine::notice_trust::Trust::new(),
+            tap_keys: None,
+            tap_armed: false,
             lists_moves_ms: None,
             late_moves: BTreeMap::new(),
             flip_leads_notice: false,
@@ -699,6 +725,9 @@ impl Desk {
             made_for: BTreeMap::new(),
             mission: false,
             mission_frames: BTreeMap::new(),
+            mission_lays_out: false,
+            mission_layout: BTreeMap::new(),
+            dock_tells_mission: false,
             calls: Vec::new(),
             probes: BTreeMap::new(),
             home: dir,
@@ -1033,6 +1062,8 @@ impl Desk {
 
     fn listed(&self, w: &Win) -> CgWindow {
         let bounds = self.late_moves.get(&w.id).filter(|(until, _)| clock::now() < *until).map_or(w.frame, |(_, old)| *old);
+        // In Mission Control's layout while it shows ([`Self::mission_lays_out`]).
+        let bounds = self.mission_layout.get(&w.id).copied().unwrap_or(bounds);
         CgWindow { id: w.id, pid: w.pid, owner: w.owner.clone(), name: None, layer: w.layer, bounds, onscreen: self.on_screen(w), alpha: 1.0 }
     }
 
@@ -1631,6 +1662,9 @@ impl Desk {
                     self.overlays.push(CgWindow { id, pid, owner: owner.into(), name: None, layer, bounds: self.screens[0].display.frame, onscreen: true, alpha: 1.0 });
                     self.overlays.sort_by_key(|w| std::cmp::Reverse(w.layer));
                 }
+                if on && owner == "WindowManager" && layer == 19 && self.mission && self.mission_lays_out {
+                    self.lay_out_mission();
+                }
             }
             Step::Switcher(shown) => self.switcher.shown = shown,
             Step::Opens { id, pid, frame, title } => {
@@ -1641,6 +1675,7 @@ impl Desk {
             }
             Step::MissionRestores => {
                 self.mission = false;
+                self.mission_layout.clear();
                 for (id, frame) in std::mem::take(&mut self.mission_frames) {
                     if let Some(w) = self.windows.get_mut(&id) {
                         w.frame = frame;
@@ -1721,6 +1756,25 @@ impl Desk {
         self.post_after(delays::MISSION_SHOWS, 0.0, Notice::Step(Step::Overlay { owner: "Dock", layer: 20, on: true }));
         self.mission = true;
         self.server_notice(delays::SERVER_MISSION_OPENS, Kind::Overview, Vec::new());
+        if self.dock_tells_mission {
+            self.post_after(delays::MISSION_SHOWS, 0.0, Notice::Switcher("AXCreated"));
+        }
+    }
+
+    /// Mission Control's layout ([`Self::mission_lays_out`]): every window of the main
+    /// screen's Desktop shown that is listed on screen, front to back, in a row across the
+    /// top at two fifths of its size.
+    fn lay_out_mission(&mut self) {
+        let display = self.screens[0].display.frame;
+        let shown = self.screens[0].shown;
+        let ids: Vec<u32> = self.z.iter().copied().filter(|id| self.windows.get(id).is_some_and(|w| w.layer == 0 && self.on_screen(w) && w.spaces.contains(&shown))).collect();
+        let mut x = display.x + 80.0;
+        for id in ids {
+            let frame = self.windows[&id].frame;
+            let (w, h) = (frame.w * 0.4, frame.h * 0.4);
+            self.mission_layout.insert(id, Rect::new(x, display.y + 140.0, w, h));
+            x += w + 40.0;
+        }
     }
 
     /// The window server's notice of `kind` naming `members` (window, Space), `ms` from now
