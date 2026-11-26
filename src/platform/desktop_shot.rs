@@ -9,13 +9,17 @@
 //! arrival once its slide settled, when the icons in the corner change, [`AGAIN_AFTER_TOUCH`]
 //! after a press on the desktop or a release in the corner ([`touched`]), [`FADE`] after the
 //! wallpaper changed ([`wallpaper_changed`]) or the frame the clock predicts is due
-//! ([`set_frame_due`]), else every [`REFRESH_EVERY`].
+//! ([`set_frame_due`]), and once more after the screen was unlocked or the display woke, else
+//! every [`REFRESH_EVERY`] ([`refresh_every`]: less often through ScreenCaptureKit where the
+//! wallpaper alone lies in the corner).
 //!
 //! The corner patch draws the desktop picture from its file, so it cannot stand for a corner
 //! with icons on it ([`crate::engine::corner::corner_patch`]), and 8L2 gave such a desktop the instant
-//! arrival. This keeps a still of the corner block ([`block`]) taken through ScreenCaptureKit
-//! of the desktop-level windows only ([`super::capture::capture_desktop`]: the picture and what
-//! lies on it, nothing else), fresh while it is wanted ([`keep_fresh`], from the WM thread at every
+//! arrival. This keeps a still of the corner block ([`block`]) of the desktop-level windows
+//! only (the picture and what lies on it, nothing else), taken by the window server's own
+//! call first and through ScreenCaptureKit where that call does not work or is not proven
+//! ([`super::desktop_fast::take`], round desktop-still; ScreenCaptureKit's is
+//! [`super::capture::capture_desktop`]), fresh while it is wanted ([`keep_fresh`], from the WM thread at every
 //! corner patch plan): macOS raises the activated windows in the corner before the app hears
 //! of the activation, and a capture started then would come after the overlay's first frame.
 //!
@@ -35,6 +39,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 
 use super::capture::{self, DesktopStill};
+use super::desktop_fast::{self, Way};
 use super::{pixels, wallpaper};
 use crate::engine::geometry::Rect;
 use crate::engine::corner::park::Corner;
@@ -51,8 +56,28 @@ pub const BLOCK: f64 = crate::engine::corner::corner_patch::COVER_CAP;
 /// any cover lies inside it with room to spare.
 pub const ZONE: f64 = 640.0;
 
-/// A still this old is taken again while it is wanted.
+/// A still this old is taken again while it is wanted: what lies in the corner can change
+/// with no cause the app hears (a widget's content, an icon's preview, label or badge, a
+/// selection made from the keyboard), and this is the longest such a change waits.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(10);
+
+/// The same for a still that came through ScreenCaptureKit (about 0.4 s of the window
+/// server's time each, UX-SPEC "Window engines measured") where Finder's icons are known and
+/// none lies in the corner's [`zone`]: the wallpaper's own changes are heard (its read every
+/// 2 s, the frame the clock predicts, the appearance, a Desktop's arrival), so the timer is
+/// only the backstop there. Under [`MAX_AGE`] with a failed try and its retry to spare.
+pub const REFRESH_FALLBACK: Duration = Duration::from_secs(30);
+
+/// How old a still that came `route` may get before it is taken again with no cause, with
+/// Finder's `icons` in the corner's zone as known now (`None`: not known): [`REFRESH_EVERY`],
+/// or [`REFRESH_FALLBACK`] through ScreenCaptureKit with no icon there. A widget in the
+/// corner is not known to the app: through ScreenCaptureKit it waits the longer time.
+pub fn refresh_every(route: Way, icons: Option<&[Rect]>) -> Duration {
+    match (route, icons) {
+        (Way::ScreenCaptureKit, Some([])) => REFRESH_FALLBACK,
+        _ => REFRESH_EVERY,
+    }
+}
 
 /// A still older than this never stands for the corner (the picture may have moved on: a
 /// dynamic desktop, an icon's label).
@@ -106,6 +131,8 @@ pub struct Meta {
     pub opaque: bool,
     /// Counts the stills kept in this run: the patch redraws when it changes.
     pub serial: u64,
+    /// The way it came: the window server's own call, or ScreenCaptureKit.
+    pub route: Way,
 }
 
 /// How a still stands for the corner ([`usable`]).
@@ -149,14 +176,14 @@ pub fn block(display: Rect, rect: Option<Rect>, corner: Corner) -> Rect {
 }
 
 /// Whether a new still is due for `key` and `region`: none yet, another Desktop, display or
-/// icons, a smaller block, [`REFRESH_EVERY`] old, or taken before one of the moments `again`
-/// that has come (a press on the desktop, a wallpaper change or a predicted frame change and
-/// its fade).
+/// icons, a smaller block, as old as its way allows ([`refresh_every`]), or taken before one
+/// of the moments `again` that has come (a press on the desktop, a wallpaper change or a
+/// predicted frame change and its fade, an unlock).
 pub fn due(meta: Option<&Meta>, key: &Key, region: Rect, again: &[Instant], now: Instant) -> bool {
     let Some(m) = meta else { return true };
     m.key != *key
         || !m.region.contains_rect(&region)
-        || now.saturating_duration_since(m.taken) >= REFRESH_EVERY
+        || now.saturating_duration_since(m.taken) >= refresh_every(m.route, key.icons.as_deref())
         || again.iter().any(|a| now >= *a && m.taken < *a)
 }
 
@@ -290,6 +317,8 @@ struct State {
     missing_since: Option<Instant>,
     /// What the patch found at the last plan, for `ctl state`.
     patch: Option<Still>,
+    /// The screen was locked or the display asleep at the last plan ([`back`]).
+    away: bool,
 }
 
 /// Every screen's state, by its `CGDirectDisplayID` (round displays-2).
@@ -333,6 +362,7 @@ pub fn keep_fresh(screen: u32, key: Key, region: Rect, moment: Moment, wants: Wa
         return;
     }
     let start = with_state(screen, |s| {
+        back(s, moment.locked || moment.asleep, now);
         // The capture gate first (pure and cheap): with captures off that is the reason the
         // switch logs, whatever else holds (the scripts expect exactly it).
         if let Err(block) = take_now(moment, wants.patch, safety) {
@@ -359,8 +389,8 @@ pub fn keep_fresh(screen: u32, key: Key, region: Rect, moment: Moment, wants: Wa
     let Some(generation) = start else { return };
     super::costs::bump(super::costs::Cost::DesktopStill);
     let wanted = key.clone();
-    let done = Box::new(move |still: DesktopStill| arrived(screen, still, wanted, region, generation, now));
-    if let Err(why) = capture::capture_desktop(screen, region, done) {
+    let done = Box::new(move |still: DesktopStill, way: Way| arrived(screen, still, way, wanted, region, generation, now));
+    if let Err(why) = desktop_fast::take(screen, region, done) {
         with_state(screen, |s| {
             s.taking = None;
             s.failed = true;
@@ -437,6 +467,17 @@ pub fn touched(screen: u32, now: Instant) {
     with_state(screen, |s| add_mark(s, now + AGAIN_AFTER_TOUCH));
 }
 
+/// The screen is unlocked or the display awake again after being `away` (WM thread, at every
+/// plan): a still is taken again once the fade is over and once more a refresh later, as the
+/// timer took them before this round whatever the way (an aerial picture comes to rest for a
+/// while after an unlock, with nothing the app hears).
+fn back(s: &mut State, away: bool, now: Instant) {
+    if std::mem::replace(&mut s.away, away) && !away {
+        add_mark(s, now + FADE);
+        add_mark(s, now + REFRESH_EVERY);
+    }
+}
+
 /// Keeps a moment in [`State::again`] (a few at most: the older ones a still has passed go).
 fn add_mark(s: &mut State, at: Instant) {
     let taken = s.shot.as_ref().map(|x| x.meta.taken);
@@ -450,8 +491,10 @@ fn add_mark(s: &mut State, at: Instant) {
 }
 
 /// The wallpaper read names another picture, placement or look (main thread): the still is
-/// of the old one; dropped, and taken again once the fade is over ([`FADE`]).
+/// of the old one; dropped, and taken again once the fade is over ([`FADE`]). The window
+/// server's call is proven afresh on the new picture ([`desktop_fast::unproven`]).
 pub fn wallpaper_changed(screen: u32, now: Instant) {
+    desktop_fast::unproven(screen);
     with_state(screen, |s| {
         forget_one(s);
         add_mark(s, now + FADE);
@@ -487,10 +530,10 @@ pub fn since_dropped(screen: u32, now: Instant) -> Option<Duration> {
     with_state(screen, |s| s.dropped_at.map(|t| now.saturating_duration_since(t))).flatten()
 }
 
-/// A capture started at `started` answered (a ScreenCaptureKit queue): kept unless [`forget`]
-/// came since or a newer still is kept ([`newer`]); stamped with its start (what it shows is
-/// at least that old).
-fn arrived(screen: u32, still: DesktopStill, key: Key, region: Rect, generation: u64, started: Instant) {
+/// A capture started at `started` answered, the way `route` (the still's own thread, or a
+/// ScreenCaptureKit queue): kept unless [`forget`] came since or a newer still is kept
+/// ([`newer`]); stamped with its start (what it shows is at least that old).
+fn arrived(screen: u32, still: DesktopStill, route: Way, key: Key, region: Rect, generation: u64, started: Instant) {
     // Judged before the lock: a small draw.
     let still = still.map(|(image, scale)| {
         let opaque = pixels::min_alpha(&image).is_some_and(|a| a >= OPAQUE_ALPHA);
@@ -509,18 +552,18 @@ fn arrived(screen: u32, still: DesktopStill, key: Key, region: Rect, generation:
             Ok((image, scale, opaque)) => {
                 if !s.had {
                     s.had = true;
-                    tracing::info!(screen, %region, opaque, "a still of the desktop stands for the park corner (the corner patch's picture, a switch's cover)");
+                    tracing::info!(screen, %region, opaque, route = route.as_str(), "a still of the desktop stands for the park corner (the corner patch's picture, a switch's cover)");
                 }
                 let now = Instant::now();
                 if s.take_logged.is_none_or(|t| now.saturating_duration_since(t) >= TAKE_LOG_EVERY) {
                     s.take_logged = Some(now);
-                    tracing::debug!(%region, opaque, took_ms = now.saturating_duration_since(started).as_millis() as u64, "the desktop's still taken (logged at most once a minute)");
+                    tracing::debug!(%region, opaque, route = route.as_str(), took_ms = now.saturating_duration_since(started).as_millis() as u64, "the desktop's still taken (logged at most once a minute)");
                 }
                 s.said = None;
                 s.why_none = None;
                 s.serial = s.serial.wrapping_add(1);
                 s.again.retain(|a| *a > started);
-                s.shot = Some(Shot { meta: Meta { key, region, scale, taken: started, opaque, serial: s.serial }, image });
+                s.shot = Some(Shot { meta: Meta { key, region, scale, taken: started, opaque, serial: s.serial, route }, image });
             }
             Err(why) => say(s, &why),
         }
@@ -600,10 +643,13 @@ fn forget_one(s: &mut State) {
 }
 
 /// The still of `screen` for `ctl state` (tests): its block, age, whether it stands alone,
-/// why none.
+/// the way it came and what the window server's call says of itself, why none.
 pub fn status(screen: u32) -> serde_json::Value {
+    let window_server = desktop_fast::status(screen);
     with_state(screen, |s| {
         serde_json::json!({
+            "route": s.shot.as_ref().map(|x| x.meta.route.as_str()),
+            "window_server": window_server,
             "region": s.shot.as_ref().map(|x| x.meta.region),
             "age_ms": s.shot.as_ref().map(|x| x.meta.taken.elapsed().as_millis() as u64),
             "opaque": s.shot.as_ref().map(|x| x.meta.opaque),
@@ -630,7 +676,7 @@ mod tests {
     const MAIN: Rect = Rect::new(0.0, 0.0, 2560.0, 1440.0);
 
     fn meta(key: Key, taken: Instant) -> Meta {
-        Meta { key, region: block(MAIN, None, Corner::BottomRight), scale: 2.0, taken, opaque: true, serial: 1 }
+        Meta { key, region: block(MAIN, None, Corner::BottomRight), scale: 2.0, taken, opaque: true, serial: 1, route: Way::WindowServer }
     }
 
     #[test]
@@ -680,6 +726,48 @@ mod tests {
         let moved = Key::new(1, MAIN, Corner::BottomRight, Some(&[Rect::new(2400.0, 1300.0, 100.0, 100.0)]));
         assert!(due(Some(&m), &moved, region, &[], now), "an icon came into the corner");
         assert!(due(Some(&m), &key, Rect::new(2000.0, 1120.0, 560.0, 320.0), &[], now), "a bigger block");
+    }
+
+    /// Round desktop-still: the timer's pace follows what a still costs and what can change
+    /// unheard. The window server's still keeps 10 s everywhere; ScreenCaptureKit's rests
+    /// 30 s only where the icons are known and none lies in the corner.
+    #[test]
+    fn a_still_through_screencapturekit_rests_longer_where_the_wallpaper_alone_lies() {
+        let icon = Rect::new(2400.0, 1300.0, 100.0, 100.0);
+        assert_eq!(refresh_every(Way::WindowServer, Some(&[])), REFRESH_EVERY);
+        assert_eq!(refresh_every(Way::WindowServer, Some(&[icon])), REFRESH_EVERY);
+        assert_eq!(refresh_every(Way::ScreenCaptureKit, Some(&[])), REFRESH_FALLBACK);
+        assert_eq!(refresh_every(Way::ScreenCaptureKit, Some(&[icon])), REFRESH_EVERY, "an icon's preview or label changes unheard");
+        assert_eq!(refresh_every(Way::ScreenCaptureKit, None), REFRESH_EVERY, "the icons not known");
+        assert!(REFRESH_FALLBACK + RETRY * 2 < MAX_AGE, "a failed try and its retry before the still is too old");
+        let now = Instant::now();
+        let calm = Key::new(1, MAIN, Corner::BottomRight, Some(&[]));
+        let region = block(MAIN, None, Corner::BottomRight);
+        let slow = Meta { route: Way::ScreenCaptureKit, ..meta(calm.clone(), now) };
+        assert!(!due(Some(&slow), &calm, region, &[], now + REFRESH_EVERY));
+        assert!(due(Some(&slow), &calm, region, &[], now + REFRESH_FALLBACK));
+        // A cause still takes one at once, whatever the way.
+        let touch = now + Duration::from_secs(1);
+        assert!(due(Some(&slow), &calm, region, &[touch], touch));
+        let fast = meta(calm.clone(), now);
+        assert!(due(Some(&fast), &calm, region, &[], now + REFRESH_EVERY));
+    }
+
+    /// After an unlock or a wake a still is taken again once the fade is over and once more
+    /// a refresh later, as the timer did before the fallback's pace grew.
+    #[test]
+    fn an_unlock_takes_the_still_again_twice() {
+        let t0 = Instant::now();
+        let mut s = State::default();
+        back(&mut s, false, t0);
+        assert!(s.again.is_empty(), "never away");
+        back(&mut s, true, t0);
+        assert!(s.again.is_empty(), "locked: nothing yet");
+        let t1 = t0 + Duration::from_secs(60);
+        back(&mut s, false, t1);
+        assert_eq!(s.again, vec![t1 + FADE, t1 + REFRESH_EVERY]);
+        back(&mut s, false, t1 + Duration::from_secs(1));
+        assert_eq!(s.again.len(), 2, "once an unlock");
     }
 
     #[test]

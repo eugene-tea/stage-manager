@@ -25,7 +25,9 @@
 //! (with `hover` only moves the pointer there, back with `debug-pointer-back`), `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
 //! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
-//! as the Dock shows it (its items' titles, the one selected), `debug-mission-control
+//! as the Dock shows it (its items' titles, the one selected), `debug-desktop-still` takes a
+//! still of the desktop in the main screen's park corner both ways now (the window server's
+//! call and ScreenCaptureKit) and says how far apart they are, `debug-mission-control
 //! status|lend [card]|back|mode off|shown|key|config` drives Mission Control's lends under the Spaces
 //! engine by hand (the probe: every hidden window put home now and kept out, taken back, the
 //! mode for this run; `lend card` parks them at their cards), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
@@ -362,6 +364,12 @@ pub enum Command {
     /// ⌘Tab's switcher as the Dock's Accessibility shows it now: the items' titles, the one
     /// selected (needs `STAGE_MANAGER_TEST=1`; round cmd-tab).
     DebugSwitcher,
+    /// A still of the desktop in the main screen's park corner taken both ways now, through
+    /// the window server's call and through ScreenCaptureKit, and how far apart the two are:
+    /// sizes, colour spaces, times and the difference, never a picture (needs
+    /// `STAGE_MANAGER_TEST=1`; round desktop-still,
+    /// [`crate::platform::desktop_fast::compare_now`]).
+    DebugDesktopStill,
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
     DebugClose {
@@ -564,6 +572,7 @@ impl Command {
                 Ok(Self::DebugFullscreen { id, on })
             }
             ["debug-switcher"] => Ok(Self::DebugSwitcher),
+            ["debug-desktop-still"] => Ok(Self::DebugDesktopStill),
             ["debug-mission-control", rest @ ..] => match rest {
                 ["status" | "lend" | "back" | "launch"] | ["lend", "card"] | ["mode", "off" | "shown" | "key" | "config"] => {
                     Ok(Self::DebugMissionControl(rest.iter().map(|w| (*w).to_string()).collect()))
@@ -1198,6 +1207,8 @@ mod tests {
         assert!(Command::parse("debug-mission-control").is_err());
         assert!(Command::parse("debug-mission-control mode sometimes").is_err());
         assert!(Command::parse("debug-switcher now").is_err());
+        assert_eq!(Command::parse("debug-desktop-still"), Ok(Command::DebugDesktopStill));
+        assert!(Command::parse("debug-desktop-still now").is_err());
         assert!(Command::parse("debug-cmd-tab").is_err());
         assert!(Command::parse("debug-cmd-tab press").is_err());
         assert!(Command::parse("debug-cmd-tab cancel 0").is_err(), "no Tab");

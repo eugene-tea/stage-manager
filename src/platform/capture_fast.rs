@@ -210,7 +210,7 @@ fn calls() -> Option<&'static Calls> {
 
 /// True when a test run asked for ScreenCaptureKit alone ([`FORCE_SCK_ENV`] with
 /// `STAGE_MANAGER_ONLY`).
-fn forced_off() -> bool {
+pub(crate) fn forced_off() -> bool {
     static FORCED: LazyLock<bool> = LazyLock::new(|| {
         let forced = forced_by(std::env::var_os(FORCE_SCK_ENV).is_some(), std::env::var_os("STAGE_MANAGER_ONLY").is_some());
         if forced {
@@ -222,7 +222,7 @@ fn forced_off() -> bool {
 }
 
 /// The test switch counts only in a test run (`only`: `STAGE_MANAGER_ONLY` set).
-fn forced_by(asked: bool, only: bool) -> bool {
+pub(crate) fn forced_by(asked: bool, only: bool) -> bool {
     asked && only
 }
 
