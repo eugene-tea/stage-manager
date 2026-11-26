@@ -176,13 +176,20 @@ Nothing here changes what a person asks for; each closes a way a slower Mac, or 
 order of events, can still go wrong. The bench first, then the live suite
 (DEVELOPMENT, "The bench").
 
-- **A screen going away under the Accessibility engine: its windows leave their stages.**
-  The live check written for the Spaces engine (`scripts/test-stages.sh display-gone`) run
-  under the Accessibility engine for the first time, 11-25: 18 of 100 checks fail, the same 18
-  on 1.9.2. The windows of the screen that went are given new stages on the screen left, and
-  a Dock click 20 s after is not arranged at the press (the Spaces engine's way). Say which
-  of the 18 are the Accessibility engine's own way and which are defects, then mend those
-  with the item below.
+- **A screen going away under the Accessibility engine, live again.** 11-25, 18 of about
+  100 checks of `scripts/test-stages.sh display-gone` failed there (the same on 1.9.2): 12
+  were the defect mended since (the windows of the Desktop the screen left no longer showed
+  left their stages), 3 asked for the Spaces engine's log line of a hide (the phase now asks
+  each engine), 3 for the Desktop arranged at a Dock press, which round arranged-ahead
+  brings. Run the phase again under the Accessibility engine: every `main` and `secondary`
+  round's watch and tour pass, and the `ahead` rounds fail only "arranged at the press"
+  until arranged-ahead is in. Then `SM_ENGINE=spaces` once, for the changed carry (the
+  Desktop a gone screen's front leaves shows its own front again).
+- **The same with the Desktop reads off (`SM_DESKTOPS=guess`, a macOS that breaks them).**
+  The Accessibility engine takes the display change by the windows on screen as 1.9.2 did,
+  and the defect stays there (bench `guessed.txt`, "the live phase's ..."). A guess could
+  take a known window missing from screen in the change's settle for one on another Desktop
+  rather than gone from its stage; whether to is the owner's call.
 - **A screen going with its Desktops kept (the rest of the Desktops design's slice 5).**
   When a screen goes and macOS moves its Desktops to the screen left under the same ids, the
   model still merges the gone screen's Desktop into the one shown there, and `spill`'s watch
@@ -248,15 +255,6 @@ Desktops' reads since round corner-desktops, hearing of Mission Control and of a
 change's end since round looks-forward. The items below are where the Accessibility mode
 was left behind for no reason of the mode.
 
-- **A display change is still taken by the windows on screen under the Accessibility engine.**
-  The window server's list of Desktops is read there too now, but its bindings are dropped
-  when a screen comes or goes and the list stays out for the change's 10 s settle
-  (`Controller::display_change_guessed`): with the list deciding, a screen that went and came
-  back with its Desktop kept left the Desktop on the screen that stayed with an empty stage in
-  front (on the bench). It goes when the Desktops design's slice 5 is built ("A screen going
-  with its Desktops kept", above); the bench has the scenarios (`bench/corner_screens.rs`).
-  Known and unchanged there: after a screen goes with its Desktop kept, the windows of the
-  Desktop left behind on the screen that stayed leave their stages until it shows again.
 - **The reads' check sees nothing on a screen with no window wholly on it.** A list of
   Desktops that names the wrong Desktop there is not noticed until a window shows
   (`engine/desk_reads.rs`). Never seen; a second public fact would close it.

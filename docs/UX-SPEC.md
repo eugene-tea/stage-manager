@@ -355,7 +355,12 @@ showing most of it (macOS's rule).
   windows on another of the remaining screen's Desktops, one not shown since the launch, and
   slide to it: the same rule holds there, that Desktop's own front a card, also when macOS
   announces the Desktop still shown before it slides; the Desktop left shows its own most
-  recent stage again when it comes back, never nothing in front. Under `engine = "spaces"`
+  recent stage again when it comes back, never nothing in front, and keeps every stage whole
+  meanwhile, each with its windows, under either engine (live 11-25, a virtual screen: the
+  gone screen's windows landed on the remaining screen's first Desktop and macOS slid there;
+  the main screen gone, the remaining screen's own windows landed there, not shown; before,
+  under the Accessibility engine, the windows of the Desktop left the screen no longer showed
+  left their stages and came back as new ones). Under `engine = "spaces"`
   a Desktop counts as ended once macOS has left it unlisted for 2.5 s with the screens and
   their Desktops unchanged; its hidden stages then join, whole, where its windows went.
 - **macOS's activations at a display change.** The app macOS activates after the change

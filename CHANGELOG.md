@@ -30,6 +30,11 @@
 - In the default mode, a hidden window that its app keeps moving back onto the screen joins
   the stage in front after a few tries, and its card is updated. Before, it stayed on screen
   with no card, or was sent to the corner again and again.
+- In the default mode, when a screen is unplugged and macOS shows another Desktop on the screen
+  left, the windows of the Desktop it showed before stay in their stages. Before, they left
+  them and came back as new stages when that Desktop showed again.
+- After a screen is unplugged, going back to the Desktop the remaining screen showed before
+  brings its own last stage in front, not an empty one.
 
 ## 1.9.2 — 2026-11-24
 

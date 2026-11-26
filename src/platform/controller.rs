@@ -5817,12 +5817,6 @@ impl Controller {
             let connected: Vec<DisplayId> = displays.iter().map(|d| d.id).collect();
             self.displays_added = returned_screens(&self.displays_added, settling, added, &connected);
             self.frames_display_changed(heard);
-            // Taken by the windows on screen where every stage's windows are listed with
-            // their Desktop ([`Self::display_change_guessed`]): the Desktops are bound again
-            // by the arrivals after it.
-            if let Some(m) = self.model.as_mut().filter(|m| m.hidden_on_their_desktop()) {
-                m.unbind_all();
-            }
         }
         // A screen gone (not one seen again under a new id): under the Spaces engine its hidden
         // windows are kept in their stages, on their own Desktops, before the model's batch

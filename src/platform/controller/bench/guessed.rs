@@ -14,7 +14,8 @@
 //! corner's cover goes to the strip ahead of the pictures, and one scenario where it does
 //! not; `ahead` where a press on a Dock item, the pointer in the Dock or a hotkey's modifiers
 //! had the pictures taken before the switch, in the two Dock clicks of round switch-pictures
-//! and four scenarios of its own).
+//! and four scenarios of its own; and the two scenarios of round display-gone,
+//! `corner_screens.rs`'s live phase, printed with the reads off).
 //! A Mac where the reads do not work behaves as before. Beside each
 //! Desktop scenario's own test (`desktops.rs`, the reads on) the file is also the "before".
 //!

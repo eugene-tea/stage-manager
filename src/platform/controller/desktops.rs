@@ -171,27 +171,18 @@ impl Controller {
     /// The window server's listing for the managed screens, read now ([`match_screens`]):
     /// `None` when the engine reads none, a managed screen has no entry, or one names no
     /// Space shown.
-    pub(super) fn listing(&self) -> Option<Listing> {
-        if self.display_change_guessed() {
-            return None;
-        }
-        self.listing_for(&self.managed_displays())
-    }
-
-    /// True while a display change settles ([`super::DISPLAY_SETTLE`]) under an engine whose
-    /// hidden windows stay on their Desktop: the change is taken by the windows on screen,
-    /// as before the reads. The bindings are dropped at the change (`set_displays`), so the
-    /// listing decides again from the first arrival after the settle, which binds its
-    /// Desktop as a launch's does.
     ///
-    /// Why: when a screen goes the model takes its Desktop into the one shown on the screen
-    /// left (the adoption), while macOS may keep it as a Desktop of its own; the listing then
-    /// names a Desktop the model has merged away (design r3, slice 5, not built). With the
-    /// windows of every stage listed on screen with their Desktop (the park corner), the
-    /// guess takes the change right, and did before the reads; under the Spaces engine a
-    /// hidden window is off screen, the guess cannot, and the listing decides throughout.
-    pub(super) fn display_change_guessed(&self) -> bool {
-        self.displays_settling() && self.model.as_ref().is_some_and(|m| m.hidden_on_their_desktop())
+    /// A display change is taken from it as any Space change is, under either engine (since
+    /// round display-gone; before, under the Corner engine, by the windows on screen for the
+    /// change's 10 s settle, its bindings dropped). When a screen goes the model takes the
+    /// Desktop it showed into the one shown on the screen left (the adoption) while macOS
+    /// may keep that Desktop, or end it and put its windows on another Desktop and show
+    /// that one: the arrival there carries the gone screen's stages whole (`carry_stages`),
+    /// and the Desktop they leave shows its own most recent stage again. The guess took the
+    /// windows of the screen left's own Desktop, no longer shown, for windows gone from it
+    /// (live 11-25: they left their stages).
+    pub(super) fn listing(&self) -> Option<Listing> {
+        self.listing_for(&self.managed_displays())
     }
 
     /// [`Self::listing`] for `displays` (the first the main one), before the model is built.

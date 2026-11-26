@@ -452,7 +452,7 @@ once a look agreed. `ctl state`'s `desks.reads` says which way it runs and why;
 
 The controller's one read is `Controller::listing()` (`platform/controller/desktops.rs`):
 `None` when the reads do not decide, a managed screen has no entry, or one names no Space
-shown or not its kind; and, under the Corner engine, while a display change settles (below).
+shown or not its kind.
  Each arrival is given its screen's Desktop, read again at the arrival, and the
 Desktop and the model's Space are bound to each other (`engine/model/desks.rs`,
 `Model::arrive_on`; one id, one Space). The bindings follow a relabel, go with a pruned or
@@ -497,15 +497,17 @@ hand (Mission Control shows it): an arrival takes it as moved, the tick's look a
 shown one, and nothing hides it "again"; one of a Desktop listed no more waits for that
 Desktop's end with its stage. The park corner's own checks judge frames, the slide's for a
 moment after a Desktop arrives: they wait a second after every arrival, whoever named it
-(`phase::Tracker::frames_settling`), and the tick stays brisk for it. And a display change is
-the guess's: when a screen comes or goes the bindings are dropped and the listing stays out
-for the change's settle (`Controller::display_change_guessed`, `DISPLAY_SETTLE`), because
-the model takes a gone screen's Desktop into the one shown where macOS may keep it as a
-Desktop of its own (slice 5, not built); with every stage's windows listed on screen with
-their Desktop the guess takes the change right, which it cannot under the Spaces engine.
+(`phase::Tracker::frames_settling`), and the tick stays brisk for it. A display change is
+the listing's under both engines (round display-gone; before, under the Corner engine, the
+bindings were dropped and the listing stayed out for the change's 10 s settle, and when
+macOS showed the screen left another Desktop than its own, that Desktop's windows, no longer
+on screen, left their stages). The model still takes a gone screen's Desktop into the one
+shown on the screen left (the adoption); when macOS shows its windows on another Desktop,
+the arrival there carries its stages whole (`carry_stages`), and the Desktop they leave owes
+its own front, as `carry_adopted` has it.
 
 **What is still guessed, and where.** With no listing (the reads missing, resting or forced
-off, the Apple mode, a display change's settle under the Corner engine): everything, as
+off, the Apple mode): everything, as
 before (`MIXED_WAIT`, `SPACE_SETTLE`,
 `FOREIGN_SETTLE`, `SPACE_CHECKS`, `BESIDE_ARRIVALS`, `STICKY_HOPS`, `SLIDE_CARRY`, the
 display change's hold of new windows at an arrival); a guess made so is corrected at the
