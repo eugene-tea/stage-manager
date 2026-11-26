@@ -187,6 +187,13 @@ if ENGINE != "corner":
 GUESS = (os.environ.get("SM_DESKTOPS") or "").strip().lower() == "guess"
 if GUESS:
     ENV["STAGE_MANAGER_DESKTOPS_GUESS"] = "1"
+# SM_STILL=sck: every app run takes the desktop's still through ScreenCaptureKit alone
+# (STAGE_MANAGER_STILL_SCK), as before round desktop-still. Default: the window server's own
+# call first. The phases that judge the corner patch and a switch's cover (`still`,
+# `capture`) run both ways.
+STILL_SCK = (os.environ.get("SM_STILL") or "").strip().lower() == "sck"
+if STILL_SCK:
+    ENV["STAGE_MANAGER_STILL_SCK"] = "1"
 
 
 def log_path():
@@ -660,6 +667,8 @@ def start_app(expect_windows, extra_env=None, fresh_log=True, capture=False):
         env["STAGE_MANAGER_ENGINE"] = ENGINE
     if GUESS:
         env["STAGE_MANAGER_DESKTOPS_GUESS"] = "1"
+    if STILL_SCK:
+        env["STAGE_MANAGER_STILL_SCK"] = "1"
     env.update(extra_env or {})
     for k, v in env.items():
         args += ["--env", f"{k}={v}"]
@@ -5087,7 +5096,9 @@ def phase_capture():
     (cover_ahead_check, Corner); a card click plays with pictures its press took or the switch
     did (card_click_pictures_check); a pinned window reaching the park corner is drawn on the
     cover from a picture of it (pinned_on_the_cover_check, Corner). `ctl switch` moves the
-    windows at once, with no pictures."""
+    windows at once, with no pictures. The cover's still of the desktop comes through the
+    window server's call, proven against ScreenCaptureKit's, or through ScreenCaptureKit with
+    SM_STILL=sck (still_way_check, still_compare_check; run the phase both ways)."""
     say("\n== capture: real thumbnails and snapshots (the only app run with captures on) ==")
     stop_app()
     stop_fixture()
@@ -5142,6 +5153,8 @@ def phase_capture():
             still = state().get("desktop_still") or {}
             if check(kept is not None, f"a still of the desktop is kept for a switch's cover ({still})"):
                 say(f"    the still: {still.get('region')}, opaque (the desktop picture's window in it): {still.get('opaque')}")
+                if still_way_check("capture"):
+                    still_compare_check("capture", "the corner a switch covers")
                 time.sleep(0.5)
                 activation_grows_check("open", "fixture", "an activation of the fixture over the desktop's still",
                                        at_once_ok=(), cover_still=True)
@@ -5687,6 +5700,82 @@ def mid(r):
     return r["x"] + r["w"] / 2, r["y"] + r["h"] / 2
 
 
+def still_way_check(label):
+    """Round desktop-still: the still of the desktop kept for the park corner came the way
+    this run asks for (`ctl state`'s `desktop_still.route`): the window server's own call by
+    default, its first still proven against ScreenCaptureKit's of the same corner
+    (`desktop_still.window_server`: the call works, proven); ScreenCaptureKit with
+    SM_STILL=sck. Waits for a still that way (a proof that failed is tried again at the next
+    one). True when it came."""
+    want = "ScreenCaptureKit" if STILL_SCK else "window server"
+    came = wait_until(lambda: (lambda d: d if d.get("route") == want else None)(state().get("desktop_still") or {}),
+                      45, f"a still of the desktop through {want}")
+    now = state().get("desktop_still") or {}
+    ws = now.get("window_server") or {}
+    if not check(came is not None, f"{label}: the desktop's still comes through {want} (the one kept: {now.get('route')}; the window server's call: {ws})"):
+        return False
+    if STILL_SCK:
+        check(ws.get("forced_off") is True and not ws.get("proven"), f"{label}: the window server's call is forced off for the still ({ws})")
+    else:
+        check(ws.get("call") == "works" and ws.get("proven") is True and ws.get("forced_off") is False,
+              f"{label}: the window server's call works, its still proven the same picture as ScreenCaptureKit's ({ws})")
+    return True
+
+
+def still_compare_check(label, what):
+    """Round desktop-still: `ctl debug-desktop-still` takes a still of the park corner both
+    ways now, whatever SM_STILL says, and compares them in the app (no picture leaves it):
+    the same size and scale, the window server's opaque, and the same picture on a grid drawn
+    in one colour space (mean and worst cell within the app's tolerance), so a colour shift,
+    a window composited in another order or a part the call cannot read is caught on this
+    display. Something moving on the desktop between the two is tried again, twice."""
+    r = {}
+    for _ in range(3):
+        r = ctl("debug-desktop-still")
+        if r.get("same") or not r.get("ok"):
+            break
+        time.sleep(1.0)
+    if not check(bool(r.get("ok")), f"{label}: the corner taken both ways, {what} ({r.get('error', 'ok')})"):
+        return
+    ws, sck, d = r.get("window_server") or {}, r.get("screencapturekit") or {}, r.get("diff") or {}
+    say(f"    {what}, block {fmt(r['region'])}: the window server's {ws.get('w')}x{ws.get('h')} px at {ws.get('scale')}x in {ws.get('space')}, "
+        f"{ws.get('ms')} ms; ScreenCaptureKit's {sck.get('w')}x{sck.get('h')} px at {sck.get('scale')}x in {sck.get('space')}, {sck.get('ms')} ms; "
+        f"apart: mean {d.get('mean')}, worst cell {d.get('worst')} of 255 (allowed {r.get('tolerance')})")
+    if not check("miss" not in ws, f"{label}: the window server's call hands back a still that is proven the desktop, {what} ({ws.get('miss')})"):
+        return
+    if not check("miss" not in sck, f"{label}: ScreenCaptureKit hands back a still, {what} ({sck.get('miss')})"):
+        return
+    check(abs(ws["w"] - sck["w"]) <= 1 and abs(ws["h"] - sck["h"]) <= 1 and ws.get("scale") == sck.get("scale"),
+          f"{label}: the two ways' stills are the same size and scale, {what}")
+    if not sck.get("opaque"):
+        skip(f"{label}: the two ways' stills compared, {what}", "ScreenCaptureKit's still holds the icons only here (the desktop picture's window is not in it)")
+        return
+    check(r.get("same") is True,
+          f"{label}: the two ways' stills are the same picture, colour included, {what} (mean {d.get('mean')}, worst {d.get('worst')}; {r.get('why_not_compared') or 'compared'})")
+
+
+def still_pace_check(label):
+    """Round desktop-still: with a sliver showing and nothing touched, the next still comes
+    the same way as the kept one and by that way alone (`costs`): the window server's with no
+    still asked of ScreenCaptureKit (10 s at most), or with SM_STILL=sck ScreenCaptureKit's
+    (30 s at most with no icon in the corner, 10 s with one)."""
+    s0 = state()
+    c0, serial = s0.get("costs") or {}, (s0.get("desktop_still") or {}).get("serial")
+    t0 = time.time()
+    fresh = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("serial") not in (None, serial) else None)(state()),
+                       38 if STILL_SCK else 16, "the next still of the desktop")
+    c1 = (fresh or state()).get("costs") or {}
+    fast = c1.get("desktop_stills_fast", 0) - c0.get("desktop_stills_fast", 0)
+    sck = c1.get("desktop_stills_sck", 0) - c0.get("desktop_stills_sck", 0)
+    say(f"    the next still after {time.time() - t0:.1f} s: {fast} by the window server, {sck} asked of ScreenCaptureKit")
+    if STILL_SCK:
+        check(fresh is not None and sck >= 1 and fast == 0, f"{label}: forced off, the next still is ScreenCaptureKit's ({fast} window server, {sck} ScreenCaptureKit)")
+    else:
+        check(fresh is not None and fast >= 1 and sck == 0,
+              f"{label}: at rest the next still is the window server's alone, no listing ({fast} window server, {sck} ScreenCaptureKit; "
+              f"one asked of ScreenCaptureKit is a proof again: the wallpaper or an icon changed)")
+
+
 def phase_still():
     """Round desktop-still-patch: with window captures on (as the capture phase), the corner
     patch is a still of the desktop, so a desktop icon under it no longer keeps it off and the
@@ -5702,7 +5791,11 @@ def phase_still():
     drawn from the still through it and its close (`show_desktop_close`). With "Click wallpaper to reveal desktop" at Always (macOS's default) the
     click and the drag run only with SM_STILL_CLICK=1: macOS's own reveal should leave a click
     on an icon alone, but would move every window aside if it did not. Skipped when Finder shows no disk image on the desktop (Finder Settings,
-    General, External disks) or will not place it under the corner (Sort By, Snap to Grid)."""
+    General, External disks) or will not place it under the corner (Sort By, Snap to Grid).
+    Round desktop-still: the still comes through the window server's call by default and
+    through ScreenCaptureKit with SM_STILL=sck (run the phase both ways), the two ways'
+    pictures of the corner are compared on the bare corner and with the icon in it, and the
+    next still at rest comes by its way alone."""
     say("\n== still: the corner patch drawn from a still of the desktop, a fixture icon under it ==")
     stop_app()
     stop_fixture()
@@ -5721,6 +5814,9 @@ def phase_still():
                        20, "the corner patch drawn from a still of the desktop")
     if not check(ready is not None, f"still: the patch is drawn from a still ({(state().get('desktop_still') or {})})"):
         return
+    if still_way_check("still"):
+        still_compare_check("still", "the bare corner")
+        still_pace_check("still")
     show_desktop_close("still", still=True)
     ready = wait_until(lambda: (lambda x: x if (x.get("desktop_still") or {}).get("patch") == "ready"
                                 and patch_plan(x).get("show") and patch_plan(x).get("still") is not None else None)(state()),
@@ -5781,6 +5877,10 @@ def phase_still():
                                     and (x.get("desktop_still") or {}).get("patch") == "ready" else None)(state()),
                            5, "the patch over the icon")
         check(shown is not None, f"still: the patch shows over a desktop icon, from a still ({patch_plan(state())})")
+        # The icon is drawn over the desktop picture in both ways' stills, and the window
+        # server's call was proven afresh with it there.
+        still_compare_check("still", "an icon in the corner")
+        still_way_check("still, an icon in the corner")
         ours = [w for w in our_windows() if w["layer"] == 0 and w.get("alpha", 1.0) > 0 and intersect(w["bounds"], icon_image(icon))]
         check(bool(ours), f"still: our patch panel is on screen over the icon ({[fmt(w['bounds']) for w in ours]})")
         serial = (state().get("desktop_still") or {}).get("serial")
