@@ -616,11 +616,11 @@ mod app {
                 }
                 stage_manager::platform::test_press::mission_pick(id, hover)
             }
-            Command::DebugClick { x, y, shift } => {
+            Command::DebugClick { x, y, shift, hold_ms } => {
                 if std::env::var_os(TEST_ENV).is_none() {
                     return ctl::error_reply("debug-click needs STAGE_MANAGER_TEST=1");
                 }
-                match input::click(stage_manager::engine::geometry::Point::new(x, y), shift) {
+                match input::click(stage_manager::engine::geometry::Point::new(x, y), shift, hold_ms.map(Duration::from_millis)) {
                     Ok(()) => json!({ "ok": true }),
                     Err(e) => ctl::error_reply(&e),
                 }

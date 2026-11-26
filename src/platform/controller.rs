@@ -6885,11 +6885,11 @@ impl Controller {
                 }
                 self.debug_cmd_tab(ob, probe)
             }
-            Command::DebugDockClick { bundle, real } => {
+            Command::DebugDockClick { bundle, real, hold_ms } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-click needs STAGE_MANAGER_TEST=1" });
                 }
-                self.debug_dock_click(ob, &bundle, real)
+                self.debug_dock_click(ob, &bundle, real, hold_ms.map(Duration::from_millis))
             }
             Command::DebugDockLend { bundle } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

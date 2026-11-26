@@ -61,6 +61,14 @@ Scenarios (all by default, in this order):
 The app runs from the dev copy with captures on (as installed; SM_CAPTURE=0 turns them off), STAGE_MANAGER_ONLY the
 fixtures, in a scratch home; fixture windows only, at frames clear of the strip.
 
+SM_CLICK_HOLD_MS=N holds each switch's click N ms between its press and its release
+(`hold=N` on `ctl debug-click` and `ctl debug-dock-click`). Not set, the clicks are the
+test's own: a card's button down 60 ms, a Dock item's press and release fed at once, so a
+picture taken at the press is seldom in at the release. A person's click holds about 100 ms
+(the press to the release in the app's logs of the owner's own Dock clicks, the figure
+`test_press::DOCK_PRESS_HOLD` carries): SM_CLICK_HOLD_MS=100 measures a switch as a person
+makes it. Use another OUT for each value; each row says it (`click_hold_ms`).
+
 SM_SNAPSHOT_MS=N writes `[animation] snapshot_interval_ms = N` into every scenario's scratch
 config: the full-size pictures of the front stage's windows on a timer again (2000 was the
 Corner engine's until 11-25), so what the timer costs is measured on one build, with and
@@ -140,6 +148,22 @@ def snapshot_ms(value):
     return n
 
 
+def click_hold_ms(value):
+    """SM_CLICK_HOLD_MS as a number of milliseconds (0 to 2000, what the ctl commands take),
+    None when not set: the clicks as the test has always made them."""
+    if value is None or not str(value).strip():
+        return None
+    n = int(str(value).strip())
+    if not 0 <= n <= 2000:
+        raise ValueError(f"SM_CLICK_HOLD_MS={value}: 0 to 2000")
+    return n
+
+
+def click_words(hold):
+    """The words a click command takes for a hold of `hold` ms (none when not set)."""
+    return [] if hold is None else [f"hold={hold}"]
+
+
 def config_text(ms, text=""):
     """A scenario's scratch config: its own `text` (other sections), with `[animation]
     snapshot_interval_ms = ms` when SM_SNAPSHOT_MS is set (`ms`)."""
@@ -148,6 +172,8 @@ def config_text(ms, text=""):
 
 # SM_SNAPSHOT_MS: the full-size pictures' timer, written into every scratch config.
 SNAPSHOT_MS = snapshot_ms(os.environ.get("SM_SNAPSHOT_MS"))
+# SM_CLICK_HOLD_MS: how long each switch's click holds the button (a person's: about 100).
+CLICK_HOLD_MS = click_hold_ms(os.environ.get("SM_CLICK_HOLD_MS"))
 # Frames from the visible frame's top-left, clear of the strip's column (its cards stay
 # clickable, never covered).
 FRAMES = "330,60,1000,640;560,220,1000,640"
@@ -302,7 +328,7 @@ def say(msg):
 
 def record(scenario, data):
     row = {"scenario": scenario, "engine": ENGINE, "run": RUN, "capture": CAPTURE, "snapshot_ms": SNAPSHOT_MS,
-           "at": time.strftime("%Y-%m-%d %H:%M:%S"), **data}
+           "click_hold_ms": CLICK_HOLD_MS, "at": time.strftime("%Y-%m-%d %H:%M:%S"), **data}
     with open(JSONL, "a") as f:
         f.write(json.dumps(row) + "\n")
     say(json.dumps(row))
@@ -430,7 +456,8 @@ def per_minute(before, after, wall_s):
 
 def scenario_rest():
     say(f"\n== rest ({ENGINE}, run {RUN}): {STAGES} stages, {SETTLE_S:.0f} s settle, {REST_S:.0f} s untouched"
-        + (f", snapshots every {SNAPSHOT_MS} ms" if SNAPSHOT_MS else "") + " ==")
+        + (f", snapshots every {SNAPSHOT_MS} ms" if SNAPSHOT_MS else "")
+        + (f", clicks held {CLICK_HOLD_MS} ms" if CLICK_HOLD_MS is not None else "") + " ==")
     stages_up()
     time.sleep(SETTLE_S)
     c0 = captured_now()
@@ -790,11 +817,12 @@ def next_target(s, i, how):
         f = c["frame"]
         if T.card_under_window(s, f):
             return None, c["number"]
-        return [T.BIN, "ctl", "debug-click", f"{f['x'] + f['w'] / 2:.1f}", f"{f['y'] + f['h'] / 2:.1f}"], c["number"]
+        return [T.BIN, "ctl", "debug-click", f"{f['x'] + f['w'] / 2:.1f}", f"{f['y'] + f['h'] / 2:.1f}",
+                *click_words(CLICK_HOLD_MS)], c["number"]
     others = [c["number"] for c in cards]
     target = others[i % len(others)]
     bundle = stage_windows(s, target)[0].get("bundle_id")
-    return [T.BIN, "ctl", "debug-dock-click", bundle], target
+    return [T.BIN, "ctl", "debug-dock-click", bundle, *click_words(CLICK_HOLD_MS)], target
 
 
 def timed_switches(how):

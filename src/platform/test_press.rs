@@ -50,9 +50,9 @@ fn on_only_list(bundle: &str) -> bool {
 /// of a `STAGE_MANAGER_ONLY` app is found and hit-tested at its center (an auto-hidden Dock
 /// shown first by the pointer at its edge, `main` the main display's frame); then pressed
 /// (`AXPress`, which activates the app as a click does) or, with `real`, clicked: a press and
-/// a release posted there [`DOCK_PRESS_HOLD`] apart, on a thread of their own. The pointer
-/// goes back where it was.
-pub fn dock_press(bundle: &str, real: bool, main: Option<Rect>) -> Value {
+/// a release posted there `hold` apart ([`DOCK_PRESS_HOLD`] unless given), on a thread of
+/// their own. The pointer goes back where it was.
+pub fn dock_press(bundle: &str, real: bool, hold: Option<Duration>, main: Option<Rect>) -> Value {
     if !on_only_list(bundle) {
         return json!({ "ok": false, "error": format!("{bundle} is not on the STAGE_MANAGER_ONLY list") });
     }
@@ -76,7 +76,7 @@ pub fn dock_press(bundle: &str, real: bool, main: Option<Rect>) -> Value {
     let mut result = match hit {
         Ok((element, item)) if item.path == listed.path => {
             if real {
-                match super::input::dock_item_click(at, DOCK_PRESS_HOLD) {
+                match super::input::dock_item_click(at, hold.unwrap_or(DOCK_PRESS_HOLD)) {
                     Ok(()) => json!({ "ok": true, "real": true, "at": [at.x, at.y] }),
                     Err(e) => json!({ "ok": false, "error": e }),
                 }

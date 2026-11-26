@@ -2182,8 +2182,12 @@ impl Controller {
     /// press reaches the controller ~100 ms before the release, and the Dock activates the app
     /// on the release as for a person's click (the fed path above arranges before `AXPress`,
     /// which hid the race of the owner's log of 11-15 06:32:34).
-    pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str, real: bool) -> serde_json::Value {
-        self.debug_dock(ob, bundle, real, true)
+    /// `hold`: how long the press is held before its release: the posted one's
+    /// ([`DOCK_PRESS_HOLD`] unless given), or the fed one's (none unless given: this thread
+    /// waits it out between the press and the release, so what the press starts, the
+    /// pictures a switch would wait for, has a person's time to come).
+    pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str, real: bool, hold: Option<Duration>) -> serde_json::Value {
+        self.debug_dock(ob, bundle, real, true, hold)
     }
 
     /// `debug-dock-lend BUNDLE` (test only, round r2-lends): [`Self::debug_dock_click`]'s fed
@@ -2192,7 +2196,7 @@ impl Controller {
     /// can tell what ends it (another app's activation, the next press, the cap). The reply's
     /// `lent` names the window put home, if any.
     pub(super) fn debug_dock_lend(&mut self, ob: &Observer, bundle: &str) -> serde_json::Value {
-        let mut r = self.debug_dock(ob, bundle, false, false);
+        let mut r = self.debug_dock(ob, bundle, false, false, None);
         if let Some(obj) = r.as_object_mut() {
             obj.insert("lent".into(), serde_json::json!(self.lent.filter(|l| !l.switcher).map(|l| l.window.0)));
         }
@@ -2200,7 +2204,7 @@ impl Controller {
     }
 
     /// [`Self::debug_dock_click`] (`activate`: the fed click presses the item after it).
-    fn debug_dock(&mut self, ob: &Observer, bundle: &str, real: bool, activate: bool) -> serde_json::Value {
+    fn debug_dock(&mut self, ob: &Observer, bundle: &str, real: bool, activate: bool, hold: Option<Duration>) -> serde_json::Value {
         use serde_json::json;
         let only = std::env::var("STAGE_MANAGER_ONLY").unwrap_or_default();
         if !only.split(',').any(|b| b.trim() == bundle) {
@@ -2233,7 +2237,7 @@ impl Controller {
         }
         let mut result = if real {
             match hit {
-                Ok((_, item)) if item.path == listed.path => match crate::platform::input::dock_item_click(at, DOCK_PRESS_HOLD) {
+                Ok((_, item)) if item.path == listed.path => match crate::platform::input::dock_item_click(at, hold.unwrap_or(DOCK_PRESS_HOLD)) {
                     Ok(()) => json!({ "ok": true, "real": true, "at": [at.x, at.y] }),
                     Err(e) => json!({ "ok": false, "error": e }),
                 },
@@ -2241,7 +2245,7 @@ impl Controller {
                 Err(miss) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
             }
         } else {
-            self.debug_dock_press(ob, &list, bundle, &listed, at, hit, activate)
+            self.debug_dock_press(ob, &list, bundle, &listed, at, hit, activate.then_some(hold.unwrap_or_default()))
         };
         if revealed {
             crate::platform::input::pointer_back();
@@ -2253,7 +2257,8 @@ impl Controller {
     }
 
     /// The rest of [`Self::debug_dock_click`]: the hit-test's answer `hit` at `at` goes
-    /// through the press and release path, then the item is pressed (unless not `activate`).
+    /// through the press and release path, the press held `activate` between them, then the
+    /// item is pressed (`AXPress`); `None`: the click fed alone, the item not pressed.
     #[allow(clippy::too_many_arguments)]
     fn debug_dock_press(
         &mut self,
@@ -2263,7 +2268,7 @@ impl Controller {
         listed: &DockItem,
         at: crate::engine::geometry::Point,
         hit: Result<(AxElement, DockItem), dock::Miss>,
-        activate: bool,
+        activate: Option<Duration>,
     ) -> serde_json::Value {
         use serde_json::json;
         let (element, item) = match hit {
@@ -2273,8 +2278,12 @@ impl Controller {
         };
         let pressed_at = clock::now();
         self.press_item(ob, list, item, at, pressed_at);
+        // The press held, as a person's is (`hold=MS`; none: the release at once).
+        if let Some(hold) = activate.filter(|h| !h.is_zero()) {
+            clock::sleep(hold);
+        }
         let predicted = self.dock_released(ob, at, false, clock::now());
-        if !activate {
+        if activate.is_none() {
             tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), "debug-dock-lend: the click fed, the item not pressed");
             return json!({ "ok": true, "predicted": predicted.map(|w| w.0) });
         }
