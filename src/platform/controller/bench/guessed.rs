@@ -58,7 +58,7 @@ impl Drop for Forced {
 
 /// Every scenario of the bench.
 fn all() -> impl Iterator<Item = &'static Scenario> {
-    super::scenarios::ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL)
+    super::scenarios::ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL).chain(super::ahead::ALL)
 }
 
 /// The pinned outcomes: a scenario's name, then its outcome at each load, tab-separated.

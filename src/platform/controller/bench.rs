@@ -49,6 +49,7 @@ use crate::platform::observe_probe::Note;
 use crate::platform::{safety, windows};
 use crate::ui::strip_model::StripEvent;
 
+mod ahead;
 mod causes;
 mod corner_screens;
 mod desktops;
@@ -458,6 +459,12 @@ impl Bench {
         self.advance(30);
         self.key(crate::engine::switcher::KEY_TAB, false);
         self.desk(|d| d.switcher_opens(order));
+    }
+
+    /// Another Tab with ⌘ still held: the switcher's selection moves on one.
+    pub(super) fn cmd_tab_again(&mut self) {
+        self.key(crate::engine::switcher::KEY_TAB, false);
+        self.desk(|d| d.switcher_steps());
     }
 
     /// ⌘ let go with the switcher up: it closes and macOS activates the app selected.

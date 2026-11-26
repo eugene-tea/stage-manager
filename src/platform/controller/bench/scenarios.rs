@@ -1271,7 +1271,7 @@ fn load_table() {
 fn bench_one() {
     let Ok(want) = std::env::var("BENCH_ONE") else { return };
     let load: f64 = std::env::var("BENCH_LOAD").ok().and_then(|l| l.parse().ok()).unwrap_or(1.0);
-    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL).filter(|(name, _, _)| name.contains(&want)) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL).chain(super::ahead::ALL).filter(|(name, _, _)| name.contains(&want)) {
         let run = script(load);
         println!("== {name} ({told}) at load {load}\n{}\n=> {}", run.story, run.outcome);
         for m in &run.margins {
@@ -1300,7 +1300,7 @@ fn verdicts(run: &Run) -> std::collections::BTreeMap<&'static str, (usize, usize
 /// The load table as Markdown.
 pub(super) fn table() -> String {
     let mut out = String::from("| Scenario | Told by | Load 1 | Load 3 | Load 10 | Limits crossed only under load |\n|---|---|---|---|---|---|\n");
-    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL).chain(super::ahead::ALL) {
         let runs = LOADS.map(script);
         let base = verdicts(&runs[0]);
         let mut changed: Vec<String> = Vec::new();
