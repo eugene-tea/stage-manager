@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.10.0 — 2026-11-26
 
 - Windows keep their size and place for each set of screens: with a screen plugged in or
   out, they go back to where they were the last time the same screens were connected, about
