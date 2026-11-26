@@ -49,10 +49,12 @@ use crate::platform::observe_probe::Note;
 use crate::platform::{safety, windows};
 use crate::ui::strip_model::StripEvent;
 
+mod ahead;
 mod causes;
 mod corner_screens;
 mod desktops;
 mod guessed;
+mod kept_out;
 mod looks;
 mod rest;
 mod screens;
@@ -458,6 +460,50 @@ impl Bench {
         self.advance(30);
         self.key(crate::engine::switcher::KEY_TAB, false);
         self.desk(|d| d.switcher_opens(order));
+    }
+
+    /// A ⌘Tab let go before the WM thread got to its Tab (`controller/switcher.rs`: "a ⌘Tab
+    /// let go before its Tab is handled on this thread"): ⌘ down, Tab and ⌘ up reach the
+    /// queue together, and macOS has already activated the app selected, picking its Desktop
+    /// by the windows it counted there then. The key tap, not on yet, forwards nothing.
+    pub(super) fn cmd_tab_let_go_unhandled(&mut self, order: Vec<i32>) {
+        self.command(true);
+        self.key(crate::engine::switcher::KEY_TAB, false);
+        self.command(false);
+        self.desk(|d| {
+            d.switcher_opens(order);
+            d.switcher_closes(false);
+            if let Some(pid) = d.switcher.pids.get(d.switcher.selected).copied() {
+                d.step(fake::Step::Activation { pid, raise_all: true });
+            }
+        });
+    }
+
+    /// ⌘ let go `ms` from now on macOS's own clock, whatever the WM thread is doing then (a
+    /// Tab's handler still asking a slow app, say): the switcher closes and macOS activates
+    /// the app selected at once, picking its Desktop by the windows it counts there at that
+    /// moment (the 3-12 ms from the release to the activation are left out).
+    pub(super) fn cmd_tab_release_in(&mut self, ms: u64) {
+        let due = clock::now() + Duration::from_millis(ms);
+        self.desk(|d| {
+            d.at(due, |d| {
+                d.cmd = false;
+                let mut event = d.input(InputKind::CommandKey, None);
+                event.cmd = false;
+                d.post(0.0, Notice::Input(event));
+                d.tap_forwards(crate::platform::mission_key_tap::Heard::CommandUp);
+                d.switcher_closes(false);
+                if let Some(pid) = d.switcher.pids.get(d.switcher.selected).copied() {
+                    d.step(fake::Step::Activation { pid, raise_all: true });
+                }
+            });
+        });
+    }
+
+    /// Another Tab with ⌘ still held: the switcher's selection moves on one.
+    pub(super) fn cmd_tab_again(&mut self) {
+        self.key(crate::engine::switcher::KEY_TAB, false);
+        self.desk(|d| d.switcher_steps());
     }
 
     /// ⌘ let go with the switcher up: it closes and macOS activates the app selected.

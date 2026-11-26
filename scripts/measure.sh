@@ -20,7 +20,13 @@
 # scripts/measure_engines.py runs this for the two engines alone, captures off, and writes the
 # corner-against-spaces table (PLAN 1.9).
 #
-# `off` is the app not running: the same fixture windows, the floor. Fixture windows only
+#   RUNS=3 ENGINES="corner off apple" scripts/measure.sh rest   # by name only: Apple's own Stage Manager at rest
+#
+# `off` is the app not running: the same fixture windows, the floor. `apple` (rest only, by
+# name only) is the app not running and Apple's Stage Manager on: it writes GloballyEnabled in
+# com.apple.WindowManager for the run and puts it back, Apple's takes every window on the Mac
+# into its strip meanwhile, and Apple's WindowManager and the Dock are read beside the window
+# server. Fixture windows only
 # (STAGE_MANAGER_ONLY), a scratch home per run; nothing is measured while another Stage
 # Manager runs (quit the installed one first). The measured processes start through
 # LaunchServices, so a `nice` on this script never reaches them; run it without one anyway

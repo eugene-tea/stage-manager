@@ -524,7 +524,7 @@ fn offered_at_notice(waiting: impl IntoIterator<Item = u32>, listed: &HashSet<u3
 /// `debug-space`, `debug-expose`, ...) never reach the WM thread's `ctl`, so they leave the
 /// motion alone too (`mark` asks `state` and `dump`).
 fn ctl_lands_switch(cmd: &Command) -> bool {
-    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher | Command::DebugMissionControl(_))
+    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher | Command::DebugDesktopStill | Command::DebugMissionControl(_))
 }
 
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
@@ -3126,6 +3126,9 @@ impl Controller {
             let before = m.before_activation(&obs);
             let actions = m.app_activated(pid, &obs);
             self.activation_switch = before.and_then(|b| m.switch_undo(b)).map(|undo| SwitchBack { pid, undo, at: now });
+            // An arrangement made ahead that this activation's switch undoes goes after the
+            // switch's own batch ([`Self::forget_held_for_switch`]).
+            let mut undo_after = false;
             if actions.is_empty() && !present {
                 // Nothing to show here: macOS may be on its way to the app's window
                 // on another Desktop (its focus may have come first and be held).
@@ -3155,10 +3158,13 @@ impl Controller {
                     tracing::info!(pid, since_activation_ms, decide_ms, asked_focus = needs_focus, "activated app lives in another stage; switching");
                 }
                 attribution::judged(Notice::Activation, i64::from(pid), if actions.is_empty() { "the user's: nothing to switch" } else { "the user's: its stage comes" });
-                self.forget_held(ob);
+                undo_after = self.forget_held_for_switch(ob);
             }
             self.activation = self.activation_for(pid, &actions, ob);
             self.execute_animated(ob, actions);
+            if undo_after {
+                self.undo_ahead(ob, "the user acted on the Desktop shown");
+            }
         }
     }
 
@@ -5817,12 +5823,6 @@ impl Controller {
             let connected: Vec<DisplayId> = displays.iter().map(|d| d.id).collect();
             self.displays_added = returned_screens(&self.displays_added, settling, added, &connected);
             self.frames_display_changed(heard);
-            // Taken by the windows on screen where every stage's windows are listed with
-            // their Desktop ([`Self::display_change_guessed`]): the Desktops are bound again
-            // by the arrivals after it.
-            if let Some(m) = self.model.as_mut().filter(|m| m.hidden_on_their_desktop()) {
-                m.unbind_all();
-            }
         }
         // A screen gone (not one seen again under a new id): under the Spaces engine its hidden
         // windows are kept in their stages, on their own Desktops, before the model's batch
@@ -6910,6 +6910,16 @@ impl Controller {
                     None => json!({ "ok": false, "error": "the Dock does not run" }),
                 }
             }
+            Command::DebugDesktopStill => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-desktop-still needs STAGE_MANAGER_TEST=1" });
+                }
+                let Some(d) = self.model.as_ref().map(|m| *m.main_display()) else { return json!({ "ok": false, "error": "not managing" }) };
+                // The block the patch's still holds now (grown to hold the patch), else the
+                // corner's own.
+                let block = desktop_shot::kept_region(d.id.0).unwrap_or_else(|| desktop_shot::block(d.frame, None, d.corner));
+                super::desktop_fast::compare_now(d.id.0, block)
+            }
             Command::DebugMissionControl(words) => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-mission-control needs STAGE_MANAGER_TEST=1" });
@@ -6928,11 +6938,11 @@ impl Controller {
                 }
                 self.debug_dock_click(ob, &bundle, real, hold_ms.map(Duration::from_millis))
             }
-            Command::DebugDockLend { bundle } => {
+            Command::DebugDockLend { bundle, hold_ms } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-dock-lend needs STAGE_MANAGER_TEST=1" });
                 }
-                self.debug_dock_lend(ob, &bundle)
+                self.debug_dock_lend(ob, &bundle, hold_ms.map(Duration::from_millis))
             }
             Command::DebugDockHover { bundle } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

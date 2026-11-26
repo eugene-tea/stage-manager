@@ -19,13 +19,16 @@
 //! prediction sees it (`hold=MS`: the press held that long before its release, as a person's is) (in the Apple mode: found, hit-tested and pressed, no prediction),
 //! `debug-dock-hover BUNDLE` moves the pointer onto that item and leaves it there (no press:
 //! the pointer in the Dock; `debug-pointer-back` puts it back),
-//! `debug-dock-lend BUNDLE` feeds that click without pressing the item (what the press put
-//! home waits for an activation that does not come),
+//! `debug-dock-lend BUNDLE [hold=MS]` feeds that click without pressing the item (what the
+//! press put home, or arranged on another Desktop, waits for an activation that does not
+//! come; with `hold=MS` past a click's 600 ms the fed press is one that is no click),
 //! `debug-mission-pick ID [hover]` clicks a fixture's window where Mission Control lays it out
 //! (with `hover` only moves the pointer there, back with `debug-pointer-back`), `debug-cmd-tab cancel|release [TABS] [HOLD_MS] [GAP_MS] [nolend]` posts ⌘Tab
 //! (Escape before ⌘'s release, or a release only onto a `STAGE_MANAGER_ONLY` app) and
 //! `debug-cmd-tab result` reports what answered it, `debug-switcher` lists ⌘Tab's switcher
-//! as the Dock shows it (its items' titles, the one selected), `debug-mission-control
+//! as the Dock shows it (its items' titles, the one selected), `debug-desktop-still` takes a
+//! still of the desktop in the main screen's park corner both ways now (the window server's
+//! call and ScreenCaptureKit) and says how far apart they are, `debug-mission-control
 //! status|lend [card]|back|mode off|shown|key|config` drives Mission Control's lends under the Spaces
 //! engine by hand (the probe: every hidden window put home now and kept out, taken back, the
 //! mode for this run; `lend card` parks them at their cards), `debug-frame ID X Y W H [only]` sets a shown managed window's frame (`only`:
@@ -341,11 +344,16 @@ pub enum Command {
     /// `STAGE_MANAGER_TEST=1`; round cmd-tab, [`crate::platform::switcher_probe`]).
     DebugCmdTab(CmdTabProbe),
     /// [`Command::DebugDockClick`]'s fed click with no press of the item (needs
-    /// `STAGE_MANAGER_TEST=1`; the Spaces engine, round r2-lends): what the press puts home
-    /// waits for an activation that never comes, for the live checks of what ends it.
+    /// `STAGE_MANAGER_TEST=1`; round r2-lends): what the press puts home, or arranges on
+    /// another Desktop, waits for an activation that never comes, for the live checks of
+    /// what ends it.
     DebugDockLend {
         /// The app's bundle id.
         bundle: String,
+        /// How long the fed press is held before its release (`hold=MS`; none: the release
+        /// at once). Past a click's time ([`crate::platform::dock::CLICK_MAX`]) it is a
+        /// press that is no click (round arranged-ahead).
+        hold_ms: Option<u64>,
     },
     /// The pointer moved onto the Dock item of a `STAGE_MANAGER_ONLY` app and left there,
     /// nothing pressed (needs `STAGE_MANAGER_TEST=1`; round picture-wait): the pointer in
@@ -362,6 +370,12 @@ pub enum Command {
     /// ⌘Tab's switcher as the Dock's Accessibility shows it now: the items' titles, the one
     /// selected (needs `STAGE_MANAGER_TEST=1`; round cmd-tab).
     DebugSwitcher,
+    /// A still of the desktop in the main screen's park corner taken both ways now, through
+    /// the window server's call and through ScreenCaptureKit, and how far apart the two are:
+    /// sizes, colour spaces, times and the difference, never a picture (needs
+    /// `STAGE_MANAGER_TEST=1`; round desktop-still,
+    /// [`crate::platform::desktop_fast::compare_now`]).
+    DebugDesktopStill,
     /// Presses the close button of a `STAGE_MANAGER_ONLY` app's window (a test's own Finder
     /// window); any other window is refused (needs `STAGE_MANAGER_TEST=1`).
     DebugClose {
@@ -564,6 +578,7 @@ impl Command {
                 Ok(Self::DebugFullscreen { id, on })
             }
             ["debug-switcher"] => Ok(Self::DebugSwitcher),
+            ["debug-desktop-still"] => Ok(Self::DebugDesktopStill),
             ["debug-mission-control", rest @ ..] => match rest {
                 ["status" | "lend" | "back" | "launch"] | ["lend", "card"] | ["mode", "off" | "shown" | "key" | "config"] => {
                     Ok(Self::DebugMissionControl(rest.iter().map(|w| (*w).to_string()).collect()))
@@ -579,7 +594,13 @@ impl Command {
                 }
                 Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: !rest.is_empty(), hold_ms })
             }
-            ["debug-dock-lend", bundle] => Ok(Self::DebugDockLend { bundle: (*bundle).to_string() }),
+            ["debug-dock-lend", bundle, rest @ ..] => {
+                let (rest, hold_ms) = hold_word(rest)?;
+                if !rest.is_empty() {
+                    return Err("debug-dock-lend needs BUNDLE [hold=MS]".into());
+                }
+                Ok(Self::DebugDockLend { bundle: (*bundle).to_string(), hold_ms })
+            }
             ["debug-dock-hover", bundle] => Ok(Self::DebugDockHover { bundle: (*bundle).to_string() }),
             ["adopted", ids @ ..] => ids
                 .iter()
@@ -1171,7 +1192,12 @@ mod tests {
             Ok(Command::DebugDockClick { bundle: "dev.example.app".into(), real: true, hold_ms: Some(250) })
         );
         assert!(Command::parse("debug-dock-click dev.example.app fake").is_err());
-        assert_eq!(Command::parse("debug-dock-lend dev.example.app"), Ok(Command::DebugDockLend { bundle: "dev.example.app".into() }));
+        assert_eq!(Command::parse("debug-dock-lend dev.example.app"), Ok(Command::DebugDockLend { bundle: "dev.example.app".into(), hold_ms: None }));
+        assert_eq!(
+            Command::parse("debug-dock-lend dev.example.app hold=700"),
+            Ok(Command::DebugDockLend { bundle: "dev.example.app".into(), hold_ms: Some(700) })
+        );
+        assert!(Command::parse("debug-dock-lend dev.example.app real").is_err());
         assert!(Command::parse("debug-dock-lend").is_err());
         assert_eq!(Command::parse("debug-dock-hover dev.example.app"), Ok(Command::DebugDockHover { bundle: "dev.example.app".into() }));
         assert!(Command::parse("debug-dock-hover").is_err());
@@ -1198,6 +1224,8 @@ mod tests {
         assert!(Command::parse("debug-mission-control").is_err());
         assert!(Command::parse("debug-mission-control mode sometimes").is_err());
         assert!(Command::parse("debug-switcher now").is_err());
+        assert_eq!(Command::parse("debug-desktop-still"), Ok(Command::DebugDesktopStill));
+        assert!(Command::parse("debug-desktop-still now").is_err());
         assert!(Command::parse("debug-cmd-tab").is_err());
         assert!(Command::parse("debug-cmd-tab press").is_err());
         assert!(Command::parse("debug-cmd-tab cancel 0").is_err(), "no Tab");

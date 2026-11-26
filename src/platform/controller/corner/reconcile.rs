@@ -31,8 +31,10 @@ impl Controller {
     /// (nothing is judged while our own park, raise or un-minimize may still be landing, nor
     /// while its listed frame changes: live 10-29, ⌘M's un-minimize focused the window and
     /// set it down out of the zone, and "focused" adopted it out of its new card),
-    /// echo-touched through the batch, with a backoff, and given up after a few tries (said
-    /// once at info). `list`: the tick's read of the on-screen list, when it made one.
+    /// echo-touched through the batch, with a backoff; one its app put back after each of a
+    /// few tries is the app's to show and joins the active stage where it is too (said once
+    /// at info; audit 11-25 H4: before, it was given up and stayed counted parked, in view
+    /// with no card). `list`: the tick's read of the on-screen list, when it made one.
     ///
     /// Not while the list cannot be trusted: a Space change settling or a full-screen Space,
     /// Mission Control and its settle, a Desktop slide before its notice (the parked windows
@@ -187,12 +189,20 @@ impl Controller {
                     tracing::info!(id, listed, tries = stray.tries, "a parked window is listed out of the park zone: parked again");
                     self.execute(ob, vec![Action::Hide { id: WindowId(id) }]);
                 }
-                Verdict::GiveUp => tracing::info!(
-                    id,
-                    listed,
-                    tries = stray.tries,
-                    "a parked window keeps leaving the park zone: given up on; it stays counted parked until its focus, a switch or a Desktop change settles it"
-                ),
+                Verdict::Kept => {
+                    let obs = Observation { focused: focused.flatten().map(WindowId), ..Observation::default() };
+                    let Some(m) = self.model.as_mut() else { return };
+                    let actions = m.adopt_shown(WindowId(id), bounds, &obs);
+                    if actions.is_empty() {
+                        // Not the model's to take (no longer parked, nor on a Desktop shown):
+                        // the stray stays given up, so it is not tried from none again.
+                        tracing::info!(id, listed, tries = stray.tries, "a parked window its app keeps out of the corner: not parked again");
+                        continue;
+                    }
+                    tracing::info!(id, listed, tries = stray.tries, "a parked window its app keeps out of the corner joins the active stage where it is");
+                    self.corner.strays.remove(&id);
+                    self.execute(ob, actions);
+                }
                 Verdict::Wait | Verdict::Settled => {}
             }
         }

@@ -6,7 +6,7 @@ use super::*;
 
 /// Audit U3 (11-25): a Dock click on Charlie, whose only window is on Desktop 2, arranges
 /// Desktop 2 at the press; no activation follows (the click went nowhere), so the
-/// arrangement is undone a second later. The window put back on Desktop 2, which does not
+/// arrangement is undone at its cap (3 s; a second, then). The window put back on Desktop 2, which does not
 /// show, stays in the safety registry until it is seen there
 /// (`Controller::keep_until_seen`): nothing can be retried for it meanwhile, and it kept the
 /// tick brisk ("shows owed") until Desktop 2 next showed, for hours if need be. It keeps its

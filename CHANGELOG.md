@@ -4,12 +4,16 @@
 
 - Much less work at rest in the Accessibility mode: the pictures of the windows in front are
   taken when a switch is likely or starts, as in the Spaces mode, and no longer every two
-  seconds. On a 5K display the app and the system together use about a third of the CPU they
-  did (about 6 % of one core against 16 %). A switch starts at most 0.06 seconds later.
+  seconds. A switch starts at most 0.06 seconds later.
   `[animation] snapshot_interval_ms`, now 0 by default, sets a timer for them in every mode.
 - Less work at rest in the Accessibility mode: the housekeeping runs every 2 seconds while
   nothing happens, as in the Spaces mode (every 0.75 seconds before, while a window was
   hidden). A press on a hidden window's edge in the corner is ignored as before.
+- Less work at rest in the Accessibility mode: the picture of the desktop that covers the
+  hidden windows' edges in the corner, taken again every ten seconds, comes from a faster
+  system call. The slower one is used wherever the faster one does not work. With both
+  changes the app and the system together use about an eighth of the CPU they did at rest on
+  a 5K display (about 2 % of one core against 16 %).
 - With `[strip] order = "dock"`, the running apps are no longer all looked up again once a
   minute.
 - In the default mode, the first switch to a Desktop after the app starts stays there, and a
@@ -24,6 +28,22 @@
 - In the default mode, Mission Control and App Exposé opening and closing are followed at
   once; before, up to a second later, two with the Mac at rest.
 - `[windows] mission_control_key_keeps_stage = true` works in the default mode too.
+- In the default mode, a hidden window that its app keeps moving back onto the screen joins
+  the stage in front after a few tries, and its card is updated. Before, it stayed on screen
+  with no card, or was sent to the corner again and again.
+- In the default mode, when a screen is unplugged and macOS shows another Desktop on the screen
+  left, the windows of the Desktop it showed before stay in their stages. Before, they left
+  them and came back as new stages when that Desktop showed again.
+- After a screen is unplugged, going back to the Desktop the remaining screen showed before
+  brings its own last stage in front, not an empty one.
+- In the default mode, a Dock click to an app on another Desktop shows that Desktop with the
+  app's stage in front also on a busy Mac. Its windows are moved as the mouse button goes
+  down, about a tenth of a second sooner, and the Desktop may take up to three seconds to
+  start sliding (one before). Before, it could slide in with the stage that was there and
+  change after.
+- ⌘Tab to an app on another Desktop shows that Desktop with the app's stage in front as it
+  slides in, in both modes. Before, in the default mode it slid in with the stage that was
+  there and changed on arrival; with `engine = "spaces"` it started to slide a moment later.
 
 ## 1.9.2 — 2026-11-24
 

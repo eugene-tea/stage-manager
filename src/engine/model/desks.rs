@@ -280,13 +280,6 @@ impl Model {
         self.desks.retain(|_, b| b.space != space);
     }
 
-    /// Forgets every binding: the screens changed under an engine that takes a display change
-    /// by the windows on screen (the platform's `display_change_guessed`); the arrivals after
-    /// it bind each Desktop again, as after a launch.
-    pub(crate) fn unbind_all(&mut self) {
-        self.desks.clear();
-    }
-
     /// Takes the bindings `state.json` saved (`desks`): kept for the saved Spaces not visited
     /// yet, so a save before their visit writes them again. Nothing is bound from them yet
     /// (slice 6 of design r3 finds a Desktop again by its uuid).

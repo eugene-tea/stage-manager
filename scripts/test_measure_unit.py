@@ -120,12 +120,15 @@ class RunKnobs(unittest.TestCase):
                 M.extra_env(bad)
 
     def test_what_a_rest_counted(self):
-        s0 = {"costs": {"window_lists": 100, "launch_services": 40, "taps_on": {"slivers": True}, "desktop_stills": 3},
+        s0 = {"costs": {"window_lists": 100, "launch_services": 40, "taps_on": {"slivers": True}, "desktop_stills": 3,
+                        "desktop_stills_fast": 2, "desktop_stills_sck": 1},
               "tick": {"brisk_ticks": 50, "rest_ticks": 10, "pace": "brisk"}}
-        s1 = {"costs": {"window_lists": 166, "launch_services": 41, "taps_on": {"slivers": True}, "desktop_stills": 9},
+        s1 = {"costs": {"window_lists": 166, "launch_services": 41, "taps_on": {"slivers": True}, "desktop_stills": 9,
+                        "desktop_stills_fast": 8, "desktop_stills_sck": 1},
               "tick": {"brisk_ticks": 62, "rest_ticks": 38, "pace": "rest", "rest_ms": 2000}}
         got = M.rest_counts(s0, s1, 60.0)
         self.assertEqual(got, {"window_lists_per_min": 66.0, "launch_services_per_min": 1.0, "desktop_stills_per_min": 6.0,
+                               "desktop_stills_fast_per_min": 6.0, "desktop_stills_sck_per_min": 0.0,
                                "ticks_brisk": 12, "ticks_rest": 28, "tick_rest_ms": 2000})
         self.assertEqual(M.rest_counts(None, s1, 60.0), {}, "the app not running: nothing counted")
 

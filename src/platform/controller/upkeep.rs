@@ -108,7 +108,7 @@ impl Controller {
     pub(super) fn upkeep_tick_waits(&self, now: Instant) -> Option<&'static str> {
         match self.engine.kind() {
             EngineKind::Corner => {
-                if self.corner.strays.values().any(|s| !s.gave_up) {
+                if self.corner.strays.values().any(crate::engine::corner::park_reconcile::Stray::wants_brisk) {
                     Some("parked windows out of the corner")
                 } else if self.corner.unrestored.values().any(|u| !u.waits) {
                     Some("shows owed")
@@ -173,7 +173,9 @@ impl Controller {
 
     /// One of Mission Control's keys, or a press while it may show, heard by its key tap
     /// ([`crate::platform::mission_key_tap`]). The Spaces engine: Escape, ⌘'s release or a
-    /// press while ⌘Tab's switcher is up first ([`Self::switcher_tap`]), then a hint, or the
+    /// press while ⌘Tab's switcher is up first, under both engines ([`Self::switcher_tap`]:
+    /// the switcher is followed whatever the engine, round arranged-ahead). Then the Spaces
+    /// engine: a hint, or the
     /// key that closed Mission Control ([`Self::mission_heard`]). The Corner engine: the
     /// hint or the key that closed it, for its look ([`Self::looks_heard`]).
     pub fn mission_input(&mut self, ob: &mut Observer, heard: crate::platform::mission_key_tap::HeardAt) {
@@ -182,7 +184,10 @@ impl Controller {
                 self.switcher_tap(ob, heard);
                 self.mission_heard(ob, heard);
             }
-            EngineKind::Corner => self.looks_heard(heard),
+            EngineKind::Corner => {
+                self.switcher_tap(ob, heard);
+                self.looks_heard(heard);
+            }
             EngineKind::Apple => {}
         }
     }

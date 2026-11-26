@@ -102,14 +102,40 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   corner as the Corner engine does.
 - **Less work while nobody looks: CPU and battery.** Measured 11-25 on a 5K display (UX-SPEC,
   "Window engines measured"): with the system's share the Accessibility engine costs about
-  6 % of a core at rest (about 16 % until the 2 s picture timer went), the Spaces engine
-  about 0.5 %. Aim: 1 to 2 %, with no card shown stale and no switch slower.
-  - The still of the desktop in the park corner is the cost: about 4.3 % of a core in the
-    window server and 0.3 % in the capture service, for one ScreenCaptureKit listing and
-    capture every 10 s while a sliver shows. Without it the Accessibility engine reads
-    about 1.2 %. Take the still through the window server's own call first, with
-    ScreenCaptureKit as the fallback (the layers' rule), then ask how often it is needed
-    with no cause heard (a widget in the corner changes with none).
+  2 % of a core at rest (about 6 % until the still of the desktop went through the window
+  server's own call, about 16 % until the 2 s picture timer went), the Spaces engine about
+  0.5 %. Aim: about 1 %, with no card shown stale and no switch slower.
+  - What is left of the 2 %: the app 0.5 %, the window server about 0.7 % for the tick and
+    its lists, and the still of the desktop in the park corner about 0.8 % (0.5 % in the
+    window server, 0.3 % in the capture service, six stills a minute). Left:
+    - The still's pace: every 10 s while a sliver shows. Each cause the app hears already
+      takes one (an icon, the wallpaper, a click on the desktop, an arrival, a wake); what
+      the timer alone catches is a widget in the corner. A longer rest, or none where no
+      widget can lie there, takes most of the 0.8 %.
+    - Through ScreenCaptureKit (the fallback) a still costs the window server about 1 % for
+      each still a minute, most likely for its listing of what can be shared. If the
+      listing can be kept between stills (the same desktop windows), the fallback costs
+      what the window server's call does.
+    - Apple's own Stage Manager adds nothing at rest that a run can see (UX-SPEC; its own
+      process and the Dock read 0), but it hides the Mac's other windows too, so its window
+      server row cannot be set beside the two engines'. Not measured: Apple mode (the app
+      beside Apple's; `measure.sh`'s `apple` runs Apple's alone), and the three with the
+      same windows hidden (an account with fixture windows only).
+    - The proof's tolerance (a mean of 2 of 255, no cell over 12) is a guess: read
+      `ctl debug-desktop-still`'s numbers on a wide-gamut display, with a dynamic, an HDR
+      and an aerial wallpaper, and with an icon and a widget in the corner. Where the two
+      ways never agree the call rests and the cost is the fallback's.
+    - Whether the windows are composited in the window server's own order whatever the
+      array's is not documented; the comparison with an icon in the corner says
+      (`test-stages.sh still`).
+    - A widget in the corner is not known to the app. Through ScreenCaptureKit the still
+      rests 30 s unless Finder's icons lie in the corner or are not known, so a widget
+      there can be 30 s behind in the fallback (10 s through the window server). The
+      owner's call: keep 30 s, or 10 s always and the fallback's cost with it.
+    - Each change of the wallpaper's frame, each Desktop arrival with another picture and
+      each icon change in the corner proves the call again with one ScreenCaptureKit still
+      (as many as before this round, none at rest). If a proof once a launch and a screen
+      is enough, they go.
   - The inert slivers' list at rest is up to 2.2 s behind a window that comes or goes with
     no click, key or notice (a system panel, a notification of a process that is not
     observed); 0.8 s before. If one is seen to matter: the mouse moves' monitor, on while a
@@ -126,10 +152,9 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   - A switch's wait for its pictures: the pictures are taken when a switch is likely, one up
     to 2 s old is played, and the corner's cover goes ahead of them (ARCHITECTURE, "Window
     pictures"); a card click held as a person's ends 13 ms later than on 1.9.2. Left:
-    - One capture call for several windows is refused by the window server (11-25, 30 of
-      30): drop `STAGE_MANAGER_CAPTURE_LIST` and `capture_fast::pictures`. One call a window
-      takes about 18 ms a window, one after another: try them at once from several
-      threads, if that is safe.
+    - One call a window takes about 18 ms a window, one after another: try them at once
+      from several threads, if that is safe. (One call for several windows hands back one
+      image of them all together: UX-SPEC, "Window engines measured".)
     - A Dock click's outgoing windows still go 63 ms later than on 1.9.2 under the
       Accessibility engine with a click held as a person's (none under Spaces; UX-SPEC).
       Find what waits there.
@@ -158,13 +183,11 @@ Nothing here changes what a person asks for; each closes a way a slower Mac, or 
 order of events, can still go wrong. The bench first, then the live suite
 (DEVELOPMENT, "The bench").
 
-- **A screen going away under the Accessibility engine: its windows leave their stages.**
-  The live check written for the Spaces engine (`scripts/test-stages.sh display-gone`) run
-  under the Accessibility engine for the first time, 11-25: 18 of 100 checks fail, the same 18
-  on 1.9.2. The windows of the screen that went are given new stages on the screen left, and
-  a Dock click 20 s after is not arranged at the press (the Spaces engine's way). Say which
-  of the 18 are the Accessibility engine's own way and which are defects, then mend those
-  with the item below.
+- **A screen going away with the Desktop reads off (`SM_DESKTOPS=guess`, a macOS that breaks them).**
+  The Accessibility engine takes the display change by the windows on screen as 1.9.2 did,
+  and the defect stays there (bench `guessed.txt`, "the live phase's ..."). A guess could
+  take a known window missing from screen in the change's settle for one on another Desktop
+  rather than gone from its stage; whether to is the owner's call.
 - **A screen going with its Desktops kept (the rest of the Desktops design's slice 5).**
   When a screen goes and macOS moves its Desktops to the screen left under the same ids, the
   model still merges the gone screen's Desktop into the one shown there, and `spill`'s watch
@@ -230,15 +253,6 @@ Desktops' reads since round corner-desktops, hearing of Mission Control and of a
 change's end since round looks-forward. The items below are where the Accessibility mode
 was left behind for no reason of the mode.
 
-- **A display change is still taken by the windows on screen under the Accessibility engine.**
-  The window server's list of Desktops is read there too now, but its bindings are dropped
-  when a screen comes or goes and the list stays out for the change's 10 s settle
-  (`Controller::display_change_guessed`): with the list deciding, a screen that went and came
-  back with its Desktop kept left the Desktop on the screen that stayed with an empty stage in
-  front (on the bench). It goes when the Desktops design's slice 5 is built ("A screen going
-  with its Desktops kept", above); the bench has the scenarios (`bench/corner_screens.rs`).
-  Known and unchanged there: after a screen goes with its Desktop kept, the windows of the
-  Desktop left behind on the screen that stayed leave their stages until it shows again.
 - **The reads' check sees nothing on a screen with no window wholly on it.** A list of
   Desktops that names the wrong Desktop there is not noticed until a window shows
   (`engine/desk_reads.rs`). Never seen; a second public fact would close it.
@@ -253,14 +267,16 @@ was left behind for no reason of the mode.
   window in a word the app learns only from the Spaces engine's own asks. A way to learn it
   with no Space call (a window the app sees open, matched by its id) would bring that look
   forward too.
-- **⌘Tab to another Desktop arranges the stage on arrival**, in both modes, though the chosen
-  app is known before ⌘ is released (the Spaces engine's lend already follows it). Arranged
-  ahead, as a Dock click's is; UX-SPEC's "known gap" sentence then goes.
-- **A Dock click's arrangement is undone after 1 s** under the Accessibility engine, 3 s under
-  Spaces; the reason for 3 s (a busy Mac's late notice) is not the mode's. One cap; and
-  whether the Accessibility engine can arrange at the press as Spaces does.
-- **A hidden window found shown is given up after four tries** under the Accessibility engine
-  and then stays in view, counted hidden, with no card; the Spaces engine never gives up.
+- **The first Tab's round with a busy app.** At the first Tab the app selected is asked as at
+  a Dock press (bounded at 100 ms on the WM thread; 23 ms with a fixture app, live 11-25).
+  Never measured with an app that answers slowly.
+- **A wrong ⌘Tab guess that comes into view.** ⌘ let go before the Dock lists the switcher,
+  the guess wrong, and the app let go on living on the Desktop arranged for the guess: that
+  Desktop slides in with the guessed app's stage, is put back at the other app's
+  activation and arranged again at the notice (three stages in view where there were two;
+  `bench/ahead.rs`). Going straight from the guessed stage to the right one there needs an
+  arrangement that can change its window without the undo between (`Model::arrange_ahead`
+  keeps one stage to go back to).
 - **Smaller.** The wait for a switch's pictures (160 ms) is sized for ScreenCaptureKit, not for
   the window server's capture; the landing variants can be tried only with `engine = "spaces"`;
   the Spaces engine's lends keep their own copy of the watch that brings Mission Control's

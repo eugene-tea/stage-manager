@@ -253,7 +253,9 @@ app's activation (up to 3 s after ⌘'s release, 5 s after a Dock press) and goe
 at Escape, at a press that was no click, or when another app comes in front. An app whose
 only window waits in a hidden stage of another Desktop is asked its focused window at its
 activation (within 50 ms), that window's Desktop is arranged and the window focused, and macOS
-goes there. An app that does not say in time is asked again 60, 180, 420 and 900 ms later
+goes there (what an activation nothing announced gets, an `open` say; a Dock click and
+⌘-Tab have that Desktop arranged before the release, "Desktops" below, and macOS goes by
+itself). An app that does not say in time is asked again 60, 180, 420 and 900 ms later
 (11-23: Messages took 55 to 79 ms at its activations; ⌘-Tab to it left it in front with no
 window, and no focus notice followed, its key window being the same). Under All at Once a Shift-click on a card brings in only the
 window clicked; that window dragged back to the strip takes the app's other windows along.
@@ -316,7 +318,47 @@ measured 11-09 with an app of two windows alone in front; a shared stage not mea
 windows. The same app can have stages on several Desktops. A card click never changes the
 Desktop. ⌘-Tab and the Dock switch Desktops as macOS's own setting says ("When switching to
 an application, switch to a Space with open windows for the application"), and the arriving
-Desktop shows that window's stage. An app macOS activates as a Desktop slides in (a swipe,
+Desktop shows that window's stage. For a Dock click that Desktop is arranged before it slides
+in, at the click's press (the Dock acts at the release, about 0.1 s later; under `engine =
+"spaces"` the window waits on no Desktop until then and macOS must find it there, under the
+Accessibility engine its moves get that time, where they went out at the release until round
+arranged-ahead), so the app's stage is in front as it arrives. A press that is no click (the
+icon dragged, held for its menu, a modifier down) has the arrangement put back at its
+release: every window where it was, on a Desktop nobody sees (on the bench four window moves
+in all, two each way, and nothing changed in view). A click that takes macOS
+nowhere has the arrangement put back as it was, on the Desktop nobody sees, 3 s after it (1 s
+under the Accessibility engine until round arranged-ahead: on a busy Mac, whose Desktop began
+to slide later than that, the arrangement was put back just before and the stage changed in
+view; on the bench an app 0.4 s slow to come in front, at three times the measured delays).
+For ⌘-Tab the same Desktop is arranged while the switcher shows, under both engines (round
+arranged-ahead; until then when it arrived: under the Accessibility engine it slid in with
+the stage that was there and changed in view, under `engine = "spaces"` the app was asked
+its focused window at its activation first). The app selected is the one ⌘'s release goes
+to: at the first Tab it is the app used before the one in front, and the Dock's own list,
+which shows about 0.18 s later, says it from then on. So a ⌘-Tab let go at once is arranged
+from that guess, and one held longer from the Dock's reading (the logs of 11-18 to 11-24:
+of 668 first Tabs, 220 were let go before the Dock's list was read; where both the guess
+and the list named an app, 442 times, they agreed in 435). The arrangement is put back, every window where it was on
+the Desktop nobody sees, when the selection moves on, at Escape, or when ⌘ is let go on
+another app; let go on its app, it waits for the Desktop as a Dock click's does. A guess
+that proves wrong is put back the same way: by the Dock's list while the switcher shows,
+else when the app ⌘ was let go on comes in front. Nothing moves on the Desktop in view for
+any of it (one case apart, under Known gaps). It needs the switcher's end heard (Escape is never told to an input monitor
+while the switcher shows; a listen-only event tap hears it, on from the Tab to the
+switcher's end and off again after): where macOS refuses that tap, or keeps it off while a
+password field has the keyboard, nothing is arranged ahead and the Desktop is arranged when
+it arrives, as before.
+Live 11-25 (fixture apps, both engines, `scripts/test-stages.sh spaces --auto`): the Desktop
+was arranged about 25 ms after the first Tab was heard. Let go 100 ms after ⌘'s press, or
+held 450 ms, the app's Desktop slid in with its stage in front and the stage left stayed
+hidden at every look (30 ms apart). Escape and a second Tab put it back with no window of
+that Desktop listed on screen meanwhile (it stood 230 to 260 ms before the second Tab). One
+quick ⌘-Tab of those runs had its arrangement undone at the release: the tick found ⌘ let
+go 3 ms before the key tap's word of it was handled, and could not tell a release from a
+cancel. Where the tap hears, the tick now waits 100 ms for its word (`switcher::UNHEARD_WAIT`).
+At rest the Dock sent no notice to its observer under the Accessibility engine (0 a minute,
+three runs of `measure.sh rest`).
+An app macOS activates as a Desktop slides in (a swipe,
 ⌃-arrow) never switches a stage on the Desktop being left: it is decided once the new
 Desktop is recognized, as Apple's never touches the Desktop left. Full-screen apps have no
 strip.
@@ -343,7 +385,7 @@ showing most of it (macOS's rule).
   on a card's app icon: the app's windows come from that screen's stages. Decided, not
   measured: ⌘-Tab or the Dock to an app whose stage is on the other screen switches that
   screen only. A Dock click or ⌘-Tab to a Desktop on either screen is arranged as on one
-  screen (the Dock click ahead of the slide; see Known gaps).
+  screen, ahead of the slide.
 - **A new app** opens on the screen with keyboard focus, as its own stage there, by the
   one-screen rules (macOS picks the screen; the window is taken where it shows).
 - **The lid closed.** That screen's front stage comes to the remaining screen as its front
@@ -355,7 +397,12 @@ showing most of it (macOS's rule).
   windows on another of the remaining screen's Desktops, one not shown since the launch, and
   slide to it: the same rule holds there, that Desktop's own front a card, also when macOS
   announces the Desktop still shown before it slides; the Desktop left shows its own most
-  recent stage again when it comes back, never nothing in front. Under `engine = "spaces"`
+  recent stage again when it comes back, never nothing in front, and keeps every stage whole
+  meanwhile, each with its windows, under either engine (live 11-25, a virtual screen: the
+  gone screen's windows landed on the remaining screen's first Desktop and macOS slid there;
+  the main screen gone, the remaining screen's own windows landed there, not shown; before,
+  under the Accessibility engine, the windows of the Desktop left the screen no longer showed
+  left their stages and came back as new ones). Under `engine = "spaces"`
   a Desktop counts as ended once macOS has left it unlisted for 2.5 s with the screens and
   their Desktops unchanged; its hidden stages then join, whole, where its windows went.
 - **macOS's activations at a display change.** The app macOS activates after the change
@@ -738,6 +785,19 @@ never probes, and is the default (GUIDE, Troubleshooting); `"spaces"` runs the p
 every launch and takes the Spaces way wherever it passes. The two are measured against each
 other in "Window engines measured", below.
 
+**A hidden window its app keeps showing (the park corner).** Apple's hidden windows are out
+of their apps' reach. A parked one is not: an app may move it back where it had it (one
+restoring its saved bounds, one re-centring its window). Such a window is parked again once
+it rests, four times at most, the tries 0.5, 1 and 2 s apart; each try shows, the window
+going to the corner and coming back. If its app moves it back every time, it joins the stage
+in front where it is, as a window you focus or drag out of the corner does at once, and its
+card loses it (the card goes if it held nothing else): on the bench, about 5 s after the app
+first moved it back. It is not parked again for that until a switch away from its new
+stage. A window the app moves back fewer times stays hidden. Before (audit 11-25), it was
+given up after the tries and stayed in view with no card, counted hidden; an app slower than
+the tick to move it back had it parked again for good. In the Spaces way a hide moves
+nothing, so an app has nothing to move back.
+
 **Updates.** Apple's Stage Manager updates with macOS; ours updates itself (GUIDE, Updates).
 A downloaded update also installs when you quit Stage Manager: the menu's Quit, or ⌘Q in
 Settings and About. It then stays closed (no relaunch: the user asked it to stop). Never at a
@@ -922,9 +982,12 @@ ours included), exact by construction, so nothing on the desktop keeps it off an
 under it take clicks and drags as usual (an icon dropped, moved or taken away under the patch
 hides it until the new still is drawn, so a stale picture never cuts the icon); it is taken
 again on arriving at a Desktop once the slide settles, when an icon there changes, after a click on the desktop, a moment after the
-picture or its predicted frame changes, and every 10 seconds otherwise (never during a
+picture or its predicted frame changes, after an unlock or a wake, and every 10 seconds otherwise (never during a
 switch's motion, a slide, Mission Control or Show Desktop; none while the screen is locked
-or asleep). The patch stays where it is through Show Desktop, Mission Control and App
+or asleep). The still is taken by the window server's own call, which lists nothing, and
+through ScreenCaptureKit wherever that call does not work or its picture is not proven the
+same as ScreenCaptureKit's (ARCHITECTURE, "Window pictures"); through ScreenCaptureKit the
+timer is 30 seconds where no icon lies in the corner. The patch stays where it is through Show Desktop, Mission Control and App
 Exposé, as the desktop picture does. Drawn from a still, it shows through Show Desktop what
 the desktop shows there and grows over the hidden windows' corners that Show Desktop pushes
 into view, back to its usual size once they are back in the corner (never over a shown
@@ -1451,6 +1514,55 @@ tick and its lists about 1 %. Without the still the Corner engine reads about 1.
 core at rest with the system's share (the app 0.5 %, the window server 0.7 % above its own
 load).
 
+Round desktop-still (11-25, after these runs) takes that still through the window server's
+own call, with no listing, and through ScreenCaptureKit only for the first one on a screen,
+after the wallpaper or an icon in the corner changes, and where the call does not work.
+Measured the same evening, the same Mac and windows (`scripts/measure.sh rest`; the first
+pair of runs had other work in it, 11.9 and 9.7 %, and is left out):
+
+| Run | Window server, % | Stills a minute | Capture service, % |
+|---|---|---|---|
+| The app quit (five runs) | 4.2 to 4.5 | | 0 |
+| Corner, four stages, the still by the window server's call (five runs) | 5.0 to 5.9 | 5 to 6, none asked of ScreenCaptureKit | 0.27 to 0.33 |
+| the same, the still forced through ScreenCaptureKit at its new pace (`SM_ENV="STAGE_MANAGER_STILL_SCK=1"`, two runs) | 6.7, 7.4 | 2 | 0.12 |
+
+So the Corner engine now costs the window server about 1.2 % of a core at rest (5.5 against
+4.3, the means), where it cost 4.6 to 5: the still's share fell from about 4.3 % to about
+0.5 %. The capture service works as much as before (0.3 %, about 0.05 % for a still a
+minute by either way: macOS 27 serves the window server's call through it too), so what was
+saved is most likely the listing of what can be shared. With the system's share the Corner
+engine reads about 2 % of a core at rest (the app 0.54 %, the capture service 0.3 %, the
+window server 1.2 %), the Spaces engine about 0.5 %. Through the fallback a still costs the
+window server what it did, about 1 % for each still a minute, so its slower pace (30 s where
+no icon lies in the corner) holds it to about 2 %. In the still phase (`test-stages.sh still
+capture`) the two ways' stills of the same corner were the same picture (a mean of 0.0 and
+no cell apart, of 255; 640 by 640 pixels at 2x), taken in 15 to 20 ms by the window server's
+call and 28 to 29 ms by ScreenCaptureKit, and at rest the next still listed nothing. With a
+desktop icon put in the corner (a disk image's) they were the same picture again (a mean of
+0.0, the worst cell 1 apart), and a double click and a drag on the icon went through the
+patch as before, a new still following the drag.
+
+Apple's own Stage Manager at rest, later the same evening (`ENGINES="corner off apple"
+scripts/measure.sh rest`: the app not running, Apple's switched on for the run in its own
+preference and switched back after it, the same four fixture apps opened one after another;
+three runs of each in turn, 60 s untouched):
+
+| Run | Window server, % | Apple's WindowManager, % | Dock, % | Capture service, % |
+|---|---|---|---|---|
+| Nothing running | 4.9 to 5.2 | 0 | 0 | 0 |
+| Apple's Stage Manager on (16 windows of its own on screen) | 3.3 to 3.6 | 0.00 to 0.03 | 0 | 0 |
+| Corner, four stages | 5.7 to 6.0 | | | 0.28 |
+
+Apple's own process and the Dock use nothing that shows at rest. The window server reads
+about 1.6 % lower with Apple's on than with nothing running: Apple's hides every window on
+the Mac but the front stage's, the other apps' windows that the test leaves on screen in the
+other two rows as well, so less is drawn. The run therefore says that Apple's adds no cost
+at rest that can be seen, and cannot say what its strip alone costs the window server: for
+that the same windows would have to be hidden in each row, which a run on fixture windows
+only cannot do. The Corner engine's rows agree with the earlier ones (0.85 % above nothing
+in the window server at the medians, the app 0.55 %, 6 stills a minute, none asked of
+ScreenCaptureKit). Apple mode (the app beside Apple's) is not in these rows.
+
 Measured again the same day after round picture-wait: a Dock click's press, the pointer
 coming into the Dock and a hotkey's modifiers take the pictures before the switch, a picture
 up to 2 s old is played (0.5 s before), and the park corner's cover no longer waits for the
@@ -1478,9 +1590,12 @@ the pictures, 37 with the timer), and a new app's window shows over the stage le
 77 ms as before.
 
 One capture call for all of a switch's windows was tried (`probe-spaces capture BUNDLE fast
-list`, 30 rounds): the window server handed back no image a window for 2, 3 or 4 windows,
-every time. One call a window took 26, 44, 61 and 79 ms for 1 to 4 windows of about 1040 by
-784 pixels, about 18 ms a window, one after another.
+list`, 30 rounds): for 2, 3 or 4 windows the window server handed back one image of them
+all together, the size of the rectangle around them (1340 by 984 pixels for two windows of
+1040 by 784, 1700 by 1264 for four), in 22 to 23 ms whatever their number; never an image a
+window. One call a window took 22, 38, 56 and 69 ms for 1 to 4 windows (26, 44, 61 and 79 in
+the first run), about 17 ms a window, one after another. The test switch for one call is
+gone.
 
 A person does not notice a delay this small: a response to a click reads as instant up to
 about 100 ms, a click's latency is told apart from about 50 to 100 ms, and two durations near
@@ -1634,8 +1749,12 @@ screen's Desktop at once.
 - Where the window server's list of Desktops cannot be read (or in the Apple mode), Desktops
   are told apart by their windows: an empty Desktop is forgotten when you leave it, and one
   whose windows are all hidden or minimized looks new until one of them shows.
-- A Dock click to another Desktop arranges it before it slides in. ⌘-Tab cannot: no public
-  notice names the chosen app early enough, so the Desktop is arranged when it arrives.
+- ⌘-Tab to another Desktop is arranged ahead from a guess when ⌘ is let go before the Dock
+  lists the switcher. When that guess is wrong (about 1 in 60 where the Dock's list could
+  tell) and the app let go on has its windows on the very Desktop arranged for the guess,
+  that Desktop slides in with the guessed app's stage in front and changes on arrival
+  (before: with the stage that was there, and changed on arrival). Where macOS refuses the
+  key tap, or keeps it off for a password field, ⌘-Tab's Desktop is arranged when it arrives.
 - A Desktop's strip appears after the Desktop has slid in on its first visit; Apple's slides
   in with it.
 - A dialog's parent window is a guess: the app's frontmost window at the time.

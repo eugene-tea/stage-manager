@@ -415,12 +415,15 @@ fn cmd_tab_cancelled_with_and_without_the_key_tap() {
 /// Live 11-23 17:43 (the owner's Messages): ⌘Tab from Desktop 1 to Alpha, whose only window
 /// waits in a hidden stage of Desktop 2 (in a stage Space, on no Desktop: macOS goes nowhere
 /// for it). The activation asks the app its focused window, arranges that window's Desktop
-/// and focuses it, and macOS goes (`arrange_for_hidden_focus`). `wakes_ms`: how long after
+/// and focuses it, and macOS goes (`arrange_for_hidden_focus`). Since round arranged-ahead
+/// that Desktop is arranged while the switcher shows, the window on it before ⌘'s release,
+/// and macOS goes by itself (`bench/ahead.rs`); with the key tap refused (`tap` false)
+/// nothing is arranged ahead and the activation does it, as it did. `wakes_ms`: how long after
 /// its activation the app answers nothing; asked within its first 50 ms it did not say, the
 /// activation was held for nothing, no focus notice followed (its key window had not
 /// changed), and the app was in front with no window: "clicking on Messages from the app
 /// switcher wasn't working".
-fn cmd_tab_to_an_app_hidden_on_another_desktop(load: f64, wakes_ms: Option<f64>) -> Run {
+fn cmd_tab_to_an_app_hidden_on_another_desktop(load: f64, wakes_ms: Option<f64>, tap: bool) -> Run {
     let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, 1.0, 2, |d| {
         d.add_app(A, "com.example.alpha", "Alpha");
         d.add_app(B, "com.example.bravo", "Bravo");
@@ -441,6 +444,7 @@ fn cmd_tab_to_an_app_hidden_on_another_desktop(load: f64, wakes_ms: Option<f64>)
         d.strip.transitions = 0;
         d.calls.clear();
         d.load = load;
+        d.tap_hears = tap;
         let alpha = d.apps.get_mut(&A).expect("Alpha");
         alpha.wakes_ms = wakes_ms;
         // Its key window the same before and after: it says nothing of it.
@@ -455,11 +459,19 @@ fn cmd_tab_to_an_app_hidden_on_another_desktop(load: f64, wakes_ms: Option<f64>)
 }
 
 fn cmd_tab_to_an_app_hidden_elsewhere(load: f64) -> Run {
-    cmd_tab_to_an_app_hidden_on_another_desktop(load, None)
+    cmd_tab_to_an_app_hidden_on_another_desktop(load, None, true)
 }
 
 fn cmd_tab_to_an_app_hidden_elsewhere_waking(load: f64) -> Run {
-    cmd_tab_to_an_app_hidden_on_another_desktop(load, Some(70.0))
+    cmd_tab_to_an_app_hidden_on_another_desktop(load, Some(70.0), true)
+}
+
+fn cmd_tab_to_an_app_hidden_elsewhere_at_its_activation(load: f64) -> Run {
+    cmd_tab_to_an_app_hidden_on_another_desktop(load, None, false)
+}
+
+fn cmd_tab_to_an_app_hidden_elsewhere_waking_at_its_activation(load: f64) -> Run {
+    cmd_tab_to_an_app_hidden_on_another_desktop(load, Some(70.0), false)
 }
 
 #[test]
@@ -467,6 +479,10 @@ fn cmd_tab_to_an_app_whose_only_window_is_hidden_on_another_desktop() {
     let there = "front [13] shows [13] desktop 2 app 101 switches 0 slides 1";
     expect(cmd_tab_to_an_app_hidden_elsewhere, [there, there, there]);
     expect(cmd_tab_to_an_app_hidden_elsewhere_waking, [there, there, there]);
+    // The key tap refused: arranged and focused at the activation, the app asked again when
+    // it does not say its focused window in time (the path of 11-23, as before the round).
+    expect(cmd_tab_to_an_app_hidden_elsewhere_at_its_activation, [there, there, there]);
+    expect(cmd_tab_to_an_app_hidden_elsewhere_waking_at_its_activation, [there, there, there]);
 }
 
 #[test]
@@ -612,7 +628,7 @@ fn activation_that_slides(load: f64) -> Run {
     Run::of(&b, out)
 }
 
-/// The same by a Dock click (the Desktop arranged ahead at the click, `DOCK_SWITCH_WAIT`).
+/// The same by a Dock click (the Desktop arranged ahead at the click, `DOCK_SWITCH_CAP`).
 fn dock_click_that_slides(load: f64) -> Run {
     let mut b = both_desktops_known(EngineKind::Corner, load, |d| {
         d.add_app(C, "com.example.charlie", "Charlie");
@@ -626,6 +642,261 @@ fn dock_click_that_slides(load: f64) -> Run {
     b.advance(8000);
     let out = seen(&mut b);
     Run::of(&b, out)
+}
+
+/// Charlie's window on Desktop 2 beside Alpha's and Bravo's, Desktop 2 left with Alpha's
+/// stage in front (the Corner engine: Charlie's and Bravo's windows there wait in the corner).
+fn charlie_on_desktop_2(load: f64) -> Bench {
+    both_desktops_known(EngineKind::Corner, load, |d| {
+        d.add_app(C, "com.example.charlie", "Charlie");
+        d.add_window(14, C, frame(4), D2);
+        d.raise(13);
+        d.raise(15);
+        d.raise(11);
+        d.raise(12);
+    })
+}
+
+/// Time moves on by `ms`, 10 ms at a time: for how long of it a person saw window `id`
+/// (listed on screen, out of the park zone).
+pub(super) fn seen_for(b: &mut Bench, id: u32, ms: u64) -> u64 {
+    let mut seen = 0;
+    for _ in 0..ms / 10 {
+        b.advance(10);
+        if b.on_screen().contains(&id) {
+            seen += 10;
+        }
+    }
+    seen
+}
+
+/// Whether the stage left on a Desktop showed while that Desktop slid in, in words.
+pub(super) fn left_shown(ms: u64) -> &'static str {
+    if ms == 0 { "never shown" } else { "shown as it slid in" }
+}
+
+/// Audit engine-uniformity 11-25, H3 (`controller/arrival.rs`, the cap on an arrangement made
+/// ahead): the Dock click of [`dock_click_that_slides`] on a busy Mac, Charlie taking the
+/// activation 0.4 s late (times the load), so the Space change's notice comes later than the
+/// cap allows at some load. An arrangement undone before its notice leaves the stage that was
+/// in front on Desktop 2 (Alpha's) showing as Desktop 2 slides in, arranged again in view.
+fn dock_click_that_slides_late(load: f64) -> Run {
+    let mut b = charlie_on_desktop_2(load);
+    b.desk(|d| d.apps.get_mut(&C).expect("Charlie").activates_ms = Some(400.0));
+    b.dock_click(C, 90);
+    let left = seen_for(&mut b, 13, 12_000);
+    let out = format!("the stage left on Desktop 2 {}; {}", left_shown(left), seen(&mut b));
+    Run::of(&b, out)
+}
+
+/// The same click going nowhere: Charlie never takes the activation (hung), so no Desktop
+/// slides. The arrangement on Desktop 2, not shown, stands until its cap and is undone:
+/// how long it stood, whether Desktop 2 is as it was after (every window at its frame of
+/// before, Alpha's stage in front there), how many moves it took in all, and whether anything
+/// changed on the Desktop in view meanwhile.
+fn dock_click_that_goes_nowhere(load: f64) -> Run {
+    let mut b = charlie_on_desktop_2(load);
+    b.desk(|d| d.apps.get_mut(&C).expect("Charlie").activates_ms = Some(10_000_000.0));
+    let there = b.space_of(13).expect("Desktop 2");
+    let frames = |b: &mut Bench| b.desk(|d| [13, 14, 15].map(|id| d.windows[&id].frame));
+    let before = frames(&mut b);
+    b.dock_click(C, 90);
+    b.advance(100);
+    let arranged = b.front_in(there) == Some(vec![14]);
+    let (mut stood, mut here_changed) = (100, false);
+    while b.front_in(there) == Some(vec![14]) && stood < 8000 {
+        b.advance(10);
+        stood += 10;
+        here_changed |= b.on_screen().into_iter().collect::<Vec<_>>() != [12];
+    }
+    b.advance(8000);
+    let as_it_was = frames(&mut b) == before && b.front_in(there) == Some(vec![13]);
+    let moves = b.calls().iter().filter(|c| matches!(c, fake::Call::Frame(..))).count();
+    let stood = match stood {
+        0..=1500 => "about 1 s",
+        1501..=3500 => "about 3 s",
+        _ => "longer",
+    };
+    let out = format!(
+        "arranged {arranged}, stood {stood}, {moves} moves in all, Desktop 2 as it was {as_it_was}, the Desktop in view changed {here_changed}; {}",
+        seen(&mut b)
+    );
+    Run::of(&b, out)
+}
+
+#[test]
+fn a_dock_click_to_another_desktop_on_a_busy_mac() {
+    let ahead = "the stage left on Desktop 2 never shown; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
+    let late = "the stage left on Desktop 2 shown as it slid in; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
+    // TIME DECIDES: DOCK_SWITCH_CAP (3 s under every engine since round arranged-ahead; the
+    // Corner engine's was 1 s, and at load 3, Charlie taking the activation 1.2 s after the
+    // click, the arrangement was undone just before and the Desktop slid in with the stage
+    // left in front, arranged again in view). At load 10 the activation comes 4 s after the
+    // click, past the cap.
+    expect(dock_click_that_slides_late, [ahead, ahead, late]);
+    // TIME DECIDES: DOCK_SWITCH_CAP, as meant: with no activation and no Space change the cap
+    // is the only end (about 1 s before). Nothing shows of it: the moves are on the Desktop
+    // not shown, and the undo puts every window back where it was.
+    let nowhere = "arranged true, stood about 3 s, 4 moves in all, Desktop 2 as it was true, the Desktop in view changed false; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(dock_click_that_goes_nowhere, [nowhere, nowhere, nowhere]);
+}
+
+/// Audit engine-uniformity 11-25, U2 (`controller/arrival.rs`, `arrange_at_press`): the Dock
+/// click of [`dock_click_that_slides`], read for when Desktop 2 is arranged: while the button
+/// is down (the click's 90 ms before macOS acts on its release), or after the release. (The
+/// bench plays one thing at a time: a move still on its way as the Desktop's windows are
+/// listed does not show here; what the earlier start buys is those 90 ms.)
+fn dock_click_that_slides_when(load: f64) -> Run {
+    let mut b = charlie_on_desktop_2(load);
+    let there = b.space_of(13).expect("Desktop 2");
+    b.dock_press(C);
+    b.advance(90);
+    let at_press = b.front_in(there) == Some(vec![14]);
+    b.dock_release(C);
+    let left = seen_for(&mut b, 13, 12_000);
+    let out = format!("arranged at the press {at_press}; the stage left on Desktop 2 {}; {}", left_shown(left), seen(&mut b));
+    Run::of(&b, out)
+}
+
+/// How a press on a Dock item ends that is no click.
+#[derive(Clone, Copy)]
+enum NoClick {
+    /// Let go off the item (a drag out of the Dock), 300 ms after the press.
+    Dragged,
+    /// Held 900 ms (the item's menu), then let go on it.
+    Held,
+    /// Its release never heard; the next press, 2 s later, is on the wallpaper.
+    ReleaseMissed,
+}
+
+/// Every window's frame and Desktop on the desk (`None`: on no Desktop).
+fn desk_as_is(b: &mut Bench) -> Vec<(u32, Rect, Option<u64>)> {
+    b.desk(|d| {
+        let mut all: Vec<(u32, Rect, Option<u64>)> = d.windows.values().map(|w| (w.id, w.frame, d.desktop_of(w.id))).collect();
+        all.sort_by_key(|w| w.0);
+        all
+    })
+}
+
+/// `controller/arrival.rs`, `press_not_click` (audit 11-25, U2): a press on the Dock item of
+/// an app whose click would take macOS to another Desktop, ended with no click (`how`). What
+/// was arranged at the press on the Desktop not shown is undone: whether it was arranged
+/// while the button was down, how many window moves went out in all (through Accessibility,
+/// or into and out of a Space), whether every window is at its frame and Desktop of before
+/// with the stage that was in front there in front again, and whether anything changed on
+/// the Desktop in view meanwhile.
+fn dock_press_that_is_no_click(engine: EngineKind, load: f64, how: NoClick) -> Run {
+    // Corner: Charlie's window waits in the corner on Desktop 2, seen from Desktop 1. Spaces:
+    // Alpha's only window waits in a stage Space of Desktop 1, seen from Desktop 2.
+    let (mut b, app, window, left, shows) = match engine {
+        EngineKind::Corner => (charlie_on_desktop_2(load), C, 14, 13, vec![12]),
+        _ => {
+            let mut b = Bench::new(EngineKind::Spaces, DEFAULTS, 1.0, 2, |d| {
+                d.add_app(A, "com.example.alpha", "Alpha");
+                d.add_app(B, "com.example.bravo", "Bravo");
+                d.add_window(15, B, frame(5), D2);
+                d.add_window(11, A, frame(1), D1);
+                d.add_window(12, B, frame(2), D1);
+                d.front = Some(B);
+            });
+            b.go_to_desktop(D2, true);
+            b.advance(4000);
+            b.log.clear();
+            b.desk(|d| {
+                d.calls.clear();
+                d.load = load;
+            });
+            (b, A, 11, 12, vec![15])
+        }
+    };
+    let there = b.space_of(window).expect("the other Desktop");
+    let before = desk_as_is(&mut b);
+    let mut here_changed = false;
+    let mut pass = |b: &mut Bench, ms: u64| {
+        for _ in 0..ms / 10 {
+            b.advance(10);
+            here_changed |= b.on_screen().into_iter().collect::<Vec<_>>() != shows;
+        }
+    };
+    b.dock_press(app);
+    pass(&mut b, 80);
+    let at_press = b.front_in(there) == Some(vec![window]);
+    match how {
+        NoClick::Dragged => {
+            pass(&mut b, 220);
+            b.desk(|d| d.pointer = Point::new(700.0, 400.0));
+            b.release();
+        }
+        NoClick::Held => {
+            pass(&mut b, 820);
+            b.release();
+        }
+        NoClick::ReleaseMissed => {
+            pass(&mut b, 1920);
+            b.desk(|d| d.left_down = false);
+            b.press(Point::new(1400.0, 300.0));
+        }
+    }
+    pass(&mut b, 100);
+    let undone = b.front_in(there) == Some(vec![left]);
+    // (Past Finder's activation after the wallpaper press, at every load.)
+    pass(&mut b, 14_000);
+    let as_it_was = desk_as_is(&mut b) == before && b.front_in(there) == Some(vec![left]);
+    let moves = b.calls().iter().filter(|c| matches!(c, fake::Call::Frame(..) | fake::Call::IntoSpace(..))).count();
+    let out = format!(
+        "arranged at the press {at_press}, the stage left in front again at its end {undone}, {moves} moves in all, the other Desktop as it was {as_it_was}, the Desktop in view changed {here_changed}; {}",
+        seen(&mut b)
+    );
+    Run::of(&b, out)
+}
+
+fn dock_press_dragged_off(load: f64) -> Run {
+    dock_press_that_is_no_click(EngineKind::Corner, load, NoClick::Dragged)
+}
+
+fn dock_press_held(load: f64) -> Run {
+    dock_press_that_is_no_click(EngineKind::Corner, load, NoClick::Held)
+}
+
+fn dock_press_release_missed(load: f64) -> Run {
+    dock_press_that_is_no_click(EngineKind::Corner, load, NoClick::ReleaseMissed)
+}
+
+fn dock_press_dragged_off_spaces(load: f64) -> Run {
+    dock_press_that_is_no_click(EngineKind::Spaces, load, NoClick::Dragged)
+}
+
+fn dock_press_held_spaces(load: f64) -> Run {
+    dock_press_that_is_no_click(EngineKind::Spaces, load, NoClick::Held)
+}
+
+fn dock_press_release_missed_spaces(load: f64) -> Run {
+    dock_press_that_is_no_click(EngineKind::Spaces, load, NoClick::ReleaseMissed)
+}
+
+#[test]
+fn a_dock_press_arranges_the_other_desktop_and_one_that_is_no_click_undoes_it() {
+    // Every engine arranges at the press (round arranged-ahead; the Corner engine at the
+    // release until then, "arranged at the press false").
+    let at_press = "arranged at the press true; the stage left on Desktop 2 never shown; front [14] shows [14] desktop 2 app 103 switches 0 slides 1";
+    expect(dock_click_that_slides_when, [at_press, at_press, at_press]);
+    // A press that is no click undoes it, under the Corner engine with real moves: two to
+    // arrange (the stage left to the corner, the app's window out of it), two back, all on
+    // the Desktop not shown; every window where it was, nothing changed in view. (Before:
+    // nothing arranged, 0 moves.)
+    let back = "arranged at the press true, the stage left in front again at its end true, 4 moves in all, the other Desktop as it was true, the Desktop in view changed false; front [12] shows [12] desktop 1 app 102 switches 0 slides 0";
+    expect(dock_press_dragged_off, [back, back, back]);
+    expect(dock_press_held, [back, back, back]);
+    // (The next press is on the wallpaper: Finder comes in front.)
+    let back_finder = back.replace("app 102", "app 91");
+    expect(dock_press_release_missed, [&back_finder, &back_finder, &back_finder]);
+    // The Spaces engine, as before: the window into its Desktop and back out, the stage left
+    // out and back in, nothing in view.
+    let undone = "arranged at the press true, the stage left in front again at its end true, 4 moves in all, the other Desktop as it was true, the Desktop in view changed false; front [15] shows [15] desktop 2 app 102 switches 0 slides 0";
+    expect(dock_press_dragged_off_spaces, [undone, undone, undone]);
+    expect(dock_press_held_spaces, [undone, undone, undone]);
+    let undone_finder = undone.replace("app 102", "app 91");
+    expect(dock_press_release_missed_spaces, [&undone_finder, &undone_finder, &undone_finder]);
 }
 
 /// Live 11-21, `spaces --auto`, "Dock arrival N of 3" (round r2-lends-fix): a Dock click on
@@ -971,6 +1242,8 @@ pub(super) const ALL: &[Scenario] = &[
     ("Cmd-Tab let go onto an app 0.4 s slow, the tap refused (Spaces)", "engine/switcher.rs SILENT_ACTIVATION_WAIT", cmd_tab_onto_a_slow_app_tap_refused),
     ("Cmd-Tab to an app whose only window is hidden on another Desktop (Spaces)", "controller/arrival.rs, arrange_for_hidden_focus", cmd_tab_to_an_app_hidden_elsewhere),
     ("the same, the app answering nothing for 70 ms after its activation", "engine/slide_hold.rs, AskAgain, live 11-23", cmd_tab_to_an_app_hidden_elsewhere_waking),
+    ("Cmd-Tab to an app whose only window is hidden on another Desktop, the key tap refused (Spaces)", "controller/arrival.rs, arrange_for_hidden_focus", cmd_tab_to_an_app_hidden_elsewhere_at_its_activation),
+    ("the same, the app answering nothing for 70 ms after its activation, the key tap refused", "engine/slide_hold.rs, AskAgain, live 11-23", cmd_tab_to_an_app_hidden_elsewhere_waking_at_its_activation),
     ("Mission Control closed by its key over another app", "controller/mission_control.rs, mc-key", mission_control_key_close),
     ("the same with mission_control_key_keeps_stage", "controller/mission_control.rs, mc-key", mission_control_key_close_keeps_stage),
     ("Mission Control: a hidden stage's window picked", "engine/mission_control.rs, mc-pick 11-19", mission_control_pick),
@@ -979,7 +1252,16 @@ pub(super) const ALL: &[Scenario] = &[
     ("Desktop keys between two known Desktops (Spaces)", "engine/slide_hold.rs, 10-23", desktop_keys_between_known_desktops),
     ("the first visit to a Desktop by its key (Spaces)", "engine/slide_hold.rs, 11-15", first_visit_to_a_desktop),
     ("an activation that slides to another Desktop (Corner)", "controller/arrival.rs, 10-13", activation_that_slides),
-    ("a Dock click that slides to another Desktop (Corner)", "controller/arrival.rs, DOCK_SWITCH_WAIT", dock_click_that_slides),
+    ("a Dock click that slides to another Desktop (Corner)", "controller/arrival.rs, DOCK_SWITCH_CAP", dock_click_that_slides),
+    ("the same, its app 0.4 s slow to take the activation (Corner)", "audit 11-25 H3, the cap on an arrangement made ahead", dock_click_that_slides_late),
+    ("the same click going nowhere, its app hung (Corner)", "audit 11-25 H3, the cap on an arrangement made ahead", dock_click_that_goes_nowhere),
+    ("the same click: when its Desktop is arranged (Corner)", "audit 11-25 U2, arrange_at_press", dock_click_that_slides_when),
+    ("a Dock press dragged off its item, the app on another Desktop (Corner)", "controller/arrival.rs, press_not_click", dock_press_dragged_off),
+    ("a Dock press held 0.9 s, the app on another Desktop (Corner)", "controller/arrival.rs, press_not_click", dock_press_held),
+    ("a Dock press whose release is never heard, the app on another Desktop (Corner)", "controller/arrival.rs, dock_pressed", dock_press_release_missed),
+    ("a Dock press dragged off its item, the app hidden on another Desktop (Spaces)", "controller/arrival.rs, press_not_click", dock_press_dragged_off_spaces),
+    ("a Dock press held 0.9 s, the app hidden on another Desktop (Spaces)", "controller/arrival.rs, press_not_click", dock_press_held_spaces),
+    ("a Dock press whose release is never heard, the app hidden on another Desktop (Spaces)", "controller/arrival.rs, dock_pressed", dock_press_release_missed_spaces),
     ("a Dock click whose activation leads the slide (Spaces)", "live 11-21 Dock arrivals, r2-lends-fix", dock_click_whose_activation_leads_the_slide),
     ("a Dock click on the app in front, its other window in a hidden stage of another Desktop (Spaces)", "controller/arrival.rs, arrange_at_press", dock_click_on_the_app_in_front_no_tab),
     ("the same, a tab not selected of it waiting", "controller/arrival.rs, waits_elsewhere, live 11-23", dock_click_on_the_app_in_front_with_a_tab_waiting),
@@ -1007,7 +1289,7 @@ fn load_table() {
 fn bench_one() {
     let Ok(want) = std::env::var("BENCH_ONE") else { return };
     let load: f64 = std::env::var("BENCH_LOAD").ok().and_then(|l| l.parse().ok()).unwrap_or(1.0);
-    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL).filter(|(name, _, _)| name.contains(&want)) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL).chain(super::kept_out::ALL).chain(super::ahead::ALL).filter(|(name, _, _)| name.contains(&want)) {
         let run = script(load);
         println!("== {name} ({told}) at load {load}\n{}\n=> {}", run.story, run.outcome);
         for m in &run.margins {
@@ -1036,7 +1318,7 @@ fn verdicts(run: &Run) -> std::collections::BTreeMap<&'static str, (usize, usize
 /// The load table as Markdown.
 pub(super) fn table() -> String {
     let mut out = String::from("| Scenario | Told by | Load 1 | Load 3 | Load 10 | Limits crossed only under load |\n|---|---|---|---|---|---|\n");
-    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL) {
+    for (name, told, script) in ALL.iter().chain(super::causes::ALL).chain(super::switch::ALL).chain(super::desktops::ALL).chain(super::screens::ALL).chain(super::corner_screens::ALL).chain(super::looks::ALL).chain(super::kept_out::ALL).chain(super::ahead::ALL) {
         let runs = LOADS.map(script);
         let base = verdicts(&runs[0]);
         let mut changed: Vec<String> = Vec::new();

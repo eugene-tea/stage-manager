@@ -161,6 +161,16 @@ pub enum Val {
     El(El),
 }
 
+/// An app that puts its window back where it had it whenever something else moves it
+/// ([`App::moves_back`]): one restoring its saved bounds, one re-centring its window.
+#[derive(Debug, Clone, Copy)]
+pub struct MovesBack {
+    /// How long after the move it puts the window back, in ms before the load factor.
+    pub after_ms: f64,
+    /// How many times it does (`None`: every time).
+    pub times: Option<u32>,
+}
+
 /// An app on the desk.
 #[derive(Debug, Clone)]
 pub struct App {
@@ -210,6 +220,9 @@ pub struct App {
     /// its reorder reaches the window server" (`engine/raise_order.rs`: the fixture's 40 ms
     /// lag; a slow app's longer).
     pub reorders_ms: Option<f64>,
+    /// It moves its window back when the app (our park, our show) moves it away from where
+    /// the app itself had it ([`MovesBack`]; `None`: it leaves it where it was put).
+    pub moves_back: Option<MovesBack>,
 }
 
 /// A window on the desk.
@@ -282,6 +295,15 @@ pub struct Goes {
     /// wave this many ms after the change, the machine's own time (`engine/spill.rs`: a
     /// moment later, and as late as 20 s after, 11-18). Empty: none is let out.
     pub lets_out_ms: Vec<f64>,
+    /// The Desktop of the screen left that an ended Desktop's windows land on (the gone
+    /// screen's, [`Self::keeps_ids`] false; the screen left's own, [`Self::ends_own`]);
+    /// `None`: the Desktop the screen left shows. Live 11-25, a virtual screen: the windows
+    /// of the Desktop that ended landed on the screen left's first Desktop, not the one shown.
+    pub lands_on: Option<u64>,
+    /// The screen left slides to [`Self::lands_on`] as the screen goes (live 11-25: a virtual
+    /// screen right of the main one went, and the main screen slid to its first Desktop,
+    /// where the gone screen's windows landed).
+    pub shows_landing: bool,
 }
 
 /// What macOS tells the app, queued until due.
@@ -509,6 +531,9 @@ pub struct Desk {
     /// Windows moved whose new place is not listed yet ([`Self::lists_moves_ms`]): until when,
     /// and where they are listed until then.
     late_moves: BTreeMap<u32, (Instant, Rect)>,
+    /// Where an app that moves its windows back ([`App::moves_back`]) has each of them: the
+    /// frame before the app's first move of it, or where the user last put it.
+    own_frames: BTreeMap<u32, Rect>,
     /// The "Current Space" flips with the leaving Desktop's windows going from the list,
     /// before the notice is sent (never measured so; the order a slow main thread gives at
     /// any load). False, the desk's way: [`delays::FLIP_AFTER_NOTICE`] after the notice is
@@ -720,6 +745,7 @@ impl Desk {
             tap_armed: false,
             lists_moves_ms: None,
             late_moves: BTreeMap::new(),
+            own_frames: BTreeMap::new(),
             flip_leads_notice: false,
             leaving_lingers_ms: 0.0,
             listing_unreadable: false,
@@ -764,7 +790,7 @@ impl Desk {
     pub fn add_app(&mut self, pid: i32, bundle: &str, name: &str) {
         self.apps.insert(
             pid,
-            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, quiet_key: false, wakes_ms: None, busy_until: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None },
+            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, quiet_key: false, wakes_ms: None, busy_until: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None, moves_back: None },
         );
         let n = self.dock.items.len() as f64;
         self.dock.items.push((format!("/Applications/{name}.app/"), Rect::new(self.dock.bar.x + 8.0 + 58.0 * n, self.dock.bar.y + 8.0, 50.0, 50.0)));
@@ -870,16 +896,18 @@ impl Desk {
             let s = &mut self.screens[0];
             let own = std::mem::replace(&mut s.desktops, gone.desktops.clone());
             (s.shown, s.current, s.sliding_in, s.sliding_to) = (gone.shown, gone.current, None, None);
+            let lands = how.lands_on.unwrap_or(gone.shown);
             for w in self.windows.values_mut() {
                 if w.spaces.iter().any(|x| own.contains(x)) {
                     w.spaces.retain(|x| !own.contains(x));
-                    w.spaces.push(gone.shown);
+                    w.spaces.push(lands);
                 }
             }
         } else if how.keeps_ids {
             self.screens[0].desktops.extend(gone.desktops.iter().copied());
         }
         let (shown, main) = (self.screens[0].shown, self.screens[0].display);
+        let lands = if how.keeps_ids { shown } else { how.lands_on.unwrap_or(shown) };
         for w in self.windows.values_mut() {
             let theirs = w.spaces.iter().any(|s| gone.desktops.contains(s)) || !main.frame.contains(w.frame.center());
             if theirs {
@@ -887,8 +915,13 @@ impl Desk {
             }
             if !how.keeps_ids && w.spaces.iter().any(|s| gone.desktops.contains(s)) {
                 w.spaces.retain(|s| !gone.desktops.contains(s));
-                w.spaces.push(shown);
+                w.spaces.push(lands);
             }
+        }
+        if how.shows_landing
+            && let Some(to) = how.lands_on.filter(|to| *to != self.screens[0].shown)
+        {
+            self.slide(0, to);
         }
         // The hidden windows of the gone screen's Desktops, let out in waves.
         let hidden: Vec<u32> = self
@@ -1293,6 +1326,7 @@ impl Desk {
             self.late_moves.insert(id, (until, old));
         }
         let (moved, resized) = (to.origin() != w.frame.origin(), to.size() != w.frame.size());
+        let before = w.frame;
         w.frame = to;
         if w.spaces.iter().any(|s| desktops.contains(s)) && !w.spaces.iter().any(|s| theirs.contains(s)) {
             w.spaces.retain(|s| !desktops.contains(s));
@@ -1306,6 +1340,31 @@ impl Desk {
         if resized {
             self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_RESIZED });
         }
+        if let Some(back) = self.apps.get(&pid).and_then(|a| a.moves_back).filter(|b| b.times != Some(0)) {
+            let own = *self.own_frames.entry(id).or_insert(before);
+            if to != own {
+                let due = clock::now() + self.at_load(back.after_ms);
+                self.at(due, move |d| d.app_moves_back(id));
+            }
+        }
+    }
+
+    /// An app that moves its windows back ([`App::moves_back`]) puts window `id` where it
+    /// had it, and says it moved; once for each of its times.
+    fn app_moves_back(&mut self, id: u32) {
+        let Some(own) = self.own_frames.get(&id).copied() else { return };
+        let Some(w) = self.windows.get(&id).filter(|w| !w.minimized && w.frame != own) else { return };
+        let pid = w.pid;
+        let Some(back) = self.apps.get_mut(&pid).and_then(|a| a.moves_back.as_mut()) else { return };
+        match back.times {
+            Some(0) => return,
+            Some(ref mut n) => *n -= 1,
+            None => {}
+        }
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.frame = own;
+        }
+        self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_MOVED });
     }
 
     /// An action.
@@ -1395,6 +1454,9 @@ impl Desk {
         }
         w.frame = frame;
         let pid = w.pid;
+        if let Some(own) = self.own_frames.get_mut(&id) {
+            *own = frame;
+        }
         self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_MOVED });
     }
 
@@ -1820,6 +1882,19 @@ impl Desk {
         self.switcher = Switcher { shown: false, pids: order, selected: 1 };
         self.post(delays::SWITCHER_SHOWS, Notice::Step(Step::Switcher(true)));
         self.post(delays::SWITCHER_SHOWS, Notice::Switcher("AXCreated"));
+    }
+
+    /// Another Tab with the switcher up: its selection moves on one; once its list shows, the
+    /// Dock says so (`AXSelectedChildrenChanged`, observed live 11-15:
+    /// `controller/switcher.rs`, `NOTICES`).
+    pub fn switcher_steps(&mut self) {
+        if self.switcher.pids.is_empty() {
+            return;
+        }
+        self.switcher.selected = (self.switcher.selected + 1) % self.switcher.pids.len();
+        if self.switcher.shown {
+            self.post(1.0, Notice::Switcher("AXSelectedChildrenChanged"));
+        }
     }
 
     /// What the key tap heard while it is armed for ⌘Tab's switcher and hears: forwarded as

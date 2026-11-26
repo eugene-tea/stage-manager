@@ -16,7 +16,8 @@ the virtual screen goes. Checks, sampled every second for 65 s and then on every
 the screen left (slid to with the app's shortcut, `ctl debug-space`, then back to the start
 one):
 
-- no stage gains or loses a window (the app's model, by stage id);
+- no stage gains or loses a window (the app's model, by stage id; on a failure the log's
+  `window left this Space` and `Space changed` lines since the change are printed, ids only);
 - the window server shows no fixture window of a hidden stage, on any Desktop: only windows
   of the front stage of the Desktop shown are on screen (under the Corner engine, a hidden
   one is on screen only in a park zone);
@@ -33,10 +34,15 @@ Desktop only, its Dock item is pressed (`ctl debug-dock-click`). The app arrange
 before macOS slides to it, so its stage in front goes to a card while the other Desktop still
 shows. Checks: the clicked app's stage comes in front there; the stage that was in front stays
 a stage of that Desktop with its windows, hidden; the log never says `window left this Space`
-for its windows, and its hide's line (`a hide while a screen gone is watched`) takes the
+for its windows; each was hidden on the Desktop it was on; and the Desktop was arranged at the
+press (the Spaces engine's way; the Corner engine's from round arranged-ahead, failing there
+until then). Where a hidden window is differs by engine, so the check of the hide does too:
+under the Spaces engine the hide's line (`a hide while a screen gone is watched`) takes the
 Desktop the window was on as its home (`on` = `home`; 11-21: a Dock click 36 s after the change
-hid it into a stage of the Desktop still shown, and it showed up on the other Desktop), and
-that the Desktop was arranged at the press. With no such stage the step is skipped and says
+hid it into a stage of the Desktop still shown, and it showed up on the other Desktop); under
+the Corner engine a hidden window stays on its Desktop in the park corner and no Desktop is
+chosen at the hide, so each window is listed in a park zone of the screen showing that
+Desktop, now that it shows. With no such stage the step is skipped and says
 so; `main` and `secondary` rounds leave every fixture on the Desktop shown, so the `ahead`
 kind sets it up: Alpha 1 and Bravo 1 opened on another Desktop of the main screen (slid to
 with `ctl debug-space`), a stage each, Bravo's in front, then back, a virtual screen added to
@@ -55,10 +61,16 @@ had on the built-in screen alone. The screen is added again: every window on the
 frame was kept on is back at its frame of the two-screen setup; one macOS put on another
 screen is counted `elsewhere` by the log, never moved across.
 
-Under the Spaces engine each round ends by printing the shadow of design r3 (`ctl state`'s
-`desks`: where the model's Desktop and the window server's disagree, open and begun, the
-longest) and the log's disagreement lines. A disagreement on a hidden window's Desktop still
-open 10 s after the round's last look fails (design r3, slice 4).
+Each round ends by printing the shadow of design r3 (`ctl state`'s `desks`: where the model's
+Desktop and the window server's disagree, open and begun, the longest) and the log's
+disagreement lines. A disagreement on a hidden window's Desktop still open 10 s after the
+round's last look fails (design r3, slice 4).
+
+With `SM_DESKTOPS=guess` (the window server's Desktop reads forced off) the Corner engine takes
+the display change by the windows on screen, as 1.9.2 did: when macOS shows the screen left
+another Desktop than its own (every `main` and `secondary` round, 11-25), that Desktop's
+windows leave their stages, and the watch's and the tour's checks fail (the bench pins it,
+`bench/guessed.txt`, "the live phase's ...").
 
 The virtual screen is removed and the screens put back where they were whatever happens (the
 tool does it on SIGTERM too); the app is quit and the fixtures closed after each round. It
@@ -332,10 +344,21 @@ def dock_ahead(what):
           f"{what}: the stage that was in front ({front['id']}) stays on Desktop {front['space']} with its windows, hidden"
           + ("" if now else ": gone") + (f": now {now}" if now and set(now["windows"]) != front_ids else ""))
     lines = log_lines(ts.log_text(), mark)
+    # Asked of both engines: the Corner engine's way too from round arranged-ahead.
     check(any(ARRANGED_AT_PRESS in ln for ln in lines), f"{what}: the Desktop was arranged at the press, ahead of the slide "
           "(else the front stage is hidden only once its Desktop shows, and nothing is tried)")
     left = [ln[:200] for ln in lines if LEFT_SPACE in ln and any(re.search(rf"\bid={i}\b", ln) for i in front_ids)]
     check(not left, f"{what}: no '{LEFT_SPACE}' for the front stage's windows" + (f": {left[:2]}" if left else ""))
+    if not ts.SPACES:
+        # The park corner is on the window's own Desktop: hidden there, it is listed in a park
+        # zone of the screen that shows that Desktop now.
+        listed = {w["id"]: w for w in shown_fixture_windows()}
+        where = [(i, bool(listed.get(i, {}).get("onscreen")), i in listed and parked_anywhere(listed[i]["bounds"], x))
+                 for i in sorted(front_ids)]
+        say(f"    {what}: the front stage's windows (id, on screen, in a park zone): {where}")
+        check(bool(where) and all(on and parked for _, on, parked in where),
+              f"{what}: each was hidden on the Desktop it was on (in the park corner of Desktop {front['space']}, shown)")
+        return True
     homes = []
     for ln in lines:
         if WATCHED_HIDE not in ln:
@@ -449,15 +472,14 @@ def desk_shadow(label, since_line):
     disagreements since `since_line`. A disagreement on a hidden window's Desktop (the
     engine's home against the Desktop the model has the window on) still open 10 s after
     this look fails (design r3, slice 4: one record; the look returns as soon as none is
-    open, so a round that agrees waits for nothing). Under the Corner engine the listing is
-    not read."""
+    open, so a round that agrees waits for nothing)."""
     try:
         d = ts.state().get("desks") or {}
     except Exception as e:  # noqa: BLE001 - the app may be busy or gone
         say(f"    desks ({label}): not read: {e}")
         return
     if d.get("listing") is None:
-        say(f"    desks ({label}): the window server's listing is not read (the reads off or resting, or a display change's settle under the Corner engine)")
+        say(f"    desks ({label}): the window server's listing is not read (the reads off or resting)")
         return
     def homes_agree():
         try:
@@ -536,6 +558,9 @@ def one_round(kind, n):
         problems_watch = sorted(out)
         check(not problems_watch, f"{kind} {n}: {WATCH_SECONDS:.0f} s after the screen went, every stage keeps its windows "
               "and no hidden one shows" + (f": {problems_watch[:8]}" if problems_watch else ""))
+        if problems_watch:
+            for ln in [ln for ln in log_lines(ts.log_text(), log_mark) if LEFT_SPACE in ln or "Space changed" in ln][:12]:
+                say(f"    log: {ln[:300]}")
         out.clear()
         seen = desktops_tour(before, out, home)
         check(not out, f"{kind} {n}: on every Desktop ({len(seen)}), the same" + (f": {sorted(out)[:8]}" if out else ""))

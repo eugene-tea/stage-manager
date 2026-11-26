@@ -8,8 +8,11 @@
 //!   [`super::dock::dock_pid`]) and listings of the running apps (one each).
 //! - `dock_reads`: the Dock's list of apps read through Accessibility ([`super::dock::app_order`]).
 //! - `captures`: windows a capture round asked a picture of ([`super::capture`]).
-//! - `desktop_stills`: stills of the desktop in the park corner asked of ScreenCaptureKit
+//! - `desktop_stills`: stills of the desktop in the park corner asked for
 //!   ([`super::desktop_shot`]: the corner patch's picture, kept fresh while slivers show).
+//! - `desktop_stills_fast`: stills of the desktop the window server's own call took, no
+//!   listing ([`super::desktop_fast`]); `desktop_stills_sck`: stills asked of ScreenCaptureKit
+//!   (a listing and a screenshot each: the fallback, and the first still's proof).
 //! - `wallpaper_reads`: the desktop picture asked of NSWorkspace ([`super::wallpaper`]).
 //! - `lock_polls`: the login session asked whether the screen is locked ([`super::session`]).
 //! - `tap_events`: events through our event taps, the inert slivers', the minimize's and
@@ -41,6 +44,10 @@ pub enum Cost {
     Capture,
     /// A still of the desktop asked for.
     DesktopStill,
+    /// A still of the desktop taken by the window server's own call.
+    DesktopStillFast,
+    /// A still of the desktop asked of ScreenCaptureKit.
+    DesktopStillSck,
     /// A desktop picture read.
     WallpaperRead,
     /// The screen lock asked.
@@ -58,12 +65,14 @@ pub enum Cost {
 }
 
 /// Every cost, in the order `ctl state` prints them.
-pub const ALL: [Cost; 12] = [
+pub const ALL: [Cost; 14] = [
     Cost::WindowList,
     Cost::LaunchServices,
     Cost::DockRead,
     Cost::Capture,
     Cost::DesktopStill,
+    Cost::DesktopStillFast,
+    Cost::DesktopStillSck,
     Cost::WallpaperRead,
     Cost::LockPoll,
     Cost::TapEvent,
@@ -82,6 +91,8 @@ impl Cost {
             Cost::DockRead => "dock_reads",
             Cost::Capture => "captures",
             Cost::DesktopStill => "desktop_stills",
+            Cost::DesktopStillFast => "desktop_stills_fast",
+            Cost::DesktopStillSck => "desktop_stills_sck",
             Cost::WallpaperRead => "wallpaper_reads",
             Cost::LockPoll => "lock_polls",
             Cost::TapEvent => "tap_events",
