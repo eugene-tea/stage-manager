@@ -37,7 +37,9 @@ show even during the slide, and by `open`; the window server sampled every 30 ms
 the slide, no transition for the arrival, the timeline printed; before it, a probe says
 whether macOS carries out a move of a window on a Desktop not shown; and a Dock press that
 is no click, then a click that goes nowhere: Desktop 1 arranged at the press and put back as
-it was, at the release or at the 3 s cap, with nothing of it in view); going back shows
+it was, at the release or at the 3 s cap, with nothing of it in view; a posted ⌘Tab to the
+same app: Desktop 1 arranged while the switcher shows, put back at Escape or when the
+selection moves on, and sliding in arranged when ⌘ is let go on it, quick or held); going back shows
 Desktop 1's stages; quit with a window parked on the other
 Desktop brings it back (Accessibility reaching another Space); a relaunch rebuilds both
 Desktops' stages; kill -9 with a window parked on the other Desktop: the guardian waits,
@@ -668,6 +670,13 @@ planned steps (hands-free):
               fixture blocked by SIGPROF, held 1.5 s, released onto it): 0 Space changes; a Dock click with
               no press of the item (ctl debug-dock-lend), then Bravo activated: the window put home back at
               Bravo's activation (macOS goes to Desktop 2)
+  cmd-tab     (every engine) Alpha 1 hidden on Desktop 1 behind the Fixture stage, the fixture app in front on
+  arrival     Desktop 2, Alpha the app used before it: a posted ⌘Tab (ctl debug-cmd-tab): Escape after 400 ms,
+              and Tab-Tab-Escape: Desktop 1 arranged while the switcher shows and put back as it was (no Space
+              change, no Desktop 1 window on screen, every window at its bounds); a quick tap (~60 ms) and
+              a held one (400 ms) let go on Alpha: Desktop 1 comes up with Alpha 1's stage and the stage left
+              never shows once Desktop 1 is on screen (strict, as a Dock arrival); the key tap's and the
+              Dock's notices' counts printed
   back        (already on Desktop 1 after the activation, else ctl debug-space <back>); checks as guided
               (Desktop 2's pane stays there)
   edge tab    on Desktop 1: [reveal] edge_tab on (a live reload); ctl debug-frame <a shown Desktop 1 window> to
@@ -906,6 +915,9 @@ def run():
 
     say("\n== ⌘Tab home: a posted ⌘Tab to an app hidden here with a window on Desktop 2 stays here ==")
     cmd_tab_cases(d1, d2)
+
+    say("\n== ⌘Tab to an app on another Desktop: that Desktop arranged while the switcher shows ==")
+    cmd_tab_arrival_cases(d1, d2)
 
     say("\n== back on Desktop 1 ==")
     if current_space() != d1:
@@ -1751,6 +1763,198 @@ def cmd_tab_cases(d1, d2):
         WATCH.pause()
 
 
+def cmd_tab_arrival_cases(d1, d2):
+    """Round arranged-ahead (audit 11-25, H5): ⌘Tab to an app whose only window waits hidden
+    on another Desktop. Under every engine, hands-free only (the keys are posted: the Mac
+    must be left alone). On Desktop 2 the fixture app is in front (Fixture 3's stage) and
+    Alpha is the app used before it; Alpha 1 waits on Desktop 1 behind the Fixture stage
+    there (Fixture 1-2 shown: the stage left). One Tab selects Alpha; ⌘'s release on it makes
+    macOS slide to Desktop 1. Ends on Desktop 1.
+
+    1. **Escape** (held 400 ms, past the Dock's list): Desktop 1 is arranged for Alpha 1
+       while the switcher shows, and put back as it was at Escape ("the switcher was
+       cancelled"); no Space change, no window of Desktop 1 on screen at any look, every
+       window of it back at its bounds.
+    2. **Tabbed on** (Tab, 250 ms, Tab, 300 ms, Escape): arranged at the first Tab, undone
+       when the selection moves on (or at Escape, when the second app's Desktop is the same
+       arrangement's); the same checks.
+    3. **A quick tap** (⌘ let go ~60 ms after the Tab, before the Dock lists the switcher):
+       arranged from the first Tab's guess, the arrangement stands at the release; Desktop 1
+       comes up with Alpha 1's stage active and the stage left never shows once Desktop 1 is
+       on screen, not even during the slide (the window server every 30 ms; strict, as a
+       Dock arrival).
+    4. **Held** (400 ms: the Dock's list read): the same, and who decided the selection is
+       said.
+    Printed: how many events went through the key tap and how many Dock notices came over
+    the four switchers (`ctl state`'s `costs`), and that the key tap is off again after."""
+    if not AUTO:
+        ts.skip("⌘Tab to another Desktop (a posted ⌘Tab)", "hands-free only (--auto)")
+        return
+    WATCH.pause()
+    costs0 = state().get("costs") or {}
+    try:
+        _cmd_tab_arrival_cases(d1, d2)
+    finally:
+        WATCH.desk("d1" if current_space() == d1 else "d2")
+        if current_space() != d1:
+            go("d1", "Switch to Desktop 1")
+        WATCH.pause()
+    time.sleep(2.5)
+    costs1 = state().get("costs") or {}
+    grew = {k: costs1.get(k, 0) - costs0.get(k, 0) for k in ("tap_events", "dock_notices")}
+    taps = costs1.get("taps_on") or {}
+    say(f"    costs of following the switcher (four ⌘Tabs): {grew}; taps on now: {taps}")
+    trust = ((((state().get("engine") or {}).get("notices") or {}).get("trust")) or {}).get("state")
+    if not ts.SPACES and trust == "working":
+        # (The Spaces engine may keep it on for Mission Control's keys; with the window
+        # server's notices not trusted, the Corner engine does too: its public fallback.)
+        check(taps.get("mission_keys") is False, f"cmd-tab arrival: the key tap is off again once no switcher is up ({taps})")
+    else:
+        say(f"    (the key tap may stay on for Mission Control: engine {ts.ENGINE}, notices {trust})")
+
+
+def _cmd_tab_arrival_setup(d1, d2, label):
+    """Desktop 1: Alpha's stage in front, then the Fixture stage (Alpha 1 hidden: Alpha is
+    the app used before the fixture app). Desktop 2: Fixture 3's stage in front, so arriving
+    there activates no other app. Returns (Alpha 1, the stage left's window ids) on Desktop 2,
+    or None."""
+    if current_space() != d2:
+        go("d2", "Switch to Desktop 2")
+    WATCH.pause()
+    x = state()
+    f3 = stage_holding(x, "Fixture 3")
+    if not check(x.get("space") == d2 and f3 is not None, f"{label}: on Desktop 2 with Fixture 3's stage"):
+        return None
+    if x["active"] != f3:
+        ctl("switch", f3)
+        ts.wait_state(lambda y: y["active"] == stage_holding(y, "Fixture 3"), "Fixture 3's stage in front", timeout=4)
+    go("d1", "Switch to Desktop 1")
+    WATCH.pause()
+    x = state()
+    fixture, alpha_stage = stage_holding(x, "Fixture 1"), stage_holding(x, "Alpha 1")
+    if not check(x.get("space") == d1 and fixture is not None and alpha_stage is not None, f"{label}: on Desktop 1 with the Fixture and Alpha stages"):
+        return None
+    if x["active"] != alpha_stage:
+        ctl("switch", alpha_stage)
+        ts.wait_state(lambda y: y["active"] == alpha_stage, "Alpha's stage in front", timeout=4)
+        time.sleep(0.5)
+    ctl("switch", fixture)
+    x = ts.wait_state(lambda y: y["active"] == fixture and any(w["title"] == "Alpha 1" and w["parked"] for w in y["windows"]),
+                      "the Fixture stage in front, Alpha 1 hidden", timeout=4)
+    if not check(x is not None, f"{label}: Desktop 1 with the Fixture stage in front, Alpha 1 hidden"):
+        return None
+    time.sleep(1.0)  # past the echo window of the switch's own activation
+    go("d2", "Switch to Desktop 2")
+    WATCH.pause()
+    x = state()
+    alpha = next((w for w in x["windows"] if w["title"] == "Alpha 1"), None)
+    left = [w["id"] for w in x["windows"] if w["title"] in ("Fixture 1", "Fixture 2") and w["space"] == d1]
+    if not check(x.get("space") == d2 and alpha is not None and alpha["parked"] and alpha["space"] == d1 and bool(left),
+                 f"{label}: on Desktop 2, Alpha 1 hidden on Desktop 1 behind the Fixture stage"):
+        return None
+    time.sleep(0.5)
+    return alpha, left
+
+
+def _cmd_tab_arrival_cases(d1, d2):
+    d1_ids = set(WATCH.ids["d1"])
+    alpha_bundle = ts.EXTRA["a"][0]
+
+    def sampler_for(ms):
+        p = subprocess.Popen([ts.BIN, "probe-windows", "--every", "30", "--for", str(ms), *ts.ALL_IDS],
+                             env=ts.ENV, stdout=subprocess.PIPE, text=True)
+        time.sleep(0.1)
+        return p
+
+    def said(r, label):
+        ts.say_cmd_tab_report(r, label)
+        if not check(r.get("ok"), f"{label}: the probe ran ({r.get('error') or r.get('outcome')})"):
+            return False
+        expected = r.get("start", {}).get("expected_bundle")
+        return check(expected == alpha_bundle, f"{label}: one Tab selects Alpha, as the app predicts ({expected})")
+
+    def put_back(label, words, why):
+        """A ⌘Tab that ends with Escape: arranged for Alpha 1, then undone, unseen."""
+        setup = _cmd_tab_arrival_setup(d1, d2, label)
+        if not setup:
+            return
+        alpha, left = setup
+        watched = [alpha["id"], *left]
+        before = {w["id"]: w["bounds"] for w in probe_all()}
+        sampler, t0 = sampler_for(3500), time.time()
+        r = ts.cmd_tab_probe(*words)
+        if not said(r, label):
+            sampler.kill()
+            return
+        time.sleep(0.5)
+        events = log_events(t0)
+        arranged = first_after(events, "cmd-tab: the Desktop ⌘'s release on the app selected goes to is arranged while the switcher shows", t0)
+        undone = [(t, line) for t, line in events if "the arrangement made ahead is undone" in line]
+        say(f"    {label}: undone: {[line[line.find('is undone'):][:90] for _, line in undone] or 'not undone'}")
+        if check(arranged is not None, f"{label}: Desktop 1 arranged for Alpha 1 while the switcher showed (engine {ts.ENGINE})") \
+                and check(bool(undone), f"{label}: the arrangement was undone"):
+            check(any(w in line for _, line in undone for w in why), f"{label}: undone for the switcher's own reason ({why})")
+            say(f"    {label}: it stood {(undone[0][0] - arranged) * 1000:.0f} ms")
+        samples, _ = _sampled(sampler, label)
+        if samples:
+            seen = sorted({w["id"] for x in samples for w in x["windows"] if w["onscreen"] and w["id"] in d1_ids})
+            check(not seen, f"{label}: no window of Desktop 1 listed on screen at any of {len(samples)} looks ({seen or 'none'})")
+        changes = space_changes_since(t0)
+        check(not changes, f"{label}: no Space change ({changes})")
+        x = state()
+        check(x.get("space") == d2 and any(w["id"] == alpha["id"] and w["parked"] for w in x["windows"])
+              and not any(w["parked"] for w in x["windows"] if w["id"] in left),
+              f"{label}: still on Desktop 2, Desktop 1 as it was in the app's state ({ts.stage_titles(x)})")
+        now = {w["id"]: w["bounds"] for w in probe_all()}
+        moved_ = [(i, before.get(i) and ts.fmt(before[i]), now.get(i) and ts.fmt(now[i])) for i in watched
+                  if not (before.get(i) and now.get(i) and ts.close(now[i], before[i]))]
+        check(not moved_, f"{label}: every window of Desktop 1 back at its bounds of before ({moved_ or 'all'})")
+
+    def arrives(label, hold):
+        """A ⌘Tab let go on Alpha: Desktop 1 slides in arranged."""
+        setup = _cmd_tab_arrival_setup(d1, d2, label)
+        if not setup:
+            return
+        alpha, left = setup
+        sampler = subprocess.Popen([ts.BIN, "probe-windows", "--every", "30", "--for", "3500", *ts.ALL_IDS],
+                                   env=ts.ENV, stdout=subprocess.PIPE, text=True)
+        time.sleep(0.1)
+        t_open = time.time()
+        r = ts.cmd_tab_probe("release", "1", hold)
+        if not said(r, label):
+            sampler.kill()
+            return
+        check(r.get("outcome") == "released", f"{label}: ⌘ let go on Alpha ({r.get('outcome')})")
+
+        def arrived():
+            x = state()
+            w = next((w for w in x["windows"] if w["id"] == alpha["id"]), None)
+            return x if x.get("space") == d1 and w and not w["parked"] and x["active"] == stage_holding(x, "Alpha 1") else None
+
+        x = ts.wait_until(arrived, 6, "Desktop 1 with Alpha 1's stage active")
+        check(x is not None, f"{label}: Desktop 1 came up with Alpha 1's stage active")
+        time.sleep(1.5)
+        lines = [line for _, line in log_events(t_open)]
+        check(any("cmd-tab: the Desktop ⌘'s release on the app selected goes to is arranged while the switcher shows" in line for line in lines),
+              f"{label}: Desktop 1 arranged while the switcher showed (engine {ts.ENGINE})")
+        check(any("the arrangement stands for the Space change" in line for line in lines),
+              f"{label}: at ⌘'s release the arrangement stands")
+        by = [m.group(0) for m in (re.search(r'by="[^"]*"', line) for line in lines if "cmd-tab: the switcher selects an app" in line) if m]
+        say(f"    {label}: who decided the selection: {by or 'no selection line'}")
+        changes = space_changes_since(t_open)
+        check(len(changes) == 1, f"{label}: one Space change ({changes})")
+        samples, display = _sampled(sampler, label)
+        if samples:
+            clean = judge_arrival(t_open, samples, display, left, alpha["id"], d1_ids, set(WATCH.ids["d2"]), "cmd-tab")
+            check(clean, f"{label}: a clean arrival (the stage left never out of the park zone once Desktop 1 is on screen)")
+
+    put_back("cmd-tab arrival, Escape", ("cancel", "1", "400"), ("the switcher was cancelled",))
+    put_back("cmd-tab arrival, tabbed on", ("cancel", "2", "300", "250"),
+             ("the switcher's selection moved on", "the switcher was cancelled"))
+    arrives("cmd-tab arrival, quick tap", "50")
+    arrives("cmd-tab arrival, held", "400")
+
+
 def _cmd_tab_setup(d1, d2, label):
     """Desktop 2: Fixture 3's stage in front; Desktop 1: the Fixture stage in front, then
     Alpha's (Fixture 1-2 hidden), so the fixture app is the app used before Alpha. True when
@@ -2441,13 +2645,17 @@ def judge_arrival(t_open, samples, display, left, alpha_id, d1_ids, d2_ids, how)
         clean = clean and not late
         check(not late, "once the arrangement was sent, the stage Desktop 1 was left with never shows "
               f"(Fixture 1-2 in the park zone at every look 50 ms after it){'' if not late else ': ' + str([rel(t) for t in late][:8])}")
+    strict = {"dock": "dock-click", "cmd-tab": "cmd-tab"}.get(how)
     if how == "dock":
         check(trigger == "dock-click", f"arranged at the Dock click ({path})")
         # Round arranged-ahead: at the press under every engine (the fed click's press).
         check(first_after(events, "dock: the Desktop the press goes to is arranged at the press", t_open) is not None,
               f"arranged at the Dock press, not at its release (engine {ts.ENGINE})")
+    if how == "cmd-tab":
+        check(trigger == "cmd-tab", f"arranged while the switcher showed ({path}; engine {ts.ENGINE})")
+    if strict:
         during = [t for t in stale if slide_from is not None and t >= slide_from]
-        clean = clean and not during and trigger == "dock-click"
+        clean = clean and not during and trigger == strict
         check(not during, "the stage left never shows once Desktop 1 is on screen, not even during the slide"
               + ("" if not during else f": {[rel(t) for t in during][:8]}"))
     check(any(w["id"] == alpha_id and shown(w) for w in last), "the window arrived for is on screen out of the park zone at the last look")

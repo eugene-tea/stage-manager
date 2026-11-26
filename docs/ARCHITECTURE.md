@@ -150,7 +150,8 @@ NSWorkspace notifications     persists state.json               ctl socket (test
   that tick. The event taps (`platform::tap_switch`) are on only while they have something
   to catch: the inert slivers' while windows are parked with the shield on, the minimize
   tap's while the WM thread arranges and `minimize_to_strip` holds, Mission Control's key tap
-  while the Spaces engine arranges with `mission_control_stages` not `"off"`. With no strip showing
+  while the Spaces engine arranges with `mission_control_stages` not `"off"`, and under every
+  engine from ⌘Tab's Tab to the switcher's end. With no strip showing
   cards (hidden, or standing down) the strip lets go of the mouse moves' monitor and the
   card glass reads no wallpaper; capture workers with no targets sleep until given work.
   The Dock order's running-app paths are asked of LaunchServices after a launch or a quit
@@ -585,7 +586,10 @@ twenty in a row with no open, close or Space change between them rest them for t
 triggers are the fallback, used only while the notices are not `working`: Mission Control's
 shortcuts heard by the key tap (or the input monitor) and the Dock's `AXCreated`, its
 observer made then from the Dock's pid the tick already has. So with the notices working
-the default mode runs no key tap and no Dock observer at rest, and none of the three fires
+the default mode runs no key tap at rest (it is on from ⌘Tab's Tab to the switcher's end,
+round arranged-ahead), the Dock's observer is the switcher's (made at ⌘'s first press and
+kept, under every engine: its notices come only while the Dock makes or drops an element,
+its switcher or a menu), and none of the three fires
 while nothing happens (`ctl state`'s `costs`: `server_notices`, `dock_notices`,
 `trigger_looks`, `tap_events`, `taps_on.mission_keys`). A window added to or taken out of a
 Space (1325, 1326) stays the Spaces engine's: which word of that notice names the window is
@@ -742,6 +746,35 @@ activation, which with the switch confirms it, while another app's activation re
 the 3 s cap (`ACTIVATION_WAIT`, `UNREAD_WAIT` after a pick) ends only an activation that
 never comes. A tap that does not hear (macOS refused it, secure input) leaves the guess of
 before: no activation within 200 ms of the release is a cancel (`SILENT_ACTIVATION_WAIT`).
+
+The switcher is followed under every engine (round arranged-ahead), for the other half of
+what a Dock press does: an app selected whose windows are all on another Desktop has that
+Desktop arranged while the switcher shows (`engine::switcher::plan_ahead`,
+`Controller::arrange_for_switcher`, `Trigger::Switcher`), so it slides in with the app's
+stage in front. The app is asked what a Dock press asks (`Controller::app_asked`: the
+model's gates first, then one bounded round, 100 ms at most; `Model::dock_arrival` says
+whether macOS will slide; never the app in front). When: at the first Tab's guess, corrected
+by the Dock's list, as the lend. Under the Spaces engine the window is on no Desktop until
+arranged and macOS picks the Desktop 3-12 ms after ⌘'s release by what it counts there, so
+it has to be before the release; under the Corner engine macOS goes either way and the
+earlier start is its moves'. A third of the ⌘Tabs in a week's logs (220 of 668) were let go
+before the Dock's list was read, and the list agreed with the guess in 435 of 442: arranging
+only once the Dock confirmed, or at the release, would leave those as they were. It is undone (the
+same moves back, on a Desktop not shown) when the selection moves on, at Escape, when the
+keys lose the switcher, or when ⌘ is let go on another app; let go on its app it stands as
+a Dock click's after its release (the window held, `DOCK_SWITCH_CAP` from the release).
+While the switcher is up nothing else undoes it and no cap runs (`awaits_switcher`, as
+`awaits_release` for a press). A wrong guess never corrected (⌘ let go before the list) is
+undone by what macOS does next: the other app's activation (after its own switch's batch,
+`forget_held_for_switch`, so that switch still animates) or the Space change's notice that
+lists another Desktop. All of it only while the key tap hears the switcher's end
+(`mission_key_tap::hears`; the tap is made at ⌘'s first press, `prepare`): Escape reaches no
+input monitor while the switcher shows, so without the tap a cancel cannot be told from a
+release, nothing is arranged ahead, and a switcher that closes with no key heard for its end
+has its arrangement undone; the Desktop is then arranged on arrival, as before the round.
+One arrangement can come too late for macOS under the Spaces engine (⌘ let go while the
+app selected is still being asked): it stands, and its window is focused at the app's
+activation, which takes macOS there (`late_for_macos`).
 
 Mission Control and App Exposé lay out only the windows of the Desktop, so under the Spaces
 engine the same lend is made for every hidden window of the Desktops shown while one of them

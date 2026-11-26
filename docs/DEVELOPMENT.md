@@ -88,6 +88,14 @@ person and macOS did, as its log tells it, and its test asserts what came of it 
 3 and 10. An assertion marked `// TIME DECIDES:` names the constant that changed the
 outcome under load.
 
+`src/platform/controller/bench/ahead.rs` pins ⌘Tab to an app on another Desktop under both
+engines (the twin of the Dock click that slides): let go at once, held past the Dock's
+list, cancelled, tabbed on, the first Tab's guess wrong, the key tap refused, ⌘ let go while
+the app is still asked. Each outcome reads what stood in front on the other Desktop when the
+switcher ended, which of its windows a person saw on the way, how many of its windows were
+moved and whether it ended as it was. Print them:
+`BENCH_PRINT=1 cargo test --lib ahead::print_them -- --nocapture`.
+
 `src/platform/controller/bench/causes.rs` pins the focus and activation chains ("who caused
 this notice", `engine/attribution.rs`): one scenario for each gate, from the incident its doc
 comment tells. Their outcomes also read what each focus and activation notice came to, in

@@ -49,8 +49,9 @@
 //! windows it counts there then. Under the Corner engine the hidden window is on its Desktop
 //! already, and the earlier start is its moves' (through Accessibility, each as slow as its
 //! app). Arranging only once the Dock confirmed, or at the release, would leave a quick
-//! ⌘Tab as it was: in the logs of 11-18 to 11-24, 226 of 668 first Tabs were let go before
-//! the Dock's list was read, and the list agreed with the guess in 435 of the 442 others.
+//! ⌘Tab as it was: in the logs of 11-18 to 11-24, 220 of 668 first Tabs had no reading of
+//! the Dock's list after them (let go before it), and where both the guess and the list
+//! named an app (442) they agreed in 435.
 //! A wrong guess costs its moves twice, on a Desktop nobody sees: corrected by the Dock's
 //! list while the switcher shows; let go before that, undone by what macOS does next (the
 //! other app's activation, or the Space change that lists another Desktop).
