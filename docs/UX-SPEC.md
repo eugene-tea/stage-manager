@@ -1414,47 +1414,78 @@ of three, ms of work in 60 s; 390 under the Corner engine, 217 under Spaces):
 The Corner engine's tick was no heavier than the Spaces engine's (3.2 ms a pass against
 5.2 ms); it ran 2.7 times as often, because it rested 0.75 s at most while a window was
 parked, for the list its inert slivers' tap trusted for one second. Since round rest-cost
-(11-25) that list stands through a rest and the tick rests 2 s under every engine: by these
-figures about 160 ms a minute less under the Corner engine, which would bring the app near
-the Spaces engine's 0.5 % (to be measured). The same round stopped the LaunchServices
+(11-25) that list stands through a rest and the tick rests 2 s under every engine. Measured
+after it (the same day, three runs): the app 0.55 % of a core at rest under the Corner engine
+against 0.49 % under Spaces, 278 against 222 ms of work in 60 s, 72 window lists a minute
+under both, and with the strip slid away 71 and 65 lists and one LaunchServices lookup a
+minute. The same round stopped the LaunchServices
 lookups at rest (the running apps' paths read again once a minute with the strip following
 the Dock, about 300 lookups for 150 apps; the Dock's pid every 2 s; a window owner's bundle
 at every tick) and a tick kept brisk for as long as a window put back on a Desktop not
 shown waited there.
 
 What the samples do not explain is the window server: 4.6 % of a core more under the Corner
-engine than with the app quit, with no window pictured. They are of the app alone. What
-the Corner engine asks of the window server and of the capture service at rest, each to be
-measured by a run with it off (DEVELOPMENT, "Measuring cost"):
+engine than with the app quit, with no window pictured. They are of the app alone. Measured
+the same day by a run without each thing the Corner engine asks of the window server at
+rest (`scripts/measure.sh rest`, DEVELOPMENT, "Measuring cost"; two or three runs each, the
+window server's CPU; one run in each of three rows read 7 to 18 % with other work in it and
+is left out):
 
-| What | How often at rest | A run without it |
-|---|---|---|
-| A still of the desktop in the park corner, through ScreenCaptureKit (a listing of what can be shared, then a capture) | every 10 s while a sliver shows | `SM_CAPTURE=0` |
-| The corner patch's panel, ordered above the parked windows and redrawn at each still | every 10 s | `windows.corner_patch=false` (the still and the icons' read go too) |
-| Window lists | 150 a minute until round rest-cost, about 60 since | `STAGE_MANAGER_TICK_REST_MS=750` against `10000` |
-| Hidden windows on the Desktop, a sliver of each on screen | always | `SM_STAGES=1` |
-| The inert slivers' event tap | no event at rest | `windows.inert_slivers=false` |
+| Run | Window server, % | Stills a minute | Capture service, % |
+|---|---|---|---|
+| The app quit | 4.2 to 4.4 | | 0 |
+| Corner, one stage: nothing in the corner (`SM_STAGES=1`) | 4.7 to 4.9 | 0 | 0 |
+| Corner, four stages, no corner patch (`windows.corner_patch=false`) | 5.1 to 5.4 | 0 | 0 |
+| Corner, four stages, captures off: the patch drawn from the file (`SM_CAPTURE=0`) | 4.8 to 5.0 | 0 | 0 |
+| Corner, four stages, as shipped | 8.8 to 10.4 | 6 | 0.25 to 0.35 |
+| the same, the inert slivers' tap off (`windows.inert_slivers=false`) | 9.0 to 10.4 | 6 | 0.25 |
+| the same, the tick resting 0.75 s (`STAGE_MANAGER_TICK_REST_MS=750`) | 9.6 to 9.8 | 6 | 0.25 |
+| the same, the tick resting 10 s | 7.8 to 8.5 | 6 | 0.27 |
 
-The capture service's 0.25 % is the still's: every stack of the app on its connection to
-it is the still's capture or ScreenCaptureKit's listing for it. A window picture cost the
-window server about 12 ms and the capture service about 7 ms each in the `covered` runs
-(240 thumbnails a minute under Spaces: 6.1 to 10.8 % and 0.01 to 2.9 %); six stills a minute
-at that price would be 0.1 % of the window server's 4.6 %, so either a still of the desktop
-costs it far more than a window's picture, or the cost is one of the other rows.
+The cost is the still of the desktop in the park corner: about 4.3 % of a core in the window
+server and 0.3 % in the capture service, for one still every 10 s while a sliver shows, each
+a ScreenCaptureKit listing of what can be shared and a capture: about 430 ms of the window
+server's time a still, where a window's picture through its own call costs it about 12 ms.
+The patch's panel, the parked windows themselves and the tap cost nothing that shows; the
+tick and its lists about 1 %. Without the still the Corner engine reads about 1.2 % of a
+core at rest with the system's share (the app 0.5 %, the window server 0.7 % above its own
+load).
 
-Changed since these numbers (11-25, round picture-wait) and not measured yet: a Dock click's
-press, the pointer coming into the Dock and a hotkey's modifiers take the pictures before
-the switch, a picture up to 2 s old is played (0.5 s when the table was measured), and the
-park corner's cover no longer waits for the pictures. The switch rows and the time an
-activated window shows raised in the corner are to be measured again, with the test's own
-clicks and with clicks held as a person's (`SM_CLICK_HOLD_MS=100`: about 100 ms from the
-press to the release in the app's logs of real Dock clicks).
+Measured again the same day after round picture-wait: a Dock click's press, the pointer
+coming into the Dock and a hotkey's modifiers take the pictures before the switch, a picture
+up to 2 s old is played (0.5 s before), and the park corner's cover no longer waits for the
+pictures. Two runs, each row from the press; "test" is the test's own click (a card's button
+down 60 ms, a Dock item's press and release at once), "held" a click held 100 ms as a
+person's (`SM_CLICK_HOLD_MS=100`: about 100 ms from the press to the release in the app's
+logs of real Dock clicks). A card and a Dock item both act at the release.
+
+| ms from the press | corner, test | corner, held | spaces, test | spaces, held |
+|---|---|---|---|---|
+| Card click to the last frame | 975 | 928 | 960 | 908 |
+| Card click until the outgoing windows are gone | 320 | 281 | 318 | 264 |
+| Dock click until the outgoing windows are gone | 1152 | 1195 | 1134 | 1122 |
+
+From the release, which is when a person's click asks for the switch, a held card click
+ends 828 ms later under the Corner engine and 808 under Spaces, against 815 on 1.9.2 with
+its timer (875 from the press of a 60 ms click): the wait for the pictures is gone but for
+about 13 ms. A held Dock click's outgoing windows go 1095 ms after the release under the
+Corner engine and 1022 under Spaces, against 1032 on 1.9.2: 63 ms left under the Corner
+engine, none under Spaces. With the test's short click the press's pictures are not in at
+the release and are asked for again, so those rows read about 20 ms above the round before
+(951 and 941). An activated app's windows now show raised in the park corner for 0 to 37 ms
+before the switch's cover (the capture phase; 121 to 155 ms before the cover went ahead of
+the pictures, 37 with the timer), and a new app's window shows over the stage left for
+77 ms as before.
+
+One capture call for all of a switch's windows was tried (`probe-spaces capture BUNDLE fast
+list`, 30 rounds): the window server handed back no image a window for 2, 3 or 4 windows,
+every time. One call a window took 26, 44, 61 and 79 ms for 1 to 4 windows of about 1040 by
+784 pixels, about 18 ms a window, one after another.
 
 A person does not notice a delay this small: a response to a click reads as instant up to
 about 100 ms, a click's latency is told apart from about 50 to 100 ms, and two durations near
 a second need 10 to 20 % between them (as the studies of input latency give them). The card
-shows pressed at once in any case. The Dock click's 113 ms is at that edge, so nothing more
-should be added there.
+shows pressed at once in any case. The Dock click's 63 ms is inside that.
 
 ## The window server's notices
 

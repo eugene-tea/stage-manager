@@ -3,9 +3,9 @@
 ## Unreleased
 
 - Much less work at rest in the Accessibility mode: the pictures of the windows in front are
-  taken when a switch starts, as in the Spaces mode, and no longer every two seconds. On a 5K
-  display the app and the system together use about a third of the CPU they did (about 6 %
-  of one core against 16 %). A switch starts about a tenth of a second later.
+  taken when a switch is likely or starts, as in the Spaces mode, and no longer every two
+  seconds. On a 5K display the app and the system together use about a third of the CPU they
+  did (about 6 % of one core against 16 %). A switch starts at most 0.06 seconds later.
   `[animation] snapshot_interval_ms`, now 0 by default, sets a timer for them in every mode.
 - Less work at rest in the Accessibility mode: the housekeeping runs every 2 seconds while
   nothing happens, as in the Spaces mode (every 0.75 seconds before, while a window was

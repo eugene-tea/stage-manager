@@ -41,11 +41,11 @@ them.
 | Desktops: read from macOS's own undocumented list first, told apart by their windows wherever it fails | ✓ | ✓ | — |
 | Mission Control and Desktop changes: heard from macOS's own undocumented notices first, found by a regular look wherever they fail | ✓ | ✓ | — |
 | ***Cost at rest*** (test windows, nobody at the Mac) ⁹ | | | |
-| **Total, with the system's share** | **about 5.7 %** | **about 0.5 %** | — |
-| Stage Manager itself (what Activity Monitor shows) | 0.83 % | 0.50 % | — |
-| macOS's screen-capture service | 0.25 % | 0 % | — |
-| Window server, above its own load | +4.6 % | about 0 | — |
-| Time awake per minute | 392 ms | 216 ms | — |
+| **Total, with the system's share** | **about 6 %** | **about 0.5 %** | — |
+| Stage Manager itself (what Activity Monitor shows) | 0.55 % | 0.49 % | — |
+| macOS's screen-capture service | 0.3 % | 0 % | — |
+| Window server, above its own load | +5 % | about 0 | — |
+| Time awake per minute | 278 ms | 222 ms | — |
 | ***Cost in use*** ¹⁰ | | | |
 | Stage Manager itself, while working | 1–2 % | — | about 1 % |
 | ***Speed*** | | | |
@@ -76,7 +76,8 @@ them.
 9. Percent of one CPU core at rest, test windows only, the median of three runs (Apple
    silicon, macOS 27, a 5K display, 11-25; details in [UX-SPEC.md](UX-SPEC.md), "Window engines
    measured"). Most of Accessibility's cost is in macOS's window server, so Activity Monitor's
-   line for Stage Manager shows only a small part of it. Until 1.9.2 Accessibility also took
+   line for Stage Manager shows only a small part of it; nearly all of it is one picture of the
+   desktop behind the parked window edges, taken again every ten seconds. Until 1.9.2 Accessibility also took
    pictures of the front windows every two seconds, and the total read about 16 % on the same
    Mac.
 10. Activity Monitor's figure for Stage Manager in everyday use (11-18), without the system's
