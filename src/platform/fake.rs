@@ -161,6 +161,16 @@ pub enum Val {
     El(El),
 }
 
+/// An app that puts its window back where it had it whenever something else moves it
+/// ([`App::moves_back`]): one restoring its saved bounds, one re-centring its window.
+#[derive(Debug, Clone, Copy)]
+pub struct MovesBack {
+    /// How long after the move it puts the window back, in ms before the load factor.
+    pub after_ms: f64,
+    /// How many times it does (`None`: every time).
+    pub times: Option<u32>,
+}
+
 /// An app on the desk.
 #[derive(Debug, Clone)]
 pub struct App {
@@ -210,6 +220,9 @@ pub struct App {
     /// its reorder reaches the window server" (`engine/raise_order.rs`: the fixture's 40 ms
     /// lag; a slow app's longer).
     pub reorders_ms: Option<f64>,
+    /// It moves its window back when the app (our park, our show) moves it away from where
+    /// the app itself had it ([`MovesBack`]; `None`: it leaves it where it was put).
+    pub moves_back: Option<MovesBack>,
 }
 
 /// A window on the desk.
@@ -509,6 +522,9 @@ pub struct Desk {
     /// Windows moved whose new place is not listed yet ([`Self::lists_moves_ms`]): until when,
     /// and where they are listed until then.
     late_moves: BTreeMap<u32, (Instant, Rect)>,
+    /// Where an app that moves its windows back ([`App::moves_back`]) has each of them: the
+    /// frame before the app's first move of it, or where the user last put it.
+    own_frames: BTreeMap<u32, Rect>,
     /// The "Current Space" flips with the leaving Desktop's windows going from the list,
     /// before the notice is sent (never measured so; the order a slow main thread gives at
     /// any load). False, the desk's way: [`delays::FLIP_AFTER_NOTICE`] after the notice is
@@ -720,6 +736,7 @@ impl Desk {
             tap_armed: false,
             lists_moves_ms: None,
             late_moves: BTreeMap::new(),
+            own_frames: BTreeMap::new(),
             flip_leads_notice: false,
             leaving_lingers_ms: 0.0,
             listing_unreadable: false,
@@ -764,7 +781,7 @@ impl Desk {
     pub fn add_app(&mut self, pid: i32, bundle: &str, name: &str) {
         self.apps.insert(
             pid,
-            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, quiet_key: false, wakes_ms: None, busy_until: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None },
+            App { pid, bundle: bundle.into(), name: name.into(), hidden: false, focused: None, activates_ms: None, reports_focus_ms: None, focus_before_activation: false, answers_ms: None, quiet_key: false, wakes_ms: None, busy_until: None, timeout: 0.0, enhanced: false, gone: false, reorders_ms: None, moves_back: None },
         );
         let n = self.dock.items.len() as f64;
         self.dock.items.push((format!("/Applications/{name}.app/"), Rect::new(self.dock.bar.x + 8.0 + 58.0 * n, self.dock.bar.y + 8.0, 50.0, 50.0)));
@@ -1293,6 +1310,7 @@ impl Desk {
             self.late_moves.insert(id, (until, old));
         }
         let (moved, resized) = (to.origin() != w.frame.origin(), to.size() != w.frame.size());
+        let before = w.frame;
         w.frame = to;
         if w.spaces.iter().any(|s| desktops.contains(s)) && !w.spaces.iter().any(|s| theirs.contains(s)) {
             w.spaces.retain(|s| !desktops.contains(s));
@@ -1306,6 +1324,31 @@ impl Desk {
         if resized {
             self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_RESIZED });
         }
+        if let Some(back) = self.apps.get(&pid).and_then(|a| a.moves_back).filter(|b| b.times != Some(0)) {
+            let own = *self.own_frames.entry(id).or_insert(before);
+            if to != own {
+                let due = clock::now() + self.at_load(back.after_ms);
+                self.at(due, move |d| d.app_moves_back(id));
+            }
+        }
+    }
+
+    /// An app that moves its windows back ([`App::moves_back`]) puts window `id` where it
+    /// had it, and says it moved; once for each of its times.
+    fn app_moves_back(&mut self, id: u32) {
+        let Some(own) = self.own_frames.get(&id).copied() else { return };
+        let Some(w) = self.windows.get(&id).filter(|w| !w.minimized && w.frame != own) else { return };
+        let pid = w.pid;
+        let Some(back) = self.apps.get_mut(&pid).and_then(|a| a.moves_back.as_mut()) else { return };
+        match back.times {
+            Some(0) => return,
+            Some(ref mut n) => *n -= 1,
+            None => {}
+        }
+        if let Some(w) = self.windows.get_mut(&id) {
+            w.frame = own;
+        }
+        self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_MOVED });
     }
 
     /// An action.
@@ -1395,6 +1438,9 @@ impl Desk {
         }
         w.frame = frame;
         let pid = w.pid;
+        if let Some(own) = self.own_frames.get_mut(&id) {
+            *own = frame;
+        }
         self.post(delays::MOVED, Notice::Ax { pid, el: El::Window(id), name: n::WINDOW_MOVED });
     }
 
