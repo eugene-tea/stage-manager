@@ -579,6 +579,14 @@ pub fn reveal_edge(p: Point, rest: Duration) -> Result<(), String> {
     Ok(())
 }
 
+/// A synthetic pointer move onto a Dock item at `p`, no button (test only): the pointer in
+/// the Dock's bar, left there. Only for an item the caller hit-tested as a
+/// `STAGE_MANAGER_ONLY` app's (the Dock is no test window, so [`hover`] would refuse it).
+/// [`pointer_back`] puts the pointer where it was.
+pub fn dock_item_hover(p: Point) -> Result<(), String> {
+    reveal_edge(p, Duration::ZERO)
+}
+
 /// Puts the pointer back where it was before [`reveal_edge`] or [`hover`] moved it.
 pub fn pointer_back() {
     if let Some(home) = HOVER_HOME.lock().ok().and_then(|mut h| h.take()) {

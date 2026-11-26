@@ -2187,7 +2187,17 @@ impl Controller {
     /// waits it out between the press and the release, so what the press starts, the
     /// pictures a switch would wait for, has a person's time to come).
     pub(super) fn debug_dock_click(&mut self, ob: &Observer, bundle: &str, real: bool, hold: Option<Duration>) -> serde_json::Value {
-        self.debug_dock(ob, bundle, real, true, hold)
+        self.debug_dock(ob, bundle, DockAct::Click { real, hold })
+    }
+
+    /// `debug-dock-hover BUNDLE` (test only, round picture-wait): the pointer moved onto the
+    /// Dock item of a `STAGE_MANAGER_ONLY` app, found and hit-tested as for
+    /// [`Self::debug_dock_click`], and left there; nothing is pressed or fed. The reply's
+    /// `in_bar` says whether that point lies in the Dock's bar as this app last read it
+    /// (an auto-hidden Dock's is read where it rests): only then can the pointer's sign of
+    /// a likely switch come (`platform/switch_likely.rs`).
+    pub(super) fn debug_dock_hover(&mut self, ob: &Observer, bundle: &str) -> serde_json::Value {
+        self.debug_dock(ob, bundle, DockAct::Hover)
     }
 
     /// `debug-dock-lend BUNDLE` (test only, round r2-lends): [`Self::debug_dock_click`]'s fed
@@ -2196,15 +2206,16 @@ impl Controller {
     /// can tell what ends it (another app's activation, the next press, the cap). The reply's
     /// `lent` names the window put home, if any.
     pub(super) fn debug_dock_lend(&mut self, ob: &Observer, bundle: &str) -> serde_json::Value {
-        let mut r = self.debug_dock(ob, bundle, false, false, None);
+        let mut r = self.debug_dock(ob, bundle, DockAct::Lend);
         if let Some(obj) = r.as_object_mut() {
             obj.insert("lent".into(), serde_json::json!(self.lent.filter(|l| !l.switcher).map(|l| l.window.0)));
         }
         r
     }
 
-    /// [`Self::debug_dock_click`] (`activate`: the fed click presses the item after it).
-    fn debug_dock(&mut self, ob: &Observer, bundle: &str, real: bool, activate: bool, hold: Option<Duration>) -> serde_json::Value {
+    /// [`Self::debug_dock_click`], [`Self::debug_dock_lend`] and [`Self::debug_dock_hover`]:
+    /// the item found, shown and hit-tested, then `act`.
+    fn debug_dock(&mut self, ob: &Observer, bundle: &str, act: DockAct) -> serde_json::Value {
         use serde_json::json;
         let only = std::env::var("STAGE_MANAGER_ONLY").unwrap_or_default();
         if !only.split(',').any(|b| b.trim() == bundle) {
@@ -2235,19 +2246,29 @@ impl Controller {
                 hit = dock::item_at(dock, at);
             }
         }
-        let mut result = if real {
-            match hit {
-                Ok((_, item)) if item.path == listed.path => match crate::platform::input::dock_item_click(at, hold.unwrap_or(DOCK_PRESS_HOLD)) {
-                    Ok(()) => json!({ "ok": true, "real": true, "at": [at.x, at.y] }),
-                    Err(e) => json!({ "ok": false, "error": e }),
-                },
-                Ok((_, other)) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found another item ({})", other.path) }),
-                Err(miss) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
-            }
-        } else {
-            self.debug_dock_press(ob, &list, bundle, &listed, at, hit, activate.then_some(hold.unwrap_or_default()))
+        // A posted press, or the pointer alone: only on the item the hit-test found there.
+        let posted = |post: &dyn Fn() -> Result<(), String>, real: bool| match &hit {
+            Ok((_, item)) if item.path == listed.path => match post() {
+                Ok(()) => json!({ "ok": true, "real": real, "at": [at.x, at.y] }),
+                Err(e) => json!({ "ok": false, "error": e }),
+            },
+            Ok((_, other)) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found another item ({})", other.path) }),
+            Err(miss) => json!({ "ok": false, "error": format!("the hit-test at {at:?} found no application item: {}", miss.found) }),
         };
-        if revealed {
+        let mut result = match act {
+            DockAct::Click { real: true, hold } => posted(&|| crate::platform::input::dock_item_click(at, hold.unwrap_or(DOCK_PRESS_HOLD)), true),
+            DockAct::Hover => {
+                let mut r = posted(&|| crate::platform::input::dock_item_hover(at), false);
+                if let Some(obj) = r.as_object_mut() {
+                    obj.insert("in_bar".into(), json!(crate::platform::switch_likely::in_dock(&self.dock_bar_now().bars, at)));
+                }
+                r
+            }
+            DockAct::Click { real: false, hold } => self.debug_dock_press(ob, &list, bundle, &listed, at, hit, Some(hold.unwrap_or_default())),
+            DockAct::Lend => self.debug_dock_press(ob, &list, bundle, &listed, at, hit, None),
+        };
+        // The pointer shown at the Dock's edge goes back, but a hover's: it stays on the item.
+        if revealed && act != DockAct::Hover {
             crate::platform::input::pointer_back();
         }
         if let Some(obj) = result.as_object_mut() {
@@ -2291,6 +2312,19 @@ impl Controller {
         tracing::info!(bundle, predicted = ?predicted.map(|w| w.0), pressed = pressed.is_ok(), "debug-dock-click");
         json!({ "ok": pressed.is_ok(), "predicted": predicted.map(|w| w.0), "error": pressed.err().map(|e| e.to_string()) })
     }
+}
+
+/// What a test does at a fixture's Dock item ([`Controller::debug_dock`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DockAct {
+    /// A click: posted (`real`, the press held `hold`, [`DOCK_PRESS_HOLD`] unless given), or
+    /// fed to the controller and the item pressed through Accessibility (`hold` waited out
+    /// between the fed press and its release; none: the release at once).
+    Click { real: bool, hold: Option<Duration> },
+    /// The fed click alone, the item not pressed.
+    Lend,
+    /// The pointer moved onto the item and left there.
+    Hover,
 }
 
 /// App `pid`'s focused window, asked with a bounded timeout (the app goes back to the global

@@ -17,6 +17,8 @@
 //! still for `MS` on the desktop itself (only where nothing but the desktop lies: a fixture's icon under the corner
 //! patch, the wallpaper, or Show Desktop's own window over the revealed desktop), `debug-dock-click BUNDLE [real] [hold=MS]` clicks a fixture's Dock item as the Dock-click
 //! prediction sees it (`hold=MS`: the press held that long before its release, as a person's is) (in the Apple mode: found, hit-tested and pressed, no prediction),
+//! `debug-dock-hover BUNDLE` moves the pointer onto that item and leaves it there (no press:
+//! the pointer in the Dock; `debug-pointer-back` puts it back),
 //! `debug-dock-lend BUNDLE` feeds that click without pressing the item (what the press put
 //! home waits for an activation that does not come),
 //! `debug-mission-pick ID [hover]` clicks a fixture's window where Mission Control lays it out
@@ -345,6 +347,14 @@ pub enum Command {
         /// The app's bundle id.
         bundle: String,
     },
+    /// The pointer moved onto the Dock item of a `STAGE_MANAGER_ONLY` app and left there,
+    /// nothing pressed (needs `STAGE_MANAGER_TEST=1`; round picture-wait): the pointer in
+    /// the Dock's bar, for the live checks of the pictures taken when a switch is likely.
+    /// `debug-pointer-back` puts the pointer back.
+    DebugDockHover {
+        /// The app's bundle id.
+        bundle: String,
+    },
     /// Mission Control's lends under the Spaces engine, for the probe (needs
     /// `STAGE_MANAGER_TEST=1`; round spaces-mission-control): `status`, `lend`, `back`,
     /// `mode off|shown|key|config`.
@@ -570,6 +580,7 @@ impl Command {
                 Ok(Self::DebugDockClick { bundle: (*bundle).to_string(), real: !rest.is_empty(), hold_ms })
             }
             ["debug-dock-lend", bundle] => Ok(Self::DebugDockLend { bundle: (*bundle).to_string() }),
+            ["debug-dock-hover", bundle] => Ok(Self::DebugDockHover { bundle: (*bundle).to_string() }),
             ["adopted", ids @ ..] => ids
                 .iter()
                 .map(|id| id.parse::<u32>().map_err(|_| format!("expected a window id, got {id:?}")))
@@ -1162,6 +1173,8 @@ mod tests {
         assert!(Command::parse("debug-dock-click dev.example.app fake").is_err());
         assert_eq!(Command::parse("debug-dock-lend dev.example.app"), Ok(Command::DebugDockLend { bundle: "dev.example.app".into() }));
         assert!(Command::parse("debug-dock-lend").is_err());
+        assert_eq!(Command::parse("debug-dock-hover dev.example.app"), Ok(Command::DebugDockHover { bundle: "dev.example.app".into() }));
+        assert!(Command::parse("debug-dock-hover").is_err());
         assert_eq!(
             Command::parse("debug-cmd-tab cancel"),
             Ok(Command::DebugCmdTab(CmdTabProbe::Start { release: false, tabs: 1, hold_ms: 300, gap_ms: 40, lend: true }))

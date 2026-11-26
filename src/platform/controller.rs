@@ -6897,6 +6897,12 @@ impl Controller {
                 }
                 self.debug_dock_lend(ob, &bundle)
             }
+            Command::DebugDockHover { bundle } => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-dock-hover needs STAGE_MANAGER_TEST=1" });
+                }
+                self.debug_dock_hover(ob, &bundle)
+            }
             Command::DebugFrame { id, frame, only } => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
                     return json!({ "ok": false, "error": "debug-frame needs STAGE_MANAGER_TEST=1" });
