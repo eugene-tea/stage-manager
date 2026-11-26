@@ -10,7 +10,8 @@
 //!   only while they do ([`Settler::alike_for`]).
 //! - **A still** ([`Settler::settle`] when the candidates differ; [`Settler::check`] on
 //!   arrival at a Desktop, even for a frame the clock names exactly): one still of the block
-//!   through ScreenCaptureKit ([`crate::platform::capture::capture_desktop`]: the desktop's
+//!   ([`crate::platform::desktop_fast::take`]: the window server's own call first,
+//!   ScreenCaptureKit as the fallback; the desktop's
 //!   own windows only, never a window, never ours; only where window captures already work,
 //!   and never asked for), drawn in the display's colour space and compared with every
 //!   frame on the same grid ([`crate::engine::solar_settle::seen`], Finder's icons masked
@@ -28,6 +29,7 @@ use crate::engine::geometry::{Rect, Size};
 use crate::engine::solar_settle::{self, Facts, Step, Thumb, Way};
 use crate::engine::wallpaper as wp;
 use crate::platform::capture;
+use crate::platform::desktop_fast;
 use crate::platform::wallpaper::{self, Job};
 
 /// The most alike verdicts remembered (one per picture, block and frames met).
@@ -295,12 +297,12 @@ impl Settler {
         let unix = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
         let (b, path) = (base.clone(), job.path.clone());
         let screen_id = self.screen;
-        let done = Box::new(move |still: capture::DesktopStill| {
+        let done = Box::new(move |still: capture::DesktopStill, _way: desktop_fast::Way| {
             let result = still.map(|(image, _)| (wallpaper::thumb(&image, space.as_deref(), size), wallpaper::space_name(&image)));
             dispatch2::DispatchQueue::main()
                 .exec_async(move || super::corner_patch::settle_news(screen_id, News::Still { token, base: b, path, key, global, unix, result }));
         });
-        match capture::capture_desktop(screen_id, global, done) {
+        match desktop_fast::take(screen_id, global, done) {
             Ok(()) => tracing::debug!(%global, "corner patch: a still of the desktop to settle a solar frame"),
             Err(why) => {
                 self.in_flight = None;

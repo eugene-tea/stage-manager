@@ -64,7 +64,8 @@
 //!   server, whose pictures prove nothing of the alert; a refusal of a look's still, a
 //!   desktop still or a round counts, each once.
 //! - The one still that is not of a window, the desktop in the park corner for a switch's
-//!   cover ([`capture_desktop`], round 8L3), follows the same rules and goes only once the
+//!   cover ([`capture_desktop`], round 8L3; the window server's own call first,
+//!   [`super::desktop_fast`]), follows the same rules either way and goes only once the
 //!   gate is open (window captures already worked): it never asks and is never the probe.
 //! - Quit waits for captures in flight ([`quiesce`]): replayd checks a capture's approval
 //!   after answering it, and for a process that has just exited it cannot resolve the app's
@@ -1460,6 +1461,10 @@ pub fn desktop_level(layer: isize, pid: Option<i32>, own: i32) -> bool {
 /// picture's own window among them or not, [`capture_desktop`]).
 static DESKTOP_LAYERS_SAID: AtomicBool = AtomicBool::new(false);
 
+/// ScreenCaptureKit's still of the desktop: the fallback of [`super::desktop_fast::take`],
+/// which every caller goes through (the window server's own call first, round
+/// desktop-still), and what its first still on a screen is proven against.
+///
 /// A still of `region` (global, top-left points) of the main display showing the desktop
 /// only: only the desktop-level windows listed when it is taken ([`desktop_level`]: the
 /// desktop picture and what lies on it, Finder's icons, widgets) are included (round 8L4:

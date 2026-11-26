@@ -138,6 +138,8 @@ scripts/test-stages.sh m3 safety          # some phases
 scripts/test-stages.sh still              # by name only, as away, glass and crop (a combined
                                           # card drawn whole, one of its windows lifted off
                                           # alone in the column, dropped in a gap, dragged out)
+SM_STILL=sck scripts/test-stages.sh still capture   # the desktop's still through ScreenCaptureKit
+                                          # alone (default: the window server's call first)
 scripts/test-stages.sh rest               # by name only: the housekeeping rests 2 s under every
                                           # engine; a press on a parked window's sliver, judged on
                                           # a list over a second old at rest, is still swallowed
@@ -208,7 +210,8 @@ scripts/measure.sh --summary /tmp/sm-measure.XXXXXX   # the table again
   app launched or quit (`costs.apps_changed` says whether one did).
 
 `rest` also records, from `ctl state` before and after its minute, every number of `costs` a
-minute (window lists, LaunchServices lookups, stills of the desktop, wallpaper reads), the
+minute (window lists, LaunchServices lookups, stills of the desktop and how many of them the
+window server took and how many were asked of ScreenCaptureKit, wallpaper reads), the
 ticks that ran brisk and at rest (the two reads stir the tick: about 12 brisk ticks are
 theirs), the rest's period and how the corner patch shows. What one part of the app costs is
 measured by one run with it off or slowed, each in an `OUT` of its own (every row says what
@@ -218,6 +221,7 @@ it ran with):
 E="RUNS=3 ENGINES=corner"                                   # add "off spaces" for the floor and the other engine
 env $E OUT=/tmp/sm-rest.base scripts/measure.sh rest sample
 env $E OUT=/tmp/sm-rest.nocap SM_CAPTURE=0 scripts/measure.sh rest          # no ScreenCaptureKit: no still of the desktop
+env $E OUT=/tmp/sm-rest.sck SM_ENV="STAGE_MANAGER_STILL_SCK=1" scripts/measure.sh rest           # the still through ScreenCaptureKit
 env $E OUT=/tmp/sm-rest.nopatch SM_CONFIG="windows.corner_patch=false" scripts/measure.sh rest   # no patch panel, still or icons read
 env $E OUT=/tmp/sm-rest.notap SM_CONFIG="windows.inert_slivers=false" scripts/measure.sh rest     # no event tap
 env $E OUT=/tmp/sm-rest.one SM_STAGES=1 scripts/measure.sh rest             # nothing hidden: nothing in the corner
@@ -277,8 +281,8 @@ The installed app is never started with any of them, so none acts on a user's co
 | `STAGE_MANAGER_ENGINE` | yes, `ONLY` | `spaces`: the Spaces window engine, whatever the config says (`SM_ENGINE` sets it) |
 | `STAGE_MANAGER_PROBE_FAIL` | yes, `ONLY` | `hide` or `show`: that step of the Spaces engine's launch probe is not sent, as on a Mac that refuses it |
 | `STAGE_MANAGER_DEBUG_ACTIVATION_DELAY_MS` | yes, `ONLY` | activation notices reach the WM thread this late (as under load; `test-stages.sh stale`) |
-| `STAGE_MANAGER_CAPTURE_SCK` | yes, `ONLY` | every window picture through ScreenCaptureKit, the window server's own source off (as before 1.9) |
-| `STAGE_MANAGER_CAPTURE_LIST` | yes, `ONLY` | a switch's windows on screen are pictured in one call of the window server's capture instead of one call a window (to be measured: `probe-spaces capture BUNDLE fast list`) |
+| `STAGE_MANAGER_CAPTURE_SCK` | yes, `ONLY` | every window picture and the desktop's still through ScreenCaptureKit, the window server's own source off (as before 1.9) |
+| `STAGE_MANAGER_STILL_SCK` | yes, `ONLY` | the still of the desktop in the park corner through ScreenCaptureKit alone, the window server's call off (as before round desktop-still; `SM_STILL=sck` sets it) |
 | `STAGE_MANAGER_DESKTOPS_GUESS` | yes, `ONLY` | the window server's Desktops are not read: Desktops by the windows on screen (as 1.9.2 under the Corner engine) |
 | `STAGE_MANAGER_LANDING` | `ONLY`, or any run under `[windows] engine = "spaces"` | the landing variant: `pictures` (the default), `ordered`, `live`, `live-early`, `live-late` (`ui/landing_math.rs`; the only test switch a user's config can open) |
 | `STAGE_MANAGER_LANDING_LEVEL` | as `STAGE_MANAGER_LANDING` | `ranked`: the live landing's windows get levels by rank instead of as made |
@@ -309,6 +313,7 @@ The installed app is never started with any of them, so none acts on a user's co
 | `SM_FIXTURE_ID` | `test-stages.sh`, `measure.sh`, `test_stages.py` | the main fixture's bundle id |
 | `SM_ENGINE` | `test-stages.sh`, `test_stages.py`, `measure_stages.py` | `spaces` runs the suite under the Spaces engine (sets `STAGE_MANAGER_ENGINE`); default the Corner engine |
 | `SM_DESKTOPS` | `test_stages.py`, `test_spaces.py` | `guess` runs every app with the window server's Desktop reads off (sets `STAGE_MANAGER_DESKTOPS_GUESS`); default the reads on |
+| `SM_STILL` | `test_stages.py` | `sck` runs every app with the desktop's still through ScreenCaptureKit alone (sets `STAGE_MANAGER_STILL_SCK`); default the window server's call first. The `still` and `capture` phases run both ways |
 | `SM_SCREENSHOTS` | `test_stages.py` | a folder: turns on the visible phase's strip screenshots |
 | `SM_SHOTS` | `test_stages.py`, `test_spaces.py` | a folder: turns on `spaces --auto`'s by-eye screenshots and the Mission Control pixel checks |
 | `SM_PIXELS` | `test_stages.py` | turns on the checks read back from the overlay's pixels |

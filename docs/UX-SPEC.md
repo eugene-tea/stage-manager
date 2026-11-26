@@ -935,9 +935,12 @@ ours included), exact by construction, so nothing on the desktop keeps it off an
 under it take clicks and drags as usual (an icon dropped, moved or taken away under the patch
 hides it until the new still is drawn, so a stale picture never cuts the icon); it is taken
 again on arriving at a Desktop once the slide settles, when an icon there changes, after a click on the desktop, a moment after the
-picture or its predicted frame changes, and every 10 seconds otherwise (never during a
+picture or its predicted frame changes, after an unlock or a wake, and every 10 seconds otherwise (never during a
 switch's motion, a slide, Mission Control or Show Desktop; none while the screen is locked
-or asleep). The patch stays where it is through Show Desktop, Mission Control and App
+or asleep). The still is taken by the window server's own call, which lists nothing, and
+through ScreenCaptureKit wherever that call does not work or its picture is not proven the
+same as ScreenCaptureKit's (ARCHITECTURE, "Window pictures"); through ScreenCaptureKit the
+timer is 30 seconds where no icon lies in the corner. The patch stays where it is through Show Desktop, Mission Control and App
 Exposé, as the desktop picture does. Drawn from a still, it shows through Show Desktop what
 the desktop shows there and grows over the hidden windows' corners that Show Desktop pushes
 into view, back to its usual size once they are back in the corner (never over a shown
@@ -1464,6 +1467,13 @@ tick and its lists about 1 %. Without the still the Corner engine reads about 1.
 core at rest with the system's share (the app 0.5 %, the window server 0.7 % above its own
 load).
 
+Round desktop-still (11-25, after these runs; not measured yet) takes that still through
+the window server's own call, with no listing, and through ScreenCaptureKit only for the
+first one on a screen, after the wallpaper or an icon in the corner changes, and where the
+call does not work. The rows above are the cost of the fallback at its old pace;
+`SM_ENV="STAGE_MANAGER_STILL_SCK=1"` measures it at its new one (30 s where no icon lies in
+the corner).
+
 Measured again the same day after round picture-wait: a Dock click's press, the pointer
 coming into the Dock and a hotkey's modifiers take the pictures before the switch, a picture
 up to 2 s old is played (0.5 s before), and the park corner's cover no longer waits for the
@@ -1493,7 +1503,8 @@ the pictures, 37 with the timer), and a new app's window shows over the stage le
 One capture call for all of a switch's windows was tried (`probe-spaces capture BUNDLE fast
 list`, 30 rounds): the window server handed back no image a window for 2, 3 or 4 windows,
 every time. One call a window took 26, 44, 61 and 79 ms for 1 to 4 windows of about 1040 by
-784 pixels, about 18 ms a window, one after another.
+784 pixels, about 18 ms a window, one after another. The test switch for one call is gone;
+the probe now prints what the call handed back (how many images, their sizes).
 
 A person does not notice a delay this small: a response to a click reads as instant up to
 about 100 ms, a click's latency is told apart from about 50 to 100 ms, and two durations near

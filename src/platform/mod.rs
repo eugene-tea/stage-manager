@@ -23,6 +23,7 @@ pub mod ctl;
 pub(crate) mod desk_reads;
 pub mod desktop;
 pub(crate) mod desktop_counts;
+pub(crate) mod desktop_fast;
 pub(crate) mod desktop_items;
 pub mod desktop_shot;
 pub(crate) mod dock;

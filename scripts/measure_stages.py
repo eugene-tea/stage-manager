@@ -84,12 +84,15 @@ rest-cost), each in an OUT of its own; every row says what it ran with (`config`
   `SM_CONFIG="windows.inert_slivers=false"` (no event tap, no list for it).
 - SM_ENV="NAME=value ..." sets test switches of the app for the run:
   `SM_ENV="STAGE_MANAGER_TICK_REST_MS=750"` is the housekeeping's rest as the Accessibility
-  engine had it until round rest-cost (2000 since; any value from 250 to 60000).
+  engine had it until round rest-cost (2000 since; any value from 250 to 60000);
+  `SM_ENV="STAGE_MANAGER_STILL_SCK=1"` takes every still of the desktop through
+  ScreenCaptureKit, as before round desktop-still (the window server's own call since).
 - SM_STAGES=1 leaves no window hidden (one stage): the engine with nothing in its corner.
 - SM_CAPTURE=0: no ScreenCaptureKit at all (no still of the desktop; the patch draws the
   wallpaper's file).
 `rest` also records, from `ctl state` before and after the span, each of `costs` a minute
-(window lists, LaunchServices lookups, stills of the desktop, ...), the ticks that ran brisk
+(window lists, LaunchServices lookups, stills of the desktop and which way they came: the
+window server's own call or ScreenCaptureKit, ...), the ticks that ran brisk
 and at rest (the two reads stir the tick: about 12 brisk ticks belong to them), and how the
 corner patch shows (`patch`).
 """
@@ -587,7 +590,9 @@ def scenario_rest():
         m["patch"] = patch_now(s1)
         say(f"  ticks: {counts.get('ticks_rest')} at rest (every {counts.get('tick_rest_ms')} ms), {counts.get('ticks_brisk')} brisk; "
             f"a minute: {counts.get('window_lists_per_min')} window lists, {counts.get('launch_services_per_min')} LaunchServices lookups, "
-            f"{counts.get('desktop_stills_per_min')} stills of the desktop; the patch {m['patch']}")
+            f"{counts.get('desktop_stills_per_min')} stills of the desktop "
+            f"({counts.get('desktop_stills_fast_per_min')} by the window server, {counts.get('desktop_stills_sck_per_min')} asked of ScreenCaptureKit); "
+            f"the patch {m['patch']}")
     return record("rest", m)
 
 
@@ -1275,6 +1280,8 @@ def summary(out):
     add("rest: window lists/min", "rest", g("window_lists_per_min"))
     add("rest: LaunchServices lookups/min", "rest", g("launch_services_per_min"))
     add("rest: stills of the desktop/min", "rest", g("desktop_stills_per_min"))
+    add("rest: stills by the window server/min", "rest", g("desktop_stills_fast_per_min"))
+    add("rest: stills asked of ScreenCaptureKit/min", "rest", g("desktop_stills_sck_per_min"))
     add("rest: wallpaper reads/min", "rest", g("wallpaper_reads_per_min"))
     add("sample: active ms in 60 s", "sample", g("active_ms"))
     for how in ("card", "dock", "ctl"):

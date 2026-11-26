@@ -10,6 +10,9 @@
 - Less work at rest in the Accessibility mode: the housekeeping runs every 2 seconds while
   nothing happens, as in the Spaces mode (every 0.75 seconds before, while a window was
   hidden). A press on a hidden window's edge in the corner is ignored as before.
+- Less work at rest in the Accessibility mode: the picture of the desktop that covers the
+  hidden windows' edges in the corner, taken again every ten seconds, comes from a faster
+  system call. The slower one is used wherever the faster one does not work.
 - With `[strip] order = "dock"`, the running apps are no longer all looked up again once a
   minute.
 - In the default mode, the first switch to a Desktop after the app starts stays there, and a

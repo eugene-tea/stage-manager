@@ -54,8 +54,9 @@ NSWorkspace notifications     persists state.json               ctl socket (test
 - **Platform layer** (`src/platform`): AX, CGWindowList, ScreenCaptureKit, Carbon hotkeys,
   NSWorkspace events, safety. Windows are moved and hidden through public APIs only, plus
   `_AXUIElementGetWindow`, under the Corner engine; the Spaces engine adds SkyLight's Space
-  calls, loaded at run time. Window pictures ask the window server's own capture first under
-  every engine and fall back to ScreenCaptureKit; the Desktops are read from the window
+  calls, loaded at run time. Window pictures and the still of the desktop in the park corner
+  ask the window server's own capture first under every engine and fall back to
+  ScreenCaptureKit; the Desktops are read from the window
   server's listing under both of our engines (two read-only calls) and guessed from the
   windows on screen where that does not work; Mission Control's opening and close and a
   Desktop change's end are heard from the window server's notices under both engines, and
@@ -645,11 +646,54 @@ after 0.5 s if none comes. It stays with the transition when a window leaving re
 cover's rectangle (its picture is drawn over the cover) or a window that stays shown into
 the corner waits for its picture.
 
-One call for several windows is behind a test switch (`STAGE_MANAGER_CAPTURE_LIST`,
-`capture_fast::pictures`): `SLSHWCaptureWindowList` with all the ids of a switch's windows on
-screen, each image taken for its window only when the call hands back one a window and the
-picture is that window's shape. Whether it is faster than one call a window is not measured
-yet (`probe-spaces capture BUNDLE fast list`).
+A window's picture is always one call a window. One call of `SLSHWCaptureWindowList` with
+several windows' ids did not hand back an image a window (live 11-25, 30 of 30 for 2 to 4
+windows), so the test switch for it is gone; `probe-spaces capture BUNDLE fast list` prints
+what the call does hand back.
+
+The still of the desktop in the park corner (the corner patch's picture, a switch's cover
+over a desktop with icons, the still that settles a solar frame) goes the same way, the
+window server first (`platform/desktop_fast.rs`, round desktop-still; kept and judged fresh
+by `platform/desktop_shot.rs`). The call is `CGWindowListCreateImageFromArray` (CGWindow.h:
+a composite of the windows named, cut to a rectangle of the screen; deprecated in macOS 14,
+unavailable in the 15 SDK, still exported and loaded at run time, as
+`CGWindowListCreateImage` is): the windows named are the desktop-level ones the window
+server lists on screen in the corner block (below layer 0, never ours: the desktop picture,
+Finder's icons, widgets), one `CGWindowListCopyWindowInfo` a still and no listing of the
+shareable content. `SLSHWCaptureWindowList` is not used for it: no public source documents
+a composite or a crop from it.
+
+- **Its check.** A still counts only at the block's size at the display's own scale, with an
+  RGB colour space of its own, and with no see-through part (the header: a transparent image
+  comes back when the windows cannot be read; a still without the desktop picture's window
+  is see-through where only it draws). Size and alpha cannot tell a wrong opaque picture, so
+  the first still on a screen is taken both ways and stands only when the two are the same
+  picture (on a 64-cell grid drawn in the still's own colour space: a mean difference of 2
+  of 255 at most, no cell over 12). That proof is kept for the display's frame, its scale,
+  the still's colour space and the very windows composited, and is made again when the
+  wallpaper read changes or Finder's icons in the corner do; each of those took a still
+  through ScreenCaptureKit before this round too. With nothing changing, every still is the
+  window server's alone.
+- **Its rest.** Three bad stills in a row (nothing handed back, not proven the desktop, a
+  proof that failed) rest the call for 30 min, logged once at info, and ScreenCaptureKit
+  takes every still meanwhile; a good one clears the count. Whatever the call misses,
+  ScreenCaptureKit takes that still, exactly as before.
+- **Colour.** The image comes tagged with the display's colour space and is never redrawn:
+  the patch and the cover crop it (the crop shares the pixels and the space) and their
+  layers match it to the screen, as they do ScreenCaptureKit's. The proof compares in the
+  still's own space, so a shift fails it.
+- **Its pace.** Every 10 s with no cause, as before: a widget's content, an icon's preview,
+  label or badge and a selection made from the keyboard change with nothing the app hears,
+  and the call is cheap. Through ScreenCaptureKit the timer rests 30 s where Finder's icons
+  are known and none lies in the corner (the wallpaper's own changes are heard), 10 s
+  otherwise; after an unlock or a wake a still is taken again after the fade and once more
+  10 s later whatever the way.
+- `ctl state`'s `desktop_still`: `route` (the way the kept still came) and `window_server`
+  (`call`: works, untried, off or missing; `proven`; the last comparison's `diff`; `why` the
+  last still went the other way). `costs`: `desktop_stills` asked, `desktop_stills_fast`
+  taken by the window server, `desktop_stills_sck` asked of ScreenCaptureKit.
+  `STAGE_MANAGER_STILL_SCK` (a test run) forces ScreenCaptureKit; `ctl debug-desktop-still`
+  (a test's) takes the corner both ways now and says how far apart they are.
 
 The landing, behind a test switch for now (round sm-landing; `ui/landing_math.rs`, pure;
 `STAGE_MANAGER_LANDING` with `STAGE_MANAGER_ONLY` or under `[windows] engine = "spaces"`, default today's): **ordered** puts each

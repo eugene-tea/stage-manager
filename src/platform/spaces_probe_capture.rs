@@ -19,14 +19,17 @@
 //! after another; a window it misses answers with no picture (counted as missing), never through
 //! ScreenCaptureKit. `cached` with `fast` captures the same way (there is no listing to keep).
 //!
-//! With `fast list` (round picture-wait): for the first 1, 2, … of the fixture's windows, N
-//! rounds each of the window server's capture one call a window, one after another (what a
-//! switch does), against one call with all their ids ([`capture_fast::pictures`]), each timed
-//! from the first call to the last picture in hand, the two ways taking turns to go first.
-//! Each list picture is compared with the one-call picture of its window (its size and the
-//! brightness of its corners and middle): `same` counts those that agree, and
-//! `order_checked` says whether the windows differ enough from each other for that to prove
-//! the images come in the order asked. The windows stay where they are.
+//! With `fast list` (round picture-wait; what it prints, round desktop-still): for the first
+//! 1, 2, … of the fixture's windows, N rounds each of the window server's capture one call a
+//! window, one after another (what a switch does), against one call with all their ids
+//! ([`capture_fast::handed_back`]), each timed from the first call to the last answer in
+//! hand, the two ways taking turns to go first. For the one call it prints what came back:
+//! `handed_back`, every different answer met with how many rounds gave it (`images`: the
+//! size of each image of the array, in its order; `null` for no array at all), beside each
+//! window's own size from its own call (`pixels`) and frame (`windows`), so one image a
+//! window, one image of them all (its size the windows' union) or fewer images can be told
+//! apart. The app never asks for several windows in one call (one call for 2 to 4 windows
+//! did not hand back an image a window, live 11-25). The windows stay where they are.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -229,20 +232,14 @@ fn shown_rounds(targets: &[Target], rounds: usize) -> Value {
     json!({ "captures": per_count, "listing_ms": spread(&listings) })
 }
 
-/// What tells one picture from another: its size, and the mean brightness of its four
-/// corner boxes and its middle.
-type Print = (usize, usize, Vec<Option<u8>>);
+/// A picture's size in pixels.
+type Print = (usize, usize);
+
+/// What one call for several windows handed back: each image's size, or no array at all.
+type HandedBack = Option<Vec<Print>>;
 
 fn print_of(p: &crate::platform::capture::Picture) -> Print {
-    let (w, h) = (objc2_core_graphics::CGImage::width(Some(&p.image)), objc2_core_graphics::CGImage::height(Some(&p.image)));
-    let mut boxes = capture_pixels::corner_boxes(w, h).to_vec();
-    boxes.push(capture_pixels::middle(PixelRect { x: 0, y: 0, w, h }));
-    (w, h, capture_pixels::box_stats(&p.image, &boxes).into_iter().map(|s| s.map(|s| s.mean)).collect())
-}
-
-/// Two prints of one window taken a moment apart: the same size, each box within 8 of 255.
-fn same_print(a: &Print, b: &Print) -> bool {
-    a.0 == b.0 && a.1 == b.1 && a.2.iter().zip(&b.2).all(|(x, y)| matches!((x, y), (Some(x), Some(y)) if x.abs_diff(*y) <= 8))
+    (objc2_core_graphics::CGImage::width(Some(&p.image)), objc2_core_graphics::CGImage::height(Some(&p.image)))
 }
 
 /// `fast list` (module docs): one call a window against one call for them all.
@@ -260,10 +257,10 @@ fn list_rounds(targets: &[Target], rounds: usize) -> Value {
         (ms(t0), got)
     };
     let list = |k: usize| {
+        let ids: Vec<u32> = framed[..k].iter().map(|(t, _)| t.id).collect();
         let t0 = Instant::now();
-        let got = capture_fast::pictures(&framed[..k], &displays);
-        let at = ms(t0);
-        (at, got.map(|g| g.into_iter().map(|p| p.ok().map(|p| print_of(&p))).collect::<Vec<Option<Print>>>()))
+        let got = capture_fast::handed_back(&ids);
+        (ms(t0), got)
     };
     // One of each first: a process's first capture is slower.
     let _ = (each(1), list(1));
@@ -271,7 +268,9 @@ fn list_rounds(targets: &[Target], rounds: usize) -> Value {
     let mut per_count = Vec::new();
     for k in 1..=framed.len() {
         let (mut each_ms, mut list_ms) = (Vec::new(), Vec::new());
-        let (mut refused, mut missing, mut same, mut compared) = (0, 0, 0, 0);
+        let mut missing = 0;
+        // Every different answer of the one call, with how many rounds gave it.
+        let mut answers: Vec<(HandedBack, usize)> = Vec::new();
         let mut prints: Vec<Option<Print>> = Vec::new();
         for r in 0..rounds {
             // The two ways take turns to go first.
@@ -287,35 +286,23 @@ fn list_rounds(targets: &[Target], rounds: usize) -> Value {
             pause();
             each_ms.push(one.0);
             missing += one.1.iter().filter(|p| p.is_none()).count();
-            match all.1 {
-                None => refused += 1,
-                Some(listed) => {
-                    list_ms.push(all.0);
-                    for (a, b) in one.1.iter().zip(&listed) {
-                        if let (Some(a), Some(b)) = (a, b) {
-                            compared += 1;
-                            same += usize::from(same_print(a, b));
-                        }
-                    }
-                    missing += listed.iter().filter(|p| p.is_none()).count();
-                }
+            list_ms.push(all.0);
+            match answers.iter_mut().find(|(a, _)| *a == all.1) {
+                Some((_, n)) => *n += 1,
+                None => answers.push((all.1, 1)),
             }
             prints = one.1;
         }
-        // The order asked is proven only when no two windows look alike.
-        let known: Vec<&Print> = prints.iter().flatten().collect();
-        let order_checked = known.len() == k && known.iter().enumerate().all(|(i, a)| known.iter().skip(i + 1).all(|b| !same_print(a, b)));
-        let px: Vec<(usize, usize)> = known.iter().map(|p| (p.0, p.1)).collect();
+        let px: Vec<Print> = prints.iter().flatten().copied().collect();
+        let one_each = answers.iter().filter(|(a, _)| a.as_ref().is_some_and(|a| a.len() == k)).map(|(_, n)| n).sum::<usize>();
         per_count.push(json!({
             "windows": k,
             "pixels": px,
             "one_call_a_window_ms": spread(&each_ms),
             "one_call_for_all_ms": spread(&list_ms),
-            "list_refused": refused,
+            "handed_back": answers.iter().map(|(a, n)| json!({ "images": a, "rounds": n })).collect::<Vec<_>>(),
+            "one_image_a_window_rounds": one_each,
             "missing": missing,
-            "same": same,
-            "compared": compared,
-            "order_checked": order_checked,
         }));
     }
     json!({ "list": per_count })

@@ -104,12 +104,30 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   "Window engines measured"): with the system's share the Accessibility engine costs about
   6 % of a core at rest (about 16 % until the 2 s picture timer went), the Spaces engine
   about 0.5 %. Aim: 1 to 2 %, with no card shown stale and no switch slower.
-  - The still of the desktop in the park corner is the cost: about 4.3 % of a core in the
+  - The still of the desktop in the park corner was the cost: about 4.3 % of a core in the
     window server and 0.3 % in the capture service, for one ScreenCaptureKit listing and
-    capture every 10 s while a sliver shows. Without it the Accessibility engine reads
-    about 1.2 %. Take the still through the window server's own call first, with
-    ScreenCaptureKit as the fallback (the layers' rule), then ask how often it is needed
-    with no cause heard (a widget in the corner changes with none).
+    capture every 10 s while a sliver shows; without it the Accessibility engine reads
+    about 1.2 %. It now goes through the window server's own call first, ScreenCaptureKit
+    the fallback (ARCHITECTURE, "Window pictures"; round desktop-still, nothing of it run
+    live yet). Left:
+    - Run it: `scripts/test-stages.sh still capture`, the same with `SM_STILL=sck`, and
+      `scripts/measure.sh rest` with and without `SM_ENV="STAGE_MANAGER_STILL_SCK=1"`; then
+      the numbers in UX-SPEC and MODES (its cost rows and note 9).
+    - The proof's tolerance (a mean of 2 of 255, no cell over 12) is a guess: read
+      `ctl debug-desktop-still`'s numbers on a wide-gamut display, with a dynamic, an HDR
+      and an aerial wallpaper, and with an icon and a widget in the corner. Where the two
+      ways never agree the call rests and the cost is the fallback's.
+    - Whether the windows are composited in the window server's own order whatever the
+      array's is not documented; the comparison with an icon in the corner says
+      (`test-stages.sh still`).
+    - A widget in the corner is not known to the app. Through ScreenCaptureKit the still
+      rests 30 s unless Finder's icons lie in the corner or are not known, so a widget
+      there can be 30 s behind in the fallback (10 s through the window server). The
+      owner's call: keep 30 s, or 10 s always and the fallback's cost with it.
+    - Each change of the wallpaper's frame, each Desktop arrival with another picture and
+      each icon change in the corner proves the call again with one ScreenCaptureKit still
+      (as many as before this round, none at rest). If a proof once a launch and a screen
+      is enough, they go.
   - The inert slivers' list at rest is up to 2.2 s behind a window that comes or goes with
     no click, key or notice (a system panel, a notification of a process that is not
     observed); 0.8 s before. If one is seen to matter: the mouse moves' monitor, on while a
@@ -126,10 +144,10 @@ wait for 2.0. Known gaps that can't be closed from our side are in UX-SPEC, "Kno
   - A switch's wait for its pictures: the pictures are taken when a switch is likely, one up
     to 2 s old is played, and the corner's cover goes ahead of them (ARCHITECTURE, "Window
     pictures"); a card click held as a person's ends 13 ms later than on 1.9.2. Left:
-    - One capture call for several windows is refused by the window server (11-25, 30 of
-      30): drop `STAGE_MANAGER_CAPTURE_LIST` and `capture_fast::pictures`. One call a window
-      takes about 18 ms a window, one after another: try them at once from several
-      threads, if that is safe.
+    - One call a window takes about 18 ms a window, one after another: try them at once
+      from several threads, if that is safe. (One call for several windows did not hand
+      back an image a window; `probe-spaces capture BUNDLE fast list` prints what it does
+      hand back: one image of them all would be another way to the desktop's still.)
     - A Dock click's outgoing windows still go 63 ms later than on 1.9.2 under the
       Accessibility engine with a click held as a person's (none under Spaces; UX-SPEC).
       Find what waits there.

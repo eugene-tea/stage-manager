@@ -524,7 +524,7 @@ fn offered_at_notice(waiting: impl IntoIterator<Item = u32>, listed: &HashSet<u3
 /// `debug-space`, `debug-expose`, ...) never reach the WM thread's `ctl`, so they leave the
 /// motion alone too (`mark` asks `state` and `dump`).
 fn ctl_lands_switch(cmd: &Command) -> bool {
-    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher | Command::DebugMissionControl(_))
+    !matches!(cmd, Command::State | Command::Space | Command::Dump | Command::Adopted(_) | Command::DebugCmdTab(_) | Command::DebugSwitcher | Command::DebugDesktopStill | Command::DebugMissionControl(_))
 }
 
 /// Gives window `element` of app `pid` the keyboard: raised and made main first, then only the
@@ -6909,6 +6909,16 @@ impl Controller {
                     }
                     None => json!({ "ok": false, "error": "the Dock does not run" }),
                 }
+            }
+            Command::DebugDesktopStill => {
+                if std::env::var_os("STAGE_MANAGER_TEST").is_none() {
+                    return json!({ "ok": false, "error": "debug-desktop-still needs STAGE_MANAGER_TEST=1" });
+                }
+                let Some(d) = self.model.as_ref().map(|m| *m.main_display()) else { return json!({ "ok": false, "error": "not managing" }) };
+                // The block the patch's still holds now (grown to hold the patch), else the
+                // corner's own.
+                let block = desktop_shot::kept_region(d.id.0).unwrap_or_else(|| desktop_shot::block(d.frame, None, d.corner));
+                super::desktop_fast::compare_now(d.id.0, block)
             }
             Command::DebugMissionControl(words) => {
                 if std::env::var_os("STAGE_MANAGER_TEST").is_none() {

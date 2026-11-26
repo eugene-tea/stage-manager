@@ -1,8 +1,9 @@
 //! The corner patch drawn from a still of the desktop (round desktop-still-patch, review
 //! PARKING.md "Medium term"): where Screen Recording is granted and window captures work, the
-//! patch's picture is a ScreenCaptureKit still of the corner block showing only the
+//! patch's picture is a still of the corner block showing only the
 //! desktop-level windows (the wallpaper, Finder's icons, widgets;
-//! [`crate::platform::desktop_shot`]), so it matches the screen by construction. The
+//! [`crate::platform::desktop_shot`]; taken by the window server's own call first, through
+//! ScreenCaptureKit otherwise, round desktop-still), so it matches the screen by construction. The
 //! exactness gate of the file's picture ([`crate::engine::wallpaper::decide`], the icons under the
 //! corner in [`super::corner_patch::visibility`]) falls away while a still stands for the
 //! corner; the file's picture is the fallback without one.
@@ -26,8 +27,9 @@
 //! - **When a new one is due** ([`crate::platform::desktop_shot::due`]): a Desktop arrived,
 //!   the icons in the corner changed, a bigger block, [`AGAIN_AFTER_TOUCH`] after a press on
 //!   the desktop or a release in the corner (a selection, a dropped icon), [`FADE`] after the
-//!   wallpaper changed or the frame the clock predicts is due, else every 10 s while slivers
-//!   show.
+//!   wallpaper changed or the frame the clock predicts is due, after an unlock or a wake,
+//!   else every 10 s while slivers show (30 s through ScreenCaptureKit where no icon lies
+//!   in the corner).
 //!
 //! Pure: the WM thread and the patch's panel ask it with what they know.
 

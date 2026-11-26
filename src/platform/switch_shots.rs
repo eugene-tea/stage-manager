@@ -21,9 +21,8 @@
 //! begun, so [`capture::quiesce`] never sees none in flight between two of its windows (the
 //! review's D-5).
 //!
-//! With `STAGE_MANAGER_CAPTURE_LIST` set in a test run the windows on screen are taken in one
-//! call of the same capture with all their ids ([`shoot_list`], round picture-wait): to be
-//! measured against one call a window before either is kept.
+//! One call a window: one call of the same capture for several windows did not hand back an
+//! image a window (live 11-25; [`super::capture_fast`], "One call a window").
 //!
 //! **The listing** (ScreenCaptureKit only). Every such capture starts from a listing of the
 //! shareable content (every window of the system: ~50 ms on a busy screen, 11-14). The last listing any capture made
@@ -325,10 +324,7 @@ pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDon
     let displays = super::desktop::cg_display_bounds();
     let children = super::capture_fast::with_children(&ids, &displays);
     let mut left = Vec::new();
-    // One call for the windows on screen, where a test run asks for it; what it does not
-    // answer for is taken below, one by one.
-    let listed = if super::capture_fast::list_capture() { shoot_list(targets, now, &children, &displays, done) } else { Vec::new() };
-    for t in targets.iter().filter(|t| !listed.contains(&t.id)) {
+    for t in targets {
         let frame = now.iter().find(|(id, _)| *id == t.id).map(|(_, f)| *f);
         let frame = match step(capture::closing(), children.contains(&t.id), frame) {
             Step::Take(frame) => frame,
@@ -355,50 +351,6 @@ pub(crate) fn shoot_fast(targets: &[Target], now: &[(u32, Rect)], done: &ShotDon
         }
     }
     Missed { children: left.iter().any(|t| children.contains(&t.id)), targets: left }
-}
-
-/// The windows of `targets` one list capture can take ([`super::capture_fast::pictures`]):
-/// those [`step`] would take, wholly on the displays (`frames`: each one's frame now), when
-/// there are two or more. A parked window, one with a window of its app over it and a closed
-/// one keep their own way.
-fn list_batch(targets: &[Target], frames: &[(u32, Rect)], children: &std::collections::HashSet<u32>, displays: &[Rect]) -> Vec<(Target, Rect)> {
-    let batch: Vec<(Target, Rect)> = targets
-        .iter()
-        .filter_map(|t| {
-            let frame = frames.iter().find(|(id, _)| *id == t.id).map(|(_, f)| *f);
-            match step(false, children.contains(&t.id), frame) {
-                Step::Take(f) if super::capture_fast::route_for(f, displays) == super::capture_fast::Route::Fast => Some((*t, f)),
-                _ => None,
-            }
-        })
-        .collect();
-    if batch.len() >= 2 { batch } else { Vec::new() }
-}
-
-/// Takes the windows of `targets` that one list capture can ([`list_batch`]) in one call,
-/// each picture answering `done`. The windows answered; the rest (and all of them when the
-/// call stands for none, or quit has begun) are the caller's, one by one.
-fn shoot_list(targets: &[Target], now: &[(u32, Rect)], children: &std::collections::HashSet<u32>, displays: &[Rect], done: &ShotDone) -> Vec<u32> {
-    let batch = list_batch(targets, now, children, displays);
-    if batch.is_empty() || capture::closing() {
-        return Vec::new();
-    }
-    let t0 = Instant::now();
-    let Some(pictures) = super::capture_fast::pictures(&batch, displays) else { return Vec::new() };
-    let mut answered = Vec::new();
-    for ((t, _), picture) in batch.iter().zip(pictures) {
-        match picture {
-            Ok(picture) => {
-                counters::bump(Count::CaptureOk);
-                capture::IMAGES.fetch_add(1, Ordering::Relaxed);
-                done(t.id, Some(picture));
-                answered.push(t.id);
-            }
-            Err(miss) => tracing::trace!(window = t.id, why = miss.as_str(), "switch picture: not in the list capture; taken on its own"),
-        }
-    }
-    tracing::debug!(asked = batch.len(), got = answered.len(), ms = t0.elapsed().as_millis() as u64, "switch pictures: one call for the windows on screen");
-    answered
 }
 
 /// The windows [`shoot_fast`] left for ScreenCaptureKit.
@@ -515,21 +467,6 @@ mod tests {
         assert_eq!(step(false, true, Some(f)), Step::Left);
         assert_eq!(step(false, false, None), Step::Answer);
         assert_eq!(step(false, false, Some(f)), Step::Take(f));
-    }
-
-    /// Round picture-wait: one call takes only windows wholly on the displays, with no window
-    /// of their app over them, and only when there are two or more.
-    #[test]
-    fn one_call_takes_only_the_windows_on_screen_two_or_more() {
-        let screen = [Rect::new(0.0, 0.0, 2560.0, 1440.0)];
-        let t = |id| Target { id, width: 1600, height: 1200 };
-        let on = Rect::new(100.0, 100.0, 800.0, 600.0);
-        let parked = Rect::new(2559.0, 1408.0, 800.0, 600.0);
-        let frames = [(1, on), (2, on), (3, parked), (4, on)];
-        let children: std::collections::HashSet<u32> = [4].into();
-        let ids = |b: Vec<(Target, Rect)>| b.iter().map(|(t, _)| t.id).collect::<Vec<_>>();
-        assert_eq!(ids(list_batch(&[t(1), t(2), t(3), t(4), t(5)], &frames, &children, &screen)), vec![1, 2], "not the parked one, the one under a child, the closed one");
-        assert!(list_batch(&[t(1), t(3)], &frames, &children, &screen).is_empty(), "one window: its own call");
     }
 
     /// D-5: the thread counts as a capture in flight while it runs, so a quit waits for it.
