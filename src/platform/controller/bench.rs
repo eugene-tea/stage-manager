@@ -508,6 +508,25 @@ impl Bench {
         self.desk(|d| d.post(0.0, Notice::Strip(StripEvent::CardClicked { stage, shift: false })));
     }
 
+    /// A sign that a switch is likely, as the main thread tells it (the pointer in the Dock's
+    /// bar, a hotkey's modifiers down: `platform/switch_likely.rs`).
+    pub(super) fn likely(&mut self, sign: crate::platform::switch_likely::Sign) {
+        self.note(format!("switch likely: {}", sign.as_str()));
+        self.c.switch_likely(sign);
+        self.pump();
+        self.after();
+    }
+
+    /// A hotkey pressed (`WmCommand::Hotkey`).
+    pub(super) fn hotkey(&mut self, command: crate::config::HotkeyCommand) {
+        self.note(format!("hotkey {command:?}"));
+        self.desk(|d| d.last_press = Some(clock::now()));
+        self.pace.stir(clock::now());
+        self.c.hotkey(&mut self.ob, command);
+        self.pump();
+        self.after();
+    }
+
     /// The left button pressed on app `pid`'s Dock item.
     pub(super) fn dock_press(&mut self, pid: i32) {
         let p = self.desk(|d| d.dock_point(pid));

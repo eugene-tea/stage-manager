@@ -106,6 +106,14 @@ impl Conductor {
         }
     }
 
+    /// A switch is likely ([`super::switch_likely`]): ours takes its pictures ahead; the
+    /// Apple mode plays none.
+    pub fn switch_likely(&mut self, sign: super::switch_likely::Sign) {
+        if let Self::Ours(c) = self {
+            c.switch_likely(sign);
+        }
+    }
+
     /// The strip shown or hidden (ours; Apple's own in the Apple mode).
     pub fn toggle_strip(&mut self) {
         match self {

@@ -50,6 +50,10 @@ use super::capture::{self, Deliver, InFlight, Picture, Target, WindowShot};
 use crate::engine::geometry::Rect;
 use crate::logbook::counters::{self, Count};
 
+/// A picture that reached the strip this recently is fresh: a switch plays it and takes no
+/// other (`controller/switch_pictures.rs`).
+pub const FRESH: Duration = Duration::from_millis(500);
+
 /// A remembered listing older than this is never reused.
 const LISTING_MAX_AGE: Duration = Duration::from_secs(60);
 
@@ -186,6 +190,31 @@ pub fn take(targets: Vec<Target>, max: Duration) -> Taken {
         Err(_) => (0, 0),
     };
     Taken { asked, got: n.1, answered: n.0, ms: t0.elapsed().as_millis() as u64, skipped: None }
+}
+
+/// Captures `targets` ([`shoot`]) and waits for none (the WM thread, when a switch is likely:
+/// [`super::switch_likely`]): each picture goes to the strip on the main thread as it comes,
+/// fresh for the switch that follows. How many were asked for, or why none was.
+pub fn take_ahead(targets: Vec<Target>) -> Result<usize, &'static str> {
+    let asked = targets.len();
+    #[cfg(test)]
+    {
+        let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+        if super::fake::with(|d| d.take_ahead(&ids)).is_some() {
+            return Ok(asked);
+        }
+    }
+    let Some(&deliver) = DELIVER.get() else { return Err("no strip") };
+    if asked == 0 {
+        return Ok(0);
+    }
+    let done: ShotDone = Arc::new(move |id, picture| {
+        if let Some(p) = picture {
+            DispatchQueue::main().exec_async(move || deliver(id, p));
+        }
+    });
+    shoot(targets, done)?;
+    Ok(asked)
 }
 
 /// Captures `targets` now, each at its size: through the window server where it can, one

@@ -132,6 +132,8 @@ fn stirs(cmd: &WmCommand) -> bool {
         WmCommand::Input(e, _) => e.kind != input::InputKind::KeyDown || e.cmd || e.other_modifiers,
         // A notice brings its own look forward; the tick's pace follows what that look finds.
         WmCommand::ServerNotice(_) => false,
+        // Pictures taken ahead move nothing: the pointer in the Dock never makes the tick brisk.
+        WmCommand::SwitchLikely(_) => false,
         _ => true,
     }
 }
@@ -249,6 +251,9 @@ pub enum WmCommand {
     /// The window server's notices of one kind heard in one turn of the main run loop
     /// ([`super::spaces::notices`], the Spaces engine only): a trigger for a look, never a fact.
     ServerNotice(crate::engine::server_notice::Burst),
+    /// A switch is likely ([`super::switch_likely`]: the pointer in the Dock, a hotkey's
+    /// modifiers down): its pictures are taken ahead. Nothing moves for it.
+    SwitchLikely(super::switch_likely::Sign),
 }
 
 impl WmCommand {
@@ -274,6 +279,7 @@ impl WmCommand {
             WmCommand::Probe(_) => "command Probe",
             WmCommand::LaunchScan(_) => "command LaunchScan",
             WmCommand::ServerNotice(_) => "command ServerNotice",
+            WmCommand::SwitchLikely(_) => "command SwitchLikely",
         }
     }
 }
@@ -601,6 +607,9 @@ impl WmState {
             // Nothing is looked at for a notice while nothing is arranged; the polls resume.
             WmCommand::ServerNotice(_) if !self.logout.admits(Work::SpaceChange) || !self.stand_down.admits(Work::SpaceChange) => {}
             WmCommand::ServerNotice(burst) => self.conductor.server_notice(&mut self.observer, burst),
+            // No picture is taken for a switch that cannot come: nothing is arranged now.
+            WmCommand::SwitchLikely(_) if !self.logout.admits(Work::Input) || !self.stand_down.admits(Work::Input) => {}
+            WmCommand::SwitchLikely(sign) => self.conductor.switch_likely(sign),
             WmCommand::LogoutSignal(name, signal, at) => self.logout_signal(&name, signal, at),
             // The tap swallowed the person's minimize: never lost. While nothing is arranged
             // it is macOS's, genie and all.
@@ -1549,6 +1558,7 @@ mod tests {
         assert!(stirs(&event(InputKind::OtherMouseDown, false, false)));
         assert!(stirs(&WmCommand::SpaceChanged(Instant::now())));
         assert!(stirs(&WmCommand::ReloadConfig));
+        assert!(!stirs(&WmCommand::SwitchLikely(crate::platform::switch_likely::Sign::DockPointer)), "the pointer in the Dock");
     }
 
     /// The leftovers' time bounds count each Accessibility call at the timeout set here.

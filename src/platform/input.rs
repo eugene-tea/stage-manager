@@ -145,6 +145,15 @@ pub fn monitor(mtm: MainThreadMarker, sink: impl Fn(InputEvent) + 'static) -> Op
         // SAFETY: AppKit passes a live event for the duration of the block.
         let event = unsafe { event.as_ref() };
         if event.r#type() == NSEventType::FlagsChanged {
+            // A hotkey's modifiers going down: its pictures are taken ahead (told only when
+            // the keys held become a binding's; nothing else is done for ⇧, ⌥ or ⌃).
+            let flags = event.modifierFlags();
+            super::switch_likely::modifiers(crate::config::Mods {
+                ctrl: flags.contains(NSEventModifierFlags::Control),
+                alt: flags.contains(NSEventModifierFlags::Option),
+                shift: flags.contains(NSEventModifierFlags::Shift),
+                cmd: flags.contains(NSEventModifierFlags::Command),
+            });
             let held = event.modifierFlags().contains(NSEventModifierFlags::Command);
             if !command_changed(COMMAND_HELD.swap(held, Ordering::Relaxed), held) {
                 return;

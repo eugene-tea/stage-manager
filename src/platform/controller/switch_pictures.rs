@@ -40,6 +40,17 @@
 //! them changes no picture, and the wait for them only delays the strip's start, never a
 //! focus.
 //!
+//! **Pictures taken ahead** (round picture-wait). The wait above is only for a switch nothing
+//! announced. The strip takes the pictures as the pointer reaches a card or presses it, and at
+//! the app switcher's key; the controller takes them at the other signs that a switch is
+//! likely ([`crate::platform::switch_likely`]: the pointer in the Dock's bar, a press on a
+//! Dock item, a hotkey's modifiers going down): of the windows in front and the pinned ones
+//! shown, on each screen where a stage waits hidden and a switch would play pictures, those
+//! with no picture younger than [`AHEAD_OLDER`] ([`super::Controller::switch_likely`]).
+//! Nothing waits for them; they reach the strip as any other, and the switch that follows
+//! finds them fresh. A sign is an event, never a timer: with the pointer at rest, in the Dock
+//! or anywhere, no window is pictured.
+//!
 //! **The corner's cover first** (round picture-wait). Where a hidden window waits in the park
 //! corner (the Corner engine), macOS has raised an activated app's windows there before the
 //! app hears of the activation, and the strip covers the corner for the switch
@@ -66,9 +77,14 @@ use crate::ui::strip_model::{self, Transition};
 /// anyway (module docs).
 pub(super) const WAIT_MAX: Duration = Duration::from_millis(160);
 
-/// A picture that reached the strip this recently is not taken again: the pointer's press on a
-/// card took it (a Dock click or ⌘Tab has none this fresh).
-const FRESH: Duration = Duration::from_millis(500);
+/// A picture that reached the strip this recently is not taken again
+/// ([`switch_shots::FRESH`]).
+const FRESH: Duration = switch_shots::FRESH;
+
+/// When a switch is likely, a picture older than this is taken again ([`ahead_targets`]):
+/// half the freshness, so a picture left as it is at a sign is still fresh for a switch
+/// within the other half, and the next sign takes it.
+pub(super) const AHEAD_OLDER: Duration = Duration::from_millis(FRESH.as_millis() as u64 / 2);
 
 /// Pixels a point asked for: more than any display has, so each picture is the window's own
 /// pixels ([`crate::platform::capture_frame::fit_to_content`] never makes one larger).
@@ -85,14 +101,56 @@ pub(super) fn targets(t: &Transition, age: impl Fn(u32) -> Option<Duration>) -> 
     let stale: Vec<Target> = wanted
         .iter()
         .filter(|(id, _)| age(*id).is_none_or(|a| a > FRESH))
-        .map(|(id, frame)| Target {
-            id: *id,
-            width: (frame.w * ASK_SCALE).round().clamp(1.0, 16384.0) as u32,
-            height: (frame.h * ASK_SCALE).round().clamp(1.0, 16384.0) as u32,
-        })
+        .map(|(id, frame)| target(*id, *frame))
         .collect();
     let fresh = wanted.len() - stale.len();
     (stale, fresh)
+}
+
+/// The pictures to take when a switch is likely, of `windows` (the windows shown that a
+/// switch would move away or draw on its cover: id and frame): those with none, or one older
+/// than [`AHEAD_OLDER`] (`age`), each at its own pixels.
+pub(super) fn ahead_targets(windows: &[(u32, Rect)], age: impl Fn(u32) -> Option<Duration>) -> Vec<Target> {
+    let mut seen = Vec::with_capacity(windows.len());
+    windows
+        .iter()
+        .filter(|(id, _)| {
+            let new = !seen.contains(id);
+            seen.push(*id);
+            new && age(*id).is_none_or(|a| a > AHEAD_OLDER)
+        })
+        .map(|(id, frame)| target(*id, *frame))
+        .collect()
+}
+
+/// A window's picture at its own pixels ([`ASK_SCALE`]).
+fn target(id: u32, frame: Rect) -> Target {
+    Target { id, width: (frame.w * ASK_SCALE).round().clamp(1.0, 16384.0) as u32, height: (frame.h * ASK_SCALE).round().clamp(1.0, 16384.0) as u32 }
+}
+
+/// Takes the pictures of `windows` that are not fresh enough for a switch likely now
+/// ([`ahead_targets`]), waiting for none; `sign` for the log. How many were asked for.
+pub(super) fn take_ahead(sign: &'static str, windows: &[(u32, Rect)]) -> usize {
+    let targets = ahead_targets(windows, strip_model::snapshot_age);
+    if targets.is_empty() {
+        tracing::trace!(sign, shown = windows.len(), "a switch is likely: every picture it would play is fresh");
+        return 0;
+    }
+    if let Err(why) = switch_shots::may_take() {
+        tracing::trace!(sign, why, "a switch is likely: no picture can be taken now");
+        return 0;
+    }
+    let ids: Vec<u32> = targets.iter().map(|t| t.id).collect();
+    match switch_shots::take_ahead(targets) {
+        Ok(asked) => {
+            tracing::debug!(sign, ?ids, fresh = windows.len().saturating_sub(asked), "a switch is likely: its pictures are taken ahead");
+            asked
+        }
+        Err(why) => {
+            tracing::debug!(sign, why, "a switch is likely: no picture taken");
+            0
+        }
+    }
 }
 
 /// What a switch's pictures need now ([`targets`], by how long ago each reached the strip).
@@ -163,6 +221,54 @@ pub(super) fn take(id: u64, wanted: Wanted) -> Taken {
         "transition: outgoing pictures taken at the switch"
     );
     taken
+}
+
+/// Why no picture is taken ahead on a screen, if so ([`super::Controller::switch_likely`]):
+/// no switch would play pictures there now (`animates`: animation on; `strip_visible`: the
+/// user has not hidden the strip; `frozen`: a full-screen Space shows or a Desktop change
+/// settles), or no stage waits hidden to switch to (`hidden_stage`).
+pub(super) fn ahead_refused(animates: bool, strip_visible: bool, frozen: bool, hidden_stage: bool) -> Option<&'static str> {
+    match (animates, strip_visible, frozen, hidden_stage) {
+        (false, ..) => Some("animation is off"),
+        (_, false, ..) => Some("the strip is hidden: no switch plays pictures"),
+        (_, _, true, _) => Some("a full-screen Space shows or a Desktop change settles"),
+        (_, _, _, false) => Some("no stage is hidden to switch to"),
+        _ => None,
+    }
+}
+
+impl super::Controller {
+    /// A switch is likely (`sign`, [`crate::platform::switch_likely`]): the pictures it would
+    /// wait for are taken now, waited for by nothing, so the switch finds them fresh
+    /// ([`take_ahead`]). On every screen where a switch would play pictures and a stage
+    /// waits hidden ([`ahead_refused`]): the windows of the stage in front and the pinned
+    /// ones shown, those a switch moves away or draws on its cover of the park corner. The
+    /// same under every engine.
+    pub fn switch_likely(&mut self, sign: crate::platform::switch_likely::Sign) {
+        use crate::engine::model::Home;
+        let Some(m) = self.model.as_ref() else { return };
+        let animates = self.store.config().style.animation.animates();
+        let mut windows: Vec<(u32, Rect)> = Vec::new();
+        let mut refused = None;
+        for d in m.displays() {
+            let space = m.current_space(d.id);
+            let active = m.active_stage_in(space);
+            let hidden_stage = m.stages().iter().any(|s| s.space == space && Some(s.id) != active && !s.windows.is_empty());
+            if let Some(why) = ahead_refused(animates, self.strip_visible, self.frozen_on(d.id), hidden_stage) {
+                refused = Some(why);
+                continue;
+            }
+            let shown = m.windows().filter(|w| {
+                !w.parked && ((w.home == Home::Pinned && (w.space == space || w.sticky)) || active.is_some_and(|a| w.home == Home::Stage(a)))
+            });
+            windows.extend(shown.map(|w| (w.meta.id.0, w.meta.frame)));
+        }
+        if windows.is_empty() {
+            tracing::trace!(sign = sign.as_str(), why = refused, "a switch is likely: no picture to take");
+            return;
+        }
+        take_ahead(sign.as_str(), &windows);
+    }
 }
 
 #[cfg(test)]
@@ -253,6 +359,35 @@ mod tests {
         // No cover (nothing arrives in the corner, the Spaces engine).
         let none = Transition { corner: None, ..t };
         assert!(corner_ahead(&none, &wanted(&none, &old)).is_err());
+    }
+
+    /// Round picture-wait: when a switch is likely the pictures taken are those a switch
+    /// about now would not find fresh: none yet, or older than half the freshness; each
+    /// window once.
+    #[test]
+    fn a_likely_switch_takes_only_the_pictures_not_fresh_enough() {
+        let frame = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let shown = [(1, frame), (2, frame), (3, frame), (2, frame)];
+        let age = |id| match id {
+            1 => None,
+            2 => Some(AHEAD_OLDER + Duration::from_millis(1)),
+            _ => Some(AHEAD_OLDER),
+        };
+        let taken = ahead_targets(&shown, age);
+        assert_eq!(taken.iter().map(|t| t.id).collect::<Vec<_>>(), vec![1, 2]);
+        assert_eq!((taken[0].width, taken[0].height), (3200, 2400), "the window's own pixels, as at a switch");
+        assert!(ahead_targets(&shown, |_| Some(Duration::from_millis(50))).is_empty(), "all fresh: none");
+        assert!(AHEAD_OLDER < FRESH, "one left at a sign is still fresh for a while");
+    }
+
+    /// Nothing is taken ahead where no switch would play pictures, or none could come.
+    #[test]
+    fn nothing_is_taken_ahead_where_no_switch_would_play_pictures() {
+        assert_eq!(ahead_refused(true, true, false, true), None);
+        assert!(ahead_refused(false, true, false, true).is_some(), "animation off");
+        assert!(ahead_refused(true, false, false, true).is_some(), "the strip hidden by the user");
+        assert!(ahead_refused(true, true, true, true).is_some(), "a full-screen Space");
+        assert!(ahead_refused(true, true, false, false).is_some(), "one stage only");
     }
 
     /// With every picture fresh, or nothing leaving, nothing is waited for: the strip is told

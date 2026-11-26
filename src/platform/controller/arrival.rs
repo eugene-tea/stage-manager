@@ -1667,6 +1667,9 @@ impl Controller {
         if let Ok((_, window)) = prediction {
             self.arrange_at_press(ob, &item, window, now);
         }
+        // Its click may switch stages: the pictures that switch would wait for are taken
+        // now, while the button is down (`switch_pictures`, "Pictures taken ahead").
+        self.switch_likely(crate::platform::switch_likely::Sign::DockPress);
         self.dock_press = Some(DockPress { item, at: p, when: now, prediction });
     }
 

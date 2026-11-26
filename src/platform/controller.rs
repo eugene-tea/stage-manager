@@ -1532,6 +1532,10 @@ impl Controller {
         let bars = pid.and_then(super::dock::bar_frame).into_iter().collect();
         let bar = sliver::DockBar { pid, bars };
         let changed = self.dock_bar.as_ref().is_none_or(|(_, was)| *was != bar);
+        if changed {
+            // The pointer coming into it says a switch is likely (`switch_likely`).
+            super::switch_likely::set_dock_bars(&bar.bars);
+        }
         self.dock_bar = Some((clock::now(), bar));
         if changed {
             tracing::debug!(bar = ?self.dock_bar.as_ref().map(|(_, b)| b), "inert slivers: the Dock's bar");

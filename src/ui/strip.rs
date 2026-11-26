@@ -524,6 +524,8 @@ pub fn drop_slot(p: Point) -> Option<StripDrop> {
 /// desktop (the global monitor). Main thread.
 pub fn pointer_moved(p: Point) {
     with_strips(|s| s.pointer_moved(p));
+    // In the Dock's bar a click there may switch stages: its pictures are taken ahead.
+    crate::platform::switch_likely::pointer_at(p);
 }
 
 /// The global monitor feeds [`pointer_moved`]: a strip hidden at the edge waits for its moves

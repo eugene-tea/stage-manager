@@ -381,6 +381,9 @@ pub enum Call {
     /// A switch's cover of the park corner sent to the strip ahead of its transition (the
     /// transition's id).
     Corner(u64),
+    /// Full-size pictures of these windows taken when a switch was likely, waited for by
+    /// nothing.
+    Ahead(Vec<u32>),
 }
 
 /// The strip as the desk plays it.
@@ -1904,6 +1907,19 @@ impl Desk {
         clock::test::advance(took);
         self.pictured(ids);
         took.as_millis() as u64
+    }
+
+    /// Pictures of windows `ids` asked for when a switch is likely
+    /// (`switch_shots::take_ahead`): nothing waits; they reach the strip [`Self::shot_ms`]
+    /// later (at the desk's load), on macOS's own clock.
+    pub fn take_ahead(&mut self, ids: &[u32]) {
+        if ids.is_empty() {
+            return;
+        }
+        self.call(Call::Ahead(ids.to_vec()));
+        let due = clock::now() + self.at_load(self.shot_ms);
+        let ids = ids.to_vec();
+        self.at(due, move |d| d.pictured(&ids));
     }
 
     /// A switch's cover of the park corner handed to the strip ahead of transition `id`

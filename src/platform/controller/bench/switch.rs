@@ -19,7 +19,8 @@ use crate::platform::fake::{Call, Desk};
 
 /// The calls made of the platform so far, in short words, in order: `shots` (full-size
 /// pictures of windows taken at the switch and waited for), `corner` (the park corner's cover
-/// sent to the strip ahead of the transition), `strip` (a transition presented),
+/// sent to the strip ahead of the transition), `ahead` (pictures taken when a switch was
+/// likely, waited for by nothing), `strip` (a transition presented),
 /// `park` and `show` (a frame set into or out of the park zone), `space` (windows put into a
 /// Space), `raise`, `main`, `front` (an app made frontmost).
 fn calls(b: &mut Bench) -> String {
@@ -32,6 +33,7 @@ fn calls(b: &mut Bench) -> String {
             Call::Present(None) => None,
             Call::Shots(ids) => Some(format!("shots {ids:?}")),
             Call::Corner(_) => Some("corner".to_string()),
+            Call::Ahead(ids) => Some(format!("ahead {ids:?}")),
             Call::Frame(id, r) if parks.parks(r) => Some(format!("park {id}")),
             Call::Frame(id, _) => Some(format!("show {id}")),
             Call::IntoSpace(_, ids) => Some(format!("space {ids:?}")),
@@ -150,10 +152,14 @@ fn strip_never(load: f64) -> Run {
 
 /// `controller/switch_pictures.rs` (round switch-pictures): a Dock click on Alpha, its window
 /// waiting in a hidden stage, the park corner's cover drawable (the activation grows from its
-/// card, `[animation] activation_grows`). Nothing announced the switch: no picture of
-/// Bravo's window, the one leaving, is fresh, so it is taken after the early focus and before
-/// the strip is told, no window moved yet; the same calls under either engine but for the
-/// hide (`park`, `space`).
+/// card, `[animation] activation_grows`), the button held 90 ms as a person's is. The press
+/// on the Dock item says a switch is likely (round picture-wait): the picture of Bravo's
+/// window, the one leaving, is asked for then (`ahead`) and is in at the release, so the
+/// switch waits for none and the strip is told first. Until that round nothing announced
+/// the switch and the picture was taken after the early focus and before the strip was told
+/// (`main 11, front 101, shots [12], strip`): still what happens when the press's picture
+/// is late (load 10; a click let go at once, below). The same calls under either engine but
+/// for the hide (`park`, `space`) and the corner's cover (`corner`).
 fn dock_click_pictures(engine: EngineKind, load: f64) -> Run {
     let mut b = bench(engine, load, |d| d.corner_covers = true);
     b.dock_click(A, 90);
@@ -166,10 +172,11 @@ fn dock_click_pictures_corner(load: f64) -> Run {
     dock_click_pictures(EngineKind::Corner, load)
 }
 
-/// Round picture-wait, the corner's cover first: the same Dock click with Bravo's window, the
-/// one leaving, filling the screen down into the park corner. Its picture goes over the
-/// cover and is the one being taken, so the cover is not sent ahead (no `corner` call): it
-/// comes with the transition, as before the round.
+/// Round picture-wait, the corner's cover first: a Dock click let go at once (20 ms: the
+/// press's picture is not in, the switch waits for its own) with Bravo's window, the one
+/// leaving, filling the screen down into the park corner. Its picture goes over the cover
+/// and is the one being taken, so the cover is not sent ahead (no `corner` call): it comes
+/// with the transition, as before the round.
 fn dock_click_window_in_the_corner(load: f64) -> Run {
     let mut b = Bench::new(EngineKind::Corner, DEFAULTS, 1.0, 1, |d| {
         d.add_app(A, "com.example.alpha", "Alpha");
@@ -182,7 +189,7 @@ fn dock_click_window_in_the_corner(load: f64) -> Run {
     b.advance(3000);
     b.desk(|d| d.corner_covers = true);
     start(&mut b, load);
-    b.dock_click(A, 90);
+    b.dock_click(A, 20);
     b.advance(3000);
     let out = played(&mut b);
     Run::of(&b, out)
@@ -204,6 +211,93 @@ fn dock_click_captures_off(load: f64) -> Run {
 
 fn dock_click_pictures_spaces(load: f64) -> Run {
     dock_click_pictures(EngineKind::Spaces, load)
+}
+
+// ----- pictures taken when a switch is likely ---------------------------------------------------
+
+/// Round picture-wait, `platform/switch_likely.rs`: the same Dock click let go 20 ms after
+/// the press, sooner than a picture comes (40 ms on the desk): the press asked for Bravo's
+/// window's picture (`ahead`), it is not in at the release, so the switch takes one itself
+/// and waits, the corner's cover sent first.
+fn dock_click_let_go_at_once(load: f64) -> Run {
+    let mut b = bench(EngineKind::Corner, load, |d| d.corner_covers = true);
+    b.dock_click(A, 20);
+    b.advance(3000);
+    let out = played(&mut b);
+    Run::of(&b, out)
+}
+
+/// The pointer comes into the Dock's bar (its sign: Bravo's window's picture is taken, waited
+/// for by nothing), rests there `rest_ms`, then clicks Alpha's item, held 90 ms. With the
+/// picture still fresh enough at the press nothing more is taken, and the switch is sent to
+/// the strip at once; older, the press takes it again.
+fn pointer_into_the_dock(engine: EngineKind, load: f64, rest_ms: u64) -> Run {
+    let mut b = bench(engine, load, |d| d.corner_covers = true);
+    b.likely(crate::platform::switch_likely::Sign::DockPointer);
+    b.advance(rest_ms);
+    b.dock_click(A, 90);
+    b.advance(3000);
+    let out = played(&mut b);
+    Run::of(&b, out)
+}
+
+fn pointer_into_the_dock_corner(load: f64) -> Run {
+    pointer_into_the_dock(EngineKind::Corner, load, 200)
+}
+
+fn pointer_into_the_dock_spaces(load: f64) -> Run {
+    pointer_into_the_dock(EngineKind::Spaces, load, 200)
+}
+
+/// The pointer rested 5 s in the Dock before the click: no move, no sign, the picture old.
+fn pointer_rested_in_the_dock(load: f64) -> Run {
+    pointer_into_the_dock(EngineKind::Corner, load, 5000)
+}
+
+/// A hotkey's modifiers go down (their sign), its key 150 ms later: "switch to stage N",
+/// Alpha's. The picture of Bravo's window was asked for at the modifiers.
+fn hotkey_modifiers_then_key(load: f64) -> Run {
+    let mut b = bench(EngineKind::Corner, load, |_| {});
+    let alpha = crate::engine::model::StageId(b.stage_of(11));
+    let number = b.c.model.as_ref().and_then(|m| m.stage_number(alpha)).expect("Alpha's stage has a number");
+    b.likely(crate::platform::switch_likely::Sign::HotkeyModifiers);
+    b.advance(150);
+    b.hotkey(crate::config::HotkeyCommand::SwitchTo(number));
+    b.advance(3000);
+    let out = played(&mut b);
+    Run::of(&b, out)
+}
+
+/// The signs with nothing to take: captures off, the strip hidden by the user, one stage
+/// only. No picture is asked for.
+#[test]
+fn a_sign_takes_no_picture_where_none_would_be_played() {
+    use crate::platform::switch_likely::Sign;
+    let ahead = |b: &mut Bench| b.calls().into_iter().filter(|c| matches!(c, Call::Ahead(_))).count();
+    let mut b = bench(EngineKind::Corner, 1.0, |d| d.captures_off = true);
+    b.likely(Sign::DockPointer);
+    assert_eq!(ahead(&mut b), 0, "captures off or not allowed");
+    drop(b);
+    let mut b = bench(EngineKind::Corner, 1.0, |_| {});
+    b.c.toggle_strip();
+    b.likely(Sign::HotkeyModifiers);
+    assert_eq!(ahead(&mut b), 0, "the strip hidden: no switch plays pictures");
+    b.c.toggle_strip();
+    b.likely(Sign::HotkeyModifiers);
+    assert_eq!(b.calls().into_iter().filter(|c| matches!(c, Call::Ahead(ids) if ids == &[12])).count(), 1, "shown again: the window in front, once");
+    b.advance(100);
+    b.likely(Sign::DockPointer);
+    assert_eq!(ahead(&mut b), 1, "its picture came a moment ago: not again");
+    drop(b);
+    let mut b = Bench::new(EngineKind::Corner, DEFAULTS, 1.0, 1, |d| {
+        d.add_app(A, "com.example.alpha", "Alpha");
+        d.add_window(11, A, frame(1), D1);
+        d.front = Some(A);
+    });
+    b.advance(3000);
+    start(&mut b, 1.0);
+    b.likely(Sign::DockPointer);
+    assert_eq!(ahead(&mut b), 0, "no stage hidden to switch to");
 }
 
 /// ⌘Tab to Alpha, ⌘ let go `held_ms` after Tab. The switcher's key has the strip take every
@@ -417,19 +511,19 @@ fn pinned_strip_never() {
 /// a Dock click, its pictures (Corner).
 #[test]
 fn pinned_dock_click_pictures_corner() {
-    // Round picture-wait: the corner's cover goes to the strip first, before the early focus
-    // and the pictures ('main 11, front 101, shots [12], strip' until then).
-    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; corner, main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
-    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
-    expect(dock_click_pictures_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; corner, main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+    // Round picture-wait: 'ahead [12]' at the press, then the strip first ('main 11, front
+    // 101, shots [12], strip' until then).
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; ahead [12], strip, main 11, front 101, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: the press's picture comes 400 ms after it at load 10, past the release: the switch takes its own and waits (FRESH); and COVER_TIMEOUT: the strip answers (200 ms) past the cap, the windows move at once, no pictures.
+    expect(dock_click_pictures_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], corner, main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
 }
 
 /// a Dock click, a window leaving in the corner (Corner).
 #[test]
 fn pinned_dock_click_window_in_the_corner() {
-    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; ahead [12], main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
     // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
-    expect(dock_click_window_in_the_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+    expect(dock_click_window_in_the_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
 }
 
 /// a Dock click, captures off (Corner).
@@ -443,9 +537,9 @@ fn pinned_dock_click_captures_off() {
 /// a Dock click, its pictures (Spaces).
 #[test]
 fn pinned_dock_click_pictures_spaces() {
-    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; main 11, front 101, shots [12], strip, space [12], raise 11, main 11, front 101, space [11], raise 11, raise 11, main 11, front 101";
-    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
-    expect(dock_click_pictures_spaces, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; main 11, front 101, shots [12], strip, space [12], space [11], raise 11, raise 11, main 11, front 101"]);
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; ahead [12], strip, main 11, front 101, space [12], raise 11, main 11, front 101, space [11], raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: the press's picture comes 400 ms after it at load 10, past the release: the switch takes its own and waits (FRESH); and COVER_TIMEOUT: the strip answers (200 ms) past the cap, the windows move at once, no pictures.
+    expect(dock_click_pictures_spaces, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], main 11, front 101, shots [12], strip, space [12], space [11], raise 11, raise 11, main 11, front 101"]);
 }
 
 /// ⌘Tab let go at once, its pictures.
@@ -573,6 +667,46 @@ fn pinned_click_during_the_check() {
     expect(click_during_the_check, [at_1, at_1, "front [11, 13] shows [11, 13] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; shots [12], strip, park 12, show 11, show 13, raise 11, raise 13, raise 13, main 13, front 103; stacked [11, 13]"]);
 }
 
+/// a Dock click let go at once, its pictures.
+#[test]
+fn pinned_dock_click_let_go_at_once() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; ahead [12], corner, main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(dock_click_let_go_at_once, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], corner, main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
+/// the pointer into the Dock, then a click.
+#[test]
+fn pinned_pointer_into_the_dock_corner() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; ahead [12], strip, main 11, front 101, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(pointer_into_the_dock_corner, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], ahead [12], strip, main 11, front 101, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
+/// the pointer into the Dock, then a click (Spaces).
+#[test]
+fn pinned_pointer_into_the_dock_spaces() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; ahead [12], strip, main 11, front 101, space [12], raise 11, main 11, front 101, space [11], raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(pointer_into_the_dock_spaces, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], ahead [12], strip, main 11, front 101, space [12], space [11], raise 11, raise 11, main 11, front 101"]);
+}
+
+/// the pointer rested 5 s in the Dock, then a click.
+#[test]
+fn pinned_pointer_rested_in_the_dock() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; ahead [12], ahead [12], strip, main 11, front 101, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: the press's picture comes 400 ms after it at load 10, past the release: the switch takes its own and waits (FRESH); and COVER_TIMEOUT: the strip answers (200 ms) past the cap, the windows move at once, no pictures.
+    expect(pointer_rested_in_the_dock, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], ahead [12], corner, main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
+/// a hotkey's modifiers, then its key.
+#[test]
+fn pinned_hotkey_modifiers_then_key() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; ahead [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: the press's picture comes 400 ms after it at load 10, past the release: the switch takes its own and waits (FRESH); and COVER_TIMEOUT: the strip answers (200 ms) past the cap, the windows move at once, no pictures.
+    expect(hotkey_modifiers_then_key, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
 /// Every scenario, for the load table.
 pub(super) const ALL: &[Scenario] = &[
     ("a card click, the strip in time", "controller.rs send_transition, COVER_TIMEOUT", strip_in_time),
@@ -582,6 +716,11 @@ pub(super) const ALL: &[Scenario] = &[
     ("a Dock click, its pictures (Spaces)", "controller/switch_pictures.rs, round switch-pictures", dock_click_pictures_spaces),
     ("a Dock click, a window leaving in the corner (Corner)", "controller/switch_pictures.rs corner_ahead", dock_click_window_in_the_corner),
     ("a Dock click, captures off (Corner)", "platform/switch_shots.rs may_take", dock_click_captures_off),
+    ("a Dock click let go at once, its pictures", "platform/switch_likely.rs, the press's sign", dock_click_let_go_at_once),
+    ("the pointer into the Dock, then a click", "platform/switch_likely.rs, the pointer's sign", pointer_into_the_dock_corner),
+    ("the pointer into the Dock, then a click (Spaces)", "platform/switch_likely.rs, the pointer's sign", pointer_into_the_dock_spaces),
+    ("the pointer rested 5 s in the Dock, then a click", "controller/switch_pictures.rs AHEAD_OLDER", pointer_rested_in_the_dock),
+    ("a hotkey's modifiers, then its key", "platform/switch_likely.rs, the modifiers' sign", hotkey_modifiers_then_key),
     ("⌘Tab let go at once, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_quick),
     ("⌘Tab let go at once, its pictures (Spaces)", "controller/switch_pictures.rs FRESH", cmd_tab_quick_spaces),
     ("⌘Tab held 0.7 s, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_held),
