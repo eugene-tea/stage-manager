@@ -51,8 +51,13 @@ use crate::engine::geometry::Rect;
 use crate::logbook::counters::{self, Count};
 
 /// A picture that reached the strip this recently is fresh: a switch plays it and takes no
-/// other (`controller/switch_pictures.rs`).
-pub const FRESH: Duration = Duration::from_millis(500);
+/// other (`controller/switch_pictures.rs`). Two seconds: what a switch played under the
+/// Corner engine from 1.0 until 11-25, when its pictures came from a timer every 2 s
+/// (`[animation] snapshot_interval_ms`, 2000 then), so a picture up to that old over its
+/// window is what switches have always shown. At 0.5 s (round switch-pictures, sized for the
+/// press on a card alone) a picture taken as the pointer came into the Dock, or at the app
+/// switcher's key held a moment, was taken again at the switch and waited for.
+pub const FRESH: Duration = Duration::from_secs(2);
 
 /// A remembered listing older than this is never reused.
 const LISTING_MAX_AGE: Duration = Duration::from_secs(60);

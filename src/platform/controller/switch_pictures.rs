@@ -5,7 +5,8 @@
 //! window-server step under the Spaces engine, an Accessibility move its app carries out under
 //! the Corner engine): the windows leaving can wait on screen for their pictures. Before the
 //! transition goes to the strip, every outgoing window whose picture is not fresh (the
-//! pointer's press on a card took one a moment ago, or the app switcher's key) is captured,
+//! pointer's press on a card took one a moment ago, or the app switcher's key, or a sign
+//! that a switch was likely; fresh: [`switch_shots::FRESH`], 2 s) is captured,
 //! and the WM thread waits for them up to [`WAIT_MAX`]. The strip then draws them over their
 //! windows as before, and the windows hide behind them. With them, a window that stays shown
 //! into the park corner the switch covers ([`Transition::corner`], round 8L5: a pinned
@@ -396,7 +397,8 @@ mod tests {
     fn nothing_is_taken_with_every_picture_fresh_or_nothing_leaving() {
         let t = Transition { outgoing: vec![moving(1)], incoming: vec![moving(9)], ..Transition::default() };
         assert!(targets(&t, |_| Some(Duration::from_millis(300))).0.is_empty());
-        assert!(!targets(&t, |_| Some(Duration::from_millis(501))).0.is_empty(), "past FRESH");
+        assert!(targets(&t, |_| Some(FRESH)).0.is_empty(), "as old as the timer's pictures were: still played");
+        assert!(!targets(&t, |_| Some(FRESH + Duration::from_millis(1))).0.is_empty(), "past FRESH");
         let arriving = Transition { incoming: vec![moving(9)], ..Transition::default() };
         assert_eq!(targets(&arriving, |_| None), (Vec::new(), 0));
     }

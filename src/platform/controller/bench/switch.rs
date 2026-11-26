@@ -302,8 +302,9 @@ fn a_sign_takes_no_picture_where_none_would_be_played() {
 
 /// ⌘Tab to Alpha, ⌘ let go `held_ms` after Tab. The switcher's key has the strip take every
 /// shown window's picture (`main.rs` `monitor_input`, `strip::prefetch`: the bench runs no
-/// strip, so the scenario says it): let go within `switch_pictures`' `FRESH` the switch takes
-/// none and the strip is told first; past it the picture is old and taken again.
+/// strip, so the scenario says it): let go within `switch_shots::FRESH` (2 s since round
+/// picture-wait, 0.5 s before) the switch takes none and the strip is told first; past it
+/// the picture is old and taken again.
 fn cmd_tab_pictures(engine: EngineKind, load: f64, held_ms: u64) -> Run {
     let mut b = bench(engine, load, |d| d.corner_covers = true);
     b.cmd_tab(vec![B, A, C]);
@@ -325,8 +326,16 @@ fn cmd_tab_quick_spaces(load: f64) -> Run {
     cmd_tab_pictures(EngineKind::Spaces, load, 150)
 }
 
+/// Held 0.7 s: past the 0.5 s of round switch-pictures (the picture was taken again and
+/// waited for), within the 2 s since round picture-wait.
 fn cmd_tab_held(load: f64) -> Run {
     cmd_tab_pictures(EngineKind::Corner, load, 700)
+}
+
+/// Held 3 s, past `FRESH`: the picture taken at the switcher's key is old and taken again,
+/// the corner's cover sent first.
+fn cmd_tab_held_long(load: f64) -> Run {
+    cmd_tab_pictures(EngineKind::Corner, load, 3000)
 }
 
 /// A card click for Alpha's stage whose press had the strip take the leaving window's
@@ -563,9 +572,9 @@ fn pinned_cmd_tab_quick_spaces() {
 /// ⌘Tab held 0.7 s, its pictures.
 #[test]
 fn pinned_cmd_tab_held() {
-    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; corner, main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; strip, main 11, front 101, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
     // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
-    expect(cmd_tab_held, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; corner, main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+    expect(cmd_tab_held, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; strip, main 11, front 101, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
 }
 
 /// a card click, its pictures fresh from the press.
@@ -707,6 +716,14 @@ fn pinned_hotkey_modifiers_then_key() {
     expect(hotkey_modifiers_then_key, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; ahead [12], shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
 }
 
+/// ⌘Tab held 3 s, its pictures.
+#[test]
+fn pinned_cmd_tab_held_long() {
+    let at_1 = "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 1, at once 0; corner, main 11, front 101, shots [12], strip, park 12, raise 11, main 11, front 101, show 11, raise 11, raise 11, main 11, front 101";
+    // TIME DECIDES: COVER_TIMEOUT: at load 10 the strip answers (200 ms) past the cap; the windows move at once, no pictures.
+    expect(cmd_tab_held_long, [at_1, at_1, "front [11] shows [11] desktop 1 app 101 switches 1 slides 0; pictures 0, at once 1; corner, main 11, front 101, shots [12], strip, park 12, show 11, raise 11, raise 11, main 11, front 101"]);
+}
+
 /// Every scenario, for the load table.
 pub(super) const ALL: &[Scenario] = &[
     ("a card click, the strip in time", "controller.rs send_transition, COVER_TIMEOUT", strip_in_time),
@@ -723,7 +740,8 @@ pub(super) const ALL: &[Scenario] = &[
     ("a hotkey's modifiers, then its key", "platform/switch_likely.rs, the modifiers' sign", hotkey_modifiers_then_key),
     ("⌘Tab let go at once, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_quick),
     ("⌘Tab let go at once, its pictures (Spaces)", "controller/switch_pictures.rs FRESH", cmd_tab_quick_spaces),
-    ("⌘Tab held 0.7 s, its pictures", "controller/switch_pictures.rs FRESH", cmd_tab_held),
+    ("⌘Tab held 0.7 s, its pictures", "platform/switch_shots.rs FRESH", cmd_tab_held),
+    ("⌘Tab held 3 s, its pictures", "platform/switch_shots.rs FRESH", cmd_tab_held_long),
     ("a card click, its pictures fresh from the press", "controller/switch_pictures.rs FRESH", card_click_pictures_fresh),
     ("a card click, the strip never answers", "strip_model::wait_cover, COVER_TIMEOUT", strip_never),
     ("a second card click during the cover wait", "controller.rs flush_superseded, r6-waits", second_click_corner),
