@@ -8967,6 +8967,144 @@ def phase_reads():
     all_onscreen("reads")
 
 
+def sliver_point(parked_id):
+    """Where to press parked fixture window `parked_id`'s sliver: half a point in from the
+    edge it shows at, 12 pt below its top (its title bar), as the window server lists it; and
+    its sliver. None when it shows none on its display."""
+    wins, d = fixture_windows()
+    w = next((x for x in wins if x["id"] == parked_id), None)
+    if w is None or d is None:
+        return None
+    sliver = intersect(w["bounds"], d)
+    if sliver is None or sliver["w"] > 4 or sliver["h"] < 20:
+        return None
+    return (sliver["x"] + sliver["w"] / 2, sliver["y"] + 12), sliver
+
+
+def phase_rest():
+    """Round rest-cost: the housekeeping rests 2 s under every engine, and a press on a parked
+    window's sliver stays as inert as it was while it rested 0.75 s for the sliver's sake.
+    Fixture windows only; one Desktop; about 80 s. By name only (not a default phase).
+    1. The rest: two fixture windows, each a stage, one hidden. Across 20 s untouched between
+       two `ctl state` reads the tick ran at rest 6 to 10 times (every 2 s once the first
+       read's stir is over; it was 20 and more at 0.75 s) and the pace says 2000 ms.
+    2. The Corner engine's list at rest (`ctl state`'s `slivers`, read before the read's own
+       stir is told): the tap knows the tick rests, and a press would be judged on the list
+       whatever its age (2.2 s at most).
+    3. Three presses on the parked window's sliver (`ctl debug-click`, posted from the ctl
+       thread: the command itself stirs nothing), each 4.6 s after the last command that
+       does: the tick went to rest 3.0 to 3.25 s after that one and published its list then,
+       so the press is judged on a list 1.4 to 1.8 s old, older than the second the tap
+       trusted before. Each is swallowed (the log's line, with the list's age), the window stays
+       hidden, nothing takes the focus, and no press in the corner passes unjudged. When no
+       press met a list over a second old (the Mac was busy, the timing slipped) that one
+       check is skipped, not failed."""
+    say("\n== rest: the tick's rest, and the inert slivers' list through it ==")
+    stop_app()
+    stop_all_fixtures()
+    for f in ("state.json", "config.toml", ".config-last-good.toml"):
+        path = os.path.join(HOME, f)
+        if os.path.exists(path):
+            os.remove(path)
+    start_fixture(2, "--frames", "380,120,640,420;460,200,560,380")
+    s = start_app(2, extra_env={"STAGE_MANAGER_TEST": "1"})
+    if not check(s is not None, "rest: the app is up with two fixture windows"):
+        return
+    two = by_title(ctl("state")).get("Fixture 2")
+    if two is not None and [t for t in stage_titles(ctl("state")).get(two["home"], []) if t != "Fixture 2"]:
+        do("new", two["id"])
+    st = wait_state(lambda x: sorted(map(sorted, stage_sets(x).values())) == [["Fixture 1"], ["Fixture 2"]], "Fixture 1 and 2 each in a stage")
+    if not check(st is not None, "rest: Fixture 1 and 2 each in a stage, one hidden"):
+        stop_app()
+        return
+    pointer_off_strip(st, "the rest")
+    time.sleep(5.0)
+
+    # 1. The rest.
+    s0 = ctl("state")
+    t0 = time.time()
+    time.sleep(20.0)
+    s1 = ctl("state")
+    wall = time.time() - t0
+    tick0, tick1 = s0.get("tick") or {}, s1.get("tick") or {}
+    rests = tick1.get("rest_ticks", 0) - tick0.get("rest_ticks", 0)
+    brisk = tick1.get("brisk_ticks", 0) - tick0.get("brisk_ticks", 0)
+    lists = (s1.get("costs") or {}).get("window_lists", 0) - (s0.get("costs") or {}).get("window_lists", 0)
+    say(f"    {wall:.1f} s untouched: {rests} ticks at rest, {brisk} brisk (the first read's 3 s are 12 or 13), {lists} window lists; "
+        f"the pace at the second read: {tick1.get('pace')} {tick1.get('rest_ms')} ms, why {tick1.get('why')}")
+    # An event of the Mac's own (an app launched, a notice) stirs the tick for 3 s: read again.
+    for _ in range(3):
+        if tick1.get("pace") == "rest":
+            break
+        say(f"    the tick was brisk at that read (why: {tick1.get('why') or 'an event in the last 3 s'}); reading again in 4.5 s")
+        time.sleep(4.5)
+        s1 = ctl("state")
+        tick1 = s1.get("tick") or {}
+    check(tick1.get("pace") == "rest" and tick1.get("rest_ms") == 2000,
+          f"rest: the tick rests 2 s with a window hidden ({tick1.get('pace')} {tick1.get('rest_ms')} ms; why brisk: {tick1.get('why')})")
+    check(6 <= rests <= 10, f"rest: {rests} ticks at rest in {wall:.0f} s, the first 3 s brisk (6 to 10; 20 and more when it rested 0.75 s; "
+          f"{brisk} brisk ticks: more than 13 says events of the Mac's own stirred it)")
+
+    # 2 and 3: the Corner engine's own.
+    if corner_only("rest: the inert slivers' list through a rest"):
+        stop_app()
+        all_onscreen("rest")
+        return
+    sl = s1.get("slivers") or {}
+    say(f"    slivers at the second read: {sl}")
+    check(sl.get("tick") == "rest" and sl.get("judged") is True and (sl.get("list_age_ms") or 0) <= 2300,
+          f"rest: at rest the tap would judge a press on the tick's list (tick {sl.get('tick')}, judged {sl.get('judged')}, the list {sl.get('list_age_ms')} ms old)")
+    check(((s1.get("costs") or {}).get("taps_on") or {}).get("slivers") is True, "rest: the inert slivers' tap is on")
+    st = ctl("state")
+    parked = [w for w in st["windows"] if w["parked"] and w["role"] == "standard"]
+    if not check(len(parked) == 1, f"rest: one fixture window is parked ({[w['title'] for w in parked]})"):
+        stop_app()
+        all_onscreen("rest")
+        return
+    pid_w = parked[0]["id"]
+    seen_before = len(re.findall(r"a press on a parked window's sliver swallowed", log_text()))
+    ages = []
+    for n in range(3):
+        at = sliver_point(pid_w)
+        if not check(at is not None, f"rest: press {n + 1}: the parked fixture shows a sliver to press"):
+            break
+        (x, y), sliver = at
+        before = ctl("state")
+        mark = time.time()
+        # The tick rests 3.0 to 3.25 s after this command and next ticks 2.0 to 2.2 s later.
+        time.sleep(max(0.0, 4.6 - (time.time() - mark)))
+        r = ctl("debug-click", f"{x:.1f}", f"{y:.1f}")
+        if blocked(r, f"rest: press {n + 1} on the sliver at {x:.1f},{y:.1f}"):
+            break
+        if not check(bool(r.get("ok")), f"rest: press {n + 1} posted on the sliver at {x:.1f},{y:.1f} ({r.get('error', 'ok')})"):
+            break
+        # A swallowed press reaches nobody, the input monitor neither: nothing stirs the tick,
+        # and the tap's word is logged at the next tick, a rest later at most.
+        swallowed = lambda: re.findall(r"a press on a parked window's sliver swallowed id=(\d+) .*?list_age_ms=(\d+)", log_text())  # noqa: E731
+        wait_until(lambda: len(swallowed()) > seen_before, 3.5, f"the log's line for press {n + 1}")
+        lines = swallowed()
+        fresh = lines[seen_before:]
+        seen_before = len(lines)
+        after = ctl("state")
+        mine = [int(age) for wid, age in fresh if int(wid) == pid_w]
+        w_after = next((w for w in after["windows"] if w["id"] == pid_w), {})
+        check(len(mine) >= 1, f"rest: press {n + 1} on the sliver ({fmt(sliver)}) was swallowed (the list {mine} ms old; the log's lines since: {fresh})")
+        check(w_after.get("parked") is True and after.get("active") == before.get("active") and after.get("focused") != pid_w,
+              f"rest: press {n + 1}: the window stays hidden, its stage behind, the focus elsewhere (parked {w_after.get('parked')}, active {after.get('active')}, focused {after.get('focused')})")
+        ages += mine[:1]
+    old = [a for a in ages if a > 1000]
+    say(f"    the lists the presses were judged on: {ages} ms old")
+    if old:
+        check(True, f"rest: {len(old)} of {len(ages)} presses were judged on a list over a second old, at rest, and swallowed ({ages} ms)")
+    elif ages:
+        skip("rest: a press judged on a list over a second old", f"the timing slipped (the lists were {ages} ms old): the rule is pinned on the bench")
+    unjudged = len(re.findall(r"no fresh window list to judge it by", log_text()))
+    check(unjudged == 0, f"rest: no press in the corner passed unjudged ({unjudged} lines)")
+    ctl("debug-pointer-back")
+    stop_app()
+    all_onscreen("rest")
+
+
 def phase_engine():
     """Round sm-probe (1.9, S5): which window engine runs. Each launch's probe and choice
     (`ctl state` `engine`: kind, why, probe, fallback):
@@ -10922,7 +11060,7 @@ def main():
              "native": phase_native, "parity": phase_parity, "motion": phase_motion, "slots": phase_slots,
              "expose": phase_expose, "capture": phase_capture, "restore": phase_restore, "raise": phase_raise,
              "park": phase_park, "offscreen": phase_offscreen, "enhanced": phase_enhanced, "stale": phase_stale, "handles": phase_handles, "tabs": phase_tabs, "still": phase_still, "away": phase_away,
-             "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine, "reads": phase_reads,
+             "glass": phase_glass, "cards": phase_cards, "displays": phase_displays, "screens": phase_screens, "crop": phase_crop, "behave": phase_behave, "engine": phase_engine, "reads": phase_reads, "rest": phase_rest,
              "launch": phase_launch, "landing": phase_landing, "landing-abort": phase_landing_abort, "landing-order": phase_landing_order, "landing-merge": phase_landing_merge,
              "cmdtab-probe": phase_cmdtab_probe, "edgeflat": phase_edgeflat, "panel": phase_panel,
              "mission": phase_mission, "mission-probe": phase_mission_probe, "mission-desktop": phase_mission_desktop}[p]()

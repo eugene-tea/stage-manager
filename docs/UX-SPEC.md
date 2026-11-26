@@ -1386,6 +1386,55 @@ corner for 121 to 155 ms before the switch's cover (37 ms with the timer; the ch
 Corner engine and 0.39 % under Spaces, with 150 against 63 window lists a minute and about
 300 LaunchServices lookups a minute under both.
 
+Where the app's own time at rest goes, from the `sample` profiles of those runs (the mean
+of three, ms of work in 60 s; 390 under the Corner engine, 217 under Spaces):
+
+| | corner | spaces |
+|---|---|---|
+| The housekeeping tick, in all | 259 | 155 |
+| of it: the window server's two lists a tick, read and parsed | 180 | 83 |
+| of it: process tests for windows closed and apps gone with no notice | 49 | 23 |
+| of it: LaunchServices asked (a window owner's bundle, the Dock's pid; under Spaces whether a hidden window's app is hidden) | 13 | 14 |
+| of it: the Desktops read from the window server | | 26 |
+| of it: the rest | 17 | 9 |
+| Ticks a minute | 80 | 30 |
+| The card glass's read of the wallpaper, every 2 s (main thread) | 37 | 39 |
+| The corner patch's own read of the wallpaper, every 2 s (main thread) | 33 | |
+| The still of the desktop in the park corner, every 10 s (ScreenCaptureKit's replies, its pixels checked) | 26 | |
+| The patch drawn again at each still; Finder's icons read every 5 s | 8 | |
+| Everything else | 27 | 23 |
+
+The Corner engine's tick was no heavier than the Spaces engine's (3.2 ms a pass against
+5.2 ms); it ran 2.7 times as often, because it rested 0.75 s at most while a window was
+parked, for the list its inert slivers' tap trusted for one second. Since round rest-cost
+(11-25) that list stands through a rest and the tick rests 2 s under every engine: by these
+figures about 160 ms a minute less under the Corner engine, which would bring the app near
+the Spaces engine's 0.5 % (to be measured). The same round stopped the LaunchServices
+lookups at rest (the running apps' paths read again once a minute with the strip following
+the Dock, about 300 lookups for 150 apps; the Dock's pid every 2 s; a window owner's bundle
+at every tick) and a tick kept brisk for as long as a window put back on a Desktop not
+shown waited there.
+
+What the samples do not explain is the window server: 4.6 % of a core more under the Corner
+engine than with the app quit, with no window pictured. They are of the app alone. What
+the Corner engine asks of the window server and of the capture service at rest, each to be
+measured by a run with it off (DEVELOPMENT, "Measuring cost"):
+
+| What | How often at rest | A run without it |
+|---|---|---|
+| A still of the desktop in the park corner, through ScreenCaptureKit (a listing of what can be shared, then a capture) | every 10 s while a sliver shows | `SM_CAPTURE=0` |
+| The corner patch's panel, ordered above the parked windows and redrawn at each still | every 10 s | `windows.corner_patch=false` (the still and the icons' read go too) |
+| Window lists | 150 a minute until round rest-cost, about 60 since | `STAGE_MANAGER_TICK_REST_MS=750` against `10000` |
+| Hidden windows on the Desktop, a sliver of each on screen | always | `SM_STAGES=1` |
+| The inert slivers' event tap | no event at rest | `windows.inert_slivers=false` |
+
+The capture service's 0.25 % is the still's: every stack of the app on its connection to
+it is the still's capture or ScreenCaptureKit's listing for it. A window picture cost the
+window server about 12 ms and the capture service about 7 ms each in the `covered` runs
+(240 thumbnails a minute under Spaces: 6.1 to 10.8 % and 0.01 to 2.9 %); six stills a minute
+at that price would be 0.1 % of the window server's 4.6 %, so either a still of the desktop
+costs it far more than a window's picture, or the cost is one of the other rows.
+
 A person does not notice a delay this small: a response to a click reads as instant up to
 about 100 ms, a click's latency is told apart from about 50 to 100 ms, and two durations near
 a second need 10 to 20 % between them (as the studies of input latency give them). The card

@@ -239,8 +239,8 @@ pub(in crate::platform) fn secure_input_on() -> bool {
 /// What the callback decided, logged later by the WM thread.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Note {
-    /// A press on a parked window's sliver, swallowed.
-    Swallowed { id: u32, at: Point },
+    /// A press on a parked window's sliver, swallowed; how old the list it was judged on.
+    Swallowed { id: u32, at: Point, age_ms: u64 },
     /// A press in a zone, not on a sliver: passed.
     Passed { at: Point },
     /// A press in a zone passed unjudged: the published list was missing or too old.
@@ -322,8 +322,8 @@ pub fn tick_paced(pace: Pace, after_tick: bool) {
 /// `ctl state`'s `slivers`: how the list the tap judges on stands now (`list_age_ms`, none
 /// while the tap judges nothing; `judged`: a press in a corner zone would be judged on it),
 /// and the tick's pace as the tap knows it (`tick`: "rest" or "brisk", `brisk_ms` since
-/// when). A ctl command stirs the tick itself: `tick` reads "brisk" in its own reply unless
-/// the reply comes before the stir is told.
+/// when; `due_ms`: the longest two ticks are apart at rest). A ctl command stirs the tick
+/// only once its reply is made, so the reply says the pace as it was before the command.
 pub fn status() -> serde_json::Value {
     let now = Instant::now();
     let tick = tick();
@@ -395,7 +395,9 @@ pub fn refresh(list: Option<&[CgWindow]>) {
 
 fn log_note(n: Note) {
     match n {
-        Note::Swallowed { id, at } => tracing::info!(id, x = at.x, y = at.y, "inert slivers: a press on a parked window's sliver swallowed"),
+        Note::Swallowed { id, at, age_ms } => {
+            tracing::info!(id, x = at.x, y = at.y, list_age_ms = age_ms, "inert slivers: a press on a parked window's sliver swallowed")
+        }
         Note::Passed { at } => tracing::debug!(x = at.x, y = at.y, "inert slivers: a press in the corner, not on a sliver: passed"),
         Note::Unjudged { at, age_ms } => tracing::info!(
             x = at.x,
@@ -439,7 +441,10 @@ fn on_sliver(at: Point) -> bool {
     let own = std::process::id() as i32;
     let hit = shield.hits(list, at, own);
     match hit {
-        Some(id) => note(Note::Swallowed { id, at }),
+        Some(id) => {
+            let age_ms = seen.as_ref().map_or(0, |s| now.saturating_duration_since(s.at).as_millis() as u64);
+            note(Note::Swallowed { id, at, age_ms })
+        }
         None => {
             note(Note::Passed { at });
             note_zone_owner(&shield, list, at, own);
